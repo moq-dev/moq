@@ -2522,8 +2522,10 @@ export class Subscriber {
 	}
 
 	#guard(group: GroupConsumer): GroupConsumer {
-		// Handed out, it is read, whatever this reader judged it while buffered.
+		// Handed out, it is read, whatever this reader judged it while buffered. Taking it is the
+		// cache access buffering it is not, as in Rust: it restarts the group's idle window.
 		hooks.groupReads(group, true);
+		hooks.refreshGroup(group);
 		const held: Superseded = {};
 		hooks.onShedRead(group, () => {
 			if (this.#state.latest === group.sequence && this.#state.producer) hooks.joinProducer(this.#state.producer);

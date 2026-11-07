@@ -143,6 +143,27 @@ test("a read group outlives a later unread one", async () => {
 	});
 });
 
+// Taking a group is a cache access: a reader handed one just inside the window can still read
+// it almost a window later. Mirrors Rust `delivery_restarts_the_expiry_clock`.
+test("delivery restarts a group's idle window", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Milli(10_000) });
+		const producer = pooled(pool);
+		const subscriber = producer.subscribe({ delay: { max: null } });
+		finished(producer, 1); // seq 0
+		finished(producer, 1); // seq 1 takes the live edge, so seq 0 can expire
+
+		await clock.advance(9_000);
+		const reading = subscriber.tryRecvGroup();
+		expect(reading?.sequence).toBe(0n);
+		// Far beyond the write, inside the delivery. The new group runs the expiry scan.
+		await clock.advance(9_000);
+		finished(producer, 1);
+		expect((await reading?.readFrame())?.payload.length).toBe(1);
+		subscriber.close();
+	});
+});
+
 // Every track of a broadcast caches into one pool, and the mean access across all of them
 // orders eviction: a track writing past the capacity pays with its own groups, but only those
 // accessed no later than the mean, so a fresher track's groups survive its own debt while a

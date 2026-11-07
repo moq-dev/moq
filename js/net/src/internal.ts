@@ -836,6 +836,8 @@ export const hooks: {
 	 * on, or may yet, from another copy.
 	 */
 	evictGroup: (group: GroupConsumer, lost: Error) => boolean;
+	/** Record a cache access on a group a reader takes, restarting its idle window. */
+	refreshGroup: (group: GroupConsumer) => void;
 	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Reserve an on-demand track without listing it or enabling a request handler. */
@@ -1169,6 +1171,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	refreshGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	onClosed: () => {

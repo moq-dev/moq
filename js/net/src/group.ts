@@ -1270,6 +1270,7 @@ export class Consumer {
 		};
 		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
+		hooks.refreshGroup = (group) => group.#state.charge?.refresh();
 		hooks.onShedRead = (group, notify) => {
 			group.#state.shedRead = notify;
 		};

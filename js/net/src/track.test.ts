@@ -2923,14 +2923,15 @@ test("no publisher limit still ages idle groups out", async () => {
 		expect(await (await within.recvGroup())?.readString()).toBe("old");
 		within.close();
 
-		// The read was an access, as in Rust: past the write's window, the group stays.
+		// The read was an access, as in Rust: past the write's window, the group stays. Taking it
+		// again is another access.
 		clock.set(10_000 + CACHE_WINDOW_MS + 1_000);
 		const read = producer.subscribe({ delay: { max: Milli(100_000) } });
 		expect(read.tryRecvGroup()?.sequence).toBe(0n);
 		read.close();
 
-		// Past the read's window, a subscribe's own scan reclaims it.
-		clock.set(10_000 + 2 * CACHE_WINDOW_MS + 1_000);
+		// Past that delivery's window, a subscribe's own scan reclaims it.
+		clock.set(10_000 + 2 * CACHE_WINDOW_MS + 2_000);
 		const after = producer.subscribe({ delay: { max: Milli(100_000) } });
 		expect(after.tryRecvGroup()?.sequence).toBe(1n);
 		expect(after.tryRecvGroup()).toBeUndefined();
