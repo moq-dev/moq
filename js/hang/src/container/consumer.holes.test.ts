@@ -286,6 +286,13 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 			write(2n, [60_000_000]);
 			await flush();
 			expect(results.slice(3)).toEqual([frame(2n, 60_000_000), frame(3n, 60_060_000)]);
+			// Resumed, a later hole past the budget is proven again without a wait.
+			write(5n, [61_000_000]);
+			await flush();
+			expect(results.slice(5)).toEqual([
+				{ kind: "gap", timestamp: Micro(60_060_000), duration: Micro(940_000) },
+				frame(5n, 61_000_000),
+			]);
 		} else {
 			await clock.advance(Nano.fromMilli(Milli(1)));
 			expect(results.slice(3)).toEqual([

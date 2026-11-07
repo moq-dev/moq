@@ -47,8 +47,9 @@ head was not decoded"): 2 of 22 on the default 20 ms Opus and 1 on 60 ms.
 The group after a head could overtake it, and the read took the mute's
 timestamp jump as proof the head was too late to wait for;
 [moq-dev/moq#8123](https://github.com/moq-dev/moq/pull/8123) fixed it, and two
-20 ms runs after the fix kept all 44 heads. What remains is to switch the page to the defaults, measure on `kixtop` again,
-and set and enforce the budget.
+20 ms runs after the fix kept all 44 heads. What remains is to switch the
+page to the defaults, measure on `kixtop` again, and set and enforce the
+budget.
 
 Measured 2026-11-05 on the defaults, before Watch, one run of 22 presses
 each, Chromium 156 headless through a local relay. `kixtop` is a MacBook Air
