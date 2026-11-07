@@ -2202,6 +2202,11 @@ run_media() {
         # The measurements are the point even when nothing fails: a skew or frame rate creeping
         # toward its bound is worth seeing before it crosses.
         grep -E '^(  |=== )' "$log" || true
+        local marker quarantined detail
+        while IFS=$'\t' read -r marker quarantined detail; do
+            echo "  SKIP  $name: $quarantined: $detail"
+            record skip case="$name: $quarantined" publisher="$(media_publisher "$@")" subscriber=js detail="$detail" log="$log"
+        done < <(grep $'^QUARANTINE\t' "$log" || true)
     else
         echo "  FAIL  $name ($((SECONDS - started))s)"
         record fail "${cell[@]}" detail="media.ts exited $status"
