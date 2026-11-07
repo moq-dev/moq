@@ -1,9 +1,8 @@
 import { expect, test } from "bun:test";
-import type { Grant, Handle } from "../auth.ts";
+import type { Handle } from "../auth.ts";
 import type { Pending } from "../auth_session.ts";
 import * as Ietf from "../ietf/index.ts";
 import { createMockTransportPair } from "../mock.ts";
-import * as Path from "../path.ts";
 import { Reader } from "../stream.ts";
 import type { Established } from "./established.ts";
 import { offered } from "./extensions.ts";
@@ -63,18 +62,14 @@ function handle() {
 	const fake = {
 		present(token: string) {
 			presented.push(token);
-			let granted: Grant | undefined;
-			const answered = new Promise<void>((resolve) =>
+			const pending = { held: false, answered: Promise.resolve(), close: () => closed.push(token) };
+			pending.answered = new Promise<void>((resolve) =>
 				answers.set(token, () => {
-					granted = { publish: new Path.Patterns(), subscribe: new Path.Patterns() };
+					pending.held = true;
 					resolve();
 				}),
 			);
-			return {
-				grant: { peek: () => granted },
-				answered,
-				close: () => closed.push(token),
-			} as unknown as Pending;
+			return pending as unknown as Pending;
 		},
 	} as unknown as Handle;
 	const answer = async (token: string) => {

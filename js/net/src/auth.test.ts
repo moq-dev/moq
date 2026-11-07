@@ -1016,6 +1016,48 @@ test("lite-07 ignores a draining session's late refusal while its successor retr
 });
 
 // moq-lite carries patterns, so every grant arrives exactly as issued.
+test("lite-07 a token granted on a draining session stays held until its successor answers", async () => {
+	const protocol = Lite.ALPN_07_WIP;
+	const handle = new Handle();
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client, publish: new OriginProducer().consume(), auth: handle }),
+		acceptSession({ transport: pair.server, url }),
+	]);
+	const requests = server.auth.requests();
+	const setup = await requests.next();
+	if (!setup) throw new Error("missing setup token");
+	const issued = [setup.accept(grant([], []))];
+	const token = handle.present("token");
+	const request = await requests.next();
+	if (!request) throw new Error("missing token");
+	issued.push(request.accept(grant(["a"], [])));
+	await token.answered;
+	expect(token.held).toBe(true);
+
+	const stream = await Stream.open(pair.server, { version: Lite.Version.DRAFT_07 });
+	await stream.writer.u53(Lite.StreamId.Goaway);
+	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+	await settles(() => !wireOf(client).auth.active);
+
+	const next = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+	const successorRequests = next.server.auth.requests();
+	try {
+		const successorSetup = await successorRequests.next();
+		if (!successorSetup) throw new Error("missing successor setup token");
+		issued.push(successorSetup.accept(grant([], [])));
+		expect(await successorRequests.next()).toBeDefined();
+		// The live session has not answered, but the draining one still grants it.
+		expect(token.grant.peek()).toBeUndefined();
+		expect(token.held).toBe(true);
+	} finally {
+		client.abort();
+		server.abort();
+		next.client.abort();
+		next.server.abort();
+	}
+});
+
 test("a fetch abandoned while its token waits never reaches the wire", async () => {
 	const logged = spyOn(console, "debug");
 	const origin = new OriginProducer();

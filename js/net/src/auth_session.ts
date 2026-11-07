@@ -165,6 +165,8 @@ class Presented {
 export interface Pending extends Credential {
 	/** Resolves once a peer accepts the token, or rejects as {@link Handle.add} does. */
 	readonly answered: Promise<void>;
+	/** Whether any session holds a grant for it now, a draining one included. */
+	readonly held: boolean;
 }
 
 class Token implements Pending {
@@ -176,14 +178,14 @@ class Token implements Pending {
 	isAnswered = false;
 	ended = false;
 
-	#withdraw: (token: Token) => void;
+	#state: HandleState;
 	#close!: (err: Error | null) => void;
 	#answer!: () => void;
 	#refuse!: (err: Error) => void;
 
-	constructor(bytes: Uint8Array, withdraw: (token: Token) => void) {
+	constructor(bytes: Uint8Array, state: HandleState) {
 		this.bytes = bytes;
-		this.#withdraw = withdraw;
+		this.#state = state;
 		this.closed = new Promise((resolve) => {
 			this.#close = resolve;
 		});
@@ -212,8 +214,12 @@ class Token implements Pending {
 		this.#close(err);
 	}
 
+	get held(): boolean {
+		return this.#state.sessions.some((session) => session.grantOf(this) !== undefined);
+	}
+
 	close() {
-		this.#withdraw(this);
+		this.#state.withdraw(this);
 	}
 }
 
@@ -274,7 +280,7 @@ class HandleState {
 		if (this.own && !this.sessions.some((session) => session.active)) {
 			throw new StreamError(StreamCode.GoingAway);
 		}
-		const token = new Token(bytes, (token) => this.withdraw(token));
+		const token = new Token(bytes, this);
 		this.tokens.add(token);
 		for (const session of [...this.sessions]) session.offer(token);
 		return token;

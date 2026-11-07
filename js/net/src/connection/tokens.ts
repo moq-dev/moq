@@ -1,4 +1,4 @@
-import { type Credential, type Handle, Unsupported } from "../auth.ts";
+import { type Handle, Unsupported } from "../auth.ts";
 import type { Pending } from "../auth_session.ts";
 import type { Established } from "./established.ts";
 
@@ -57,7 +57,7 @@ export function extra(credential: Presentation, tokens: readonly string[]): stri
 }
 
 interface Entry {
-	auth?: Credential;
+	auth?: Pending;
 	pending: boolean;
 	/** Withdrawn by us, so its rejected answer is no refusal. */
 	withdrawn: boolean;
@@ -101,7 +101,7 @@ export class Held {
 			// Only a granted token keeps the grant wide; one refused or still unanswered, such as
 			// one retrying while its backend fails, is withdrawn at once so repeated updates never
 			// pile up retrying streams.
-			if (entry.auth?.grant.peek() !== undefined) this.#retiring.push(entry);
+			if (entry.auth?.held) this.#retiring.push(entry);
 			else this.#withdraw(entry);
 		}
 		this.#entries = next;
