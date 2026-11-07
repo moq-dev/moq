@@ -601,7 +601,7 @@ mod tests {
 
 	use moq_net::Timestamp;
 
-	use super::super::tests::{gpu, pixels};
+	use super::super::tests::gpu;
 	use super::super::texture;
 	use super::super::{Exporter, Route};
 	use super::*;
@@ -836,7 +836,9 @@ mod tests {
 				pass.dispatch_workgroups(contract.size.width.div_ceil(8), contract.size.height.div_ceil(8), 1);
 			}
 			queue.submit([encoder.finish()]);
-			pixels(device, queue, &plain)
+			let size = Size::new(plain.width(), plain.height());
+			let mut readback = crate::render::readback::Readback::new(device, queue, size).unwrap();
+			readback.copy(&plain).unwrap().unwrap().wait().unwrap().into_data()
 		}
 	}
 }

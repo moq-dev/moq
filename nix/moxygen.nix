@@ -31,8 +31,8 @@ stdenv.mkDerivation {
   src = sources.moxygen;
   cmakeDir = "../standalone";
   patches = [
-    # The relay conformance profile: the client accepts track-level priority and
-    # an END_OF_TRACK directly after the last object. Every other check stays.
+    # The relay conformance profile: request the configured fixture's start,
+    # accept track-level priority and END_OF_TRACK after its last object.
     ./moxygen-profile.patch
   ];
   nativeBuildInputs = [

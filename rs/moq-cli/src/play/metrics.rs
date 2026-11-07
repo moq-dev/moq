@@ -6,7 +6,8 @@
 //! browser one. Durations are milliseconds as floats. `at` is this process's
 //! monotonic clock from the first sample, `render` the device's clock, and
 //! `timestamp` the media clock; fields this player cannot read are left out
-//! rather than written as zero.
+//! rather than written as zero. `comfort` and `utterances` have no browser
+//! counterpart: they show how a declared silence played, for push-to-talk.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -45,10 +46,22 @@ struct Sample {
 	quanta: Option<u64>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	quiet: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	comfort: Option<f64>,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	gaps: Vec<Gap>,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	stalls: Vec<Stall>,
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	utterances: Vec<Utterance>,
+}
+
+/// Audio resuming after a declared silence: when it was written, and the media
+/// timestamp of its first sample.
+#[derive(Serialize)]
+struct Utterance {
+	at: f64,
+	timestamp: f64,
 }
 
 #[derive(Serialize)]
@@ -76,6 +89,7 @@ struct Totals {
 	clock: Duration,
 	quanta: u64,
 	quiet: u64,
+	comfort: Duration,
 }
 
 impl Totals {
@@ -84,6 +98,7 @@ impl Totals {
 			clock: observation.clock,
 			quanta: observation.quanta,
 			quiet: observation.quiet,
+			comfort: observation.comfort,
 		}
 	}
 }
@@ -96,6 +111,8 @@ pub(super) struct Metrics {
 	current: Option<(Observer, Totals)>,
 	/// What closed engines counted, added to the current one's totals.
 	base: Totals,
+	/// Utterances since the last sample.
+	utterances: Vec<Utterance>,
 	start: Instant,
 	interval: kio::clock::Interval,
 }
@@ -116,6 +133,7 @@ impl Metrics {
 			observers,
 			current: None,
 			base: Totals::default(),
+			utterances: Vec::new(),
 			start: Instant::now(),
 			interval,
 		};
@@ -126,6 +144,14 @@ impl Metrics {
 	pub(super) async fn tick(&mut self) -> anyhow::Result<()> {
 		self.interval.tick().await;
 		self.sample()
+	}
+
+	/// Note audio resuming after a declared silence at media `timestamp`.
+	pub(super) fn utterance(&mut self, timestamp: Duration) {
+		self.utterances.push(Utterance {
+			at: ms(Instant::now().duration_since(self.start)),
+			timestamp: ms(timestamp),
+		});
 	}
 
 	/// End the measurement: close any gap still open and write one last sample.
@@ -161,6 +187,7 @@ impl Metrics {
 					clock: base.clock + totals.clock,
 					quanta: base.quanta + totals.quanta,
 					quiet: base.quiet + totals.quiet,
+					comfort: base.comfort + totals.comfort,
 				};
 			}
 			self.current = Some((next, self.base));
@@ -190,8 +217,10 @@ impl Metrics {
 			output_latency: observation.as_ref().and_then(|(o, _)| o.latency).map(ms),
 			quanta: observation.as_ref().map(|(o, base)| base.quanta + o.quanta),
 			quiet: observation.as_ref().map(|(o, base)| base.quiet + o.quiet),
+			comfort: observation.as_ref().map(|(o, base)| ms(base.comfort + o.comfort)),
 			gaps,
 			stalls,
+			utterances: std::mem::take(&mut self.utterances),
 		};
 		serde_json::to_writer(&mut self.file, &sample)?;
 		self.file.write_all(b"\n")?;
