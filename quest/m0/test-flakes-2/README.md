@@ -131,7 +131,11 @@ merge-queue batch, one child.
 Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
 `js/net`'s datagram-end close case, which failed
 [moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check while
-reproducing on unchanged `main`.
+reproducing on unchanged `main`. Its end waited a host task when the
+publisher's write budget yielded under load while writing SUBSCRIBE_FINISH, past
+the case's microtask drain. [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000)
+stubbed that budget, merging after the quarantine was written. The case was
+re-enabled in [moq-dev/moq#8110](https://github.com/moq-dev/moq/pull/8110).
 
 Public API: none. Wire: none.
 
@@ -140,4 +144,4 @@ Public API: none. Wire: none.
 - [Flate's tail-shed test passes under load](/quest/m0/test-flakes-2/flate-tail-shed.md) - `js/net`'s compressed tail-shed cases finish within bun's timeout under load, re-enabled once fixed
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
+- [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown

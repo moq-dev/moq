@@ -29,9 +29,9 @@ Rules every child keeps:
 - Never replace one real wait with a shorter or longer one, or with a
   quiet window.
 - Fix a test and its siblings in other languages together.
-- Each JS child removes the opt-outs the
-  [JS guard](/quest/m0/clock-guard/js.md) added, so the guard covers the
-  converted tests.
+- Each JS child removes the bare `hostTime();` opt-outs in its area, so the
+  `bun test` guard (`js/clock/src/preload.ts`) covers the converted tests. An
+  opt-out with a trailing reason comment is real I/O and stays.
 
 The counts come from a heuristic scan on 2026-11-06; re-scan each area
 before starting, since tests land and move.
