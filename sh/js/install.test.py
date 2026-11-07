@@ -32,7 +32,7 @@ class Install(unittest.TestCase):
             bin_dir.mkdir()
             bun = bin_dir / "bun"
             bun.write_text("""#!/usr/bin/env python3
-import os
+from pathlib import Path
 import sys
 r = Path.cwd()
 if sys.argv[1] == '--version':
@@ -41,8 +41,7 @@ else:
     with (r / 'calls').open('a') as f:
         f.write('install\\n')
     # Signal the parent while holding the install lock, then block on a pipe.
-    with open(r / 'started', 'w') as f:
-        f.write('ready')
+    print('ready', flush=True)
     with open(r / 'continue') as f:
         f.read()
     (r / 'node_modules').mkdir(exist_ok=True)
@@ -51,12 +50,11 @@ else:
     (r / 'bun.lock').write_text('after')
 """)
             bun.chmod(0o755)
-            for name in ("started", "continue"):
-                os.mkfifo(root / name)
+            os.mkfifo(root / "continue")
             env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
-            recipe = subprocess.Popen(["just", "biome"], cwd=root, env=env)
-            with (root / "started").open() as started:
-                self.assertEqual(started.read(), "ready")
+            recipe = subprocess.Popen(["just", "biome"], cwd=root, env=env, stdout=subprocess.PIPE, text=True)
+            self.addCleanup(lambda: recipe.kill() if recipe.poll() is None else None)
+            self.assertEqual(recipe.stdout.readline(), "ready\n")
             test = subprocess.Popen(["just", "--justfile", "test/justfile", "media"], cwd=root, env=env)
             with (root / "continue").open("w"):
                 pass
