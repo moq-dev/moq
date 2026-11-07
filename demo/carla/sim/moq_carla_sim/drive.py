@@ -8,6 +8,7 @@ exactly where a real vehicle-bus backend would.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Literal
@@ -21,6 +22,16 @@ class Gear(str, Enum):
     NEUTRAL = "neutral"
     FORWARD = "forward"
     REVERSE = "reverse"
+
+
+def handle(session: str) -> str:
+    """The name `status` gives the lease or e-stop a session carried.
+
+    A hash of the session id, which only that session's two ends know, so the
+    driver recognizes its own lease while no viewer learns its endpoint id,
+    which anyone could announce to take the route to that driver's next dial.
+    """
+    return "driver-" + hashlib.sha256(session.encode()).hexdigest()[:8]
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -94,11 +105,12 @@ class Command:
     `drive`, `estop`, `reset_estop`, and `respawn` arrive on the wire;
     `driver_left` and `watchdog_expired` are synthesized locally.
 
-    `driver_id` is the driver's socket endpoint id, which `status` echoes.
+    `driver_id` is the driver's socket endpoint id, which stays private.
     `session` is the socket session that carried it, one per lease the player
     takes: the same id on another session is a different driver for the lease.
-    The session id is the secret that keeps a session to its two ends, so it
-    never leaves this process.
+    The session id is the secret that keeps a session to its two ends, so only
+    its `handle` leaves this process. Only a locally synthesized command has
+    none.
     """
 
     kind: CommandKind
@@ -117,12 +129,9 @@ class Drive:
 
     The lease binds to the driver's socket session, so a driver whose session
     ends loses it, and another session claiming the same driver id is another
-    driver. It is still cooperative, not enforced: anonymous drivers share one
-    grant, so anyone can announce an endpoint under the holder's id, which the
-    public `status` track echoes. Their own sessions never continue the
-    holder's lease, but they can disrupt it: a relay may route the truck's
-    accept of the holder's next session to the impostor instead. This stops two
-    honest drivers colliding; it does not stop a deliberate disruption.
+    driver. `driver` and `estop_by` are session handles, never endpoint ids, so
+    the public `status` track gives nobody an id to announce in the holder's
+    place.
     """
 
     def __init__(self) -> None:
@@ -135,7 +144,8 @@ class Drive:
 
     @property
     def driver(self) -> str | None:
-        return self._driver
+        """The lease holder's handle, or None while nobody holds it."""
+        return None if self._session is None else handle(self._session)
 
     @property
     def state(self) -> DriveState:
@@ -147,6 +157,7 @@ class Drive:
 
     @property
     def estop_by(self) -> str | None:
+        """The handle of the session that latched the e-stop."""
         return self._estop_by
 
     def holds(self, command: Command) -> bool:
@@ -159,7 +170,8 @@ class Drive:
     def apply(self, command: Command) -> bool:
         """Apply a command, returning whether it changed or refreshed state."""
         if command.kind == "drive":
-            if self._estopped or not (self._driver is None or self.holds(command)):
+            # A lease binds to a session, so a command without one cannot hold it.
+            if command.session is None or self._estopped or not (self._driver is None or self.holds(command)):
                 return False
             claiming = self._driver is None
             self._driver = command.driver_id
@@ -187,8 +199,8 @@ class Drive:
             # legitimately claimed.
             self._state = DriveState.stopped()
             self._estopped = True
-            if not was_estopped:
-                self._estop_by = command.driver_id
+            if not was_estopped and command.session is not None:
+                self._estop_by = handle(command.session)
 
         elif command.kind == "reset_estop":
             if not self._estopped:

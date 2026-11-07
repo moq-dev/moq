@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { applyKeys, REST } from "./input.ts";
-import { SOCKET } from "./paths.ts";
+import { handle, SOCKET } from "./paths.ts";
 import type { TruckStatus } from "./schemas.ts";
 import { shiftGear, Truck } from "./truck.ts";
 
@@ -452,9 +452,11 @@ describe("Truck sessions", () => {
 			const incoming = endpoint.acceptTrack();
 			driving.set(truck.id);
 			const dial = await incoming;
-			expect(dial.peer).toBe(truck.driverId.peek() as string);
-			expect(dial.peer).toMatch(/^driver-/);
+			expect(dial.peer).toMatch(/^driver-[0-9a-f]{32}$/);
 			const stream = await dial.accept();
+			// Status names the lease by the session, never by the endpoint id.
+			while (truck.handle.peek() === undefined) await truck.handle.changed();
+			expect(truck.handle.peek()).toBe(await handle(stream.session));
 
 			// Taking control heartbeats at once, so the truck hears the claim.
 			const command = await read(stream);
@@ -483,7 +485,7 @@ describe("Truck sessions", () => {
 			stream.producer.finish();
 			expect(await released).toBeUndefined();
 			// The lease's endpoint goes with it.
-			while (truck.driverId.peek() !== undefined) await truck.driverId.changed();
+			while (truck.handle.peek() !== undefined) await truck.handle.changed();
 		} finally {
 			close();
 		}
@@ -517,7 +519,7 @@ describe("Truck sessions", () => {
 			const reader = stream.consumer.ordered();
 			expect((await read(stream, reader)).type).toBe("estop");
 			expect(driving.peek()).toBeUndefined();
-			expect(truck.driverId.peek()).toBeUndefined();
+			expect(truck.handle.peek()).toBeUndefined();
 
 			// The truck's status echoing the latch is what lets the session go.
 			const broadcast = new Moq.Broadcast.Producer();
@@ -529,7 +531,12 @@ describe("Truck sessions", () => {
 					broadcast.consume(),
 				);
 				producer.update({
-					value: { accepted: { ...REST }, autonomy: "manual", estopped: true, estop_by: dial.peer },
+					value: {
+						accepted: { ...REST },
+						autonomy: "manual",
+						estopped: true,
+						estop_by: await handle(dial.session),
+					},
 				});
 				expect(await read(stream, reader)).toBeUndefined();
 			} finally {
@@ -595,7 +602,7 @@ describe("Truck respawn", () => {
 			driving.set(truck.id);
 			expect(await active).toBe(true);
 
-			truck.driverId.set("mine");
+			truck.handle.set("mine");
 			const status = {
 				accepted: { ...REST },
 				autonomy: "manual",

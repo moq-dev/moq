@@ -18,8 +18,8 @@ clients, moq-boy, and CARLA.
 
 Non-goals: stopping a client from announcing another client's id once it learns
 it. Ids stay unguessable secrets until the m3 [mesh](/quest/m3/mesh/README.md)
-makes them public keys; [CARLA's driver ids](/quest/m1/carla-driver-ids.md)
-stops CARLA leaking them.
+makes them public keys; CARLA's `status` names drivers by a session handle,
+so it leaks none.
 
 ## Plan
 
