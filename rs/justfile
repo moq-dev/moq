@@ -166,6 +166,11 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
+# moq-net without its `async` feature: the lib, its tests, and its docs.
+no-async:
+    bash sh/local.sh cargo clippy --locked -p moq-net --no-default-features --lib --tests -- -D warnings
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
+
 # Lint media tests without the device features the gate's test build enables.
 media-defaults:
     bash sh/local.sh cargo clippy --locked -p moq-audio -p moq-video --tests -- -D warnings
