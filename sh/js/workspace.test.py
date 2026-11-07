@@ -54,6 +54,8 @@ class SelectionTest(unittest.TestCase):
         sh = self.root / "sh"
         shutil.copy(selector.ROOT / "sh/dispatch.sh", sh / "dispatch.sh")
         shutil.copy(selector.ROOT / "sh/quest.sh", sh / "quest.sh")
+        (sh / "js").mkdir()
+        (sh / "js/install.py").write_text("# Dependency setup is outside this selector fixture.\n")
         changed = sh / "changed.sh"
         changed.write_text("#!/bin/sh\nprintf '%s\\n' js/auth/src/token.ts demo/pub/worker.ts quest/unrelated.md\n")
         changed.chmod(0o755)

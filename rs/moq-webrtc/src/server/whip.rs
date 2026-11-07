@@ -189,7 +189,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	let instance = route.instance();
 
 	let resource_id = sdp::new_resource_id();
-	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
+	let socket = crate::ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let session = session::Session::ingest(rtc, socket, sink)?.with_rate(&rate);
 
 	// Register before returning so a DELETE that races the first packet still
