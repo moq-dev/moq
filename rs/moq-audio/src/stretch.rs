@@ -6,12 +6,6 @@
 //! preemptive_expand,dsp_helper,audio_vector,decision_logic}.
 //! See WEBRTC-LICENSE and WEBRTC-PATENTS in this crate.
 
-/// Below the target, expand every window, as many whole periods as fit, at
-/// the lower admission threshold. False is NetEq's exact preemptive expand.
-/// The maintainer's listening check picks one, and the browser's
-/// `FAST_EXPAND` in `js/watch/src/audio/stretch.ts` must match it.
-const FAST_EXPAND: bool = true;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Operation {
 	Hold,
@@ -81,7 +75,7 @@ impl Stretch {
 				&self.input,
 				self.channels,
 				self.rate,
-				operation == Operation::Fast || (FAST_EXPAND && operation == Operation::Expand),
+				operation != Operation::Accelerate,
 			)
 		};
 		self.position = 0;
@@ -120,7 +114,7 @@ impl Stretch {
 		self.cooldown = self.rate as usize * 50 / 1000;
 	}
 
-	/// With [`FAST_EXPAND`], expand departs from NetEq's preemptive expand,
+	/// Expand departs from NetEq's preemptive expand,
 	/// which repeats one period per cooldown. A queue below its target is short
 	/// of the cushion its arrivals need, so it expands the way fast accelerate
 	/// shrinks: every window, as many whole periods as fit, at the lower
@@ -129,14 +123,12 @@ impl Stretch {
 		let high = target + self.rate as usize * 20 / 1000;
 		if buffered >= high * 4 {
 			Operation::Fast
-		} else if FAST_EXPAND && buffered < target {
+		} else if buffered < target {
 			Operation::Expand
 		} else if self.cooldown > 0 {
 			Operation::Hold
 		} else if buffered >= high {
 			Operation::Accelerate
-		} else if buffered < target {
-			Operation::Expand
 		} else {
 			Operation::Hold
 		}

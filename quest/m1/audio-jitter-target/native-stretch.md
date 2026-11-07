@@ -35,11 +35,10 @@ The port retains WebRTC's BSD notice and patent grant, 4 kHz analysis,
 8192/16384 fast admission thresholds, passive-speech VAD, 20 ms decision
 band, 4x fast threshold, and 60 ms startup / 50 ms successful-stretch
 cooldowns.
-[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) adds a fast
-expand to both players behind `FAST_EXPAND`, recorded in the shared spec:
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) replaces NetEq's
+expand in both players with a fast expand, recorded in the shared spec:
 below the target, expand ignores the cooldown and takes every whole period
-that fits at the lower threshold. Watch's listening check picks it or
-NetEq's exact expand. It also drains a declared end's tail
+that fits at the lower threshold. It also drains a declared end's tail
 unstretched, as finishing does. Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
 device rates and uses floating-point peak refinement and fades. Those
 arithmetic adaptations are documented, not claimed bit-identical to int16

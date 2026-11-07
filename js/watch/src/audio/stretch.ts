@@ -20,11 +20,6 @@ const DOWN = 110;
 const LAGS = 50;
 const MIN_LAG = 10;
 
-// Below the target, expand every window, as many whole periods as fit, at the lower admission
-// threshold. False is NetEq's exact preemptive expand. The maintainer's listening check picks one,
-// and native's FAST_EXPAND must match it.
-const FAST_EXPAND = true;
-
 // NetEq's voice activity bound before it has a background noise model, from signed 16-bit PCM.
 const PASSIVE = (8 * 75000) / (32768 * 32768);
 
@@ -102,8 +97,7 @@ export class Stretch {
 	 */
 	process(frames: number, buffered: number, target: number, enabled: boolean): void {
 		const decision = enabled && frames === this.window ? this.decide(buffered, target) : "Hold";
-		const lag =
-			decision === "Hold" ? 0 : this.#pitch(decision === "Fast" || (FAST_EXPAND && decision === "Expand"));
+		const lag = decision === "Hold" ? 0 : this.#pitch(decision !== "Accelerate");
 		this.#position = 0;
 		this.#length = frames;
 		if (lag === 0) {
@@ -139,7 +133,7 @@ export class Stretch {
 	/**
 	 * What a full window with `buffered` frames queued decides against `target`, both in frames.
 	 *
-	 * With {@link FAST_EXPAND}, expand departs from NetEq's preemptive expand, which repeats one
+	 * Expand departs from NetEq's preemptive expand, which repeats one
 	 * period per cooldown. A ring below its target is short of the cushion its arrivals need, and
 	 * running dry re-stalls it for a whole target of silence, so it expands the way fast accelerate
 	 * shrinks: every window, as many whole periods as fit, at the lower admission threshold.
@@ -147,10 +141,9 @@ export class Stretch {
 	decide(buffered: number, target: number): Decision {
 		const high = target + this.#band;
 		if (buffered >= high * 4) return "Fast";
-		if (FAST_EXPAND && buffered < target) return "Expand";
+		if (buffered < target) return "Expand";
 		if (this.cooldown > 0) return "Hold";
 		if (buffered >= high) return "Accelerate";
-		if (buffered < target) return "Expand";
 		return "Hold";
 	}
 

@@ -1,19 +1,17 @@
-# [M] js/watch: prove inaudible steady-state audio convergence on real hardware
+# [S] js/watch: prove inaudible steady-state audio convergence
 
 ## Goal
 
-On the measured real-microphone rows, the "Real-time" (`"auto"`) preset plays
-with no audible glitch after convergence, judged by the maintainer's
-listening check, with the estimator's `QUANTILE` left at 0.95. Audio holds
-back or catches up by playing slightly slower or faster, the way NetEq's
-preemptive expand and accelerate do, rather than running dry, discarding
-buffered audio, or rendering silence. Convergence is inaudible at ordinary
-drift and burst sizes.
+The "Real-time" (`"auto"`) preset plays with no audible glitch after
+convergence, with the estimator's `QUANTILE` left at 0.95. Audio holds back or
+catches up by playing slightly slower or faster, the way NetEq's preemptive
+expand and accelerate do, rather than running dry, discarding buffered audio,
+or rendering silence. Convergence is inaudible at ordinary drift and burst
+sizes.
 
-The measured rows are the `relay-mic-rtt40` replay row and a live re-run of
-the 2026-11-03 rows below with a real microphone, Chrome's with 40 ms or more
-of added RTT and Safari's on the direct path, read from the stats panel's
-audio Underruns and Skips. Their underrun and skip ceilings are measured by
+The maintainer's listening check of the native runs below settled the
+audible part, and waived the live browser re-run. Every underrun and skip
+ceiling, the nightly browser rows' included, is measured by
 `test/audio-quality/budgets.json`'s rule, like every other budget, rather than
 fixed at zero.
 
@@ -24,43 +22,60 @@ missing audio; only received audio is stretched. The estimator stays as
 ## Plan
 
 [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) ports the shared
-NetEq stretch into the browser's ring, passing the shared PCM corpus. Expand
-has two variants, chosen by `FAST_EXPAND` in `js/watch/src/audio/stretch.ts`
-and `rs/moq-audio/src/stretch.rs`, which must match:
+NetEq stretch into the browser's ring, passing the shared PCM corpus. Both
+players expand fast, as `doc/concept/audio-jitter.md` records: below the
+target, every window, as many whole periods as fit, at the lower admission
+threshold. Every replay row, `relay-mic-rtt40` included, measures and is
+budgeted at 0 `player_underruns_per_min`. NetEq-exact expand, one period per
+50 ms cooldown at the normal threshold, left `relay-mic-rtt40` at 2.1 and
+`bursty-aac` at 2.2 player underruns a minute on the 2026-11-06 replays, and
+is deleted.
 
-- Fast expand, the default: below the target, every window, as many whole
-  periods as fit, at the lower admission threshold, as
-  `doc/concept/audio-jitter.md` records. Every replay row,
-  `relay-mic-rtt40` included, measures and is budgeted at 0
-  `player_underruns_per_min`.
-- NetEq-exact expand: one period per 50 ms cooldown at the normal threshold.
-  On the 2026-11-06 replays it left `relay-mic-rtt40` at 2.1 and
-  `bursty-aac` at 2.2 player underruns a minute, and the other rows at 0.
+What remains is the nightly browser ceilings, re-measured by `budgets.json`'s
+rule from seven scheduled nightlies with the stretch. The lag heuristic behind
+`skip_aheads` and `discarded_ms` reads a sustained accelerate as a skip, so
+those can rise on rows whose target moves; `player_skips` counts the ring's
+real re-anchors beside them. One local run of the twelve chromium rows on
+2026-11-06 fit every current ceiling, with zero player underruns and skips.
 
-The listening check under Waiting picks one; the other is deleted, with the
-replay budgets and shared corpus re-measured for the choice if it is
-NetEq-exact. What remains is proof outside the replay:
+Decided 2026-11-07 (maintainer, /quest-unblock on
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058)): keep fast
+expand. The maintainer listened to the native runs in both variants and could
+not tell them apart, and left the pick to the coordinator. Both were equal in
+steady state, but NetEq-exact was the only variant with gaps: each of its two
+shaped rows had 2 short gaps (12 to 119 ms) in the first 3 s, while the target
+rose from 120 to 160 ms, which fits its slower expansion. Fast expand was
+already the default, so nothing needed re-measuring or restoring. The live
+browser rows (Chrome at +40 ms, Safari on the direct path) were not run; the
+maintainer waived them. Options shown:
 
-- The 2026-11-03 rows re-run on real hardware, Chrome's at +40 ms and Safari's
-  on the direct path, under Waiting.
-- A listening check of that run and of the native player in both expand
-  variants, since the departure changes both and postdates the 2026-11-05
-  native listening in
-  [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md).
-- The nightly browser ceilings re-measured by `budgets.json`'s rule from seven
-  scheduled nightlies with the stretch. The lag heuristic behind
-  `skip_aheads` and `discarded_ms` reads a sustained accelerate as a skip, so
-  those can rise on rows whose target moves; `player_skips` counts the ring's
-  real re-anchors beside them. One local run of the twelve chromium rows on
-  2026-11-06 fit every current ceiling, with zero player underruns and skips.
+- ✅ Fast expand
+- NetEq-exact expand
+
+The runs: macOS, head `354e35df40`, `moq play --video off --metrics`, `say`
+speech from `LICENSE-APACHE` over Opus at 128 kb/s through ffmpeg
+`-readrate`, relay `test/audio-quality/relay.toml`, shaper `bursty` seed 7,
+120 s a row. Skips are not in the native metrics, so they are not counted.
+Caveat: the output device changed between the sets (fast at 245 ms output
+latency, exact at 13 ms), which confounds the startup comparison.
+
+| Rate | Path | Variant | Underruns | Delay | Media / render | Gaps |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1.002 | direct | fast | 0 | 120-140 ms | 1.0023 | 0 |
+| 1.002 | bursty | fast | 0 | 120-260 ms | 1.0014 | 0 |
+| 0.998 | direct | fast | 0 | 120 ms | 0.9982 | 0 |
+| 0.998 | bursty | fast | 0 | 120-260 ms | 0.9974 | 0 |
+| 1.002 | direct | exact | 0 | 120 ms | 1.0021 | 0 |
+| 1.002 | bursty | exact | 0 | 120-260 ms | 1.0016 | 2 (startup) |
+| 0.998 | direct | exact | 0 | 120-140 ms | 0.9982 | 0 |
+| 0.998 | bursty | exact | 0 | 120-280 ms | 0.9979 | 2 (startup) |
 
 Decided 2026-11-06 (maintainer, /quest-complete on
 [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058)): the Goal was
 wrong to require exactly zero steady-state player underruns, which pushed
 expand away from NetEq in both players. The Goal is now no audible glitch in
 steady state, judged by listening, with underrun ceilings measured by
-`budgets.json`'s rule. The listening check picks the expand variant:
-NetEq-exact if it sounds as good, otherwise fast expand. Options shown:
+`budgets.json`'s rule. Options shown:
 
 - ✅ Audible, not zero
 - Keep zero, and take fast expand in both players
@@ -103,36 +118,6 @@ on the direct path. Underruns are the stats panel's counter after the first
 
 ## Waiting
 
-- Maintainer: re-run the 2026-11-03 rows on the MacBook Air, listen to them
-  in both expand variants, and pick the variant: NetEq-exact if it sounds as
-  good as fast expand (**recommended** then, since it keeps both players on
-  NetEq), otherwise fast expand. An agent has no microphone, speaker, or
-  Safari. Automation considered: rendering speech through the ring offline,
-  but the repository's only speech clips are 0.4 s, and the live run
-  exercises the same stretch on a real voice. On a checkout of `main` once
-  [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) merges, or of
-  its branch before, run each step once with `FAST_EXPAND = true` (the
-  default) and once with it set to `false` in both
-  `js/watch/src/audio/stretch.ts` and `rs/moq-audio/src/stretch.rs`:
-  1. `just web serve https://cdn.moq.dev/anon`, and in its publish tab
-     publish the built-in microphone with 20 ms groups, the default.
-  2. For the +40 ms RTT, `cargo run --release -p moq-shaper -- --listen
-     127.0.0.1:443 --target "$(dig +short cdn.moq.dev | head -1):443"
-     --delay 20ms`, then open the watch page in a second Chrome profile:
-     `open -na "Google Chrome" --args --user-data-dir=/tmp/rtt40
-     --host-resolver-rules="MAP cdn.moq.dev 127.0.0.1"`.
-  3. Play the broadcast at the Real-time delay and talk for three minutes.
-     Note the stats panel's audio Underruns and Skips at 30 s and at the end,
-     and listen for warble, pitch wobble, or gaps.
-  4. Repeat with 100 ms groups, then both group sizes in Safari on the direct
-     path, with no shaper.
-  5. Repeat the 2026-11-05 native listening runs of
-     [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) on the
-     same checkout: `say` speech over Opus at a 1.002 and a 0.998 publisher
-     rate, direct and through the shaper's `bursty` profile.
-
-  Done when the chosen variant has no audible glitch in steady state. Record
-  the table of Underruns and Skips per row and variant here, and the pick.
 - moq-dev/moq: seven scheduled Nightly runs on `main` with the stretch. Then
   re-measure the chromium ceilings in `test/audio-quality/budgets.json` from
   their `audio-quality-run` artifacts by the note's rule, adding
