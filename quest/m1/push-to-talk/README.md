@@ -43,7 +43,8 @@ Decided 2026-10-28 (maintainer):
   same idea special-cased.
 
 The epic's own work: the acceptance proof `just test push-to-talk` (22
-presses, 60 ms Opus, 300 ms delay). A listener's unmute pays no catalog
+presses, 60 ms Opus, 300 ms delay), with a native `moq play` listener held to
+the same no-lost-head, comfort-noise, and no-underrun checks. A listener's unmute pays no catalog
 round trip and no resubscribe, and every frame of each utterance is encoded,
 sent, received, and decoded from its first frame, with no catalog flip and no
 underrun or stall across the presses.
@@ -96,7 +97,3 @@ holding every ordered read's first delivery).
 
 The runner fails on a head that is received but never decoded, so the proof
 catches this. A complete set of runs finishes this epic.
-
-## Required
-
-- [Native playback in the acceptance proof](/quest/m1/push-to-talk/native.md) - `just test push-to-talk` also runs a `moq play` listener, held to the same no-lost-head, comfort-noise, and no-underrun checks
