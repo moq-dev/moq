@@ -183,3 +183,4 @@ Public API: none. Wire: none.
 - [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
 - [A lite-07 relative start resolves to the publisher's start every time](/quest/m0/test-flakes-2/lite07-relative-start.md) - `js/net`'s frameless-newest-group integration test stops reading a start of 0, and its `test.skip` is removed
 - [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
+- [moq-tokio's stream-stopped tests survive a loaded host](/quest/m0/test-flakes-2/quic-stream-stopped.md) - `stream_stopped` awaits its stop event instead of a 100 ms wall-clock deadline, and its `#[ignore]` is removed
