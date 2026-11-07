@@ -339,7 +339,7 @@ impl Client {
 	///
 	/// The connect timeout bounds the MoQ handshake from this call. A transport handed
 	/// over cannot be redialed, so there is no reconnect: the session ends with it.
-	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+	#[cfg(feature = "qmux")]
 	pub async fn connect_with(&self, session: qmux::Session) -> crate::Result<moq_net::Session> {
 		let timeout = self.policy.timeout;
 		let connect = connect_session(&self.moq, session);
@@ -352,39 +352,6 @@ impl Client {
 			}
 		})
 		.await
-	}
-
-	/// Run a MoQ client session over the data channel an [`crate::webrtc::Offerer`] opened.
-	///
-	/// The connect timeout bounds ICE and the channel coming up, then
-	/// [`Self::connect_with`] bounds the MoQ handshake. A peer link cannot be redialed, so
-	/// there is no reconnect: the session ends with the peer connection.
-	#[cfg(feature = "webrtc")]
-	pub async fn connect_webrtc(&self, peer: &crate::webrtc::Offerer) -> crate::Result<moq_net::Session> {
-		let protocol = peer.protocol();
-		if !self.versions.alpns().contains(&protocol) {
-			return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
-		}
-
-		let establish = async {
-			let opened = peer.channel().await?;
-			let session = qmux::Session::connect(opened.channel, opened.config).await?;
-			Ok::<_, crate::webrtc::Error>(crate::spawn_qmux(session))
-		};
-		let timeout = self.policy.timeout;
-		let session = crate::runtime::scope(async move {
-			match timeout.is_zero() {
-				true => Ok(establish.await?),
-				false => kio::clock::timeout(timeout, establish)
-					.await
-					.map_err(|_| Error::ConnectTimeout(timeout))?
-					.map_err(Error::from),
-			}
-		})
-		.await?;
-		let session = self.connect_with(session).await?;
-		tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
-		Ok(session)
 	}
 
 	/// Dial one attempt of a [`Connection`]'s policy and complete the MoQ handshake.

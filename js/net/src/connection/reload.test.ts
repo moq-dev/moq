@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Viewers } from "../bandwidth.ts";
@@ -128,6 +129,7 @@ test("closing mid-connect aborts the pending attempt", async () => {
 });
 
 test("a peer that severs immediately keeps escalating the backoff", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;
@@ -173,6 +175,7 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 });
 
 test("an explicitly undefined delay field falls back to its default", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let dials = 0;
@@ -215,6 +218,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 }
 
 test("a follower follows the reconnect on the same handle", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -434,6 +438,7 @@ function refusing(refused: string, release: Promise<void>) {
 }
 
 test("a refused credential replaced since its dial redials with the new one", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
 	const { dialed, stub } = refusing("old", release);
@@ -462,6 +467,7 @@ test("a refused credential replaced since its dial redials with the new one", as
 });
 
 test("new tokens redial a URL that stopped on refusing the old ones", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const { dialed, stub } = refusing("old", Promise.resolve());
 	globalThis.WebTransport = stub;
@@ -540,6 +546,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 // disjoint. Reading a stream reset off the session table would call every SETUP-stream reset
 // an auth rejection and suppress reconnect for the life of the page.
 test("a setup stream reset is not mistaken for an unauthorized session", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;
@@ -577,6 +584,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 });
 
 test("origins span reconnects: local re-announces, remote re-populates", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/origins");
 
@@ -1064,6 +1072,7 @@ test("announced accepts a non-prefix scope before any session exists", () => {
  * a reconnect takes it back until the next session's set lands.
  */
 test("a watcher syncs with the server's initial set, and again after a reconnect", async () => {
+	hostTime();
 	// Through the consume origin, and through the handle's own stream without one.
 	for (const [alpn, viaOrigin] of [
 		[Lite.ALPN_06, true],

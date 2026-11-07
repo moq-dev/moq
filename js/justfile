@@ -17,7 +17,7 @@ install mode:
 # `build` runs here rather than as its own gate: the per-package `check` script
 # is `tsc --noEmit`, which never runs declaration emit, so the errors that only
 # surface when emitting a `.d.ts` (TS4023 and friends) pass `check` and then
-# break a JSR/npm publish. It costs about 20s for every package.
+# break an npm publish. It costs about 20s for every package.
 #
 # `common/deps.ts` runs first and cheaply: bundlers resolve an undeclared
 # workspace import through hoisting, so nothing else in `check` notices one.

@@ -1,4 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
+import { Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
@@ -48,7 +50,7 @@ function subscribe(fields: number[][], name: number, requestId = 0): Uint8Array 
 /** Resolves to the session's close code, or undefined if it stays open a moment. */
 async function closeCode(quic: WebTransport): Promise<number | undefined> {
 	const open = Symbol("open");
-	const result = await Promise.race([quic.closed, Bun.sleep(50).then(() => open)]);
+	const result = await Promise.race([quic.closed, sleep(Nano.fromMilli(Milli(50))).then(() => open)]);
 	return result === open ? undefined : (result as WebTransportCloseInfo).closeCode;
 }
 
@@ -161,6 +163,7 @@ for (const [version, alpn] of DRAFTS) {
 		["a second GOAWAY", 2, SessionCode.ProtocolViolation],
 	] as const) {
 		test(`${name} on a namespace subscription ${code === undefined ? "keeps" : "closes"} ${alpn}`, async () => {
+			hostTime();
 			const logged = spyOn(console, "error").mockImplementation(() => undefined);
 			const { pair, stream, close } = await serving(version, alpn);
 			try {
@@ -176,6 +179,7 @@ for (const [version, alpn] of DRAFTS) {
 		});
 
 		test(`${name} on a subscription ${code === undefined ? "keeps" : "closes"} ${alpn}`, async () => {
+			hostTime();
 			const logged = spyOn(console, "error").mockImplementation(() => undefined);
 			const { pair, stream, close } = await serving(version, alpn);
 			try {
@@ -218,6 +222,7 @@ for (const [version, alpn] of DRAFTS) {
 
 	// A relay cancels an object stream it no longer serves, such as an old route's after a replacement.
 	test(`a peer reset object stream keeps ${alpn} and logs no error`, async () => {
+		hostTime();
 		const logged = spyOn(console, "error");
 		const { pair, close } = await serving(version, alpn);
 		try {
@@ -252,6 +257,7 @@ for (const [version, alpn] of DRAFTS) {
 		],
 	] as const) {
 		test(`${name} on the setup stream ${code === undefined ? "keeps" : "closes"} ${alpn}`, async () => {
+			hostTime();
 			const logged = spyOn(console, "error").mockImplementation(() => undefined);
 			const { pair, peer, connection } = await client(version, alpn);
 			try {
@@ -302,6 +308,7 @@ for (const [requestId, code] of [
 ] as const) {
 	const name = requestId === undefined ? "without a Request ID" : `Request ID ${requestId}`;
 	test(`a draft-18 GOAWAY ${name} ${code === undefined ? "keeps" : "closes"} a client`, async () => {
+		hostTime();
 		const logged = spyOn(console, "error").mockImplementation(() => undefined);
 		const { pair, peer, connection } = await client(Version.DRAFT_18, ALPN.DRAFT_18);
 		try {

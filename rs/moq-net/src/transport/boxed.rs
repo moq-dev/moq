@@ -57,11 +57,15 @@ impl Session {
 
 	/// Poll opening a unidirectional stream for a group, like [`Self::poll_open_uni`], which the
 	/// session lists among its open group streams until it is finished, reset, or dropped.
+	///
+	/// A higher-ranked open waiting for credit may reset it with `preempt`, the stream code
+	/// the negotiated version gives the reason; its writer then reads that code back.
 	pub(crate) fn poll_open_group(
 		&self,
 		open: &mut Open,
 		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
+		preempt: u32,
 	) -> Poll<Result<SendStream, Error>> {
 		let SendStream(Sender::Own(stream)) = ready!(self.poll_open_uni(open, waiter, options))? else {
 			unreachable!("a stream is listed only here");
@@ -71,6 +75,9 @@ impl Session {
 				stream,
 				group: options.group.map(|group| group.priority.clone()),
 				priority: options.priority,
+				preempt,
+				preempted: false,
+				waiters: Default::default(),
 			}),
 		});
 		let key = self.opens.list(&listed);
@@ -259,6 +266,29 @@ impl SendStream {
 		}
 	}
 
+	/// Poll a write, failing once the session preempted the stream, and waking a parked
+	/// write when it does.
+	fn poll_writing(
+		&mut self,
+		waiter: &kio::Waiter,
+		f: impl FnOnce(&mut dyn ErasedSend) -> Poll<Result<usize, Error>>,
+	) -> Poll<Result<usize, Error>> {
+		match &mut self.0 {
+			Sender::Own(stream) => f(stream.as_mut()),
+			Sender::Listed(listing) => {
+				let mut state = listing.listed.lock();
+				if let Some(err) = state.preempted() {
+					return Poll::Ready(Err(err));
+				}
+				let res = f(state.stream.as_mut());
+				if res.is_pending() {
+					state.waiters.register(waiter);
+				}
+				res
+			}
+		}
+	}
+
 	fn get(&self) -> Read<'_> {
 		match &self.0 {
 			Sender::Own(stream) => Read::Own(stream.as_ref()),
@@ -294,6 +324,34 @@ struct ListedState {
 	/// The priority of the send group the stream is in, shared with the group's handles.
 	group: Option<Arc<std::sync::atomic::AtomicI64>>,
 	priority: i64,
+	/// The stream code a reset to make room uses.
+	preempt: u32,
+	/// Whether the session reset the stream to make room, so its writer fails.
+	preempted: bool,
+	/// The writer's waits, woken once the stream is preempted.
+	waiters: kio::WaiterList,
+}
+
+impl ListedState {
+	/// The writer's error once the session reset the stream to make room.
+	fn preempted(&self) -> Option<Error> {
+		self.preempted.then(|| Error::new(Preempted(self.preempt)))
+	}
+}
+
+/// A group stream the session reset to make room for a higher-ranked open.
+#[derive(Debug, thiserror::Error)]
+#[error("reset to make room for a higher-priority stream")]
+struct Preempted(u32);
+
+impl super::Error for Preempted {
+	fn session_error(&self) -> Option<(u32, String)> {
+		None
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		Some(self.0)
+	}
 }
 
 impl Listed {
@@ -311,6 +369,18 @@ impl Listed {
 			),
 			acknowledged: state.stream.acknowledged(),
 		}
+	}
+
+	/// Reset the stream to make room, failing its writer with the reset's code.
+	pub(super) fn preempt(&self) {
+		let mut state = self.lock();
+		if state.preempted {
+			return;
+		}
+		state.preempted = true;
+		let code = state.preempt;
+		state.stream.reset(code);
+		state.waiters.wake();
 	}
 }
 
@@ -841,11 +911,11 @@ impl poll::SendStream for SendStream {
 	type Group = Group;
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
-		self.with(false, |stream| stream.poll_write(waiter, buf))
+		self.poll_writing(waiter, |stream| stream.poll_write(waiter, buf))
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
-		self.with(false, |stream| stream.poll_write_buf(waiter, buf))
+		self.poll_writing(waiter, |stream| stream.poll_write_buf(waiter, buf))
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -863,15 +933,36 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn finish(&mut self) -> Result<(), Error> {
+		if let Sender::Listed(listing) = &self.0
+			&& let Some(err) = listing.listed.lock().preempted()
+		{
+			return Err(err);
+		}
 		self.with(true, |stream| stream.finish())
 	}
 
 	fn reset(&mut self, code: u32) {
+		// A preempted stream keeps the code it was reset with.
+		if let Sender::Listed(listing) = &self.0
+			&& listing.listed.lock().preempted
+		{
+			return;
+		}
 		self.with(true, |stream| stream.reset(code))
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		self.get().poll_closed(waiter)
+		match &self.0 {
+			Sender::Own(stream) => stream.poll_closed(waiter),
+			Sender::Listed(listing) => {
+				let mut state = listing.listed.lock();
+				if let Some(err) = state.preempted() {
+					return Poll::Ready(Err(err));
+				}
+				state.waiters.register(waiter);
+				state.stream.poll_closed(waiter)
+			}
+		}
 	}
 
 	fn acknowledged(&self) -> Option<bool> {
@@ -989,7 +1080,7 @@ mod test {
 	}
 
 	fn open_group(session: &Session, options: SendOptions<'_, Group>) -> SendStream {
-		let Poll::Ready(Ok(stream)) = session.poll_open_group(&mut Open::default(), &kio::Waiter::noop(), options)
+		let Poll::Ready(Ok(stream)) = session.poll_open_group(&mut Open::default(), &kio::Waiter::noop(), options, 1)
 		else {
 			panic!("the transport opens at once");
 		};

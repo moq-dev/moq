@@ -55,12 +55,6 @@ typedef PixelBuffer = PixelBufferMoqVideoSurface;
 /// One encoded access unit from an [Encoder].
 typedef Packet = MoqVideoPacket;
 
-/// How pictures are split into independently decodable groups.
-typedef Gop = MoqVideoGop;
-
-/// A keyframe every `interval` pictures.
-typedef Keyframe = KeyframeMoqVideoGop;
-
 /// H.264 or H.265.
 typedef Codec = MoqVideoCodec;
 
