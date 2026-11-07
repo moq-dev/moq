@@ -12,7 +12,8 @@
 //!
 //! The session also lists the group streams it has open, each with its rank and whether the
 //! peer has acknowledged everything written to it. A unidirectional open waiting for the peer's
-//! credit resets the lowest-ranked one below it to make room, at most one reset in flight per
+//! credit resets the lowest-ranked one it preempts to make room: one in a lower-priority group,
+//! or an older one of its own group, never a tied group's. At most one reset is in flight per
 //! waiting open, since each frees credit only once the peer's MAX_STREAMS arrives.
 
 use std::cmp::Reverse;
@@ -55,6 +56,25 @@ impl Rank {
 				stream,
 			},
 			None => Self::Ungrouped { stream },
+		}
+	}
+
+	/// Whether an open at this rank may reset a stream at `other` to make room: one outside
+	/// every group or in a higher-priority group, or an older stream of its own group. A tied
+	/// group's stream is only behind in turn, so resetting it would just hand the turn back.
+	fn preempts(self, other: Self) -> bool {
+		match (self, other) {
+			(Self::Ungrouped { stream }, Self::Ungrouped { stream: other }) => stream > other,
+			(Self::Ungrouped { .. }, Self::Grouped { .. }) => true,
+			(Self::Grouped { .. }, Self::Ungrouped { .. }) => false,
+			(
+				Self::Grouped { group, turn, stream },
+				Self::Grouped {
+					group: other_group,
+					turn: other_turn,
+					stream: other,
+				},
+			) => group > other_group || (group == other_group && turn == other_turn && stream > other),
 		}
 	}
 
@@ -204,7 +224,7 @@ impl Lines {
 		self.listing().streams.remove(&key);
 	}
 
-	/// Reset the lowest-ranked open group stream below each waiting open not yet owed a reset,
+	/// Reset the lowest-ranked open group stream each waiting open not yet owed a reset preempts,
 	/// unless the transport reports it refused no open, so the open waits on something else,
 	/// such as a WebTransport header.
 	fn make_room(&self, line: &mut Line) {
@@ -226,13 +246,12 @@ impl Lines {
 			.into_iter()
 			.map(|(key, stream)| (stream.read().rank, key, stream))
 			.collect();
-		// Sorted highest first, so the lowest pops off the end.
-		open.sort_by_key(|(rank, key, _)| Reverse((*rank, *key)));
+		open.sort_by_key(|(rank, key, _)| (*rank, *key));
 		for rank in owed {
-			let Some((lowest, key, stream)) = open.pop_if(|(lowest, _, _)| *lowest < rank) else {
-				// The opens behind rank lower still.
-				break;
+			let Some(index) = open.iter().position(|(lowest, _, _)| rank.preempts(*lowest)) else {
+				continue;
 			};
+			let (lowest, key, stream) = open.remove(index);
 			tracing::debug!(?lowest, waiting = ?rank, "reset a lower-ranked stream to make room");
 			stream.preempt();
 			self.unlist(key);
@@ -720,5 +739,63 @@ mod tests {
 			}
 		}
 		assert_eq!(order, ["early", "late", "early", "late"]);
+	}
+
+	/// Out of credit, a waiting open resets a stream only of a lower group priority or of its
+	/// own group, never a tied group's, so tied subscriptions take turns instead of resetting
+	/// each other's streams.
+	#[test]
+	fn tied_groups_never_reset_each_other() {
+		use super::super::poll::Session as _;
+
+		let credit = kio::Producer::new(true);
+		let session = boxed::Session::new(
+			crate::lite::test_transport::SinkSession::gated_open_uni(credit.consume()).with_groups(),
+		);
+		let waiter = kio::Waiter::noop();
+		let [served, tied, high] =
+			[0, 0, 1].map(|priority| session.send_group(priority).expect("the sink opens groups"));
+		let grant = |open: bool| {
+			let Ok(mut credit) = credit.write() else {
+				panic!("the gate stays open");
+			};
+			*credit = open;
+		};
+		let open = |open: &mut Open, group: &boxed::Group, stream| {
+			let options = SendOptions {
+				group: Some(group),
+				priority: stream,
+			};
+			session.poll_open_group(open, &waiter, options, 7)
+		};
+		let Poll::Ready(Ok(_older)) = open(&mut Open::default(), &served, 1) else {
+			panic!("credit is free");
+		};
+		grant(false);
+
+		let mut waiting = Open::default();
+		assert!(open(&mut waiting, &tied, 1).is_pending());
+		assert_eq!(session.open_streams().len(), 1, "a tied group waits its turn");
+
+		let mut newer = Open::default();
+		assert!(open(&mut newer, &served, 2).is_pending());
+		assert!(
+			session.open_streams().is_empty(),
+			"a group's newer stream resets its older one"
+		);
+		drop((waiting, newer));
+
+		grant(true);
+		let Poll::Ready(Ok(_other)) = open(&mut Open::default(), &tied, 0) else {
+			panic!("credit is free");
+		};
+		grant(false);
+		let mut higher = Open::default();
+		assert!(open(&mut higher, &high, 0).is_pending());
+		assert!(
+			session.open_streams().is_empty(),
+			"a higher group priority resets a lower"
+		);
+		drop(higher);
 	}
 }
