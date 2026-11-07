@@ -3,8 +3,8 @@
 //! `POST /<broadcast-path>` accepts a WHEP SDP offer and returns an SDP
 //! answer sourced from the matching MoQ broadcast on the subscribe origin.
 
+use crate::vendor::str0m::Candidate;
 #[cfg(feature = "server")]
-use crate::vendor::str0m;
 use axum::{
 	Router,
 	body::Bytes,
@@ -13,7 +13,6 @@ use axum::{
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
-use str0m::Candidate;
 
 use std::time::Duration;
 

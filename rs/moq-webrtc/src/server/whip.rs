@@ -4,8 +4,8 @@
 //! and returns an SDP answer. The request path becomes the broadcast name on
 //! the upstream publish origin.
 
-#[cfg(feature = "server")]
 use crate::vendor::str0m;
+#[cfg(feature = "server")]
 use axum::{
 	Router,
 	body::Bytes,
