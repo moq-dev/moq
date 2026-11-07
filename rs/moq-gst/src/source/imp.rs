@@ -733,7 +733,11 @@ impl PadActor {
 	/// Start a new stream on the pad and stream `play` to it. The finished record is checked only
 	/// now, since the play before records its track as finished before it lets go.
 	async fn play(&mut self, play: Play) -> Exit {
-		if *play.cancel.borrow() || play.finished.contains(&self.rendition, &play.shape.track, play.serial) {
+		if *play.cancel.borrow()
+			|| play
+				.finished
+				.contains(&self.rendition, &play.shape.track, play.attached)
+		{
 			return Exit::Done;
 		}
 		let name = &self.rendition.1;
@@ -1201,6 +1205,7 @@ fn reconcile(
 			resumable: HashMap::new(),
 			finished: Finished::default(),
 			started: 0,
+			starts: 0,
 			next_id: 0,
 			empty: empty_tx,
 			emptied: emptied.clone(),
@@ -1276,6 +1281,8 @@ struct Follower {
 	finished: Finished,
 	/// How many instances started, numbering each.
 	started: u64,
+	/// How many times any instance started, a return included.
+	starts: u64,
 	next_id: u64,
 	/// The run's [`Followed::empty`].
 	empty: watch::Sender<bool>,
@@ -1294,6 +1301,17 @@ struct Current {
 	timeline: Arc<Timeline>,
 	/// Its number among the follower's instances.
 	serial: u64,
+	/// Its number among the follower's starts, which a return does not keep.
+	start: u64,
+}
+
+/// The instance a reader reads, and the start of it that the reader belongs to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Attached {
+	/// The instance's [`Current::serial`].
+	serial: u64,
+	/// The instance's [`Current::start`].
+	start: u64,
 }
 
 /// A rendition a [`Follower`] plays.
@@ -1495,11 +1513,13 @@ impl Follower {
 		if let Some(id) = &id {
 			self.resumable.insert(id.clone(), (serial, timeline.clone()));
 		}
+		self.starts += 1;
 		self.current = Some(Current {
 			instance: Some(instance),
 			id,
 			timeline,
 			serial,
+			start: self.starts,
 		});
 		self.forget();
 		self.idle();
@@ -1566,7 +1586,10 @@ impl Follower {
 					rendition: rendition.clone(),
 					shape: entry.shape.clone(),
 					instance: instance.clone(),
-					serial: current.serial,
+					attached: Attached {
+						serial: current.serial,
+						start: current.start,
+					},
 					timeline: current.timeline.clone(),
 					finished: self.finished.clone(),
 					live: live.clone(),
@@ -1631,8 +1654,7 @@ struct Reader {
 	rendition: Rendition,
 	shape: Shape,
 	instance: moq_net::broadcast::Consumer,
-	/// The instance's [`Current::serial`].
-	serial: u64,
+	attached: Attached,
 	timeline: Arc<Timeline>,
 	/// The follower's [`Follower::finished`].
 	finished: Finished,
@@ -1651,7 +1673,7 @@ impl Reader {
 			rendition,
 			shape,
 			instance,
-			serial,
+			attached,
 			timeline,
 			finished,
 			live,
@@ -1667,7 +1689,7 @@ impl Reader {
 
 		// An instance that already played this track to its end on the pad would replay its last
 		// group.
-		if finished.contains(&rendition, &shape.track, serial) {
+		if finished.contains(&rendition, &shape.track, attached) {
 			return Exit::Done;
 		}
 
@@ -1716,7 +1738,7 @@ impl Reader {
 			shape,
 			track,
 			instance,
-			serial,
+			attached,
 			timeline,
 			finished,
 			live,
@@ -1733,8 +1755,7 @@ struct Play {
 	shape: Shape,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	instance: moq_net::broadcast::Consumer,
-	/// The instance's [`Current::serial`].
-	serial: u64,
+	attached: Attached,
 	timeline: Arc<Timeline>,
 	finished: Finished,
 	/// Shared with the reader's [`ReaderHandle::live`], set once the play has the pad.
@@ -1752,7 +1773,7 @@ impl Play {
 			shape,
 			mut track,
 			instance,
-			serial,
+			attached,
 			timeline,
 			finished,
 			mut cancel,
@@ -1767,13 +1788,11 @@ impl Play {
 			tokio::select! {
 				// The follower stopped this reader (the instance changed, the rendition was
 				// reshaped or delisted, or the run ended). An end or failure that arrived alongside
-				// still finishes the track, as the arms below would, or the play queued behind this
-				// one would replay it.
+				// is recorded as the arms below would, or the play queued behind this one would
+				// replay it.
 				_ = cancel.changed() => {
-					match ended(&mut track) {
-						Some(Ok(())) => finished.insert(rendition, &shape.track, serial),
-						Some(Err(_)) if !instance.is_closed() => finished.insert(rendition, &shape.track, serial),
-						_ => {}
+					if let Some(end) = ended(&mut track) {
+						finished.insert(rendition, &shape.track, attached, end.is_err());
 					}
 					return;
 				}
@@ -1838,14 +1857,14 @@ impl Play {
 					// Recorded before the actor takes the next play,
 					// so a reshape on this instance does not replay it.
 					Ok(None) => {
-						finished.insert(rendition, &shape.track, serial);
+						finished.insert(rendition, &shape.track, attached, false);
 						return;
 					}
-					// The track is over on an instance still up, which may hand a new subscription
-					// the groups already played, so it is recorded like an end.
+					// The instance may still hand a new subscription the groups already played,
+					// such as a relay's copy cut off by its publisher's session closing.
 					Err(err) => {
 						gst::warning!(CAT, "track {name} failed: {err:?}");
-						finished.insert(rendition, &shape.track, serial);
+						finished.insert(rendition, &shape.track, attached, true);
 						return;
 					}
 				}
@@ -1860,28 +1879,41 @@ impl Play {
 /// after its tracks end, or a disable and an enable) must not start it on that pad again. Another
 /// instance carries a new track, and a pad that never played the track joins it like any late
 /// subscriber.
+/// An end holds for every return of its instance. A failure holds only for the start it happened
+/// on: it may be the instance going away, seen before the instance reports closed, and the same
+/// instance returning serves the track again.
 /// Only the last track is kept, so the records stay bounded by the catalog: a rendition switched
 /// back to a track it finished before another replays its last group. Shared with the plays,
 /// since a play queued behind another on its pad learns this only once the other is done.
 #[derive(Clone, Default)]
-struct Finished(Arc<Mutex<HashMap<(Rendition, u64), String>>>);
+struct Finished(Arc<Mutex<HashMap<(Rendition, u64), Ended>>>);
+
+/// A [`Finished`] record.
+struct Ended {
+	track: String,
+	/// The [`Attached::start`] a failure happened on, or none for an end.
+	failed: Option<u64>,
+}
 
 impl Finished {
-	/// Record that instance `serial` served the rendition's `track` to its end.
-	fn insert(&self, rendition: &Rendition, track: &str, serial: u64) {
-		self.0
-			.lock()
-			.unwrap()
-			.insert((rendition.clone(), serial), track.to_string());
+	/// Record that the rendition's `track` ended, or `failed`, while `attached`.
+	fn insert(&self, rendition: &Rendition, track: &str, attached: Attached, failed: bool) {
+		self.0.lock().unwrap().insert(
+			(rendition.clone(), attached.serial),
+			Ended {
+				track: track.to_string(),
+				failed: failed.then_some(attached.start),
+			},
+		);
 	}
 
-	/// Whether instance `serial` already served the rendition's `track` to its end on its pad.
-	fn contains(&self, rendition: &Rendition, track: &str, serial: u64) -> bool {
+	/// Whether the rendition's `track` already played out on its pad for a reader `attached`.
+	fn contains(&self, rendition: &Rendition, track: &str, attached: Attached) -> bool {
 		self.0
 			.lock()
 			.unwrap()
-			.get(&(rendition.clone(), serial))
-			.is_some_and(|finished| finished == track)
+			.get(&(rendition.clone(), attached.serial))
+			.is_some_and(|ended| ended.track == track && ended.failed.is_none_or(|start| start == attached.start))
 	}
 
 	/// Keep only the records `keep` accepts.
@@ -4032,7 +4064,7 @@ mod session_tests {
 				warmup: Duration::ZERO,
 			},
 			instance,
-			serial: 1,
+			attached: super::Attached { serial: 1, start: 1 },
 			timeline: Arc::default(),
 			finished: super::Finished::default(),
 			live: Arc::default(),
@@ -4083,7 +4115,7 @@ mod session_tests {
 				warmup: Duration::ZERO,
 			},
 			instance,
-			serial: 1,
+			attached: super::Attached { serial: 1, start: 1 },
 			timeline: Arc::default(),
 			finished: super::Finished::default(),
 			live: Arc::default(),
@@ -4630,6 +4662,64 @@ mod session_tests {
 		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
 		recorder.assert_one_pad_held();
 		drop(first);
+	}
+
+	/// A track failing may be its instance going away before the instance reports closed, as a
+	/// relay's copy does when its publisher's session closes, so the same instance announced again
+	/// plays the track's later groups on its pad.
+	#[test]
+	fn a_reannounced_sibling_instance_plays_a_track_that_failed() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let _room = referencing(&origin, None);
+		// [`follow`], keeping the pads to wait on.
+		let pads = Pads::default();
+		let session = {
+			let (shutdown, stopping) = watch::channel(false);
+			let session = Session {
+				max_delay: DEFAULT_MAX_DELAY,
+				element: element.downgrade(),
+				pads: pads.clone(),
+				shutdown: stopping,
+			};
+			let origin = origin.consume();
+			let task =
+				super::RUNTIME.spawn(async move { session.follow_path(&origin, "room", std::future::pending()).await });
+			(shutdown, task)
+		};
+		let mut follow = watch(&origin, "cam");
+
+		let mut first = Publisher::sibling(&origin, None);
+		let pad = recorder.written(&mut first, 1);
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::Start(_))
+		});
+		// The pad plays out the failure while the instance is still announced.
+		first.video.abort(moq_net::Error::Cancel);
+		super::RUNTIME.block_on(pads.settled(&(TrackKind::Video, "video".to_string())));
+		first.route.as_ref().unwrap().withdraw();
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::origin::RouteEvent::End(_))
+		});
+
+		// The returning instance serves the track again, from a later group.
+		first.video = moq_mux::container::Producer::new(
+			first
+				.broadcast
+				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+				.unwrap(),
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		first.route.as_ref().unwrap().announce().unwrap();
+		assert_eq!(
+			recorder.written(&mut first, 2),
+			pad,
+			"the returning instance moved to another pad"
+		);
+		stop(session);
+		recorder.assert_one_pad_held();
 	}
 
 	/// A sibling the catalog stopped reading is let go: once the catalog closes, the run ends while
