@@ -140,6 +140,43 @@ function installFakeVideoEncoder() {
 	};
 }
 
+for (const stage of ["support", "flush"] as const) {
+	test(`a cancelled ${stage} probe cannot block the next capture`, async () => {
+		using _videoEncoder = installFakeVideoEncoder();
+		const pending = Promise.withResolvers<never>();
+		const held =
+			stage === "support"
+				? spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementationOnce(() => pending.promise)
+				: spyOn(FakeVideoEncoder.prototype, "flush").mockImplementationOnce(() => pending.promise);
+		const enabled = new Signal(true);
+		const encoder = new Encoder("video", {
+			enabled,
+			capture: {
+				in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+				out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(undefined) },
+			} as never,
+			config: { codec: "avc1" },
+		});
+		try {
+			await settle();
+			expect(held).toHaveBeenCalledTimes(1);
+			enabled.set(false);
+			await settle();
+			if (stage === "flush") expect(FakeVideoEncoder.instances[0]?.state).toBe("closed");
+			enabled.set(true);
+			await settle();
+			expect(encoder.out.catalog.peek()?.codec).toStartWith("avc1");
+			// The abandoned browser promise still has not resolved.
+			expect(held.mock.calls.length).toBeGreaterThan(1);
+		} finally {
+			encoder.close();
+			held.mockRestore();
+			pending.reject(new DOMException("closed", "AbortError"));
+			await settle();
+		}
+	});
+}
+
 test("encoding tracks encoder config in its child effect", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -1147,6 +1184,75 @@ async function installRecording() {
 			else Reflect.deleteProperty(globalThis, "VideoFrame");
 		},
 	};
+}
+
+for (const stop of ["resume", "close", "detach", "track closed", "track replaced"] as const) {
+	test(`a stalled final black frame cannot block ${stop}`, async () => {
+		using recording = await installRecording();
+		const enabled = new Signal(true);
+		const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO });
+		const rendition = {
+			slot: new Signal(undefined),
+			config: new Signal(undefined),
+			stats: new Signal(undefined),
+			track: new Signal(track),
+			join: new Signal(undefined),
+			close: () => {},
+		};
+		const order = new Order();
+		const broadcast = new Signal<Broadcast | undefined>({
+			video: () => rendition,
+			order,
+			join: new Signal(undefined),
+		} as never);
+		const encoder = new Encoder("video", {
+			enabled,
+			capture: recording.capture as never,
+			broadcast,
+		});
+		const pending = Promise.withResolvers<void>();
+		const closed = spyOn(RecordingVideoEncoder.prototype, "close");
+		const leave = spyOn(order, "leave");
+		let flush: ReturnType<typeof spyOn<RecordingVideoEncoder, "flush">> | undefined;
+		try {
+			await settle();
+			await recording.send(0);
+			flush = spyOn(RecordingVideoEncoder.prototype, "flush").mockImplementationOnce(() => pending.promise);
+			enabled.set(false);
+			await settle();
+			expect(flush).toHaveBeenCalledTimes(1);
+			// Muting releases sibling catalog delay even while the cosmetic flush is pending.
+			expect(leave).toHaveBeenCalled();
+			const before = closed.mock.calls.length;
+			enabled.set(false, true);
+			await settle();
+			expect(closed.mock.calls.length).toBe(before);
+			if (stop === "close") encoder.close();
+			else if (stop === "detach") broadcast.set(undefined);
+			else if (stop === "track closed") track.close();
+			else if (stop === "track replaced")
+				rendition.track.set(
+					new Moq.Track.Producer("replacement").accept({ timescale: Moq.Time.Timescale.MICRO }),
+				);
+			else enabled.set(true);
+			await settle();
+			expect(closed.mock.calls.length).toBeGreaterThan(before);
+			expect(leave).toHaveBeenCalled();
+			if (stop === "resume") {
+				await recording.send(300);
+				expect(recording.keys).toContain(300);
+			}
+		} finally {
+			encoder.close();
+			track.finish();
+			track.close();
+			flush?.mockRestore();
+			closed.mockRestore();
+			leave.mockRestore();
+			pending.resolve();
+			await settle();
+		}
+	});
 }
 
 async function recordKeyframes(

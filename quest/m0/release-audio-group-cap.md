@@ -16,10 +16,17 @@ and rolls at the net caps, tested with 2.5 ms frames and 1 MiB frames under a
 ([unbounded groups](/quest/m2/unbounded-groups/README.md)), so it gets no
 change.
 
+Decided 2026-11-07 (maintainer, /quest-unblock): ✅ cut it now as 0.5.6, a
+patch (rejected: waiting for a bigger cut).
+[moq-dev/moq#8118](https://github.com/moq-dev/moq/pull/8118) merged into
+`release` as c4c4078293, and
+[moq-dev/moq#8213](https://github.com/moq-dev/moq/pull/8213) bumps
+`@moq/publish` to 0.5.6 there; merging it publishes through `release-js.yml`.
+
 Once the patch publishes, delete this quest.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
-- Maintainer: merge [moq-dev/moq#8118](https://github.com/moq-dev/moq/pull/8118) into `release` and cut the next `@moq/publish` patch; check that `npm view @moq/publish version` is past 0.5.5 and that its release cut contains [moq-dev/moq#8118](https://github.com/moq-dev/moq/pull/8118)'s merge commit. A release cut is a maintainer action, and version bumps are manual.
+- Maintainer: merge [moq-dev/moq#8213](https://github.com/moq-dev/moq/pull/8213), the 0.5.6 bump on `release`; merging is the maintainer's pick. Check that `npm view @moq/publish version` prints 0.5.6.
