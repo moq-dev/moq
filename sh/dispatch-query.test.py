@@ -659,6 +659,17 @@ esac
                     with self.assertRaises(ProcessLookupError):
                         os.kill(int(pid.read_text()), 0)
 
+    def test_formatters_get_the_listed_files(self):
+        # A deleted tracked file is listed by git but skipped.
+        self.change("justfile")
+        self.change("demo/justfile")
+        self.git("add", "demo/justfile")
+        self.git("commit", "-qm", "demo")
+        (self.repo / "demo/justfile").unlink()
+        calls = self.run_ci()
+        self.assertIn("--fmt --check --justfile justfile", calls)
+        self.assertFalse(any("demo/justfile" in call for call in calls), calls)
+
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
         self.change("rs/kio/src/clock/mod.rs")
         calls = self.run_ci()

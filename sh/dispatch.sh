@@ -318,13 +318,14 @@ fi
 # that lands just before the fork never reaches the command, so a cancel would
 # wait for the whole phase. A lane and its phase therefore fork every command
 # as a job: `wait` runs the trap at once, and Bash runs a trap left pending
-# across the fork as soon as the fork returns. Async lists ignore INT and QUIT
-# without job control; the job restores them for the command.
+# across the fork as soon as the fork returns. Without job control, an async
+# list ignores INT and QUIT, which the job restores for the command, and may
+# read /dev/null instead of the caller's stdin, which it redirects explicitly.
 run() {
     {
         trap - INT QUIT
         exec "$@"
-    } &
+    } <&0 &
     wait "$!"
 }
 
