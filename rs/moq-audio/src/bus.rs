@@ -1417,7 +1417,7 @@ mod tests {
 		let last = feed(&mut driver, &mut [(&mut second, 0.5)], &mut [&mut reader], 40);
 		let sample = *last[0].data.last().unwrap();
 		assert!((sample - 0.25 * CENTER).abs() < 1e-2, "{sample}");
-		assert!(strip.level().peak() > 0.2);
+		assert!(strip.level().peak() > 0.2 * CENTER);
 	}
 
 	/// Readers advance independently: one that stalls loses only its own
