@@ -7,6 +7,7 @@
 //! bitstream / RTP packetization is identical to the WHEP server path, so
 //! most of the work lives in the crate-private egress source.
 
+use crate::vendor::str0m;
 use str0m::{
 	Candidate,
 	change::SdpAnswer,

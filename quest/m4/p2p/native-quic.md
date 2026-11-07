@@ -16,8 +16,8 @@ Decided with the maintainer on 2026-10-13:
 - No iroh. It brings its own discovery and relaying beside the relay, which
   this line rejects; native pairs use the same STUN and ICE as browsers, with
   the relay as rendezvous and fallback.
-- ICE is str0m's standalone sans-IO agent, the `is` crate (0.11, already in
-  the lockfile through str0m; str0m re-exports it as `str0m::ice`). Gather
+- ICE is str0m's standalone sans-IO agent, the `is` crate, vendored in
+  moq-webrtc beside str0m (`rs/moq-webrtc/src/vendor/is`). Gather
   candidates with `moq_webrtc::p2p`'s host gathering, `.local` resolution,
   and the STUN Binding client in moq-webrtc's ICE module; don't copy them. The first two
   are private to the data channel transport today, so move them into the

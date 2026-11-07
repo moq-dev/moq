@@ -54,7 +54,6 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("client-version", Some("MOQ_CLIENT_VERSION")),
 	("cluster-connect", Some("MOQ_CLUSTER_CONNECT")),
 	("cluster-connect-api", Some("MOQ_CLUSTER_CONNECT_API")),
-	("cluster-id", Some("MOQ_CLUSTER_ID")),
 	("cluster-node", Some("MOQ_CLUSTER_NODE")),
 	("cluster-tier", Some("MOQ_CLUSTER_TIER")),
 	("cluster-token", Some("MOQ_CLUSTER_TOKEN")),
@@ -106,7 +105,9 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 	("web-https-listen", Some("MOQ_WEB_HTTPS_LISTEN")),
 	("web-https-root", Some("MOQ_WEB_HTTPS_ROOT")),
 	("web-ws", Some("MOQ_WEB_WS")),
+	#[cfg(feature = "websocket")]
 	("websocket-delay", Some("MOQ_CLIENT_WEBSOCKET_DELAY")),
+	#[cfg(feature = "websocket")]
 	("websocket-enabled", Some("MOQ_CLIENT_WEBSOCKET_ENABLED")),
 ];
 

@@ -138,7 +138,6 @@ openh264 = { version = "0.9.8", optional = true }
 # features it needs; cargo unifies this on the same version it depends on, so the
 # raw API types stay identical.
 openh264-sys2 = { version = "0.9.8", default-features = false, optional = true }
-scuffle-h265 = "0.2.2"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = { workspace = true }

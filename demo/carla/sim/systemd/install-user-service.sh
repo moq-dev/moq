@@ -44,7 +44,7 @@ Before starting, write the relay settings to:
   CARLA_IMAGE=localhost/moq-carla:<tag printed by the moq-dev/carla build>
 
 The token is a demo-project JWT scoped to publish carla/** and subscribe
-carla/.socket/driver-*, the endpoints drivers dial from. For local
+carla/.client/**, the endpoints drivers dial from. For local
 development, MOQ_URL=http://localhost:4443 needs no token.
 
 Then run:

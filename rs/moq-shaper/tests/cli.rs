@@ -16,6 +16,7 @@ fn a_profile_run_reports_its_counters() {
 
 	let report = std::env::temp_dir().join(format!("moq-shaper-report-{}.json", std::process::id()));
 	let mut shaper = Command::new(env!("CARGO_BIN_EXE_moq-shaper"))
+		.env_remove("KIO_DENY_HOST_TIMERS")
 		.args(["--listen", "127.0.0.1:0", "--target", &target_addr.to_string()])
 		.args(["--profile", "mild", "--seed", "7"])
 		.args(["--report-interval", "100ms", "--report", report.to_str().unwrap()])
@@ -71,6 +72,7 @@ fn a_profile_run_reports_its_counters() {
 #[test]
 fn a_zero_report_interval_is_refused_before_binding() {
 	let result = Command::new(env!("CARGO_BIN_EXE_moq-shaper"))
+		.env_remove("KIO_DENY_HOST_TIMERS")
 		.args([
 			"--listen",
 			"127.0.0.1:0",

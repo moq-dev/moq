@@ -154,7 +154,3 @@ feature unification, so changed compiler inputs remain a separate cause.
   change, and count the Nightly jobs that rebuilt a crate the 14-day expiry
   deleted, listing as unknown any it cannot attribute. Bring the lifecycle back to the
   maintainer only if that count argues for lengthening it.
-
-## Related
-
-- [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - the same R2 and Environment bootstrap for Nix

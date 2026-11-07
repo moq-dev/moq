@@ -27,7 +27,8 @@ fn forward(origin: &origin::Producer, path: &str, route: origin::RouteInfo) -> o
 }
 
 /// A permissive source sends an over-limit path to prove ingress refusal; an
-/// accepted boundary path then proves egress counts the relay's own stamp.
+/// accepted boundary path then proves egress counts the relay's own stamp. Lite-07
+/// carries no hop chain: its routes are loop-free by feasibility instead.
 #[kio::test]
 async fn hop_limit_bounds_receive_and_send() {
 	for name in [
@@ -35,7 +36,6 @@ async fn hop_limit_bounds_receive_and_send() {
 		"moq-lite-04",
 		"moq-lite-05",
 		"moq-lite-06",
-		"moq-lite-07-wip",
 		"moq-transport-18",
 		"moq-transport-22",
 	] {
@@ -95,8 +95,9 @@ async fn hop_limit_bounds_receive_and_send() {
 /// withdraws only once no in-cap route is left.
 #[kio::test]
 async fn hop_limit_falls_back_to_a_forwardable_route() {
-	// Only wires carrying a route cost can rank a longer route first.
-	for name in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	// Only wires carrying a route cost can rank a longer route first, and only those
+	// carrying a hop chain cap it: lite-07 carries none.
+	for name in ["moq-lite-06", "moq-transport-18", "moq-transport-22"] {
 		let version = name.parse().unwrap();
 		let near = produce_origin(1);
 		let far = produce_origin(4);
