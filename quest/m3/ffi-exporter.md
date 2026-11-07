@@ -58,10 +58,11 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
 - moq-ffi depends on the `rust2-uniffi*` crates directly, with no `[patch]` and
   no git dependency, so crates.io moq-ffi still builds.
 - **Generated code stays identical**: Kotlin package names, library symbol
-  prefixes, and every wrapper's API do not change. Diff the regenerated
-  bindings for every language against `main`'s, and run each wrapper's check
-  plus `just test interop --all`. The C names below are the only expected
-  differences.
+  prefixes, and every wrapper's API do not change, except Dart's
+  `MoqRoute.instanceId()` below. Diff the regenerated bindings for every
+  language against `main`'s, and run each wrapper's check plus
+  `just test interop --all`. The C names and that Dart rename below are the
+  only expected differences.
 - **C names** (maintainer, 2026-10-24 and 2026-10-25): rust2's C generator
   names in GLib style
   ([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)).
@@ -131,8 +132,8 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
 
 Public API: moq-ffi's dependency names change, generated C type names become
 CamelCase, and the generated record `MoqAudioEncoderFinished` becomes
-`MoqAudioEncoderFinish` in every language; wrapper APIs do not change. Wire:
-none.
+`MoqAudioEncoderFinish` in every language; wrapper APIs do not change except
+Dart's `MoqRoute.instanceId()`, which takes the exporter's name. Wire: none.
 
 ## Required
 

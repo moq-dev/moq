@@ -3,8 +3,9 @@
 ## Goal
 
 `just test bare-fin`, `max-age`, `stream-limits`, `relay-fill`, and
-`receive-credit` pass in a fresh checkout. Each runs `sh/js/install.py frozen`
-before its Rust tests spawn `bun`, instead of relying on an earlier install
+`receive-credit` pass in a fresh checkout. Each runs the root installer
+`sh/js/install.py frozen` (from `test/justfile`, a path relative to the
+repository root, not `test/`) before its Rust tests spawn `bun`, instead of relying on an earlier install
 (CI's `interop.yml` "Workspace dependencies" step hides the gap today).
 
 ## Plan

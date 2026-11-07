@@ -12,8 +12,10 @@ Raised by [moq-dev/moq#8114](https://github.com/moq-dev/moq/pull/8114), which
 pins Smoke to that commit. First confirm whether `sh/gh/cache-runtime.sh` (or
 the copy it runs) skips uploading paths already in the bucket. If it does, a
 path that many commits reuse keeps its first upload's age and expires while
-newer commits still need it. Then fix it, for example by refreshing reused
-paths on upload, or by expiring only paths no recent commit references.
+newer commits still need it. Then fix it so the guarantee also holds when no
+upload runs for 30 days: refreshing reused paths on upload alone does not
+cover such a gap. For example, a scheduled job refreshes the newest cached
+commit's closure, or the expiry deletes only paths no recent commit references.
 
 ## Related
 
