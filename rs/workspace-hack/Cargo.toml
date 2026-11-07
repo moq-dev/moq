@@ -256,7 +256,7 @@ crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -288,7 +288,7 @@ crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -322,10 +322,11 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31", features = ["net", "uio"] }
@@ -334,7 +335,6 @@ proc-macro2 = { version = "1" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
 regex = { version = "1" }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
@@ -355,17 +355,17 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
@@ -379,8 +379,7 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [target.x86_64-pc-windows-msvc.dependencies]
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -400,8 +399,7 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [target.x86_64-pc-windows-msvc.build-dependencies]
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -427,10 +425,11 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31", features = ["net", "uio"] }
@@ -439,7 +438,6 @@ proc-macro2 = { version = "1" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
 regex = { version = "1" }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
@@ -460,17 +458,17 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
