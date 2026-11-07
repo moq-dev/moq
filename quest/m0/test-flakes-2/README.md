@@ -102,6 +102,9 @@ test, which failed two merge-queue batches and two loaded local runs.
 Added 2026-11-05 (maintainer, `/quest-audit`): Interop's P2P data-channel
 timeout, one child.
 
+Added 2026-11-06: `js/net`'s lite-06 datagram end/close case, from `Check` on
+[moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
+
 Added 2026-11-05 (maintainer, `/quest-complete` follow-ups): moq-net's
 pool-debt flight test, the Python audio playout-delay test, and the io_uring
 tests' shared locked-memory budget, one child each. The pool-debt test
