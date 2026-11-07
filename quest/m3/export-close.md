@@ -32,8 +32,10 @@ end it cleanly whichever signal comes first:
   orderly leave can fail the export there before any media is read.
 
 Fix them in the shared source and the catalog consumer, so every exporter
-gets it; `mp4::Export` ends when the fMP4 export under it does. Buffered
-media still drains before `None`. Prove it through whole exports, where the
+gets it; `mp4::Export` ends when the fMP4 export under it does. The
+catalog-owning broadcast's end is the export's end: a sibling still
+publishing stops being read then, rather than keeping the export open.
+Buffered media still drains before `None`. Prove it through whole exports, where the
 catalog's and the media's shutdown arrive in both orders against the
 instance's close.
 
@@ -47,8 +49,10 @@ orders first.
 
 A failure that is no orderly shutdown (malformed media, a protocol violation,
 producers that went away unfinished) still fails the export even once the
-instance has gone, as `a_sibling_failure_outlives_its_instance` pins, and
-`a_remote_sibling_ends_with_its_instance` covers the remote case.
+instance has gone, whether the sibling's subscription had resolved
+(`a_sibling_failure_outlives_its_instance` pins this) or was still pending,
+which no test covers yet. `a_remote_sibling_ends_with_its_instance` covers
+the remote case.
 
 Consumer: the studio's per-guest recorder
 ([moq-dev/studio#65](https://github.com/moq-dev/studio/pull/65)) treats an
