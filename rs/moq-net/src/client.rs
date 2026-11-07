@@ -224,8 +224,9 @@ impl Client {
 	/// moq-transport via the MoQ Cluster extension).
 	///
 	/// The dialer is the side that knows what a link costs, because it chose the peer:
-	/// use `0` for a sibling in the same datacenter and something large for another
-	/// region across a metered backbone. So this prices both directions. We add it to
+	/// use `1` for a sibling in the same datacenter and something large for another
+	/// region across a metered backbone. Zero is refused on moq-lite-07, whose routing
+	/// needs every link to cost something. So this prices both directions. We add it to
 	/// the route cost of every announcement the peer sends us, and declare it in our
 	/// SETUP so the peer adds it to every announcement we send, which is what a server
 	/// accepting an anonymous connection needs: it cannot tell a sibling from a

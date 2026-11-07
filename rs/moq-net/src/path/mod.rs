@@ -1144,6 +1144,7 @@ mod tests {
 		let tracks = crate::lite::Tracks {
 			broadcast: Path::new(&longest).unwrap(),
 			instance: None,
+			node: 0,
 		};
 		let buf = tracks.encode_bytes(Version::Lite07).unwrap();
 		let (decoded, _) = crate::lite::Tracks::decode_slice(&buf, Version::Lite07).unwrap();

@@ -35,5 +35,8 @@ ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m5/video-hardwar
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
 
+# Need another implementation to speak the route wire; the quest ports it.
+ignore moq-net::test_interop::lite_tracks_interop /quest/m2/cluster-routing/routes/js.md
+
 # Quarantined flakes, until the quest that owns the flake fixes it at its cause.
 ignore moq-tokio::quic::driver::tests::stream_stopped /quest/m0/test-flakes-2/README.md
