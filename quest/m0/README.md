@@ -36,5 +36,4 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Bun-spawning test recipes install the JS workspace](/quest/m0/recipe-js-install.md) - `bare-fin`, `max-age`, `stream-limits`, `relay-fill`, and `receive-credit` pass in a fresh checkout
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
-- [Tests can't wait on the real clock](/quest/m0/clock-guard/README.md) - a test whose real-clock timer fires fails every run, in JS and, if the spike holds, Rust
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk

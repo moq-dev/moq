@@ -27,6 +27,13 @@ Assume a better approach exists until you have tried to find one:
 An approach finding names the alternative and why it holds up better long-term.
 "Rework or abandon this PR" is a valid finding when the case is strong.
 
+# Tests
+
+Unit tests mock time instead of waiting on the real clock: a test that sleeps to let work settle, or waits out a timeout to prove nothing happened, passes on a quiet machine and flakes under load.
+Flag one in any language, even when the timer goes through `kio::clock` or `@moq/clock`, whose timers still wait in real time until the test installs a paused, simulated, or `Manual` clock.
+The fix is a mocked clock or an awaited event, never a shorter or longer real wait, and the same fix lands in every language's sibling test.
+The runtime guards fail Rust and bun tests only when a timer fires on the host clock, so they miss Go and Python tests and any wait that bypasses those clocks; and `host_time()` or `hostTime()` opts a test out, which belongs only where it drives real sockets, devices, or processes.
+
 # Not findings
 
 Each of these has been raised and refuted repeatedly here; the rules in `AGENTS.md` already decide them:
