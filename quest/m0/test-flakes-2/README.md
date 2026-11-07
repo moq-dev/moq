@@ -137,4 +137,3 @@ Public API: none. Wire: none.
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
-- [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load
