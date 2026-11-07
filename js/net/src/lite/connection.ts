@@ -11,6 +11,7 @@ import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCau
 import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { hooks } from "../internal.ts";
+import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -200,6 +201,8 @@ export class Connection implements Established {
 		detect(this, quic);
 
 		this.probe = this.#probe;
+		// Opens waiting for credit make room after about this RTT when the transport has none.
+		lines(quic).probe = this.#probe;
 
 		this.hop = randomHop();
 		// What the peer's connection credential earns by default: publishing anything to us,

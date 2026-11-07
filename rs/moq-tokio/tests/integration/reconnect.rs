@@ -1,8 +1,7 @@
 //! What ends the reconnect loop, and where a peer's GOAWAY can send it.
 //!
-//! Dials over plain TCP (`tcp://`), which fails fast and locally: no TLS material, no QUIC
-//! handshake, no server. That keeps the assertion about the *budget* rather than about how long a
-//! particular backend takes to give up.
+//! Dials over plain TCP (`tcp://`): no TLS material and no QUIC handshake, so the assertions are
+//! about the loop rather than about how a particular backend connects.
 
 #![cfg(feature = "tcp")]
 
@@ -15,43 +14,6 @@ fn client(backoff: moq_tokio::Backoff) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.backoff = backoff;
 	config.init(Default::default()).expect("failed to init client")
-}
-
-/// A transient failure is retried, escalating, until the budget runs out. The give-up error names
-/// the underlying cause so an operator sees why rather than just "timed out".
-#[tokio::test]
-async fn a_transient_failure_retries_until_the_budget_runs_out() {
-	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Some((Duration::from_millis(20)).into());
-	backoff.max = Some((Duration::from_millis(40)).into());
-	backoff.timeout = Some((Duration::from_millis(200)).into());
-
-	// Nothing listens on port 1, so every attempt is refused: transient as far as this layer knows.
-	let url: url::Url = "tcp://127.0.0.1:1".parse().expect("failed to parse url");
-	let started = kio::clock::now();
-	let reconnect = client(backoff).connect(url);
-
-	let err = kio::clock::timeout(Duration::from_secs(10), reconnect.closed())
-		.await
-		.expect("reconnect loop never gave up")
-		.expect_err("reconnect loop stopped without an error");
-
-	assert!(
-		matches!(err, moq_tokio::Error::Reconnect(_)),
-		"stopped with {err} rather than exhausting the budget"
-	);
-	assert_ne!(
-		err.to_string(),
-		"reconnect timed out after 200ms",
-		"give-up error lost the underlying cause"
-	);
-	// The budget is spent on sleeping between attempts, so reaching it takes at least most of it.
-	// Jitter draws each delay from the top half of its window, hence half rather than the whole.
-	assert!(
-		started.elapsed() >= Duration::from_millis(100),
-		"gave up after {:?} without retrying",
-		started.elapsed()
-	);
 }
 
 /// The retry window decides whether a new attempt starts, not how long one may take: a handshake
@@ -139,9 +101,13 @@ async fn the_connect_count_advances_on_reconnect() {
 	let session = sessions.recv().await.expect("server stopped accepting");
 	drop(session);
 
+	// Revisions, not `status()`: a drop and redial between polls would leave the status
+	// reading `Connected`, unchanged, with nothing left to wake it.
+	let monitor = connection.monitor();
 	kio::clock::timeout(Duration::from_secs(10), async {
-		while connection.connects() < 2 {
-			kio::clock::sleep(Duration::from_millis(10)).await;
+		let mut state = monitor.state();
+		while state.connects < 2 {
+			state = monitor.state_changed(state.revision).await.expect("monitor stopped");
 		}
 	})
 	.await

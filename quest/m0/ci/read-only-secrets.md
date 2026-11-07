@@ -149,4 +149,3 @@ fails the check.
 ## Related
 
 - [Stop publishing to JSR](/quest/m0/ci/jsr-retire.md) - removes JSR publishing and its repository OIDC trust, so no `JSR_TOKEN` is created
-- [Drop main from publish](/quest/m0/ci/publish-release-only.md) - narrows `publish` to `release` and release tags once `main` merges into `release`

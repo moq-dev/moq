@@ -168,6 +168,8 @@ pub(crate) struct WebState {
 	/// handshake and partial headers included), and a WebSocket wait for its MoQ
 	/// SETUP; `None` waits forever.
 	pub(crate) timeout: Option<std::time::Duration>,
+	/// The moq-net server each upgraded WebSocket accepts its session with.
+	pub(crate) server: moq_net::Server,
 	/// The `[quic]` windows and stream count each WebSocket session starts with.
 	pub(crate) quic: moq_tokio::quic::Resolved,
 }
@@ -182,18 +184,12 @@ pub struct Addrs {
 	pub https: Option<net::SocketAddr>,
 }
 
-/// The implementation WebSocket sessions advertise in SETUP, or `None` for the library's.
-#[derive(Clone, Default)]
-#[cfg_attr(not(feature = "websocket"), allow(dead_code, reason = "websocket-only"))]
-pub(crate) struct Implementation(pub Option<String>);
-
 /// Run a HTTP server using Axum
 pub struct Web {
 	state: Arc<WebState>,
 	config: Config,
+	/// The versions [`WebState::server`] accepts, which pick the WebSocket subprotocol.
 	versions: moq_net::Versions,
-	extensions: moq_net::setup::Extensions,
-	implementation: Implementation,
 	health: moq_tokio::accept::Health,
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
@@ -214,21 +210,21 @@ impl Web {
 		certificates: moq_tokio::tls::Certificates,
 		config: Config,
 	) -> Self {
+		let listen = moq_tokio::listen::Config::default();
 		let state = Arc::new(WebState {
 			auth,
 			cluster,
 			certificates,
 			shutdown: crate::shutdown::Observer::disabled(),
 			sessions: crate::session::Registry::new(),
-			timeout: moq_tokio::listen::Config::default().resolved_timeout(),
+			timeout: listen.resolved_timeout(),
+			server: listen.server(),
 			quic: Default::default(),
 		});
 		Self {
 			state,
 			config,
-			versions: moq_net::Versions::all(),
-			extensions: Default::default(),
-			implementation: Default::default(),
+			versions: listen.versions(),
 			health: moq_tokio::accept::Health::new("web"),
 			http_listener: None,
 			https_listener: None,
@@ -311,21 +307,19 @@ impl Web {
 		self.state.certificates.fingerprints()
 	}
 
-	/// Restrict which MoQ versions WebSocket sessions accept, in preference order.
-	pub fn with_versions(mut self, versions: moq_net::Versions) -> Self {
-		self.versions = versions;
-		self
-	}
-
-	/// Choose which moq-transport extensions WebSocket sessions offer in SETUP.
-	pub(crate) fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
-		self.extensions = extensions;
-		self
-	}
-
-	/// Set the implementation WebSocket sessions advertise in SETUP; empty advertises nothing.
-	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
-		self.implementation = Implementation(Some(implementation.into()));
+	/// Accept WebSocket sessions as `listen` describes, the way the relay's other listeners do:
+	/// its versions, the extensions and implementation SETUP offers, and its timeout.
+	///
+	/// The timeout closes a connection that sits that long with no complete request in
+	/// flight, including one stalled in its TLS handshake or headers or idle in keep-alive,
+	/// bounds an HTTP request's auth admission (answering 502 past it), and bounds a
+	/// WebSocket's MoQ SETUP after the upgrade. Zero, or a timeout past the clock's range,
+	/// waits forever. Defaults to [`moq_tokio::listen::Config::default`].
+	pub fn with_listen(mut self, listen: &moq_tokio::listen::Config) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_listen called after routes were built");
+		state.timeout = listen.resolved_timeout();
+		state.server = listen.server();
+		self.versions = listen.versions();
 		self
 	}
 
@@ -355,20 +349,6 @@ impl Web {
 	pub fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
 		let state = Arc::get_mut(&mut self.state).expect("with_shutdown called after routes were built");
 		state.shutdown = shutdown;
-		self
-	}
-
-	/// Close a connection that sits this long with no complete request in flight,
-	/// including one stalled in its TLS handshake or headers or idle in keep-alive,
-	/// bound an HTTP request's auth admission (answering 502 past it), and bound a
-	/// WebSocket's MoQ SETUP after the upgrade; `None`, or a timeout past the clock's
-	/// range, waits forever. Defaults to the
-	/// [`moq_tokio::listen::Config::resolved_timeout`] default.
-	pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
-		let state = Arc::get_mut(&mut self.state).expect("with_timeout called after routes were built");
-		// hyper adds the header timeout to the clock unchecked, so an unreachable
-		// one would panic on every connection.
-		state.timeout = timeout.filter(|timeout| kio::clock::now().checked_add(*timeout).is_some());
 		self
 	}
 
@@ -444,8 +424,6 @@ impl Web {
 		};
 
 		app.layer(Extension(self.versions.clone()))
-			.layer(Extension(self.extensions))
-			.layer(Extension(self.implementation.clone()))
 			.with_state(self.state.clone())
 	}
 
@@ -1169,6 +1147,13 @@ impl IntoResponse for ServeGroup {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A listen config with `timeout`, where `None` waits forever.
+	fn listen(timeout: Option<std::time::Duration>) -> moq_tokio::listen::Config {
+		let mut listen = moq_tokio::listen::Config::default();
+		listen.timeout = Some(timeout.unwrap_or_default().into());
+		listen
+	}
 
 	/// The state an acceptor built outside [`Web::serve`] hands a `tls://` session.
 	#[cfg(all(feature = "websocket", any(unix, windows)))]
@@ -2244,7 +2229,7 @@ mod tests {
 			let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 			// No idle deadline, so a stalled connection outlives serving below.
 			let mut web = Web::new(auth, cluster, certificates, config)
-				.with_timeout(None)
+				.with_listen(&listen(None))
 				.bind()
 				.unwrap();
 			let incoming = rtmp.then(|| web.rtmp());
@@ -2406,7 +2391,8 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
-		let web = Web::new(auth, cluster, certificates, Config::default()).with_timeout(Some(std::time::Duration::MAX));
+		let web = Web::new(auth, cluster, certificates, Config::default())
+			.with_listen(&listen(Some(std::time::Duration::MAX)));
 		assert_eq!(web.state.timeout, None);
 	}
 
@@ -2432,7 +2418,7 @@ mod tests {
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 		let web = Web::new(auth, cluster, certificates, config)
-			.with_timeout(Some(timeout))
+			.with_listen(&listen(Some(timeout)))
 			.bind()
 			.unwrap();
 		let http = web.addrs().http.expect("the HTTP listener is configured");
@@ -2469,7 +2455,7 @@ mod tests {
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 		let web = Web::new(auth, cluster, certificates, config)
-			.with_timeout(Some(timeout))
+			.with_listen(&listen(Some(timeout)))
 			.bind()
 			.unwrap();
 		let http = web.addrs().http.expect("the HTTP listener is configured");
@@ -2645,7 +2631,7 @@ mod tests {
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 		let web = Web::new(auth, cluster, certificates, config)
-			.with_timeout(None)
+			.with_listen(&listen(None))
 			.bind()
 			.unwrap();
 		let http = web.addrs().http.expect("the HTTP listener is configured");
@@ -2881,6 +2867,7 @@ mod tests {
 			.await;
 			let (transport, driver) = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
 				.connect()
+				.await
 				.unwrap();
 			tokio::spawn(driver);
 			let origin = moq_tokio::origin::spawn();

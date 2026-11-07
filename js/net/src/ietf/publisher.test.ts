@@ -1,5 +1,6 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -27,7 +28,7 @@ import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
-import { toRequestCode } from "./error.ts";
+import { SubscribeRefused, toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
@@ -463,6 +464,49 @@ test("a TRACK_STATUS refusal that may pass invites a retry", async () => {
 	}
 });
 
+// A relay refuses its reader with the code and Retry Interval its upstream's refusal asked for,
+// where deriving an interval from the code would differ: DOES_NOT_EXIST derives "never retry",
+// and GOING_AWAY derives a retry the upstream declined.
+test("a relay forwards an upstream SUBSCRIBE refusal's retry interval", async () => {
+	for (const version of IETF_VERSIONS) {
+		for (const [errorCode, retryInterval] of [
+			[0x10, 5000n],
+			[0x6, 0n],
+		] as const) {
+			const pair = createMockTransportPair(ALPNS[version]);
+			const session = new NativeSession(pair.server, version, true);
+			const { pub, origin } = publisher(pair.server, { session });
+			const requests = origin.routePrefix(Path.from("room")).requested();
+
+			const reader = requestStream(version);
+			const subscribing = pub.runSubscribe(
+				new Subscribe({
+					requestId: 7n,
+					trackNamespace: Path.from("room"),
+					trackName: "video",
+					subscriberPriority: 0,
+				}),
+				reader.stream,
+			);
+			const request = (await requests.next()).value;
+			if (!request) throw new Error("no request for room");
+			const served = new BroadcastProducer();
+			const trackRequest = wireOf(served).requested();
+			request.serve(served);
+			(await trackRequest)?.reject(new SubscribeRefused(errorCode, "upstream", retryInterval, version));
+			await subscribing;
+
+			const wire = reader.wire();
+			expect(await wire.u53()).toBe(RequestError.id);
+			const refused = await RequestError.decode(wire, version);
+			expect([refused.errorCode, refused.retryInterval]).toEqual([errorCode, retryInterval]);
+			await requests.return?.();
+			served.close();
+			origin.close();
+		}
+	}
+});
+
 // The requester leaving is owed nothing, and gives back the origin demand or the track
 // lookup it held, whichever was still resolving.
 test("a cancelled TRACK_STATUS releases its demand on every draft", async () => {
@@ -604,6 +648,56 @@ test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
 			else client.reader.stop(new Error("cancel"));
 			await serving;
 			expect(resumed.demand().wanted.peek()).toBeUndefined();
+		} finally {
+			client.close();
+			fx.close();
+		}
+	}
+});
+
+// A resume refused upstream is refused downstream with the Retry Interval the upstream asked
+// for, where DOES_NOT_EXIST would derive "never retry".
+test("a relay forwards a resume refusal's retry interval", async () => {
+	for (const version of IETF_VERSIONS) {
+		const fx = fixture(version);
+		const client = await Stream.open(fx.pair.client, { version });
+		const server = await Stream.accept(fx.pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		const first = (async () => {
+			const request = await wireOf(fx.broadcast).requested();
+			if (!request) throw new Error("no track was requested");
+			return request.accept({ timescale: Timescale.MILLI });
+		})();
+		const serving = fx.pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				forward: false,
+			}),
+			server,
+		);
+		try {
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			await SubscribeOk.decode(client.reader, version);
+			const track = await first;
+			while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			track.finish();
+			track.close();
+			const second = wireOf(fx.broadcast).requested();
+			const parameters = new Parameters();
+			parameters.forward = true;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, version);
+			const resumed = await second;
+			if (!resumed) throw new Error("the resume asked for nothing");
+			resumed.reject(new SubscribeRefused(0x10, "upstream", 5000n, version));
+
+			expect(await client.reader.u53()).toBe(RequestError.id);
+			const refused = await RequestError.decode(client.reader, version);
+			expect([refused.errorCode, refused.retryInterval]).toEqual([0x10, 5000n]);
+			await serving;
 		} finally {
 			client.close();
 			fx.close();
@@ -1096,6 +1190,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
  * namespace unadvertised until something unrelated changed.
  */
 test("a broadcast published mid-advertisement is still announced", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1128,6 +1223,7 @@ test("a broadcast published mid-advertisement is still announced", async () => {
  * be offered again for the life of the session.
  */
 test("a declined advertisement is retried on the next change", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1362,6 +1458,7 @@ test("a refusal that forbids retrying is not retried", async () => {
  * the replacement for the life of the session.
  */
 test("republishing a path clears a refusal without unannouncing first", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1392,6 +1489,7 @@ test("republishing a path clears a refusal without unannouncing first", async ()
  * delivers.
  */
 test("a new instance at the same path clears a refusal", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1422,6 +1520,7 @@ test("a new instance at the same path clears a refusal", async () => {
  * by rebuilding the watched entry on re-announce.
  */
 test("re-announcing a path clears a refusal that forbade retrying", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -3243,6 +3342,7 @@ for (const synchronous of [true, false]) {
 // PUBLISH_DONE MUST wait until every stream the subscription will open is closed, so its
 // Stream Count is final. A group still queued for a stream slot when the track ends is one.
 test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -4569,6 +4669,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 });
 
 test("draft-22: widening with a fill keeps the open live group", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
@@ -4613,6 +4714,7 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 });
 
 test("draft-22: a fill-only update short of the edge keeps the live join's floor", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
@@ -4660,6 +4762,7 @@ test("draft-22: a fill-only update short of the edge keeps the live join's floor
 });
 
 test("draft-22: a fill-only update keeps the subscription's floor", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);

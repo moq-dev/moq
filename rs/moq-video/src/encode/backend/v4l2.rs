@@ -64,7 +64,7 @@ use moq_v4l::sys::{
 	v4l2_mpeg_video_header_mode_V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
 };
 
-use super::super::encoder::{Applied, Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config};
 use super::{Backend, Encoded, keyframe_annexb};
 use crate::v4l2::{self, Dequeue, Device, Dir, Planes, Queue, Rect, Request, Role};
 use crate::{Error, Frame, Size};
@@ -145,8 +145,10 @@ impl V4l2 {
 			v4l2_mpeg_video_h264_profile_V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE as i32,
 		)?;
 		device.set_control(V4L2_CID_MPEG_VIDEO_H264_LEVEL, h264_level(config)?)?;
-		let Gop::Keyframe { interval } = config.gop;
-		device.set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, interval.min(i32::MAX as u32) as i32)?;
+		device.set_control(
+			V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+			config.keyframe_interval().min(i32::MAX as u32) as i32,
+		)?;
 		set_bitrate(&device, config.resolved_bitrate().as_bps())?;
 		// Constant rate is what a live uplink wants: the congestion controller
 		// already owns the rate, and a variable-rate encoder would spend it on the

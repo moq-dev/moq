@@ -90,7 +90,7 @@ records, with no datagrams. The application supplies signaling and ICE and
 keeps ownership of the peer connection; closing the transport closes only its
 channel. SCTP ordering means one lost packet can hold back every stream.
 
-Native peers can opt into `moq-tokio`'s internal `webrtc` feature, which runs its own ICE agent:
+Native peers can use `moq-webrtc`'s `p2p` feature, which runs its own ICE agent:
 host candidates on every interface, server-reflexive candidates from the STUN
 servers it is given, and mDNS resolution of a browser's `.local` candidates.
 The application still carries the offer, answer, and candidates; the offering
