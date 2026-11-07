@@ -2,9 +2,9 @@
 
 ## Goal
 
-A browser publisher on shipping Chrome, Firefox, and Safari gets a send-rate estimate, so its bandwidth reservations (`Reservation.rate`) follow the path and `@moq/publish` encoders adapt, instead of holding their ceiling because the estimate is always `undefined`.
+A browser publisher on shipping Chrome and Firefox gets a send-rate estimate, so its bandwidth reservations (`Reservation.rate`) follow the path and `@moq/publish` encoders adapt, instead of holding their ceiling because the estimate is always `undefined`.
 
-The WebSocket fallback is out of scope: it has no browser estimate to read, so its publishers keep holding their rate (decided 2026-11-07, below).
+The WebSocket fallback is out of scope: it has no browser estimate to read, so its publishers keep holding their rate (decided 2026-11-07, below). That includes every WebKit browser, which `js/net` routes to the fallback (`isWebTransportUserAgentSupported` in `js/net/src/connection/browser.ts`) until [Safari WebTransport](/quest/m5/safari-webtransport.md) lifts the gate; that quest owns Safari's estimate.
 
 ## Plan
 
@@ -41,7 +41,6 @@ Public API: none expected. Wire: none.
 ## Waiting
 
 - Chrome: ships `WebTransport.getStats()` with `estimatedSendRate` enabled for all users in 159, per the 2026-11-05 Intent to Ship. Check that stable Chrome's `getStats()` reports a non-null `estimatedSendRate` on a connection that has been sending media for a few seconds.
-- WebKit: Safari's `getStats()` reports a non-null `estimatedSendRate`. Check the `return_object_property_estimatedSendRate` entry under `api.WebTransport.getStats` in browser-compat-data, or a Safari publisher's `Reservation.rate`.
 
 ## Related
 
