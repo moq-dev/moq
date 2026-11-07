@@ -11,6 +11,8 @@ rust-version.workspace = true
 
 keywords = ["webrtc", "whip", "whep", "moq", "media"]
 categories = ["multimedia", "network-programming", "web-programming"]
+# The vendored stack's RTP captures are only read by its tests.
+exclude = ["src/vendor/str0m/tests/data"]
 
 [features]
 default = ["server"]
