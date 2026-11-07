@@ -8,7 +8,9 @@ import {
 	type Getter,
 	getter,
 	type Inputs,
+	Once,
 	type Readonlys,
+	race,
 	readonlys,
 	Signal,
 } from "@moq/signals";
@@ -599,8 +601,17 @@ export class Encoder {
 					} finally {
 						frame.close();
 					}
-					// A rejected flush already reported through the error callback.
-					await encoder.flush().catch(() => {});
+					// A cosmetic frame must never hold the next enable or final close behind a codec
+					// flush. The old codec is closed below even if the browser never settles it.
+					const resumed = new Once<true>();
+					const unwatch = this.in.enabled.subscribe((enabled) => {
+						if (enabled && resumed.peek() === undefined) resumed.set(true);
+					});
+					try {
+						await race([encoder.flush().catch(() => {}), resumed, this.#signals.closed]);
+					} finally {
+						unwatch();
+					}
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
@@ -684,7 +695,9 @@ export class Encoder {
 			try {
 				let detected: Probe;
 				try {
-					detected = await this.#bestCodec(dimensions, target);
+					const result = await this.#bestCodec(dimensions, target, effect);
+					if (!result) return;
+					detected = result;
 				} catch (err) {
 					// A capture that outgrew the accepted ceiling to a size the hardware refuses encodes scaled
 					// down to fit it, until a smaller capture reruns the probe. Re-probing the ceiling with the
@@ -702,7 +715,9 @@ export class Encoder {
 						`video ${dimensions.width}x${dimensions.height} unsupported, keeping ${accepted.width}x${accepted.height}:`,
 						err,
 					);
-					detected = await this.#bestCodec(accepted, target);
+					const result = await this.#bestCodec(accepted, target, effect);
+					if (!result) return;
+					detected = result;
 				}
 				if (superseded.aborted) return;
 
@@ -817,7 +832,11 @@ export class Encoder {
 	}
 
 	// Try to determine the best config for the given settings.
-	async #bestCodec(dimensions: { width: number; height: number }, target: Target): Promise<Probe> {
+	async #bestCodec(
+		dimensions: { width: number; height: number },
+		target: Target,
+		effect: Effect,
+	): Promise<Probe | undefined> {
 		// A list of codecs to try, in order of preference. Only full RFC 6381 strings: Chrome, Firefox,
 		// and Safari all refuse a bare `avc1` or `vp09`, and native players can't decode without the profile.
 		const HARDWARE_CODECS = [
@@ -897,10 +916,12 @@ export class Encoder {
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 
-			const { supported } = await VideoEncoder.isConfigSupported(config);
-			if (!supported) continue;
+			const support = await effect.race(VideoEncoder.isConfigSupported(config));
+			if (!support) return;
+			if (!support.supported) continue;
 
-			const probed = await probeEncoder(config);
+			const probed = await probeEncoder(config, effect);
+			if (!probed) return;
 			if ("reported" in probed) return { config, reported: probed.reported };
 			console.warn(`moq-publish: skipping ${codec}: ${probed.refused}`);
 		}
@@ -1022,7 +1043,10 @@ const PROBE_FRAMES = 4;
 //   length-prefixed NAL units with an hvcC description, which no subscriber can decode. A
 //   description means length-prefixed output (per the AVC and HEVC WebCodecs registrations), which
 //   also catches a four-byte length that happens to read as a start code, such as `00 00 01 2c`.
-async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: string } | { refused: string }> {
+async function probeEncoder(
+	config: VideoEncoderConfig,
+	effect: Effect,
+): Promise<{ reported: string } | { refused: string } | undefined> {
 	let reported: string | undefined;
 	let reordered = false;
 	let last: number | undefined;
@@ -1042,6 +1066,12 @@ async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: str
 		// flush() rejects with the same error.
 		error: () => {},
 	});
+
+	// A superseded probe must release its codec even if the browser never settles flush().
+	const close = () => {
+		if (encoder.state !== "closed") encoder.close();
+	};
+	effect.cleanup(close);
 
 	try {
 		encoder.configure(config);
@@ -1063,9 +1093,10 @@ async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: str
 			}
 		}
 
-		await encoder.flush();
+		await effect.race(encoder.flush());
+		if (effect.abort.aborted) return;
 	} finally {
-		if (encoder.state !== "closed") encoder.close();
+		close();
 	}
 
 	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);

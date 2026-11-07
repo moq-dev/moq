@@ -339,6 +339,27 @@ for (const [kind, create] of [
 		});
 	}
 
+	test(`${kind} retries a refusal explicitly without changing the enabled setting`, async () => {
+		using _time = fakeTime();
+		using media = install(new FakeMediaDevices());
+		media.denied = true;
+		const enabled = new Signal(true);
+		const source = create(enabled);
+		try {
+			await settle();
+			expect(source.out.error.peek()?.name).toBe("NotAllowedError");
+			media.denied = false;
+			source.retry();
+			await settle();
+			expect(enabled.peek()).toBe(true);
+			expect(source.out.error.peek()).toBeUndefined();
+			expect(source.out.source.peek()).toBeDefined();
+			expect(media.attempts).toBe(2);
+		} finally {
+			source.close();
+		}
+	});
+
 	test(`${kind} reports a refusal and stops retrying until capture is reset`, async () => {
 		using time = fakeTime();
 		using media = install(new FakeMediaDevices());

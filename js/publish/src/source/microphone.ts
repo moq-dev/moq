@@ -142,6 +142,12 @@ export class Microphone {
 		});
 	}
 
+	/** Retry a failed capture after an explicit user action. */
+	retry(): void {
+		this.#out.error.set(undefined);
+		this.#retry.refund();
+	}
+
 	/** Stop the capture and release the device. */
 	close() {
 		this.#signals.close();
