@@ -269,7 +269,7 @@ features:
     run bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
     # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
     run bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
-    run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
+    run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-webrtc --no-default-features --all-targets
     run bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     run bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features

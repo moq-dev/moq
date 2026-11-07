@@ -1,8 +1,8 @@
-# [M] moq-rtc on rind
+# [M] moq-webrtc on rind
 
 ## Goal
 
-moq-rtc and moq-ice run the vendored str0m and dimpl on rind:
+moq-webrtc runs the vendored str0m and dimpl on rind:
 DTLS 1.2, SRTP (AES-CM-HMAC-SHA1-80 and AEAD AES-128/256-GCM), STUN
 MESSAGE-INTEGRITY, and DTLS certificates through `rind-rcgen`. Their graphs
 hold no aws-lc-rs or str0m-aws-lc-rs, and a browser still connects.

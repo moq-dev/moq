@@ -49,7 +49,7 @@ The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
 catalog group dropped mid-read ending the player's catalog, fixed by
 [moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
 
-moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
+moq-webrtc's session-end test was never load-bound: on the paused clock, dimpl's
 randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
 fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
 

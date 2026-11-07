@@ -1,7 +1,7 @@
 //! Bitrate caps for WHIP ingest.
 //!
 //! An embedder hands [`whip::accept`](crate::whip::accept) a [`Limit`] through
-//! [`Request::with_rate`](crate::whip::Request::with_rate), and moq-rtc steers the
+//! [`Request::with_rate`](crate::whip::Request::with_rate), and moq-webrtc steers the
 //! publisher's encoder under its [`Cap`]: a `b=TIAS`
 //! line in the SDP answer, and periodic REMB where the publisher negotiated
 //! it. WebRTC has no receiver backpressure, so a publisher that ignores both is metered
@@ -16,7 +16,7 @@ use kio::clock::Instant;
 use moq_net::bandwidth::Rate;
 use tokio::sync::watch;
 
-/// The share of the cap moq-rtc steers the encoder to.
+/// The share of the cap moq-webrtc steers the encoder to.
 ///
 /// The meter counts every media payload, but the steering lines only bound what the
 /// browser's video encoder targets: audio rides on top, and encoders overshoot their
@@ -27,7 +27,7 @@ const STEER: f64 = 0.9;
 /// How long the meter remembers the credit it discarded, for frames still assembling.
 ///
 /// str0m completes a frame at most its video reordering timeout after the frame's first
-/// packet, 2 seconds by default, which moq-rtc keeps; audio waits half that.
+/// packet, 2 seconds by default, which moq-webrtc keeps; audio waits half that.
 const ASSEMBLY: Duration = Duration::from_secs(2);
 
 /// A bitrate cap: the sustained rate media may arrive at, and the burst above it.
@@ -84,7 +84,7 @@ impl From<Rate> for Cap {
 /// Clones share the cap. [`Limit::set`] applies to a running session at once: the
 /// meter switches to the new cap, and the next REMB goes out immediately, lifting its
 /// ceiling when the cap is lifted. The SDP answer's TIAS is fixed at the cap set when the
-/// offer was accepted, since moq-rtc never renegotiates: a session that starts uncapped
+/// offer was accepted, since moq-webrtc never renegotiates: a session that starts uncapped
 /// steers only through REMB, and raising or lifting a starting cap frees the publisher
 /// only as far as that TIAS allows.
 #[derive(Clone)]

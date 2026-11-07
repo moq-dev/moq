@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use crate::canonical;
+use super::canonical;
 
 /// One inbound UDP datagram and the address it came from.
 pub type Packet = (Vec<u8>, SocketAddr);
@@ -15,7 +15,7 @@ pub type Packet = (Vec<u8>, SocketAddr);
 /// and a stalled session must not grow memory without limit.
 pub const INBOX: usize = 256;
 
-/// The UDP socket an [`crate::Agent`] runs on: where it sends, what it receives,
+/// The UDP socket an [`super::Agent`] runs on: where it sends, what it receives,
 /// and the host candidates it is reachable at.
 pub struct Socket {
 	/// Sends datagrams, possibly shared by several agents (a demuxed server socket).
@@ -45,7 +45,7 @@ impl Socket {
 	}
 }
 
-/// The datagrams routed to one [`crate::Agent`], and the counters they are tallied in.
+/// The datagrams routed to one [`super::Agent`], and the counters they are tallied in.
 pub struct Inbound {
 	/// Ends once every sender is dropped, which ends the agent.
 	pub packets: mpsc::Receiver<Packet>,
@@ -66,6 +66,7 @@ struct Counters {
 }
 
 /// A snapshot of a [`Wire`]'s counters.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
 	/// Bytes the socket accepted, including ICE, DTLS, and retransmissions.
@@ -76,6 +77,7 @@ pub struct Stats {
 
 impl Wire {
 	/// Read both counters without consuming them.
+	#[cfg(test)]
 	pub fn stats(&self) -> Stats {
 		Stats {
 			tx: self.0.tx.load(Ordering::Relaxed),

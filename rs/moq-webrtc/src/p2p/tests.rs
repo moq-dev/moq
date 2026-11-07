@@ -10,12 +10,12 @@ const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
 /// A protocol both the default client and server speak.
 fn protocol() -> &'static str {
-	crate::connect::Config::default().versions().alpns()[0]
+	moq_tokio::connect::Config::default().versions().alpns()[0]
 }
 
 /// A one-frame broadcast named `test` and the handles that keep it alive.
 fn broadcast(payload: &[u8]) -> (moq_net::origin::Producer, impl Sized) {
-	let origin = crate::origin::spawn();
+	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.route("test", moq_net::origin::RouteOptions::default()).unwrap();
 	let track = broadcast
 		.broadcast()
@@ -34,28 +34,28 @@ fn broadcast(payload: &[u8]) -> (moq_net::origin::Producer, impl Sized) {
 /// offering one, and read the frame back across the data channel.
 async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 	let (origin, _keep) = broadcast(payload);
-	let listener = crate::listen::Config::default()
+	let listener = moq_tokio::listen::Config::default()
 		.init_streams()
 		.unwrap()
 		.listen()
 		.await
 		.unwrap();
 	let server = async {
-		let request = listener.accept_webrtc(answerer).await.unwrap();
-		assert_eq!(request.transport(), crate::Transport::WebRtc);
-		assert_eq!(request.alpn(), Some(answerer.protocol()));
+		let request = answerer.accept(&listener).await.unwrap();
+		assert_eq!(request.transport(), moq_tokio::Transport::WebRtc);
+		assert_eq!(request.alpn(), Some(answerer.protocol.as_str()));
 		request.with_publisher(&origin).ok().await.unwrap()
 	};
 
-	let subscribed = crate::origin::spawn();
+	let subscribed = moq_tokio::origin::spawn();
 	let consumer = subscribed.consume();
 	let mut announced = consumer.announced();
-	let client = crate::client::Config::default()
+	let client = moq_tokio::client::Config::default()
 		.init()
 		.unwrap()
 		.with_subscriber(subscribed);
 	let (_server, _client) = kio::clock::timeout(TIMEOUT, async {
-		tokio::join!(server, async { client.connect_webrtc(offerer).await.unwrap() })
+		tokio::join!(server, async { offerer.connect(&client).await.unwrap() })
 	})
 	.await
 	.expect("handshake timed out");
@@ -77,6 +77,22 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 #[tokio::test]
 async fn session_over_loopback() {
 	let config = Config::default();
+	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, protocol(), vec![LOOPBACK])
+		.await
+		.unwrap();
+	offerer.accept(&answer).await.unwrap();
+
+	transfer(&offerer, &answerer, b"hello").await;
+}
+
+/// A zero timeout disables the bound rather than elapsing at once.
+#[tokio::test]
+async fn zero_timeout_is_unbounded() {
+	let config = Config {
+		timeout: Duration::ZERO,
+		..Config::default()
+	};
 	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
 	let (answerer, answer) = Answerer::with_hosts(&config, &offer, protocol(), vec![LOOPBACK])
 		.await
@@ -202,6 +218,7 @@ async fn server_reflexive_candidate_is_offered_and_selected() {
 	let stun = stun_server().await;
 	let config = Config {
 		stun: vec![format!("stun:{stun}").parse().unwrap()],
+		..Default::default()
 	};
 	let private = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
 	let (mut offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![private]).await.unwrap();
@@ -231,22 +248,36 @@ async fn server_reflexive_candidate_is_offered_and_selected() {
 	transfer(&offerer, &answerer, b"hello").await;
 }
 
+/// A channel carrying a protocol that is not MoQ opens, and moq-net's policy refuses it on both sides.
 #[tokio::test]
 async fn unsupported_protocol_is_refused() {
-	let (offerer, _) = Offerer::with_hosts(&Config::default(), "not-moq", vec![LOOPBACK])
+	let config = Config::default();
+	let (offerer, offer) = Offerer::with_hosts(&config, "not-moq", vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, "not-moq", vec![LOOPBACK])
 		.await
 		.unwrap();
-	let client = crate::client::Config::default().init().unwrap();
-	assert!(matches!(
-		client.connect_webrtc(&offerer).await,
-		Err(crate::Error::WebRtc(err)) if matches!(*err, Error::Protocol(_))
-	));
+	offerer.accept(&answer).await.unwrap();
+
+	let listener = moq_tokio::listen::Config::default()
+		.init_streams()
+		.unwrap()
+		.listen()
+		.await
+		.unwrap();
+	let client = moq_tokio::client::Config::default().init().unwrap();
+	let (accepted, connected) = kio::clock::timeout(TIMEOUT, async {
+		tokio::join!(answerer.accept(&listener), offerer.connect(&client))
+	})
+	.await
+	.expect("the refusal timed out");
+	assert!(accepted.is_err(), "the answerer accepted an unsupported protocol");
+	assert!(connected.is_err(), "the offerer connected with an unsupported protocol");
 }
 
 /// A channel carrying another supported ALPN than the one signaling agreed is refused.
 #[tokio::test]
 async fn unsignaled_protocol_is_refused() {
-	let versions = crate::connect::Config::default().versions();
+	let versions = moq_tokio::connect::Config::default().versions();
 	let [agreed, other, ..] = versions.alpns()[..] else {
 		panic!("expected two supported ALPNs");
 	};
@@ -257,19 +288,16 @@ async fn unsignaled_protocol_is_refused() {
 		.unwrap();
 	offerer.accept(&answer).await.unwrap();
 
-	let listener = crate::listen::Config::default()
+	let listener = moq_tokio::listen::Config::default()
 		.init_streams()
 		.unwrap()
 		.listen()
 		.await
 		.unwrap();
-	let accepted = kio::clock::timeout(TIMEOUT, listener.accept_webrtc(&answerer))
+	let accepted = kio::clock::timeout(TIMEOUT, answerer.accept(&listener))
 		.await
 		.expect("the channel did not open");
-	assert!(matches!(
-		accepted,
-		Err(crate::Error::WebRtc(err)) if matches!(&*err, Error::Protocol(protocol) if protocol == other)
-	));
+	assert!(matches!(accepted, Err(Error::Protocol(protocol)) if protocol == other));
 }
 
 #[test]
@@ -399,16 +427,10 @@ async fn a_drain_waits_for_an_establishing_peer() {
 		.unwrap();
 
 	let activity = moq_net::server::Activity::default();
-	let listener = crate::server::Config {
-		activity: activity.clone(),
-		..Default::default()
-	}
-	.init_streams()
-	.unwrap()
-	.listen()
-	.await
-	.unwrap();
-	let mut accept = std::pin::pin!(listener.accept_webrtc(&answerer));
+	let mut config = moq_tokio::server::Config::default();
+	config.activity = activity.clone();
+	let listener = config.init_streams().unwrap().listen().await.unwrap();
+	let mut accept = std::pin::pin!(answerer.accept(&listener));
 	// The answer is not applied yet, so the channel cannot open.
 	assert!(futures::poll!(accept.as_mut()).is_pending());
 	let mut closed = std::pin::pin!(activity.close());
@@ -418,11 +440,10 @@ async fn a_drain_waits_for_an_establishing_peer() {
 	);
 
 	offerer.accept(&answer).await.unwrap();
-	let client = crate::client::Config::default().init().unwrap();
-	let (request, session) =
-		kio::clock::timeout(TIMEOUT, async { tokio::join!(accept, client.connect_webrtc(&offerer)) })
-			.await
-			.expect("handshake timed out");
+	let client = moq_tokio::client::Config::default().init().unwrap();
+	let (request, session) = kio::clock::timeout(TIMEOUT, async { tokio::join!(accept, offerer.connect(&client)) })
+		.await
+		.expect("handshake timed out");
 	let request = request.expect("the drain refused an establishing peer");
 	assert!(futures::poll!(closed.as_mut()).is_pending());
 	drop((request, session));
