@@ -22,14 +22,20 @@
 //!
 //! Datagrams ignore their send options, and are dropped when oversized or when the
 //! peer's queue is full, as a network would.
+//!
+//! [`Config::latency`] delays each stream message and finish on the ambient clock, so
+//! a mesh of pairs orders its traffic as a network of that latency would. Opens,
+//! resets, stops, datagrams, and the session close skip it.
 
 use std::{
 	collections::VecDeque,
+	pin::Pin,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
 	},
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use bytes::{Buf, Bytes};
@@ -61,6 +67,9 @@ pub struct Config {
 	/// stops, or drops it, and its writer finishes, resets, or drops it. `None` grants credit
 	/// without limit.
 	pub max_concurrent_bi_streams: Option<usize>,
+	/// How long each stream message and finish takes to reach its reader, on the ambient
+	/// clock. Zero delivers at once.
+	pub latency: Duration,
 }
 
 impl Default for Config {
@@ -72,6 +81,7 @@ impl Default for Config {
 			protocol: None,
 			max_concurrent_uni_streams: None,
 			max_concurrent_bi_streams: None,
+			latency: Duration::ZERO,
 		}
 	}
 }
@@ -183,6 +193,7 @@ impl Conn {
 			channel: channel.clone(),
 			close: self.close.clone(),
 			buffer: self.config.stream_buffer,
+			latency: self.config.latency,
 			done: false,
 			credit: send,
 		};
@@ -191,6 +202,7 @@ impl Conn {
 			close: self.close.clone(),
 			stopped: false,
 			credit: recv,
+			landing: None,
 		});
 		(writer, reader)
 	}
@@ -464,11 +476,24 @@ impl poll::Session for Session {
 /// One direction of a stream: the messages its writer queued for its reader.
 #[derive(Default)]
 struct Channel {
-	messages: VecDeque<Bytes>,
+	messages: VecDeque<Message>,
 	/// The bytes in `messages`.
 	queued: usize,
 	/// How the channel closed, once it has.
 	end: Option<End>,
+	/// When a finish reaches the reader, under [`Config::latency`].
+	finished: Option<kio::clock::Instant>,
+}
+
+/// One write, and when it reaches the reader under [`Config::latency`].
+struct Message {
+	bytes: Bytes,
+	lands: Option<kio::clock::Instant>,
+}
+
+/// When something a writer sent `latency` ago reaches the reader: `None` at once.
+fn landing(latency: Duration) -> Option<kio::clock::Instant> {
+	(!latency.is_zero()).then(|| kio::clock::now() + latency)
 }
 
 #[derive(Clone, Copy)]
@@ -488,6 +513,16 @@ impl Channel {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
 		}
+	}
+
+	/// When the next thing the reader takes lands, if it is still in flight.
+	fn in_flight(&self) -> Option<kio::clock::Instant> {
+		let lands = match self.messages.front() {
+			Some(message) => message.lands,
+			None if matches!(self.end, Some(End::Fin)) => self.finished,
+			None => None,
+		}?;
+		(lands > kio::clock::now()).then_some(lands)
 	}
 
 	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
@@ -516,6 +551,8 @@ pub struct SendStream {
 	channel: kio::Shared<Channel>,
 	close: Close,
 	buffer: usize,
+	/// See [`Config::latency`].
+	latency: Duration,
 	/// This side finished or reset the stream.
 	done: bool,
 	/// The credit of a bidi stream the peer opened, held until this side is done.
@@ -560,7 +597,10 @@ impl poll::SendStream for SendStream {
 
 		// Take ownership rather than copy: free for a `Bytes` source.
 		let size = buf.remaining();
-		channel.messages.push_back(buf.copy_to_bytes(size));
+		channel.messages.push_back(Message {
+			bytes: buf.copy_to_bytes(size),
+			lands: landing(self.latency),
+		});
 		channel.queued += size;
 
 		Poll::Ready(Ok(size))
@@ -585,6 +625,7 @@ impl poll::SendStream for SendStream {
 			return Err(Error::Stopped(code));
 		}
 		channel.end = Some(End::Fin);
+		channel.finished = landing(self.latency);
 		drop(channel);
 		self.done = true;
 		self.credit = None;
@@ -646,6 +687,8 @@ pub struct Chunks {
 	stopped: bool,
 	/// The open-stream count this stream holds a credit in, until it is done.
 	credit: Option<Credit>,
+	/// Armed while the next message or the finish is still in flight.
+	landing: Option<Pin<Box<kio::clock::Sleep>>>,
 }
 
 impl Chunks {
@@ -680,6 +723,32 @@ impl poll::Chunks for Chunks {
 			}
 		};
 
+		if let Some(lands) = channel.in_flight() {
+			drop(channel);
+			// Wait on the channel too: a reset or stop drops what is in flight, and the
+			// reader sees it at once rather than at the discarded message's landing.
+			let changed = |channel: &kio::Ref<'_, Channel>| match channel.in_flight() {
+				Some(_) => Poll::Pending,
+				None => Poll::Ready(()),
+			};
+			if self.channel.poll(waiter, changed).is_ready() {
+				return self.poll_read_chunk(waiter, max);
+			}
+			let landing = match &mut self.landing {
+				Some(landing) => {
+					// A reset wakes the task parked on the sleep, so resetting to the
+					// same instant on every poll would spin without time advancing.
+					if landing.deadline() != lands {
+						landing.as_mut().reset(lands);
+					}
+					landing
+				}
+				None => self.landing.insert(Box::pin(kio::clock::sleep_until(lands))),
+			};
+			ready!(waiter.poll_future(landing.as_mut()));
+			return self.poll_read_chunk(waiter, max);
+		}
+
 		let Some(front) = channel.messages.front_mut() else {
 			let end = channel.end.expect("checked above");
 			drop(channel);
@@ -690,9 +759,9 @@ impl poll::Chunks for Chunks {
 				End::Stop(_) => Err(Error::Closed),
 			});
 		};
-		let chunk = match front.len() > max {
-			true => front.split_to(max),
-			false => channel.messages.pop_front().expect("front exists"),
+		let chunk = match front.bytes.len() > max {
+			true => front.bytes.split_to(max),
+			false => channel.messages.pop_front().expect("front exists").bytes,
 		};
 		channel.queued -= chunk.len();
 
@@ -950,6 +1019,71 @@ mod tests {
 			ready(write(&mut send, &Bytes::from_static(b"x"))),
 			Err(Error::Closed)
 		));
+	}
+
+	/// The next chunk `recv` reads, once it lands.
+	async fn landed(recv: &mut RecvStream) -> Option<Bytes> {
+		kio::wait(|waiter| poll::Chunks::poll_read_chunk(recv.get_mut(), waiter, usize::MAX))
+			.await
+			.unwrap()
+	}
+
+	#[test]
+	fn latency_delays_each_message_and_the_finish() {
+		kio::clock::sim::run(async {
+			const LATENCY: Duration = Duration::from_millis(10);
+			let (a, b) = pair(Config {
+				latency: LATENCY,
+				..Default::default()
+			});
+			let (mut send, mut recv) = uni(&a, &b);
+			let start = kio::clock::now();
+
+			ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+			// Polling again while it is in flight must not wake the reader, or a task
+			// re-polling its stream would spin without simulated time moving.
+			let count = Arc::new(Count::default());
+			let waiter = kio::Waiter::new(Waker::from(count.clone()));
+			for _ in 0..2 {
+				let chunk = poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX);
+				assert!(chunk.is_pending(), "a message landed at once");
+			}
+			assert_eq!(count.0.load(Ordering::Relaxed), 0, "a re-poll woke the reader");
+			kio::clock::sleep(LATENCY / 2).await;
+			ready(write(&mut send, &Bytes::from_static(b"two"))).unwrap();
+			send.finish().unwrap();
+
+			// Each lands its latency after it was sent, in order, and the finish last.
+			assert_eq!(landed(&mut recv).await.unwrap(), "one");
+			assert_eq!(start.elapsed(), LATENCY);
+			assert_eq!(landed(&mut recv).await.unwrap(), "two");
+			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
+			assert_eq!(landed(&mut recv).await, None);
+			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
+		});
+	}
+
+	#[test]
+	fn a_reset_skips_the_latency() {
+		kio::clock::sim::run(async {
+			let (a, b) = pair(Config {
+				latency: Duration::from_millis(10),
+				..Default::default()
+			});
+			let (mut send, mut recv) = uni(&a, &b);
+			let start = kio::clock::now();
+			ready(write(&mut send, &Bytes::from_static(b"dropped"))).unwrap();
+
+			// A reader parked on a message in flight wakes for the reset that drops it.
+			let count = Arc::new(Count::default());
+			let waiter = kio::Waiter::new(Waker::from(count.clone()));
+			assert!(poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX).is_pending());
+			send.reset(2);
+			assert!(count.0.load(Ordering::Relaxed) > 0, "the reset did not wake the reader");
+			let read = poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX);
+			assert!(matches!(ready(read), Err(Error::Reset(2))));
+			assert_eq!(start.elapsed(), Duration::ZERO);
+		});
 	}
 
 	#[test]
