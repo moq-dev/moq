@@ -189,9 +189,6 @@
           bun
           # Only for NPM publishing
           nodejs_24
-          # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
-          # so the release doesn't race on a runtime binary download.
-          deno
         ];
 
         # Python dependencies
