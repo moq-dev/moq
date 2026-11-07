@@ -186,8 +186,7 @@ quests that require them.
 - [Rename moq-rtc to moq-webrtc](/quest/m2/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
 - [One typed WebTransport error per QUIC adapter](/quest/m2/web-error.md) - moq-tokio and moq-uring each expose one typed `quic::web::Error`, and uring's `quic::Error` loses its `Web` and `Http3` variants
 - [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
-- [Publish reports rendition stats as hang's type](/quest/m2/rendition-stats-type.md) - `Rendition.stats` is a `Stats.Rendition`, with `Report.Writer` taking the schema's input type
-- [moq-webrtc drops the ICE wire counters nothing reads](/quest/m2/ice-wire-counters.md) - the per-packet `Wire` atomics and their public type go, beside the rename
+- [Publish reports rendition stats as hang's type](/quest/m2/rendition-stats-type.md) - `Rendition.stats` and `Report.Writer` take the rendition stats schema's input type, so encoders write plain numbers
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
