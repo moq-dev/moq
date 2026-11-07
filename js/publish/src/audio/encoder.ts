@@ -542,8 +542,11 @@ export class Encoder {
 	// waiting on a probe.
 	#runConfig(effect: Effect): void {
 		const join = effect.get(this.join);
-		if (!Number.isFinite(join) || join <= 0)
+		if (!Number.isFinite(join) || join <= 0) {
+			// The broadcast reads every registered rendition's spacing, listed or not.
+			this.#spacing.set(undefined);
 			throw new Error(`audio join must be a finite number of ms greater than 0: ${join}`);
+		}
 		this.#join = Micro.fromMilli(join);
 
 		const capture = effect.get(this.in.capture);

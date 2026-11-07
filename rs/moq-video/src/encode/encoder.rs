@@ -225,8 +225,9 @@ impl Config {
 	/// The time between join points the encoder holds to: [`join`](Self::join)
 	/// rounded to whole frames at `framerate`, the value a catalog declares.
 	pub fn effective_join(&self) -> std::time::Duration {
-		let nanos = u128::from(self.keyframe_interval()) * 1_000_000_000 * u128::from(self.framerate.denominator())
-			/ u128::from(self.framerate.numerator());
+		// Rounded up, since a catalog declares it as the longest group.
+		let nanos = (u128::from(self.keyframe_interval()) * 1_000_000_000 * u128::from(self.framerate.denominator()))
+			.div_ceil(u128::from(self.framerate.numerator()));
 		std::time::Duration::from_nanos(nanos.try_into().unwrap_or(u64::MAX))
 	}
 
@@ -1311,7 +1312,8 @@ mod tests {
 	/// The catalog declares the join after rounding to whole frames, since that
 	/// is the spacing the stream actually has: a fractional frame rate stretches
 	/// the default two seconds, and a positive join shorter than a frame rounds
-	/// up to one frame rather than down to none.
+	/// up to one frame rather than down to none. Nanoseconds round up too, so
+	/// the declaration never undercuts the stream.
 	#[test]
 	fn the_effective_join_is_whole_frames() {
 		let join = |ms, framerate| {
@@ -1325,7 +1327,7 @@ mod tests {
 		let thirty = crate::FrameRate::new(30, 1).unwrap();
 		assert_eq!(join(2000, ntsc), (60, std::time::Duration::from_millis(2002)));
 		assert_eq!(join(2000, thirty), (60, std::time::Duration::from_secs(2)));
-		assert_eq!(join(1, thirty), (1, std::time::Duration::from_nanos(33_333_333)));
+		assert_eq!(join(1, thirty), (1, std::time::Duration::from_nanos(33_333_334)));
 	}
 
 	/// `cut()` has to reach the codec on a *warm* encoder, which is the case that

@@ -7,7 +7,7 @@ public enum Video {
 
     /// The raw frame layout, resolution, and framerate the caller writes.
     public typealias EncoderInput = VideoEncoderInput
-    /// The codec, bitrate, group mode, and backend preference.
+    /// The codec, bitrate, join interval, and backend preference.
     public typealias EncoderOutput = VideoEncoderOutput
     /// What a `Consumer` delivers: an optional resize, a delay, and the decoder's surface (macOS only).
     public typealias DecoderOutput = VideoDecoderOutput

@@ -937,6 +937,33 @@ test("refuses a join that is not a positive duration", async () => {
 	error.mockRestore();
 });
 
+// The broadcast reads every registered rendition's spacing, listed or not, so a refused join must not
+// leave the old one for a new network broadcast to declare.
+test("a refused join withdraws its group spacing", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const name = new Signal(Moq.Path.from("refused.hang"));
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name });
+	const video = broadcast.video("video");
+	video.join.set(Milli(20));
+	video.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
+	// 20 ms Opus frames start a group every two frames for a 30 ms join.
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never, join: Milli(30) });
+	try {
+		await settle();
+		expect(broadcast.join.peek()).toBe(Milli(40));
+
+		encoder.join.set(Milli(0));
+		name.set(Moq.Path.from("renamed.hang"));
+		await settle();
+		expect(broadcast.join.peek()).toBe(Milli(20));
+	} finally {
+		encoder.close();
+		broadcast.close();
+		error.mockRestore();
+	}
+});
+
 test("settles while the capture waits on a gesture", async () => {
 	const capture = {
 		in: { source: new Signal(undefined) },
