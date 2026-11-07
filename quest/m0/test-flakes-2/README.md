@@ -148,6 +148,11 @@ skipped the timing report. A TERM landing after a lane forked but before
 hung. The exit trap now waits again, and cancellation reads the job table,
 fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
 
+Added 2026-11-07 (maintainer, /quest-complete): moq-gst's stale-completion
+sink test, which failed once in 30 stress iterations in
+[moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160)'s validation.
+It is quarantined with `#[ignore]` until its child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -156,3 +161,4 @@ Public API: none. Wire: none.
 - [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
 - [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
 - [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
+- [moq-gst's stale-completion sink test survives load](/quest/m0/test-flakes-2/gst-stale-completion.md) - `a_stale_completion_cannot_end_the_next_publication` passes under stress, and its `#[ignore]` is removed
