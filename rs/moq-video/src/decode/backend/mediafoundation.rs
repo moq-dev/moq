@@ -477,9 +477,9 @@ impl Backend for MediaFoundation {
 
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 		// Whatever the drain does, the next access unit opens a new stream.
-		self.pending.clear();
 		self.discontinuity = true;
 		if !self.output_configured {
+			self.pending.clear();
 			return Ok(Vec::new());
 		}
 
@@ -487,6 +487,8 @@ impl Backend for MediaFoundation {
 		let drained = unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0) }
 			.map_err(|e| mf_err("drain", e))
 			.and_then(|()| self.drain_output(&mut out));
+		// Only after the drain, which pairs the delayed pictures with these.
+		self.pending.clear();
 		if let Err(err) = drained {
 			// A drain cut short leaves the MFT refusing input until it has handed
 			// back everything it holds. Flushing discards that instead, and is what
