@@ -263,8 +263,11 @@ function connect(config?: Config): { session: Session; peer: FakePeer } {
 	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
 	// Idle timer off so a stray interval can't interfere with the test.
 	// Bare version ALPNs are offered by default (requireProtocol defaults to false).
+	// A one-byte send buffer makes one write stuck in the socket a backlog, so
+	// frames behind it stay queued in the session.
 	const session = new Session("https://example/test", {
 		config: { idleTimeout: null, ...config },
+		sendBufferSize: 1,
 	});
 	const peer = FakePeer.last as FakePeer;
 	return { session, peer };
