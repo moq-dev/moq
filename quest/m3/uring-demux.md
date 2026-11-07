@@ -28,10 +28,10 @@ the QUIC endpoint. The classifier, pin table, per-source `Queue`, and
 listener's socket does inline in its receive; only QUIC continues into the
 endpoint. Until this lands, `moq_relay::Relay::webrtc` refuses an io_uring
 relay. The worker is thread-per-core and `!Send`, while the consumers
-of the other classes (`moq-rtc`, `moq-srt`) run on
+of the other classes (`moq-webrtc`, `moq-srt`) run on
 tokio, so non-QUIC datagrams cross to them on a `Send` channel, and their
 replies come back through a remote-send path into the owning worker's ring,
-which is what a fed `moq-rtc` takes as its `Transmit`
+which is what a fed `moq-webrtc` takes as its `Transmit`
 ([WebRTC on the shared socket](/quest/m3/one-port/rtc-feed.md)). A flow
 pinned on one shard keeps landing there because reuseport steers only QUIC by
 connection ID.

@@ -179,17 +179,11 @@ pub enum Error {
 	},
 
 	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
-	#[error("unsupported CPU: {0}")]
-	UnsupportedCpu(String),
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }
 
 impl Error {
-	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
-	#[cfg(feature = "async")]
-	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
-		Self::UnsupportedCpu(err.to_string())
-	}
-
 	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
 	/// The import loop consults it: a `503` on a playlist fetch is worth another pass, a `404` is
@@ -263,9 +257,7 @@ mod tests {
 		drop(listener);
 
 		// reqwest reads rustls's process default, as the importer installs it.
-		let _ = rind_rustls::default_provider()
-			.expect("supported CPU")
-			.install_default();
+		moq_crypto::provider::install_default().expect("supported CPU");
 		let err: Error = reqwest::get(format!("http://user:pass@{address}/media.m3u8?jwt=secret"))
 			.await
 			.expect_err("dial a closed port")

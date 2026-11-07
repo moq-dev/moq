@@ -22,13 +22,14 @@ naming abandoned groups on the wire lands on lite-07-wip) and the whole
 unbounded-groups epic, whose additive compressed-stream child rides with it.
 
 The cut gates that break nothing (main no slower than release, vendored
-fixes, the pre-cut audit re-run, and moq-c parity) live under the recurring
+fixes, and moq-c parity) live under the recurring
 [cut gate](/quest/m2/cut-gate/README.md), decided the same day.
 
 Held by open claims: the m1 epics and quests marked below stay where they
 are until their claims merge, and the [probe epic](/quest/m2/probe/README.md)
-stays here while its padding claim is open, so the cut waits on it until the
-[re-cut follow-up](/quest/m2/recut-held.md) moves it to m3.
+stays here while its open claims last, so the cut waits on it until the
+[re-cut follow-up](/quest/m2/recut-held.md) moves it to m3. Its padding and JS
+rung disable quests already moved to m3 on 2026-11-06.
 
 Carried from m1's Plan before the re-cut, where "m1" means the whole pre-cut
 milestone, now m1 and m2:
@@ -85,8 +86,9 @@ and the API-diff tooling. Public routes now wait on cluster routing.
 Added 2026-10-20 (maintainer): the probe target, native probing, and the
 native rung disable moved up from the [m2 probe epic](/quest/m2/probe/README.md),
 so Rust, FFI, and OBS publishers recover a stopped rendition in this release;
-padding and the browser's rung disable stay in m2, with only padding's
-lite-07 stream type here.
+padding and the browser's rung disable stayed in m2, with only padding's
+lite-07 stream type here. Both moved to m3 on 2026-11-06 (maintainer,
+/quest-unblock), parked for a rethink of padding.
 
 Added 2026-10-22 (maintainer, clustering audit): three interim fixes for
 announce churn on today's hop-list mesh, shipping with the next cut from
@@ -170,21 +172,22 @@ quests that require them.
 
 ## Required
 
-- [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07 (held in m1 by an open claim)
+- [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind` (held in m1 by an open claim)
 - [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH for multi-group reads (single-group FETCH stays); merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Address groups by timestamp](/quest/m2/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate (held in m1 by an open claim)
 - [Cluster routing](/quest/m2/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - the wire names every abandoned group and the drop signal is public, so readers count losses instead of stalling
-- [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport (held in m1 by an open claim)
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
-- [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them (held in m1 by an open claim)
-- [Rename moq-rtc to moq-webrtc](/quest/m2/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
+- [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
+- [Publish reports rendition stats as hang's type](/quest/m2/rendition-stats-type.md) - `Rendition.stats` and `Report.Writer` take the rendition stats schema's input type, so encoders write plain numbers
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
-- [Rename buffer to lookahead](/quest/m2/watch-lookahead.md) - `<moq-watch>`'s `buffer` becomes `lookahead`, so it is no longer mistaken for a jitter buffer on live streams
-- [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, the pre-cut audit re-run, and moq-c at parity
-- [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; the browser pads where native sessions retransmit (held in m2 by an open claim; moves to m3)
+- [A recreated or restarted track cannot reuse group sequences](/quest/m2/sequence-reuse.md) - recreating a track or restarting an instance cannot give new content an old group identity unless the app seeds past it, and datagrams are documented as exempt
+- [Subscriptions name the oldest group without a u64::MAX sentinel](/quest/m2/anchor-oldest.md) - `Anchor` gets an explicit oldest variant, decoded the same way on every wire
+- [moq auth serve bounds what a leaked token or public caller can do](/quest/m2/auth-serve-policy.md) - tokens need an `exp` unless the operator opts out, and a public listener authenticates relays
+- [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
+- [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
 - [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge

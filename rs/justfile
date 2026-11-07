@@ -166,6 +166,11 @@ macos-test:
 capture *args:
     bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
+# moq-net without its `async` feature: the lib, its tests, and its docs.
+no-async:
+    bash sh/local.sh cargo clippy --locked -p moq-net --no-default-features --lib --tests -- -D warnings
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
+
 # Lint media tests without the device features the gate's test build enables.
 media-defaults:
     bash sh/local.sh cargo clippy --locked -p moq-audio -p moq-video --tests -- -D warnings
@@ -229,10 +234,6 @@ android-test *args:
 audit:
     bash sh/local.sh cargo deny check --show-stats
 
-# Verify relay startup validation without a QUIC backend.
-relay-minimal:
-    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
-
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
 # Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
@@ -256,7 +257,7 @@ features:
     run just rs media-features --all
     run bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
     run bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
-    run just rs relay-minimal
+    run just rs test -p moq-relay --no-default-features
     run bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
     run just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
     run just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
@@ -264,7 +265,7 @@ features:
     run bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
     # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
     run bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
-    run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
+    run bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-webrtc --no-default-features --all-targets
     run bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     run bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
@@ -357,10 +358,13 @@ media-features *args:
 # default filter leaves the benches unrun. `build.warnings` denies warnings
 # without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
 
+# A test whose timer waits on the host clock aborts (see `kio::clock::host_time`).
+# The ignored tests are benchmarks and hardware tests, which run on real time by design.
+
 # Run library, binary, and integration tests, enforcing clippy from the same compile.
 [positional-arguments]
 test *args:
-    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked --tests "$@"
+    {{ if args =~ '--run-ignored' { '' } else { 'KIO_DENY_HOST_TIMERS=1' } }} CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked --tests "$@"
 
 # Exercise the ignored hardware tests for every GPU vendor on this Linux host.
 gpu:
@@ -446,11 +450,11 @@ render-sw:
         -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size|an_unimportable_gpu_frame_is_refused|the_output_follows_the_device)$/)'
     # Mesa's software driver exports no memory, so this covers the readback route.
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
-        just rs test -p moq-video --features render,openh264 --lib --run-ignored only -E 'test(/^render::export::(nv12::)?tests::/)'
+        just rs test -p moq-video --features render,openh264 --lib --run-ignored only -E 'test(/^render::(readback::|export::(nv12::)?)tests::/)'
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
-    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery) | test(/^mdns::tests::daemon_/)'
+    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::same_app_peers_find_each_other) | test(/^mdns::tests::daemon_/)'
     just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
 
 # Run the long TS recovery arms; a failing arm keeps its export and ledgers under $HARNESS_RUNS.

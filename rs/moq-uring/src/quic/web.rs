@@ -30,7 +30,7 @@ pub use web_transport_proto as proto;
 /// The HTTP/3 ALPN used by WebTransport.
 pub const ALPN: &str = "h3";
 
-use super::{Connection, Error, VarInt, recv as driver_recv, send as driver_send};
+use super::{Connection, VarInt, recv as driver_recv, send as driver_send};
 
 /// Incoming WebTransport streams and their errors.
 pub mod recv;
@@ -38,8 +38,8 @@ pub mod recv;
 pub mod send;
 use self::{recv::Stream as RecvStream, send::Stream as SendStream};
 
-/// An error establishing or using a WebTransport session on this worker.
-pub use super::Error as SessionError;
+mod error;
+pub use error::{Error, HandshakeError};
 
 /// The frame type WebTransport bidirectional streams lead with.
 const FRAME_WEBTRANSPORT: u64 = 0x41;
@@ -213,7 +213,7 @@ impl Request {
 		let mut peer_control = peer_control.expect("the loop only ends with a control stream");
 		let settings = read_settings(&mut peer_control).await?;
 		if settings.supports_webtransport() == 0 {
-			return Err(Error::Web("peer does not support WebTransport".into()));
+			return Err(HandshakeError::Unsupported.into());
 		}
 		held[0] = Some(peer_control);
 
@@ -240,15 +240,15 @@ impl Request {
 	pub async fn respond(mut self, response: impl Into<proto::ConnectResponse>) -> Result<Session, Error> {
 		let response = response.into();
 		if response.status != http::StatusCode::OK {
-			return Err(Error::Web("respond requires OK; use reject for other statuses".into()));
+			return Err(HandshakeError::Status(response.status).into());
 		}
 		if let Some(protocol) = &response.protocol
 			&& !self.request.protocols.contains(protocol)
 		{
-			return Err(Error::Web(format!("subprotocol {protocol:?} was not offered")));
+			return Err(HandshakeError::Protocol(protocol.clone()).into());
 		}
 		let mut buf = Vec::new();
-		response.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;
+		response.encode(&mut buf).map_err(HandshakeError::from)?;
 		write_all(&mut self.send, &buf).await?;
 		self.guard.disarm();
 		Ok(Session::establish(self, response))
@@ -274,11 +274,11 @@ impl Request {
 	/// instead of the status it was sent.
 	pub async fn reject(mut self, status: http::StatusCode) -> Result<(), Error> {
 		if !status.is_client_error() && !status.is_server_error() {
-			return Err(Error::Web("reject requires a 4xx or 5xx status".into()));
+			return Err(HandshakeError::Status(status).into());
 		}
 		let response = proto::ConnectResponse::new(status);
 		let mut buf = Vec::new();
-		response.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;
+		response.encode(&mut buf).map_err(HandshakeError::from)?;
 		write_all(&mut self.send, &buf).await?;
 		let send = self.send.finish();
 
@@ -394,14 +394,14 @@ impl Session {
 	///
 	/// See [`Connection::send_datagram`].
 	pub fn send_datagram(&self, payload: impl Buf, options: driver_send::Options<'_>) -> Result<(), Error> {
-		let Some(web) = &self.web else {
-			return Ok(self.conn.send_datagram(payload, options)?);
+		let result = match &self.web {
+			None => self.conn.send_datagram(payload, options),
+			// The session id goes ahead of the payload as its own chunk, so neither is copied.
+			Some(web) => self
+				.conn
+				.send_datagram(web.header_datagram.clone().chain(payload), options),
 		};
-		// The session id goes ahead of the payload as its own chunk, so neither is copied.
-		let framed = web.header_datagram.clone().chain(payload);
-		self.conn
-			.send_datagram(framed, options)
-			.map_err(|err| unmap_err(err.into()))
+		result.map_err(|err| self.handles.map(err.into()))
 	}
 
 	/// Wrap a raw-QUIC connection in a session, with no
@@ -496,12 +496,9 @@ impl Session {
 		}
 	}
 
-	/// Rewrite error codes out of the HTTP/3 mapping in web mode.
-	fn map_err(&self, err: Error) -> Error {
-		match self.web {
-			Some(_) => unmap_err(err),
-			None => err,
-		}
+	/// Report a connection error as the session's close reason.
+	fn map_err(&self, err: super::Error) -> Error {
+		self.handles.map(err.into())
 	}
 }
 
@@ -544,7 +541,8 @@ impl Session {
 			return self
 				.conn
 				.poll_accept_uni(waiter)
-				.map_ok(|recv| RecvStream::new(recv, &self.handles));
+				.map_ok(|recv| RecvStream::new(recv, &self.handles))
+				.map_err(|err| self.map_err(err));
 		};
 		web.state.poll(waiter, |state, cx| {
 			loop {
@@ -562,7 +560,7 @@ impl Session {
 					if state.pending_uni.is_empty()
 						&& let Some(err) = ended
 					{
-						return Poll::Ready(Err(unmap_err(err)));
+						return Poll::Ready(Err(self.map_err(err)));
 					}
 					return Poll::Pending;
 				}
@@ -574,12 +572,16 @@ impl Session {
 	#[kio::wrapper]
 	pub fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		let Some(web) = &self.web else {
-			return self.conn.poll_accept_bi(waiter).map_ok(|(send, recv)| {
-				(
-					SendStream::new(send, &self.handles, None),
-					RecvStream::new(recv, &self.handles),
-				)
-			});
+			return self
+				.conn
+				.poll_accept_bi(waiter)
+				.map_ok(|(send, recv)| {
+					(
+						SendStream::new(send, &self.handles, None),
+						RecvStream::new(recv, &self.handles),
+					)
+				})
+				.map_err(|err| self.map_err(err));
 		};
 		web.state.poll(waiter, |state, cx| {
 			loop {
@@ -600,7 +602,7 @@ impl Session {
 					if state.pending_bi.is_empty()
 						&& let Some(err) = ended
 					{
-						return Poll::Ready(Err(unmap_err(err)));
+						return Poll::Ready(Err(self.map_err(err)));
 					}
 					return Poll::Pending;
 				}
@@ -629,7 +631,7 @@ impl Session {
 				opening.uni = Some((SendStream::new(inner, &self.handles, None), header));
 			}
 			let (send, header) = opening.uni.as_mut().unwrap();
-			let result = ready!(send.poll_header(opening.park.hold(cx), header)).map_err(Error::from);
+			let result = ready!(send.poll_header(opening.park.hold(cx), header));
 			let (mut send, _) = opening.uni.take().unwrap();
 			result?;
 			send.set_priority(options.priority);
@@ -664,7 +666,7 @@ impl Session {
 				));
 			}
 			let (send, _, header) = opening.bi.as_mut().unwrap();
-			let result = ready!(send.poll_header(opening.park.hold(cx), header)).map_err(Error::from);
+			let result = ready!(send.poll_header(opening.park.hold(cx), header));
 			let (mut send, recv, _) = opening.bi.take().unwrap();
 			result?;
 			send.set_priority(options.priority);
@@ -724,12 +726,7 @@ impl Session {
 	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let err = ready!(self.conn.poll_closed(waiter));
-		Poll::Ready(
-			self.web
-				.as_ref()
-				.and_then(|web| web.closed.borrow().clone())
-				.unwrap_or_else(|| self.map_err(err)),
-		)
+		Poll::Ready(self.map_err(err))
 	}
 	/// Return connection-level QUIC statistics.
 	pub fn stats(&self) -> moq_quic::connection::Stats {
@@ -830,6 +827,12 @@ impl moq_net::transport::poll::Session for Session {
 	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
 		Some(Self::receive_window(self))
 	}
+	/// The connection's limits, which every WebTransport session on it shares.
+	fn set_limits(&self, limits: moq_net::transport::Limits) -> Result<(), moq_net::transport::LimitsError> {
+		let mut quic = super::Limits::default();
+		quic.receive_window = limits.receive_window;
+		Self::set_limits(self, quic).map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
+	}
 	/// The connection's credit, which every WebTransport session on it shares.
 	fn stream_credit(&self, dir: moq_net::transport::Dir) -> Option<moq_net::transport::StreamCredit> {
 		Some(self.conn.stream_credit(dir))
@@ -874,10 +877,7 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 		if closed.is_some() {
 			return;
 		}
-		*closed = Some(Error::App {
-			code: u64::from(code),
-			reason: reason.to_string(),
-		});
+		*closed = Some(Error::Closed(code, reason.to_string()));
 	}
 
 	let connect_send = web.state.lock().connect_send.take();
@@ -985,19 +985,18 @@ impl Handles {
 		self.web
 			.as_ref()
 			.filter(|_| code.into_inner() == 0x170d7b68)
-			.map(|web| {
-				web.closed
-					.borrow()
-					.clone()
-					.unwrap_or_else(|| Error::Web("session gone".into()))
-			})
+			.map(|web| web.closed.borrow().clone().unwrap_or(Error::SessionGone))
 	}
+	/// Replace an error caused by the connection closing with the recorded close reason, or
+	/// decode the peer's close code when none was recorded.
 	fn map(&self, err: Error) -> Error {
-		if let Some(web) = &self.web {
-			web.closed.borrow().clone().unwrap_or_else(|| unmap_err(err))
-		} else {
-			err
+		if !err.is_close() {
+			return err;
 		}
+		if let Some(reason) = self.web.as_ref().and_then(|web| web.closed.borrow().clone()) {
+			return reason;
+		}
+		err.decode(self.web.is_some())
 	}
 }
 
@@ -1010,40 +1009,6 @@ impl Drop for Handles {
 /// An HTTP/3 code as a QUIC varint.
 fn http3_code(code: u64) -> VarInt {
 	VarInt::from_u64(code).expect("HTTP/3 codes are varints")
-}
-
-/// Rewrite HTTP/3-mapped error codes back into WebTransport code space.
-///
-/// Only a sparse range of HTTP/3 codes names a WebTransport error. Anything
-/// else is HTTP/3's own failure rather than a code the peer's application
-/// chose, so it becomes [`Error::Http3`]: keeping the `App`/`Reset`/`Stop`
-/// variant would advertise it through `session_error()`/`stream_error()` as
-/// the very thing this mapping exists to tell it apart from.
-fn unmap_err(err: Error) -> Error {
-	fn unmap(code: u64) -> Option<u64> {
-		proto::error_from_http3(code).map(u64::from)
-	}
-	match err {
-		Error::Reset(code) => match unmap(code) {
-			Some(code) => Error::Reset(code),
-			None => Error::Http3 {
-				code,
-				reason: String::new(),
-			},
-		},
-		Error::Stop(code) => match unmap(code) {
-			Some(code) => Error::Stop(code),
-			None => Error::Http3 {
-				code,
-				reason: String::new(),
-			},
-		},
-		Error::App { code, reason } => match unmap(code) {
-			Some(code) => Error::App { code, reason },
-			None => Error::Http3 { code, reason },
-		},
-		other => other,
-	}
 }
 
 // ── Incoming stream classification ──────────────────────────────────
@@ -1286,7 +1251,7 @@ async fn read_some(recv: &mut driver_recv::Stream, buf: &mut BytesMut) -> Result
 	match n {
 		Some(n) => {
 			if buf.len() + n > MESSAGE_LIMIT {
-				return Err(Error::Web("an HTTP/3 message exceeded the buffer limit".into()));
+				return Err(HandshakeError::TooLarge.into());
 			}
 			buf.extend_from_slice(&chunk[..n]);
 			Ok(true)
@@ -1307,10 +1272,10 @@ async fn read_settings(recv: &mut driver_recv::Stream) -> Result<proto::Settings
 		match proto::Settings::decode(&mut peek) {
 			Ok(settings) => return Ok(settings),
 			Err(proto::SettingsError::UnexpectedEnd) => {}
-			Err(err) => return Err(Error::Web(err.to_string())),
+			Err(err) => return Err(HandshakeError::Settings(err).into()),
 		}
 		if !read_some(recv, &mut buf).await? {
-			return Err(Error::Web("control stream ended before SETTINGS".into()));
+			return Err(HandshakeError::UnexpectedEnd.into());
 		}
 	}
 }
@@ -1323,10 +1288,10 @@ async fn read_connect(recv: &mut driver_recv::Stream) -> Result<proto::ConnectRe
 		match proto::ConnectRequest::decode(&mut peek) {
 			Ok(request) => return Ok(request),
 			Err(proto::ConnectError::UnexpectedEnd) => {}
-			Err(err) => return Err(Error::Web(err.to_string())),
+			Err(err) => return Err(HandshakeError::Connect(err).into()),
 		}
 		if !read_some(recv, &mut buf).await? {
-			return Err(Error::Web("stream ended before the CONNECT request".into()));
+			return Err(HandshakeError::UnexpectedEnd.into());
 		}
 	}
 }
@@ -1362,10 +1327,9 @@ async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: driver_recv::St
 
 	match capsule {
 		Some((code, reason)) => {
-			web.closed.borrow_mut().get_or_insert(Error::App {
-				code: u64::from(code),
-				reason: reason.clone(),
-			});
+			web.closed
+				.borrow_mut()
+				.get_or_insert(Error::Closed(code, reason.clone()));
 			conn.close_code(proto::error_to_http3(code), &reason);
 		}
 		// The CONNECT stream ending closes the session with no error.
@@ -1389,7 +1353,7 @@ struct Capsules {
 
 impl Capsules {
 	/// Take the next whole capsule, or `None` until one has fully arrived.
-	fn take(&mut self) -> Result<Option<proto::Capsule>, Error> {
+	fn take(&mut self) -> Result<Option<proto::Capsule>, CapsuleError> {
 		self.demux()?;
 
 		let mut peek: &[u8] = &self.body;
@@ -1401,13 +1365,13 @@ impl Capsules {
 			}
 			// A short header and a short body are both just "not yet".
 			Err(proto::CapsuleError::UnexpectedEnd | proto::CapsuleError::VarInt(_)) => Ok(None),
-			Err(err) => Err(Error::Web(err.to_string())),
+			Err(err) => Err(CapsuleError::Malformed(err)),
 		}
 	}
 
 	/// Move every whole DATA payload into [`body`](Self::body), skipping other
 	/// frame types entirely.
-	fn demux(&mut self) -> Result<(), Error> {
+	fn demux(&mut self) -> Result<(), CapsuleError> {
 		loop {
 			let mut peek: &[u8] = &self.frames;
 			let Some(typ) = decode_varint(&mut peek) else {
@@ -1416,7 +1380,7 @@ impl Capsules {
 			let Some(len) = decode_varint(&mut peek) else {
 				return Ok(());
 			};
-			let len = usize::try_from(len).map_err(|_| Error::Web("oversized HTTP/3 frame".into()))?;
+			let len = usize::try_from(len).map_err(|_| CapsuleError::TooLarge)?;
 			if peek.len() < len {
 				return Ok(());
 			}
@@ -1426,7 +1390,7 @@ impl Capsules {
 				// Bounded like the frame buffer: a capsule nothing ever
 				// completes must not grow here either.
 				if self.body.len() + len > MESSAGE_LIMIT {
-					return Err(Error::Web("a capsule exceeded the buffer limit".into()));
+					return Err(CapsuleError::TooLarge);
 				}
 				self.body.extend_from_slice(&peek[..len]);
 			}
@@ -1435,14 +1399,14 @@ impl Capsules {
 	}
 }
 
-impl From<send::Error> for Error {
-	fn from(err: send::Error) -> Self {
-		match err {
-			send::Error::SessionError(err) => err,
-			send::Error::Stopped(code) => Self::Stop(code.into()),
-			err => Self::Web(err.to_string()),
-		}
-	}
+/// Why the CONNECT stream's capsules could not be read. Only logged: the session is over
+/// either way.
+#[derive(Debug, thiserror::Error)]
+enum CapsuleError {
+	#[error("malformed capsule: {0}")]
+	Malformed(proto::CapsuleError),
+	#[error("a capsule exceeded the buffer limit")]
+	TooLarge,
 }
 
 impl std::fmt::Debug for Handles {
@@ -1459,43 +1423,6 @@ fn decode_stream_code(raw: bool, code: VarInt) -> Option<u32> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// A code with a WebTransport meaning comes back out as itself; one
-	/// without is HTTP/3's own failure, and must stop advertising itself as an
-	/// application error through the trait accessors.
-	#[test]
-	fn an_unmappable_code_is_not_an_application_error() {
-		use moq_net::transport::Error as _;
-
-		let app = unmap_err(Error::App {
-			code: proto::error_to_http3(7),
-			reason: "seven".into(),
-		});
-		assert!(
-			matches!(&app, Error::App { code: 7, reason } if reason == "seven"),
-			"got {app:?}"
-		);
-		assert_eq!(app.session_error(), Some((7, "seven".to_string())));
-
-		// H3_NO_ERROR: HTTP/3's, and no WebTransport code at all.
-		let h3 = unmap_err(Error::App {
-			code: 0x100,
-			reason: "done".into(),
-		});
-		assert!(
-			matches!(&h3, Error::Http3 { code: 0x100, reason } if reason == "done"),
-			"got {h3:?}"
-		);
-		assert_eq!(h3.session_error(), None, "not a code the peer's application chose");
-
-		let reset = unmap_err(Error::Reset(0x100));
-		assert!(matches!(reset, Error::Http3 { code: 0x100, .. }), "got {reset:?}");
-		assert_eq!(reset.stream_error(), None, "not a MoQ stream code");
-		assert!(matches!(
-			unmap_err(Error::Stop(proto::error_to_http3(3))),
-			Error::Stop(3)
-		));
-	}
 
 	#[test]
 	fn stream_codes_preserve_their_registry() {
@@ -1636,7 +1563,7 @@ mod tests {
 			}
 			capsules.frames.extend_from_slice(&frame(FRAME_DATA, &chunk));
 		};
-		assert!(matches!(err, Error::Web(_)), "refused with {err}");
+		assert!(matches!(err, CapsuleError::TooLarge), "refused with {err}");
 		assert!(capsules.body.len() <= MESSAGE_LIMIT, "the buffer stayed bounded");
 	}
 }

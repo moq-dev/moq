@@ -71,9 +71,9 @@ verdicts:
   check (69/78 samples); shared benches confirm six paired slowdowns;
   supplemental benches lack 15 base comparisons after the baseline lacks
   `moq-sign`; relay session benches panic with `Evicted`; Rust bench targets
-  reach measurement but are cancelled at 60.4 minutes. Confirm calibration
-  before calling paired slowdowns product regressions: [bench CI](/quest/m1/bench-ci.md)
-  owns it. [moq-dev/moq#7592](https://github.com/moq-dev/moq/pull/7592) already
+  reach measurement but are cancelled at 60.4 minutes. The paired calibration
+  in [Paired comparison](/bench/README.md#paired-comparison) says which paired
+  slowdowns to trust. [moq-dev/moq#7592](https://github.com/moq-dev/moq/pull/7592) already
   verifies that the old paired-base Cargo alias blocker is past.
 - Latest scheduled [Interop](https://github.com/moq-dev/moq/actions/runs/41317901057)
   costs 48.2 Linux minutes and fails buffering, a catalog assertion, and the
@@ -227,7 +227,7 @@ release credentials remain under the existing publisher-environment work above.
 | [release-gate](/.github/workflows/release-gate.yml) | Keep: complete release PR admission, including callable platform lanes | Caller gate/alert and release artifacts | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41376436029) ARM 0.2, Windows 6.5, macOS 4.4 |
 | [release-go-ffi](/.github/workflows/release-go-ffi.yml) | Keep: Go native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 1.0 |
 | [release-go](/.github/workflows/release-go.yml) | Keep: Go wrapper publication | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182420464) Linux 1.4 |
-| [release-js](/.github/workflows/release-js.yml) | Keep: npm/JSR packages and exports | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 6.0 |
+| [release-js](/.github/workflows/release-js.yml) | Keep: npm packages and exports | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 6.0 |
 | [release-kt-ffi](/.github/workflows/release-kt-ffi.yml) | Keep: Kotlin native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 1.7 |
 | [release-kt-lib](/.github/workflows/release-kt-lib.yml) | Keep: Kotlin wrapper artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 11.1 |
 | [release-nix](/.github/workflows/release-nix.yml) | Keep: Nix release evaluation/publication | Caller gate/alert and release artifacts | No completed direct sample in fetched page |

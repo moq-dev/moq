@@ -2,14 +2,11 @@
 # one: `<kind> <name> <quest>`. sh/gh/test-inventory.py prints the name of any
 # orphan missing here, and fails on an entry that has a caller.
 
-# Flaky under load; the quest makes it reliable, then removes its `#[ignore]`.
-ignore moq-ffi::test::concurrent_ready_calls_all_wake /quest/m0/test-flakes-2/ffi-concurrent-ready.md
-
 # Need a GPU, a desktop, or a device that no CI runner has.
 ignore moq-carla-bridge::gpu_video_reaches_the_worker /quest/m5/carla-bridge.md
 recipe carla::bridge-gpu /quest/m5/carla-bridge.md
 recipe rs::gpu /quest/m3/gpu-ci.md
-ignore moq-video::encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu /quest/m1/video-vaapi.md
+ignore moq-video::encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu /quest/m4/vaapi-render-tests.md
 ignore moq-video::frame::vulkan::tests::vulkan_gpu_device /quest/m3/gpu-ci.md
 ignore moq-video::frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown /quest/m3/gpu-ci.md
 ignore moq-video::frame::cuda::tests::vulkan_cuda_auto_external_encode /quest/m3/gpu-ci.md
@@ -38,3 +35,5 @@ ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m5/video-hardwar
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
 
+# Need another implementation to speak the route wire; the quest ports it.
+ignore moq-net::test_interop::lite_tracks_interop /quest/m2/cluster-routing/routes/js.md

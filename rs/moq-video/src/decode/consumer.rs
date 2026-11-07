@@ -487,9 +487,7 @@ mod tests {
 			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let rendition = config.probe().await.unwrap();
-		let reserved = source_catalog
-			.reserve()
-			.with_interval(config.gop.duration(config.framerate));
+		let reserved = source_catalog.reserve().with_interval(config.effective_join());
 		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
@@ -987,6 +985,7 @@ mod tests {
 	#[cfg(not(apple))]
 	#[tokio::test]
 	async fn a_cancelled_read_resumes_the_flush_in_flight() {
+		kio::clock::host_time();
 		probe::prepare_blocking_flush();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1021,20 +1020,18 @@ mod tests {
 		.unwrap();
 
 		let mut read = Box::pin(consumer.next_frame());
-		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(1);
-		loop {
+		let entered = async {
 			tokio::select! {
 				_result = &mut read => panic!("flush returned before cancellation"),
-				_ = kio::clock::sleep(std::time::Duration::from_millis(1)) => {
-					if probe::flush_entered() {
-						break;
-					}
-					if kio::clock::Instant::now() >= deadline {
-						probe::release_flush();
-						panic!("flush never reached the codec thread");
-					}
-				}
+				_ = probe::flush_entered() => {}
 			}
+		};
+		if kio::clock::timeout(std::time::Duration::from_secs(1), entered)
+			.await
+			.is_err()
+		{
+			probe::release_flush();
+			panic!("flush never reached the codec thread");
 		}
 		drop(read);
 		probe::release_flush();
@@ -1200,25 +1197,37 @@ mod tests {
 	/// Let the decoders run with nothing new to show until the max-delay one
 	/// has caught up, or fail after ten seconds of trying.
 	async fn catch_up(consumer: &mut Consumer) {
-		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(10);
-		while consumer.selector.source() != Lane::Max {
-			assert!(
-				kio::clock::Instant::now() < deadline,
-				"the max-delay decoder never caught up"
-			);
-			if let Ok(frame) = kio::clock::timeout(std::time::Duration::from_millis(20), consumer.next_frame()).await {
-				panic!(
-					"nothing new was published, yet read returned {:?}",
-					frame.map(|f| f.map(|f| f.timestamp))
-				);
+		let mut sleep = None;
+		let caught_up = std::future::poll_fn(|cx| {
+			loop {
+				match consumer.poll_read(cx, &mut sleep) {
+					// Breaks carry no picture, so `next_frame` would skip them too.
+					Poll::Ready(Ok(Some(Read::Gap { .. } | Read::End { .. }))) => {}
+					Poll::Ready(read) => panic!(
+						"nothing new was published, yet read returned {:?}",
+						read.map(|read| read.map(|read| match read {
+							Read::Frame(frame) => frame.timestamp,
+							_ => unreachable!("matched above"),
+						}))
+					),
+					Poll::Pending => break,
+				}
 			}
-		}
+			match consumer.selector.source() {
+				Lane::Max => Poll::Ready(()),
+				Lane::Min => Poll::Pending,
+			}
+		});
+		kio::clock::timeout(std::time::Duration::from_secs(10), caught_up)
+			.await
+			.expect("the max-delay decoder never caught up");
 	}
 
 	/// A cold join shows the min-delay decoder's pictures at the live edge first,
 	/// then the max-delay decoder's once it has decoded the sweep before them.
 	#[tokio::test]
 	async fn a_cold_join_hands_over_to_the_max_delay_decoder() {
+		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
@@ -1251,6 +1260,7 @@ mod tests {
 	/// max-delay decoder still starts at the group before it, and takes over.
 	#[tokio::test]
 	async fn a_cold_join_whose_live_edge_arrives_first_starts_a_group_earlier() {
+		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut live = group(&mut track, 1, &[4, 5]);
 
@@ -1296,6 +1306,7 @@ mod tests {
 	/// never alternating in between.
 	#[tokio::test]
 	async fn a_short_stall_skips_only_the_min_delay_decoder() {
+		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut consumer = dual(
 			&broadcast,
@@ -1361,6 +1372,7 @@ mod tests {
 	/// late frames are never shown, and the max-delay decoder still takes over.
 	#[tokio::test]
 	async fn a_long_stall_skips_both_decoders() {
+		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut consumer = dual(
 			&broadcast,

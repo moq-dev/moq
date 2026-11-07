@@ -1,5 +1,6 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
@@ -189,6 +190,7 @@ async function syncInline(stream: Stream, announced: announce.Routes, cluster?: 
  * watcher drops a broadcast that is still being published.
  */
 test("an announcement survives the first of its two sources ending", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
@@ -315,6 +317,7 @@ test("a subscription that dies releases what it advertised", async () => {
  * for the session with nobody left to release it.
  */
 test("an entry buffered past a consumer close does not pin the path", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
@@ -787,13 +790,15 @@ async function subscribeTrack({
 	return { subscriber, track: consumer };
 }
 
-// A refusal already ended the request: a reset back would tell the publisher we failed.
+// A refusal already ended the request: a reset back would tell the publisher we failed. The
+// track fails with what the refusal asked for, so a relay can pass its Retry Interval on.
 test("a refused SUBSCRIBE or SUBSCRIBE_NAMESPACE ends its stream cleanly", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
 	const refuse = async (peer: Stream) => {
 		await peer.writer.u53(RequestError.id);
-		await new RequestError({ errorCode: 0x10, reasonPhrase: "not here" }).encode(peer.writer, VERSION);
+		const refusal = new RequestError({ errorCode: 0x10, reasonPhrase: "not here", retryInterval: 5000n });
+		await refusal.encode(peer.writer, VERSION);
 		peer.writer.close();
 	};
 
@@ -813,6 +818,7 @@ test("a refused SUBSCRIBE or SUBSCRIBE_NAMESPACE ends its stream cleanly", async
 	await Subscribe.decode(subscribe.reader, VERSION);
 	await refuse(subscribe);
 	expect(await subscribe.reader.done()).toBe(true);
+	expect(await track.closed).toMatchObject({ condition: "does_not_exist", retryInterval: 5000n });
 	track.close();
 });
 

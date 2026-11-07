@@ -129,9 +129,8 @@ pub enum Congestion {
 
 /// Why a connection could not be set up or has ended.
 ///
-/// One error type for the whole module: it is also what every
-/// [`moq_net::transport::poll`] session operation reports, which
-/// is how the close reason reaches `moq_net::Error::from_transport`.
+/// A [`web::Session`] reports it as [`web::Error::Connection`], decoding the
+/// peer's close code into the session's own.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -174,7 +173,7 @@ pub enum Error {
 	Tls(String),
 	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
 	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::provider::UnsupportedCpu),
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 	/// The socket died underneath the connection.
 	#[error("socket error: {0}")]
 	Io(String),
@@ -186,20 +185,6 @@ pub enum Error {
 	/// without.
 	#[error("endpoint has no server configuration")]
 	NotServer,
-	/// The WebTransport (HTTP/3) layer failed: a broken handshake, or a
-	/// stream that could not be framed.
-	#[error("webtransport error: {0}")]
-	Web(String),
-	/// HTTP/3 failed with a code of its own, one that names no WebTransport
-	/// error (`H3_NO_ERROR`, say). Neither trait accessor reports it, because
-	/// it is not a code the peer's application chose.
-	#[error("http/3 closed: code={code} reason={reason:?}")]
-	Http3 {
-		/// The HTTP/3 error code.
-		code: u64,
-		/// The UTF-8 lossy close reason, empty for a stream-level code.
-		reason: String,
-	},
 	/// qlog traces were asked for and cannot be captured: the directory is
 	/// missing or unwritable, or the writer thread could not be started.
 	#[error("qlog error: {0}")]
@@ -246,7 +231,7 @@ mod outcome_tests {
 		assert_eq!(Error::Closed.close_kind(), CloseKind::Closed);
 		assert_eq!(web::recv::Error::Evicted.close_kind(), CloseKind::Evicted);
 		assert_eq!(
-			web::send::Error::SessionError(Error::TimedOut).close_kind(),
+			web::send::Error::Session(web::Error::Connection(Error::TimedOut)).close_kind(),
 			CloseKind::IdleTimeout
 		);
 		let outside = Error::App {

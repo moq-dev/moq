@@ -183,3 +183,4 @@ the model layer (maintainer, 2026-10-30).
 - [Byte holes](/quest/m2/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
 - [JS byte holes](/quest/m2/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way
 - [Compressed frames have no size cap and inflate as a bounded stream](/quest/m2/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one
+- [Lite-07 history runs are paced](/quest/m2/unbounded-groups/run-fill-pacing.md) - range fills, recoveries, and a reader's own history range backpressure upstream once a reader loses a group to eviction

@@ -251,7 +251,6 @@ pub struct TlsAcceptor {
 	tls: crate::tls::Serve,
 	qmux: qmux::tls::Server,
 	server: moq_net::Server,
-	timeout: Option<std::time::Duration>,
 }
 
 #[cfg(feature = "_certs")]
@@ -261,7 +260,6 @@ impl TlsAcceptor {
 		tls: crate::tls::Serve,
 		session: qmux::Config,
 		server: moq_net::Server,
-		timeout: Option<std::time::Duration>,
 	) -> Self {
 		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(session);
 		Self {
@@ -269,7 +267,6 @@ impl TlsAcceptor {
 			tls,
 			qmux,
 			server,
-			timeout,
 		}
 	}
 
@@ -301,7 +298,7 @@ impl TlsAcceptor {
 		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRef<tokio::net::TcpStream> + Send + Unpin + 'static,
 	{
 		crate::runtime::scope(async move {
-			let deadline = self.timeout.and_then(|timeout| kio::clock::now().checked_add(timeout));
+			let deadline = self.server.deadline(kio::clock::now());
 			let tcp: &tokio::net::TcpStream = stream.get_ref().0.as_ref();
 			let remote = tcp.peer_addr().ok();
 			let local = tcp.local_addr().ok();
@@ -322,7 +319,7 @@ impl TlsAcceptor {
 			let session = crate::server::within(deadline, handshake).await?;
 			let incoming = crate::server::Incoming::tcp(&session, Some(&self.tls), remote, local, deadline, active)
 				.with_alpn(alpn);
-			crate::server::accept_stream(&self.server, session, incoming).await
+			crate::server::Request::accept_qmux(&self.server, session, incoming).await
 		})
 		.await
 	}
@@ -670,6 +667,7 @@ mod tests {
 	/// through to the loopback listener within the stagger delay.
 	#[tokio::test]
 	async fn failover_recovers_from_blackhole_candidate() {
+		kio::clock::host_time();
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
 			.await
 			.expect("bind listener")

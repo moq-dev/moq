@@ -123,8 +123,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
 
-	// The minimum audio carried by each group. Defaults to 20 ms; zero puts every frame in its own group.
-	groupDuration?: Milli | Signal<Milli>;
+	// The time between join points: a frame opens a group once it is this far past the last one's start. Defaults to 20 ms.
+	join?: Milli | Signal<Milli>;
 };
 
 /** Signals the encoder derives. */
@@ -181,11 +181,12 @@ export class Encoder {
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 	/**
-	 * The minimum timestamp span before a frame opens the next group, closing the previous one. Defaults to 20 ms; zero puts every frame in its own group. A longer group costs the
+	 * The time between join points: a frame opens the next group once it is at least this far past
+	 * the open group's start, closing the previous one. Defaults to 20 ms. A longer join costs the
 	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
-	 * negative or non-finite duration refuses the rendition.
+	 * join that is not a positive, finite duration refuses the rendition.
 	 */
-	groupDuration: Signal<Milli>;
+	join: Signal<Milli>;
 
 	/**
 	 * The capture supplying this rendition, or undefined while none is wired.
@@ -242,11 +243,11 @@ export class Encoder {
 	// caught up behind the live edge, not frames written late, so they never raise the catalog delay.
 	#history: Micro | undefined;
 
-	// The last valid group duration, which #runConfig validates.
-	#groupDuration = Micro(20_000);
-	// How far apart groups start under the resolved config, which the broadcast may declare as the
-	// catalog's join interval (see groupSpacing).
-	#joinInterval = new Signal<Milli | undefined>(undefined);
+	// The last valid join, which #runConfig validates.
+	#join = Micro(20_000);
+	// How far apart groups start under the resolved config, a whole number of frames, which the
+	// broadcast may declare as the catalog's join interval (see groupSpacing).
+	#spacing = new Signal<Milli | undefined>(undefined);
 
 	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
 	// config is coming until one reruns.
@@ -297,7 +298,7 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.muted = Signal.from(props?.muted ?? false);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
-		this.groupDuration = Signal.from(props?.groupDuration ?? Milli(20));
+		this.join = Signal.from(props?.join ?? Milli(20));
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {
@@ -439,7 +440,7 @@ export class Encoder {
 		effect.cleanup(() => rendition.close());
 		// How far apart groups start, which the broadcast declares as the catalog's join interval when
 		// nothing longer, such as a video GOP, sits beside it.
-		effect.proxy(rendition.joinInterval, this.#joinInterval);
+		effect.proxy(rendition.join, this.#spacing);
 		effect.proxy(this.#slot, rendition.slot);
 		effect.cleanup(() => this.#slot.set(undefined));
 
@@ -540,10 +541,13 @@ export class Encoder {
 	// rather than tearing down. A config probed once is reused, so the catalog flips back without
 	// waiting on a probe.
 	#runConfig(effect: Effect): void {
-		const groupDuration = effect.get(this.groupDuration);
-		if (!Number.isFinite(groupDuration) || groupDuration < 0)
-			throw new Error(`audio group duration must be a finite, non-negative number of ms: ${groupDuration}`);
-		this.#groupDuration = Micro.fromMilli(groupDuration);
+		const join = effect.get(this.join);
+		if (!Number.isFinite(join) || join <= 0) {
+			// The broadcast reads every registered rendition's spacing, listed or not.
+			this.#spacing.set(undefined);
+			throw new Error(`audio join must be a finite number of ms greater than 0: ${join}`);
+		}
+		this.#join = Micro.fromMilli(join);
 
 		const capture = effect.get(this.in.capture);
 		const captured = capture ? effect.get(capture.out.format) : undefined;
@@ -554,7 +558,7 @@ export class Encoder {
 
 		const resolved = resolve(captured, effect.get(this.codec));
 		// Set before the config is listed, so the catalog's first listing declares it.
-		this.#joinInterval.set(groupSpacing(groupDuration, resolved));
+		this.#spacing.set(groupSpacing(join, resolved));
 		const source = capture ? effect.get(capture.in.source) : undefined;
 		const kind = source ? sourceKind(source) : "auto";
 		const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
@@ -757,7 +761,7 @@ export class Encoder {
 							// first one at or past the minimum after the open group's start. Frames forward
 							// as they are written rather than waiting for the group to fill. A dropped
 							// group leaves a gap for the codec's PLC.
-							const keyframe = live.start === undefined || timestamp - live.start >= this.#groupDuration;
+							const keyframe = live.start === undefined || timestamp - live.start >= this.#join;
 							if (keyframe) live.start = timestamp;
 							live.producer.encode(frame, timestamp, keyframe);
 							const history = this.#history !== undefined && timestamp < this.#history;
@@ -1008,14 +1012,13 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 }
 
 /**
- * How far apart audio groups start: a frame opens one once it is at least `groupDuration` past the
- * open group's start, so groups are a whole number of frames apart, and at least one, since a zero
- * duration opens a group per frame.
+ * How far apart audio groups start: a frame opens one once it is at least `join` past the
+ * open group's start, so groups are a whole number of frames apart, and at least one.
  * @internal
  */
-export function groupSpacing(groupDuration: Milli, resolved: Resolved): Milli {
+export function groupSpacing(join: Milli, resolved: Resolved): Milli {
 	const frame = resolved.frameDuration ?? (AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate;
-	const frames = Math.max(1, Math.ceil(Micro.fromMilli(groupDuration) / frame));
+	const frames = Math.max(1, Math.ceil(Micro.fromMilli(join) / frame));
 	return Milli.fromMicro(Micro(frames * frame));
 }
 

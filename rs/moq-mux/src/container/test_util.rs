@@ -317,7 +317,7 @@ pub(crate) fn common_offset(
 
 /// An origin at `hop`, its driver spawned.
 pub(crate) fn origin(hop: u64) -> moq_net::origin::Producer {
-	let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+	let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
 	producer
@@ -354,9 +354,10 @@ impl Link {
 			gate: gate.clone(),
 			answers: true,
 		};
+		// `from` may be a middle hop, so it forwards what it learned as well as its own.
 		let client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_publisher(from.consume());
+			.with_publisher(from.consume().with_proxy(true));
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_subscriber(to.clone());
@@ -408,7 +409,7 @@ impl Link {
 			.with_subscriber(to.clone());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_publisher(from.consume());
+			.with_publisher(from.consume().with_proxy(true));
 		let sessions = tokio::join!(
 			async {
 				let (session, driver) = client

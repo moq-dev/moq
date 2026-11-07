@@ -21,3 +21,12 @@ output side (`Block::position`, `Driver::position`). Studio broadcast sync
 video by up to 37.5 ms after a channel runs dry. Decide what a write for a
 position already mixed or beyond the headroom does, and fail loudly rather
 than silently shifting it.
+
+[moq-dev/studio#93](https://github.com/moq-dev/studio/pull/93) adds a second
+case: after a silence the studio's `playout::Writer` can't tell how much its
+channel holds, so a first write lands up to one block (10 ms) early. Broadcast
+and media sources both hit it. A positioned write fixes this too; test that a
+first write after silence is mixed at the sample it was meant for.
+
+- ✅ **Fold studio#93 in here**, decided 2026-11-07 (maintainer, /quest-complete).
+  Rejected: an interim bus-position accessor quest, and dropping the plan.

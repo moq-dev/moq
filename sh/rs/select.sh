@@ -172,6 +172,8 @@ case "$action" in
         if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
             if [[ "$action" == check-test ]]; then just rs capture-test; else just rs capture; fi
         fi
+        # moq-net without `async`, which every other build unifies back in.
+        if wants moq-net; then just rs no-async; fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         ;;
@@ -201,8 +203,8 @@ case "$action" in
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
-        # The WebRTC module's hostile-input tests, such as mDNS backpressure.
-        if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
+        # The WebRTC data channel's hostile-input tests, such as mDNS backpressure.
+        if wants moq-webrtc; then features+=(moq-webrtc/p2p); fi
         # The relay's io_uring listener, Linux-only. A moq-uring change selects
         # the relay too, as its dependent.
         if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi

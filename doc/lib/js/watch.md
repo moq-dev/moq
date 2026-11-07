@@ -33,7 +33,7 @@ in sync at the latency you ask for.
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
-| `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
+| `lookahead` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
@@ -50,7 +50,7 @@ The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
 Audio, video, and captions play from one clock on local time, anchored at the
-earliest arrival (with `buffer`, at the earliest retained frame once startup
+earliest arrival (with `lookahead`, at the earliest retained frame once startup
 fills). A congested track falls behind on its own instead of stalling the
 others; in `auto` delay, its rising playout target still raises the delay
 every track plays at. A discontinuity restarts only its own track's timeline,
@@ -186,7 +186,6 @@ import * as Watch from "@moq/watch";
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 const player = new Watch.Player({
     origin: connection.origin,
-    probe: connection.probe,
     name: Moq.Path.from("alice.hang"),
     video: { canvas },
     viewer: { viewers: connection.viewers },
@@ -205,10 +204,14 @@ estimate (see [`connection.viewers`](/lib/js/net)). Its ceiling follows the
 catalog: the rate at which selection would pick the best enabled video
 rendition the `video.target` allows, plus the selected audio rendition's
 bitrate, counting only media being downloaded. A relay that probes raises the
-estimate toward it, so a larger rendition can become affordable. Set
+estimate toward it, and video selects from the claim's grant less that audio, so a viewer on a small
+rendition moves up once the grant reaches the ceiling. Players sharing a connection split its estimate
+instead of each selecting against all of it. Set
 `viewer.max` (`controls.viewer.max` on `<moq-watch>`) to claim a fixed ceiling
-in bits per second instead while media downloads, or `0` to claim nothing; omit `viewer.viewers` to
-leave the connection's estimate unclaimed.
+in bits per second instead while media downloads, which also caps what video selects, or `0` to claim nothing; omit `viewer.viewers` to
+leave the connection's estimate unclaimed. Without a claim, video selects the best rendition its
+`video.target` allows. To stop the relay probing while still adapting, keep the claim and call
+`connection.viewers.setTarget(0)`.
 
 To chart when each audio frame arrived against when it plays, open an
 `arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped
@@ -239,18 +242,22 @@ them; nothing is retained without an open handle.
 By default the player minimizes latency: it skips ahead whenever media piles
 up past the delay. Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
-`buffer` to how far ahead it may run and it plays through at the encoded pace:
+`lookahead` to how far ahead it may run and it plays through at the encoded pace:
 
 ```html
-<moq-watch url="..." name="bot/tts.hang" delay="100ms" buffer="30s"></moq-watch>
+<moq-watch url="..." name="bot/tts.hang" delay="100ms" lookahead="30s"></moq-watch>
 ```
 
-Durations need a unit; a bare number is rejected. Audio holds the buffer as
-encoded frames, so a large one is cheap; video waits as decoded pictures, which
-hold decoder memory, so a long video buffer is not. The first video frame shows
-as a poster at once, and playback starts once every enabled track has buffered
-the delay. `el.reset()` flushes and re-anchors at the next frame, which is how a
-producer interrupts an utterance.
+`lookahead` is not a jitter buffer: a live stream leaves it at zero and tunes
+`delay`, since playback only skips ahead once media sits more than
+`delay + lookahead` past the playhead.
+
+Durations need a unit; a bare number is rejected. Audio holds the lookahead
+as encoded frames, so a large one is cheap; video waits as decoded pictures,
+which hold decoder memory, so a long video lookahead is not. The first video
+frame shows as a poster at once, and playback starts once every enabled track
+has buffered the delay. `el.reset()` flushes and re-anchors at the next frame,
+which is how a producer interrupts an utterance.
 
 ## Strict CSP
 

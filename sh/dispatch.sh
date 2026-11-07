@@ -129,18 +129,18 @@ module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-form
 # the libobs headers it compiles against.
 module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
-# The bun lane exists because `bun install` relinks the root workspace's
-# packages even when nothing changed, so a concurrent install or import of
-# them fails. Biome checks the whole repository. It registers before js so
+# The bun lane serializes fixers and JS builds that write shared outputs.
+# Dependency setup separately uses sh/js/install.py across every entry point.
+# Biome checks the whole repository. It registers before js so
 # that fix runs it first, since Biome can fix sources that the package build
 # rejects, such as a type-only export.
 module biome '' \
-    tools='bun' lane=bun fix
+    tools='bun uv' lane=bun fix
 # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
 # fails a check that reads a cross-tree input this pattern misses.
 # Root Nix inputs own the browser version every npm Playwright pin matches.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
-    tools='bun python3' lane=bun fix
+    tools='bun python3 uv' lane=bun fix
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
@@ -161,11 +161,11 @@ module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|rs/uniffi-bin
 module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
     tools='cargo go uniffi-bindgen-go' compiles=check fix
 module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
-    tools='bun kramdown-rfc xml2rfc' lane=bun
+    tools='bun uv kramdown-rfc xml2rfc' lane=bun
 module markdown '' \
-    tools='bun' lane=bun fix
+    tools='bun uv' lane=bun fix
 module gh '' \
-    tools='actionlint zizmor bun python3 cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='actionlint zizmor bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
@@ -372,7 +372,7 @@ step() {
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
         check:biome) just biome ;;
         check:markdown)
-            bun install --frozen-lockfile
+            uv run --no-project python sh/js/install.py frozen
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
@@ -392,7 +392,7 @@ step() {
         fix:js) just js fix-changed "$js_list" ;;
         fix:biome) just biome-fix ;;
         fix:markdown)
-            bun install
+            uv run --no-project python sh/js/install.py update
             sh/markdown.sh fix
             ;;
         fix:python)
@@ -520,10 +520,11 @@ report() {
     } >>"$GITHUB_STEP_SUMMARY"
 }
 
-# Stop every running lane, whose process group holds its whole tree.
+# Stop every running lane, whose process group holds its whole tree. The job
+# table also holds a lane a signal interrupted before `running` recorded it.
 cancel() {
     local pid
-    for pid in "${!running[@]}"; do
+    for pid in $(jobs -pr); do
         kill -TERM -- "-$pid" 2>/dev/null || true
     done
 }
@@ -534,7 +535,10 @@ lone=
 next=0
 failed=()
 failed_status=0
-trap 'cancel; wait; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
+# A trapped signal that lands after `wait -n` returns, before the next builtin
+# runs, makes Bash end the exit trap's first wait at once, though that signal's
+# trap already ran; the next wait blocks until every lane has exited.
+trap 'cancel; until wait; do :; done; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

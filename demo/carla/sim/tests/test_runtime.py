@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from moq_carla_sim import runtime
-from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry
+from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry, handle
 from moq_carla_sim.publish import Pose
 from moq_carla_sim.runtime import MAX_STAGE_MS, StuckDetector, latency_breakdown
 from moq_carla_sim.world import Truck
@@ -23,6 +23,16 @@ class FakeClock:
 
     def release(self, reason: str) -> None:
         self.held.discard(reason)
+
+
+class Replies:
+    """Records what the truck answers on each driver session."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, dict]] = []
+
+    def reply(self, command: Command, message: dict) -> None:
+        self.sent.append((command.session, message))
 
 
 class DemandPublisher:
@@ -58,7 +68,7 @@ def test_takeover_preserves_steering_and_gear_but_resets_pedals(gear: Gear) -> N
     async def scenario() -> None:
         measured = DriveState(steering=-0.3, throttle=0.85, brake=0.0, gear=gear)
         commands = asyncio.Queue()
-        commands.put_nowait(Command(kind="drive", driver_id="driver", sequence=1, state=measured))
+        commands.put_nowait(Command(kind="drive", driver_id="driver", session="driver", sequence=1, state=measured))
 
         session = runtime.TruckSession.__new__(runtime.TruckSession)
         session._clock = FakeClock()
@@ -69,7 +79,7 @@ def test_takeover_preserves_steering_and_gear_but_resets_pedals(gear: Gear) -> N
         session._drive = Drive()
         session._commands = commands
         session._deadline = None
-        session._media_pipeline = {}
+        session._drivers = Replies()
         actuated = []
         published = asyncio.Event()
         session._truck.actuate = lambda accepted, *, has_driver: actuated.append((accepted, has_driver))
@@ -81,7 +91,7 @@ def test_takeover_preserves_steering_and_gear_but_resets_pedals(gear: Gear) -> N
             await asyncio.wait({task, published_waiter}, return_when=asyncio.FIRST_COMPLETED)
             if task.done():
                 await task
-            assert session._drive.driver == "driver"
+            assert session._drive.driver == handle("driver")
             assert session._drive.state == DriveState(steering=-0.3, throttle=0.0, brake=1.0, gear=gear)
             assert actuated == [(session._drive.accepted(), True)]
         finally:
@@ -92,13 +102,58 @@ def test_takeover_preserves_steering_and_gear_but_resets_pedals(gear: Gear) -> N
     asyncio.run(scenario())
 
 
+def test_only_the_holders_accepted_commands_are_acknowledged_on_its_session() -> None:
+    """The ack and the pipeline echo are the holder's alone, so they ride its session."""
+
+    async def scenario() -> None:
+        stages = (TimestampEntry(label="received", ts=10.0), TimestampEntry(label="decoded", ts=14.0))
+        commands = asyncio.Queue()
+        for command in (
+            Command(kind="drive", driver_id="holder", session="s1", sequence=1, state=DriveState(), timestamps=stages),
+            # Another session of the same id is another driver, refused while the lease is held.
+            Command(kind="drive", driver_id="holder", session="s2", sequence=2, state=DriveState()),
+            # A bystander's e-stop latches, but is not the lease's to acknowledge.
+            Command(kind="estop", driver_id="bystander", session="s3", sequence=3),
+            Command(kind="estop", driver_id="holder", session="s1", sequence=4),
+        ):
+            commands.put_nowait(command)
+
+        session = runtime.TruckSession.__new__(runtime.TruckSession)
+        session._clock = FakeClock()
+        session._truck = SimpleNamespace(name="truck1", autonomous=False)
+        session._drive = Drive()
+        session._commands = commands
+        session._deadline = None
+        session._drivers = Replies()
+        session._actuate = lambda: None
+        session._publish = lambda: None
+
+        task = asyncio.create_task(session._loop())
+        try:
+            for _ in range(10):
+                if commands.empty():
+                    break
+                await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert session._drivers.sent == [
+                ("s1", {"sequence": 1, "media_pipeline": [{"label": "received→decoded", "ms": 4}]}),
+                ("s1", {"sequence": 4, "media_pipeline": []}),
+            ]
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(scenario())
+
+
 def test_only_unestopped_lease_holder_can_respawn_truck() -> None:
     async def scenario() -> None:
         commands = asyncio.Queue()
-        commands.put_nowait(Command(kind="respawn", driver_id="bystander", sequence=2))
-        commands.put_nowait(Command(kind="respawn", driver_id="holder", sequence=3))
-        commands.put_nowait(Command(kind="reset_estop", driver_id="holder", sequence=4))
-        commands.put_nowait(Command(kind="respawn", driver_id="holder", sequence=5))
+        commands.put_nowait(Command(kind="respawn", driver_id="bystander", session="bystander", sequence=2))
+        commands.put_nowait(Command(kind="respawn", driver_id="holder", session="holder", sequence=3))
+        commands.put_nowait(Command(kind="reset_estop", driver_id="holder", session="holder", sequence=4))
+        commands.put_nowait(Command(kind="respawn", driver_id="holder", session="holder", sequence=5))
         respawns: list[str] = []
         published: list[bool] = []
 
@@ -107,11 +162,13 @@ def test_only_unestopped_lease_holder_can_respawn_truck() -> None:
         session._truck = SimpleNamespace(name="truck1", respawn=lambda: respawns.append("truck1"))
         session._drive = Drive()
         session._stuck = StuckDetector()
-        assert session._drive.apply(Command(kind="drive", driver_id="holder", sequence=1, state=DriveState()))
-        assert session._drive.apply(Command(kind="estop", driver_id="bystander", sequence=2))
+        assert session._drive.apply(
+            Command(kind="drive", driver_id="holder", session="holder", sequence=1, state=DriveState())
+        )
+        assert session._drive.apply(Command(kind="estop", driver_id="bystander", session="bystander", sequence=2))
         session._commands = commands
         session._deadline = None
-        session._media_pipeline = {"holder": []}
+        session._drivers = Replies()
         session._actuate = lambda: None
         session._publish = lambda: published.append(True)
 
@@ -123,7 +180,6 @@ def test_only_unestopped_lease_holder_can_respawn_truck() -> None:
                 await asyncio.sleep(0)
             assert respawns == ["truck1"]
             assert session._drive.driver is None
-            assert session._media_pipeline == {}
             assert published == [True, True]
         finally:
             task.cancel()
@@ -133,7 +189,7 @@ def test_only_unestopped_lease_holder_can_respawn_truck() -> None:
     asyncio.run(scenario())
 
 
-def test_video_demand_renders_the_world_for_the_truck(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_video_demand_renders_the_world_for_the_truck() -> None:
     """The stream's demand is what turns the simulator's renderer on for a truck."""
 
     async def wait_forever(*_args: object) -> None:
@@ -157,9 +213,9 @@ def test_video_demand_renders_the_world_for_the_truck(monkeypatch: pytest.Monkey
         session._status = DemandPublisher()
         session._publish = lambda: None
         session._loop = wait_forever
-        monkeypatch.setattr(runtime, "watch_drivers", wait_forever)
+        session._drivers = SimpleNamespace(run=wait_forever)
 
-        run = asyncio.create_task(session.run(SimpleNamespace(), "viewer/carla/truck1"))
+        run = asyncio.create_task(session.run(SimpleNamespace()))
         await watching.wait()
         run.cancel()
         await asyncio.gather(run, return_exceptions=True)
@@ -168,7 +224,7 @@ def test_video_demand_renders_the_world_for_the_truck(monkeypatch: pytest.Monkey
     asyncio.run(scenario())
 
 
-def test_session_exits_when_its_video_demand_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_session_exits_when_its_video_demand_fails() -> None:
     """A world that cannot start rendering for a viewer fails the session."""
 
     async def wait_forever(*_args: object) -> None:
@@ -186,10 +242,10 @@ def test_session_exits_when_its_video_demand_fails(monkeypatch: pytest.MonkeyPat
         session._status = DemandPublisher()
         session._publish = lambda: None
         session._loop = wait_forever
-        monkeypatch.setattr(runtime, "watch_drivers", wait_forever)
+        session._drivers = SimpleNamespace(run=wait_forever)
 
         with pytest.raises(ExceptionGroup) as failure:
-            await session.run(SimpleNamespace(), "viewer/carla/truck1")
+            await session.run(SimpleNamespace())
 
         assert len(failure.value.exceptions) == 1
         assert str(failure.value.exceptions[0]) == "CARLA rejected settings"
@@ -237,7 +293,7 @@ def telemetry_session(pose, *, autonomous: bool = True) -> runtime.TruckSession:
     )
     session._drive = Drive()
     session._deadline = None
-    session._media_pipeline = {}
+    session._drivers = Replies()
     session._stuck = StuckDetector()
     return session
 
@@ -391,21 +447,24 @@ def test_a_wedged_truck_handed_back_respawns_whether_or_not_its_estop_was_reset(
 
         # Claim with the brake applied, then supply a pedal input. This also
         # exercises a genuine manual takeover with the takeover pedal hold.
-        await command(Command(kind="drive", driver_id="holder", sequence=1, state=DriveState(gear=Gear.FORWARD)))
+        await command(
+            Command(kind="drive", driver_id="holder", session="holder", sequence=1, state=DriveState(gear=Gear.FORWARD))
+        )
         await command(
             Command(
                 kind="drive",
                 driver_id="holder",
+                session="holder",
                 sequence=2,
                 state=DriveState(throttle=0.5, brake=0.0, gear=Gear.FORWARD),
             )
         )
         assert not truck.autonomous
         assert controls[-1].throttle == 0.5
-        await command(Command(kind="estop", driver_id="holder", sequence=3))
+        await command(Command(kind="estop", driver_id="holder", session="holder", sequence=3))
         assert controls[-1].brake == 1.0 and controls[-1].hand_brake
         if reset_before_handback:
-            await command(Command(kind="reset_estop", driver_id="holder", sequence=4))
+            await command(Command(kind="reset_estop", driver_id="holder", session="holder", sequence=4))
         if handback == "watchdog_expired":
             assert session._deadline is not None
             clock = session._deadline
@@ -413,7 +472,7 @@ def test_a_wedged_truck_handed_back_respawns_whether_or_not_its_estop_was_reset(
             assert expired.kind == "watchdog_expired"
             await command(expired)
         else:
-            await command(Command(kind="driver_left", driver_id="holder"))
+            await command(Command(kind="driver_left", driver_id="holder", session="holder"))
         assert session._drive.driver is None
         assert session._drive.estopped is not reset_before_handback
         assert truck.autonomous is reset_before_handback
@@ -440,26 +499,28 @@ def test_a_wedged_truck_handed_back_respawns_whether_or_not_its_estop_was_reset(
         assert published[-1] == (False, None, True)
         # Until then the latch stood, attributed to the driver who set it.
         if not reset_before_handback:
-            assert (True, "holder", False) in published
+            assert (True, handle("holder"), False) in published
 
     asyncio.run(scenario())
 
 
 def holding(drive: Drive) -> None:
     """A driver parked with the brake on."""
-    assert drive.apply(Command(kind="drive", driver_id="holder", sequence=1, state=DriveState(brake=1.0)))
+    assert drive.apply(
+        Command(kind="drive", driver_id="holder", session="holder", sequence=1, state=DriveState(brake=1.0))
+    )
 
 
 def estopped_holding(drive: Drive) -> None:
     """A driver who e-stopped and still holds the lease."""
     holding(drive)
-    assert drive.apply(Command(kind="estop", driver_id="holder", sequence=2))
-    assert drive.driver == "holder" and drive.estopped
+    assert drive.apply(Command(kind="estop", driver_id="holder", session="holder", sequence=2))
+    assert drive.driver == handle("holder") and drive.estopped
 
 
 def estopped_by_bystander(drive: Drive) -> None:
     """A bystander's e-stop outlives the lease it never held."""
-    assert drive.apply(Command(kind="estop", driver_id="bystander", sequence=1))
+    assert drive.apply(Command(kind="estop", driver_id="bystander", session="bystander", sequence=1))
     assert drive.driver is None and drive.estopped
 
 
@@ -555,7 +616,9 @@ def test_a_driver_keeps_the_world_stepping_with_nobody_watching() -> None:
 
     async def scenario() -> None:
         commands = asyncio.Queue()
-        commands.put_nowait(Command(kind="drive", driver_id="holder", sequence=1, state=DriveState(throttle=0.5)))
+        commands.put_nowait(
+            Command(kind="drive", driver_id="holder", session="holder", sequence=1, state=DriveState(throttle=0.5))
+        )
 
         session = runtime.TruckSession.__new__(runtime.TruckSession)
         session._clock = FakeClock()
@@ -563,7 +626,7 @@ def test_a_driver_keeps_the_world_stepping_with_nobody_watching() -> None:
         session._drive = Drive()
         session._commands = commands
         session._deadline = None
-        session._media_pipeline = {}
+        session._drivers = Replies()
         session._stuck = StuckDetector()
         session._actuate = lambda: None
         session._publish = lambda: None
@@ -668,7 +731,7 @@ def test_an_estopped_holder_neither_steps_the_world_nor_keeps_its_lease(
         session._drive = Drive()
         session._commands = asyncio.Queue()
         session._deadline = None
-        session._media_pipeline = {}
+        session._drivers = Replies()
         session._actuate = lambda: None
         session._publish = lambda: published.append(True)
 
@@ -682,14 +745,14 @@ def test_an_estopped_holder_neither_steps_the_world_nor_keeps_its_lease(
         task = asyncio.create_task(session._loop())
         try:
             session._commands.put_nowait(
-                Command(kind="drive", driver_id="holder", sequence=1, state=DriveState(brake=1.0))
+                Command(kind="drive", driver_id="holder", session="holder", sequence=1, state=DriveState(brake=1.0))
             )
             await settle(1)
             assert session._clock.held == {"drive:truck1"}
 
-            session._commands.put_nowait(Command(kind="estop", driver_id="holder", sequence=2))
+            session._commands.put_nowait(Command(kind="estop", driver_id="holder", session="holder", sequence=2))
             await settle(2)
-            assert session._drive.driver == "holder"
+            assert session._drive.driver == handle("holder")
             assert session._clock.held == set()
             assert session._deadline == runtime.COMMAND_TIMEOUT
 
@@ -698,9 +761,9 @@ def test_an_estopped_holder_neither_steps_the_world_nor_keeps_its_lease(
             # marks the refused frame as processed.
             now = runtime.COMMAND_TIMEOUT / 2
             session._commands.put_nowait(
-                Command(kind="drive", driver_id="holder", sequence=3, state=DriveState(throttle=0.5))
+                Command(kind="drive", driver_id="holder", session="holder", sequence=3, state=DriveState(throttle=0.5))
             )
-            session._commands.put_nowait(Command(kind="estop", driver_id="bystander", sequence=1))
+            session._commands.put_nowait(Command(kind="estop", driver_id="bystander", session="bystander", sequence=1))
             await settle(3)
             assert session._deadline == runtime.COMMAND_TIMEOUT
             assert session._clock.held == set()

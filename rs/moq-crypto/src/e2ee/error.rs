@@ -1,6 +1,6 @@
 /// Typed failures from [draft-lcurley-moq-e2ee](https://datatracker.ietf.org/doc/draft-lcurley-moq-e2ee/).
 ///
-/// Display is the profile code. Secrets, keys, and plaintext never appear here.
+/// Display is the profile code or the CPU refusal. Secrets, keys, and plaintext never appear here.
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
@@ -25,8 +25,8 @@ pub enum Error {
 	Authentication,
 
 	/// This CPU lacks an instruction set extension the crypto requires; the message names it.
-	#[error("unsupported: {0}")]
-	Unsupported(String),
+	#[error(transparent)]
+	UnsupportedCpu(#[from] crate::cpu::UnsupportedCpu),
 
 	/// The underlying MoQ track failed.
 	#[error(transparent)]
