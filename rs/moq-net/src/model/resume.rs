@@ -3496,6 +3496,75 @@ mod test {
 		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
 	}
 
+	/// A half-read frame refuses a replacement that stamps it with another time.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_half_read_frame_refuses_a_replacement_with_another_timestamp() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+		let open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut frame = open
+			.create_frame(crate::frame::Info {
+				size: 4,
+				timestamp: Some(ts(0)),
+			})
+			.unwrap();
+		frame.write(b"ab".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		let mut chunks = reading.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_some());
+
+		drop(frame);
+		a.clone().abort(Error::Dropped).unwrap();
+		let b = copy();
+		let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+		whole.write_frame(ts(1), b"abcd".as_ref()).unwrap();
+		routes.serve(b.consume());
+
+		let res = chunks.read_chunk().now_or_never().unwrap();
+		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+	}
+
+	/// A group read past where the replacement finishes it refuses that end, rather than
+	/// ending cleanly with frames the replacement says do not exist.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_group_refuses_a_replacement_ending_before_what_was_read() {
+		for frames in [2, 1] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			open.write_frame(ts(1), b"b".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+			a.clone().abort(Error::Dropped).unwrap();
+
+			let b = copy();
+			let mut replacement = b.create_group(group::Info { sequence: 0 }).unwrap();
+			for (frame, payload) in [b"a", b"b"].into_iter().enumerate().take(frames) {
+				replacement.write_frame(ts(frame as u64), payload.as_ref()).unwrap();
+			}
+			replacement.finish().unwrap();
+			routes.serve(b.consume());
+
+			let res = reading.read_frame().now_or_never().expect("a result");
+			match frames {
+				2 => assert!(matches!(res, Ok(None)), "{res:?}"),
+				_ => assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}"),
+			}
+		}
+	}
+
 	/// A resumed group that the serving route gives up or aborts ends with that route's
 	/// error, even with no successor or later writes and its fetch still unanswered.
 	#[test]

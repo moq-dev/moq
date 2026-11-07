@@ -1598,11 +1598,19 @@ export class Consumer {
 			if (closed !== undefined) {
 				// The copy finished the group: a replacement asked for meanwhile is moot.
 				this.#abandon();
+				// Unless it finished before frames an earlier copy delivered, so the copies
+				// disagree on where the group ends.
+				if (this.#state.total.peek() < this.#skip) {
+					this.#terminal = new ProtocolViolation(`group ${this.sequence} ended before frames already read`);
+					if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
+					this.#closed?.refresh();
+					throw this.#terminal;
+				}
 				this.#closed?.refresh();
 				return;
 			}
 
-			// Nothing buffered and the group is still open: this wait is the stall the
+			// Nothing buffered and the group is still open: this wait is the
 			// drift budget bounds, and the only place it applies.
 			if (this.#expire()) continue;
 			// A stall while a newer route serves looks there too.

@@ -285,6 +285,10 @@ pub(super) struct GroupState {
 
 	// How far readers got, which each frame entering the log is measured against.
 	pace: Arc<Pace>,
+
+	// The track's timestamps may be send times ([`track::Info::unchecked`]), so copies of
+	// a frame need not agree on them.
+	pub(super) unchecked: bool,
 }
 
 /// The frames a copy of a group holds, from where it starts, which a successor copy of
@@ -1261,6 +1265,8 @@ impl GroupState {
 				key,
 				size: entry.frame.payload.len() as u64,
 				inflated: self.flate.as_ref().map(|_| entry.inflated),
+				timestamp: self.checked_time(entry.frame.timestamp),
+				fields: entry.fields.as_deref(),
 			},
 			input,
 			&self.charge,
@@ -1269,6 +1275,11 @@ impl GroupState {
 		entry.frame.payload = row.freeze();
 		*entry.owner.lock().unwrap_or_else(PoisonError::into_inner) = Some(row);
 		Ok(())
+	}
+
+	/// A frame's timestamp as copies compare it: none where they may differ.
+	fn checked_time(&self, timestamp: Option<Timestamp>) -> Option<Timestamp> {
+		timestamp.filter(|_| !self.unchecked)
 	}
 
 	/// Whether Object IDs left the frame ordinals, so ordinal recovery cannot stitch.
@@ -1305,6 +1316,13 @@ impl GroupState {
 		};
 		self.charge
 			.add(slots + if self.content.is_none() { written } else { 0 })
+	}
+
+	/// Where this copy declared the whole group ends, as a frame position its copies share:
+	/// not a copy a transport cut short, nor one whose ordinals left its Object IDs.
+	fn declared_fin(&self) -> Option<u64> {
+		let fin = self.fin.filter(|_| self.range_end.is_none() && !self.sparse())?;
+		Some(fin as u64)
 	}
 
 	/// Whether the frames held start at the group's first object.
@@ -1618,6 +1636,7 @@ impl Producer {
 				)));
 			}
 			state.charge = charge;
+			state.unchecked = track.unchecked;
 			(state.log.reader(), state.pace.clone())
 		};
 		let alive = Arc::new(Alive {
@@ -2024,6 +2043,8 @@ impl Producer {
 						key,
 						size: frame.size,
 						inflated: header.inflated,
+						timestamp: state.checked_time(timestamp),
+						fields: header.fields.as_deref(),
 					},
 					Input::Stream(None),
 					&state.charge,
@@ -2197,6 +2218,14 @@ impl Producer {
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let fin = state.next_index;
 		state.fin = Some(fin);
+		// Another copy of the group finished elsewhere, or holds a frame past this end.
+		if let Some(content) = &state.content
+			&& let Some(fin) = state.declared_fin()
+			&& let Err(err) = content.finish(fin)
+		{
+			state.fin = None;
+			return Err(self.abort_conflict(state, err));
+		}
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
 		if let Some(flate) = &mut state.flate {
@@ -2408,6 +2437,8 @@ impl Handle {
 						key,
 						size: entry.frame.payload.len() as u64,
 						inflated: state.flate.as_ref().map(|_| entry.inflated),
+						timestamp: state.checked_time(entry.frame.timestamp),
+						fields: entry.fields.as_deref(),
 					},
 					Input::Whole(entry.frame.payload),
 					&state.charge,
@@ -2424,6 +2455,7 @@ impl Handle {
 				let partial = state.partial.as_ref().expect("checked above");
 				let key = Content::key(state.next_index - 1, partial.fields.as_deref(), state.wire().is_some());
 				let (buf, inflated, charged) = (partial.buf.clone(), partial.inflated, partial.charged);
+				let (timestamp, fields) = (state.checked_time(partial.timestamp), partial.fields.clone());
 				let transferred = state.charge.transfer(charged);
 				buf.bill_view(state.charge.extra());
 				content.row(
@@ -2431,11 +2463,17 @@ impl Handle {
 						key,
 						size: buf.size() as u64,
 						inflated,
+						timestamp,
+						fields: fields.as_deref(),
 					},
 					Input::Stream(Some(buf)),
 					&state.charge,
 					Some(transferred),
 				)?;
+			}
+			// A copy that already finished the whole group says where it ends.
+			if let Some(fin) = state.declared_fin() {
+				content.finish(fin)?;
 			}
 			Ok(())
 		})();
@@ -3713,6 +3751,12 @@ impl Consumer {
 				}
 				// Read to its end: no route is needed for it any more.
 				Poll::Ready(Ok(None)) => {
+					// The copy read before held frames past where this one ends.
+					if self.cursor.state.read().fin.is_some_and(|fin| fin < index) {
+						let err = Error::ProtocolViolation;
+						recover.failed(index, &err);
+						return Poll::Ready(Err(err));
+					}
 					if let Some(carry) = &mut self.carry {
 						carry.recover = None;
 					}
@@ -6951,6 +6995,139 @@ mod test {
 			frames.push(Frame::new(None, verbose(10))).unwrap();
 			assert!(matches!(batch.write_frames(&mut frames), Err(Error::ProtocolViolation)));
 			assert!(batch.handle.is_aborted());
+		}
+	}
+
+	/// A group's copies sharing content, the first finished with two frames if `finished`.
+	fn shared_copies(info: track::Info, finished: bool) -> (Producer, impl Fn() -> Producer) {
+		let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+		let mut first = Producer::new(Info::from(0u64), info.clone(), cache.clone());
+		first.write_frame(None, verbose(0)).unwrap();
+		first.write_frame(None, verbose(1)).unwrap();
+		if finished {
+			first.finish().unwrap();
+		}
+		let content = first.handle.activate_content().unwrap().unwrap();
+		let copy = move || {
+			let copy = Producer::new(Info::from(0u64), info.clone(), cache.clone());
+			copy.handle.share_content(content.clone());
+			copy
+		};
+		(first, copy)
+	}
+
+	/// Copies of a frame with the same bytes still disagree on another timestamp, except on
+	/// a track whose timestamps may be send times.
+	#[test]
+	fn copies_disagreeing_on_a_timestamp_fail() {
+		let ms = |ms| Timestamp::from_millis(ms).unwrap();
+		for unchecked in [false, true] {
+			let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+			let mut info = track::Info::default().with_timescale(Timescale::MILLI);
+			info.unchecked = unchecked;
+			let mut first = Producer::new(Info::from(0u64), info.clone(), cache.clone());
+			first.write_frame(ms(1), verbose(0)).unwrap();
+			let content = first.handle.activate_content().unwrap().unwrap();
+			let mut copy = Producer::new(Info::from(0u64), info, cache);
+			copy.handle.share_content(content);
+			let res = copy.write_frame(ms(2), verbose(0));
+			match unchecked {
+				false => assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}"),
+				true => assert!(res.is_ok(), "{res:?}"),
+			}
+			assert_eq!(copy.handle.is_aborted(), !unchecked);
+		}
+	}
+
+	/// Copies of an object with the same bytes still disagree on other properties.
+	#[test]
+	fn copies_disagreeing_on_object_properties_fail() {
+		let write = |group: Producer, properties: &'static [u8]| -> Result<Producer> {
+			let fields = super::super::object::Fields {
+				id: 0,
+				properties: super::super::object::Properties {
+					sealed_time: None,
+					block: Some(super::super::object::Block {
+						bytes: Bytes::from_static(properties),
+						immutable: false,
+					}),
+				},
+			};
+			let payload = verbose(0);
+			let mut frame = group.create_object(frame::Header {
+				info: untimed(payload.len()),
+				fields: Some(Arc::new(fields)),
+				inflated: None,
+			})?;
+			frame.write(payload)?;
+			frame.finish()
+		};
+		let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+		let producer = || Producer::new(Info::from(0u64), track::Info::default(), cache.clone());
+		let first = write(producer(), b"\x01\x02").unwrap();
+		let content = first.handle.activate_content().unwrap().unwrap();
+		let copy = || {
+			let copy = producer();
+			copy.handle.share_content(content.clone());
+			copy
+		};
+		assert!(write(copy(), b"\x01\x02").is_ok());
+		let differing = copy();
+		let handle = differing.handle();
+		assert!(matches!(write(differing, b"\x01\x03"), Err(Error::ProtocolViolation)));
+		assert!(handle.is_aborted());
+	}
+
+	/// A copy holding a frame past the end another declared fails, whether it writes the
+	/// frame whole or streams it, and whether the end was declared before the copies shared
+	/// content or after.
+	#[test]
+	fn a_copy_past_the_declared_end_fails() {
+		for finished in [true, false] {
+			let (mut first, copy) = shared_copies(track::Info::default(), finished);
+			if !finished {
+				first.finish().unwrap();
+			}
+			let mut same = copy();
+			same.write_frame(None, verbose(0)).unwrap();
+			same.write_frame(None, verbose(1)).unwrap();
+			same.finish().unwrap();
+
+			let mut whole = copy();
+			whole.write_frame(None, verbose(0)).unwrap();
+			whole.write_frame(None, verbose(1)).unwrap();
+			let res = whole.write_frame(None, verbose(2));
+			assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
+			assert!(whole.handle.is_aborted());
+
+			let mut streamed = copy();
+			streamed.write_frame(None, verbose(0)).unwrap();
+			streamed.write_frame(None, verbose(1)).unwrap();
+			let handle = streamed.handle();
+			assert!(matches!(
+				streamed.create_frame(untimed(1)),
+				Err(Error::ProtocolViolation)
+			));
+			assert!(handle.is_aborted());
+		}
+	}
+
+	/// A copy finishing short of a frame another copy holds fails, as does one finishing
+	/// short of another's declared end. A copy its transport cut short declares no end.
+	#[test]
+	fn a_copy_finishing_short_fails() {
+		for finished in [false, true] {
+			let (_first, copy) = shared_copies(track::Info::default(), finished);
+			let mut short = copy();
+			short.write_frame(None, verbose(0)).unwrap();
+			assert!(matches!(short.finish(), Err(Error::ProtocolViolation)));
+			assert!(short.handle.is_aborted());
+			assert!(!short.handle.is_finished());
+
+			let mut cut = copy();
+			cut.bound(Bounds { start: 0, end: Some(1) }).unwrap();
+			cut.write_frame(None, verbose(0)).unwrap();
+			cut.finish().unwrap();
 		}
 	}
 

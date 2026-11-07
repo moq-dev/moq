@@ -1,7 +1,9 @@
 //! Weak indexed identity; delivery records and streaming readers own the bytes.
+use super::super::object;
 use super::*;
 use std::collections::hash_map::RandomState;
-use std::hash::Hash;
+use std::hash::{BuildHasher, Hash};
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicU64;
 
 type Map<K, V> = hashbrown::HashMap<K, V, RandomState>;
@@ -28,25 +30,62 @@ pub(in crate::model) enum Key {
 	Object(u64),
 }
 
+impl Key {
+	/// Where the frame sits in the group: its Object ID, which a frame without one shares
+	/// with its ordinal, so every copy of one track counts in the same space.
+	fn position(self) -> u64 {
+		match self {
+			Self::Frame(index) | Self::Object(index) => index,
+		}
+	}
+}
+
+/// Keyed per process, so a peer cannot pick properties that collide with another copy's.
+static DIGEST: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+
+/// A frame's object properties, as one value copies compare. A frame without fields holds
+/// none, the same as an empty block; its Object ID is already in its [`Key`].
+fn digest(fields: Option<&object::Fields>) -> u64 {
+	match fields.map(|fields| &fields.properties) {
+		Some(properties) if *properties != object::Properties::default() => DIGEST.hash_one(properties),
+		_ => 0,
+	}
+}
+
 pub(super) enum Input {
 	Whole(Payload),
 	Stream(Option<FrameBuf>),
 	Adopt(frame::Shared),
 }
 
-pub(super) struct Spec {
+pub(super) struct Spec<'a> {
 	pub key: Key,
 	pub size: u64,
 	pub inflated: Option<u64>,
+	/// The frame's timestamp, or `None` on a track whose timestamps may be send times
+	/// ([`track::Info::unchecked`]), which every copy of that track shares.
+	pub timestamp: Option<Timestamp>,
+	pub fields: Option<&'a object::Fields>,
 }
 
 struct Row {
 	inflated: Option<u64>,
+	timestamp: Option<Timestamp>,
+	fields: u64,
 	content: frame::SharedWeak,
 }
 
+#[derive(Default)]
+struct State {
+	rows: Map<Key, Row>,
+	// One past the last frame position a copy declared complete with its finish.
+	fin: Option<u64>,
+	// One past the furthest frame position any copy opened.
+	reached: u64,
+}
+
 pub(in crate::model) struct Content {
-	state: Mutex<Map<Key, Row>>,
+	state: Mutex<State>,
 	frame_charge: AtomicU64,
 	bill: cache::Extra,
 	plain: Mutex<Option<Arc<Plain>>>,
@@ -68,7 +107,7 @@ impl Content {
 		})
 	}
 
-	pub(super) fn key(index: usize, fields: Option<&super::super::object::Fields>, wire: bool) -> Key {
+	pub(super) fn key(index: usize, fields: Option<&object::Fields>, wire: bool) -> Key {
 		if wire || fields.is_some() {
 			Key::Object(fields.map_or(index as u64, |fields| fields.id))
 		} else {
@@ -78,16 +117,31 @@ impl Content {
 
 	pub(super) fn row(
 		self: &Arc<Self>,
-		spec: Spec,
+		spec: Spec<'_>,
 		input: Input,
 		charge: &cache::Charge,
 		transferred: Option<cache::Extra>,
 	) -> Result<frame::Shared> {
-		let Spec { key, size, inflated } = spec;
+		let Spec {
+			key,
+			size,
+			inflated,
+			timestamp,
+			fields,
+		} = spec;
+		let fields = digest(fields);
+		let position = key.position();
 		let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-		if let Some(row) = state.get(&key) {
+		// A copy finished before this position, so the frame does not exist.
+		if state.fin.is_some_and(|fin| position >= fin) {
+			return Err(Error::ProtocolViolation);
+		}
+		if let Some(row) = state.rows.get(&key) {
 			if let Some(shared) = row.content.upgrade() {
-				let matches = shared.size() as u64 == size && row.inflated == inflated;
+				let matches = shared.size() as u64 == size
+					&& row.inflated == inflated
+					&& row.timestamp == timestamp
+					&& row.fields == fields;
 				// A temporary strong owner must never drop under this mutex: its last
 				// release removes its weak record through `forget_frame`.
 				drop(state);
@@ -110,7 +164,7 @@ impl Content {
 				}
 				return Ok(shared);
 			}
-			state.remove(&key);
+			state.rows.remove(&key);
 		}
 		// Retained bytes/frame limits remain per delivery. Combining valid disjoint
 		// ranges must not introduce a stricter aggregate admission policy.
@@ -129,16 +183,30 @@ impl Content {
 		}
 		shared.bill_content(transferred.unwrap_or_else(|| charge.extra()));
 		insert(
-			&mut state,
+			&mut state.rows,
 			key,
 			Row {
 				inflated,
+				timestamp,
+				fields,
 				content: shared.downgrade(),
 			},
 			&self.bill,
 		);
+		state.reached = state.reached.max(position + 1);
 		drop(state);
 		Ok(shared)
+	}
+
+	/// Declare the group complete at frame position `fin`, refusing a copy that disagrees:
+	/// one finished elsewhere at another position, or one short of a frame another opened.
+	pub(super) fn finish(&self, fin: u64) -> Result<()> {
+		let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+		if state.fin.is_some_and(|prior| prior != fin) || state.reached > fin {
+			return Err(Error::ProtocolViolation);
+		}
+		state.fin = Some(fin);
+		Ok(())
 	}
 
 	pub(in crate::model) fn charge_frame(&self, bytes: u64) {
@@ -150,8 +218,8 @@ impl Content {
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| total.checked_sub(charge))
 			.expect("canonical frame charge underflow");
 		let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-		if state.get(&key).is_some_and(|row| row.content.address() == address) {
-			remove(&mut state, &key, &self.bill);
+		if state.rows.get(&key).is_some_and(|row| row.content.address() == address) {
+			remove(&mut state.rows, &key, &self.bill);
 		}
 	}
 
@@ -178,6 +246,7 @@ impl Content {
 		self.state
 			.lock()
 			.unwrap_or_else(PoisonError::into_inner)
+			.rows
 			.values()
 			.filter_map(|row| row.content.upgrade())
 			.collect()
@@ -306,6 +375,8 @@ impl StorageBench {
 							key: Key::Frame(index as u64),
 							size: 64,
 							inflated: None,
+							timestamp: None,
+							fields: None,
 						},
 						Input::Whole(Bytes::from(vec![0; 64]).into()),
 						&charge,
@@ -353,6 +424,8 @@ mod tests {
 							key: Key::Frame(index),
 							size: 0,
 							inflated: None,
+							timestamp: None,
+							fields: None,
 						},
 						Input::Whole(Bytes::new().into()),
 						&charge,
@@ -369,7 +442,7 @@ mod tests {
 		assert_eq!(current.cost().0, 512);
 		drop(frames);
 		assert_eq!(current.cost().0, 0);
-		assert_eq!(current.state.lock().unwrap().allocation_size(), 0);
+		assert_eq!(current.state.lock().unwrap().rows.allocation_size(), 0);
 		drop(current);
 		assert!(contents.get(7).is_none());
 		assert_eq!(

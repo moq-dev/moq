@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
-import { FrameTooLarge, StreamCode, StreamError } from "./error.ts";
+import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError } from "./error.ts";
 import { encodable } from "./flate/group.ts";
 import { Producer } from "./group.ts";
 import { hooks, type Replacement } from "./internal.ts";
@@ -509,6 +509,34 @@ test("done ignores replayed frames an adopted copy buffers", async () => {
 	await readable;
 	expect(consumer.tryReadFrame()).toBeUndefined();
 	producer.finish();
+});
+
+test("a resumed read refuses a replacement that ends before the frames already read", async () => {
+	for (const repeated of [2, 1]) {
+		const producer = new Producer(0n);
+		const consumer = producer.mirror();
+		const replacement = new Producer(0n);
+		for (const text of ["zero", "one"].slice(0, repeated)) replacement.writeFrame(textFrame(text));
+		replacement.finish();
+		const failed = new Error("route failed");
+		hooks.recoverGroup(consumer, {
+			changed: new Signal(false),
+			wants: (error) => error === failed,
+			replace: async () => ({
+				group: replacement.mirror(),
+				expiry: { expired: () => false, changed: [] },
+				adopt: () => {},
+				discard: () => {},
+			}),
+		});
+		producer.writeFrame(textFrame("zero"));
+		producer.writeFrame(textFrame("one"));
+		expect(await consumer.readString()).toBe("zero");
+		expect(await consumer.readString()).toBe("one");
+		producer.abort(failed);
+		if (repeated === 2) expect(await consumer.readFrame()).toBeUndefined();
+		else await expect(consumer.readFrame()).rejects.toBeInstanceOf(ProtocolViolation);
+	}
 });
 
 test("buffered frames are still readable after the group closes", async () => {

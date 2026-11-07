@@ -1529,6 +1529,27 @@ pub struct Consumer {
 	recover: Option<Box<(super::resume::Recover, u64)>>,
 }
 
+/// One copy's read of a frame, as [`agree`] compares it.
+type Read<'a> = (&'a kio::Consumer<GroupState>, &'a Info, Option<&'a super::object::Fields>);
+
+/// Whether two copies' reads of one frame carry the same timestamp and object properties,
+/// where both copies hold them: timestamps that may be send times differ per copy, and only
+/// a copy whose Object IDs arrive with its frames says a frame without fields has none.
+fn agree(a: Read<'_>, b: Read<'_>) -> bool {
+	fn properties(fields: Option<&super::object::Fields>) -> Option<&super::object::Properties> {
+		fields
+			.map(|fields| &fields.properties)
+			.filter(|properties| **properties != super::object::Properties::default())
+	}
+	fn copy(state: &kio::Consumer<GroupState>) -> (bool, bool) {
+		let state = state.read();
+		(state.unchecked, state.wire().is_some())
+	}
+	let ((a_unchecked, a_wire), (b_unchecked, b_wire)) = (copy(a.0), copy(b.0));
+	(a_unchecked || b_unchecked || a.1.timestamp == b.1.timestamp)
+		&& (!a_wire || !b_wire || properties(a.2) == properties(b.2))
+}
+
 impl std::ops::Deref for Consumer {
 	type Target = Info;
 
@@ -1623,8 +1644,14 @@ impl Consumer {
 			if frame.fields.as_ref().is_some_and(|fields| fields.id != *index) {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
-			// Same name, same content: a different size is the routes disagreeing.
-			if frame.info.size != self.info.size || frame.inflated != self.inflated {
+			// Same name, same content: anything a reader sees differing is the routes disagreeing.
+			if frame.info.size != self.info.size
+				|| frame.inflated != self.inflated
+				|| !agree(
+					(&self.state, &self.info, self.fields.as_deref()),
+					(&frame.state, &frame.info, frame.fields.as_deref()),
+				)
+			{
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
 			recover.adopt(&replacement);

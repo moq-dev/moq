@@ -19,7 +19,7 @@ pub(crate) struct Property {
 ///
 /// On a timed track, the mutable Timestamp is never held: it is the frame's, which egress
 /// restates. On an untimed one it has no units, so it stays in the block like any other.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Properties {
 	/// The Timestamp the block's Immutable Properties hold on a timed track, which keeps
 	/// its ingress units.
@@ -32,7 +32,7 @@ pub(crate) struct Properties {
 ///
 /// Kept encoded because a decoded list costs many times its wire size, and a relay holds
 /// one per cached object. Egress decodes it only to re-encode for another draft.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Block {
 	/// The properties in ascending ID order, serialized as the track's
 	/// [`TrackProperties::version`] does. Never empty.
