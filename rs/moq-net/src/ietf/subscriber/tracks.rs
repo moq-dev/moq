@@ -524,7 +524,11 @@ impl Subscriber {
 				let error = ietf::RequestError {
 					error_code: code,
 					reason_phrase: reason.into(),
-					retry_interval: 0,
+					// The rule judges the refusal as the peer reads it.
+					retry_interval: request::retry_interval(
+						&request::from_code(code, request::Kind::Publish, self.version),
+						code,
+					),
 				};
 				request_stream::Reject::new(stream, error)
 			}
@@ -760,10 +764,10 @@ impl Subscriber {
 		stream: &mut Stream<Transport, Version>,
 		messages: &mut Messages,
 		held: Option<&mut Resumed>,
-	) -> Poll<Result<Option<Accepted>, Error>> {
+	) -> Poll<Result<Answer, Error>> {
 		let Some(held) = held else {
 			let Framed(id, body) = ready!(messages.poll_message(&mut stream.reader, waiter))?;
-			return Poll::Ready(self.subscribe_response(id, &body).map(Some));
+			return Poll::Ready(self.subscribe_response(id, &body));
 		};
 		loop {
 			let Framed(id, body) = ready!(messages.poll_message(&mut stream.reader, waiter))?;
@@ -776,7 +780,7 @@ impl Subscriber {
 				ietf::RequestOk::ID => {
 					let ok = body.message::<ietf::RequestOk>(self.version)?;
 					tracing::debug!(message = ?ok, "subscription resumed");
-					return Poll::Ready(Ok(Some(Accepted {
+					return Poll::Ready(Ok(Answer::Accepted(Accepted {
 						alias: held.alias,
 						properties: held.properties.clone(),
 						largest: ok.largest,
@@ -785,11 +789,7 @@ impl Subscriber {
 				ietf::RequestError::ID => {
 					let refused = body.message::<ietf::RequestError>(self.version)?;
 					tracing::debug!(message = ?refused, "resume refused");
-					return Poll::Ready(Err(request::from_code(
-						refused.error_code,
-						request::Kind::Subscribe,
-						self.version,
-					)));
+					return Poll::Ready(Ok(self.refused(&refused)));
 				}
 				ietf::PublishDone::ID => {
 					let done = body.message::<ietf::PublishDone>(self.version)?;
@@ -803,29 +803,31 @@ impl Subscriber {
 	}
 
 	/// The answer to a SUBSCRIBE: its SUBSCRIBE_OK, or the REQUEST_ERROR refusing it.
-	fn subscribe_response(&self, id: u64, body: &ietf::Body) -> Result<Accepted, Error> {
+	fn subscribe_response(&self, id: u64, body: &ietf::Body) -> Result<Answer, Error> {
 		let mut data = body.decoder(self.version);
 		match id {
 			ietf::SubscribeOk::ID => {
 				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
-				Ok(Accepted {
+				Ok(Answer::Accepted(Accepted {
 					alias: msg.track_alias,
 					properties: msg.properties,
 					largest: msg.largest,
-				})
+				}))
 			}
 			ietf::RequestError::ID => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "request error");
-				Err(request::from_code(
-					msg.error_code,
-					request::Kind::Subscribe,
-					self.version,
-				))
+				Ok(self.refused(&msg))
 			}
 			_ => Err(Error::UnexpectedMessage),
 		}
+	}
+
+	/// The REQUEST_ERROR refusing a SUBSCRIBE or its resume, as an [`Answer`].
+	fn refused(&self, msg: &ietf::RequestError<'_>) -> Answer {
+		let err = request::from_code(msg.error_code, request::Kind::Subscribe, self.version);
+		Answer::Refused(err, Duration::from_millis(msg.retry_interval))
 	}
 }
 
@@ -1253,10 +1255,9 @@ impl OpenPaused {
 						Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
 						Poll::Pending => Poll::Pending,
 					};
-					let accepted = match ready!(answered).and_then(|accepted| accepted.ok_or(Error::UnexpectedMessage))
-					{
-						Ok(accepted) => accepted,
-						Err(err) => {
+					let accepted = match ready!(answered) {
+						Ok(Answer::Accepted(accepted)) => accepted,
+						Ok(Answer::Refused(err, _)) | Err(err) => {
 							this.remove_subscribe(request_id);
 							return Poll::Ready(Err(err));
 						}
@@ -2119,6 +2120,26 @@ mod tests {
 			let _video = h.publish("video", 3).await;
 			let (_, id, body) = h.offer(offered("bcast", "video", 5)).await;
 			assert_eq!(refusal(id, &body, version), duplicate, "{version}: redundant");
+		}
+	}
+
+	/// A PUBLISH over the listed-track limit is refused as EXCESSIVE_LOAD, which may pass once
+	/// the peer unlists a track, so it invites a retry (draft-18 section 10.6.2).
+	#[kio::test]
+	async fn an_over_limit_publish_invites_a_retry() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let mut h = harness(version);
+			h.subscriber.announces = crate::session::Slots::new(0);
+			let _listing = h.establish().await;
+			let (_, id, body) = h.offer(offered("bcast", "video", 1)).await;
+			assert_eq!(id, ietf::RequestError::ID, "{version}: accepted");
+			let refused: ietf::RequestError = body.message(version).unwrap();
+			assert_eq!(refused.error_code, request::EXCESSIVE_LOAD, "{version}");
+			assert_eq!(
+				refused.retry_interval,
+				crate::auth::RETRY_INITIAL.as_millis() as u64,
+				"{version}"
+			);
 		}
 	}
 

@@ -349,6 +349,14 @@ export type Stall = {
 	stalled: boolean;
 };
 
+/** Native only: audio resuming after a silence the publisher declared, such as a push-to-talk mute. */
+export type Utterance = {
+	/** When the player wrote it to the speaker, on the `viewer` clock. */
+	at: Ms;
+	/** Its first sample's publisher timestamp, on the `media` clock. */
+	timestamp: Ms;
+};
+
 /**
  * One probe sample: what the player could read at that instant, plus what the tap reported since.
  *
@@ -407,6 +415,10 @@ export type Sample = {
 	gaps?: Gap[];
 	/** Stall changes since the previous sample. */
 	stalls?: Stall[];
+	/** Native only: cumulative device time filled with comfort noise for a declared silence. */
+	comfort?: Ms;
+	/** Native only: utterances resumed since the previous sample. */
+	utterances?: Utterance[];
 };
 
 /** What the page, or the native driver, reports once the session is up. */
