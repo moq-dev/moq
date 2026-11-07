@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Exercise pre-setup selection with real diffs and no development toolchain."""
 
+import contextlib
 import os
 import select
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -613,6 +615,49 @@ esac
                 self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
                 with self.assertRaises(ProcessLookupError):
                     os.kill(int(pid.read_text()), 0)
+
+    def test_terminating_just_before_a_phase_forks_its_command_stops_it(self):
+        # PS4 expands in the phase's shell after its last pending-trap check and
+        # before it forks a foreground command. The hook terminates the run,
+        # then blocks until the lane's group TERM kills it, so that TERM is
+        # pending when the shell would fork rs's lint.
+        script = (self.repo / "sh/dispatch.sh").read_text().splitlines()
+        line = next(n for n, text in enumerate(script, 1) if text.lstrip().startswith("check:rs)"))
+        hook = self.root / "hook.sh"
+        hook.write_text(f"""exec 9>/dev/null
+BASH_XTRACEFD=9
+declare -A hook=([dispatch.sh:{line}]=1)
+PS4='${{hook[${{BASH_SOURCE##*/}}:$LINENO]:+$(kill -TERM $$; exec sleep 600)}}'
+set -x
+""")
+        pid = self.root / "pid"
+        self.stub_ci(f'''case "$*" in
+    "rs lint-changed "*) echo $$ >"{pid}"; exec sleep 600 ;;
+esac
+''')
+        self.change("rs/kio/src/clock/mod.rs")
+        for jobs in ("1", "3"):
+            with self.subTest(jobs=jobs):
+                pid.unlink(missing_ok=True)
+                run = subprocess.Popen(
+                    ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+                    cwd=self.repo,
+                    env=dict(self.env, CHECK_JOBS=jobs, BASH_ENV=str(hook)),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    stderr = run.communicate(timeout=60)[1].decode()
+                finally:
+                    run.kill()
+                    if pid.exists():
+                        with contextlib.suppress(ProcessLookupError):
+                            os.kill(int(pid.read_text()), signal.SIGKILL)
+                self.assertEqual(run.returncode, 143, stderr)
+                self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
+                if pid.exists():
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int(pid.read_text()), 0)
 
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
         self.change("rs/kio/src/clock/mod.rs")
