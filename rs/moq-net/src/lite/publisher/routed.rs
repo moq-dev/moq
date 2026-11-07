@@ -96,6 +96,8 @@ pub(super) struct Answer {
 	epoch: u64,
 	permit: crate::auth::Permit,
 	phase: Phase,
+	/// Passes before the stream yields, so a peer flooding replies cannot hold the task.
+	budget: kio::coop::Budget,
 }
 
 impl Answer {
@@ -126,6 +128,7 @@ impl Answer {
 			epoch: 0,
 			permit: Default::default(),
 			phase: Phase::Init,
+			budget: kio::coop::Budget::new(32),
 		}
 	}
 
@@ -180,6 +183,7 @@ impl Answer {
 		}
 
 		loop {
+			ready!(self.budget.poll_yield(waiter));
 			// Deliver what is buffered before taking more work.
 			ready!(stream.writer.poll_flush(waiter))?;
 
@@ -214,10 +218,12 @@ impl Answer {
 				continue;
 			}
 
+			// One reply and one output per pass, so neither direction starves the other.
+			let mut progress = false;
 			match stream.reader.poll_decode_maybe::<lite::AnnounceReply>(waiter) {
 				Poll::Ready(Ok(Some(reply))) => {
 					self.reply(reply)?;
-					continue;
+					progress = true;
 				}
 				// The peer closed its side: it wants nothing more.
 				Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
@@ -235,9 +241,11 @@ impl Answer {
 			if let Some((index, output)) = ready {
 				self.turn = index + 1;
 				self.output(stream, index, output)?;
-				continue;
+				progress = true;
 			}
-			return Poll::Pending;
+			if !progress {
+				return Poll::Pending;
+			}
 		}
 	}
 
