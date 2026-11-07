@@ -224,7 +224,7 @@ impl Agent {
 
 			while let Some((data, dst)) = self.outbox.front() {
 				match self.socket.send_to(data, *dst).await {
-					Ok(len) => self.inbound.wire.sent(len),
+					Ok(_) => {}
 					Err(err) => tracing::warn!(%err, dst = %dst, "send failed"),
 				}
 				self.outbox.pop_front();
@@ -317,7 +317,7 @@ impl Agent {
 	fn send(&mut self, data: &[u8], dst: SocketAddr) {
 		let dst = to_family(dst, self.socket_v6);
 		match self.socket.try_send_to(data, dst) {
-			Ok(len) => self.inbound.wire.sent(len),
+			Ok(_) => {}
 			// Changes can keep coming while the socket stays full, so the backlog is
 			// bounded like the inbound queue; ICE, SCTP, and RTP recover the loss.
 			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock && self.outbox.len() < crate::ice::INBOX => {
@@ -475,30 +475,6 @@ mod tests {
 		assert_eq!(pick_local(&locals, "[2001:db8::2]:1".parse().unwrap()), v6);
 		// No same-family candidate falls back to the first.
 		assert_eq!(pick_local(&[v4], "[2001:db8::2]:1".parse().unwrap()), v4);
-	}
-
-	#[tokio::test]
-	async fn wire_counts_only_accepted_payload() {
-		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		let local = socket.local_addr().unwrap();
-		let inbound = crate::ice::reader(socket.clone());
-		let wire = inbound.wire.clone();
-		let socket = Socket::new(socket, vec![local], inbound).unwrap();
-		let mut agent = Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap();
-
-		// Until tokio has seen the socket writable, a send waits in the outbox.
-		agent.socket.writable().await.unwrap();
-		agent.send(&[42; 73], peer.local_addr().unwrap());
-		// UDP refuses an oversized datagram, which is never counted as sent.
-		agent.send(&vec![0; 65_536], peer.local_addr().unwrap());
-		assert_eq!(wire.stats(), crate::ice::Stats { tx: 73, rx: 0 });
-
-		peer.send_to(&[7; 11], local).await.unwrap();
-		let (data, _) = agent.inbound.packets.recv().await.unwrap();
-		assert_eq!(data.len(), 11);
-		drop(agent);
-		assert_eq!(wire.stats(), crate::ice::Stats { tx: 73, rx: 11 });
 	}
 
 	/// An agent on a fresh socket, which tokio reports unwritable until the runtime

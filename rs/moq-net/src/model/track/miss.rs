@@ -96,8 +96,9 @@ pub(super) struct Misses {
 	refilled: RangeSet<u64>,
 }
 
-/// A run of misses the reader gives up, for the drop cursor to name.
-pub(super) type GivenUp = Vec<ops::Range<u64>>;
+/// A run of misses the reader gives up, for the drop cursor to name, with the budget it was
+/// judged stale under when that is why.
+pub(super) type GivenUp = Vec<(ops::Range<u64>, Option<Duration>)>;
 
 /// The joins whose fills changed their answer, recorded by each join's own waiter before it
 /// wakes the reader's tasks.
@@ -625,7 +626,18 @@ impl Misses {
 		if state.start_pending || !state.readable() && bound.is_none() {
 			return asks;
 		}
-		let Some(newest) = state.newest_produced.max(bound) else {
+		// A received stale run this reader cannot trust is still asked for, though nothing above
+		// it arrived: only an update brings it back otherwise, and a reader narrower than the
+		// upstream's terms changes none. See `TrackState::unfed`. Only runs above the newest
+		// group need a look.
+		let unknown = state
+			.drops
+			.iter()
+			.rev()
+			.take_while(|(run, _)| state.newest_produced.is_none_or(|newest| run.end - 1 > newest))
+			.find(|(run, hole)| !drift.settles(state, run.start, hole))
+			.map(|(run, _)| run.end - 1);
+		let Some(newest) = state.newest_produced.max(bound).max(unknown) else {
 			return asks;
 		};
 		let at = (
@@ -714,6 +726,16 @@ impl Misses {
 			for run in span.iter() {
 				for fresh in self.judged.gaps(run) {
 					candidates.insert(fresh);
+				}
+				// A received stale run settles this reader only under the terms it judged, so
+				// what it settled is judged again under new ones.
+				for (dropped, hole) in state.drops.overlapping(run) {
+					if hole.stale_budget().is_some() {
+						let dropped = dropped.start.max(run.start)..dropped.end.min(run.end);
+						for judged in self.judged.overlapping(&dropped) {
+							candidates.insert(judged.start.max(dropped.start)..judged.end.min(dropped.end));
+						}
+					}
 				}
 			}
 		} else {
@@ -898,7 +920,7 @@ impl Misses {
 				self.filled.extend(held.clone());
 			}
 			for hole in holes(state, run.clone()) {
-				for hole in self.unclaimed(state, hole) {
+				for hole in self.unclaimed(state, hole, drift) {
 					let (unfed, awaited) = state.unfed(hole, now);
 					for run in unfed.iter() {
 						asks.insert(run.clone());
@@ -956,7 +978,7 @@ impl Misses {
 			.collect();
 		for run in stale {
 			asks.remove(run.clone());
-			self.give_up(run, given_up);
+			self.give_up_stale(run, drift.budget, given_up);
 		}
 		asks
 	}
@@ -1076,8 +1098,12 @@ impl Misses {
 			released.insert(run.clone());
 		}
 		self.release(&released);
+		// Below an old cache's floor is a boundary, not a drift verdict; above it, a stretch
+		// went stale under this reader's budget.
+		let floor = state.cache_floor(drift.budget);
 		for run in stale.iter() {
-			self.give_up(run.clone(), given_up);
+			self.give_up(run.start..run.end.min(floor), given_up);
+			self.give_up_stale(run.start.max(floor)..run.end, drift.budget, given_up);
 		}
 	}
 
@@ -1204,13 +1230,16 @@ impl Misses {
 		}
 	}
 
-	/// The part of `hole` nobody has a verdict on yet.
-	fn unclaimed(&self, state: &TrackState, hole: ops::Range<u64>) -> Vec<ops::Range<u64>> {
+	/// The part of `hole` nobody has a verdict on yet: a received stale run that does not
+	/// settle this reader is no verdict for it (see `Drift::settles`).
+	fn unclaimed(&self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) -> Vec<ops::Range<u64>> {
 		let mut left = RangeSet::new();
 		left.insert(hole.clone());
 		// Only what overlaps the hole, so judging every run costs each one the same.
-		for (run, _) in state.drops.overlapping(&hole) {
-			left.remove(run.clone());
+		for (run, gone) in state.drops.overlapping(&hole) {
+			if drift.settles(state, run.start.max(hole.start), gone) {
+				left.remove(run.clone());
+			}
 		}
 		for claimed in [&self.given_up, &self.wanted] {
 			for run in claimed.overlapping(&hole) {
@@ -1244,13 +1273,31 @@ impl Misses {
 		}
 	}
 
+	/// Judge `groups` again: an update reopened the stale verdict they were given up with.
+	/// They are no longer judged, and the next probe judges its whole span afresh, so it
+	/// asks a fill for them or gives them up again.
+	pub(super) fn retry(&mut self, groups: ops::Range<u64>) {
+		self.given_up.remove(groups.clone());
+		self.judged.remove(groups);
+		self.at = None;
+	}
+
 	pub(super) fn give_up(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
+		self.give_up_judged(groups, None, given_up);
+	}
+
+	/// Give up `groups` as stale under `budget`, a verdict a wider budget reverses.
+	fn give_up_stale(&mut self, groups: ops::Range<u64>, budget: Duration, given_up: &mut GivenUp) {
+		self.give_up_judged(groups, Some(budget), given_up);
+	}
+
+	fn give_up_judged(&mut self, groups: ops::Range<u64>, stale: Option<Duration>, given_up: &mut GivenUp) {
 		if groups.is_empty() {
 			return;
 		}
 		self.given_up.insert(groups.clone());
 		self.newly_gone.insert(groups.clone());
-		given_up.push(groups);
+		given_up.push((groups, stale));
 	}
 }
 
@@ -1380,22 +1427,35 @@ impl TrackState {
 			unfed.insert(hole);
 			return (unfed, awaited);
 		}
-		let mut from = hole.start;
 		let grace = self.miss_grace();
 		let mut gap =
 			|groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self.arrivals.folds_at(groups.start, grace) {
 				Some(at) if at <= now => unfed.insert(groups),
 				folds => awaited.push((groups, folds)),
 			};
-		for arrived in self.arrivals.accounted(from..hole.end) {
-			if from < arrived.start {
-				gap(from..arrived.start, &mut unfed);
+		// The upstream accounted for a received stale run, so the feed brings none of it unless
+		// an update supersedes the run.
+		let mut fed = RangeSet::new();
+		fed.insert(hole.clone());
+		for (run, given) in self.drops.overlapping(&hole) {
+			if given.stale_budget().is_some() {
+				let run = run.start.max(hole.start)..run.end.min(hole.end);
+				fed.remove(run.clone());
+				unfed.insert(run);
 			}
-			from = arrived.end;
-			unfed.insert(arrived);
 		}
-		if from < hole.end {
-			gap(from..hole.end, &mut unfed);
+		for hole in fed.iter() {
+			let mut from = hole.start;
+			for arrived in self.arrivals.accounted(hole.clone()) {
+				if from < arrived.start {
+					gap(from..arrived.start, &mut unfed);
+				}
+				from = arrived.end;
+				unfed.insert(arrived);
+			}
+			if from < hole.end {
+				gap(from..hole.end, &mut unfed);
+			}
 		}
 		(unfed, awaited)
 	}
@@ -1545,7 +1605,9 @@ mod tests {
 			.unwrap();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
-		for sequence in [0, 4] {
+		// Newest first, so the publisher skips nothing below it: group 2 is a live gap a fill
+		// may answer.
+		for sequence in [4, 0] {
 			track
 				.create_group(crate::group::Info { sequence })
 				.unwrap()
@@ -1561,6 +1623,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
+			coverage: None,
 		};
 		let asks = misses.judge(
 			&state,
@@ -1687,7 +1750,9 @@ mod tests {
 			.unwrap();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
-		for sequence in [0, 4] {
+		// Newest first, so the publisher skips nothing below it: group 2 is a live gap a fill
+		// may answer.
+		for sequence in [4, 0] {
 			track
 				.create_group(crate::group::Info { sequence })
 				.unwrap()
@@ -1703,6 +1768,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
+			coverage: None,
 		};
 		let asks = misses.judge(
 			&state,
@@ -1753,12 +1819,14 @@ mod tests {
 			&waiter,
 		);
 		assert!(!asks.contains(&2), "a refused hole is not asked again");
-		assert_eq!(given_up, vec![2..3]);
+		assert_eq!(given_up, vec![(2..3, None)], "a refusal is no stale verdict");
 	}
 	#[kio::test]
 	async fn unchanged_probes_and_late_arrivals_keep_other_gap_deadlines() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("sparse", crate::track::Info::default()).unwrap();
+		// A received copy, whose live gaps are filled or waited for, not skipped.
+		track.received();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in [0, 2, 4] {
@@ -1776,6 +1844,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
+			coverage: None,
 		};
 		assert!(
 			misses
@@ -1852,8 +1921,37 @@ mod tests {
 			&waiter,
 		);
 		assert!(asks.is_empty(), "the successor has aged past this reader's budget too");
-		assert_eq!(given_up, vec![3..4]);
+		assert_eq!(
+			given_up,
+			vec![(3..4, Some(drift.budget))],
+			"judged stale under the reader's budget"
+		);
 		assert!(misses.deferred.runs.is_empty());
+
+		// An update reopens the verdict: retried, the gap is judged afresh, and a wider budget
+		// asks a fill for it.
+		misses.retry(3..4);
+		let wider = Drift {
+			budget: Duration::from_secs(3600),
+			bounded: false,
+			edge: state.drift_edge(&Servable::ALL),
+			coverage: None,
+		};
+		given_up.clear();
+		let asks = misses.judge(
+			&state,
+			(0, 0, None),
+			None,
+			None,
+			None,
+			|span| [span].into_iter().collect(),
+			&Delivered::default(),
+			&wider,
+			&mut given_up,
+			&waiter,
+		);
+		assert!(asks.contains(&3), "a retried gap is asked again");
+		assert!(given_up.is_empty());
 	}
 
 	/// A grace change with nothing deferred has no deadline to move, so an unchanged probe
@@ -1864,6 +1962,8 @@ mod tests {
 		let track = broadcast
 			.create_track("grace", crate::track::Info::default().with_max_age(None))
 			.unwrap();
+		// A received copy, whose live gaps are filled or waited for, not skipped.
+		track.received();
 		let budget = Duration::from_secs(5);
 		let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
 		for sequence in 0..3 {
@@ -1881,6 +1981,7 @@ mod tests {
 			budget,
 			bounded: false,
 			edge: state.drift_edge(&Servable::ALL),
+			coverage: None,
 		};
 		let full = |span| [span].into_iter().collect();
 		assert!(
@@ -2061,6 +2162,7 @@ mod tests {
 					budget,
 					bounded: false,
 					edge: state.drift_edge(&servable),
+					coverage: None,
 				};
 				let expected = each(&misses, &state, &drift);
 				let found = misses.expired(&state, &drift, &kio::Waiter::noop());
@@ -2125,15 +2227,15 @@ mod tests {
 			let mut track = broadcast.create_track("moved", crate::track::Info::default()).unwrap();
 			let budget = Duration::from_secs(5);
 			let _reader = track.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)));
-			// A feed with holes, some of them under where it starts.
-			for sequence in 0..SEQUENCES {
-				if next(3) > 0 {
-					track
-						.create_group(crate::group::Info { sequence })
-						.unwrap()
-						.finish()
-						.unwrap();
-				}
+			// A feed with holes, some of them under where it starts, created newest first so the
+			// publisher skips none of them.
+			let sequences: Vec<_> = (0..SEQUENCES).filter(|_| next(3) > 0).collect();
+			for &sequence in sequences.iter().rev() {
+				track
+					.create_group(crate::group::Info { sequence })
+					.unwrap()
+					.finish()
+					.unwrap();
 			}
 			if next(2) == 0 {
 				track.start_at(next(SEQUENCES / 2)).unwrap();
@@ -2174,6 +2276,7 @@ mod tests {
 						budget,
 						bounded: false,
 						edge: state.drift_edge(&Servable::ALL),
+						coverage: None,
 					};
 					let asks = misses.judge(
 						&state,

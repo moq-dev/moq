@@ -22,6 +22,4 @@ mod agent;
 mod wire;
 
 pub(crate) use agent::{Agent, Error, Event, canonical};
-#[cfg(test)]
-pub(crate) use wire::Stats;
-pub(crate) use wire::{INBOX, Inbound, Packet, Socket, Wire, reader};
+pub(crate) use wire::{INBOX, Inbound, Packet, Socket, reader};
