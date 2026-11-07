@@ -282,10 +282,11 @@ builds without starving publication or delaying the dev-shell matrix.
 Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30 days
 after upload. `nix copy` never re-uploads a path the bucket already has, so a
 path many commits reuse keeps its first upload's age. Each job therefore
-records the store paths it pushed under `roots/<commit>/`, and the daily
-`cache-refresh.yml` copies every object in the newest cached commit's closures onto
-itself once it is a week old, restarting its age; it fails if any is already
-gone. That commit is the one Smoke pins, so it always substitutes in full;
+records the store paths it pushed under `roots/<commit>/`, then copies every
+object in that commit's recorded closures that is over a week old onto itself,
+restarting its age; it fails if any is already gone. The daily
+`cache-refresh.yml` repeats that for the newest cached commit, the one Smoke
+pins, so it always substitutes in full even when nothing merges;
 older commits' paths still expire. `flake.nix` sets `fallback = true` because
 that expiry can remove a path before one that depends on it.
 
