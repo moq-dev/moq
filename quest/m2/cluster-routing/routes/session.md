@@ -27,19 +27,11 @@ node table, and the public API drops what the route layer replaced.
   change and per interest (`Router::advertise`), so a large origin costs
   linear work per update. Do it with the scoping change, which reshapes the
   same per-stream presentation.
-- Public API: `Hops`, `RouteInfo::hops`, and the saturating `Cost` stay while
-  lite-06 and the moq-transport cluster extension still carry hop chains.
-  Remove them, or hide them behind those wires, when the rollout window
-  closes (see Waiting).
-
-## Waiting
-
-- Maintainer: decide when `Hops`, `RouteInfo::hops`, and the saturating
-  `Cost` leave the public API. Every older wire still fills them, so an agent
-  cannot drop them without picking the rollout's end. Options: **when lite-06
-  retires (recommended)**, since removing them now only moves them behind a
-  private type; or **now**, keeping a private chain type for the older wires.
-  Done when the Plan item above names the point.
+- Public API: remove `Hops`, `RouteInfo::hops`, and the saturating `Cost`
+  from the public API now, keeping a private chain type for lite-06 and the
+  moq-transport cluster extension, which still carry hop chains. Decided
+  2026-11-07 (maintainer, /quest-unblock): ✅ now (rejected: when lite-06
+  retires). It is a breaking change; the PR marks its title with `!`.
 
 ## Related
 
