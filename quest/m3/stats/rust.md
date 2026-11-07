@@ -31,7 +31,7 @@
   - Audio capture: `capture::Samples::gap` only flags that buffers were
     dropped. Counting `skipped` needs the drop size, converted to codec frames.
 - The gateways build their catalogs in their own crates (`moq-rtmp`,
-  `moq-srt`, `moq-rtc`, `moq-archive`; `hls` and `rtsp` build theirs in
+  `moq-srt`, `moq-webrtc`, `moq-archive`; `hls` and `rtsp` build theirs in
   `rs/moq-cli`), so each needs a way to name the stats track and the echo path
   before its first catalog, and a reporter to run beside each session's
   catalog. The report writer lives in `rs/moq-cli/src/report.rs` and reads the

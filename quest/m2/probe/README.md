@@ -100,7 +100,6 @@ This README's own work, once the children land:
 ## Required
 
 - [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - browser publishers adapt to `getStats()`'s send estimate once Chrome and Safari report one
-- [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - a page's connections share one sampling ticker
 
 ## Related
 

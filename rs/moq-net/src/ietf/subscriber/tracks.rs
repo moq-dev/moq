@@ -764,10 +764,10 @@ impl Subscriber {
 		stream: &mut Stream<Transport, Version>,
 		messages: &mut Messages,
 		held: Option<&mut Resumed>,
-	) -> Poll<Result<Option<Accepted>, Error>> {
+	) -> Poll<Result<Answer, Error>> {
 		let Some(held) = held else {
 			let Framed(id, body) = ready!(messages.poll_message(&mut stream.reader, waiter))?;
-			return Poll::Ready(self.subscribe_response(id, &body).map(Some));
+			return Poll::Ready(self.subscribe_response(id, &body));
 		};
 		loop {
 			let Framed(id, body) = ready!(messages.poll_message(&mut stream.reader, waiter))?;
@@ -780,7 +780,7 @@ impl Subscriber {
 				ietf::RequestOk::ID => {
 					let ok = body.message::<ietf::RequestOk>(self.version)?;
 					tracing::debug!(message = ?ok, "subscription resumed");
-					return Poll::Ready(Ok(Some(Accepted {
+					return Poll::Ready(Ok(Answer::Accepted(Accepted {
 						alias: held.alias,
 						properties: held.properties.clone(),
 						largest: ok.largest,
@@ -789,11 +789,7 @@ impl Subscriber {
 				ietf::RequestError::ID => {
 					let refused = body.message::<ietf::RequestError>(self.version)?;
 					tracing::debug!(message = ?refused, "resume refused");
-					return Poll::Ready(Err(request::from_code(
-						refused.error_code,
-						request::Kind::Subscribe,
-						self.version,
-					)));
+					return Poll::Ready(Ok(self.refused(&refused)));
 				}
 				ietf::PublishDone::ID => {
 					let done = body.message::<ietf::PublishDone>(self.version)?;
@@ -807,29 +803,31 @@ impl Subscriber {
 	}
 
 	/// The answer to a SUBSCRIBE: its SUBSCRIBE_OK, or the REQUEST_ERROR refusing it.
-	fn subscribe_response(&self, id: u64, body: &ietf::Body) -> Result<Accepted, Error> {
+	fn subscribe_response(&self, id: u64, body: &ietf::Body) -> Result<Answer, Error> {
 		let mut data = body.decoder(self.version);
 		match id {
 			ietf::SubscribeOk::ID => {
 				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
-				Ok(Accepted {
+				Ok(Answer::Accepted(Accepted {
 					alias: msg.track_alias,
 					properties: msg.properties,
 					largest: msg.largest,
-				})
+				}))
 			}
 			ietf::RequestError::ID => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "request error");
-				Err(request::from_code(
-					msg.error_code,
-					request::Kind::Subscribe,
-					self.version,
-				))
+				Ok(self.refused(&msg))
 			}
 			_ => Err(Error::UnexpectedMessage),
 		}
+	}
+
+	/// The REQUEST_ERROR refusing a SUBSCRIBE or its resume, as an [`Answer`].
+	fn refused(&self, msg: &ietf::RequestError<'_>) -> Answer {
+		let err = request::from_code(msg.error_code, request::Kind::Subscribe, self.version);
+		Answer::Refused(err, Duration::from_millis(msg.retry_interval))
 	}
 }
 
@@ -1257,10 +1255,9 @@ impl OpenPaused {
 						Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
 						Poll::Pending => Poll::Pending,
 					};
-					let accepted = match ready!(answered).and_then(|accepted| accepted.ok_or(Error::UnexpectedMessage))
-					{
-						Ok(accepted) => accepted,
-						Err(err) => {
+					let accepted = match ready!(answered) {
+						Ok(Answer::Accepted(accepted)) => accepted,
+						Ok(Answer::Refused(err, _)) | Err(err) => {
 							this.remove_subscribe(request_id);
 							return Poll::Ready(Err(err));
 						}

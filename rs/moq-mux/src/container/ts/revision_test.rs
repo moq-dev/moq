@@ -92,10 +92,10 @@ async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Fram
 			Some(export) => export,
 			None => {
 				let source = crate::source::announced(&consumer).await;
-				let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang)
+				let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang, DELAY)
 					.await
 					.unwrap();
-				let export = export.insert(opened.with_delay(DELAY).with_replay());
+				let export = export.insert(opened.with_replay());
 				// The first frame out carries the tables built from this span alone.
 				let first = kio::clock::timeout(DELAY * 2, export.next()).await;
 				frames.push(first.expect("a first frame").unwrap().unwrap());
@@ -697,10 +697,10 @@ fn marks(frames: &[Frame], pid: u16, marks: &[u8]) -> Vec<u8> {
 /// The export of `consumer`.
 async fn export_of(consumer: &moq_net::broadcast::Consumer) -> super::Export<crate::catalog::Consumer<Ext>> {
 	let source = crate::source::announced(consumer).await;
-	let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang)
+	let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang, DELAY)
 		.await
 		.unwrap();
-	opened.with_delay(DELAY).with_replay()
+	opened.with_replay()
 }
 
 /// Open the export of `consumer` once its first frame is out.
@@ -738,10 +738,10 @@ async fn a_pid_recorded_after_its_track_takes_the_held_frames_along() {
 		write_aac(&mut [&mut first], millis);
 	}
 	let source = crate::source::announced(&consumer).await;
-	let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang)
+	let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang, DELAY)
 		.await
 		.unwrap();
-	let mut export = opened.with_delay(DELAY).with_replay();
+	let mut export = opened.with_replay();
 	let out = kio::clock::timeout(DELAY * 2, export.next()).await;
 	let mut frames = vec![out.expect("the tables went out").unwrap().unwrap()];
 	settle(&mut export, &mut frames).await;

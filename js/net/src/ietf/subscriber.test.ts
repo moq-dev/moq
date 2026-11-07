@@ -787,13 +787,15 @@ async function subscribeTrack({
 	return { subscriber, track: consumer };
 }
 
-// A refusal already ended the request: a reset back would tell the publisher we failed.
+// A refusal already ended the request: a reset back would tell the publisher we failed. The
+// track fails with what the refusal asked for, so a relay can pass its Retry Interval on.
 test("a refused SUBSCRIBE or SUBSCRIBE_NAMESPACE ends its stream cleanly", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
 	const refuse = async (peer: Stream) => {
 		await peer.writer.u53(RequestError.id);
-		await new RequestError({ errorCode: 0x10, reasonPhrase: "not here" }).encode(peer.writer, VERSION);
+		const refusal = new RequestError({ errorCode: 0x10, reasonPhrase: "not here", retryInterval: 5000n });
+		await refusal.encode(peer.writer, VERSION);
 		peer.writer.close();
 	};
 
@@ -813,6 +815,7 @@ test("a refused SUBSCRIBE or SUBSCRIBE_NAMESPACE ends its stream cleanly", async
 	await Subscribe.decode(subscribe.reader, VERSION);
 	await refuse(subscribe);
 	expect(await subscribe.reader.done()).toBe(true);
+	expect(await track.closed).toMatchObject({ condition: "does_not_exist", retryInterval: 5000n });
 	track.close();
 });
 

@@ -60,7 +60,7 @@ names the Environment, and a branch that is not on the list fails to start it.
 | `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
 | `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
 | `corpus` | `main` | The private corpus's read key ([below](#bootstrapping-the-video-corpus)) |
-| `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
+| `npm` | `release` | Nothing; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
 | `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |
 | `github-pages` | `main` | Nothing |
@@ -81,9 +81,7 @@ A tag policy only helps if the tag itself is protected, so the `release tags`
 ruleset ([below](#bootstrapping-the-nix-cache)) also covers `moq-ffi-v*`
 and `moq-dart-v*`. A `workflow_run` job that checks out the triggering commit
 first requires its `head_branch` to be such a tag at that commit, since a
-branch can share a release's name. JSR's GitHub trust checks only the repository, not an
-Environment, so `release-js` publishes to JSR with `JSR_TOKEN` instead and the
-JSR packages do not trust the repository.
+branch can share a release's name.
 
 ## Bootstrapping a new package repository
 

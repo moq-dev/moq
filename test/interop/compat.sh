@@ -31,7 +31,7 @@ case "$*" in
         ;;
 esac
 cd "$WORKSPACE"
-bun install --frozen-lockfile
+uv run --no-project python sh/js/install.py frozen
 bun "$DIR/compat/resolve.ts" resolve "$HARNESS_RUN/versions.json"
 value() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$HARNESS_RUN/versions.json" "$1"; }
 

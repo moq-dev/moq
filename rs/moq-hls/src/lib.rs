@@ -1,7 +1,7 @@
 //! HLS / LL-HLS <-> MoQ gateway.
 //!
 //! Bridges HLS (and Low-Latency HLS) and [`moq_net`] broadcasts in both
-//! directions, mirroring the WHIP/WHEP split in `moq-rtc`:
+//! directions, mirroring the WHIP/WHEP split in `moq-webrtc`:
 //!
 //! - [`import`] pulls a remote HLS master/media playlist and publishes its CMAF
 //!   segments into MoQ (an HTTP *client* that *publishes*).
