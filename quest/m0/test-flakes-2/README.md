@@ -86,6 +86,13 @@ explains. That batch predates #7658's merge at 15:56Z, and no queue run since
 has failed it, so it needs no child of its own (noted 2026-11-03,
 `/quest-plan`).
 
+The JS reload close-drain test lost a race in the lite-07 publisher: the
+subscriber's FIN after reading the tail could land while a reply write, such as
+SUBSCRIBE_FINISH, still yielded on the write budget. That exit stopped owing the
+opened group streams, so a draining close aborted a final group whose FIN was
+still in flight. Every exit now owes them, fixed by
+[moq-dev/moq#8047](https://github.com/moq-dev/moq/pull/8047).
+
 Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
 from 2026-11-03 and early 2026-11-04 UTC, one child each.
 
@@ -115,12 +122,10 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
-- [io_uring tests fit the shared locked-memory budget](/quest/m0/test-flakes-2/uring-memlock.md) - concurrent moq-relay and moq-uring test runs stop exhausting the user's `RLIMIT_MEMLOCK`, fixed at the cause rather than by raising the limit
+- [The dev host's locked-memory limit fits parallel sessions](/quest/m0/test-flakes-2/uring-memlock.md) - the maintainer's host raises the user's `RLIMIT_MEMLOCK`, which Node.js rings from parallel agent sessions fill before io_uring tests start
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
 - [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
-- [lite-05 copy fill checks idleness without wall time](/quest/m0/test-flakes-2/copy-fill-idle.md) - the copy-fill test proves no FETCH went out on the `Manual` clock, not a 200 ms real-time wait
 - [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load

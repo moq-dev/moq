@@ -22,7 +22,6 @@ Then the rest, by file, as of 2026-11-06: `ietf/publisher` 31,
 one each in `auth`, `connection/connect`, `connection/reload`,
 `ietf/datagram`, `ietf/request_stream`, `ietf/tail`, `lite/connection`,
 `tail`, and `track`. The `copy_fill` `idle()` flake belongs to
-[test-flakes-2](/quest/m0/test-flakes-2/copy-fill-idle.md); this quest
 converts the file's other cases.
 
 Public API: none. Wire: none.

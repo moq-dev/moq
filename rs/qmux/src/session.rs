@@ -589,6 +589,18 @@ impl poll::SendStream for SendStream {
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
 	}
+
+	/// Whether every byte written so far went to the transport, which acknowledges it on a
+	/// reliable transport.
+	fn acknowledged(&self) -> Option<bool> {
+		if self.reset {
+			return Some(false);
+		}
+		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
+		let offset = stream.offset();
+		Some(stream.acked(offset).unwrap_or(false))
+	}
 }
 
 impl Drop for SendStream {
