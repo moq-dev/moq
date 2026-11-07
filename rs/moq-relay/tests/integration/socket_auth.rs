@@ -320,6 +320,7 @@ async fn a_client_grant_neither_serves_nor_reads_clients() {
 /// track, so it cannot learn a session's name to read or forge it.
 #[tokio::test]
 async fn a_reader_of_everything_lists_no_session() {
+	kio::clock::host_time();
 	let fixture = Fixture::new().await;
 	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
 	let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
