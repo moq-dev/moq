@@ -114,10 +114,11 @@ struct Outbox {
 	/// Outputs to read in order: the other kinds, and a pending entry once taken.
 	ready: VecDeque<Output>,
 	/// Each claim's last Serve or Unserve, read after the rest, in queue order. A job
-	/// queues its Serve before the Unserve of the claim it continues, and the session
-	/// needs the job's route in place before the claim's goes, so a reader resolved
-	/// through the claim carries on: so a Serve replacing a queued Serve keeps its
-	/// place, while an Unserve, or a Serve after one, goes last.
+	/// queues its Serve before the Unserve or restart of the claim it continues, and the
+	/// session needs the job's route in place before the claim's goes, so a reader
+	/// resolved through the claim carries on: so a Serve replacing a queued Serve of the
+	/// same instance and epoch keeps its place, while an Unserve, a restart, or a Serve
+	/// after an Unserve goes last.
 	serves: BTreeMap<u64, Output>,
 	/// Where each claim's last change sits in `serves`.
 	serving: HashMap<(Id, Path), u64>,
@@ -218,8 +219,10 @@ impl Outbox {
 			Output::Serve { id, ref claim, .. } | Output::Unserve { id, ref claim } => {
 				let key = (id, claim.clone());
 				if let Some(&seq) = self.serving.get(&key)
-					&& matches!(output, Output::Serve { .. })
-					&& matches!(self.serves.get(&seq), Some(Output::Serve { .. }))
+					&& let Output::Serve { served, .. } = &output
+					&& let Some(Output::Serve { served: queued, .. }) = self.serves.get(&seq)
+					&& queued.claim.instance == served.claim.instance
+					&& queued.claim.epoch == served.claim.epoch
 				{
 					self.serves.insert(seq, output);
 					return None;
@@ -614,7 +617,9 @@ impl State {
 			.take_while(|((home, _), _)| *home == id)
 			.map(|((_, claim), _)| claim.clone())
 			.collect();
-		for (claim, item, available) in claims {
+		// Most specific first: a job continuing its claim's instance is served before
+		// the claim moves on, so a reader resolved through the claim finds the job's route.
+		for (claim, item, available) in claims.into_iter().rev() {
 			gone.remove(&claim);
 			let routes = self.router.routes(id, &claim);
 			let home = self.homes.entry((id, claim.clone())).or_default();
@@ -884,6 +889,45 @@ mod tests {
 			})
 			.collect();
 		assert_eq!(read, [(p("live/x"), Some(5)), (p("live"), None)]);
+	}
+
+	/// A job and its claim's restart arriving together are read job first, even past a
+	/// change to the claim still queued, so a reader resolved through the claim's old
+	/// instance finds the job's route before the claim's moves on.
+	#[test]
+	fn a_job_is_read_before_its_claims_restart() {
+		let (old, new) = (Instance::random(), Instance::random());
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let fast = relay.receive(Link::default(), Path::empty()).unwrap();
+		let stalled = relay.receive(Link::default(), Path::empty()).unwrap();
+		let fast_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		let stalled_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live"), Some(claim(&old, 0)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		outputs(&fast);
+		outputs(&stalled);
+
+		// A change to the claim the stalled stream leaves queued.
+		origin.own(p("live"), Some(claim(&old, 1)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		outputs(&fast);
+
+		origin.own(p("live/x"), Some(claim(&old, 0)));
+		origin.own(p("live"), Some(claim(&new, 0)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		for stream in [&fast, &stalled] {
+			let read: Vec<(Path, Instance)> = (served(outputs(stream)).into_iter())
+				.map(|output| match output {
+					Output::Serve { claim, served, .. } => (claim, served.claim.instance),
+					other => panic!("not a serve: {other:?}"),
+				})
+				.collect();
+			assert_eq!(read, [(p("live/x"), old.clone()), (p("live"), new.clone())]);
+		}
 	}
 
 	/// A claim of a scoped peer left with no usable route stays where it is served,
