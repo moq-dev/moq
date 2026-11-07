@@ -100,6 +100,7 @@ test:
     python3 sh/js/install.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
+    python3 sh/gh/nightly.test.py NightlyTest
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
     python3 sh/gh/ts-paths.test.py
@@ -112,7 +113,7 @@ test-integration:
     bash sh/local.sh python3 bench/build.test.py
     python3 sh/rs/hakari.test.py
     python3 sh/rs/test-lints.test.py
-    python3 sh/gh/nightly.test.py
+    python3 sh/gh/nightly.test.py FeaturesTest FuzzTest
     python3 sh/dispatch-query.test.py --bench
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
