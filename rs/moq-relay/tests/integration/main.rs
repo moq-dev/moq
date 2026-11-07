@@ -13,6 +13,7 @@ mod cluster_close;
 mod cluster_drain;
 mod cluster_fresh_port;
 mod cluster_idle;
+#[cfg(feature = "test-support")]
 mod cluster_unknown;
 #[cfg(feature = "test-support")]
 mod connection;
