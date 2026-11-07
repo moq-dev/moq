@@ -5,9 +5,9 @@
  * @module
  */
 
-/** Re-export of {@link https://jsr.io/@moq/net | @moq/net}, the transport this package builds on. */
+/** Re-export of {@link https://www.npmjs.com/package/@moq/net | @moq/net}, the transport this package builds on. */
 export * as Net from "@moq/net";
-/** Re-export of {@link https://jsr.io/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
+/** Re-export of {@link https://www.npmjs.com/package/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
 /** The catalog schema describing a broadcast's tracks. */
 export * as Catalog from "./catalog";

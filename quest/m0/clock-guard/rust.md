@@ -3,7 +3,7 @@
 ## Goal
 
 Find out whether `kio` can fail a Rust test whose timer fires on the real
-clock, as the [JS guard](/quest/m0/clock-guard/js.md) does, and land it if
+clock, as the JS guard (`js/clock/src/preload.ts`) does, and land it if
 so. Otherwise land a grep check that flags a new `#[tokio::test]` without
 `start_paused` and without a stated real-I/O reason.
 

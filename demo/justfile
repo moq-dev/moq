@@ -5,7 +5,7 @@ set fallback
 # Picks the first free port at/after 4443 so multiple worktrees can run
 # `just dev` without colliding; see sh/demo/run.sh.
 default:
-    bun install
+    uv run --no-project python ../sh/js/install.py update
     ../sh/demo/run.sh
 
 # Wait for the localhost relay to be ready by repeatedly requesting the cert

@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -112,6 +113,7 @@ test.each([
 	[Version.DRAFT_05, false],
 	[Version.DRAFT_06, true],
 ])("a re-price goes out only where the wire carries cost (version %s)", async (version, sent) => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -150,6 +152,7 @@ test.each([
 test.each([Version.DRAFT_06, Version.DRAFT_07])(
 	"a republish restarts the advertisement (version %s)",
 	async (version) => {
+		hostTime();
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -422,6 +425,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 // Opening a stream can block on transport capacity, and a subscription listener only sees
 // later changes, so an update landing in that window would otherwise be lost until the next one.
 test("lite draft-05: a subscribe update during the stream open still ranks the group", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
@@ -1489,6 +1493,7 @@ test.each([
 ])(
 	"lite %s (reported %s, routed %s): a subscribe that beats its track resolving joins at its newest group",
 	async (version, reported, routed) => {
+		hostTime();
 		const sub = await servedSubscription({ version, pending: true, routed });
 		try {
 			await sub.accept([0n, 3n, 7n], reported);
@@ -1511,6 +1516,7 @@ test.each([
 test.each([Version.DRAFT_04, Version.DRAFT_05])(
 	"lite %s: a join on a track already holding groups starts at a reported newer group",
 	async (version) => {
+		hostTime();
 		const sub = await servedSubscription({ version, prefill: [0n, 3n], reported: 9n });
 		try {
 			if (version === Version.DRAFT_04) {
@@ -1783,6 +1789,7 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 // Applying one update can itself race the decoder's next message. The serving loop yields a task
 // before another pop so the decoder can finish the already-delivered update and tighten the cap.
 test("lite draft-06: a newer update wins before a buffered group backlog drains", async () => {
+	hostTime();
 	const sub = await servedSubscription({
 		version: Version.DRAFT_06,
 		startGroup: 0n,
@@ -1864,6 +1871,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 // there rather than draining what is buffered, since nobody is reading the rest. Matches the Rust
 // publisher's TrackEnd::PeerFin, which drops the in-flight group machines instead of draining.
 test("lite draft-05: a peer FIN ends serving while the producer is still live", async () => {
+	hostTime();
 	const sub = await servedSubscription({ startGroup: 0n });
 	try {
 		sub.serve(0n);
@@ -1929,12 +1937,14 @@ test("lite draft-05: teardown unwinds with an undelivered update queued", async 
 // A Rust subscriber feeds this value straight into `track::Producer::finish_at`, which is
 // exclusive, so an inclusive bound here silently truncates the final group across languages.
 test("lite draft-05: subscribe end is the exclusive boundary", async () => {
+	hostTime();
 	expect((await subscribeEnd([0, 1, 2])).group).toBe(3n);
 });
 
 // recvGroup is arrival-ordered, so the boundary has to clear the max sequence delivered,
 // not the last one seen. Otherwise the boundary lands on a group already on the wire.
 test("lite draft-05: subscribe end clears the max sequence when groups arrive out of order", async () => {
+	hostTime();
 	expect((await subscribeEnd([0, 2, 1])).group).toBe(3n);
 });
 
@@ -1946,6 +1956,7 @@ test("lite draft-05: subscribe end is 0 when no groups were produced", async () 
 
 // Lite-07 forwards an errored end's error with its boundary, so the subscriber keeps the history.
 test("lite draft-07: subscribe end carries the track's error", async () => {
+	hostTime();
 	const end = await subscribeEnd([0, 1], Version.DRAFT_07, new StreamError(StreamCode(71)));
 	expect([end.group, end.error]).toEqual([2n, 71]);
 	expect((await subscribeEnd([0, 1], Version.DRAFT_07)).error).toBeUndefined();
@@ -1953,6 +1964,7 @@ test("lite draft-07: subscribe end carries the track's error", async () => {
 
 // The boundary clears every produced group even when a sequence was skipped.
 test("lite draft-07: subscribe end names the final boundary", async () => {
+	hostTime();
 	const end = await subscribeEnd([0, 2], Version.DRAFT_07);
 	expect(end.group).toBe(3n);
 });
@@ -2008,6 +2020,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 // Before lite-07 an errored end goes out only as the reset at that end: a clean SUBSCRIBE_FINISH
 // sent early could let the subscriber settle before the reset arrives.
 test("lite draft-06: an errored end is not declared early", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
@@ -2368,6 +2381,7 @@ async function serve(
 // The response has no per-frame index, so the receiver numbers what it gets from the
 // GROUP header. Ignoring the requested start would relabel frame 0 as frame N.
 test("lite draft-06: a subscription starting mid-group skips the head", async () => {
+	hostTime();
 	const { served } = await serve({ 0: ["a", "b", "c", "d"] }, { startGroup: 0n, startFrame: 2 });
 	expect(served).toEqual([{ sequence: 0n, frameStart: 2, payloads: ["c", "d"] }]);
 });
@@ -2375,6 +2389,7 @@ test("lite draft-06: a subscription starting mid-group skips the head", async ()
 // A start at the group's final frame count is a valid, empty range: FIN, don't reset.
 // A relay resuming a parked track asks for exactly this.
 test("lite draft-06: a subscription starting at the end of a group serves it empty", async () => {
+	hostTime();
 	const { start, served } = await serve({ 0: ["a", "b"] }, { startGroup: 0n, startFrame: 2 });
 	expect(start).toBe(0n);
 	expect(served).toEqual([{ sequence: 0n, frameStart: 2, payloads: [] }]);
@@ -2382,12 +2397,14 @@ test("lite draft-06: a subscription starting at the end of a group serves it emp
 
 // A received tail that ends where it starts is the same valid, empty range.
 test("lite draft-06: an empty received tail is served empty at its start", async () => {
+	hostTime();
 	const { served } = await serve({ 0: [] }, { startGroup: 0n, startFrame: 5 }, { 0: 5 });
 	expect(served).toEqual([{ sequence: 0n, frameStart: 5, payloads: [] }]);
 });
 
 // The end bound is inclusive.
 test("lite draft-06: a subscription capped mid-group stops at the end frame", async () => {
+	hostTime();
 	const { served } = await serve(
 		{ 0: ["a", "b", "c", "d"] },
 		{ startGroup: 0n, startFrame: 1, endGroup: 0n, endFrame: 2 },
@@ -2397,6 +2414,7 @@ test("lite draft-06: a subscription capped mid-group stops at the end frame", as
 
 // The default is the whole group, byte-identical to a draft with no such field.
 test("lite draft-06: an unbounded subscription serves the whole group", async () => {
+	hostTime();
 	const { served } = await serve({ 0: ["a", "b"] }, {});
 	expect(served).toEqual([{ sequence: 0n, frameStart: 0, payloads: ["a", "b"] }]);
 });
@@ -2404,6 +2422,7 @@ test("lite draft-06: an unbounded subscription serves the whole group", async ()
 // The frame bounds qualify their own group and nothing else. Without a span like this,
 // an implementation that caps every group passes just as well.
 test("lite draft-06: frame bounds apply only to the groups they name", async () => {
+	hostTime();
 	const { served } = await serve(
 		{ 0: ["a0", "a1", "a2"], 1: ["b0", "b1", "b2"], 2: ["c0", "c1", "c2"] },
 		{ startGroup: 0n, startFrame: 2, endGroup: 2n, endFrame: 0 },
@@ -2419,6 +2438,7 @@ test("lite draft-06: frame bounds apply only to the groups they name", async () 
 // A group below the requested start was never asked for. Serving it also lets
 // SUBSCRIBE_START name a group below the start, which the draft forbids.
 test("lite draft-06: groups below the start group are not served", async () => {
+	hostTime();
 	const { start, served } = await serve({ 0: ["x"], 1: ["y"], 2: ["z"] }, { startGroup: 1n });
 	expect(served.map((s) => s.sequence)).toEqual([1n, 2n]);
 	expect(start).toBe(1n);
@@ -2426,6 +2446,7 @@ test("lite draft-06: groups below the start group are not served", async () => {
 
 // The end group is inclusive; anything past it is outside the subscription.
 test("lite draft-06: groups past the end group are not served", async () => {
+	hostTime();
 	const { served } = await serve({ 0: ["w"], 1: ["x"], 2: ["y"], 3: ["z"] }, { startGroup: 1n, endGroup: 2n });
 	expect(served.map((s) => s.sequence)).toEqual([1n, 2n]);
 });
@@ -2434,6 +2455,7 @@ test("lite draft-06: groups past the end group are not served", async () => {
 // range: a Rust peer feeds it into finish_at, so a truncated value would silently drop
 // the held-back groups across languages.
 test("lite draft-06: a capped subscription still reports the track's final boundary", async () => {
+	hostTime();
 	const { end } = await serve({ 0: ["w"], 1: ["x"], 2: ["y"], 3: ["z"] }, { startGroup: 1n, endGroup: 2n });
 	expect(end).toBe(4n);
 });
@@ -2595,6 +2617,7 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 });
 
 test("lite draft-05: a group waiting for a stream slot is dropped when the subscriber leaves", async () => {
+	hostTime();
 	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
 
 	client.close();
@@ -2616,6 +2639,7 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 // delivered, so dropping them here would strand the tail of every finite track. The FIN
 // tells the subscriber every group is accounted for, so it waits for the queued group.
 test("lite draft-05: a group waiting for a stream slot survives the track finishing", async () => {
+	hostTime();
 	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
 
 	track.finish();
@@ -2644,6 +2668,7 @@ test("lite draft-05: a group waiting for a stream slot survives the track finish
 // and `runProbe`'s catch would then close the probe stream for the rest of the
 // session. Drive the real loop so removing the rounding fails this test.
 test("runProbe rounds a fractional smoothedRtt instead of killing the stream", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN_05, {
 		stats: { estimatedSendRate: 1_000_000, smoothedRtt: 12.34 },
 	});
@@ -2821,6 +2846,7 @@ function unauthorizedResets(resets: { mock: { calls: unknown[][] } }): string[] 
 // Nothing is announced before the grant it would be checked against: an ANNOUNCE_REQUEST that
 // lands before the setup token is answered waits, then leaves out what the grant excludes.
 test("lite draft-06: announces wait for the setup grant", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
 	const grant = new Signal<Grant | undefined>(undefined);
@@ -2866,6 +2892,7 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 // A local close while an announce waits on the setup grant finishes it at once, rather than
 // holding the close until its deadline.
 test("lite draft-06: closing while announces wait for the setup grant does not hang", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
 	const grant = new Signal<Grant | undefined>(undefined);

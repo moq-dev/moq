@@ -1,4 +1,4 @@
-# [S] Release's audio encoder rolls groups before the cap
+# [XS] Release's audio encoder rolls groups before the cap
 
 ## Goal
 
@@ -9,16 +9,17 @@ the next release as a patch.
 
 ## Plan
 
-Added 2026-11-06 (maintainer, follow-up planning in `/quest-complete`), from
-[moq-dev/moq#7279](https://github.com/moq-dev/moq/pull/7279), which shipped
-`groupDuration` in `@moq/publish` 0.5.5: a `groupDuration` of tens of
-seconds with 2.5 ms Opus frames passes `release`'s per-group frame cap and
-throws.
+The fix is [moq-dev/moq#8118](https://github.com/moq-dev/moq/pull/8118), a PR
+into `release` only: `Audio.Encoder` counts the open group's frames and bytes
+and rolls at the net caps, tested with 2.5 ms frames and 1 MiB frames under a
+60 s `groupDuration`. `main` has no group cap
+([unbounded groups](/quest/m2/unbounded-groups/README.md)), so it gets no
+change.
 
-`main` has no group cap ([unbounded groups](/quest/m2/unbounded-groups/README.md)),
-so this is a fix on `release` only, a PR into `release` with no `main`
-change. Roll the group at the cap the way `js/json`'s window encoder does on
-`release` (`MAX_GROUP_FRAMES`, kept below the net cap), and test a long
-`groupDuration` with 2.5 ms frames.
+Once the patch publishes, delete this quest.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: merge [moq-dev/moq#8118](https://github.com/moq-dev/moq/pull/8118) into `release` and cut the next `@moq/publish` patch; check that `npm view @moq/publish version` is past 0.5.5 and that its release cut contains [moq-dev/moq#8118](https://github.com/moq-dev/moq/pull/8118)'s merge commit. A release cut is a maintainer action, and version bumps are manual.

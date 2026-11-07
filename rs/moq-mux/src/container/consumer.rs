@@ -2719,6 +2719,51 @@ mod tests {
 		assert_eq!(items(&mut consumer).await, ["0", "end 0", "1000000"]);
 	}
 
+	/// A pause's timestamp jump is not lateness: the group that resumes it can arrive behind the
+	/// one after it, and is waited for like any hole rather than skipped as too old.
+	#[tokio::test(start_paused = true)]
+	async fn the_head_after_a_declared_end_is_waited_for() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut consumer = Consumer::new(
+			track.subscribe(
+				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30))),
+			),
+			Container::Legacy(crate::container::Kind::Audio),
+		);
+		consumer.max_delay = Duration::from_millis(300);
+		write_group(&mut track, 0, &[ts(0)]);
+		// The end, then the stopped encoder's final packet, as `moq_audio`'s producer writes them.
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		let frame = |timestamp, payload| Frame {
+			timestamp,
+			payload,
+			keyframe: true,
+			duration: None,
+		};
+		Container::Legacy(crate::container::Kind::Audio)
+			.write(
+				&mut group,
+				&[
+					frame(ts(60_000), Bytes::new()),
+					frame(ts(40_000), Bytes::from_static(b"x")),
+				],
+			)
+			.unwrap();
+		group.finish().unwrap();
+		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
+		assert!(matches!(
+			consumer.read().await.unwrap(),
+			Some(Read::End { group: 1, .. })
+		));
+		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(40_000));
+		write_group(&mut track, 3, &[ts(60_060_000)]);
+		tokio::time::advance(Duration::from_millis(299)).await;
+		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());
+		write_group(&mut track, 2, &[ts(60_000_000)]);
+		track.finish().unwrap();
+		assert_eq!(items(&mut consumer).await, ["60000000", "60060000"]);
+	}
+
 	#[tokio::test]
 	async fn a_zero_budget_idle_resume_reports_the_shed_marker_as_a_gap() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));

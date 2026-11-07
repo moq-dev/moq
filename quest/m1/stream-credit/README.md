@@ -42,5 +42,4 @@ receiving every group, and nothing hanging.
 
 ## Required
 
-- [Reset fallback](/quest/m1/stream-credit/reset-fallback.md) - a waiting higher-priority open resets the lowest-priority stream, one reset in flight per waiting open
 - [Takeover](/quest/m1/stream-credit/takeover.md) - on lite-07 a higher-priority group takes over an acknowledged stream, and a group that lost its stream resumes

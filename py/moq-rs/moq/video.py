@@ -27,7 +27,6 @@ from .types import VideoCodec as Codec
 from .types import VideoEncoderInput as EncoderInput
 from .types import VideoEncoderKind as EncoderKind
 from .types import VideoEncoderOutput as EncoderOutput
-from .types import VideoGop as Gop
 from .types import VideoPixelFormat as PixelFormat
 
 Read = VideoDecodedFrame | Gap | End
@@ -132,7 +131,7 @@ class Producer:
     def cut(self) -> None:
         """Start a new group at the next written frame.
 
-        Optional: the encoder starts groups on its own per ``output.gop``. Raises
+        Optional: the encoder starts groups on its own per ``output.join``. Raises
         if the selected encoder cannot force a keyframe; groups keep their interval.
         """
         self._inner.cut()
@@ -229,7 +228,6 @@ __all__ = [
     "End",
     "Frame",
     "Gap",
-    "Gop",
     "Packet",
     "PixelFormat",
     "Producer",

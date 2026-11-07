@@ -118,8 +118,8 @@ pub struct MoqVideoEncoderInput {
 	pub width: u32,
 	/// Encoded height in pixels. Must be even.
 	pub height: u32,
-	/// Nominal frames per second, used for the codec time base and the default
-	/// bitrate and keyframe interval. Must be non-zero.
+	/// Nominal frames per second, used for the codec time base, the default
+	/// bitrate, and rounding the join to whole frames. Must be non-zero.
 	pub framerate: MoqVideoFrameRate,
 }
 
@@ -132,9 +132,11 @@ pub struct MoqVideoEncoderOutput {
 	/// and framerate.
 	#[uniffi(default = None)]
 	pub bitrate: Option<u64>,
-	/// How encoded pictures are divided into independently decodable groups.
+	/// The time between join points: a keyframe opens a group this often,
+	/// rounded to whole frames. `None` keyframes every two seconds; zero is
+	/// refused.
 	#[uniffi(default = None)]
-	pub gop: Option<MoqVideoGop>,
+	pub join: Option<std::time::Duration>,
 	/// Encoder implementation preference. Pass
 	/// [`MoqVideoEncoderKind::Auto`] unless you need a specific backend.
 	pub kind: MoqVideoEncoderKind,
@@ -162,24 +164,6 @@ pub struct MoqVideoProducerOptions {
 	/// [`bandwidth`](Self::bandwidth), and a ceiling above the lower rendition's.
 	#[uniffi(default = None)]
 	pub lower: Option<Arc<MoqVideoProducer>>,
-}
-
-/// How the encoded stream is divided into independently decodable groups.
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum MoqVideoGop {
-	/// Start a group with a keyframe every `interval` frames.
-	Keyframe {
-		/// The number of frames between keyframes.
-		interval: u32,
-	},
-}
-
-impl From<MoqVideoGop> for moq_video::encode::Gop {
-	fn from(gop: MoqVideoGop) -> Self {
-		match gop {
-			MoqVideoGop::Keyframe { interval } => Self::Keyframe { interval },
-		}
-	}
 }
 
 /// One raw video frame: pixels plus a presentation timestamp.
@@ -226,8 +210,8 @@ fn video_encoder_config(
 	config.codec = output.codec.into();
 	config.kind = output.kind.clone().into();
 	config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
-	if let Some(gop) = output.gop {
-		config.gop = gop.into();
+	if let Some(join) = output.join {
+		config.join = join;
 	}
 	Ok(config)
 }
@@ -626,7 +610,7 @@ impl MoqVideoProducer {
 	/// Cut a new group at the next written frame.
 	///
 	/// Optional. The encoder already keyframes every
-	/// [`gop`](MoqVideoEncoderOutput::gop) frames, and each of those cuts a
+	/// [`join`](MoqVideoEncoderOutput::join), and each of those cuts a
 	/// group, so a subscriber can always join without you calling this. Reach for
 	/// it only to place the boundaries yourself: aligning groups with something
 	/// the encoder cannot see, such as a scene change, a source switch, or
@@ -785,7 +769,7 @@ impl MoqVideoProducer {
 		// closes its encoder before this one opens, so only one codec session is live.
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
-		let gop = config.gop.duration(config.framerate);
+		let join = config.effective_join();
 		let ceiling = video_ceiling(&config, &rendition);
 		if let Some((_, below, _)) = &lower
 			&& *below >= ceiling
@@ -818,7 +802,7 @@ impl MoqVideoProducer {
 			};
 			Ok(moq_video::encode::Producer::with_track(
 				track,
-				state.catalog.reserve().with_interval(gop),
+				state.catalog.reserve().with_interval(join),
 				rendition,
 			)?)
 		})?;
@@ -1408,7 +1392,7 @@ mod finish_tests {
 		let output = MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: None,
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		};
 		for (numerator, denominator) in [(30_000, 1001), (60_000, 2002), (24_000, 1001)] {
@@ -1462,7 +1446,7 @@ mod finish_tests {
 			MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: Some(500_000),
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 		)
@@ -1513,7 +1497,7 @@ mod finish_tests {
 		let output = MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: Some(4_000_000),
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		};
 		let video = crate::video::MoqVideoProducer::new(
@@ -1707,7 +1691,7 @@ mod rung_tests {
 		MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: Some(bitrate),
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		}
 	}

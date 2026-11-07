@@ -16,7 +16,7 @@ excluded:
   ACKs, and retransmits.
 - **WebSocket:** the TCP stream's bytes, which include TLS, WebSocket, and
   qmux framing and retransmits.
-- **Gateways an embedder terminates:** SRT through moq-srt's source. moq-rtc
+- **Gateways an embedder terminates:** SRT through moq-srt's source. moq-webrtc
   exposes none since #6454 removed its unused one; it returns only with an
   adapter a consumer registers. An embedder terminating RTMP on its own socket
   registers that socket's `TCP_INFO` counts; moq-rtmp's own `Server` and

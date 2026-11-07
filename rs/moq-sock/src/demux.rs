@@ -149,7 +149,7 @@ impl Counters {
 /// Keyed by the remote address alone: the local port is the socket's, and a
 /// remote address reaching two of a wildcard socket's local addresses is
 /// treated as one flow. IPv4-mapped addresses are folded to IPv4, as
-/// `moq_ice::canonical` does, so a dual-stack socket's pins match.
+/// moq-webrtc's ICE agent does, so a dual-stack socket's pins match.
 #[derive(Clone, Debug, Default)]
 pub struct Flows(Arc<FlowsState>);
 
