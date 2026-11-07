@@ -2712,12 +2712,30 @@ mod tests {
 		);
 		consumer.max_delay = Duration::from_millis(300);
 		write_group(&mut track, 0, &[ts(0)]);
-		write_marker_group(&mut track, 1, ts(60_000));
+		// The end, then the stopped encoder's final packet, as `moq_audio`'s producer writes them.
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		let frame = |timestamp, payload| Frame {
+			timestamp,
+			payload,
+			keyframe: true,
+			duration: None,
+		};
+		Container::Legacy(crate::container::Kind::Audio)
+			.write(
+				&mut group,
+				&[
+					frame(ts(60_000), Bytes::new()),
+					frame(ts(40_000), Bytes::from_static(b"x")),
+				],
+			)
+			.unwrap();
+		group.finish().unwrap();
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 		assert!(matches!(
 			consumer.read().await.unwrap(),
 			Some(Read::End { group: 1, .. })
 		));
+		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(40_000));
 		write_group(&mut track, 3, &[ts(60_060_000)]);
 		tokio::time::advance(Duration::from_millis(299)).await;
 		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());

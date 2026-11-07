@@ -191,8 +191,9 @@ export class Consumer {
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
 	#mediaGroup?: bigint;
-	// The last item read was a declared end, so the timeline is paused until a frame resumes it.
-	#paused = false;
+	// The group of the last declared end read, until a frame from a later group resumes the timeline.
+	// Not at the next frame: the stopped encoder's final packets may follow the end in its group.
+	#paused?: bigint;
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	#lost = false;
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
@@ -825,7 +826,7 @@ export class Consumer {
 					const skipHole =
 						head.frames.length > 0 &&
 						(maxDelay === 0 ||
-							(!this.#paused &&
+							(this.#paused === undefined &&
 								this.#presentedEnd !== undefined &&
 								head.latest !== undefined &&
 								head.latest - this.#presentedEnd > maxDelay));
@@ -1043,7 +1044,8 @@ export class Consumer {
 		const edge = this.#edge;
 		const lost = this.#lost;
 		this.#lost = false;
-		this.#paused = read.kind === "end";
+		if (read.kind === "end") this.#paused = read.group;
+		else if (this.#paused !== undefined && read.group > this.#paused) this.#paused = undefined;
 		this.#advance(read.kind === "frame" ? Micro(resume + (read.frame.duration ?? Micro.zero)) : resume);
 		if (!lost || edge === undefined) return read;
 

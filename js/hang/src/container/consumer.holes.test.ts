@@ -257,12 +257,14 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 			results.push(read);
 		}
 	})();
-	const write = (sequence: bigint, timestamp: number, payload = new Uint8Array([1])) => {
+	const write = (sequence: bigint, ...frames: [number, Uint8Array?][]) => {
 		const group = track.createGroup(sequence);
-		group.writeFrame({
-			payload: encodeFrame(payload, Micro(timestamp)),
-			timestamp: Time.Timestamp.fromMicros(Micro(timestamp)),
-		});
+		for (const [timestamp, payload = new Uint8Array([1])] of frames) {
+			group.writeFrame({
+				payload: encodeFrame(payload, Micro(timestamp)),
+				timestamp: Time.Timestamp.fromMicros(Micro(timestamp)),
+			});
+		}
 		group.finish();
 	};
 	const frame = (group: bigint, timestamp: number) => ({
@@ -271,21 +273,22 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 		frame: expect.objectContaining({ timestamp }),
 	});
 	try {
-		write(0n, 0);
-		write(1n, 60_000, new Uint8Array());
+		write(0n, [0]);
+		// The end, then the stopped encoder's final packet, as a native publisher writes them.
+		write(1n, [60_000, new Uint8Array()], [40_000]);
 		await flush();
-		expect(results).toEqual([frame(0n, 0), { kind: "end", group: 1n, end: Micro(60_000) }]);
-		write(3n, 60_060_000);
+		expect(results).toEqual([frame(0n, 0), { kind: "end", group: 1n, end: Micro(60_000) }, frame(1n, 40_000)]);
+		write(3n, [60_060_000]);
 		await flush();
 		await clock.advance(Nano.fromMilli(Milli(299)));
-		expect(results).toHaveLength(2);
+		expect(results).toHaveLength(3);
 		if (arrives) {
-			write(2n, 60_000_000);
+			write(2n, [60_000_000]);
 			await flush();
-			expect(results.slice(2)).toEqual([frame(2n, 60_000_000), frame(3n, 60_060_000)]);
+			expect(results.slice(3)).toEqual([frame(2n, 60_000_000), frame(3n, 60_060_000)]);
 		} else {
 			await clock.advance(Nano.fromMilli(Milli(1)));
-			expect(results.slice(2)).toEqual([
+			expect(results.slice(3)).toEqual([
 				{ kind: "gap", timestamp: Micro(60_000), duration: Micro(60_000_000) },
 				frame(3n, 60_060_000),
 			]);
