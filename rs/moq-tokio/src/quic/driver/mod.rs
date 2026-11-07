@@ -85,6 +85,7 @@ pub(crate) enum ConnectionEvent {
 	},
 	Proto(moq_quic::ConnectionEvent),
 	/// The endpoint switched sockets
+	#[cfg(test)]
 	Rebind,
 }
 

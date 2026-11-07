@@ -757,6 +757,7 @@ impl State {
 	fn process_conn_events(&mut self, cx: &mut Context<'_>) -> Result<(), Error> {
 		loop {
 			match self.conn_events.poll_recv(cx) {
+				#[cfg(test)]
 				Poll::Ready(Some(ConnectionEvent::Rebind)) => {
 					self.inner.local_address_changed();
 				}
