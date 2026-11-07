@@ -1,14 +1,15 @@
 import MoqFFI
 
-/// Point-to-point sessions over hidden endpoint broadcasts.
+/// Point-to-point sessions between server and client endpoints.
 public enum Socket {}
 
 extension Socket {
-    /// Announces one endpoint and dials or accepts independent TCP and track sessions.
+    /// A server, a client, or both: dials or accepts independent TCP and track sessions.
     public final class Endpoint: Sendable {
         let ffi: MoqSocketEndpoint
 
-        /// Announce `id` beneath `prefix`, using `origin` to find peers.
+        /// The endpoint `id` beneath `prefix`, using `origin` to find peers. Its first dial
+        /// announces it as a client, and its first accept as a server.
         public init(origin: OriginProducer, prefix: String, id: String) throws {
             ffi = try MoqSocketEndpoint(origin: origin.ffi, prefix: prefix, id: id)
         }
@@ -17,7 +18,7 @@ extension Socket {
         public var id: String { ffi.id() }
         /// The shared endpoint prefix.
         public var prefix: String { ffi.prefix() }
-        /// Retract the endpoint and reset its pending dials and sessions.
+        /// Retract the endpoint's broadcasts and reset its pending dials and sessions.
         public func close() { ffi.close() }
 
         /// Dial a new tcp session; cancelling resets this dial.

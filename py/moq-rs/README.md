@@ -253,8 +253,9 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 `from moq import socket` exposes `socket.Endpoint(origin, prefix, id)`. Use the
 same origin as the session's publish and consume sides. Hold the endpoint while
-sessions run, or use it as an async context manager. It announces only
-`<prefix>/.socket/<id>`; keep each session id private.
+sessions run, or use it as an async context manager. Its first dial announces
+`<prefix>/.client/<id>` and its first accept `<prefix>/.server/<id>`, so grants
+decide whether it may be a client, a server, or both; keep each session id private.
 
 - `await endpoint.dial_tcp(peer)` and `await endpoint.accept_tcp()` use the TCP queue.
 - `await endpoint.dial_track(peer, info=None)` and `await endpoint.accept_track()` use the track queue.
