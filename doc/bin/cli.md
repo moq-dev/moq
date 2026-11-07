@@ -262,7 +262,8 @@ the schema the
 [audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
 reduces to underruns, skips, and silence. A silence the publisher declares, such
 as a push-to-talk mute, plays as comfort noise at the level of the quietest audio
-heard before it, and counts as no gap or stall.
+heard before it, and counts as no gap or stall. The metrics total that comfort
+noise and name the media timestamp each utterance after it resumes from.
 
 The broadcast's announcement is its online signal, followed until the window
 closes. Playback starts when the name is announced. A
