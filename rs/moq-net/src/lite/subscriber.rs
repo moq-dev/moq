@@ -3102,7 +3102,7 @@ impl kio::Task for DatagramServe {
 			self.state,
 			DatagramState::Ending { .. } | DatagramState::Finish { .. } | DatagramState::Done
 		) && self.gate.poll_denied(waiter).is_ready()
-			&& self.closed.poll_closed(waiter).is_pending()
+			&& self.closed.poll_ending(waiter).is_pending()
 		{
 			tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name(), "datagrams no longer authorized");
 			self.abort(Error::Unauthorized);
@@ -10856,7 +10856,7 @@ impl kio::Task for TrackServeRun {
 		// its tracks end.
 		if !matches!(self.state, TrackRunState::Ending { .. } | TrackRunState::Finish { .. })
 			&& self.gate.poll_denied(waiter).is_ready()
-			&& self.serve.subscriber.session.clone().poll_closed(waiter).is_pending()
+			&& self.serve.subscriber.session.poll_ending(waiter).is_pending()
 		{
 			self.revoke();
 			return Poll::Ready(());
