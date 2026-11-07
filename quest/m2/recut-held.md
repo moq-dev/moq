@@ -29,6 +29,5 @@ padding probes already moved to m3 on 2026-11-06.
 
 ## Required
 
-- [Release on leave](/quest/m1/stream-credit/release-on-leave.md) - claim held stream-credit
 - [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - claim held probe
 - [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - claim held probe

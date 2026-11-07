@@ -17,8 +17,8 @@ test("audio-only sampling holds probe demand until its final RTT sample", async 
 	});
 	const empty = new Signal(undefined);
 	const watch = {
+		connection: { probe: network },
 		player: {
-			in: { probe: network },
 			audio: {
 				out: { stalled: new Signal(false), context: empty, root: empty, timestamp: empty, stats: empty },
 				source: { out: { config: empty } },
