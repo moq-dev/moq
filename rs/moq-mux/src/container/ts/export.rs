@@ -12,7 +12,7 @@
 //! the instant it asserts. Video is carried as Annex-B, audio as ADTS AAC.
 //!
 //! Every frame is muxed a fixed delay after its release time, its decode time less its
-//! send-ahead ([`Export::with_delay`]), so tracks interleave in one order whatever the
+//! send-ahead ([`Export::new`]), so tracks interleave in one order whatever the
 //! arrival skew between them, and the output keeps the source's pace.
 //!
 //! Video flows through `ExportSource`, which normalizes every H.264/H.265
@@ -240,7 +240,8 @@ where
 /// What a queued output frame tells [`Export::stats`], applied only once the frame is
 /// returned: a rewind drops the queue unwritten.
 struct Tally {
-	/// The frame's PCR in 27 MHz ticks, and whether it flags a new time base.
+	/// The frame's PCR in 27 MHz ticks, and whether a declared marker, rewind, or program
+	/// switch started a new time base.
 	pcr: (u64, bool),
 	/// The PID of each access unit whose packets begin in the frame.
 	units: Vec<u16>,
@@ -272,8 +273,6 @@ struct Pending {
 /// A frame waiting in the jitter buffer, with what it needs from the moment it was read.
 struct Queued {
 	frame: Frame,
-	/// Delivery skips before this frame, excluding declared timeline boundaries.
-	gap: u64,
 	/// When the frame decodes: its DTS, else its PTS.
 	decode: Timestamp,
 	/// Where the jitter buffer orders it ([`Track::release_key`]).
@@ -319,14 +318,6 @@ struct Track {
 	/// The marker, skip and cut counts of the sources the track read before this one, so the
 	/// counts keep rising across a resubscription.
 	base: (u64, u64, u64),
-	/// Delivery skips before the last frame muxed, so read-ahead cannot flag earlier output.
-	gap: u64,
-	/// Furthest presentation time muxed, so overlapping track losses share one break.
-	last_timestamp: Option<Timestamp>,
-	/// The last delivery loss the track signalled or joined ([`coalesce`]). Only the last, so
-	/// state stays bounded by the track count: a slower track can flag an outage again after a
-	/// faster one moved past it, an extra flag where loss did happen.
-	lost: Option<Lost>,
 	/// How many unmarked steps back the track's timeline took ([`Self::steps_back`]), each
 	/// counted as a marker of its own.
 	steps: u64,
@@ -409,9 +400,6 @@ impl Track {
 			latest: kio::clock::Instant::ZERO,
 			restart: 0,
 			base: (0, 0, 0),
-			gap: 0,
-			last_timestamp: None,
-			lost: None,
 			steps: 0,
 			high: None,
 			finished: false,
@@ -853,7 +841,6 @@ impl Track {
 		let Pending {
 			frame,
 			restart,
-			skip,
 			arrived,
 			read,
 			..
@@ -902,7 +889,6 @@ impl Track {
 			bytes: frame.payload.len() + self.key.name.len(),
 			item: Queued {
 				frame,
-				gap: skip.saturating_sub(restart),
 				decode,
 				key,
 				dts,
@@ -1239,8 +1225,6 @@ struct PesUnit {
 	pid: u16,
 	is_video: bool,
 	keyframe: bool,
-	/// Delivery loss precedes this frame, so its scheduled PCR flags the gap.
-	skipped: bool,
 	timestamp: Timestamp,
 	/// Authored decode timestamp for a reordered (B-frame) video frame, in continuous
 	/// (unwrapped) 90 kHz ticks (wrapped to the wire field in `write_pes`). `Some` only when
@@ -1566,7 +1550,7 @@ impl<S: Stream> Program<S>
 where
 	S::Ext: catalog::Catalog,
 {
-	fn new(mut source: crate::Source, catalog: S) -> Self {
+	fn new(mut source: crate::Source, catalog: S, delay: Duration) -> Self {
 		source.isolate();
 		let instance = source.broadcast().info().instance.clone();
 		Self {
@@ -1587,7 +1571,7 @@ where
 			tables: Vec::new(),
 			psi_due: false,
 			revised: false,
-			delay: Duration::ZERO,
+			delay,
 			generation: 0,
 			tracks: HashMap::new(),
 			counters: FxHashMap::default(),
@@ -1601,7 +1585,7 @@ where
 			epoch: 0,
 			emitted_epoch: 0,
 			pcr_discontinuity: false,
-			schedule: Schedule::new(Duration::ZERO),
+			schedule: Schedule::new(delay),
 			slot_timer: None,
 			replay: false,
 			queue: VecDeque::new(),
@@ -1623,10 +1607,42 @@ where
 	/// The caller chooses the catalog format and rendition selection on any [`Stream`].
 	/// The stream remains owned until the export is dropped or follows another broadcast;
 	/// concrete catalog consumers release their subscription and decoder when they end.
-	pub fn new(source: crate::Source, catalog: S) -> Self {
+	///
+	/// Mux each frame `delay` after its release time, like an SRT receiver's TSBPD: its
+	/// decode time less its send-ahead.
+	///
+	/// The send-ahead comes out of the same budget. A frame may go out up to the delay
+	/// ahead of its decode time, as far as its PID's decoder buffer holds and as early as the
+	/// receiver's buffers admit, so a heavy passage rides the slots before it. Its release
+	/// time is that far before its decode time, so it is muxed just as the first slot it may
+	/// ride is laid, and each slot goes out the delay after its own time on the source's
+	/// clock rather than a delay later still.
+	///
+	/// The clock is acquired before anything goes out: frames are held until every expected
+	/// track has delivered (two delays at most) and a track starts a new group, or for a delay
+	/// at most once all have. The track sent latest against its release time sets the clock,
+	/// so a joiner runs at the delay from its first output and every frame has the whole delay
+	/// to arrive in. A source that sends its video its send-ahead
+	/// early, as a TS mux does, is trailed by the delay; one that sends every track at its
+	/// decode time, by the delay and the video's send-ahead. The output then keeps the
+	/// source's pace and muxes every track in `(release time, PID)` order whatever the
+	/// arrival skew between them. A frame that arrives after its deadline is dropped, and a
+	/// video track that dropped one resumes at its next keyframe. A source whose clock runs
+	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
+	/// the delay, where a brief network stall only drops what it made late. A stalled group is
+	/// skipped once it falls half the delay behind the newest content (see
+	/// [`Consumer`](crate::container::Consumer)), so the group after it still arrives with
+	/// the other half to spare.
+	///
+	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
+	/// as does video whose HRD declares a buffer delay past the delay.
+	///
+	/// A zero `delay` holds nothing and sends each frame by its decode time.
+	pub fn new(source: crate::Source, catalog: S, delay: Duration) -> Self {
+		let program = Program::new(source, catalog, delay);
 		Self {
-			program: Program::new(source, catalog),
-			jitter: jitter::Buffer::new(Duration::ZERO),
+			program,
+			jitter: jitter::Buffer::new(delay),
 			held: None,
 			pending: None,
 			next_program: 1,
@@ -1662,52 +1678,11 @@ where
 		self
 	}
 
-	/// Mux each frame this long after its release time, like an SRT receiver's TSBPD: its
-	/// decode time less its send-ahead.
-	///
-	/// The send-ahead comes out of the same budget. A frame may go out up to the delay
-	/// ahead of its decode time, as far as its PID's decoder buffer holds and as early as the
-	/// receiver's buffers admit, so a heavy passage rides the slots before it. Its release
-	/// time is that far before its decode time, so it is muxed just as the first slot it may
-	/// ride is laid, and each slot goes out the delay after its own time on the source's
-	/// clock rather than a delay later still.
-	///
-	/// The clock is acquired before anything goes out: frames are held until every expected
-	/// track has delivered (two delays at most) and a track starts a new group, or for a delay
-	/// at most once all have. The track sent latest against its release time sets the clock,
-	/// so a joiner runs at the delay from its first output and every frame has the whole delay
-	/// to arrive in. A source that sends its video its send-ahead
-	/// early, as a TS mux does, is trailed by the delay; one that sends every track at its
-	/// decode time, by the delay and the video's send-ahead. The output then keeps the
-	/// source's pace and muxes every track in `(release time, PID)` order whatever the
-	/// arrival skew between them. A frame that arrives after its deadline is dropped, and a
-	/// video track that dropped one resumes at its next keyframe. A source whose clock runs
-	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
-	/// the delay, where a brief network stall only drops what it made late. A stalled group is
-	/// skipped once it falls half the delay behind the newest content (see
-	/// [`Consumer`](crate::container::Consumer)), so the group after it still arrives with
-	/// the other half to spare.
-	///
-	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
-	/// as does video whose HRD declares a buffer delay past the delay. Defaults to
-	/// [`Duration::ZERO`], which holds nothing and sends each frame by its decode time.
-	pub fn with_delay(mut self, delay: Duration) -> Self {
-		self.program.delay = delay;
-		self.jitter = jitter::Buffer::new(delay);
-		#[cfg(test)]
-		if self.program.replay {
-			self.jitter = jitter::Buffer::new(delay).replay();
-		}
-		self.program.schedule = Schedule::new(delay);
-		self.program.schedule.set_rate(self.program.mux_rate);
-		self
-	}
-
 	/// Get the next muxed frame.
 	///
 	/// Each [`Frame`] carries one slice of the PCR grid in `payload`: the clock
 	/// packets that slice opens with, followed by the muxed bytes belonging to it.
-	/// With a [delay](Self::with_delay), each slice is handed over at its time on the
+	/// With a [delay](Self::new), each slice is handed over at its time on the
 	/// jitter buffer's clock, which follows the source's, so a sink writes it as it
 	/// comes. It is stamped with the media time that slice starts at, for a transport
 	/// that stamps its own delivery, and `keyframe` marks the slice a video keyframe
@@ -2923,13 +2898,11 @@ where
 	}
 
 	fn replacement(&mut self, source: crate::Source, catalog: S) -> Program<S> {
-		let mut next = Program::new(source, catalog);
+		let mut next = Program::new(source, catalog, self.program.delay);
 		next.id = self.next_program;
 		self.next_program += 1;
-		next.delay = self.program.delay;
 		next.replay = self.program.replay;
 		next.mux_rate_override = self.program.mux_rate_override;
-		next.schedule = Schedule::new(next.delay);
 		next
 	}
 
@@ -3029,8 +3002,6 @@ where
 			psi.led = psi.out.as_ref().map(|laid| laid.pmt.clone());
 		}
 		for track in self.program.tracks.values_mut() {
-			track.last_timestamp = None;
-			track.lost = None;
 			track.pack = None;
 			track.parked.clear();
 		}
@@ -3509,27 +3480,12 @@ where
 	fn mux(&mut self, name: &str, queued: Queued) -> anyhow::Result<()> {
 		let Queued {
 			frame,
-			gap,
 			decode,
 			dts,
 			description,
 			pes,
 			..
 		} = queued;
-		let track = self.program.tracks.get_mut(name).context("missing track")?;
-		let skipped = gap > track.gap;
-		track.gap = gap;
-		// The track's missing interval runs from its furthest media muxed, or from the last
-		// reset when it has muxed none since, a start every such track shares (`None`).
-		let start = track.last_timestamp;
-		let end = frame.timestamp;
-		track.last_timestamp = Some(start.map_or(end, |start| start.max(end)));
-		let skipped = skipped && {
-			let others = self.program.tracks.values().filter_map(|track| track.lost);
-			let (lost, separate) = coalesce((start, end), others);
-			self.program.tracks.get_mut(name).context("missing track")?.lost = Some(lost);
-			separate
-		};
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let kind = &track.kind;
 		let is_video = matches!(kind, Kind::Video(_));
@@ -3592,7 +3548,7 @@ where
 		// The tables lead the unit that carries this frame, behind whatever went before it.
 		if kind.placed() {
 			self.program.psi_due |= psi;
-			return self.place(name, &frame, out, skipped);
+			return self.place(name, &frame, out);
 		}
 		match es_payload {
 			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
@@ -3606,7 +3562,6 @@ where
 					pid,
 					is_video,
 					keyframe,
-					skipped,
 					timestamp: frame.timestamp,
 					dts,
 					stream_id: stream_id(&kind),
@@ -3621,7 +3576,7 @@ where
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		self.push_unit(name, pid, decode, out, (keyframe, skipped), Vec::new())
+		self.push_unit(name, pid, decode, out, keyframe, Vec::new())
 	}
 
 	/// Queue a whole PES or section unchanged on `name`'s PID behind `tables`, its
@@ -3632,7 +3587,7 @@ where
 	/// unit that begins in it, so each one after counts on from there and leaves at its own time.
 	/// The bytes ahead of the first end a frame an earlier PES began; they leave with it,
 	/// which only overstates what the buffer holds. A PES without a PTS holds nothing there.
-	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>, skipped: bool) -> anyhow::Result<()> {
+	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
 		let track = self.program.tracks.get(name).context("missing track")?;
 		let pes = match track.kind {
 			Kind::PesPacket { stream_type } => Some(
@@ -3672,9 +3627,6 @@ where
 			self.program.schedule.set_buffer(pid, buffer);
 		}
 		self.lead_tables()?;
-		if skipped {
-			self.program.schedule.skip();
-		}
 		self.program.schedule.push_placed(
 			pid,
 			(place, decode.unwrap_or(place)),
@@ -3712,8 +3664,7 @@ where
 		let (size, fit) = track.fit(payload.len());
 		let place = place(unit.timestamp, samples, rate);
 		// A PTS is a whole 90 kHz tick, so the frames run on within one of where they end.
-		let joins = !unit.skipped
-			&& start.is_some()
+		let joins = start.is_some()
 			&& track.pack.as_ref().is_some_and(|pack| {
 				pack.start == start
 					&& pack.rate == rate
@@ -3760,7 +3711,7 @@ where
 		} = pack;
 		let mut out = Vec::new();
 		self.write_pes(&mut out, &unit, &payload)?;
-		self.push_unit(name, unit.pid, decode, out, (unit.keyframe, unit.skipped), frames)
+		self.push_unit(name, unit.pid, decode, out, unit.keyframe, frames)
 	}
 
 	/// Send on, in decode order, the packed frames of each track for which `done` holds, given
@@ -3792,7 +3743,7 @@ where
 		pid: u16,
 		decode: Timestamp,
 		out: Vec<u8>,
-		(keyframe, skipped): (bool, bool),
+		keyframe: bool,
 		frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
 		let mut tables = std::mem::take(&mut self.program.tables);
@@ -3822,9 +3773,6 @@ where
 		}
 		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
 		self.lead_tables()?;
-		if skipped {
-			self.program.schedule.skip();
-		}
 		self.program.schedule.push_frames(
 			pid,
 			super::schedule::Timing {
@@ -3959,8 +3907,8 @@ where
 			let mut payload = slot.layout(&clock, pmt_pid, &NULL_PACKET);
 			// The slot opens with its PCR, in the clock packet or the clock PID's packet that
 			// carries it, whose adaptation field flags the break.
-			let discontinuity = std::mem::take(&mut self.program.pcr_discontinuity) || slot.discontinuity;
-			if discontinuity {
+			let discontinuity = std::mem::take(&mut self.program.pcr_discontinuity);
+			if discontinuity || slot.discontinuity {
 				payload[5] |= 0x80;
 			}
 			self.number(&mut payload);
@@ -3980,6 +3928,7 @@ where
 				spent = breaks;
 			}
 			let tables = (0..slot.tables).filter_map(|_| psi.sending.pop_front()).last();
+			// Skipped slots retain the source timeline, so silence statistics include the jump.
 			let tally = Tally {
 				pcr: (slot.pcr, discontinuity),
 				units: slot.units,
@@ -4329,30 +4278,6 @@ fn dolby_removals(codec: Dolby, payload: &[u8], decode: u128) -> Vec<(u128, usiz
 		tail.1 += payload.len().saturating_sub(offset);
 	}
 	frames
-}
-
-/// A delivery loss's presentation interval: from the furthest media its track muxed before,
-/// `None` when it had muxed none since the last reset, to the frame it resumed at.
-type Lost = (Option<Timestamp>, Timestamp);
-
-/// Merge `lost` with every interval in `others` it overlaps, and whether it overlapped none,
-/// so it needs a PCR flag of its own.
-///
-/// Tracks resume the same outage in different release slots, and in any order. One flag covers
-/// their overlapping intervals, including a later read on another track that extends one
-/// already signalled. Presentation time shares the content's timeline across their different
-/// decode reserves, and every track that muxed nothing since the last reset starts its loss
-/// there.
-fn coalesce((start, end): Lost, others: impl IntoIterator<Item = Lost>) -> (Lost, bool) {
-	let shared: Vec<Lost> = others
-		.into_iter()
-		.filter(|&(first, last)| start.is_none_or(|start| start < last) && first.is_none_or(|first| first < end))
-		.collect();
-	// `None` sorts first, so a merge keeps an unbounded start.
-	let lost = shared.iter().fold((start, end), |(start, end), &(first, last)| {
-		(start.min(first), end.max(last))
-	});
-	(lost, shared.is_empty())
 }
 
 /// Whether `timestamp` has crossed into a later repetition slot than `last`.
@@ -5109,29 +5034,6 @@ mod tests {
 		Buffer, DecodeClock, Dolby, Kind, Laid, Mpeg2Picture, PSI_INTERVAL, PesPacket, Psi, Settle, dolby_removals,
 		due, is_complete_section, si_due, slot, unwrap_pts, verbatim_buffer,
 	};
-
-	/// Losses resumed out of presentation order flag each outage once, however they interleave.
-	#[test]
-	fn coalesce_flags_each_outage_once() {
-		let ms = |ms: u64| Timestamp::from_millis(ms).unwrap();
-		let a = (Some(ms(10_200)), ms(10_400));
-		let b = (Some(ms(9_800)), ms(10_000));
-		assert_eq!(super::coalesce(a, []), (a, true));
-		assert_eq!(super::coalesce(b, [a]), (b, true), "a disjoint earlier outage");
-		assert_eq!(super::coalesce(a, [a, b]), (a, false), "the first outage again");
-		let wider = (Some(ms(9_900)), ms(10_300));
-		assert_eq!(
-			super::coalesce(wider, [a, b]),
-			((Some(ms(9_800)), ms(10_400)), false),
-			"spanning both"
-		);
-		let reset = (None, ms(24_280));
-		assert_eq!(
-			super::coalesce((None, ms(24_216)), [reset]),
-			((None, ms(24_280)), false),
-			"both since a reset"
-		);
-	}
 
 	/// The tables as they stand take the version after the last laid, whatever was set on the
 	/// schedule meanwhile, and the last laid's own when they come back to it. The PAT keeps its

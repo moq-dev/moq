@@ -102,6 +102,9 @@ test, which failed two merge-queue batches and two loaded local runs.
 Added 2026-11-05 (maintainer, `/quest-audit`): Interop's P2P data-channel
 timeout, one child.
 
+Added 2026-11-06: `js/net`'s lite-06 datagram end/close case, from `Check` on
+[moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
+
 Added 2026-11-05 (maintainer, `/quest-complete` follow-ups): moq-net's
 pool-debt flight test, the Python audio playout-delay test, and the io_uring
 tests' shared locked-memory budget, one child each. The pool-debt test
@@ -129,7 +132,6 @@ Public API: none. Wire: none.
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
-- [The dev host's locked-memory limit fits parallel sessions](/quest/m0/test-flakes-2/uring-memlock.md) - the maintainer's host raises the user's `RLIMIT_MEMLOCK`, which Node.js rings from parallel agent sessions fill before io_uring tests start
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
 - [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
 - [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load
