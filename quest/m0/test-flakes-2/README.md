@@ -115,7 +115,11 @@ concurrent-ready test, quarantined here instead of in the unrelated
 Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
 `js/net`'s datagram-end close case, which failed
 [moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check while
-reproducing on unchanged `main`.
+reproducing on unchanged `main`. Its end waited a host task when the
+publisher's write budget yielded under load while writing SUBSCRIBE_FINISH, past
+the case's microtask drain. [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000)
+stubbed that budget, merging after the quarantine was written. The case was
+re-enabled in [moq-dev/moq#8110](https://github.com/moq-dev/moq/pull/8110).
 
 Public API: none. Wire: none.
 
@@ -127,6 +131,5 @@ Public API: none. Wire: none.
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [The dev host's locked-memory limit fits parallel sessions](/quest/m0/test-flakes-2/uring-memlock.md) - the maintainer's host raises the user's `RLIMIT_MEMLOCK`, which Node.js rings from parallel agent sessions fill before io_uring tests start
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
-- [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
 - [lite-05 copy fill checks idleness without wall time](/quest/m0/test-flakes-2/copy-fill-idle.md) - the copy-fill test proves no FETCH went out on the `Manual` clock, not a 200 ms real-time wait
 - [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load
