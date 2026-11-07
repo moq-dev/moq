@@ -4,7 +4,7 @@
 //! This is the shape that matters for a server. A 1:1 call has 2 m-lines and the
 //! cost is invisible. An SFU client in an N-person room has ~N m-lines (one per
 //! other participant), and `poll_output` is called thousands of times per second
-//! per connection — so any per-call linear scan over medias/streams is paid
+//! per connection - so any per-call linear scan over medias/streams is paid
 //! O(N) times, O(N^2) per room.
 //!
 //! The number reported is the cost of a poll that finds NOTHING to do (returns
@@ -133,7 +133,7 @@ fn measure(n: usize) -> Result<f64, RtcError> {
 		std::hint::black_box(l.rtc.poll_output()?);
 	}
 
-	// Time the empty poll. It is idempotent — it keeps returning Timeout — so we
+	// Time the empty poll. It is idempotent - it keeps returning Timeout - so we
 	// can call it repeatedly without changing the connection's state.
 	let mut best = f64::MAX;
 	for _ in 0..TRIALS {

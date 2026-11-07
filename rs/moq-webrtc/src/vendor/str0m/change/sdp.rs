@@ -732,7 +732,7 @@ fn init_dtls(rtc: &mut Rtc, remote_sdp: &Sdp) -> Result<(), RtcError> {
 /// The remote init bytes are stored in `RtcSctp.snap_init` for §5.6
 /// re-offer validation.
 ///
-/// When the remote includes `a=sctp-init`, we always accept and reciprocate —
+/// When the remote includes `a=sctp-init`, we always accept and reciprocate -
 /// Section 5.4 of draft-hancke-tsvwg-snap says the answerer MAY include the
 /// attribute, and doing so is beneficial.
 ///
@@ -741,7 +741,7 @@ fn init_dtls(rtc: &mut Rtc, remote_sdp: &Sdp) -> Result<(), RtcError> {
 fn process_remote_sctp_init(sctp: &mut RtcSctp, remote_init: Option<&str>) -> Result<bool, RtcError> {
 	if let Some(remote_init_str) = remote_init {
 		if sctp.is_inited() {
-			// §5.6: SCTP already established — remote MUST re-send the
+			// §5.6: SCTP already established - remote MUST re-send the
 			// same sctp-init value on subsequent offers/answers.
 			match sctp.snap_remote_init_string() {
 				Some(cached) if cached == remote_init_str => {
@@ -1544,10 +1544,10 @@ impl<'a, 'b> AsSdpParams<'a, 'b> {
 		// Answerers use the negotiated role (active/passive).
 		// We distinguish offer vs answer by the presence of `pending` (Some = offer).
 		let setup = if pending.is_some() {
-			// This is an offer — always actpass per RFC 8842
+			// This is an offer - always actpass per RFC 8842
 			Setup::ActPass
 		} else {
-			// This is an answer — use the negotiated DTLS role
+			// This is an answer - use the negotiated DTLS role
 			match rtc.dtls.is_active() {
 				Some(true) => Setup::Active,
 				Some(false) => Setup::Passive,

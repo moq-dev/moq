@@ -4280,7 +4280,7 @@ fn test_out_of_band_association_stream_negotiation() {
 			.with_max_num_inbound_streams(200),
 	);
 
-	// Remote uses default config — token always advertises u16::MAX
+	// Remote uses default config - token always advertises u16::MAX
 	let remote_config = TransportConfig::default();
 
 	let local_init_bytes = generate_snap_token(&config).unwrap();

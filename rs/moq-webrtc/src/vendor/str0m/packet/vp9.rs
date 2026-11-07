@@ -174,11 +174,11 @@ pub fn detect_vp9_keyframe(payload: &[u8]) -> bool {
 ///
 /// Supports both non-flexible mode (F=0) and flexible mode (F=1), controlled
 /// by [`Vp9PacketizerMode`]. Defaults to non-flexible mode for broad browser
-/// compatibility — Safari and older Chrome drop inter-frames with F=1.
+/// compatibility - Safari and older Chrome drop inter-frames with F=1.
 #[derive(Default, Clone)]
 pub struct Vp9Packetizer {
 	picture_id: u16,
-	/// Temporal layer 0 picture index — increments on every frame (since all
+	/// Temporal layer 0 picture index - increments on every frame (since all
 	/// frames are packetized as TID=0). Used in L byte for non-flexible mode.
 	tl0picidx: u8,
 	initialized: bool,
@@ -371,7 +371,7 @@ impl Vp9Packetizer {
 
 			let mut out = Vec::with_capacity(VP9_FLEXIBLE_HEADER_SIZE + current_fragment_size);
 
-			// Byte 0: I|P|L|F|B|E|V|Z — I=1, F=1
+			// Byte 0: I|P|L|F|B|E|V|Z - I=1, F=1
 			let mut flags = 0x90u8; // I=1, F=1
 			if is_first {
 				flags |= 0x08; // B=1
@@ -1280,7 +1280,7 @@ mod test {
 		assert_eq!(pkt[0], 0xEC, "Inter-frame flags should be 0xEC");
 		// tl0picidx = 2 (second frame, both TID=0 so both increment)
 		assert_eq!(pkt[4], 2);
-		// No SS data — payload starts at byte 5
+		// No SS data - payload starts at byte 5
 		assert_eq!(&pkt[5..], &inter[..]);
 
 		Ok(())

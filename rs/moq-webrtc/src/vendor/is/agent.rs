@@ -1721,8 +1721,8 @@ impl IceAgent {
 	///
 	/// We only act on 487 (Role Conflict) per RFC 8445 §7.3.1.1: switch to
 	/// the opposite role, but only if the request that triggered the 487 was
-	/// sent under our current role. Otherwise the response is stale —
-	/// in-flight from before an earlier swap — and acting on it would flap.
+	/// sent under our current role. Otherwise the response is stale -
+	/// in-flight from before an earlier swap - and acting on it would flap.
 	fn stun_client_handle_error(&mut self, message: StunMessage<'_>) {
 		let Some((code, _)) = message.error_code() else {
 			return;
@@ -1927,7 +1927,7 @@ impl IceAgent {
 	///
 	/// This is the ICE-level equivalent of
 	/// [`RTCIceCandidatePairStats.currentRoundTripTime`][1] and is updated
-	/// on every STUN keepalive/consent exchange — useful for measuring RTT
+	/// on every STUN keepalive/consent exchange - useful for measuring RTT
 	/// on receive-only endpoints where RTP-based RTT estimates aren't
 	/// available.
 	///
@@ -2623,7 +2623,7 @@ mod test {
 
 	/// On simultaneous controlling/controlling startup, the lower-tiebreaker
 	/// agent typically receives the peer's request first (server-side swap)
-	/// while its own in-flight requests — sent under the old role — are
+	/// while its own in-flight requests - sent under the old role - are
 	/// still being 487'd by the peer. Each of those stale 487s must be
 	/// ignored, otherwise the role flaps with every retransmit until the
 	/// in-flight drain finishes.
@@ -2640,7 +2640,7 @@ mod test {
 		remote_candidate.set_ufrag(&remote_creds.ufrag);
 		agent.add_remote_candidate(remote_candidate);
 
-		// Drive one binding request out — recorded as `controlling=true`.
+		// Drive one binding request out - recorded as `controlling=true`.
 		agent.handle_timeout(Instant::now());
 		let req_payload = Vec::from(agent.poll_transmit().unwrap().contents);
 		let trans_id = StunMessage::parse(&req_payload).unwrap().trans_id();
@@ -2810,7 +2810,7 @@ mod test {
 		// The controlled case above is the supported one. A *controlling*
 		// ice-lite agent must not be promoted the same way: there,
 		// `CheckState::Succeeded` feeds `evaluate_nomination`, so one
-		// request — whose PRIORITY the sender chooses — would pick the
+		// request - whose PRIORITY the sender chooses - would pick the
 		// send address without any return-routability proof.
 		let mut agent = new_test_agent();
 		agent.set_ice_lite(true);

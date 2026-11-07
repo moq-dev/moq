@@ -627,7 +627,7 @@ impl fmt::Display for AidCollisionKind {
 
 /// Specific errors that can occur during SNAP (out-of-band token) setup.
 ///
-/// These are not part of the stable API — match on [`ConnectError::Snap`]
+/// These are not part of the stable API - match on [`ConnectError::Snap`]
 /// and use the `Display` impl for user-facing messages.
 #[non_exhaustive]
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

@@ -3050,7 +3050,7 @@ fn test_snap_partial_config_falls_back_to_handshake() {
 	let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None);
 	let remote_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
 
-	// Only local_sctp_init set, remote missing — should fall back to normal handshake
+	// Only local_sctp_init set, remote missing - should fall back to normal handshake
 	let local_init = generate_snap_token(&TransportConfig::default()).expect("local init");
 	let client_config = ClientConfig {
 		local_sctp_init: Some(local_init),
@@ -3065,7 +3065,7 @@ fn test_snap_partial_config_falls_back_to_handshake() {
 		"should use normal handshake when only local init provided"
 	);
 
-	// Only remote_sctp_init set, local missing — should fall back to normal handshake
+	// Only remote_sctp_init set, local missing - should fall back to normal handshake
 	let remote_init = generate_snap_token(&TransportConfig::default()).expect("remote init");
 	let client_config = ClientConfig {
 		remote_sctp_init: Some(remote_init),
@@ -3086,7 +3086,7 @@ fn test_snap_rejects_reused_local_init() {
 	let mut endpoint = Endpoint::new(Arc::new(EndpointConfig::default()), None);
 	let remote_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
 
-	// Generate a single local init — reusing it causes a collision
+	// Generate a single local init - reusing it causes a collision
 	let local_init = generate_snap_token(&TransportConfig::default()).expect("local init");
 
 	let remote1 = generate_snap_token(&TransportConfig::default()).expect("remote init 1");
@@ -3202,7 +3202,7 @@ fn test_snap_rejects_truncated_bytes() {
 
 	let valid = generate_snap_token(&TransportConfig::default()).expect("valid init");
 
-	// Truncate to just 10 bytes — not enough for INIT header + fixed fields
+	// Truncate to just 10 bytes - not enough for INIT header + fixed fields
 	let truncated = valid.slice(..10.min(valid.len()));
 
 	let cfg = ClientConfig::new().with_snap(valid.clone(), truncated.clone());
@@ -3580,7 +3580,7 @@ fn test_snap_end_to_end_bidirectional_data() {
 	let addr_a: SocketAddr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), CLIENT_PORTS.lock().unwrap().next().unwrap());
 	let addr_b: SocketAddr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), CLIENT_PORTS.lock().unwrap().next().unwrap());
 
-	// Both sides are clients (no server config) — this is the SNAP model.
+	// Both sides are clients (no server config) - this is the SNAP model.
 	let mut ep_a = Endpoint::new(endpoint_config.clone(), None);
 	let mut ep_b = Endpoint::new(endpoint_config, None);
 

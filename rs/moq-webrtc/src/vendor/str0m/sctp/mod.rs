@@ -1616,7 +1616,7 @@ mod tests {
 	/// Regression test: when `assoc.open_stream()` returns `ErrStreamAlreadyExist`
 	/// for an in-band (DCEP) data channel, the entry must eventually transition to
 	/// Closed and emit `SctpEvent::Close`. The error is transient (a reset
-	/// handshake could clear it), so the entry retries first — but bounded by
+	/// handshake could clear it), so the entry retries first - but bounded by
 	/// `STREAM_OPEN_TIMEOUT`, not the infinite loop this once was.
 	#[test]
 	fn err_stream_already_exist_in_band_returns_close() {

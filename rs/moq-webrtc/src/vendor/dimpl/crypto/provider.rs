@@ -374,7 +374,7 @@ pub trait HmacProvider: CryptoSafe {
 ///
 /// # Components
 ///
-/// PRF key derivation is built generically on top of `hmac_provider` — see the
+/// PRF key derivation is built generically on top of `hmac_provider` - see the
 /// [`prf_hkdf`](super::prf_hkdf) module.
 ///
 /// # Design

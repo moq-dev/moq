@@ -211,7 +211,7 @@ mod test {
 
 	#[test]
 	fn psk_rejects_oversized_hint_length() {
-		// hint_length=0x00FF (255) but only 2 bytes follow — parser must fail
+		// hint_length=0x00FF (255) but only 2 bytes follow - parser must fail
 		let bad: &[u8] = &[0x00, 0xFF, b'a', b'b'];
 		let result = ServerKeyExchange::parse(bad, 0, KeyExchangeAlgorithm::PSK);
 		assert!(

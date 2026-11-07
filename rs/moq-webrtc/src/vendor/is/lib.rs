@@ -298,7 +298,7 @@ pub(crate) mod test {
 	}
 
 	// RFC 8445 §7.3.1.1: when both agents claim the controlling role, the
-	// role conflict is resolved deterministically by the tiebreaker — the
+	// role conflict is resolved deterministically by the tiebreaker - the
 	// higher-tiebreaker agent keeps the role, the other yields. Tiebreakers
 	// here are the random ones picked by the constructor, so we cannot
 	// predict which side wins; we only assert that the conflict resolves:

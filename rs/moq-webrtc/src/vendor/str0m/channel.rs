@@ -534,7 +534,7 @@ mod tests {
 		handler.remove_channel(id0, true);
 		assert_eq!(handler.closed_stream_ids, vec![0]);
 
-		// Build the taken list as do_allocations does — stream 0 is held.
+		// Build the taken list as do_allocations does - stream 0 is held.
 		let _id2 = handler.new_channel(&Default::default());
 		let taken: Vec<u16> = handler
 			.allocations

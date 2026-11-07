@@ -131,10 +131,10 @@
 //! A "mutation" is anything that takes `&mut Rtc` (directly or through a
 //! handle obtained from it). The common ones are:
 //!
-//! - `Rtc::handle_input` — feeding a network packet or a timeout
-//! - `Writer::write` / `Writer::request_keyframe` — sending media
-//! - `Channel::write` — sending data channel data
-//! - `SdpApi::apply` / `DirectApi::*` — negotiation
+//! - `Rtc::handle_input` - feeding a network packet or a timeout
+//! - `Writer::write` / `Writer::request_keyframe` - sending media
+//! - `Channel::write` - sending data channel data
+//! - `SdpApi::apply` / `DirectApi::*` - negotiation
 //! - `Rtc::add_local_candidate` / `Rtc::add_remote_candidate`
 //!
 //! Always: **mutate → drain to `Timeout` → mutate → drain to `Timeout` → …**
@@ -143,7 +143,7 @@
 //! waiting on I/O while the engine still has output queued, leaves the
 //! engine in an inconsistent state and produces wrong behavior. Mutations
 //! issued from inside the drain loop (e.g. calling `Writer::write` in
-//! response to an `Output::Event`) are fine — the drain loop naturally
+//! response to an `Output::Event`) are fine - the drain loop naturally
 //! continues calling `poll_output` afterward and so the invariant holds.
 //!
 //! ### Canonical shape
@@ -154,7 +154,7 @@
 //! 1. **Wait** for one of: the next timeout firing, an incoming network
 //!    packet, or the application wanting to perform a mutation (e.g.
 //!    write media).
-//! 2. **Perform that ONE mutation** — feed `Input` to `handle_input`, or
+//! 2. **Perform that ONE mutation** - feed `Input` to `handle_input`, or
 //!    call into a writer / channel / SDP API.
 //! 3. **Poll** `Rtc::poll_output`.
 //! 4. **Handle** the output: `Output::Transmit` is sent on the socket,
@@ -162,7 +162,7 @@
 //!    records the next deadline.
 //! 5. **Goto 3** until `poll_output` returns `Output::Timeout`. Only then
 //!    is the engine fully drained.
-//! 6. The returned timeout is what we wait on next — **goto 1**.
+//! 6. The returned timeout is what we wait on next - **goto 1**.
 //!
 //! ```ignore
 //! # use crate::vendor::str0m::{Rtc, Output, IceConnectionState, Event, Input};
@@ -229,7 +229,7 @@
 //!             )
 //!         }
 //!
-//!         // The socket read timed out — feed Input::Timeout to advance
+//!         // The socket read timed out - feed Input::Timeout to advance
 //!         // the engine to the deadline. WouldBlock is the unix error,
 //!         // TimedOut is the windows error.
 //!         Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {

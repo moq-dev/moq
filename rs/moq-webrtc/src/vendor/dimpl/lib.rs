@@ -1,4 +1,4 @@
-//! dimpl — DTLS 1.2 implementation (Sans‑IO, Sync)
+//! dimpl - DTLS 1.2 implementation (Sans‑IO, Sync)
 //!
 //! dimpl is a DTLS 1.2 implementation aimed at WebRTC. It is a Sans‑IO
 //! state machine you embed into your own UDP/RTC event loop: you feed incoming
@@ -20,8 +20,8 @@
 //!
 //! ## Constructors
 //!
-//! - [`Dtls::new_12`][new_12] — certificate‑based
-//! - [`Dtls::new_12_psk`][new_12_psk] — PSK, no certificates
+//! - [`Dtls::new_12`][new_12] - certificate‑based
+//! - [`Dtls::new_12_psk`][new_12_psk] - PSK, no certificates
 //!
 //! # Cryptography surface
 //! - **Cipher suites (TLS 1.2 over DTLS)**
@@ -47,11 +47,11 @@
 //!
 //! ## Sans‑IO integration model
 //! Drive the engine with three calls:
-//! - [`Dtls::handle_packet`][handle_packet] — feed an entire
+//! - [`Dtls::handle_packet`][handle_packet] - feed an entire
 //!   received UDP datagram.
-//! - [`Dtls::poll_output`][poll_output] — drain pending output:
+//! - [`Dtls::poll_output`][poll_output] - drain pending output:
 //!   DTLS records, timers, events.
-//! - [`Dtls::handle_timeout`][handle_timeout] — trigger
+//! - [`Dtls::handle_timeout`][handle_timeout] - trigger
 //!   retransmissions/time‑based progress.
 //!
 //! The output is an [`Output`][output] enum with borrowed
@@ -60,7 +60,7 @@
 //! - `BufferTooSmall { needed }`: resize the poll buffer and retry
 //! - `Timeout(Instant)`: schedule a timer and call `handle_timeout` at/after it
 //! - `Connected`: handshake complete
-//! - `PeerCert(&[u8])`: peer leaf certificate (DER) — validate in your app
+//! - `PeerCert(&[u8])`: peer leaf certificate (DER) - validate in your app
 //! - `KeyingMaterial(KeyingMaterial, SrtpProfile)`: DTLS‑SRTP export
 //! - `ApplicationData(&[u8])`: plaintext received from peer
 //! - `CloseNotify`: peer sent a `close_notify` alert (graceful shutdown)
@@ -72,11 +72,11 @@
 //! `send_application_data`, and `close`) is **fatal**: the connection is no
 //! longer usable and must be thrown away. The engine has no recoverable
 //! error states, so the correct response is always to drop the `Dtls`
-//! instance — and start a fresh handshake if you still need a connection.
+//! instance - and start a fresh handshake if you still need a connection.
 //!
 //! Transient, non‑fatal conditions inherent to running over an unreliable
-//! transport — malformed datagrams, replayed or out‑of‑window records, and
-//! other parser noise — are handled internally and never surface as an
+//! transport - malformed datagrams, replayed or out‑of‑window records, and
+//! other parser noise - are handled internally and never surface as an
 //! `Error`. Such packets are discarded (logged at `debug!`) while the
 //! connection keeps running. You therefore never need to distinguish
 //! "retry" from "give up": a returned `Error` always means give up on this
@@ -111,7 +111,7 @@
 //!                 }
 //!                 Output::Timeout(t) => { next_wake = Some(t); break; }
 //!                 Output::Connected => {
-//!                     // DTLS established — application may start sending
+//!                     // DTLS established - application may start sending
 //!                 }
 //!                 Output::PeerCert(_der) => {
 //!                     // Inspect peer leaf certificate if desired
@@ -123,7 +123,7 @@
 //!                     // Deliver plaintext to application
 //!                 }
 //!                 Output::CloseNotify => {
-//!                     // Peer initiated graceful shutdown — leave the event loop
+//!                     // Peer initiated graceful shutdown - leave the event loop
 //!                     return Ok(());
 //!                 }
 //!                 _ => {}

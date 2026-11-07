@@ -489,7 +489,7 @@ impl ConfigBuilder {
 		}
 
 		// Skip DTLS 1.2 kx-group validation only when the surviving DTLS 1.2
-		// suites are exclusively PSK — those don't negotiate an ECDHE group.
+		// suites are exclusively PSK - those don't negotiate an ECDHE group.
 		// Any cert-based DTLS 1.2 suite left in the filter still needs a
 		// compatible key exchange group, even when PSK is also configured.
 		let has_non_psk_dtls12 = dtls12_suites.iter().any(|cs| !cs.suite().is_psk());
@@ -806,7 +806,7 @@ mod tests {
 
 		// Mixed config: PSK is set, but a cert-based DTLS 1.2 suite is also in
 		// the filter alongside a PSK suite. That cert suite still needs an
-		// ECDHE group, so kx_groups(&[]) must fail build — the fact that PSK
+		// ECDHE group, so kx_groups(&[]) must fail build - the fact that PSK
 		// is also configured does not excuse the missing groups.
 		let result = Config::builder()
 			.with_psk_server(None, Arc::new(DummyResolver))

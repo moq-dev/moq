@@ -722,7 +722,7 @@ impl State {
 			// Resolve PSK via the configured resolver. On failure we derive a
 			// random dummy of fixed length so the handshake proceeds identically
 			// to a valid-identity flow (no timing oracle) and the Finished MAC
-			// is guaranteed to mismatch — not merely likely to.
+			// is guaranteed to mismatch - not merely likely to.
 			let resolved = server
 				.engine
 				.config()
@@ -934,7 +934,7 @@ impl State {
 
 		// Invariant: full PSK handshakes always set psk_valid in
 		// await_client_key_exchange before reaching Finished. A violation is a
-		// state-machine bug, not network input — `assert!` (not debug_assert!)
+		// state-machine bug, not network input - `assert!` (not debug_assert!)
 		// because a silent bypass could let a forged-PSK Finished through.
 		// Loosen when dtls-conn-id lands and abbreviated handshakes legitimately
 		// skip ClientKeyExchange (reusing a cached master secret).
@@ -951,7 +951,7 @@ impl State {
 		// dummy path survive the MAC check still fails closed here.
 		//
 		// `None` is legitimate for abbreviated (resumption) handshakes, which
-		// skip ClientKeyExchange and therefore never set psk_valid — those
+		// skip ClientKeyExchange and therefore never set psk_valid - those
 		// paths reuse a cached master_secret and don't consult the resolver.
 		if server.psk_valid == Some(false) {
 			return Err(

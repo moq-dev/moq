@@ -302,7 +302,7 @@ impl Record {
 			buffer.len()
 		};
 
-		// Decryption succeeded — now commit the replay window update.
+		// Decryption succeeded - now commit the replay window update.
 		// RFC 6347 §4.1.2.6: "The receive window is updated only if the
 		// MAC verification succeeds."
 		decrypt.replay_update(sequence);

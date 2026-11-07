@@ -686,9 +686,9 @@ impl RtcConfig {
 	///
 	/// VP9 supports two RTP payload descriptor formats:
 	///
-	/// * [`Vp9PacketizerMode::NonFlexible`] (default) — 5-6 byte header with layer indices
+	/// * [`Vp9PacketizerMode::NonFlexible`] (default) - 5-6 byte header with layer indices
 	///   and scalability structure. Compatible with all major browsers including Safari.
-	/// * [`Vp9PacketizerMode::Flexible`] — minimal 3-byte header. Simpler but may cause
+	/// * [`Vp9PacketizerMode::Flexible`] - minimal 3-byte header. Simpler but may cause
 	///   issues with Safari which drops inter-frames.
 	pub fn set_vp9_packetizer_mode(mut self, mode: Vp9PacketizerMode) -> Self {
 		self.vp9_packetizer_mode = mode;

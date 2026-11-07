@@ -523,7 +523,7 @@ impl Engine {
 
 		// The client stops its resend timer only once it has received the
 		// server's final flight, which proves the server received the client's
-		// final flight — so the peer is confirmed. The server, by contrast,
+		// final flight - so the peer is confirmed. The server, by contrast,
 		// stops its timer right after sending flight 6, before the client has
 		// confirmed anything, so it must NOT confirm here (it relies on later
 		// authenticated application data instead).

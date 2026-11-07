@@ -399,7 +399,7 @@ impl ClientConfig {
 	/// state.
 	///
 	/// **Note:** When using SNAP, **both** peers must call
-	/// [`Endpoint::connect`](crate::vendor::sctp_proto::Endpoint::connect) — there is no
+	/// [`Endpoint::connect`](crate::vendor::sctp_proto::Endpoint::connect) - there is no
 	/// server-side SNAP via [`Endpoint::handle`](crate::vendor::sctp_proto::Endpoint::handle).
 	///
 	/// See [draft-hancke-tsvwg-snap-01](https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/).
@@ -412,7 +412,7 @@ impl ClientConfig {
 
 /// Generate a SNAP token (INIT chunk) for out-of-band negotiation.
 ///
-/// Creates a serialized SCTP INIT **chunk** (not a full SCTP packet — no
+/// Creates a serialized SCTP INIT **chunk** (not a full SCTP packet - no
 /// common header or IP/UDP framing) with random `initiate_tag` and
 /// `initial_tsn` values, using the receiver window from the provided
 /// [`TransportConfig`]. Stream counts are set to `u16::MAX` so that the

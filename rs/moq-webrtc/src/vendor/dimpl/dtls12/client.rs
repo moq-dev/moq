@@ -659,7 +659,7 @@ impl State {
 		};
 
 		// PSK ServerKeyExchange contains only an identity hint per RFC 4279 §2
-		// (no curve_type or named_group — those are ECDHE-only parameters).
+		// (no curve_type or named_group - those are ECDHE-only parameters).
 		let hint_range = match &ske.params {
 			ServerKeyExchangeParams::Psk(psk) => psk.hint_range.clone(),
 			_ => {

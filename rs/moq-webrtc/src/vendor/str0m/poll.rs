@@ -7,7 +7,7 @@
 //!
 //! A [`Wake`] defaults to re-polling *everything*: left untouched it signals
 //! both a pending event drain and a timeout recompute. A component narrows it
-//! locally — [`Wake::no_events`] / [`Wake::no_timeout`] — when it knows less
+//! locally - [`Wake::no_events`] / [`Wake::no_timeout`] - when it knows less
 //! changed. The guard folds its (possibly narrowed) signal into the owning
 //! [`Readiness`] on drop.
 //!
@@ -21,7 +21,7 @@
 //! [`SdpApi`][crate::vendor::str0m::change::SdpApi], [`Channel`][crate::vendor::str0m::channel::Channel])
 //! hold an [`RtcMut`] instead of `&mut Rtc`. It arms
 //! the readiness on *mutable* deref only, so a `&mut self` method that mutates
-//! re-polls the tree while a `&self` reader never does — and neither has to
+//! re-polls the tree while a `&self` reader never does - and neither has to
 //! remember to call anything.
 
 use std::ops::{Deref, DerefMut};
@@ -34,15 +34,15 @@ use crate::vendor::str0m::Rtc;
 /// read and never arms; `deref_mut` arms both halves (the safe default).
 /// Because a `&self` method can only reach `deref` and a mutating `&mut self`
 /// method reaches `deref_mut`, "mutation re-polls, reads don't" is enforced by
-/// the borrow checker — a new method can't forget, and a read-only method
+/// the borrow checker - a new method can't forget, and a read-only method
 /// can't accidentally arm.
 ///
 /// Deliberately has no `Drop`: the API wrappers are held in `let` bindings
 /// across other `Rtc` use, and a destructor would extend their borrow to the
 /// end of scope. Arming therefore happens eagerly on the mutable access.
 ///
-/// When a mutation only affects one half of the re-poll — and especially when
-/// that isn't known until the mutation is underway — take it through
+/// When a mutation only affects one half of the re-poll - and especially when
+/// that isn't known until the mutation is underway - take it through
 /// [`RtcMut::mutate`] and narrow the returned [`Mutation`] guard.
 pub(crate) struct RtcMut<'a> {
 	rtc: &'a mut Rtc,
@@ -57,8 +57,8 @@ impl<'a> RtcMut<'a> {
 	///
 	/// The returned [`Mutation`] derefs to `Rtc`, so mutate through it, then
 	/// (optionally, conditionally) call [`Mutation::no_events`] /
-	/// [`Mutation::no_timeout`]. It folds its own — per-operation, never shared
-	/// — signal into the readiness when it drops.
+	/// [`Mutation::no_timeout`]. It folds its own - per-operation, never shared
+	/// - signal into the readiness when it drops.
 	///
 	/// Plain `&mut *` (via [`DerefMut`]) is the shorthand for "arm both": it's
 	/// what methods that don't narrow, or that return a `&mut` borrowed from
@@ -91,12 +91,12 @@ impl DerefMut for RtcMut<'_> {
 ///
 /// Derefs to `Rtc` for the actual change. Armed for both halves by default;
 /// narrow with [`Mutation::no_events`] / [`Mutation::no_timeout`] at any point
-/// before it drops — including conditionally, once the mutation has revealed
+/// before it drops - including conditionally, once the mutation has revealed
 /// which half it touched. Folds the (possibly narrowed) signal into the
 /// readiness on drop.
 ///
 /// The signal is private to this one guard, so narrowing here can never
-/// interfere with another method call's decision regardless of call order —
+/// interfere with another method call's decision regardless of call order -
 /// the property a long-lived shared guard could not offer.
 pub(crate) struct Mutation<'a> {
 	rtc: &'a mut Rtc,

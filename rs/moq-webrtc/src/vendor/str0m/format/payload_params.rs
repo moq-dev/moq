@@ -461,7 +461,7 @@ impl PayloadParams {
 
 	/// Match H.265 codec specifications and return compatibility score.
 	///
-	/// # Matching Rules — Full PTL (both sides have profile+tier+level)
+	/// # Matching Rules - Full PTL (both sides have profile+tier+level)
 	///
 	/// - **Profiles** must match exactly (no cross-profile compatibility)
 	/// - **Tiers** must match exactly (Main vs High tier are distinct)
@@ -470,7 +470,7 @@ impl PayloadParams {
 	///   match time. For H.265, `update_param` additionally narrows the
 	///   negotiated level to `min(local, remote)` afterward; H.264 does not.
 	///
-	/// # Matching Rules — Profile-only (at least one side lacks tier+level)
+	/// # Matching Rules - Profile-only (at least one side lacks tier+level)
 	///
 	/// - **Profiles** must match; missing profile info falls back to
 	///   `FALLBACK.profile()` (not rejected).
@@ -1204,7 +1204,7 @@ mod test {
 				h265.with_donl(donl_enabled);
 			}
 
-			// Packetize a NAL — should include DONL field (2 extra bytes)
+			// Packetize a NAL - should include DONL field (2 extra bytes)
 			let nalu = vec![0x02, 0x01, 0xAA, 0xBB];
 			let packets = pack.packetize(1200, &nalu).unwrap();
 			assert_eq!(packets.len(), 1);
@@ -1220,7 +1220,7 @@ mod test {
 				h265.with_donl(donl_enabled);
 			}
 
-			// Depacketize the packet — should correctly strip DONL
+			// Depacketize the packet - should correctly strip DONL
 			use crate::vendor::str0m::packet::{CodecExtra, Depacketizer};
 			let mut out = Vec::new();
 			let mut extra = CodecExtra::None;
@@ -1253,7 +1253,7 @@ mod test {
 			let donl_enabled = local_params.spec.format.sprop_max_don_diff.unwrap_or(0) > 0;
 			assert!(!donl_enabled, "DONL should NOT be enabled when sprop-max-don-diff=0");
 
-			// Packetize without DONL — packet should be same size as NAL
+			// Packetize without DONL - packet should be same size as NAL
 			let nalu = vec![0x02, 0x01, 0xAA, 0xBB];
 			let mut pack = crate::vendor::str0m::packet::CodecPacketizer::new(
 				local_params.spec.codec,

@@ -37,7 +37,7 @@ use crate::vendor::str0m::streams::{DEFAULT_RTX_CACHE_DURATION, DEFAULT_RTX_RATI
 /// </div>
 pub struct DirectApi<'a> {
 	// `RtcMut` arms the readiness on mutable deref only, so the `&mut self`
-	// methods below re-poll the tree while the `&self` readers do not — with no
+	// methods below re-poll the tree while the `&self` readers do not - with no
 	// per-method call to forget. See [`crate::vendor::str0m::poll`].
 	rtc: RtcMut<'a>,
 }

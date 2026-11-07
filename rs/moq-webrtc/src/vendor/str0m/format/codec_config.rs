@@ -245,7 +245,7 @@ impl CodecConfig {
 		// Start with single default configuration
 		// Profile/tier/level negotiation will happen via SDP fmtp parameters
 		//
-		// Level 6.0 (level_id=180) — a high capability level well supported by modern browsers.
+		// Level 6.0 (level_id=180) - a high capability level well supported by modern browsers.
 		// Level-id formula per ITU-T H.265 Annex A: level_id = (a*10 + b) * 3
 		//   e.g. Level 6.0 → (6*10 + 0) * 3 = 180
 		//

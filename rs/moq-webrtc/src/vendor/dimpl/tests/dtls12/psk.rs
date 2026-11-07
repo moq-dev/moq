@@ -264,7 +264,7 @@ fn psk_invalid_identity_fails_at_finished() {
 #[test]
 fn psk_mismatched_keys_fail_at_finished_via_mac() {
 	// Both resolvers return Some, so server.psk_valid stays Some(true) and
-	// the defense-in-depth flag check is bypassed — any failure here must
+	// the defense-in-depth flag check is bypassed - any failure here must
 	// come from the Finished MAC mismatch itself. Exercises the primary
 	// cryptographic guarantee independently of the flag.
 

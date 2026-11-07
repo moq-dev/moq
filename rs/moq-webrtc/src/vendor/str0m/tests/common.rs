@@ -93,7 +93,7 @@ impl TestRtc {
 	}
 
 	/// Like [`TestRtc::new`], but lets the caller customise the `RtcConfig`
-	/// builder — e.g. to enable a non-default codec such as H.266.
+	/// builder - e.g. to enable a non-default codec such as H.266.
 	pub fn new_with_config(peer: Peer, f: impl FnOnce(RtcConfig) -> RtcConfig) -> Self {
 		let now = Instant::now();
 		let builder = Rtc::builder();

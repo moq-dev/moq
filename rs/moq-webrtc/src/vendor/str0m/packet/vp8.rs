@@ -1140,7 +1140,7 @@ mod test {
 		// Byte 1: VP8 payload header with P=1 → 0x01
 		assert!(!detect_vp8_keyframe(&[0x10, 0x01]));
 
-		// Not the first packet (S=0) — cannot detect keyframe
+		// Not the first packet (S=0) - cannot detect keyframe
 		assert!(!detect_vp8_keyframe(&[0x00, 0x00]));
 
 		// Continuation packet (PID != 0)

@@ -2,7 +2,7 @@
 //!
 //! The TLS 1.2 PRF is a pure composition of HMAC calls. This module provides a
 //! generic implementation so that crypto backends only need to implement
-//! [`HmacProvider`] — no separate PRF provider.
+//! [`HmacProvider`] - no separate PRF provider.
 
 use crate::vendor::dimpl::CryptoError;
 use crate::vendor::dimpl::buffer::Buf;

@@ -363,7 +363,7 @@ impl CandidatePair {
 	/// ice-lite agent cannot obtain the former by construction, so the
 	/// alternative is not a stronger check but a permanently unusable
 	/// state. The caller restricts this to controlled agents, where
-	/// nomination — which is what governs egress — already accepts a
+	/// nomination - which is what governs egress - already accepts a
 	/// forged request without return-routability proof.
 	pub fn record_remote_binding_request_success(&mut self) {
 		if self.state != CheckState::Succeeded {

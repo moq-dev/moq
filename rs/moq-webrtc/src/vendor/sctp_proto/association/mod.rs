@@ -554,7 +554,7 @@ impl Association {
 	) -> Result<Self> {
 		// Derive side deterministically: the peer with the lower initiate_tag
 		// acts as server so that log lines are distinguishable. This is purely
-		// cosmetic — equal tags are impossible because the caller in
+		// cosmetic - equal tags are impossible because the caller in
 		// `connect_with_snap` rejects that case with `AidCollision`.
 		let side = if local_init.initiate_tag <= remote_init.initiate_tag {
 			Side::Server
@@ -2519,7 +2519,7 @@ impl Association {
 		Ok(reply)
 	}
 
-	/// Handle I-FORWARD-TSN (RFC 8260) — identical to FORWARD-TSN but with
+	/// Handle I-FORWARD-TSN (RFC 8260) - identical to FORWARD-TSN but with
 	/// 32-bit MID and explicit per-entry unordered flag.
 	fn handle_i_forward_tsn(&mut self, c: &ChunkIForwardTsn) -> Result<Vec<Packet>> {
 		trace!("[{}] I-FwdTSN: {}", self.side, c);

@@ -25,7 +25,7 @@ pub type NamedGroupVec = ArrayVec<NamedGroup, { NamedGroup::supported().len() }>
 ///
 /// The first 4 bytes are `gmt_unix_time` ([`Random::new_with_time`]).
 ///
-/// After construction nothing accesses sub-fields — all consumers use
+/// After construction nothing accesses sub-fields - all consumers use
 /// [`bytes`](Self::bytes) or [`serialize`](Self::serialize).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Random {

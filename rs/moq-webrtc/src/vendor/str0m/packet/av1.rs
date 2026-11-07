@@ -591,7 +591,7 @@ fn parse_obus(payload: &[u8], parsed_obus: &mut Vec<Obu>) -> Result<(), PacketEr
 			obu.size += 1;
 		}
 
-		// Reuse the existing payload Vec — clear preserves capacity
+		// Reuse the existing payload Vec - clear preserves capacity
 		obu.payload.clear();
 
 		if obu.has_size() {

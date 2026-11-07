@@ -15,8 +15,8 @@ use common::{connect_l_r, init_crypto_default, init_log};
 /// 1. Set up a connected pair with a media + stream via direct API
 /// 2. Write an RTP packet so the stream's send queue is non-empty
 /// 3. Call handle_input(Timeout) so session.handle_timeout populates the pacer
-/// 4. Remove the media via direct_api().remove_media() — pacer still references the mid
-/// 5. Call poll_output() — poll_packet asks pacer for next mid, finds it missing → panic
+/// 4. Remove the media via direct_api().remove_media() - pacer still references the mid
+/// 5. Call poll_output() - poll_packet asks pacer for next mid, finds it missing → panic
 #[test]
 pub fn remove_media_while_pacer_queued() -> Result<(), RtcError> {
 	init_log();
@@ -69,7 +69,7 @@ pub fn remove_media_while_pacer_queued() -> Result<(), RtcError> {
 	// Trigger handle_timeout which calls update_queue_state → pacer captures the MidRid
 	l.handle_input(Input::Timeout(now))?;
 
-	// Now remove the media — the pacer still holds a reference to mid "aud"
+	// Now remove the media - the pacer still holds a reference to mid "aud"
 	l.direct_api().remove_media(mid);
 
 	// poll_output will call poll_packet → pacer.poll_queue() returns the stale MidRid → panic

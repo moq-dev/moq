@@ -189,7 +189,7 @@ impl CryptoProvider {
 			let hash_alg = cs.suite().hash_algorithm();
 			let sig_alg = match cs.suite().signature_algorithm() {
 				Some(alg) => alg,
-				// PSK suites have no signature — skip validation
+				// PSK suites have no signature - skip validation
 				None => continue,
 			};
 

@@ -168,7 +168,7 @@ fn dtls12_recovers_from_corrupted_packet() {
 		let _ = server.handle_packet(&p);
 	}
 
-	// Server has no valid packet yet — arm its timers so it's ready
+	// Server has no valid packet yet - arm its timers so it's ready
 	server.handle_timeout(now).expect("server arm");
 	let s_pkts = collect_packets(&mut server);
 	assert!(s_pkts.is_empty(), "server should have nothing to send yet");
@@ -255,7 +255,7 @@ fn dtls12_discards_wrong_epoch_record() {
 	let bogus = vec![
 		22, // content_type: handshake
 		0xFE, 0xFD, // version: DTLS 1.2
-		0x00, 0x00, // epoch: 0 (wrong — should be 1 post-handshake)
+		0x00, 0x00, // epoch: 0 (wrong - should be 1 post-handshake)
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x99, // sequence number
 		0x00, 0x05, // length: 5
 		0x01, // handshake type: ClientHello
@@ -344,11 +344,11 @@ fn dtls12_discards_truncated_record() {
 	server.set_active(false);
 
 	// Inject a truncated packet before the handshake begins
-	let truncated = vec![0x16, 0xFE, 0xFD]; // 3 bytes — too short for any DTLS record
+	let truncated = vec![0x16, 0xFE, 0xFD]; // 3 bytes - too short for any DTLS record
 	let result = client.handle_packet(&truncated);
 	// Should either return Ok (silently discarded) or a non-fatal error
 	match result {
-		Ok(()) => {} // silently discarded — expected
+		Ok(()) => {} // silently discarded - expected
 		Err(e) => {
 			// Some parse errors are acceptable as long as the endpoint survives
 			eprintln!("Truncated packet returned error (non-fatal): {}", e);
@@ -399,7 +399,7 @@ fn dtls12_discards_unauthenticated_close_notify() {
 	let close_notify_epoch0 = vec![
 		21, // content_type: alert
 		0xFE, 0xFD, // version: DTLS 1.2
-		0x00, 0x00, // epoch: 0 (plaintext — will be discarded post-handshake)
+		0x00, 0x00, // epoch: 0 (plaintext - will be discarded post-handshake)
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x50, // sequence number
 		0x00, 0x02, // length: 2
 		0x01, // level: warning
@@ -466,15 +466,15 @@ fn dtls12_rejects_renegotiation() {
 	let result = server.handle_packet(&renegotiation_hello);
 	match result {
 		Ok(()) => {
-			// Silently discarded — acceptable (epoch 0 record post-handshake)
+			// Silently discarded - acceptable (epoch 0 record post-handshake)
 		}
 		Err(e) => {
-			// RenegotiationAttempt or other error — also acceptable
+			// RenegotiationAttempt or other error - also acceptable
 			eprintln!("Renegotiation attempt correctly rejected with error: {}", e);
 		}
 	}
 
-	// Verify the connection still works after the renegotiation attempt — we need
+	// Verify the connection still works after the renegotiation attempt - we need
 	// a client to send data, so re-create using the existing pair's server.
 	// Since _client was moved, just verify server can still queue data.
 	let result = server.send_application_data(b"post-reneg");
@@ -729,7 +729,7 @@ fn dtls12_app_data_after_close_notify_is_ignored() {
 	let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
 	now = now_hs;
 
-	// Step 1: Client sends app data — capture the packet but don't deliver yet.
+	// Step 1: Client sends app data - capture the packet but don't deliver yet.
 	client.send_application_data(b"before-close").expect("send app data");
 	now += Duration::from_millis(10);
 	client.handle_timeout(now).expect("client timeout");
@@ -752,7 +752,7 @@ fn dtls12_app_data_after_close_notify_is_ignored() {
 	assert!(server_out.close_notify, "Server should emit CloseNotify");
 
 	// Step 4: Now deliver the app data datagram that was sent BEFORE the alert
-	// but arrived AFTER — it must be discarded.
+	// but arrived AFTER - it must be discarded.
 	deliver_packets(&app_data_packets, &mut server);
 	now += Duration::from_millis(10);
 	server.handle_timeout(now).expect("server timeout");
@@ -783,7 +783,7 @@ fn dtls12_close_during_handshake_emits_no_packets() {
 	let mut server = Dtls::new_12(config, server_cert, now);
 	server.set_active(false);
 
-	// Start handshake — client sends ClientHello
+	// Start handshake - client sends ClientHello
 	client.handle_timeout(now).expect("client timeout");
 	let client_out = drain_outputs(&mut client);
 	assert!(!client_out.packets.is_empty(), "Client should emit ClientHello");
@@ -924,7 +924,7 @@ fn dtls12_close_state_matrix() {
 fn dtls12_discard_pending_writes_on_close_notify() {
 	//! Send application data from the server, then deliver a close_notify from
 	//! the client before the server polls. The pending data must be discarded
-	//! per RFC 5246 §7.2.1 — only the reciprocal close_notify is emitted.
+	//! per RFC 5246 §7.2.1 - only the reciprocal close_notify is emitted.
 
 	let mut now = Instant::now();
 	let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
@@ -944,7 +944,7 @@ fn dtls12_discard_pending_writes_on_close_notify() {
 	// Deliver the close_notify to the server (before it polls its pending data)
 	deliver_packets(&client_out.packets, &mut server);
 
-	// Now poll the server — pending data should have been discarded
+	// Now poll the server - pending data should have been discarded
 	server.handle_timeout(now).expect("server timeout");
 	let server_out = drain_outputs(&mut server);
 
@@ -954,7 +954,7 @@ fn dtls12_discard_pending_writes_on_close_notify() {
 		"Server should emit reciprocal close_notify"
 	);
 
-	// Deliver reciprocal to client — verify no app data leaked
+	// Deliver reciprocal to client - verify no app data leaked
 	deliver_packets(&server_out.packets, &mut client);
 	client.handle_timeout(now).expect("client timeout after reciprocal");
 	let client_out2 = drain_outputs(&mut client);
@@ -1075,7 +1075,7 @@ fn dtls12_close_notify_not_retransmitted() {
 	let client_out = drain_outputs(&mut client);
 	assert!(!client_out.packets.is_empty(), "Client should emit close_notify alert");
 
-	// Advance time 5 times (5 seconds each) — no retransmissions should occur
+	// Advance time 5 times (5 seconds each) - no retransmissions should occur
 	for _ in 0..5 {
 		now += Duration::from_secs(5);
 		let _ = client.handle_timeout(now);

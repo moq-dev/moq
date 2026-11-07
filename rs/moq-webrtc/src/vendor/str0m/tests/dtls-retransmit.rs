@@ -3,7 +3,7 @@
 //! When a DTLS flight timeout elapses, dimpl's `handle_timeout` re-arms the
 //! flight timer and queues the retransmit packet. Previously str0m ran
 //! `handle_timeout` at the end of `do_poll_output`, after both the DTLS
-//! `poll_output` loop and `dtls.poll_packet()` had already run — so the
+//! `poll_output` loop and `dtls.poll_packet()` had already run - so the
 //! freshly queued retransmit was left sitting in dimpl's tx queue until
 //! some unrelated subsystem (typically an ICE consent check) woke the
 //! caller for another poll pass.
@@ -224,7 +224,7 @@ fn terminal_dtls_timeout_does_not_rearm_expired_deadline() {
 /// End-to-end: a DTLS handshake between two peers must complete even
 /// when the link drops packets. Before the fix, dropped handshake
 /// packets stalled for seconds at a time because each lost flight's
-/// retransmit was deferred to the next unrelated wake-up — on a lossy
+/// retransmit was deferred to the next unrelated wake-up - on a lossy
 /// link the handshake could miss its connect deadline entirely.
 #[test]
 fn dtls_handshake_completes_under_packet_loss() {

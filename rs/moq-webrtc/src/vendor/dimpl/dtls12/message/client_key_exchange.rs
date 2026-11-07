@@ -184,7 +184,7 @@ mod test {
 
 	#[test]
 	fn psk_rejects_oversized_length() {
-		// identity_length=0x0064 (100) but only 3 bytes follow — parser must fail
+		// identity_length=0x0064 (100) but only 3 bytes follow - parser must fail
 		let bad: &[u8] = &[0x00, 0x64, b'a', b'b', b'c'];
 		let result = ClientKeyExchange::parse(bad, 0, KeyExchangeAlgorithm::PSK);
 		assert!(
@@ -196,7 +196,7 @@ mod test {
 	#[test]
 	fn psk_empty_identity() {
 		// identity_length=0 is wire-legal; parser should accept an empty range.
-		// (RFC 4279 §5.1 says server MAY reject this — that's an application
+		// (RFC 4279 §5.1 says server MAY reject this - that's an application
 		// policy decision, not a parse error.)
 		let empty: &[u8] = &[0x00, 0x00];
 		let (rest, parsed) = ClientKeyExchange::parse(empty, 0, KeyExchangeAlgorithm::PSK).unwrap();

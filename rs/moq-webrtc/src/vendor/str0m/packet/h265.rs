@@ -4440,7 +4440,7 @@ mod test {
 			let last_fu_hdr = H265FragmentationUnitHeader(last_fu[2]);
 			assert!(last_fu_hdr.e(), "Last FU should have E=1");
 			assert!(!last_fu_hdr.s(), "Last FU should not have S=1");
-			// No DONL in last fragment — payload is at byte 3, not 5
+			// No DONL in last fragment - payload is at byte 3, not 5
 
 			// Depacketize all FU fragments
 			out.clear();
