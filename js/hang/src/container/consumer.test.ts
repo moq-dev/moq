@@ -923,27 +923,29 @@ test("Consumer delivers groups in sequence order regardless of arrival order", a
 	consumer.close();
 });
 
-test("Consumer delivers a group that arrives below the cursor", async () => {
+// What lies below the cursor is already covered by the gap that moved it, or was never read, so a
+// group arriving there is never delivered and adds no gap. Mirrors Rust's consumer.
+test("Consumer drops a group that arrives below the cursor", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), delay: { max: 500 as Milli } });
 
-	// Group.Producer 5 arrives first (sets active = 5)
+	// Group 5 arrives first, and delivery starts there: the track reports no start.
 	writeGroupWithLegacyFrames(track, 5n, [100_000 as Micro]);
-	await sleep(Nano.fromMilli(Milli(50)));
+	expect((await nextFrame(consumer))?.group).toBe(5n);
 
-	// Group.Producer 3 lands behind it, and Group.Producer 6 ahead of it. Arriving below the
-	// cursor is not what makes content stale: how far behind the live edge a group may be is
-	// the subscription's own max delay, which `replay` deliberately opens wide here. So all
-	// three are handed over, in sequence order, since delivery has not passed any of them yet.
+	// Group 3 lands behind the cursor, and group 6 ahead of it.
 	writeGroupWithLegacyFrames(track, 3n, [0 as Micro]);
 	writeGroupWithLegacyFrames(track, 6n, [200_000 as Micro]);
 	track.finish();
 	track.close();
 
-	await sleep(Nano.fromMilli(Milli(100)));
-
-	const frames = await drainFrames(consumer, 500);
-	expect(frames.map((frame) => frame.group)).toEqual([3n, 5n, 6n]);
+	const reads: string[] = [];
+	for (;;) {
+		const read = await consumer.next();
+		if (!read) break;
+		reads.push(read.kind === "frame" ? `${read.group}` : read.kind);
+	}
+	expect(reads).toEqual(["6"]);
 	consumer.close();
 });
 
@@ -1191,14 +1193,13 @@ test("Consumer checks a whole decoded batch before a skip drops its group", asyn
 	write(0n, [1_000_000]).finish();
 	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(1_000_000 as Micro);
 
-	// The newer group arrives first and stays open, so the older one is the oldest buffered group
-	// and too old to wait for.
-	const newest = write(3n, [3_000_000]);
-	await later;
 	// Its first sample is fine; the second rewinds below the delivered group's start.
 	write(2n, [2_000_000, 0]).finish();
-	// Read only once the skip has dropped it, before the newer group's frame is delivered.
 	await rewound;
+	// The newer group stays open, so the older one is the oldest buffered group and too old to wait
+	// for. Read only once the skip has dropped it, before the newer group's frame is delivered.
+	const newest = write(3n, [3_000_000]);
+	await later;
 	newest.finish();
 	track.finish();
 	track.close();

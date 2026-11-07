@@ -3377,6 +3377,64 @@ export class Subscriber {
 	}
 
 	/**
+	 * The lowest group this subscriber's ranges name, as resolved here, raised to the start of
+	 * {@link withRange}: undefined while one reaches back to the oldest group still around, or a
+	 * relative start still waits on the first group from the live feed.
+	 *
+	 * Where a reader that waits on each group in sequence starts, rather than at whatever arrives
+	 * first, which newest-first delivery makes the latest. Mirrors the Rust `Subscriber::floor`.
+	 */
+	floor(): bigint | undefined {
+		let start: bigint | undefined;
+		if (this.#resume) {
+			for (const range of this.#resume.resolved() ?? [undefined]) {
+				if (!range?.floored) return undefined;
+				start = start === undefined ? range.start : min(start, range.start);
+			}
+		} else {
+			this.#settle();
+			start = this.#window.start();
+		}
+		return start === undefined ? undefined : max(start, this.#local.start);
+	}
+
+	/**
+	 * Where the source's feed starts once its publisher resolved it, raised to this reader's own
+	 * floor: the first group a publisher tells its peer it serves, or lower where a fill this
+	 * reader waits on starts. Undefined when the source declares none and no fill is out.
+	 *
+	 * Where a reader that waits on each group in sequence starts when {@link floor} names none:
+	 * groups arrive newest first, so the first to arrive is not the oldest served. A copy says
+	 * only once subscribed upstream, so ask once {@link info} resolves or a group arrives. Mirrors
+	 * the Rust `Subscriber::poll_start`.
+	 */
+	async start(): Promise<bigint | undefined> {
+		for (;;) {
+			const start = hooks.sourceStart(this);
+			if (start !== "pending") return start;
+			if (this.#closed || this.#state.closed.peek() !== undefined) return undefined;
+			await this.#wait();
+		}
+	}
+
+	/**
+	 * The lowest group at or above `from` this subscriber's ranges and {@link withRange} floor
+	 * cover, undefined when none does: the groups between are never read, so a reader waiting on
+	 * each group in sequence need not wait for them. `from` itself while a relative anchor waits
+	 * on the first group, which can't say yet. Mirrors the Rust `Subscriber::next_in_range`.
+	 */
+	nextInRange(from: bigint): bigint | undefined {
+		from = max(from, this.#local.start);
+		if (this.#resume) {
+			// Without a serving copy nothing says yet.
+			const runs = this.#resume.runs(from, UNBOUNDED);
+			return runs ? runs[0]?.start : from;
+		}
+		this.#settle();
+		return this.#window.next(from);
+	}
+
+	/**
 	 * The largest location within {@link withRange}: the current one at first, then each newer
 	 * one (skipping any in between), and `undefined` once the track ends.
 	 *

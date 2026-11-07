@@ -3193,6 +3193,7 @@ mod tests {
 			served: None,
 			started: false,
 			starts: Default::default(),
+			declared: None,
 			end: None,
 			wanted: None,
 			unanswered: None,
@@ -3349,6 +3350,7 @@ mod tests {
 				served: None,
 				started: false,
 				starts: Default::default(),
+				declared: None,
 				end: None,
 				wanted: None,
 				unanswered: None,
@@ -3818,6 +3820,7 @@ mod tests {
 			served: None,
 			started: false,
 			starts: Default::default(),
+			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
 			unanswered: None,
@@ -3933,6 +3936,7 @@ mod tests {
 			served: Some(4),
 			started: true,
 			starts: [(0, Some(4))].into(),
+			declared: None,
 			end: None,
 			wanted: None,
 			unanswered: None,
@@ -4000,6 +4004,7 @@ mod tests {
 			served: Some(4),
 			started: true,
 			starts: [(0, Some(4))].into(),
+			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
 			unanswered: None,
@@ -5310,6 +5315,7 @@ mod tests {
 			served: None,
 			started: false,
 			starts: Default::default(),
+			declared: None,
 			end: None,
 			wanted: None,
 			unanswered: None,
@@ -9402,6 +9408,9 @@ struct SubStream {
 	/// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range's delivery starts, by
 	/// Range ID, `None` for one with nothing to deliver.
 	starts: std::collections::BTreeMap<u64, Option<u64>>,
+	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
+	/// again: each declaration restarts the grace of the gaps above it.
+	declared: Option<(Option<u64>, bool)>,
 	/// The track's exclusive end (SUBSCRIBE_FINISH), once declared.
 	end: Option<lite::SubscribeFinish>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
@@ -9425,6 +9434,42 @@ impl SubStream {
 	/// answers even when no group resolved the start, unless nothing was asked below the end.
 	fn awaits_start(&self) -> bool {
 		!self.started && self.end.as_ref().is_some_and(|end| end.group > self.start.unwrap_or(0))
+	}
+
+	/// Lite-07's declaration of where the live feed starts: the lowest start the demand's live
+	/// ranges report, or the requested floor, pending, while SUBSCRIBE_START or a range's
+	/// SUBSCRIBE_STARTED has yet to say where one starts. `None` before lite-07, whose one start
+	/// describes only the SUBSCRIBE's demand, and while the ranges ask only for fills.
+	fn feed_start(&self) -> Option<(Option<u64>, bool)> {
+		if !self.live.reports_starts() || self.demand.is_none() {
+			return None;
+		}
+		let mut start: Option<u64> = None;
+		for (id, _) in self.live.iter().filter(|(id, _)| !self.fill_ids.contains(id)) {
+			match self.starts.get(&id) {
+				// A range with no group there serves nothing to start from.
+				Some(Some(at)) => start = Some(start.map_or(*at, |start| start.min(*at))),
+				Some(None) => {}
+				None => return Some((self.start, true)),
+			}
+		}
+		Some((start, !self.started))
+	}
+
+	/// Declare on the copy where the live feed starts, by [`Self::feed_start`], so a reader
+	/// waiting on each group in sequence starts there rather than at whatever arrives first.
+	fn declare(&mut self, serving: &mut track::Producer) {
+		let Some(next) = self.feed_start() else {
+			return;
+		};
+		if self.declared.replace(next) == Some(next) {
+			return;
+		}
+		let _ = match next {
+			(start, true) => serving.request_start(start),
+			(Some(start), false) => serving.start_resolved(start),
+			(None, false) => serving.start_at(None),
+		};
 	}
 
 	/// `largest`, when this bounded subscription's ranges, as SUBSCRIBE_START resolved them,
@@ -10043,7 +10088,11 @@ impl TrackServe {
 							// the next declaration. A buffered START re-applies only if the
 							// start returns to the demand that produced it (see
 							// `SubStream::requested`).
-							if start_moved {
+							// Lite-07 declares from each live range's reported start instead, pending
+							// while a range the update adds awaits SUBSCRIBE_STARTED.
+							if active.live.reports_starts() {
+								active.declare(producer);
+							} else if start_moved {
 								let _ = producer.start_at(active.start);
 							}
 							buffer_update(active, edit, producer, self.subscriber.runtime.now())?;
@@ -10504,6 +10553,7 @@ impl Establish {
 			served: None,
 			started: false,
 			starts: Default::default(),
+			declared: None,
 			end: None,
 			wanted: None,
 			update: 0,
@@ -11692,13 +11742,17 @@ impl ServeLoop {
 				// that moved the start makes it stale, and one that
 				// moved back restores it); elsewhere the
 				// request-tracked floor stands rather than a guess.
-				if active.start == active.requested && active.demand.is_some() {
+				active.started = true;
+				// Lite-07 says where every live range starts, so the declaration follows them
+				// whatever an update changed since.
+				if active.live.reports_starts() {
+					active.declare(&mut self.serving);
+				} else if active.start == active.requested && active.demand.is_some() {
 					let _ = match (serve.subscriber.version.resolves_start(), served) {
 						(true, Some(served)) => self.serving.start_resolved(served),
 						_ => self.serving.start_at(served),
 					};
 				}
-				active.started = true;
 				// The groups the SUBSCRIBE asked for below it are not
 				// waited for, whatever the demand asks later. One that
 				// still arrives is delivered, so they are not dropped.
@@ -11736,6 +11790,7 @@ impl ServeLoop {
 					if let Ok(mut tail) = active.tail.write() {
 						tail.expire(now);
 					}
+					active.declare(&mut self.serving);
 				}
 			}
 			// The publisher will never send these groups, so they
