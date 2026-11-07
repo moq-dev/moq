@@ -140,6 +140,14 @@ export class Jitter {
 		return fork;
 	}
 
+	/**
+	 * How late the slowest frame in the reference window arrived against its fastest: NetEq's
+	 * maximum delay, which widens the time stretch's band rather than the target.
+	 */
+	get lateness(): Milli {
+		return this.#history.lateness() as Milli;
+	}
+
 	/** The measured term: the upper edge of the bucket holding the 95th percentile. */
 	get measured(): Milli {
 		let cumulative = 0;
@@ -177,13 +185,14 @@ export interface Entry {
 
 /**
  * The arrivals inside the reference window, in media order, answering any prefix's fastest arrival
- * in logarithmic time.
+ * in logarithmic time and the whole window's slowest in constant time.
  *
  * A reordered frame is measured against the prefix at or before its timestamp, so a peer that sends
  * only reordered frames would otherwise force a scan per frame. Entries live in a ring indexed from
  * `#head`, and a segment tree over the ring's slots holds each node's fastest slot, the older on a
  * tie, as the scan would pick. A query never spans the ring's wrap point within one node, so a node
- * fully inside it is in arrival order.
+ * fully inside it is in arrival order. The slowest is the front of a monotonic queue of entries,
+ * each slower than every later one, named by how many entries were pushed before it.
  *
  * @internal Exported for the equivalence test.
  */
@@ -198,6 +207,11 @@ export class History {
 	#len = 0;
 	/** Leaf `capacity + slot` holds `slot`; each parent holds the faster of its children. */
 	#tree = new Uint32Array(0);
+	/** Entries ever pushed, so `#pushed - #len` names the oldest one held. */
+	#pushed = 0;
+	/** From `#slowHead`, the entries no later entry is as slow as, oldest first. */
+	#slow: number[] = [];
+	#slowHead = 0;
 
 	/** The entries held. */
 	get length(): number {
@@ -227,6 +241,34 @@ export class History {
 		for (let node = (capacity + slot) >> 1; node > 0; node >>= 1) {
 			this.#tree[node] = this.#faster(this.#tree[2 * node], this.#tree[2 * node + 1]);
 		}
+
+		// Drop the queue's evicted front, then every entry this one is slower than, keeping the older
+		// on a tie the way the reference does.
+		const oldest = this.#pushed - this.#len + 1;
+		while (this.#slowHead < this.#slow.length && this.#slow[this.#slowHead] < oldest) this.#slowHead++;
+		const key = arrival - media;
+		while (this.#slow.length > this.#slowHead) {
+			const back = this.at(this.#slow[this.#slow.length - 1] - oldest);
+			if (back.arrival - back.media >= key) break;
+			this.#slow.pop();
+		}
+		if (this.#slowHead > 1024 && this.#slowHead * 2 > this.#slow.length) {
+			this.#slow = this.#slow.slice(this.#slowHead);
+			this.#slowHead = 0;
+		}
+		this.#slow.push(this.#pushed);
+		this.#pushed++;
+	}
+
+	/**
+	 * How late the slowest entry arrived against the fastest, zero for an empty window: NetEq's
+	 * `GetMaxDelayMs`, in the same arithmetic as a frame's delay.
+	 */
+	lateness(): number {
+		const fast = this.reference(Number.POSITIVE_INFINITY);
+		if (fast === undefined) return 0;
+		const slow = this.at(this.#slow[this.#slowHead] - (this.#pushed - this.#len));
+		return Math.max(0, slow.arrival - fast.arrival - (slow.media - fast.media));
 	}
 
 	/** The fastest entry with `entry.media <= media`, the oldest on a tie. */

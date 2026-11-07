@@ -55,14 +55,11 @@ Recommendations:
 
 Public API: none expected. Wire: none.
 
-## Required
-
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - lands the ring's time stretch this reuses
-
 ## Closes
 
 - [#8031](https://github.com/moq-dev/moq/issues/8031) - buffered playback loses lip sync and cuts audio out on a live stream
 
 ## Related
 
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - proves on real hardware the ring's time stretch this reuses, which landed in [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058)
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - the other buffered-mode change to the audio path

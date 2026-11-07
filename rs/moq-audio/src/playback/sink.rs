@@ -272,6 +272,13 @@ impl Sink {
 		Ok(())
 	}
 
+	/// Widen the band the stretch holds above the target by how late the slowest
+	/// recent arrival was against the fastest, NetEq's maximum delay. The decode
+	/// consumer's [`lateness`](crate::decode::Consumer::lateness) is that value.
+	pub fn set_lateness(&mut self, lateness: Duration) {
+		self.channel.lock().unwrap().prod.set_lateness(lateness);
+	}
+
 	/// The PCM layout this sink was built with.
 	pub fn input(&self) -> &Input {
 		&self.input

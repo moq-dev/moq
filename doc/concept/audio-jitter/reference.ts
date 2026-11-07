@@ -151,6 +151,23 @@ export class Estimator {
 		if (this.#origin !== undefined) this.#ended = true;
 	}
 
+	/**
+	 * How late the slowest frame in the window arrived against the fastest, in milliseconds:
+	 * NetEq's maximum delay, which widens the time stretch's band rather than the target. Each
+	 * extreme is the oldest on a tie, as the reference is.
+	 */
+	get lateness(): number {
+		let fast: Arrival | undefined;
+		let slow: Arrival | undefined;
+		for (const entry of this.#history) {
+			const key = entry.arrival - entry.media;
+			if (fast === undefined || key < fast.arrival - fast.media) fast = entry;
+			if (slow === undefined || key > slow.arrival - slow.media) slow = entry;
+		}
+		if (fast === undefined || slow === undefined) return 0;
+		return Math.max(0, slow.arrival - fast.arrival - (slow.media - fast.media));
+	}
+
 	/** The target the receiver holds, in milliseconds. */
 	get target(): number {
 		let cumulative = 0;

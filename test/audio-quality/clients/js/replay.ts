@@ -84,6 +84,16 @@ const out = values.out as string;
 // Loaded only to play: listing runs before `run.sh` has installed the workspace the player needs.
 const { replay } = await import("../../../../js/watch/src/audio/replay.ts");
 
+/** What a sample reads from the latest quantum. */
+interface Reading {
+	at: number;
+	timestamp: number;
+	stalled: boolean;
+	delay: number;
+	underruns: number;
+	skips: number;
+}
+
 for (const { row, trace } of rows) {
 	const tag = rowKey(row);
 	const rate = row.rate;
@@ -103,7 +113,7 @@ for (const { row, trace } of rows) {
 	};
 
 	const arrivals = trace.arrivals.map(([at, timestamp, group, duration]) => ({ at, timestamp, group, duration }));
-	const sample = (quantum: { at: number; timestamp: number; stalled: boolean; delay: number; underruns: number }) => {
+	const sample = (quantum: Reading) => {
 		const gaps = ledger.take();
 		samples.push({
 			at: quantum.at,
@@ -112,6 +122,7 @@ for (const { row, trace } of rows) {
 			stalled: quantum.stalled,
 			delay: quantum.delay,
 			playerUnderruns: quantum.underruns,
+			playerSkips: quantum.skips,
 			quanta: ledger.counts.quanta,
 			quiet: ledger.counts.quiet,
 			gaps: gaps.length > 0 ? gaps : undefined,
@@ -126,7 +137,7 @@ for (const { row, trace } of rows) {
 		config: trace.config as unknown as Catalog.AudioConfig,
 		duration: trace.duration,
 	});
-	let last: { at: number; timestamp: number; stalled: boolean; delay: number; underruns: number } | undefined;
+	let last: Reading | undefined;
 	for await (const quantum of quanta) {
 		// The render clock is the simulated one: the trace's `at`, which starts at zero.
 		ledger.add(frame, quantum.output.length, classify([quantum.output]));
@@ -141,6 +152,7 @@ for (const { row, trace } of rows) {
 			stalled: quantum.stalled,
 			delay: quantum.delay,
 			underruns: quantum.underruns,
+			skips: quantum.skips,
 		};
 
 		if (quantum.at >= next) {

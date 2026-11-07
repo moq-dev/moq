@@ -1,7 +1,7 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
-import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
+import type { Data, End, Init, Latency, Lateness, Playing, Reset, State, Truncate } from "./render";
 
 /**
  * Decides when the decode loop may decode a frame, which is how the target delay is split between
@@ -270,6 +270,10 @@ export class AudioBuffer {
 	/** How many times the ring has run dry mid-playback, cumulative. */
 	readonly underruns: Getter<number> = this.#underruns;
 
+	readonly #skips = new Signal<number>(0);
+	/** How many times the ring skipped ahead, dropping queued audio, cumulative. */
+	readonly skips: Getter<number> = this.#skips;
+
 	readonly #silent = new Signal<boolean>(false);
 	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
 	readonly silent: Getter<boolean> = this.#silent;
@@ -326,6 +330,7 @@ export class AudioBuffer {
 				this.#timestamp.set(data.timestamp);
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
+				this.#skips.set(data.skips);
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
@@ -375,6 +380,15 @@ export class AudioBuffer {
 		const msg: Latency = { type: "latency", latency: this.#latency() };
 		// One message, so the worklet never plays a quantum between the new floor and the park.
 		if (park) msg.park = ++this.#epoch;
+		this.#worklet.port.postMessage(msg);
+	}
+
+	/**
+	 * Widen the band the worklet's stretch holds above the floor by how late the slowest recent
+	 * arrival was against the fastest, as NetEq does. See doc/concept/audio-jitter.md.
+	 */
+	setLateness(lateness: Milli): void {
+		const msg: Lateness = { type: "lateness", lateness };
 		this.#worklet.port.postMessage(msg);
 	}
 

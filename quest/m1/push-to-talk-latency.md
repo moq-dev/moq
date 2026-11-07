@@ -89,10 +89,7 @@ measured term (`js/watch/src/audio/latency.ts`); device and render follow the
 watch AudioContext's `latencyHint` (`"interactive"` in
 `js/watch/src/audio/decoder.ts`), otherwise the platform.
 
-## Required
-
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - `"auto"` stops underrunning by time-stretching the ring, so the run can hold the default delay
-
 ## Related
 
+- [Watch](/quest/m1/audio-jitter-target/watch.md) - `"auto"` stops underrunning by time-stretching the ring, so the run can hold the default delay; the stretch landed in [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058), and only its hardware proof remains there
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the `"auto"` target this latency feeds

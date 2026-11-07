@@ -136,8 +136,10 @@ function build(latencyMs: number): AudioRingBuffer {
 interface Result {
 	/** Quanta rendered short of a full block after the warmup, i.e. audible underruns. */
 	underruns: number;
-	/** Samples inserted after the warmup that were never played: skipped or overflow-dropped. */
-	skipped: number;
+	/** Times the ring re-anchored after the warmup, dropping buffered audio rather than playing it. */
+	skips: number;
+	/** Samples time stretch added or removed after the warmup: output against the media it covered. */
+	stretched: number;
 }
 
 /**
@@ -148,40 +150,40 @@ function replay(ring: AudioRingBuffer, t: Arrival[], warmupMs: number): Result {
 	const step = (QUANTUM / RATE) * 1000;
 	const output = [new Float32Array(QUANTUM)];
 	const end = t[t.length - 1].arrival;
+	const position = () => (ring.timestamp * RATE) / 1_000_000;
 
 	let next = 0;
-	let played = 0;
-	let inserted = 0;
 	let short = 0;
+	let skips = 0;
+	let stretched = 0;
 	let started = false;
-	let mark: { played: number; inserted: number; buffered: number; short: number } | undefined;
 
 	for (let now = 0; now < end; now += step) {
+		const playhead = position();
+		const skipped = ring.skips;
 		while (next < t.length && t[next].arrival <= now) {
 			ring.write(Micro.fromMilli(t[next].media as Milli), [new Float32Array(CHUNK).fill(0.5)]);
-			inserted += CHUNK;
 			next++;
 		}
 
 		const count = ring.read(output);
-		played += count;
+		if (now < warmupMs) {
+			if (count > 0) started = true;
+			continue;
+		}
 		if (started && count < QUANTUM) short++;
 		if (count > 0) started = true;
-
-		if (now >= warmupMs && !mark) mark = { played, inserted, buffered: ring.length, short };
+		if (ring.skips > skipped) skips += ring.skips - skipped;
+		else stretched += Math.abs(position() - playhead - count);
 	}
 
-	const from = mark ?? { played, inserted, buffered: ring.length, short };
-	return {
-		underruns: short - from.short,
-		skipped: inserted - from.inserted - (played - from.played) - (ring.length - from.buffered),
-	};
+	return { underruns: short, skips, stretched: Math.round(stretched) };
 }
 
 describe("ring replay", () => {
 	it("plays an evenly paced sender without underruns or skips", async () => {
 		const t = trace(600, 1, 10);
-		expect(replay(build(await settled(t)), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
+		expect(replay(build(await settled(t)), t, 2000)).toMatchObject({ underruns: 0, skips: 0 });
 	});
 
 	it("plays a bursty sender at the measured target", async () => {
@@ -189,7 +191,7 @@ describe("ring replay", () => {
 		const t = trace(600, 3, 5);
 		const measured = await settled(t);
 		expect(measured).toBeGreaterThan(2 * CHUNK_MS);
-		expect(replay(build(measured), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
+		expect(replay(build(measured), t, 2000)).toMatchObject({ underruns: 0, skips: 0 });
 	});
 
 	it("keeps a five frame flush span playing", async () => {
@@ -197,16 +199,21 @@ describe("ring replay", () => {
 		// slack above it absorbs the peak, so the flush plays instead of being cut down to the
 		// target on arrival.
 		const t = trace(600, 5, 5);
-		expect(replay(build(await settled(t)), t, 2000)).toEqual({ underruns: 0, skipped: 0 });
+		expect(replay(build(await settled(t)), t, 2000)).toMatchObject({ underruns: 0, skips: 0 });
 	});
 
-	it("underruns constantly when the target ignores the arrival spread", () => {
+	it("still underruns when the target ignores the arrival spread, but drops nothing", () => {
 		// 46ms is what the round-trip formula produced on the connection this was measured on: it
 		// describes the network and says nothing about a sender that flushes five frames at once.
+		// Every flush's trough falls below it. Preemptive expand lengthens the ring by one pitch period
+		// a window at most, as NetEq's does, which cannot cover a 100 ms trough, so the ring runs dry
+		// on most flushes; accelerate brings each peak back down rather than skipping it.
 		const t = trace(600, 5, 5);
 		const result = replay(build(46), t, 2000);
-		expect(result.underruns).toBeGreaterThan(100);
-		expect(result.skipped).toBeGreaterThan(10 * CHUNK);
+		const flushes = (t.length - 2000 / CHUNK_MS) / 5;
+		expect(result.underruns).toBeGreaterThan(flushes / 2);
+		expect(result.skips).toBe(0);
+		expect(result.stretched).toBeGreaterThan(0);
 	});
 });
 

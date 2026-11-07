@@ -1,7 +1,7 @@
 import type { Micro, Milli } from "@moq/clock";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = Init | Data | Latency | Reset | Truncate | Playing | End;
+export type Message = Init | Data | Latency | Lateness | Reset | Truncate | Playing | End;
 
 /** Create the worklet's ring. */
 export interface Init {
@@ -53,6 +53,12 @@ export interface Latency {
 	park?: number;
 }
 
+/** How late the slowest recent arrival was against the fastest, which widens the stretch's band. */
+export interface Lateness {
+	type: "lateness";
+	lateness: Milli;
+}
+
 /** State update from the worklet back to the main thread. */
 export interface State {
 	type: "state";
@@ -62,6 +68,8 @@ export interface State {
 	anchored: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
+	// How many times the ring skipped ahead, dropping queued audio, cumulative.
+	skips: number;
 	// Whether playback is at a declared end, reached or announced before any audio, and nothing has played since.
 	silent: boolean;
 	// The epoch of the last reset or park the worklet applied.

@@ -98,6 +98,8 @@ export interface Stats {
 	bytesReceived: number;
 	/** How many times playback ran dry mid-stream; a rising count means the delay is too low. */
 	underruns: number;
+	/** How many times playback skipped ahead, dropping buffered audio rather than playing it faster. */
+	skips: number;
 	/** Frames that arrived after their playout time. */
 	late: number;
 	/** Renditions that failed to decode. */
@@ -111,7 +113,7 @@ export interface Stats {
 }
 
 // The running totals before anything is counted.
-const EMPTY: Stats = { bytesReceived: 0, underruns: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
+const EMPTY: Stats = { bytesReceived: 0, underruns: 0, skips: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
 
 // What a decode attempt reads, and where its counts go.
 type Attempt = { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid; key: Key };
@@ -163,6 +165,9 @@ export class Decoder {
 
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Milli | undefined>(undefined);
+	// How late the consumer's slowest recent arrival was against its fastest, which widens the band
+	// the ring's stretch holds above its floor.
+	#lateness = new Signal<Milli>(Milli.zero);
 
 	// The newest container consumer, the path it reads, and its codec, whose estimate a replacement
 	// continues.
@@ -250,6 +255,7 @@ export class Decoder {
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
+		this.#signals.run(this.#runLateness.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
 		this.#signals.run(this.#runStalls.bind(this));
 	}
@@ -413,6 +419,14 @@ export class Decoder {
 				if (added <= 0) return;
 				this.#count(this.#playing, { underruns: added }, (stats) => ({ underruns: stats.underruns + added }));
 			});
+			let skipped = 0;
+			effect.run((inner) => {
+				const skips = inner.get(ring.skips);
+				const added = skips - skipped;
+				skipped = skips;
+				if (added <= 0) return;
+				this.#count(undefined, {}, (stats) => ({ skips: stats.skips + added }));
+			});
 
 			effect.set(this.#out.root, worklet);
 		});
@@ -452,6 +466,16 @@ export class Decoder {
 		// audio in step with video. The measured target moves a bucket at a time, and a rise the
 		// buffered slack already covers costs no silence at all.
 		ring.setLatency(effect.get(this.sync.out.delay));
+	}
+
+	#runLateness(effect: Effect): void {
+		const ring = effect.get(this.#ring);
+		if (!ring) return;
+
+		// NetEq's band above the target, from the arrivals the target was measured from. An explicit
+		// delay ignores the arrivals entirely, so it keeps the bare 20 ms band.
+		const auto = effect.get(this.sync.in.delay) === "auto";
+		ring.setLateness(auto ? effect.get(this.#lateness) : Milli.zero);
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -838,8 +862,10 @@ export class Decoder {
 		});
 
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target
-		// holds until the replacement takes over; see #retire.
+		// holds until the replacement takes over; see #retire. The stretch's band follows this
+		// consumer's own arrivals.
 		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
+		effect.run((inner) => this.#lateness.set(inner.get(consumer.lateness)));
 		return { consumer, read };
 	}
 
@@ -847,6 +873,7 @@ export class Decoder {
 	#retire(): void {
 		this.#consumer = undefined;
 		this.#measured.set(undefined);
+		this.#lateness.set(Milli.zero);
 		// Its arrivals stop holding the clock's reference.
 		this.#track.reset();
 	}

@@ -202,10 +202,13 @@ export function analyze(input: Input): Summary {
 	const silence = quanta > 0 ? ((lastTap?.quiet ?? 0) - (firstTap?.quiet ?? 0)) / quanta : null;
 	if (!lastTap) notes.push("tap: never reported, so underruns and silence are unmeasured");
 
-	// The player's own counter is cumulative, so the window's count is its rise across the window.
-	const counted = window.filter((s) => s.playerUnderruns !== undefined);
-	const playerUnderruns =
-		counted.length > 0 ? (counted.at(-1)?.playerUnderruns ?? 0) - (counted[0]?.playerUnderruns ?? 0) : null;
+	// The player's own counters are cumulative, so the window's count is each one's rise across it.
+	const rise = (counter: (s: Sample) => number | undefined) => {
+		const counted = window.map(counter).filter((n) => n !== undefined);
+		return counted.length > 0 ? (counted.at(-1) ?? 0) - (counted[0] ?? 0) : null;
+	};
+	const playerUnderruns = rise((s) => s.playerUnderruns);
+	const playerSkips = rise((s) => s.playerSkips);
 
 	// ── the playhead ────────────────────────────────────────────────────────
 	// The lag drifts when the media timeline does not run at wall rate, a property of the source
@@ -258,6 +261,8 @@ export function analyze(input: Input): Summary {
 		underrun_ms_max: lastTap ? round(Math.max(0, ...gaps.map((g) => g.ms))) : null,
 		player_underruns_total: playerUnderruns,
 		player_underruns_per_min: playerUnderruns === null ? null : perMin(playerUnderruns),
+		player_skips_total: playerSkips,
+		player_skips_per_min: playerSkips === null ? null : perMin(playerSkips),
 		skip_aheads_total: skips.count,
 		skip_aheads_per_min: perMin(skips.count),
 		discarded_ms_total: round(skips.ms),

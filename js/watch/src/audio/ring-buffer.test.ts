@@ -108,8 +108,10 @@ describe("writing data", () => {
 		}
 	});
 
+	// These drain the ring below its floor without refilling it, which a live ring stretches, so they
+	// run buffered, which plays exactly what the ring holds.
 	it("should handle late-arriving samples (out-of-order writes)", () => {
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli });
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli, buffered: true });
 
 		// Fill buffer to exit stalled mode
 		write(buffer, 0 as Milli, 100, { channels: 1, value: 0.0 });
@@ -146,7 +148,7 @@ describe("writing data", () => {
 	});
 
 	it("should discard samples that are too old", () => {
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli });
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli, buffered: true });
 
 		// Exit stalled mode by filling buffer
 		write(buffer, 0 as Milli, 100, { channels: 2, value: 0.0 });
@@ -171,9 +173,10 @@ describe("writing data", () => {
 	});
 });
 
+// Buffered, for the same reason as the writes above.
 describe("reading data", () => {
 	it("should read available data", () => {
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli });
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli, buffered: true });
 
 		// Exit stalled mode by filling the buffer
 		write(buffer, 0 as Milli, 100, { channels: 2, value: 0.0 });
@@ -211,7 +214,7 @@ describe("reading data", () => {
 	});
 
 	it("should handle partial reads", () => {
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli });
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli, buffered: true });
 
 		// Exit stalled mode by filling the buffer
 		write(buffer, 0 as Milli, 100, { channels: 2, value: 0.0 });
@@ -269,47 +272,23 @@ describe("stall behavior", () => {
 
 describe("ring buffer wrapping", () => {
 	it("should wrap around when buffer is full", () => {
-		// 100 sample target, so 200 samples of capacity.
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli });
+		// A 1000-sample ring, buffered so it plays through everything it holds.
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli, buffered: true });
+		write(buffer, 0 as Milli, 600, { channels: 1, value: 1.0 });
+		expect(read(buffer, 500, 1)[0].length).toBe(500);
 
-		// Fill to the target
-		write(buffer, 0 as Milli, 100, { channels: 1, value: 1.0 });
-		expect(buffer.stalled).toBe(false);
+		// Abs 600-1199 wraps onto slots 600-999 and 0-199.
+		write(buffer, 600 as Milli, 600, { channels: 1, value: 2.0 });
+		expect(buffer.length).toBe(700);
 
-		// Read 50 samples to make room (readIndex at 50)
-		const output1 = read(buffer, 50, 1);
-		expect(output1[0].length).toBe(50);
-
-		// Write 50 more samples at timestamp 100 (fills from sample 100-149)
-		write(buffer, 100 as Milli, 50, { channels: 1, value: 2.0 });
-
-		// Now we have 100 samples available (50-149)
-		expect(buffer.length).toBe(100);
-
-		// One chunk above the target is tolerated rather than dropped (50-199).
-		write(buffer, 150 as Milli, 50, { channels: 1, value: 3.0 });
-		expect(buffer.length).toBe(150);
-
-		// Past the band: drop back to the target, wrapping abs 200-249 onto slots 0-49.
-		write(buffer, 200 as Milli, 50, { channels: 1, value: 4.0 });
-		expect(buffer.length).toBe(100);
-
-		// Read all 100 samples: abs 150-199 = 3.0, abs 200-249 = 4.0.
-		const output2 = read(buffer, 100, 1);
-		expect(output2[0].length).toBe(100);
-
-		for (let i = 0; i < 50; i++) {
-			expect(output2[0][i]).toBe(3.0);
-		}
-		for (let i = 50; i < 100; i++) {
-			expect(output2[0][i]).toBe(4.0);
-		}
+		const [output] = read(buffer, 700, 1);
+		expect([...output]).toEqual([...Array(100).fill(1), ...Array(600).fill(2)]);
 	});
 });
 
 describe("multi-channel handling", () => {
 	it("should handle stereo data correctly", () => {
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli });
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli, buffered: true });
 
 		// Exit stalled mode by filling buffer
 		write(buffer, 0 as Milli, 100, { channels: 2, value: 0.5 });
@@ -793,7 +772,8 @@ describe("latency increase", () => {
 	// Video holds a deeper floor on its own, so audio has to park for the difference or it runs
 	// ahead. Flushing instead cost the whole floor in silence for every rise, however small.
 	it("parks a playing ring until the deeper floor refills, keeping what it buffered", () => {
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli });
+		// Buffered, so it plays its floor down without the expand a live ring stretches it with.
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Milli, buffered: true });
 
 		// Fill to the floor so playback starts, then play half of it.
 		write(buffer, 0 as Milli, 100, { channels: 1, value: 1.0 });
@@ -837,4 +817,158 @@ describe("latency increase", () => {
 		expect(buffer.stalled).toBe(false);
 		expect(read(buffer, 1, 1)[0][0]).toBe(1.0);
 	});
+});
+
+describe("time stretch", () => {
+	it("truncate replaces the unplayed part of a staged window", () => {
+		// Live, so the first read stages a whole 30 ms window though it plays only 128 samples.
+		const buffer = new AudioRingBuffer({ rate: 48000, channels: 1, latency: 100 as Milli });
+		write(buffer, 0 as Milli, 4800, { channels: 1, value: 0.1 });
+		read(buffer, 128, 1);
+
+		buffer.truncate(Micro.fromMilli(10 as Milli));
+		write(buffer, 10 as Milli, 960, { channels: 1, value: 0.9 });
+
+		// The predecessor plays to the truncation, then the successor in full.
+		const out = read(buffer, 480 - 128 + 960, 1)[0];
+		expect(out.length).toBe(480 - 128 + 960);
+		expect(out[480 - 128 - 1]).toBeCloseTo(0.1, 5);
+		expect(out[480 - 128]).toBeCloseTo(0.9, 5);
+		expect(buffer.length).toBe(0);
+	});
+
+	// 48 kHz: 30 ms windows of 1440 frames, and a constant signal stretches by its shortest pitch
+	// period, 2.5 ms or 120 frames.
+	const RATE = 48000;
+	const QUANTUM = 128;
+	const live = (latency: number) => new AudioRingBuffer({ rate: RATE, channels: 1, latency: latency as Milli });
+	const frames = (ms: number) => (RATE * ms) / 1000;
+
+	it("expands a ring short of its floor, so it plays longer than it holds before running dry", () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(100), { value: 0.5 });
+		let played = 0;
+		for (;;) {
+			const [output] = read(buffer, QUANTUM, 1);
+			played += output.length;
+			if (output.length < QUANTUM) break;
+		}
+		expect(played).toBeGreaterThan(frames(100));
+		expect(buffer.underruns).toBe(1);
+	});
+
+	it("drains the tail before a declared end as received, since running dry there is silence", () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(100), { value: 0.5 });
+		buffer.end(Micro.fromMilli(100 as Milli));
+		let played = 0;
+		for (;;) {
+			const [output] = read(buffer, QUANTUM, 1);
+			played += output.length;
+			if (output.length < QUANTUM) break;
+		}
+		expect(played).toBe(frames(100));
+		expect(buffer.underruns).toBe(0);
+		expect(buffer.silent).toBe(true);
+	});
+
+	// Fed at the real-time rate, so only the stretch can move the ring's depth.
+	async function converge(buffer: AudioRingBuffer, start: number, seconds: number) {
+		const timestamps: number[] = [];
+		let written = start;
+		for (let rendered = 0; rendered < frames(seconds * 1000); rendered += QUANTUM) {
+			while (written < start + rendered + QUANTUM) {
+				write(buffer, ((written * 1000) / RATE) as Milli, frames(20), { value: 0.5 });
+				written += frames(20);
+			}
+			const [output] = read(buffer, QUANTUM, 1);
+			expect(output.length).toBe(QUANTUM);
+			timestamps.push(Milli.fromMicro(buffer.timestamp));
+		}
+		return { timestamps, written };
+	}
+
+	it("accelerates a ring above its floor back onto it, dropping nothing", async () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(300), { value: 0.5 });
+		const { timestamps, written } = await converge(buffer, frames(300), 8);
+
+		// Within the band above the floor, give or take the 20 ms frame just written.
+		expect(buffer.length).toBeGreaterThanOrEqual(frames(100) - frames(20));
+		expect(buffer.length).toBeLessThan(frames(120) + frames(20));
+		// Every sample written either played or is still buffered, so nothing was skipped.
+		expect(Math.round((Milli.fromMicro(buffer.timestamp) * RATE) / 1000) + buffer.length).toBeGreaterThan(
+			written - frames(30),
+		);
+		for (let i = 1; i < timestamps.length; i++) {
+			const step = timestamps[i] - timestamps[i - 1];
+			expect(step).toBeGreaterThan(0);
+			expect(step).toBeLessThanOrEqual((2 * QUANTUM * 1000) / RATE + 1e-9);
+		}
+		expect(buffer.underruns).toBe(0);
+	});
+
+	it("holds a ring inside the band its arrivals' lateness widens, accelerating only past it", async () => {
+		const buffer = live(100);
+		buffer.setLateness(100 as Milli);
+		write(buffer, 0 as Milli, frames(300), { value: 0.5 });
+		await converge(buffer, frames(300), 8);
+
+		// Above the 100 ms floor but inside 100 ms of lateness plus the 20 ms band, give or take the
+		// 20 ms frame just written, where without the lateness it accelerates down to the floor.
+		expect(buffer.length).toBeGreaterThanOrEqual(frames(200) - frames(20));
+		expect(buffer.length).toBeLessThan(frames(220) + frames(20));
+		expect(buffer.underruns).toBe(0);
+	});
+
+	it("fast-accelerates a ring four times past the band, even straight after a stretch", async () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(600), { value: 0.5 });
+		await converge(buffer, frames(600), 1);
+		// Fast accelerate removes up to 15 ms of every 30 ms window until the ring is under 480 ms.
+		expect(buffer.length).toBeLessThan(frames(480));
+	});
+
+	it("drops the staged window with the audio a re-anchor skips", () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(100), { value: 0.25 });
+		read(buffer, QUANTUM, 1);
+
+		// 400 ms more crosses the 480 ms fast threshold with a 30 ms window still staged.
+		write(buffer, 100 as Milli, frames(400), { value: 0.5 });
+		expect(buffer.skips).toBe(1);
+		expect(buffer.length).toBe(frames(100));
+		expect(Milli.fromMicro(buffer.timestamp)).toBeCloseTo(400, 6);
+		const [output] = read(buffer, QUANTUM, 1);
+		expect(output.length).toBe(QUANTUM);
+		expect(output.every((sample) => sample === 0.5)).toBe(true);
+	});
+
+	// Past NetEq's fast threshold, four times the floor plus its band, or three quarters of the
+	// headroom above the floor, whichever is lower, stretching back would take seconds, so the ring
+	// re-anchors on its floor as moq-audio does. With 1000 ms of capacity, a 100 ms floor reaches the
+	// first at 480 ms, or 560 ms with 20 ms of lateness widening its band, and a 300 ms floor the
+	// second at 825 ms.
+	for (const [floor, lateness, threshold] of [
+		[100, 0, 480],
+		[100, 20, 560],
+		[300, 0, 825],
+	]) {
+		it(`re-anchors a ${floor} ms floor ${lateness} ms late only once the ring holds ${threshold} ms`, () => {
+			const buffer = live(floor);
+			buffer.setLateness(lateness as Milli);
+			write(buffer, 0 as Milli, frames(floor), { value: 0.5 });
+			read(buffer, QUANTUM, 1);
+			const playhead = buffer.timestamp;
+
+			write(buffer, floor as Milli, frames(threshold - 10 - floor), { value: 0.5 });
+			expect(buffer.timestamp).toBe(playhead);
+			expect(buffer.skips).toBe(0);
+
+			write(buffer, (threshold - 10) as Milli, frames(20), { value: 0.5 });
+			expect(buffer.timestamp).toBeGreaterThan(playhead);
+			expect(buffer.length).toBeLessThan(frames(floor) + frames(30));
+			expect(buffer.skips).toBe(1);
+		});
+	}
 });

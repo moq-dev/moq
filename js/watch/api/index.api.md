@@ -92,6 +92,7 @@ export namespace Audio {
 		bytesReceived: number;
 		errors: number;
 		late: number;
+		skips: number;
 		stalled: Clock.Milli;
 		stalls: number;
 		underruns: number;

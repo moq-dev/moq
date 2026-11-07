@@ -68,33 +68,36 @@ describe("replay", () => {
 	});
 
 	it("counts each run-dry the way the player's stats do", async () => {
-		// One frame 200 ms late against a 100 ms target: the ring runs dry once and re-stalls to refill.
+		// One frame 200 ms late against a 60 ms target: the groups behind it wait longer than time
+		// stretch can spread the ring, so it runs dry part-way through a quantum, which counts, and
+		// re-stalls to refill on the next, which counts again.
 		const trace = paced(10, (i) => (i === 250 ? 230 : 30)).sort((a, b) => a.at - b.at);
 		const counted = async (arrivals: Arrival[]) => {
 			let last = 0;
 			for await (const { underruns } of replay(arrivals, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Milli(60),
 				duration: observed(10),
 			}))
 				last = underruns;
 			return last;
 		};
 		expect(await counted(paced(10, () => 30))).toBe(0);
-		expect(await counted(trace)).toBe(1);
+		expect(await counted(trace)).toBe(2);
 	});
 
 	it("holds newer groups behind a missing one until the max delay gives up on it", async () => {
 		const trace = paced(10, () => 30).filter((arrival) => arrival.group !== 250);
-		// The consumer delivers in group order, so the ring runs dry for longer than the missing frame
-		// while the groups behind it wait. Writing arrivals straight into the ring plays straight through.
+		// The consumer delivers in group order, so the groups behind the missing one wait, longer than
+		// time stretch can spread a 60 ms ring, and it runs dry for longer than the missing frame.
+		// Writing arrivals straight into the ring would play only the frame's own 20 ms hole.
 		const frame = Math.ceil((20 / 1000) * (RATE / QUANTUM));
 		expect(
 			await underruns(trace, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Milli(60),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(frame);

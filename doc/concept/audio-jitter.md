@@ -127,6 +127,12 @@ fold(bucket):                           # prior starts at 1
 target():
     measured = upper edge of the first bucket whose cumulative weight exceeds QUANTILE
     return max(measured, advertised) + frame
+
+lateness():                             # widens the time stretch's band, not the target
+    if history is empty: return 0
+    fast = entry in history minimising (entry.arrival - entry.media), the oldest on a tie
+    slow = entry in history maximising (entry.arrival - entry.media), the oldest on a tie
+    return max(0, (slow.arrival - fast.arrival) - (slow.media - fast.media))
 ```
 
 ### Relative arrival delay
@@ -160,7 +166,8 @@ shorter than `WINDOW` instead of growing without bound.
 The reference is a minimum over a prefix of the history, and the publisher
 chooses the prefix by reordering, so scanning for it lets every frame cost
 `MAX_HISTORY` comparisons. Keep the history in a structure that answers any
-prefix's minimum in logarithmic time, such as a segment tree over a ring.
+prefix's minimum in logarithmic time, such as a segment tree over a ring, and
+the whole history's maximum for `lateness`, such as a monotonic queue.
 Keep the oldest entry on a tie: tied entries with a different `arrival` and
 `media` round `delay` differently.
 
@@ -266,6 +273,18 @@ quantile.
 A quantile of an empirical distribution, rather than a mean plus k deviations,
 because network delay is heavy-tailed and one-sided. A Gaussian assumption
 sizes that tail wrong in both directions.
+
+### Lateness
+
+`lateness` is how late the slowest frame in the history arrived against the
+fastest: NetEq's `PacketArrivalHistory::GetMaxDelayMs`, over the same
+two-second window and the same in-order frames, since a reordered frame never
+joins the history. It is not part of the target. The
+[time stretch](#received-audio-time-stretch) adds it to the band above the
+target, as NetEq's `DecisionLogic` does, so a ring the last two seconds
+refilled after a late burst keeps that cushion instead of accelerating it away
+before the next one. It reads the window as it is now rather than a quantile
+of its history, so it falls back as soon as the late frame leaves the window.
 
 ## The frame duration
 
@@ -503,10 +522,11 @@ marker in its group, and they belong to the speech before the silence, not after
 ## Fixed targets
 
 An explicit delay **fixes the target and disables adaptation**. It is taken
-literally: no advertised floor, no frame term, no estimate.
+literally: no advertised floor, no frame term, no estimate, and no lateness.
 
 ```
 target = delay
+lateness = 0
 ```
 
 An impossible fixed target is refused, not silently adjusted. A negative delay,
@@ -571,7 +591,8 @@ directly, so neither is graded against the other.
   "frame": 20,
   "arrival": [0, 10, 30],
   "media": [0, 14500, 14520],
-  "target": [[0, 120], [26, 80]]
+  "target": [[0, 120], [26, 80]],
+  "lateness": [[0, 0]]
 }
 ```
 
@@ -582,7 +603,8 @@ them, as is `ends`: the indices, ascending, of the frames observed right after a
 [declared end](#declared-silence), each of which calls `end()` before it is observed. `target` lists `[frame index, target]` at every frame where the target
 differs from the previous frame's, starting at frame 0, so an implementation
 folds the trace one frame at a time and compares its target at each listed
-index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
+index. `lateness` lists the lateness the same way, zero throughout for the
+`fixed` case. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 
 | Case | Holds the implementation to |
 | --- | --- |
@@ -614,11 +636,13 @@ the `bun doc/concept/audio-jitter/corpus.ts` command above. It runs in
 
 ## Received-audio time stretch
 
-Native playback adapts received PCM to the target with WebRTC NetEq's
-accelerate and preemptive expand. It never generates replacement audio for a
-missing packet. The estimator above is unchanged. The browser implementation
-must conform to this same algorithm and [PCM corpus](audio-jitter/stretch/corpus.json)
-when it adopts stretching; the browser does not yet stretch on this revision.
+Both players adapt received PCM to the target with WebRTC NetEq's accelerate
+and preemptive expand: native playback in `rs/moq-audio`, and the browser in the
+AudioWorklet's ring in `js/watch`. Neither generates replacement audio for a
+missing packet, so a hole in the media plays as a hole. The estimator above is
+unchanged. Both conform to this same algorithm and
+[PCM corpus](audio-jitter/stretch/corpus.json). The browser stretches only live
+playback: buffered playback plays every sample it holds, as it always has.
 
 The source is WebRTC's
 [`TimeStretch`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/time_stretch.cc),
@@ -626,8 +650,8 @@ The source is WebRTC's
 [`PreemptiveExpand`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/preemptive_expand.cc),
 [`DspHelper`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/dsp_helper.cc),
 and [`DecisionLogic`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/decision_logic.cc),
-read on 2026-11-04. The native port retains the BSD license and patent grant in
-`rs/moq-audio/WEBRTC-LICENSE` and `WEBRTC-PATENTS`.
+read on 2026-11-04. Both ports retain the BSD license and patent grant, in
+`WEBRTC-LICENSE` and `WEBRTC-PATENTS` beside `rs/moq-audio` and `js/watch`.
 
 ### PCM and decision state
 
@@ -637,13 +661,18 @@ below are frames at the output device's rate `R`. Duration-to-frame conversion
 uses `floor(R * milliseconds / 1000)`, except a measured pitch rounds to the
 nearest frame, with half rounded upward. A processing window is 30 ms of
 **newly received PCM**. A short window passes unchanged. Startup padding is
-never analysed, and finish drains the remaining input without stretching.
+never analysed, and finish drains the remaining input without stretching. So
+does the tail before a [declared end](#declared-silence): running dry after it
+is silence rather than an underrun, so nothing expands toward a target that no
+arrival will refill.
 
 `buffered` counts unread frames in the ring plus staged output. `target` is
-the current playout target. The state is `cooldown`, initially 60 ms
+the current playout target, and `lateness` the estimator's
+[lateness](#lateness), NetEq's `GetMaxDelayMs`, which is zero for a
+[fixed target](#fixed-targets). The state is `cooldown`, initially 60 ms
 (NetEq's six startup ticks), reduced
 by each frame rendered, saturating at zero. At a window boundary, with
-`high = target + 20 ms`, choose in this order:
+`high = target + lateness + 20 ms`, choose in this order:
 
 1. `buffered >= 4 * high`: fast accelerate, even during cooldown.
 2. `cooldown > 0`: hold.
@@ -653,10 +682,19 @@ by each frame rendered, saturating at zero. At a window boundary, with
 
 A successful stretch sets cooldown to 50 ms (NetEq's five 10 ms ticks).
 A rejected seam leaves it unchanged. This preserves NetEq's 20 ms adjustment
-granularity, 4x fast threshold, and minimum interval. NetEq's extra
-packet-history maximum-delay term is not added again: this controller sees the
-already decoded PCM queue and its jitter target rather than an RTP playout
-timestamp and packet-arrival history. There is no concealment state.
+granularity, its maximum-delay term, its 4x fast threshold, and its minimum
+interval. There is no concealment state.
+
+One difference from NetEq's `DecisionLogic` remains. NetEq compares its
+playout delay, how far the playhead trails the fastest arrival in its packet
+history, where this compares `buffered`. The two agree while frames arrive on
+time. During a receive stall `buffered` drains while the playout delay holds,
+so this expands into the stall, and once the stall's frames land together
+`buffered` jumps while the playout delay holds, so this can accelerate away the
+cushion they bring. Deciding on the playout delay instead cut the
+`relay-mic-rtt40` replay's player underruns by about a third in a prototype,
+but the browser's worklet would need the arrival clock mapped onto its render
+clock to do it, so neither player does yet.
 
 ### Pitch search and admission
 
@@ -720,19 +758,24 @@ ring and staged output hold the target again. Padding never enters the pitch
 search. Finishing bypasses that wait so a short tail can drain. Trimming is
 emergency recovery at the ring's capacity watermark. The
 CLI's incoming-media trim is reserved for a distance at the fast threshold,
-not ordinary 20 ms drift. These bounds do not promise concealment of missing
+`4 * high`, not ordinary 20 ms drift. The browser's ring receives each decoded
+frame as a write, so it re-anchors on its floor there, at the lower of the fast
+threshold and three quarters of its headroom above the floor, and counts each
+re-anchor as a skip in its stats. These bounds do not promise concealment of missing
 media or convergence of a signal whose seams continually fail admission.
 
 ### Stretch corpus
 
 `audio-jitter/stretch/corpus.json` holds literal interleaved input and expected
-output PCM, device rate and channels, buffered and target frame counts,
-incoming cooldown, requested decision, and admitted lag (zero means hold).
-Compare output within 1e-6 absolute sample amplitude. It includes hold,
-cooldown, fast-mode bypass, linked stereo, passive noise, rejected active
-noise, and 8/44.1/48 kHz seams. Both implementations consume these exact
-vectors; generating expected output from the implementation under test is
-not conformance.
+output PCM, device rate and channels, buffered, target, and lateness frame
+counts (lateness is zero where a vector leaves it out), incoming cooldown,
+requested decision, and admitted lag (zero means hold). Compare output within
+1e-6 absolute sample amplitude. It includes hold, cooldown, fast-mode bypass,
+linked stereo, passive noise, rejected active noise, 8/44.1/48 kHz seams, and
+a lateness that holds a ring accelerate would otherwise shorten, accelerates
+one above the widened band, and raises the fast threshold with it. Both
+implementations consume these exact vectors; generating expected output from
+the implementation under test is not conformance.
 
 ## Comfort noise
 

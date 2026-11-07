@@ -84,6 +84,9 @@ struct Shared {
 	/// on opposite sides of a window transfer.
 	consumed: AtomicUsize,
 	target: AtomicUsize,
+	/// How late the slowest recent arrival was against the fastest, in output
+	/// frames, which widens the stretch's band above the target.
+	lateness: AtomicUsize,
 	finished: AtomicBool,
 	stretch: AtomicBool,
 	/// Declared ends, counted. See [`Producer::end`].
@@ -315,6 +318,13 @@ impl Producer {
 		};
 		self.shared.finished.store(true, Ordering::Relaxed);
 		flushed
+	}
+
+	/// Widen the stretch's band above the target by how late the slowest recent
+	/// arrival was against the fastest, as NetEq does.
+	pub(crate) fn set_lateness(&mut self, lateness: Duration) {
+		let frames = (lateness.as_secs_f64() * self.rate as f64).floor() as usize;
+		self.shared.lateness.store(frames, Ordering::Relaxed);
 	}
 
 	/// Change the target without reallocating the queue. Leave one stretch window
@@ -620,6 +630,9 @@ impl Consumer {
 				}
 				frames = frames.min(ahead);
 			}
+			// A declared end's tail drains as received: running dry after it is
+			// silence, not an underrun, so nothing should expand toward the target.
+			let declared = self.declared();
 			let Some(stretch) = self.stretch.as_mut() else {
 				let frames = frames.min((output.len() - done) / channels);
 				if frames == 0 {
@@ -640,14 +653,16 @@ impl Consumer {
 				break;
 			}
 			// Never transform startup padding or a finite stream's tail.
-			let enabled = self.prime == 0 && !self.shared.finished.load(Ordering::Relaxed);
+			let enabled = self.prime == 0 && !self.shared.finished.load(Ordering::Relaxed) && !declared;
 			let frames = if self.prime > 0 { frames.min(self.prime) } else { frames };
 			self.staged_prime = self.prime > 0;
 			self.prime -= frames.min(self.prime);
 			let read = self.ring.pop_slice(&mut stretch.input[..frames * channels]);
 			debug_assert_eq!(read, frames * channels);
 			self.position = self.position.wrapping_add(frames);
-			stretch.process(frames, buffered, self.shared.target.load(Ordering::Relaxed), enabled);
+			let target = self.shared.target.load(Ordering::Relaxed);
+			let lateness = self.shared.lateness.load(Ordering::Relaxed);
+			stretch.process(frames, buffered, target, lateness, enabled);
 			// The writer still counts the input while it is being analysed.
 			// Publish only the resulting duration change, then the rendered
 			// frames. Moving PCM into staging never makes it disappear.
@@ -947,6 +962,43 @@ mod tests {
 		}
 	}
 
+	/// NetEq's band above the target widens by the arrivals' lateness, so a queue
+	/// inside it holds where it would otherwise accelerate down to the target.
+	#[test]
+	fn lateness_widens_the_band_above_the_target() {
+		for (lateness, low, high) in [(0, 80.0, 140.0), (100, 180.0, 240.0)] {
+			let (mut prod, mut cons) = channel(
+				2,
+				48_000,
+				48_000,
+				Config {
+					latency: Duration::from_millis(100),
+					capacity: Duration::from_secs(3),
+					pad: false,
+					trim: false,
+				},
+			);
+			cons.stretch(48_000);
+			cons.start();
+			prod.set_lateness(Duration::from_millis(lateness));
+			// 200 ms on top of the 100 ms the queue primes with.
+			assert_eq!(prod.push(&vec![0.25; 9600 * 2]), Push::Ok);
+			let mut out = [0.0; 480 * 2];
+			// Fed at the real-time rate, so only the stretch moves the depth.
+			for tick in 0..800 {
+				if tick % 2 == 0 {
+					assert_eq!(prod.push(&[0.25; 960 * 2]), Push::Ok);
+				}
+				assert_eq!(cons.read(&mut out), Read::Ok, "{lateness} ms late, tick {tick}");
+			}
+			let buffered = prod.buffered().as_secs_f64() * 1000.0;
+			assert!(
+				(low..high).contains(&buffered),
+				"{lateness} ms late: {buffered} ms buffered"
+			);
+		}
+	}
+
 	#[test]
 	fn staged_audio_is_buffered_and_finish_drains_it() {
 		let (mut prod, mut cons) = channel(
@@ -978,6 +1030,34 @@ mod tests {
 		}
 		assert_eq!(frames, 7200 - 128, "finish never extends the tail");
 		assert_eq!(cons.read(&mut out), Read::Underflow { frames: 0 });
+	}
+
+	#[test]
+	fn a_declared_end_drains_its_tail_unstretched() {
+		let (mut prod, mut cons) = channel(
+			2,
+			48_000,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_secs(1),
+				pad: false,
+				trim: false,
+			},
+		);
+		cons.stretch(48_000);
+		cons.start();
+		// Twice the target, so the tail drains through it: without the end it
+		// would expand there, toward a target nothing will refill.
+		assert_eq!(prod.push(&vec![0.25; 4800 * 2]), Push::Ok);
+		prod.end();
+		let mut out = [0.0; 128 * 2];
+		let mut reads = 0;
+		while cons.available() > 0 {
+			cons.read(&mut out);
+			reads += 1;
+		}
+		assert_eq!(reads, 7200usize.div_ceil(128), "a declared end never extends the tail");
 	}
 
 	#[test]
@@ -1035,12 +1115,18 @@ mod tests {
 		for (i, frame) in pcm.as_chunks_mut::<2>().0.iter_mut().enumerate() {
 			frame.fill((i as f32 * std::f32::consts::TAU * 200.0 / 48_000.0).sin() * 0.25);
 		}
-		let (first, second) = pcm.split_at(143_000 * 2);
-		// Play out the 50 ms prime and the 60 ms startup cooldown below the
-		// trim watermark, ending on a window boundary.
+		let (first, rest) = pcm.split_at(143_000 * 2);
+		let (cushion, second) = rest.split_at(1_000 * 2);
+		// Play out the 50 ms prime below the trim watermark, then top the queue
+		// up to the target so its first window, inside the 60 ms startup
+		// cooldown, holds rather than expands. End on a window boundary.
 		assert_eq!(prod.push(first), Push::Ok);
 		let mut out = [0.0; 480 * 2];
-		for _ in 0..8 {
+		for _ in 0..5 {
+			assert_eq!(cons.read(&mut out), Read::Ok);
+		}
+		assert_eq!(prod.push(cushion), Push::Ok);
+		for _ in 0..3 {
 			assert_eq!(cons.read(&mut out), Read::Ok);
 		}
 		// Above NetEq's high limit (target + 20 ms) but under the trim

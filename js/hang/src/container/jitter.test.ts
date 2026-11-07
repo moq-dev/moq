@@ -18,6 +18,7 @@ interface Case {
 	media: number[];
 	ends?: number[];
 	target: [number, number][];
+	lateness: [number, number][];
 }
 
 const cases: Case[] = readdirSync(CORPUS)
@@ -53,8 +54,10 @@ describe("audio jitter conformance", () => {
 		it(c.name, () => {
 			const jitter = new Jitter();
 			const expected = new Map(c.target);
+			const late = new Map(c.lateness);
 			const ends = new Set(c.ends);
 			let current: number | undefined;
+			let lateness = 0;
 			for (let i = 0; i < c.arrival.length; i++) {
 				if (ends.has(i)) jitter.end();
 				jitter.observe(c.arrival[i] as Milli, c.media[i] as Milli);
@@ -67,6 +70,10 @@ describe("audio jitter conformance", () => {
 					expect(value).toBeCloseTo(current, 6);
 				}
 				current = value;
+
+				// A fixed target ignores the arrivals, which the player applies on top of the estimator.
+				lateness = late.get(i) ?? lateness;
+				expect(c.delay !== undefined ? 0 : jitter.lateness).toBeCloseTo(lateness, 6);
 			}
 		});
 	}
@@ -142,6 +149,19 @@ function scan(history: History, media: number): Entry | undefined {
 	return reference;
 }
 
+// The documented lateness: the slowest entry against the fastest, each the first on a tie.
+function slowest(history: History): number {
+	if (history.length === 0) return 0;
+	let fast = history.at(0);
+	let slow = fast;
+	for (let i = 1; i < history.length; i++) {
+		const entry = history.at(i);
+		if (entry.arrival - entry.media < fast.arrival - fast.media) fast = entry;
+		if (entry.arrival - entry.media > slow.arrival - slow.media) slow = entry;
+	}
+	return Math.max(0, slow.arrival - fast.arrival - (slow.media - fast.media));
+}
+
 describe("History", () => {
 	// A tied entry with a different (arrival, media) rounds the delay differently, so the tree must
 	// pick exactly the entry the scan would.
@@ -162,6 +182,7 @@ describe("History", () => {
 			for (const query of [media - 30, media - 10, media, media + 10, media + 1e6]) {
 				expect(history.reference(query)).toEqual(scan(history, query));
 			}
+			expect(history.lateness()).toBe(slowest(history));
 		}
 	});
 
@@ -174,8 +195,10 @@ describe("History", () => {
 				for (const query of [media - 3, media - 0.5, media]) {
 					expect(history.reference(query)).toEqual(scan(history, query));
 				}
+				expect(history.lateness()).toBe(slowest(history));
 			}
 		}
 		expect(history.length).toBe(8192);
+		expect(history.lateness()).toBe(slowest(history));
 	});
 });
