@@ -385,8 +385,8 @@ describe("Session integration (scripted peer)", () => {
 
 	test("a send stream's bytes count as acknowledged once they reach the socket", async () => {
 		const { session, peer } = connect();
-		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
 		await waitFor(() => peer.has("transport_parameters"));
 		const stream = await session.createUnidirectionalStream();
 		const writer = stream.getWriter();
