@@ -78,8 +78,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	buffer: BytesMut,
 	body: Option<Body>,
 
-	// A refused chunk may contain unread bytes, so no later chunk can resume its framing.
-	failed: Option<crate::Error>,
+	// Whether input is still accepted. A refused chunk may contain unread bytes, so no later chunk
+	// can resume its framing.
+	input: crate::container::Input,
 
 	// A segment boundary (a styp or an explicit `cut()`) waiting to land on the next fragment.
 	pending_cut: bool,
@@ -201,10 +202,15 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		Ok(())
 	}
 
-	/// Close the open group and finish the track.
+	/// Close the open group and finish the track, or abort both with the cause when that fails.
 	fn finish(&mut self) -> crate::Result<()> {
-		self.close()?;
-		self.track.finish()?;
+		if let Err(err) = self.close().and_then(|()| Ok(self.track.finish()?)) {
+			if let Some(group) = self.group.take() {
+				let _ = group.abort(err.reason());
+			}
+			let _ = self.track.clone().abort(err.reason());
+			return Err(err);
+		}
 		// A track that ended before measuring declares what it saw, and no longer holds the join
 		// interval back.
 		if let Some(mut member) = self.member.take() {
@@ -281,7 +287,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			buffer: BytesMut::new(),
 			body: None,
-			failed: None,
+			input: crate::container::Input::Open,
 			pending_cut: false,
 			segment: 0,
 			dropped_metadata: 0,
@@ -307,9 +313,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// it follows the same segmentation as video. A passthrough video track rolls there as well,
 	/// while an unwrapped one opens a group at each sync sample.
 	pub fn cut(&mut self) -> Result<()> {
-		if let Some(err) = &self.failed {
-			return Err(err.clone());
-		}
+		self.input.check()?;
 		self.pending_cut = true;
 		Ok(())
 	}
@@ -364,9 +368,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// The refusing call may leave bytes unread, so even box-aligned callers must replace the
 	/// importer to resume. [`finish`](Self::finish) still ends the tracks with what was accepted.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		if let Some(err) = &self.failed {
-			return Err(err.clone());
-		}
+		self.input.check()?;
 		let result = self.drain(data);
 		if let Err(err) = &result {
 			if let Some(Body::Media(mut mdat)) = self.body.take() {
@@ -375,7 +377,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			self.buffer = BytesMut::new();
 			self.moof = None;
 			self.deferred = Deferred::default();
-			self.failed = Some(err.clone());
+			self.input = crate::container::Input::Refused(err.clone());
 		}
 		result
 	}
@@ -527,7 +529,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::TooManyTracks(moov.trak.len()).into());
 		}
 		// Only `finish()` releases the reservation before a moov, since a fragment needs one.
-		let reserved = self.initial_reservation.clone().ok_or(Error::MoovAfterFinish)?;
+		let reserved = self.initial_reservation.clone().ok_or(crate::Error::Finished)?;
 
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
@@ -1685,7 +1687,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// their groups, every track still finishes, and this returns
 	/// [`UnexpectedEof`](mp4_atom::Error::UnexpectedEof). After a decode error, this ends the
 	/// accepted media without reading more input; it does not clear that error for later decodes.
+	/// Either way every track has ended. A finish that failed returns the same error to every
+	/// later call; one that succeeded refuses later input with
+	/// [`Finished`](crate::Error::Finished), or with the decode error it followed.
 	pub fn finish(&mut self) -> Result<()> {
+		match &self.input {
+			crate::container::Input::Finished => return Ok(()),
+			crate::container::Input::Failed(err) => return Err(err.clone()),
+			crate::container::Input::Open | crate::container::Input::Refused(_) => {}
+		}
 		// No input follows, so the buffer that waited for the rest of an atom is done.
 		self.buffer = BytesMut::new();
 		// A seek or discontinuity waiting on the truncated fragment has no fragment left to land on.
@@ -1697,23 +1707,28 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			_ => false,
 		};
-		self.finish_tracks()?;
-		if truncated {
-			return Err(mp4_atom::Error::UnexpectedEof.into());
-		}
-		Ok(())
-	}
-
-	fn finish_tracks(&mut self) -> Result<()> {
+		let mut result = match truncated {
+			true => Err(mp4_atom::Error::UnexpectedEof.into()),
+			false => Ok(()),
+		};
+		// End every track even on refusal, keeping the first error. A track whose finish fails
+		// aborts with the cause, so none is left open.
 		for track in self.text.values_mut() {
-			track.producer.finish()?;
+			result = result.and(track.producer.end());
 		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			media!(&mut track.output, producer => producer.finish()?, passthrough => passthrough.finish()?);
+			result =
+				result.and(media!(&mut track.output, producer => producer.end(), passthrough => passthrough.end()));
 		}
-		Ok(())
+		match &result {
+			// A refusal keeps refusing input with its own cause.
+			Ok(()) if matches!(self.input, crate::container::Input::Refused(_)) => {}
+			Ok(()) => self.input = crate::container::Input::Finished,
+			Err(err) => self.input = crate::container::Input::Failed(err.clone()),
+		}
+		result
 	}
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
@@ -1751,9 +1766,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A fragment whose samples are still arriving owns its groups until its last sample, so the
 	/// seek waits for it to finish publishing.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		if let Some(err) = &self.failed {
-			return Err(err.clone());
-		}
+		self.input.check()?;
 		if self.publishing() {
 			self.deferred.seek = Some(sequence);
 			return Ok(());
@@ -1786,9 +1799,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// rewinds, before publishing any of it. Like [`seek`](Self::seek), it waits for a fragment
 	/// still arriving to finish publishing.
 	pub fn discontinuity(&mut self) -> Result<()> {
-		if let Some(err) = &self.failed {
-			return Err(err.clone());
-		}
+		self.input.check()?;
 		if self.publishing() {
 			self.deferred.discontinuity = true;
 			return Ok(());

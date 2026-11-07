@@ -2900,10 +2900,7 @@ fn a_moov_after_finish_is_refused() {
 
 	fmp4.finish().unwrap();
 	let err = fmp4.decode(&init).unwrap_err();
-	assert!(
-		matches!(err, crate::Error::Cmaf(crate::container::fmp4::Error::MoovAfterFinish)),
-		"{err:?}"
-	);
+	assert!(matches!(err, crate::Error::Finished), "{err:?}");
 	let snapshot = catalog.snapshot();
 	assert!(snapshot.video.renditions.is_empty() && snapshot.audio.renditions.is_empty());
 }

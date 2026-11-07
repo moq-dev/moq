@@ -340,7 +340,7 @@ impl<T> Inner<T> {
 		self.track.group = None;
 		// Idempotent: a track that is already closed keeps its first reason.
 		let _ = self.track.inner.clone().abort(reason);
-		self.aborted = Some(err);
+		self.aborted.get_or_insert(err);
 	}
 
 	/// Finish the open group, leaving the next update to open a replacement with a full snapshot.
@@ -394,11 +394,23 @@ impl<T: Serialize> Inner<T> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
+		if let Some(err) = &self.aborted {
+			return Err(err.clone());
+		}
+		// A second finish does nothing.
+		if self.track.inner.finished().is_some() {
+			return Ok(());
+		}
 		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
 		// Any further update fails on the closed track, but it has to fail as an error rather than by
 		// writing a delta with no group to hold it.
 		self.encoder.reset();
-		self.track.finish()
+		if let Err(err) = self.track.finish() {
+			// Half-finished, the track could still take groups, so it ends with the cause instead.
+			self.abort(err.clone());
+			return Err(err);
+		}
+		Ok(())
 	}
 }
 
