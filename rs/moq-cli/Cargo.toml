@@ -26,7 +26,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
+default = ["cluster-lan", "quic", "websocket", "nvidia", "vaapi", "s3", "gcs", "azure"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]
@@ -70,10 +70,10 @@ nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # feature it turns on. Only bites when `capture`, `transcode`, or `play` pulls in
 # moq-video.
 openh264 = ["moq-video?/openh264", "moq-transcode?/openh264"]
-# Intel/AMD VAAPI hardware encoding (Linux), opt-in like the moq-video feature
-# it turns on: libva is dlopen'd at runtime, but moq-vaapi's bindgen needs
-# libclang on the build host. Only bites when `capture`, `transcode`, or `play`
-# pulls in moq-video.
+# Intel/AMD VAAPI hardware codecs (Linux), on by default like the moq-video
+# feature it turns on: libva is dlopen'd at runtime and moq-vaapi checks its
+# bindings in, so nothing is needed on the build host. Only bites when
+# `capture`, `transcode`, or `play` pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # The V4L2 M2M codecs of an ARM SoC (a Raspberry Pi's VideoCore and the like),
 # opt-in like the moq-video feature it turns on. Costs the build nothing: moq-v4l

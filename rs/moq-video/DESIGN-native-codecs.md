@@ -224,7 +224,7 @@ objc2-core-media = "..."
 objc2-core-video = "..."
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# NVENC rides the default-on `nvidia` feature and VAAPI the opt-in `vaapi`
+# NVENC rides the default-on `nvidia` feature and VAAPI the default-on `vaapi`
 # feature. Both dlopen their drivers at runtime, so they link on a GPU-less builder.
 moq-nvenc = { path = "../moq-nvenc", optional = true }  # in-tree fork, dlopen-only
 moq-vaapi = { version = "0.0.2", optional = true }      # standalone; vendored cros-libva + cros-codecs
@@ -235,7 +235,7 @@ openh264 = { version = "...", optional = true } # default software fallback
 
 Hardware encoders are cfg-gated on macOS, iOS, and Windows (VideoToolbox, Media
 Foundation) and feature-gated on Linux (NVENC behind the default-on `nvidia`,
-VAAPI behind the opt-in `vaapi`); the runtime fallback chain skips whichever
+VAAPI behind the default-on `vaapi`); the runtime fallback chain skips whichever
 driver is absent. None is a build-time hard dep on the driver, so the binary
 still builds and runs on a box with no GPU. The default `openh264` feature
 provides the software fallback, so a GPU-less box still encodes (it's also what
@@ -409,8 +409,9 @@ links on a libva-less builder and loads on a libva-less machine, falling back to
 software (see `backend::open`).
 
 > **Status: realized in moq-vaapi 0.0.3** (#1837, bumped in #2465). It dlopens
-> libva and vendors the libva headers its bindgen reads, so VAAPI costs the build
-> nothing: no libva-dev, no `NEEDED libva.so.2`, no entry in the nix devShell.
+> libva and vendors the libva headers. Since moq-dev/vaapi#8 it also checks its
+> bindings in, so VAAPI costs the build nothing: no libva-dev, no libclang, no
+> `NEEDED libva.so.2`, no entry in the nix devShell.
 
 **Input: DMA-BUFs stay on the GPU, CPU frames are uploaded.** A
 `Surface::DmaBuf` is encoded without a download. An NV12 buffer at the encoder's
