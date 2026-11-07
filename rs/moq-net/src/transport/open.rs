@@ -248,9 +248,23 @@ impl Lines {
 			.collect();
 		open.sort_by_key(|(rank, key, _)| (*rank, *key));
 		for rank in owed {
-			let Some(index) = open.iter().position(|(lowest, _, _)| rank.preempts(*lowest)) else {
-				continue;
+			// An open that cannot preempt the lowest stream finds no lower-priority group open,
+			// which would rank lower, so only its own group's oldest stream is left to check.
+			let index = match (open.first(), rank) {
+				(Some((lowest, _, _)), _) if rank.preempts(*lowest) => 0,
+				(Some(_), Rank::Grouped { group, turn, .. }) => {
+					let first = Rank::Grouped {
+						group,
+						turn,
+						stream: i64::MIN,
+					};
+					open.partition_point(|(open, _, _)| *open < first)
+				}
+				_ => continue,
 			};
+			if !open.get(index).is_some_and(|(lowest, _, _)| rank.preempts(*lowest)) {
+				continue;
+			}
 			let (lowest, key, stream) = open.remove(index);
 			tracing::debug!(?lowest, waiting = ?rank, "reset a lower-ranked stream to make room");
 			stream.preempt();
