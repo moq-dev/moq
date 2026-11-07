@@ -2,11 +2,12 @@
 
 ## Goal
 
-`Manual.drive` (`js/clock/src/manual.ts`) never fires a deadline while the
-work it drives is still waiting on a mocked transport's I/O, so time stops
-exactly at the deadline the work meets. `js/net`'s `driveUntil` test helper
-is deleted: a promise caller uses `drive`, and a predicate caller awaits
-the event that flips its predicate.
+`Manual.drive` (`js/clock/src/manual.ts`) never fires a deadline while a
+mocked transport delivery is already queued for the work it drives, so time
+stops exactly at the deadline the work meets. A read with nothing in flight
+still times out when its deadline comes. `js/net`'s `driveUntil` test
+helper is deleted: every caller passes `drive` a promise, a predicate caller
+one that resolves on the event its predicate reads.
 
 ## Plan
 
@@ -22,14 +23,19 @@ fires the next deadline early. Count that I/O: route the mock transport's
 deliveries through a clock-counted task, so `#tasks` covers them with no
 per-test annotation and `drive` keeps its promise that no wait outlives the
 call. Test it with work that reads from a mocked stream before meeting a
-deadline, asserting the clock stops at that deadline.
+deadline, asserting the clock stops at that deadline. Deliveries must not
+starve a deadline: hold time only for deliveries queued before the drain
+that would fire it, not ones each delivery queues in turn, and add a test
+with continuous background traffic whose deadline still fires.
 
 Choices made while planning, open to review:
 
 - A predicate caller (most of them, such as the ~19 in
-  `js/net/src/connection/reload.test.ts`) awaits the signal or event its
-  predicate reads, per the epic's "await the event it means" rule. `drive`
-  stays promise-only rather than growing a predicate overload.
+  `js/net/src/connection/reload.test.ts`) passes `drive` a promise that
+  resolves on the signal or event its predicate reads, per the epic's
+  "await the event it means" rule, so a timer the event depends on (such as
+  a give-up deadline) still fires. `drive` stays promise-only rather than
+  growing a predicate overload.
 - A dynamic `import()` is out of scope. JavaScript exposes no "host queue
   empty" signal, so a clock-side quiescence check would be a quiet window,
   which the epic rules out. A test whose work imports a module loads it
