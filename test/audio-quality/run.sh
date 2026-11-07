@@ -241,7 +241,7 @@ done
 harness_begin audio-quality "$RERUN"
 
 echo "installing the workspace..."
-(cd "$CLIENT" && bun install --frozen-lockfile)
+(cd "$CLIENT" && uv run --no-project python "$WORKSPACE/sh/js/install.py" frozen)
 
 failed=0
 

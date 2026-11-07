@@ -13,4 +13,4 @@ serve url='http://localhost:4443': install
 
 # Install the workspace deps that vite and the demo's imports need.
 install:
-    bun install
+    uv run --no-project python ../../sh/js/install.py update

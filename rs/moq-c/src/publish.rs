@@ -1123,6 +1123,13 @@ impl Publish {
 		self.groups.insert(group)
 	}
 
+	/// Declare that a raw track will never produce groups `start..end`.
+	pub fn track_skip(&mut self, track: Id, start: u64, end: u64) -> Result<(), Error> {
+		let raw = self.tracks.get(track).ok_or(Error::TrackNotFound)?;
+		raw.inner.skip_groups(start..end);
+		Ok(())
+	}
+
 	/// Write a single-frame group to a raw track, `None` when untimed.
 	pub fn track_frame(
 		&mut self,

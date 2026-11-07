@@ -255,14 +255,9 @@ pub enum Error {
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
 
-	/// The WebRTC data channel transport failed.
-	#[cfg(feature = "webrtc")]
-	#[error(transparent)]
-	WebRtc(Arc<crate::webrtc::Error>),
-
 	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
 	/// such as a rate cap, which qmux cannot pace.
-	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+	#[cfg(feature = "qmux")]
 	#[error("qmux refused the session limits: {0}")]
 	QmuxLimits(String),
 }
@@ -430,13 +425,6 @@ impl From<crate::tcp::Error> for Error {
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
-	}
-}
-
-#[cfg(feature = "webrtc")]
-impl From<crate::webrtc::Error> for Error {
-	fn from(err: crate::webrtc::Error) -> Self {
-		Self::WebRtc(Arc::new(err))
 	}
 }
 

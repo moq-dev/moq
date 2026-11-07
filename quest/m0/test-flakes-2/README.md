@@ -49,7 +49,7 @@ The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
 catalog group dropped mid-read ending the player's catalog, fixed by
 [moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
 
-moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
+moq-webrtc's session-end test was never load-bound: on the paused clock, dimpl's
 randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
 fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
 
@@ -111,27 +111,64 @@ tests' shared locked-memory budget, one child each. The pool-debt test
 overshot because shed frames whose payload canonical content owned stayed
 billed until crossbeam-epoch reclamation, which other tests' reads in the same
 process held back; eviction now lets go of that content itself, fixed by
-[moq-dev/moq#8052](https://github.com/moq-dev/moq/pull/8052). On 2026-11-06, moq-ffi's
-concurrent-ready test, quarantined here instead of in the unrelated
-[moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
+[moq-dev/moq#8052](https://github.com/moq-dev/moq/pull/8052).
+
+moq-ffi's concurrent-ready test drained its reader until the group ended, which
+an unfinished group never does. Its `ffi_caught_up` returned without yielding
+whenever the FFI runtime answered first, so under load the woken `ready` calls
+missed their turn until every frame was read. Fixed by reading at most what was
+written and yielding after each read, in
+[moq-dev/moq#8053](https://github.com/moq-dev/moq/pull/8053).
+
+The Python audio playout-delay test was never a decoder stall: under its default
+zero max delay, a read more than the 80 ms warmup late found the first frame's
+group stale, and the warmup then trimmed all the audio left. The test now asks
+for no max delay, fixed by [moq-dev/moq#8050](https://github.com/moq-dev/moq/pull/8050).
 
 Added 2026-11-06: `js/net`'s flate tail-shed test, which timed out in a
-merge-queue batch, one child.
+merge-queue batch. It was CPU-bound, not racy: 100 one-MiB frames of pako
+deflate and inflate against a 32 MiB tail budget that sheds from the 33rd. It
+now writes four frames past the budget, fixed by
+[moq-dev/moq#8137](https://github.com/moq-dev/moq/pull/8137).
 
 Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
 `js/net`'s datagram-end close case, which failed
 [moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check while
-reproducing on unchanged `main`.
+reproducing on unchanged `main`. Its end waited a host task when the
+publisher's write budget yielded under load while writing SUBSCRIBE_FINISH, past
+the case's microtask drain. [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000)
+stubbed that budget, merging after the quarantine was written. The case was
+re-enabled in [moq-dev/moq#8110](https://github.com/moq-dev/moq/pull/8110).
+Its follow-up: a peer's protocol violation, such as a duplicate SETUP, fails the
+session without the drain a close gets, so a lite-05/06 datagram track whose
+SUBSCRIBE_FINISH arrived before its FIN aborted with the session's error. Its
+datagrams now finish whenever the stream track's settled end survives the abort,
+fixed by [moq-dev/moq#8157](https://github.com/moq-dev/moq/pull/8157).
+
+`sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
+landing just after the dispatcher's `wait -n` returned left Bash marking the
+exit trap's next `wait` as interrupted, so it returned 143 at once and errexit
+skipped the timing report. A TERM landing after a lane forked but before
+`running` recorded it left that lane uncancelled and the exit trap's `wait`
+hung. The exit trap now waits again, and cancellation reads the job table,
+fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
+
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s lite-07
+relative-start integration test, which failed once on main in
+[moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run.
+It is quarantined with `test.skip` until its child fixes it.
+
+Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
+`js/net`'s lite-07 empty-window reply test, which fails on main 12/200 under
+`--rerun-each 200`, found in [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670).
+A subscriber FIN during the reply write's budget yield resets the stream. It is
+quarantined with `test.skip` until its child fixes it.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Flate's tail-shed test passes under load](/quest/m0/test-flakes-2/flate-tail-shed.md) - `js/net`'s compressed tail-shed cases finish within bun's timeout under load, re-enabled once fixed
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
-- [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
-- [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
-- [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
-- [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load
+- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
+- [A lite-07 relative start resolves to the publisher's start every time](/quest/m0/test-flakes-2/lite07-relative-start.md) - `js/net`'s frameless-newest-group integration test stops reading a start of 0, and its `test.skip` is removed
+- [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher

@@ -238,3 +238,73 @@ test("a hole in a drained backlog is late from the earliest arrival past it, not
 		installed.close();
 	}
 });
+
+// A pause's timestamp jump is not lateness: the group that resumes it can arrive behind the one after
+// it, and is waited for like any hole rather than skipped as too old.
+test.each([true, false])("the head after a declared end is waited for (arrives: %p)", async (arrives) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const track = new Track.Producer("audio");
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
+		format: new Format("audio"),
+		delay: { max: Milli(300) },
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	const write = (sequence: bigint, ...frames: [number, Uint8Array?][]) => {
+		const group = track.createGroup(sequence);
+		for (const [timestamp, payload = new Uint8Array([1])] of frames) {
+			group.writeFrame({
+				payload: encodeFrame(payload, Micro(timestamp)),
+				timestamp: Time.Timestamp.fromMicros(Micro(timestamp)),
+			});
+		}
+		group.finish();
+	};
+	const frame = (group: bigint, timestamp: number) => ({
+		kind: "frame" as const,
+		group,
+		frame: expect.objectContaining({ timestamp }),
+	});
+	try {
+		write(0n, [0]);
+		// The end, then the stopped encoder's final packet, as a native publisher writes them.
+		write(1n, [60_000, new Uint8Array()], [40_000]);
+		await flush();
+		expect(results).toEqual([frame(0n, 0), { kind: "end", group: 1n, end: Micro(60_000) }, frame(1n, 40_000)]);
+		write(3n, [60_060_000]);
+		await flush();
+		await clock.advance(Nano.fromMilli(Milli(299)));
+		expect(results).toHaveLength(3);
+		if (arrives) {
+			write(2n, [60_000_000]);
+			await flush();
+			expect(results.slice(3)).toEqual([frame(2n, 60_000_000), frame(3n, 60_060_000)]);
+			// Resumed, a later hole past the budget is proven again without a wait.
+			write(5n, [61_000_000]);
+			await flush();
+			expect(results.slice(5)).toEqual([
+				{ kind: "gap", timestamp: Micro(60_060_000), duration: Micro(940_000) },
+				frame(5n, 61_000_000),
+			]);
+		} else {
+			await clock.advance(Nano.fromMilli(Milli(1)));
+			expect(results.slice(3)).toEqual([
+				{ kind: "gap", timestamp: Micro(60_000), duration: Micro(60_000_000) },
+				frame(3n, 60_060_000),
+			]);
+		}
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		await reading;
+		installed.close();
+	}
+});

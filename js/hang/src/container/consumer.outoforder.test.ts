@@ -1,10 +1,31 @@
-import { expect, test } from "bun:test";
-import { Micro, Milli, Nano, sleep } from "@moq/clock";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { type Installed, Manual, Micro, Milli, Nano } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
 // Standalone from consumer.test.ts so it only pulls the Legacy format, not the CMAF decoder.
+
+// Every test runs on its own Manual clock, so the consumer's waits move only when a test advances it.
+let clock: Manual;
+let installed: Installed;
+beforeEach(() => {
+	clock = new Manual();
+	installed = clock.install();
+});
+afterEach(() => {
+	installed.close();
+});
+
+/** Flush the consumer's readers without moving time, then return what `read` settled with, or "pending". */
+async function poll<T>(read: Promise<T>): Promise<T | "pending"> {
+	const flushed = clock.advance(Nano.zero);
+	try {
+		return await Promise.race([read, flushed.then(() => "pending" as const)]);
+	} finally {
+		await flushed;
+	}
+}
 
 /** The next frame, passing over gaps and ends. */
 async function nextFrame(consumer: Consumer) {
@@ -37,12 +58,12 @@ function publish(track: Track.Producer, sequence: bigint, millis: number) {
 	group.finish();
 }
 
-/** Every frame the consumer will hand over right now, as [group, payload] pairs. */
+/** Every frame the consumer will hand over without moving time, as [group, payload] pairs. */
 async function drain(consumer: Consumer): Promise<[bigint, number | undefined][]> {
 	const seen: [bigint, number | undefined][] = [];
 	for (;;) {
-		const next = await Promise.race([consumer.next(), sleep(Nano.fromMilli(Milli(50))).then(() => undefined)]);
-		if (!next) break;
+		const next = await poll(consumer.next());
+		if (next === "pending" || !next) break;
 		if (next.kind === "frame") seen.push([next.group, next.frame.payload[0]]);
 	}
 	return seen;
@@ -63,7 +84,8 @@ test("the head of the window arriving after the live edge is delivered first", a
 	// The live edge lands first, and delivery waits for the floor rather than starting there.
 	publish(track, 3n, 30);
 	const waiting = consumer.next();
-	expect(await Promise.race([waiting, sleep(Nano.fromMilli(Milli(50))).then(() => "waiting")])).toBe("waiting");
+	await clock.advance(Nano.fromMilli(Milli(4_999)));
+	expect(await poll(waiting)).toBe("pending");
 
 	// The window's head follows, and a reordered group below the floor with it.
 	publish(track, 0n, 0);

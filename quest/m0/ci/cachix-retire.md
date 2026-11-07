@@ -64,7 +64,3 @@ Public API: none. Wire: none.
   source builds once paths expired (`building '/nix/store/...uniffi-bindgen`
   in a job log), and refresh on a schedule or switch to a closure-aware
   collector (niks3) if they recur.
-
-## Related
-
-- [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - the same cache's `main` evidence

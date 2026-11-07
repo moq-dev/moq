@@ -3,7 +3,8 @@ library;
 
 import 'package:moq_ffi/moq_ffi.dart';
 
-/// Announces one hidden endpoint and dials or accepts sessions.
+/// A server, a client, or both: its first dial announces it as a client, and its
+/// first accept as a server.
 typedef Endpoint = MoqSocketEndpoint;
 
 /// An incoming TCP dial, consumed by accepting or rejecting it.

@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { Instant, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { describe, expect, onTestFinished, test } from "bun:test";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import {
 	openWebSocketStream,
 	type WebSocketConstructor,
@@ -60,12 +60,16 @@ class FakeWebSocket implements WebSocketLike {
 
 const ctor = FakeWebSocket as unknown as WebSocketConstructor;
 
-/** Yield to the event loop `n` times to let queued work run. */
-async function tick(n = 1): Promise<void> {
-	for (let i = 0; i < n; i++) {
-		await yieldNow();
-	}
+/** A Manual clock for this test, since the ponyfill polls `bufferedAmount` on a timer. */
+function manual(): Manual {
+	const clock = new Manual();
+	const installed = clock.install();
+	onTestFinished(() => installed.close());
+	return clock;
 }
+
+/** Long enough for the ponyfill to poll `bufferedAmount` many times. */
+const POLLS = Nano.fromMilli(Milli(1000));
 
 describe("WebSocketStream ponyfill", () => {
 	test("opened resolves with streams and negotiated protocol", async () => {
@@ -96,6 +100,7 @@ describe("WebSocketStream ponyfill", () => {
 	});
 
 	test("writes are sent and backpressure follows bufferedAmount", async () => {
+		const clock = manual();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
 		const ws = FakeWebSocket.last as FakeWebSocket;
 		ws.open();
@@ -113,12 +118,12 @@ describe("WebSocketStream ponyfill", () => {
 		void pending.then(() => {
 			settled = true;
 		});
-		await tick(5);
+		await clock.advance(POLLS);
 		expect(settled).toBe(false); // still backpressured
 		expect(ws.sent.length).toBe(2); // but the bytes were already sent
 
 		ws.bufferedAmount = 0; // drained
-		await pending;
+		await clock.drive(pending);
 		expect(settled).toBe(true);
 	});
 
@@ -144,6 +149,7 @@ describe("WebSocketStream ponyfill", () => {
 	});
 
 	test("setHighWaterMark resizes backpressure live (mid-drain)", async () => {
+		const clock = manual();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
 		const ws = FakeWebSocket.last as FakeWebSocket;
 		ws.open();
@@ -156,14 +162,14 @@ describe("WebSocketStream ponyfill", () => {
 		void pending.then(() => {
 			settled = true;
 		});
-		await tick(5);
+		await clock.advance(POLLS);
 		expect(settled).toBe(false); // backpressured at 100
 
 		// Raise the mark above the buffered amount - the in-progress drain resolves
 		// without bufferedAmount having to change.
 		wss.setHighWaterMark(1000);
 		expect(wss.highWaterMark).toBe(1000);
-		await pending;
+		await clock.drive(pending);
 		expect(settled).toBe(true);
 	});
 
@@ -262,7 +268,7 @@ describe("WebSocketStream.adopt", () => {
 		void wss.opened.then(() => {
 			opened = true;
 		});
-		await tick();
+		await yieldNow();
 		expect(opened).toBe(false);
 
 		ws.open();
@@ -279,6 +285,7 @@ describe("WebSocketStream.adopt", () => {
 	});
 
 	test("backpressure applies to an adopted socket", async () => {
+		const clock = manual();
 		const ws = accepted();
 		ws.bufferedAmount = 100;
 		const wss = WebSocketStream.adopt(ws, { highWaterMark: 10 });
@@ -286,20 +293,17 @@ describe("WebSocketStream.adopt", () => {
 
 		const { writable } = await wss.opened;
 		let written = false;
-		void writable
+		const write = writable
 			.getWriter()
 			.write(new Uint8Array([1]))
 			.then(() => {
 				written = true;
 			});
-		await tick(2);
+		await clock.advance(POLLS);
 		expect(written).toBe(false); // parked until the buffer drains
 
-		// The ponyfill re-checks `bufferedAmount` on a timer, so poll rather than
-		// assume how many turns the drain takes.
 		ws.bufferedAmount = 0;
-		const deadline = Instant.add(now(), Nano.fromMilli(Milli(1000)));
-		while (!written && now() < deadline) await tick();
+		await clock.drive(write);
 		expect(written).toBe(true);
 	});
 });

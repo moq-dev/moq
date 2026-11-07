@@ -2408,6 +2408,23 @@ fn raw_track_sparse_groups_and_known_end() {
 }
 
 #[test]
+fn raw_track_skips_are_final() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"raw-track-skips-are-final");
+	let name = b"skipped";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	assert_eq!(moq_publish_track_skip(track, 1, 3), 0);
+	assert!(moq_publish_track_group_at(track, 2) < 0);
+	let group = id(moq_publish_track_group_at(track, 3));
+	assert_eq!(moq_publish_group_finish(group), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert!(moq_publish_track_skip(track, 4, 5) < 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+#[test]
 fn raw_track_and_group_abort_consume_their_handles() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"raw-track-and-group-abort-consume-their-handles");
@@ -5828,7 +5845,7 @@ fn video_raw_publish_consume() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6009,7 +6026,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	let encode_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6128,7 +6145,7 @@ fn video_raw_publish_from_many_threads() {
 		// An explicit ceiling so the retunes below stay under the rate the encoder
 		// opened at, which openh264 requires.
 		bitrate: 1_000_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6200,7 +6217,7 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6279,7 +6296,7 @@ fn closing_a_broadcast_does_not_block_unrelated_calls_behind_its_encoder() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6333,7 +6350,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6374,7 +6391,7 @@ fn video_raw_publish_rejects_invalid_config() {
 	let valid_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7466,7 +7483,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 4_000_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7524,7 +7541,7 @@ fn encode_video_rung_needs_a_grant_and_a_band() {
 	let output = |bitrate| moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7567,7 +7584,7 @@ fn encode_video_ceiling_wakes_a_rung_above() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 500_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -8244,8 +8261,8 @@ fn track_request_media_carries_hints() {
 		hint: moq_audio_hint {
 			bitrate: 96_000,
 			has_bitrate: true,
-			group_duration_us: 100_000,
-			has_group_duration: true,
+			join_us: 100_000,
+			has_join: true,
 		},
 	};
 	let audio = id(unsafe { moq_track_request_audio(request, &audio_config) });
@@ -8264,8 +8281,8 @@ fn track_request_media_carries_hints() {
 		hint: moq_video_hint {
 			bitrate: 2_000_000,
 			has_bitrate: true,
-			group_duration_us: 3_000_000,
-			has_group_duration: true,
+			join_us: 3_000_000,
+			has_join: true,
 			..moq_video_hint::default()
 		},
 	};
@@ -8289,7 +8306,7 @@ fn track_request_media_carries_hints() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A hint flag set with a 0 value, or a group duration past what milliseconds hold for a
+/// A hint flag set with a 0 value, or a join past what milliseconds hold for a
 /// JavaScript reader, is an invalid config rather than a second encoding of "absent".
 #[test]
 fn invalid_hints_are_refused() {
@@ -8332,28 +8349,28 @@ fn invalid_hints_are_refused() {
 	);
 	assert_eq!(
 		audio(moq_audio_hint {
-			has_group_duration: true,
+			has_join: true,
 			..moq_audio_hint::default()
 		}),
 		invalid,
-		"audio group duration 0"
+		"audio join 0"
 	);
 	assert_eq!(
 		audio(moq_audio_hint {
-			group_duration_us: u64::MAX,
-			has_group_duration: true,
+			join_us: u64::MAX,
+			has_join: true,
 			..moq_audio_hint::default()
 		}),
 		invalid,
-		"audio group duration past milliseconds"
+		"audio join past milliseconds"
 	);
 	assert_eq!(
 		video(moq_video_hint {
-			has_group_duration: true,
+			has_join: true,
 			..moq_video_hint::default()
 		}),
 		invalid,
-		"video group duration 0"
+		"video join 0"
 	);
 	assert_eq!(
 		video(moq_video_hint {
@@ -8371,10 +8388,10 @@ fn invalid_hints_are_refused() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A group duration hint is the track's join interval, declared once its first window closes,
+/// A join hint is the track's join interval, declared once its first window closes,
 /// rather than the shorter groups it measured.
 #[test]
-fn group_duration_hint_declares_the_join_interval() {
+fn join_hint_declares_the_join_interval() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"group-duration");
 	let init = opus_head();
@@ -8385,8 +8402,8 @@ fn group_duration_hint_declares_the_join_interval() {
 		label: std::ptr::null(),
 		label_len: 0,
 		hint: moq_audio_hint {
-			group_duration_us: 500_000,
-			has_group_duration: true,
+			join_us: 500_000,
+			has_join: true,
 			..moq_audio_hint::default()
 		},
 	};

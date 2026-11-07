@@ -1,13 +1,13 @@
-# [M] moq-rtc paces WHEP viewers to a cap, NACKs included
+# [M] moq-webrtc paces WHEP viewers to a cap, NACKs included
 
 ## Goal
 
-An embedder can give a `moq-rtc` WHEP session a bitrate cap, and moq-rtc
+An embedder can give a `moq-webrtc` WHEP session a bitrate cap, and moq-webrtc
 never sends that viewer more media payload than the cap plus a burst,
 retransmits included. The cap counts payload, unlike the
 QUIC send cap (`moq_quic::Limits::send_rate`), which counts whole ack-eliciting
 packets, QUIC overhead included. RTP, SRTP, and UDP overhead sits outside
-it: moq-rtc picks the packet sizes, so the overhead per payload byte is
+it: moq-webrtc picks the packet sizes, so the overhead per payload byte is
 fixed, and the viewer can't inflate it. This backs moq.pro's
 egress caps.
 
@@ -30,7 +30,7 @@ WHEP enforcement needs it and nobody owned it.
 - NACK resends draw from the same rate-plus-burst bucket as the frame pacer,
   and a resend with no credit left is skipped, so faking loss only spends the
   credit the viewer's next group would have used. str0m fulfils NACKs from
-  its video send buffer (`rs/moq-rtc/src/session.rs`), so charging needs a
+  its video send buffer (`rs/moq-webrtc/src/session.rs`), so charging needs a
   hook on that path. Decided 2026-10-30 (maintainer): add it to the vendored str0m
   ([WebRTC epic](/quest/m3/webrtc/README.md)) rather than upstream.
 - Decided 2026-10-30 (maintainer): the pacer is moq-congestion's, made public and
@@ -56,14 +56,10 @@ WHEP enforcement needs it and nobody owned it.
   caps, each NACKing every packet for several burst windows, stay under
   their own cap plus burst.
 
-Public API: a rate handle on moq-rtc's WHEP server. Decided 2026-10-30
+Public API: a rate handle on moq-webrtc's WHEP server. Decided 2026-10-30
 (maintainer): `whep::accept` takes the same shape as `whip::accept`, a
 `whep::Request` struct with `Request::with_rate(rate::Limit)`, replacing
 its argument list rather than adding a fifth argument. Wire: none.
-
-## Required
-
-- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - the vendored str0m this adds the NACK hook to
 
 ## Related
 

@@ -5,6 +5,7 @@ mod rpm
 mod moq-sh
 mod mbx
 mod nix
+mod corpus
 
 # Deploy all infra workers.
 deploy:

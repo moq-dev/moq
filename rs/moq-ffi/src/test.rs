@@ -2225,6 +2225,20 @@ fn raw_track_supports_sparse_groups_and_known_end() {
 	track.finish().unwrap();
 }
 
+#[test]
+fn raw_track_skips_are_final() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("skipped".into(), None).unwrap();
+
+	track.create_group(0).unwrap().finish().unwrap();
+	track.skip_groups(0, 3).unwrap();
+	// The written group keeps what it is; the rest of the range is final.
+	assert!(track.create_group(2).is_err());
+	track.create_group(3).unwrap().finish().unwrap();
+	track.abort(1).unwrap();
+	assert!(matches!(track.skip_groups(4, 5), Err(MoqError::Closed)));
+}
+
 #[tokio::test]
 async fn abort_after_finish_keeps_the_track_handle() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -3285,6 +3299,7 @@ fn audio_rejects_bad_init_bytes() {
 /// the announcement.
 #[tokio::test]
 async fn a_hidden_route_is_invisible_until_announced() {
+	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let route = origin.route("live".into(), hidden()).unwrap();
@@ -4026,7 +4041,7 @@ async fn video_raw_publish_consume() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				// Software so the test is deterministic everywhere: `Auto` would
 				// reach for a hardware backend that CI runners don't have.
 				kind: MoqVideoEncoderKind::Software,
@@ -4152,7 +4167,7 @@ async fn video_decode_frame_ownership() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				// Software so the encode is deterministic everywhere.
 				kind: MoqVideoEncoderKind::Software,
 			},
@@ -4303,7 +4318,7 @@ async fn video_decode_start() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: None,
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: Some("camera".into()),
@@ -4426,7 +4441,7 @@ async fn video_raw_publish_from_many_threads() {
 				// An explicit ceiling so the retunes below stay under the rate the
 				// encoder opened at, which openh264 requires.
 				bitrate: Some(1_000_000),
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: None,
@@ -4504,7 +4519,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 	let output = || MoqVideoEncoderOutput {
 		codec: MoqVideoCodec::H264,
 		bitrate: None,
-		gop: None,
+		join: None,
 		kind: MoqVideoEncoderKind::Software,
 	};
 
@@ -4521,6 +4536,24 @@ async fn video_raw_publish_rejects_bad_frames() {
 					..input(320, 240)
 				},
 				output: output(),
+				track: None,
+				bandwidth: None,
+				lower: None,
+			}
+		)
+		.is_err()
+	);
+
+	// So is a zero join, which would open no group.
+	assert!(
+		crate::video::MoqVideoProducer::new(
+			&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+			crate::video::MoqVideoProducerOptions {
+				input: input(320, 240),
+				output: MoqVideoEncoderOutput {
+					join: Some(std::time::Duration::ZERO),
+					..output()
+				},
 				track: None,
 				bandwidth: None,
 				lower: None,
@@ -6208,11 +6241,13 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 
 #[tokio::test]
 async fn follow_hands_out_a_takeover_once_while_resolving() {
+	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("").await;
 }
 
 #[tokio::test]
 async fn follow_hands_out_a_held_takeover_once() {
+	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("live").await;
 }
 
@@ -6344,6 +6379,7 @@ async fn an_instance_pins_request_and_follow() {
 /// clock that nothing comes past the origin's update hold either.
 #[tokio::test]
 async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
+	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "live");
 	let followed = origin.consume().follow("live".into(), None).unwrap();
@@ -7462,6 +7498,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
+	kio::clock::host_time();
 	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
@@ -7486,7 +7523,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 			output: MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: Some(4_000_000),
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 			track: Some("camera".into()),
@@ -7545,7 +7582,7 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 		MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: Some(bitrate),
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		},
 	)
@@ -9433,7 +9470,6 @@ async fn ready_after_abort_is_closed() {
 /// Two calls waiting on the same group both wake once the reader drains, though the group
 /// keeps only one writer waker.
 #[tokio::test]
-#[ignore = "flaky under load: the reader can drain every frame before both ready calls finish; see quest/m0/test-flakes-2/ffi-concurrent-ready.md"]
 async fn concurrent_ready_calls_all_wake() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
@@ -9462,9 +9498,8 @@ async fn concurrent_ready_calls_all_wake() {
 	];
 	assert!(waits.iter().all(|wait| !wait.is_finished()), "the window was not full");
 
-	// Every read wakes both calls. Run them before the next read, and read no more than
-	// was written: draining the window faster than the runtime polls a woken call must
-	// not leave this loop waiting on a group nobody writes again.
+	// A read that makes room wakes both calls, which run when this task yields. Read no
+	// more than was written: the group never ends, so a read past its last frame waits forever.
 	for _ in 0..24 {
 		if waits.iter().all(|wait| wait.is_finished()) {
 			break;
@@ -9475,7 +9510,6 @@ async fn concurrent_ready_calls_all_wake() {
 			.unwrap()
 			.expect("the group ended early");
 		tokio::task::yield_now().await;
-		ffi_caught_up().await;
 	}
 	for wait in waits {
 		kio::clock::timeout(TIMEOUT, wait)

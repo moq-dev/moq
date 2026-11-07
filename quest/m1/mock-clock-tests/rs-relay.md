@@ -40,7 +40,8 @@ Decided 2026-11-06 (maintainer, on
 - ✅ **A dial hook on `cluster::Options` that an in-memory link can fill**, so
   the four tests above run on `kio::clock::sim` and prove convergence with
   `sim::idle` instead of a quiet window. Not chosen: keeping them as documented
-  real-clock exceptions opted out of the [Rust guard](/quest/m0/clock-guard/rust.md).
+  real-clock exceptions opted out of the Rust guard with
+  `kio::clock::host_time()`.
 
 Guidance:
 

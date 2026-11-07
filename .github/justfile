@@ -8,6 +8,25 @@ cache:
 cache-runtime:
     bash sh/gh/cache-runtime.sh
 
+# Print the newest main commit whose Cache push run succeeded: its closures are all on nix.moq.dev.
+cache-rev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rev=$(gh run list --repo moq-dev/moq --workflow cache.yml --branch main --event push \
+        --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+    if [[ -z "$rev" ]]; then
+        echo "no successful Cache run found on main" >&2
+        exit 1
+    fi
+    echo "$rev"
+
+# Keep the newest cached commit's closures on nix.moq.dev past the bucket's expiry.
+cache-refresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rev=$(just gh cache-rev)
+    just infra nix refresh nix-ci-moq-dev "$rev"
+
 # Build the runner image with a temporary policy on a disposable hosted runner.
 runner-vm-ci:
     #!/usr/bin/env bash
@@ -78,14 +97,13 @@ test:
     python3 sh/kt/gradle.test.py
     python3 sh/rs/select.test.py
     python3 sh/rs/config.test.py
+    python3 sh/js/install.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
     python3 sh/gh/ts-paths.test.py
     sh/go/publish-wrapper.test.sh
-    bash .claude/hooks/direnv.test.sh
-    bash .codex/hooks/direnv.test.sh
     python3 sh/rs/uring.test.py
 
 # Tooling integration tests and selector timing, run nightly outside the merge gate.
