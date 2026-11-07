@@ -142,11 +142,6 @@ let
     cargoExtraArgs = "-p moq-c --features openh264";
     nativeBuildInputs = with final; [
       pkg-config
-      # moq-c is the only nix-built package that pulls moq-video, and its `vaapi`
-      # feature brings moq-vaapi, whose build.rs runs bindgen over its vendored
-      # libva headers. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it finds
-      # libclang and the libc headers, same as the devShell in flake.nix.
-      rustPlatform.bindgenHook
     ];
 
     # moq-c is a staticlib; crane's default install phase only handles

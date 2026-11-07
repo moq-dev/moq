@@ -10,14 +10,13 @@ that closes this:
   wrote.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
   store it replaced, from the same commit before and after.
-- Each object expires 30 days after upload, so a crate no Nightly builds in
+- Each object expires 14 days after upload, so a crate no hosted job builds in
   that window stays cold for the next hosted job. Count how often a Nightly
   job pays that rebuild, including when `Cargo.lock` changed more than 8 times
   since the previous Nightly (see Plan).
 - Bucket size and request counts after a month with capped manifests
-  (mbx 1.28.0 and later, from about 2026-11-26), against the 30-day expiry
+  (mbx 1.28.0 and later, from about 2026-11-26), against the 14-day expiry
   in `infra/mbx/lifecycle.json`.
-  Shorten or lengthen it from that.
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
 nightly.yml --branch main --event schedule`), never a dispatch on a branch.
@@ -28,6 +27,12 @@ Decided 2026-11-07 (maintainer, /quest-unblock): agents collect the R2
 numbers with this desktop's wrangler login, and the maintainer only picks the
 lifecycle. Baseline that day: 720,249 objects / 1.2 TB, with 18,006,968
 `GetObject` and 4,892,769 `PutObject` requests from 2026-10-16 to 2026-11-07.
+
+Decided 2026-11-07 (maintainer, /quest-unblock): ✅ shrink the expiry to 14
+days, applied that day with `just infra mbx lifecycle`. At R2 list prices the
+30-day window was headed for about 1.65 TB (about $25 a month in storage alone), and 14 days halves
+that. Not chosen: keeping 30 days until the 2026-11-26 numbers;
+lengthening it.
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ the release pull request
 check moved to [m3](/quest/m3/mbx-r2-release-cache.md) (m2 before the milestone re-cut) behind the cut, since
@@ -48,8 +53,8 @@ The first scheduled Nightly on mbx 1.28.0,
 [40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673)
 (2026-10-27), settled the bump: every hosted job reports `configured
 read-write, effective read-write`, and macOS refused only a manifest already
-oversized before it. Six such manifests stay unreadable until the 30-day
-lifecycle deletes them, the last about 2026-11-26: `a90076a4...`,
+oversized before it. Six such manifests stay unreadable until the
+lifecycle deletes them, typically within a day of the 14-day rule applied 2026-11-07: `a90076a4...`,
 `5cb8fb79...`, `b0310ce4...`, `18d136a6...` (17235558 bytes, first refused in
 [40090959108](https://github.com/moq-dev/moq/actions/runs/40090959108)),
 `2ed9df47...` and `0d4f4e3f...`. A refusal for any other digest means the
@@ -90,7 +95,8 @@ compilation is "not looked up".
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
-  example the lockfile changes or the 30-day expiry.
+  example the lockfile changes or the expiry (30 days until 2026-11-07, 14
+  since).
 - Linux: Nightly's Linux jobs check out at depth 1, so mbx finds no earlier
   lockfile and reuses only a manifest written for the identical `Cargo.lock`.
   The doctest job hit 0 on 2026-10-24 and 2026-10-27, 115 on 2026-10-25, and
@@ -143,10 +149,11 @@ feature unification, so changed compiler inputs remain a separate cause.
   from `npx wrangler r2 bucket info mbx-moq-dev`. Request counts come from
   Cloudflare's GraphQL API (`r2OperationsAdaptiveGroups`, filtered on
   `bucketName` and grouped by `actionType`), authenticated with the
-  `oauth_token` in `~/.config/.wrangler/config/default.toml`. Then put the
-  lifecycle in `infra/mbx/lifecycle.json` to the maintainer, with the numbers:
-  shorten, keep or lengthen the 30 days. Recommended: keep 30 days unless
-  storage cost or the rebuild count argues otherwise.
+  `oauth_token` in `~/.config/.wrangler/config/default.toml`. Record them
+  here beside the 2026-11-07 baseline, split at that date's lifecycle
+  change, and count the Nightly jobs that rebuilt a crate the 14-day expiry
+  deleted, listing as unknown any it cannot attribute. Bring the lifecycle back to the
+  maintainer only if that count argues for lengthening it.
 
 ## Related
 

@@ -298,6 +298,17 @@ impl Version {
 		)
 	}
 
+	/// Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
+	/// SUBSCRIBE_DROP, for groups that existed, which names the `Update` in effect when it was
+	/// given up; SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07;
+	/// earlier versions name every hole in SUBSCRIBE_DROP.
+	pub(crate) fn has_skip(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end
 	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
 	pub(crate) fn has_end_error(self) -> bool {

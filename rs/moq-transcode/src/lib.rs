@@ -1019,6 +1019,7 @@ mod tests {
 	/// do have to keep serving, and the passthrough entry has to follow.
 	#[tokio::test]
 	async fn ladder_follows_a_source_resize() {
+		kio::clock::host_time();
 		let mut source = source_catalog(640, 360);
 
 		let config = Config {

@@ -654,6 +654,7 @@ async fn refusals_and_outages_refuse_at_connect() {
 /// ones, and media sent afterwards records there in both directions.
 #[tokio::test]
 async fn a_moved_tier_retags_the_live_session() {
+	kio::clock::host_time();
 	let mut labeled = grant(Duration::from_secs(3600));
 	labeled.label = Some("project/key/1".into());
 	let script = Script::new(labeled);
@@ -969,6 +970,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 /// named the same way under the new one.
 #[tokio::test]
 async fn a_moved_root_closes_live_sessions() {
+	kio::clock::host_time();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
@@ -986,6 +988,7 @@ async fn a_moved_root_closes_live_sessions() {
 /// 403, 401, and an empty grant are all a no.
 #[tokio::test]
 async fn a_refusal_closes_live_sessions() {
+	kio::clock::host_time();
 	// Each answer waits out a re-check cadence, so run them side by side.
 	let answers = [
 		("403", Answer::Status(403)),
@@ -1767,6 +1770,7 @@ async fn connect_through_embedded_admission(
 /// comes closes the connection at the deadline, not after a fixed cap of its own.
 #[tokio::test]
 async fn an_unanswered_admission_closes_at_the_handshake_deadline() {
+	kio::clock::host_time();
 	let (relay, mut admissions, connecting) = connect_through_embedded_admission(Duration::from_secs(1)).await;
 	let trigger = relay.shutdown_trigger().clone();
 	let running = tokio::spawn(relay.run());

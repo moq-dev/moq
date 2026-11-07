@@ -404,11 +404,13 @@ async fn unknown_publisher_republish_stays_routable() {
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
+	kio::clock::host_time();
 	assert_unknown_publisher_stays_announced(None).await;
 }
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
+	kio::clock::host_time();
 	let version = "moq-transport-22".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version)).await;
 }
@@ -420,6 +422,7 @@ async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
 /// reflected UNKNOWN route could still replace the incumbent.
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
+	kio::clock::host_time();
 	let version = "moq-lite-04".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version)).await;
 }

@@ -18,12 +18,27 @@ import {
 	StreamCode,
 	StreamError,
 	sessionCause,
+	toStreamCode,
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import { hiddenBelow, hooks, maxDelayOf, minDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import {
+	type DropRun,
+	hiddenBelow,
+	hooks,
+	insertDrop,
+	insertRun,
+	maxDelayOf,
+	minDelayOf,
+	type Run,
+	removeRun,
+	scopeCaptures,
+	scopeHead,
+	scopeOverlaps,
+	staleHole,
+} from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
@@ -36,7 +51,7 @@ import { closeUnwanted } from "../util/announce.ts";
 import { Deadline } from "../util/deadline.ts";
 import { isUnrequested, unrequested, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { min, UNBOUNDED } from "../util/sequence.ts";
+import { max, min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
 import { hasTime, rangesStart, sameRanges, Window, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
@@ -82,6 +97,7 @@ import {
 	hasRanges,
 	hasRefresh,
 	hasSetupStream,
+	hasSkip,
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
@@ -175,6 +191,16 @@ interface SubscribeEntry {
 	declared?: { start?: bigint | null; requested?: bigint };
 	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
 	updated?: boolean;
+	// The number of the latest SUBSCRIBE or SUBSCRIBE_UPDATE sent: a stale drop given up under an
+	// earlier one is no verdict on the current terms. Undefined is the SUBSCRIBE's 0.
+	update?: bigint;
+	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds: the budget
+	// a stale drop under it was judged by.
+	maxDelay?: number;
+	// The runs `tail` accounts for by a stale drop under `update`: the next update reopens them,
+	// since the publisher re-offers or drops them again under it.
+	// Coalesced, so a peer repeating a drop holds one run, not one per message.
+	stale?: DropRun[];
 	// Whether SUBSCRIBE_START arrived, which `start` alone cannot say when no range starts.
 	started?: boolean;
 	// Whether our side is FINned, which lite-07 does once the tail settles past SUBSCRIBE_FINISH.
@@ -230,6 +256,21 @@ export class Minted {
 		entry.holders -= 1;
 		if (ended || entry.holders === 0) this.#paths.delete(path);
 	}
+}
+
+/**
+ * Every group `ranges` name, which a stale drop under them was judged against. A bound only the
+ * publisher resolves is taken at its widest: a start from group 0, an end past the live edge
+ * (`UNBOUNDED`). Mirrors the Rust `judged`.
+ */
+function judged(ranges: readonly track.Range[]): Run[] {
+	const runs: Run[] = [];
+	for (const range of ranges) {
+		const start = range.start?.absolute ?? 0n;
+		const end = range.end?.absolute ?? UNBOUNDED;
+		if (start < end) insertRun(runs, start, end);
+	}
+	return runs;
 }
 
 /** Subscribe to the peer and own its receive-side protocol tasks.
@@ -1516,12 +1557,15 @@ export class Subscriber {
 			resolvesStart: resolvesStart(this.version),
 			fillsFromStart: fillsFromStart(this.version),
 		});
+		// The SUBSCRIBE's terms: the groups a stale drop under them was judged against.
+		hooks.supersedeStale(producer, judged(ranges));
 		if (!hasRanges(this.version)) hooks.dropAnchors(producer);
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
 		const entry: SubscribeEntry = {
 			track: producer,
+			maxDelay: msg.maxDelay,
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
@@ -2117,9 +2161,48 @@ export class Subscriber {
 				}
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups, so they are accounted for without a
-				// stream, and a reader of one still arriving ends with the drop's error now.
-				entry.tail.account(resp.drop.start, resp.drop.end + 1n);
-				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1n, resp.drop.cause(this.version));
+				// stream, and a reader of one still arriving ends with the drop's error now. A lite-07
+				// stale drop leaves a group whose stream arrived, since the stream wins over it.
+				const { start, end, update } = resp.drop;
+				// It can only echo an update this subscriber sent.
+				if (update > (entry.update ?? 0n))
+					throw new ProtocolViolation(`SUBSCRIBE_DROP names update ${update}, which was never sent`);
+				const error = resp.drop.cause(this.version);
+				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every other
+				// drop is final, whatever update it names.
+				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
+				// One given up under an update since replaced says nothing of the current terms: the
+				// publisher re-offers it or drops it again under the new number, so it is still owed,
+				// and a reader that wants it fills it meanwhile.
+				if (stale && update < (entry.update ?? 0n)) continue;
+				entry.tail.account(start, end + 1n);
+				// Judged under the budget this subscriber sent with that update.
+				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
+				// A group whose stream finished under this update was served over a stale drop, so it
+				// won, even once the cache evicted it.
+				const named = stale ? entry.tail.unfinished(start, end + 1n) : [{ start, end: end + 1n }];
+				const recorded = named.flatMap((run) => hooks.dropTrackGroups(entry.track, run.start, run.end, hole));
+				// A final drop is never reopened, even where it replaces a stale one. A sequence
+				// already skipped stays skipped, and one whose group arrived keeps it, so no update
+				// reopens either.
+				entry.stale = stale
+					? recorded.reduce((runs, run) => insertDrop(runs, run.start, run.end, hole), entry.stale ?? [])
+					: removeRun(entry.stale ?? [], start, end + 1n);
+			} else if ("skip" in resp) {
+				// Never produced, so nothing is waited for and no reader ends. A skip is final and
+				// replaces any drop of the same groups, stale or final, so no update reopens them; a
+				// reader a drop already ended stays ended.
+				const { start, end } = resp.skip;
+				entry.tail.account(start, end + 1n);
+				entry.stale = removeRun(entry.stale ?? [], start, end + 1n);
+				// A group that arrived was produced after all, so the skip contradicts it: it keeps
+				// the group, and the session goes on, since the draft requires no more.
+				const [cached] = hooks.skipTrackGroups(entry.track, start, end + 1n);
+				if (cached) {
+					console.warn(
+						`protocol error: SUBSCRIBE_SKIP [${start}, ${end}] names group ${cached.start}, which arrived; keeping it`,
+					);
+				}
 			}
 		}
 	}
@@ -2277,7 +2360,27 @@ export class Subscriber {
 				endGroup: inclusiveGroupEnd(span.end),
 				ranges: edit?.add,
 				remove: edit?.remove,
+				update: (entry.update ?? 0n) + 1n,
 			});
+			// A stale drop given up under the previous update may still be in flight, and this one
+			// may move the range or budget it was judged against, so the runs held as stale become
+			// unknown again: a reader fills them rather than trust an old verdict.
+			entry.update = update.update;
+			entry.maxDelay = update.maxDelay;
+			entry.tail.updated();
+			const held = hooks.supersedeStale(entry.track, judged(ranges));
+			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
+			// again under the new number what is still stale, so the tail owes every stale run again.
+			// A group that arrived since its stale drop won over it: the publisher served it, so it
+			// is neither re-offered nor owed again.
+			for (const run of entry.stale ?? []) {
+				for (const reopened of held) {
+					const start = max(run.start, reopened.start);
+					const end = min(run.end, reopened.end);
+					if (start < end) entry.tail.unaccount(start, end);
+				}
+			}
+			entry.stale = undefined;
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the
@@ -2380,6 +2483,15 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
+			// A duplicate of a copy still arriving, such as a lite-07 re-offer that overtook the reset
+			// of the stream it replaces, waits unread, which flow control bounds. Created once that copy
+			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed.
+			// Its own reset ends the wait; a clean end leaves it on the copy alone.
+			for (let arriving = hooks.arrivingGroup(track, group.sequence); arriving !== undefined; ) {
+				const settled = arriving;
+				await race([settled, stream.closed.then(() => settled)]);
+				arriving = hooks.arrivingGroup(track, group.sequence);
+			}
 			producer = hooks.receiveGroup(track, { sequence: group.sequence, start: group.frameStart });
 
 			await readFrames(stream, producer, {
@@ -2388,6 +2500,9 @@ export class Subscriber {
 			});
 
 			producer.finish();
+			// Only a group that arrived whole, not one a drop or the track ended meanwhile, and only
+			// where a lite-07 stale drop asks for it.
+			if (hasSkip(this.version) && producer.closed.peek() === null) tail.finish(group.sequence);
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything
