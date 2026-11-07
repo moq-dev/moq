@@ -64,16 +64,15 @@ else:
                 ["just", "--justfile", "test/justfile", "media"],
                 cwd=root,
                 env=env,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 stdout=subprocess.PIPE,
                 text=True,
                 start_new_session=True,
             )
-            self.addCleanup(test.stderr.close)
             self.addCleanup(test.stdout.close)
             self.addCleanup(lambda: os.killpg(test.pid, signal.SIGKILL) if test.poll() is None else None)
-            self.assertIn("install.py frozen", test.stderr.readline())
-            self.assertEqual(test.stderr.readline(), "waiting for another workspace dependency install\n")
+            self.assertIn("install.py frozen", test.stdout.readline())
+            self.assertEqual(test.stdout.readline(), "waiting for another workspace dependency install\n")
             with (root / "continue").open("w"):
                 pass
             self.assertEqual(recipe.wait(), 0)
