@@ -334,8 +334,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	const supportProbes = mock(async () => true);
 	Object.assign(supportProbes, { [supportCacheKey]: decoderConfigKey });
 	const source = new Source({ broadcast, supported: supportProbes });
-	const buffer = new Signal(Milli(buffered ? 1000 : 0));
-	const sync = new Sync({ delay, buffer });
+	const lookahead = new Signal(Milli(buffered ? 1000 : 0));
+	const sync = new Sync({ delay, lookahead });
 	// The decoder's own switch, which a mute or pause turns off.
 	const decoding = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled: decoding });
@@ -356,7 +356,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	return {
 		supportProbes,
 		delay,
-		buffer,
+		lookahead,
 		sync,
 		push,
 		queued,
@@ -1519,7 +1519,7 @@ it.each([100, 1000])(
 );
 
 it("a rejected audio support probe does not leave buffered video waiting on a pending track", async () => {
-	const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
+	const sync = new Sync({ delay: Milli(100), lookahead: Milli(1000) });
 	const remove = sync.track({
 		target: new Signal(Milli(100)),
 		startup: new Signal({ start: Milli(0), end: Milli(100) }),
@@ -1615,7 +1615,7 @@ for (const cmaf of [false, true]) {
 			const playback = await play(Milli(100), !buffered, cmaf);
 			try {
 				await playback.play(12);
-				playback.buffer.set(Milli(buffered ? 1000 : 0));
+				playback.lookahead.set(Milli(buffered ? 1000 : 0));
 				await microtasks();
 				const inserted = playback.inserted().length;
 				const start = frameTimestamp;

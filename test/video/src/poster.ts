@@ -53,7 +53,7 @@ async function poster(audio: boolean, buffered: boolean) {
 		catalog,
 		video: { canvas, visible: "always", backend: "2d" },
 		delay: Milli(100),
-		buffer: Milli(buffered ? 1000 : 0),
+		lookahead: Milli(buffered ? 1000 : 0),
 	});
 	const chunks = new Map<number, Uint8Array>();
 	const encoder = new VideoEncoder({
