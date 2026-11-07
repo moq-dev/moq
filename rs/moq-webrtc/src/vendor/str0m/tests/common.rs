@@ -386,6 +386,31 @@ where
 	result
 }
 
+// Upstream's `_internal_test_exports` peeked at these for its integration tests.
+impl Rtc {
+	pub fn _mids(&self) -> Vec<crate::vendor::str0m::media::Mid> {
+		self.session
+			.medias
+			.iter()
+			.map(crate::vendor::str0m::media::Media::mid)
+			.collect()
+	}
+
+	pub fn _exts(&self) -> &ExtensionMap {
+		&self.session.exts
+	}
+
+	pub fn _local_ice_creds(&self) -> crate::vendor::is::IceCreds {
+		self.ice.local_credentials().clone()
+	}
+}
+
+impl PayloadParams {
+	pub fn _is_locked(&self) -> bool {
+		self.locked
+	}
+}
+
 impl Deref for TestRtc {
 	type Target = Rtc;
 
@@ -637,7 +662,7 @@ pub fn load_pcap_data(data: &[u8]) -> PcapData {
 		// This magic number 42 is the ethernet/IP/UDP framing of the packet.
 		let rtp_data = &pkt.data[42..];
 
-		let header = RtpHeader::_parse(rtp_data, &exts).unwrap();
+		let header = RtpHeader::parse(rtp_data, &exts).unwrap();
 		let payload = &rtp_data[header.header_len..];
 
 		ret.push((relative_time, header, payload.to_vec()));

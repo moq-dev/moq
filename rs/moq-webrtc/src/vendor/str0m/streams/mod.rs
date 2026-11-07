@@ -14,9 +14,9 @@ use crate::vendor::str0m::packet::Vp8Patch;
 use crate::vendor::str0m::rtp_::MidRid;
 use crate::vendor::str0m::rtp_::Ssrc;
 use crate::vendor::str0m::rtp_::{Bitrate, Pt};
-use crate::vendor::str0m::rtp_::{DlrrItem, Rtcp, RtcpFb, RtpHeader};
 use crate::vendor::str0m::rtp_::{MediaTime, SenderInfo};
 use crate::vendor::str0m::rtp_::{Mid, Rid, SeqNo};
+use crate::vendor::str0m::rtp_::{Rtcp, RtcpFb, RtpHeader};
 use crate::vendor::str0m::util::already_happened;
 
 pub use self::receive::StreamRx;
@@ -151,7 +151,6 @@ pub(crate) struct Streams {
 
 	/// Whether periodic statistics reports are expected to be generated. This informs us on
 	/// whether we should be holding onto data needed for those reports or not.
-	enable_stats: bool,
 
 	/// Threshold above which an outgoing RTP packet triggers an MTU warning. Used as a
 	/// hard cap when selecting RTX cache entries for spurious padding.
@@ -173,7 +172,7 @@ struct RxLookup {
 }
 
 impl Streams {
-	pub(crate) fn new(enable_stats: bool, mtu_warn: usize, pause_threshold: Duration) -> Self {
+	pub(crate) fn new(mtu_warn: usize, pause_threshold: Duration) -> Self {
 		Self {
 			streams_rx: Default::default(),
 			rx_lookup: Default::default(),
@@ -183,7 +182,6 @@ impl Streams {
 			probe_media: None,
 			default_ssrc_tx: 0.into(), // this will be changed
 			mids_to_report: Vec::with_capacity(10),
-			enable_stats,
 			mtu_warn,
 			pause_threshold,
 		}
@@ -326,7 +324,7 @@ impl Streams {
 	pub fn declare_stream_tx(&mut self, ssrc: Ssrc, rtx: Option<Ssrc>, midrid: MidRid) -> &mut StreamTx {
 		self.streams_tx
 			.entry(ssrc)
-			.or_insert_with(|| StreamTx::new(ssrc, rtx, midrid, self.enable_stats, self.mtu_warn))
+			.or_insert_with(|| StreamTx::new(ssrc, rtx, midrid, self.mtu_warn))
 	}
 
 	pub fn remove_stream_tx(&mut self, ssrc: Ssrc) -> bool {
@@ -516,20 +514,6 @@ impl Streams {
 
 	pub(crate) fn has_stream_tx(&self, ssrc: Ssrc) -> bool {
 		self.streams_tx.contains_key(&ssrc)
-	}
-
-	pub(crate) fn handle_dlrr(&mut self, now: Instant, dlrr: DlrrItem) {
-		let is_default_ssrc = !self.default_ssrc_tx.is_probe() && dlrr.ssrc == self.default_ssrc_tx;
-		if !is_default_ssrc && !self.has_stream_tx(dlrr.ssrc) {
-			trace!("Ignoring DLRR for unknown local SSRC: {}", dlrr.ssrc);
-			return;
-		}
-
-		// DLRR identifies our RRTR sender, not a remote media SSRC. The measured
-		// round trip is shared by receive streams on this peer's transport.
-		for stream in self.streams_rx.values_mut() {
-			stream.handle_rtcp(now, RtcpFb::DlrrItem(dlrr));
-		}
 	}
 
 	pub(crate) fn streams_rx(&mut self) -> impl Iterator<Item = &mut StreamRx> {

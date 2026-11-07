@@ -15,7 +15,6 @@ use crate::vendor::str0m::format::CodecConfig;
 use crate::vendor::str0m::format::PayloadParams;
 use crate::vendor::str0m::format::Vp9PacketizerMode;
 use crate::vendor::str0m::io::DatagramSend;
-use crate::vendor::str0m::media::AppSpecificFeedback;
 use crate::vendor::str0m::media::Media;
 use crate::vendor::str0m::media::{KeyframeRequestKind, MID_PROBE};
 use crate::vendor::str0m::media::{MediaAdded, MediaChanged};
@@ -34,11 +33,9 @@ use crate::vendor::str0m::rtp_::SRTCP_OVERHEAD;
 use crate::vendor::str0m::rtp_::SeqNo;
 use crate::vendor::str0m::rtp_::SeqNoWindow;
 use crate::vendor::str0m::rtp_::{Bitrate, ExtensionMap, Goodbye, Mid, ReportList, Rtcp, RtcpFb};
-use crate::vendor::str0m::rtp_::{Dlrr, DlrrItem, ExtendedReport, ReportBlock};
 use crate::vendor::str0m::rtp_::{RtpHeader, SessionId, TwccPacketId, extend_u16};
 use crate::vendor::str0m::rtp_::{SrtpContext, Ssrc};
 use crate::vendor::str0m::rtp_::{TwccRecvRegister, TwccSendRegister};
-use crate::vendor::str0m::stats::StatsSnapshot;
 use crate::vendor::str0m::streams::{RtpPacket, StreamTimeoutConfig, Streams};
 use crate::vendor::str0m::util::{Soonest, SystemTimeExt, already_happened, not_happening};
 use crate::vendor::str0m::{Reason, net};
@@ -50,12 +47,6 @@ const NACK_MIN_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Delay between reports of TWCC. This is deliberately very low.
 const TWCC_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Maximum number of pending RRTR entries before oldest are dropped.
-const MAX_PENDING_RRTRS: usize = 300;
-
-/// Maximum number of DLRR items to include in a single ExtendedReport.
-const MAX_DLRR_PER_REPORT: usize = 50;
 
 pub(crate) struct Session {
 	id: SessionId,
@@ -114,9 +105,6 @@ pub(crate) struct Session {
 	pending_packet: Option<RtpPacket>,
 
 	// Total RTP payload bytes for media, including retransmissions.
-	media_bytes_rx: u64,
-	media_bytes_tx: u64,
-
 	pub ice_lite: bool,
 
 	/// Whether we are running in RTP-mode.
@@ -129,15 +117,7 @@ pub(crate) struct Session {
 	feedback_rx: VecDeque<Rtcp>,
 	rtp_closing: bool,
 
-	/// Pending RRTRs from remote SSRCs in FIFO order, deduplicated by SSRC.
-	/// A new RRTR for an already-pending SSRC updates its value in place.
-	/// Capped at 300 entries; at most 50 are consumed per DLRR report.
-	pending_rrtrs: VecDeque<(Ssrc, LastRrtr)>,
-
 	raw_packets: Option<VecDeque<Box<RawPacket>>>,
-
-	// Pending application-specific feedback (PSFB FMT=15) messages to emit as events.
-	pending_app_feedback: Option<AppSpecificFeedback>,
 
 	/// Target MTU (start) and warn threshold (end). Buffer sizing uses the
 	/// target; oversized outgoing datagrams above the warn threshold log a warning.
@@ -145,17 +125,6 @@ pub(crate) struct Session {
 
 	#[cfg(test)]
 	pending_probe: Option<crate::vendor::str0m::bwe_::ProbeClusterConfig>,
-}
-
-/// Last RRTR (Receiver Reference Time Report, RFC 3611 §4.4) received from a remote SSRC.
-/// Stored at session level so we can respond with a DLRR regardless of which local stream
-/// the remote is observing.
-#[derive(Debug, Clone, Copy)]
-struct LastRrtr {
-	/// Middle 32 bits of the RRTR NTP timestamp (compact NTP / LRR).
-	lrr: u32,
-	/// When the RRTR arrived locally.
-	received_at: Instant,
 }
 
 impl Session {
@@ -175,12 +144,10 @@ impl Session {
 			(PacerImpl::null(), None)
 		};
 
-		let enable_stats = config.stats_interval.is_some();
-
 		Session {
 			id,
 			medias: vec![],
-			streams: Streams::new(enable_stats, *config.mtu.end(), config.pause_threshold),
+			streams: Streams::new(*config.mtu.end(), config.pause_threshold),
 			app: None,
 			reordering_size_audio: config.reordering_size_audio,
 			reordering_size_video: config.reordering_size_video,
@@ -210,21 +177,17 @@ impl Session {
 			pacer_control: PacerControl::new(),
 			poll_packet_buf: vec![0; 2000],
 			pending_packet: None,
-			media_bytes_rx: 0,
-			media_bytes_tx: 0,
 			ice_lite: config.ice_lite,
 			rtp_mode: config.rtp_mode,
 			vp9_packetizer_mode: config.vp9_packetizer_mode,
 			feedback_tx: VecDeque::new(),
 			feedback_rx: VecDeque::new(),
 			rtp_closing: false,
-			pending_rrtrs: VecDeque::new(),
 			raw_packets: if config.enable_raw_packets {
 				Some(VecDeque::new())
 			} else {
 				None
 			},
-			pending_app_feedback: None,
 			mtu: config.mtu.clone(),
 			#[cfg(test)]
 			pending_probe: None,
@@ -303,32 +266,6 @@ impl Session {
 			},
 			&mut self.feedback_tx,
 		);
-
-		// Flush any pending RRTRs as a DLRR alongside the Sender Report compound packet.
-		// We piggyback on the SR cadence so the DLRR doesn't generate extra standalone
-		// RTCP traffic that could perturb bandwidth estimation.
-		// Consume at most 50 entries per report; the rest remain for subsequent SRs.
-		if !self.pending_rrtrs.is_empty() && self.feedback_tx.iter().any(|r| matches!(r, Rtcp::SenderReport(_))) {
-			let n = self.pending_rrtrs.len().min(MAX_DLRR_PER_REPORT);
-			let items: Vec<DlrrItem> = self
-				.pending_rrtrs
-				.drain(..n)
-				.map(|(ssrc, rrtr)| {
-					let delay = now.saturating_duration_since(rrtr.received_at);
-					let last_rr_delay = ((delay.as_micros() * 65_536) / 1_000_000) as u32;
-					DlrrItem {
-						ssrc,
-						last_rr_time: rrtr.lrr,
-						last_rr_delay,
-					}
-				})
-				.collect();
-
-			self.feedback_tx.push_back(Rtcp::ExtendedReport(ExtendedReport {
-				ssrc: sender_ssrc,
-				blocks: vec![ReportBlock::Dlrr(Dlrr { items })],
-			}));
-		}
 
 		if do_nack {
 			self.last_nack = now;
@@ -447,23 +384,6 @@ impl Session {
 		trace!("Created feedback TWCC: {:?}", twcc);
 		self.feedback_tx.push_front(Rtcp::Twcc(twcc));
 		Some(())
-	}
-
-	/// Enqueue an application-specific feedback message (PSFB FMT=15, PT=206) for
-	/// transmission as part of the regular RTCP compound packet.
-	pub(crate) fn send_app_specific_feedback(
-		&mut self,
-		sender_ssrc: Ssrc,
-		media_ssrc: Ssrc,
-		payload: impl Into<Arc<[u8]>>,
-	) {
-		use crate::vendor::str0m::rtp_::AppSpecificFeedback as RtcpAppFeedback;
-		let feedback = RtcpAppFeedback {
-			sender_ssrc,
-			media_ssrc,
-			payload: payload.into(),
-		};
-		self.feedback_tx.push_back(Rtcp::AppSpecificFeedback(feedback));
 	}
 
 	/// Enqueue a Picture Loss Indication (PLI, PT=206 FMT=1) for `media_ssrc`, to be
@@ -825,7 +745,6 @@ impl Session {
 		} else {
 			data.len()
 		};
-		self.media_bytes_rx += rx_bytes as u64;
 
 		// One-shot conversion to Arc<[u8]>: a single allocation that copies
 		// only the trimmed payload bytes out of the SRTP scratch buffer.
@@ -905,17 +824,6 @@ impl Session {
 		}
 
 		for fb in RtcpFb::from_rtcp(self.feedback_rx.drain(..)) {
-			if let RtcpFb::AppSpecificFeedback(asf) = fb {
-				self.pending_app_feedback = Some(AppSpecificFeedback {
-					sender_ssrc: asf.sender_ssrc,
-					media_ssrc: asf.media_ssrc,
-					payload: asf.payload,
-				});
-				continue;
-			}
-
-			// Application feedback above only queues an event. Keep the conservative
-			// timer wake for every other report, including reports in a compound packet.
 			may_move_timeout = true;
 
 			if let RtcpFb::Twcc(twcc) = fb {
@@ -930,30 +838,6 @@ impl Session {
 				// The funky thing about TWCC reports is that they are never stapled
 				// together with other RTCP packet. If they were though, we want to
 				// handle more packets.
-				continue;
-			}
-
-			if let RtcpFb::Rrtr((rrtr, ssrc)) = fb {
-				// DLRR responder (RFC 3611 §4.5): store the remote's RRTR so we can
-				// reply with a DLRR, letting the remote compute RTT.
-				let lrr = (rrtr.ntp_time.as_ntp_64() >> 16) as u32;
-				let entry = LastRrtr { lrr, received_at: now };
-
-				// Update in place if this SSRC is already pending (preserves queue order).
-				if let Some(existing) = self.pending_rrtrs.iter_mut().find(|(s, _)| *s == ssrc) {
-					existing.1 = entry;
-				} else {
-					// Cap at 300 entries; drop the oldest if full.
-					if self.pending_rrtrs.len() >= MAX_PENDING_RRTRS {
-						self.pending_rrtrs.pop_front();
-					}
-					self.pending_rrtrs.push_back((ssrc, entry));
-				}
-				continue;
-			}
-
-			if let RtcpFb::DlrrItem(dlrr) = fb {
-				self.streams.handle_dlrr(now, dlrr);
 				continue;
 			}
 
@@ -1018,10 +902,6 @@ impl Session {
 			if let Some(p) = raw_packets.pop_front() {
 				return Some(Event::RawPacket(p));
 			}
-		}
-
-		if let Some(feedback) = self.pending_app_feedback.take() {
-			return Some(Event::AppSpecificFeedback(feedback));
 		}
 
 		// This must be before pending_packet.take() since we need to emit the unpaused event
@@ -1252,10 +1132,6 @@ impl Session {
 			bwe.on_media_sent(payload_size.into(), is_padding, now);
 		}
 
-		if !is_padding && !header.ssrc.is_probe() {
-			self.media_bytes_tx += payload_size as u64;
-		}
-
 		Some(protected.into())
 	}
 
@@ -1340,24 +1216,6 @@ impl Session {
 			debug!("Enable TWCC feedback");
 			self.enable_twcc_feedback = true;
 		}
-	}
-
-	pub fn visit_stats(&mut self, now: Instant, snapshot: &mut StatsSnapshot) {
-		for stream in self.streams.streams_tx() {
-			stream.visit_stats(snapshot, now);
-		}
-
-		for stream in self.streams.streams_rx() {
-			stream.visit_stats(snapshot, now);
-		}
-
-		snapshot.tx = self.media_bytes_tx;
-		snapshot.rx = self.media_bytes_rx;
-		snapshot.bwe_tx = self.bwe.as_ref().and_then(|bwe| bwe.last_estimate());
-
-		snapshot.egress_loss_fraction = self.twcc_tx_register.loss(Duration::from_secs(1), now);
-		snapshot.rtt = self.twcc_tx_register.rtt();
-		snapshot.ingress_loss_fraction = self.twcc_rx_register.loss();
 	}
 
 	pub fn set_bwe_bitrate(&mut self, minimum: Bitrate, desired: Bitrate) {
@@ -1638,48 +1496,6 @@ mod tests {
 			assert!(!readiness.wants_timeout());
 			assert_eq!(session.poll_timeout(), before);
 			assert!(session.poll_event().is_none());
-		}
-	}
-
-	#[test]
-	fn readiness_rtcp_app_feedback_only_wakes_events() {
-		for mixed in [false, true] {
-			let now = Instant::now();
-			let mut session = keyed_session();
-			let before = session.poll_timeout();
-			let feedback = crate::vendor::str0m::rtp_::AppSpecificFeedback {
-				sender_ssrc: 1.into(),
-				media_ssrc: 2.into(),
-				payload: vec![1, 2, 3, 4].into(),
-			};
-			// Empty RR followed by application feedback, as sent by DirectApi.
-			let mut buf = vec![0x80, 201, 0, 1, 0, 0, 0, 1];
-			let mut packet = [0; 64];
-			let len = feedback.write_to(&mut packet);
-			buf.extend_from_slice(&packet[..len]);
-			if mixed {
-				let pli = Pli {
-					sender_ssrc: 1.into(),
-					ssrc: 2.into(),
-				};
-				let len = pli.write_to(&mut packet);
-				buf.extend_from_slice(&packet[..len]);
-			}
-			// Equal key material lets the local transmit context act as the peer.
-			let packet = session.srtp_tx.as_mut().unwrap().protect_rtcp(&buf);
-			let mut readiness = Readiness::idle();
-			session.handle_rtcp_receive(now, &packet, &mut readiness.wake());
-			assert!(readiness.wants_events());
-			assert_eq!(
-				readiness.wants_timeout(),
-				mixed,
-				"other compound reports keep timer invalidation"
-			);
-			let Some(Event::AppSpecificFeedback(received)) = session.poll_event() else {
-				panic!("feedback must remain observable immediately");
-			};
-			assert_eq!(received.payload, feedback.payload);
-			assert_eq!(session.poll_timeout(), before);
 		}
 	}
 

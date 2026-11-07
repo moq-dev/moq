@@ -291,39 +291,6 @@ mod tests {
 	}
 
 	#[test]
-	fn readiness_outgoing_app_feedback_only_wakes_events() {
-		let mut rtc = idle_rtc();
-		let before = rtc.session.poll_timeout();
-		rtc.direct_api()
-			.send_app_specific_feedback(42.into(), 43.into(), vec![1, 2, 3, 4]);
-		assert!(rtc.readiness.wants_events());
-		assert!(!rtc.readiness.wants_timeout());
-		assert_eq!(rtc.session.poll_timeout(), before);
-		assert!(
-			rtc.session.poll_datagram(rtc.last_now).is_some(),
-			"queued feedback must be sendable without a timeout"
-		);
-	}
-
-	#[test]
-	fn readiness_api_narrowing_preserves_other_mutations() {
-		for feedback_first in [false, true] {
-			let mut rtc = idle_rtc();
-			if feedback_first {
-				rtc.direct_api()
-					.send_app_specific_feedback(42.into(), 43.into(), vec![1, 2, 3, 4]);
-				rtc.bwe().reset(Bitrate::kbps(900));
-			} else {
-				rtc.bwe().reset(Bitrate::kbps(900));
-				rtc.direct_api()
-					.send_app_specific_feedback(42.into(), 43.into(), vec![1, 2, 3, 4]);
-			}
-			assert!(rtc.readiness.wants_events());
-			assert!(rtc.readiness.wants_timeout());
-		}
-	}
-
-	#[test]
 	fn narrowing_preserves_other_operations() {
 		for events in [false, true] {
 			for timeout in [false, true] {

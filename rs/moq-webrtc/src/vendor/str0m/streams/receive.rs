@@ -8,13 +8,12 @@ use crate::vendor::str0m::media::KeyframeRequestKind;
 use crate::vendor::str0m::packet::MAX_RED_RECOVERY_DEPTH;
 use crate::vendor::str0m::rtp_::MidRid;
 use crate::vendor::str0m::rtp_::SeqNoWindow;
-use crate::vendor::str0m::rtp_::{Bitrate, DlrrItem, ExtendedReport, extend_u32};
+use crate::vendor::str0m::rtp_::{Bitrate, extend_u32};
 use crate::vendor::str0m::rtp_::{Fir, FirEntry, Frequency, MediaTime, Remb};
 use crate::vendor::str0m::rtp_::{Mid, Pli, Pt, ReceiverReport};
-use crate::vendor::str0m::rtp_::{ReportBlock, ReportList, Rid, Rrtr, Rtcp};
+use crate::vendor::str0m::rtp_::{ReportList, Rid, Rtcp};
 use crate::vendor::str0m::rtp_::{RtcpFb, RtpHeader, SenderInfo, SeqNo};
 use crate::vendor::str0m::rtp_::{SdesType, Ssrc};
-use crate::vendor::str0m::stats::{MediaIngressStats, RemoteEgressStats, StatsSnapshot};
 use crate::vendor::str0m::util::{InstantExt, SystemTimeExt};
 use crate::vendor::str0m::util::{already_happened, calculate_rtt};
 
@@ -285,9 +284,6 @@ impl StreamRx {
 					}
 				}
 			}
-			DlrrItem(v) => {
-				self.set_dlrr_item(now, v);
-			}
 			Goodbye(_v) => {
 				// We get Goodbye at weird times, like SDP renegotiation, which makes
 				// pausing on the BYE not a good idea. Chrome also reuses the SSRC it
@@ -317,12 +313,6 @@ impl StreamRx {
 			info,
 			emitted: false,
 		});
-	}
-
-	fn set_dlrr_item(&mut self, now: Instant, dlrr: DlrrItem) {
-		let ntp_time = now.to_ntp_duration();
-		let rtt = calculate_rtt(ntp_time, dlrr.last_rr_delay, dlrr.last_rr_time);
-		self.stats.rtt = rtt;
 	}
 
 	pub(crate) fn paused_at(&self) -> Option<Instant> {
@@ -699,11 +689,8 @@ impl StreamRx {
 			self.stats.jitter = report.jitter;
 		}
 
-		let xr = self.create_extended_receiver_report(now, sender_ssrc);
-
-		trace!("Created feedback RR/XR ({:?}): {:?} {:?}", self.midrid, rr, xr);
+		trace!("Created feedback RR ({:?}): {:?}", self.midrid, rr);
 		feedback.push_back(Rtcp::ReceiverReport(rr));
-		feedback.push_back(Rtcp::ExtendedReport(xr));
 
 		self.last_receiver_report = now;
 	}
@@ -742,18 +729,6 @@ impl StreamRx {
 		ReceiverReport {
 			sender_ssrc: 0.into(), // set one level up
 			reports: report.into(),
-		}
-	}
-
-	fn create_extended_receiver_report(&self, now: Instant, sender_ssrc: Ssrc) -> ExtendedReport {
-		// we only want to report our time to measure RTT,
-		// the source will answer with Dlrr feedback, allowing us to calculate RTT
-		let block = ReportBlock::Rrtr(Rrtr {
-			ntp_time: now.to_system_time(),
-		});
-		ExtendedReport {
-			ssrc: sender_ssrc,
-			blocks: vec![block],
 		}
 	}
 
@@ -813,14 +788,6 @@ impl StreamRx {
 		}
 
 		Some(())
-	}
-
-	pub(crate) fn visit_stats(&self, snapshot: &mut StatsSnapshot, now: Instant) {
-		if self.ssrc.is_probe() {
-			return;
-		}
-
-		self.stats.fill(snapshot, self.midrid, self.sender_info.as_ref(), now);
 	}
 
 	pub(crate) fn poll_paused(&mut self) -> Option<StreamPaused> {
@@ -955,46 +922,6 @@ impl StreamRxStats {
 	fn update_loss(&mut self, fraction_lost: u8) {
 		self.loss = Some(fraction_lost as f32 / u8::MAX as f32)
 	}
-
-	pub(crate) fn fill(
-		&self,
-		snapshot: &mut StatsSnapshot,
-		midrid: MidRid,
-		sender_info: Option<&LastSenderInfo>,
-		now: Instant,
-	) {
-		if self.bytes == 0 {
-			return;
-		}
-
-		let stats = MediaIngressStats {
-			mid: midrid.mid(),
-			rid: midrid.rid(),
-			bytes: self.bytes,
-			packets: self.packets,
-			firs: self.firs,
-			plis: self.plis,
-			nacks: self.nacks,
-			jitter: self.jitter,
-			rtt: self.rtt,
-			loss: self.loss,
-			timestamp: now,
-			remote: sender_info.map(|l| RemoteEgressStats {
-				bytes: l.info.sender_octet_count as u64,
-				packets: l.info.sender_packet_count as u64,
-			}),
-		};
-
-		// Several SSRCs can back a given (mid, rid) tuple. For example, Firefox creates new SSRCs
-		// when a Transceiver transitions from send -> inactive -> send. In order to continue
-		// correctly reporting stats for this (mid, rid) pair we need to merge the stats across all
-		// the SSRCs that have been used.
-		snapshot
-			.ingress
-			.entry(midrid)
-			.and_modify(|s| s.merge_by_mid_rid(&stats))
-			.or_insert(stats);
-	}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1049,48 +976,6 @@ mod tests {
 			stream.update_register(now, &header, Frequency::FORTY_EIGHT_KHZ, false, seq_no);
 		}
 		stream
-	}
-
-	#[test]
-	fn dlrr_for_local_ssrc_updates_receive_streams() {
-		let mut streams = crate::vendor::str0m::streams::Streams::new(false, 1200, Duration::from_millis(1500));
-		for (ssrc, mid) in [(7, "video"), (8, "audio")] {
-			streams.expect_stream_rx(ssrc.into(), None, MidRid(mid.into(), None), false);
-		}
-		let default_ssrc = streams.first_ssrc_local();
-		streams.declare_stream_tx(9.into(), None, MidRid("send".into(), None));
-		let now = Instant::now();
-		let last_rr_time = ((now - Duration::from_millis(250)).to_system_time().as_ntp_64() >> 16) as u32;
-
-		// Ignore a sub-block addressed to the remote media source instead of us.
-		streams.handle_dlrr(
-			now,
-			DlrrItem {
-				ssrc: 7.into(),
-				last_rr_time,
-				last_rr_delay: 3276,
-			},
-		);
-		assert_eq!(streams.stream_rx(&7.into()).unwrap().stats.rtt, None);
-
-		// Accept both an active sender and the fallback SSRC used before it existed.
-		for local_ssrc in [9.into(), default_ssrc] {
-			for ssrc in [7, 8] {
-				streams.stream_rx(&ssrc.into()).unwrap().stats.rtt = None;
-			}
-			streams.handle_dlrr(
-				now,
-				DlrrItem {
-					ssrc: local_ssrc,
-					last_rr_time,
-					last_rr_delay: 3276,
-				},
-			);
-			for ssrc in [7, 8] {
-				let rtt = streams.stream_rx(&ssrc.into()).unwrap().stats.rtt.unwrap();
-				assert!((Duration::from_millis(199)..=Duration::from_millis(201)).contains(&rtt));
-			}
-		}
 	}
 
 	#[test]

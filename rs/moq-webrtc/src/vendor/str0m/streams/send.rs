@@ -23,7 +23,6 @@ use crate::vendor::str0m::rtp_::{MediaTime, Mid, NackEntry, ReportList, Rtcp, Rt
 use crate::vendor::str0m::rtp_::{Pt, Rid, RtcpFb, SenderInfo, SenderReport, Ssrc};
 use crate::vendor::str0m::rtp_::{SRTP_BLOCK_SIZE, SeqNo};
 use crate::vendor::str0m::session::PacketReceipt;
-use crate::vendor::str0m::stats::StatsSnapshot;
 use crate::vendor::str0m::util::value_history::ValueHistory;
 use crate::vendor::str0m::util::{InstantExt, already_happened, not_happening};
 
@@ -347,7 +346,7 @@ impl RtpWrite {
 }
 
 impl StreamTx {
-	pub(crate) fn new(ssrc: Ssrc, rtx: Option<Ssrc>, midrid: MidRid, enable_stats: bool, mtu_warn: usize) -> Self {
+	pub(crate) fn new(ssrc: Ssrc, rtx: Option<Ssrc>, midrid: MidRid, mtu_warn: usize) -> Self {
 		debug!("Create StreamTx for SSRC: {}", ssrc);
 
 		StreamTx {
@@ -373,7 +372,7 @@ impl StreamTx {
 			last_sender_report: already_happened(),
 			pending_request_keyframe: None,
 			pending_request_remb: None,
-			stats: StreamTxStats::new(enable_stats),
+			stats: StreamTxStats::new(),
 			rtx_ratio: (0.0, already_happened()),
 			pt_for_padding: None,
 			remote_acked_ssrc: false,
@@ -387,7 +386,6 @@ impl StreamTx {
 			0.into(),
 			None,
 			MidRid(crate::vendor::str0m::media::MID_PROBE, None),
-			false,
 			mtu_warn,
 		);
 		stream.unpaced = Some(false);
@@ -1119,10 +1117,6 @@ impl StreamTx {
 		}
 	}
 
-	pub(crate) fn visit_stats(&mut self, snapshot: &mut StatsSnapshot, now: Instant) {
-		self.stats.fill(snapshot, self.midrid, now);
-	}
-
 	pub(crate) fn queue_state(&mut self, now: Instant) -> QueueState {
 		// The unpaced flag is set to a default value on first handle_timeout. The
 		// default is to not pace audio. We unwrap default to "true" here to not
@@ -1293,9 +1287,8 @@ impl StreamTx {
 		self.pending_request_keyframe = None;
 		self.pending_request_remb = None;
 
-		// Reset all statistics - preserve whether stats tracking is enabled
-		let stats_enabled = self.stats.bytes_transmitted.is_some();
-		self.stats = StreamTxStats::new(stats_enabled);
+		// Reset all statistics.
+		self.stats = StreamTxStats::new();
 		self.rtx_ratio = (0.0, already_happened());
 		self.remote_acked_ssrc = false;
 
@@ -1334,7 +1327,7 @@ mod test {
 
 	#[test]
 	fn regular_padding_does_not_search_probe_negotiation() {
-		let mut streams = crate::vendor::str0m::streams::Streams::new(false, 1200, Duration::from_millis(1500));
+		let mut streams = crate::vendor::str0m::streams::Streams::new(1200, Duration::from_millis(1500));
 		let stream = streams.declare_stream_tx(42.into(), Some(44.into()), MidRid("vid".into(), None));
 		stream.pt_for_padding = Some(96.into());
 		let queues: Vec<_> = streams
@@ -1380,7 +1373,7 @@ mod test {
 		let codecs = CodecConfig::new_with_defaults();
 		let pt = codecs.params()[0].pt();
 		let exts = ExtensionMap::standard();
-		let mut streams = crate::vendor::str0m::streams::Streams::new(false, 1200, Duration::from_millis(1500));
+		let mut streams = crate::vendor::str0m::streams::Streams::new(1200, Duration::from_millis(1500));
 		let stream = streams.declare_stream_tx(42.into(), None, MidRid("vid".into(), None));
 		let mut buf = vec![];
 		let mut now = start;
@@ -1442,7 +1435,7 @@ mod test {
 		use crate::vendor::str0m::streams::Streams;
 
 		let now = Instant::now();
-		let mut streams = Streams::new(false, 1200, Duration::from_millis(1500));
+		let mut streams = Streams::new(1200, Duration::from_millis(1500));
 		let queue = MidRid(MID_PROBE, None);
 		let mut twcc = 0;
 		let mut buf = vec![];
@@ -1481,7 +1474,7 @@ mod test {
 
 	#[test]
 	fn queue_info_is_cached_on_queue_state_update() {
-		let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), false, 1200);
+		let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), 1200);
 
 		assert!(stream.queue_info().is_none());
 
@@ -1506,7 +1499,7 @@ mod test {
 
 	#[test]
 	fn sub_average_padding_is_visible_to_the_pacer() {
-		let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), false, 1200);
+		let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), 1200);
 		stream.padding = 240;
 
 		let snapshot = stream
@@ -1519,7 +1512,7 @@ mod test {
 
 	#[test]
 	fn sender_report_uses_supplied_intervals() {
-		let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), false, 1200);
+		let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), 1200);
 		let now = Instant::now();
 		stream.kind = Some(MediaKind::Audio);
 		stream.last_sender_report = now;

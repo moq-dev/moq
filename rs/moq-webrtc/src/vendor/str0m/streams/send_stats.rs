@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 use crate::vendor::str0m::rtp::SeqNo;
 use crate::vendor::str0m::rtp_::{ReceptionReport, extend_u32};
-use crate::vendor::str0m::stats::{MediaEgressStats, RemoteIngressStats, StatsSnapshot};
 use crate::vendor::str0m::util::value_history::ValueHistory;
 use crate::vendor::str0m::util::{InstantExt, calculate_rtt};
 
@@ -30,8 +29,6 @@ pub(crate) struct StreamTxStats {
 	/// round trip time
 	/// Can be null in case of missing or bad reports
 	rtt: Option<Duration>,
-	/// losses collecter from RR (known packets, lost ratio)
-	losses: Losses,
 	/// The last reception report for the stream, if any.
 	///
 	/// The SeqNo is the extended max_seq of the reception report, extended
@@ -46,7 +43,7 @@ pub(crate) struct StreamTxStats {
 }
 
 impl StreamTxStats {
-	pub fn new(enable_stats: bool) -> Self {
+	pub fn new() -> Self {
 		Self {
 			bytes: 0,
 			bytes_resent: 0,
@@ -56,7 +53,6 @@ impl StreamTxStats {
 			plis: 0,
 			nacks: 0,
 			rtt: None,
-			losses: Losses::new(enable_stats),
 			last_rr: None,
 			bytes_transmitted: Some(Default::default()),
 			bytes_retransmitted: Some(Default::default()),
@@ -93,90 +89,5 @@ impl StreamTxStats {
 		let ext_seq = extend_u32(Some(*last_sent_seq_no), r.max_seq).into();
 
 		self.last_rr = Some((ext_seq, r));
-
-		self.losses.push((*ext_seq, r.fraction_lost as f32 / u8::MAX as f32));
-	}
-
-	pub(crate) fn fill(&mut self, snapshot: &mut StatsSnapshot, midrid: MidRid, now: Instant) {
-		if self.bytes == 0 {
-			return;
-		}
-
-		let loss = {
-			let mut value = 0_f32;
-			let mut total_weight = 0_u64;
-
-			// average known RR losses weighted by their number of packets
-			for it in self.losses.iterator() {
-				let [prev, next] = it else { continue };
-				let weight = next.0.saturating_sub(prev.0);
-				value += next.1 * weight as f32;
-				total_weight += weight;
-			}
-
-			let result = value / total_weight as f32;
-			result.is_finite().then_some(result)
-		};
-
-		self.losses.clear_all_but_last();
-
-		snapshot.egress.insert(
-			midrid,
-			MediaEgressStats {
-				mid: midrid.mid(),
-				rid: midrid.rid(),
-				bytes: self.bytes,
-				packets: self.packets,
-				firs: self.firs,
-				plis: self.plis,
-				nacks: self.nacks,
-				rtt: self.rtt,
-				loss,
-				timestamp: now,
-				remote: self.last_rr.as_ref().map(|(seq_no, rr)| RemoteIngressStats {
-					jitter: rr.jitter,
-					maximum_sequence_number: *seq_no,
-					packets_lost: rr.packets_lost as u64,
-				}),
-			},
-		);
-	}
-}
-
-/// Helper to avoid an unbounded vec if we are not enabling stats
-#[derive(Debug)]
-enum Losses {
-	Disabled,
-	Enabled(Vec<(u64, f32)>),
-}
-
-impl Losses {
-	fn new(enabled: bool) -> Self {
-		if enabled { Self::Enabled(vec![]) } else { Self::Disabled }
-	}
-
-	fn push(&mut self, value: (u64, f32)) {
-		let Self::Enabled(losses) = self else {
-			return;
-		};
-		losses.push(value);
-	}
-
-	fn iterator(&mut self) -> impl Iterator<Item = &[(u64, f32)]> {
-		let Self::Enabled(losses) = self else {
-			return [].windows(2);
-		};
-
-		// just in case we received RRs out of order
-		losses.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-		losses.windows(2)
-	}
-
-	fn clear_all_but_last(&mut self) {
-		let Self::Enabled(losses) = self else {
-			return;
-		};
-		losses.drain(..losses.len().saturating_sub(1));
 	}
 }

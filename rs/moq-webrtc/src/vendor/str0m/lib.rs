@@ -775,11 +775,10 @@ use rtp_::{Bitrate, DataSize};
 pub mod rtp {
 	/// Feedback for RTP.
 	pub mod rtcp {
-		pub use crate::vendor::str0m::rtp_::AppSpecificFeedback;
-		pub use crate::vendor::str0m::rtp_::{Descriptions, ExtendedReport, Fir, Goodbye, Nack, Pli};
-		pub use crate::vendor::str0m::rtp_::{Dlrr, NackEntry, ReceptionReport, ReportBlock};
+		pub use crate::vendor::str0m::rtp_::{Descriptions, Fir, Goodbye, Nack, Pli};
 		pub use crate::vendor::str0m::rtp_::{FirEntry, ReceiverReport, SenderInfo, SenderReport, Twcc};
-		pub use crate::vendor::str0m::rtp_::{ReportList, Rrtr, Rtcp, Sdes, SdesType};
+		pub use crate::vendor::str0m::rtp_::{NackEntry, ReceptionReport};
+		pub use crate::vendor::str0m::rtp_::{ReportList, Rtcp, Sdes, SdesType};
 	}
 	use self::rtcp::Rtcp;
 
@@ -835,7 +834,6 @@ pub mod channel;
 use channel::{Channel, ChannelData, ChannelHandler, ChannelId};
 
 pub mod media;
-use media::AppSpecificFeedback;
 use media::SenderFeedback;
 use media::{Direction, Media, Mid, Pt, Rid, Writer};
 use media::{KeyframeRequest, KeyframeRequestKind};
@@ -851,11 +849,6 @@ use crate::vendor::str0m::poll::Readiness;
 
 mod session;
 use session::Session;
-
-pub mod stats;
-
-use stats::{CandidatePairStats, CandidateStats, MediaEgressStats, MediaIngressStats};
-use stats::{PeerStats, Stats, StatsEvent, StatsSnapshot};
 
 mod streams;
 
@@ -917,15 +910,12 @@ pub struct Rtc {
 	next_dtls_timeout: Option<Instant>,
 	sctp: RtcSctp,
 	chan: ChannelHandler,
-	stats: Option<Stats>,
 	session: Session,
 	remote_fingerprint: Option<Fingerprint>,
 	remote_addrs: Vec<SocketAddr>,
 	send_addr: Option<SendAddr>,
 	need_init_time: bool,
 	last_now: Instant,
-	peer_bytes_rx: u64,
-	peer_bytes_tx: u64,
 	change_counter: usize,
 	last_timeout_reason: Reason,
 	crypto_provider: Arc<crate::vendor::str0m::crypto::CryptoProvider>,
@@ -1011,18 +1001,7 @@ pub enum Event {
     /// A data channel's buffered amount has dropped below the configured threshold.
     ChannelBufferedAmountLow(ChannelId),
 
-    // =================== Statistics and BWE related events ===================
-
-    /// Statistics event for the Rtc instance
-    ///
-    /// Includes both media traffic (rtp payload) as well as all traffic
-    PeerStats(PeerStats),
-
-    /// Aggregated statistics for each media (mid, rid) in the ingress direction
-    MediaIngressStats(MediaIngressStats),
-
-    /// Aggregated statistics for each media (mid, rid) in the egress direction
-    MediaEgressStats(MediaEgressStats),
+    // =================== BWE related events ===================
 
     /// A new estimate from the bandwidth estimation subsystem.
     EgressBitrateEstimate(BweKind),
@@ -1044,12 +1023,6 @@ pub enum Event {
 
     /// Incoming RTP data.
     RtpPacket(RtpPacket),
-
-    /// Incoming application-specific Payload-Specific Feedback (PSFB FMT=15, PT=206).
-    ///
-    /// Emitted when a non-REMB FMT=15 RTCP PSFB message is received. The payload
-    /// is opaque and application-defined (RFC 4585 Section 6.4).
-    AppSpecificFeedback(AppSpecificFeedback),
 
     /// The remote DTLS connection or SCTP association has closed.
     ///
@@ -1142,11 +1115,6 @@ pub enum Reason {
 	///
 	/// Scheduled when we need to open allocations using SCTP.
 	Channel,
-
-	/// Stats gathering (if enabled).
-	///
-	/// Periodic gathering of statistics.
-	Stats,
 
 	/// Regular RTP feedback.
 	///
@@ -1295,14 +1263,11 @@ impl Rtc {
 			session,
 			sctp,
 			chan: ChannelHandler::default(),
-			stats: config.stats_interval.map(Stats::new),
 			remote_fingerprint: None,
 			remote_addrs: vec![],
 			send_addr: None,
 			need_init_time: true,
 			last_now: start,
-			peer_bytes_rx: 0,
-			peer_bytes_tx: 0,
 			change_counter: 0,
 			last_timeout_reason: Reason::NotHappening,
 			crypto_provider,
@@ -1586,9 +1551,6 @@ impl Rtc {
 				| Event::MediaData(_)
 				| Event::RtpPacket(_)
 				| Event::SenderFeedback(_)
-				| Event::MediaEgressStats(_)
-				| Event::MediaIngressStats(_)
-				| Event::PeerStats(_)
 				| Event::ChannelBufferedAmountLow(_)
 				| Event::EgressBitrateEstimate(_)
 				| Event::KeyframeRequest(_) => {
@@ -1596,10 +1558,7 @@ impl Rtc {
 				}
 				_ => debug!("{:?}", e),
 			},
-			Output::Transmit(t) => {
-				self.peer_bytes_tx += t.contents.len() as u64;
-				trace!("OUT {:?}", t)
-			}
+			Output::Transmit(t) => trace!("OUT {:?}", t),
 			Output::Timeout(_t) => {}
 		}
 
@@ -1839,14 +1798,6 @@ impl Rtc {
 			return Ok(Some(Output::Event(ev)));
 		}
 
-		if let Some(e) = self.stats.as_mut().and_then(|s| s.poll_output()) {
-			return Ok(Some(match e {
-				StatsEvent::Peer(s) => Output::Event(Event::PeerStats(s)),
-				StatsEvent::MediaIngress(s) => Output::Event(Event::MediaIngressStats(s)),
-				StatsEvent::MediaEgress(s) => Output::Event(Event::MediaEgressStats(s)),
-			}));
-		}
-
 		if let Some(v) = self.ice.poll_transmit() {
 			return Ok(Some(Output::Transmit(v)));
 		}
@@ -1879,7 +1830,6 @@ impl Rtc {
 	// Called only after the output pipeline has drained.
 	fn poll_timeout(&mut self) -> Instant {
 		if self.readiness.wants_timeout() {
-			let stats_timeout = self.stats.as_mut().and_then(|s| s.poll_timeout());
 			// ICE has no clock until its first timeout and asks for none, yet a remote
 			// candidate gives it checks to run: drive it at once, since a passive peer
 			// may have no other timer that would.
@@ -1892,8 +1842,7 @@ impl Rtc {
 				.soonest((ice_timeout, Reason::Ice))
 				.soonest(self.session.poll_timeout())
 				.soonest((self.sctp.poll_timeout(), Reason::Sctp))
-				.soonest((self.chan.poll_timeout(&self.sctp), Reason::Channel))
-				.soonest((stats_timeout, Reason::Stats));
+				.soonest((self.chan.poll_timeout(&self.sctp), Reason::Channel));
 
 			let time = time_and_reason.0.unwrap_or_else(not_happening);
 			self.cached_timeout = time.max(self.last_now);
@@ -2102,10 +2051,6 @@ impl Rtc {
 			sctp,
 			chan,
 			session,
-			stats,
-			send_addr,
-			peer_bytes_rx,
-			peer_bytes_tx,
 			readiness,
 			..
 		} = self;
@@ -2119,45 +2064,12 @@ impl Rtc {
 		chan.handle_timeout(now, sctp, &mut readiness.wake());
 		session.handle_timeout(now, &mut readiness.wake())?;
 
-		if let Some(stats) = stats {
-			if stats.wants_timeout(now) {
-				let mut snapshot = StatsSnapshot::new(now);
-				snapshot.peer_rx = *peer_bytes_rx;
-				snapshot.peer_tx = *peer_bytes_tx;
-				let current_round_trip_time = ice.nominated_pair_rtt();
-				let total_round_trip_time = ice.nominated_pair_total_rtt().unwrap_or_default();
-				let responses_received = ice.nominated_pair_responses_received().unwrap_or(0);
-				snapshot.selected_candidate_pair = send_addr.as_ref().map(|s| CandidatePairStats {
-					protocol: s.proto,
-					local: CandidateStats { addr: s.source },
-					remote: CandidateStats { addr: s.destination },
-					current_round_trip_time,
-					total_round_trip_time,
-					responses_received,
-				});
-				session.visit_stats(now, &mut snapshot);
-
-				// A stats snapshot surfaces as an event and re-arms the stats
-				// timer.
-				drop(readiness.wake());
-				stats.do_handle_timeout(&mut snapshot);
-			}
-		}
-
 		Ok(())
 	}
 
 	fn do_handle_receive(&mut self, recv_time: Instant, r: net::Receive) -> Result<(), RtcError> {
 		trace!("IN {:?}", r);
 		use DatagramRecvInner::*;
-
-		let bytes_rx = match r.contents.inner {
-			// TODO: stun is already parsed (depacketized) here
-			Stun(_) => 0,
-			Dtls(v) | Rtp(v) | Rtcp(v) => v.len(),
-		};
-
-		self.peer_bytes_rx += bytes_rx as u64;
 
 		// Disjoint borrows so each subsystem gets its own armed `Wake`.
 		let Rtc {
@@ -2381,10 +2293,6 @@ mod test {
 		}
 	}
 }
-
-#[cfg(test)]
-#[allow(missing_docs)]
-pub mod _internal_test_exports;
 
 #[cfg(any())]
 pub mod unversioned {

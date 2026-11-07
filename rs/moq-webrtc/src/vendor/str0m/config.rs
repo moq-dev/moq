@@ -40,7 +40,6 @@ pub struct RtcConfig {
 	pub(crate) max_stun_retransmits: Option<usize>,
 	pub(crate) codec_config: CodecConfig,
 	pub(crate) exts: ExtensionMap,
-	pub(crate) stats_interval: Option<Duration>,
 	pub(crate) intervals: RtcpReportIntervals,
 	pub(crate) bwe_config: Option<BweConfig>,
 	pub(crate) reordering_size_audio: usize,
@@ -401,33 +400,6 @@ impl RtcConfig {
 	pub fn set_extension(mut self, id: u8, ext: Extension) -> Self {
 		self.exts.set(id, ext);
 		self
-	}
-
-	/// Set the interval between statistics events.
-	///
-	/// None turns off the stats events.
-	///
-	/// This includes [`MediaEgressStats`][crate::vendor::str0m::stats::MediaEgressStats],
-	/// [`MediaIngressStats`][crate::vendor::str0m::stats::MediaIngressStats]
-	pub fn set_stats_interval(mut self, interval: Option<Duration>) -> Self {
-		self.stats_interval = interval;
-		self
-	}
-
-	/// The configured statistics interval.
-	///
-	/// None means statistics are disabled.
-	///
-	/// ```ignore
-	/// # use crate::vendor::str0m::Rtc;
-	/// # use std::time::Duration;
-	/// let config = Rtc::builder();
-	///
-	/// // Defaults to None.
-	/// assert_eq!(config.stats_interval(), None);
-	/// ```
-	pub fn stats_interval(&self) -> Option<Duration> {
-		self.stats_interval
 	}
 
 	/// Sets the interval between RTCP sender/receiver reports for audio streams.
@@ -870,7 +842,6 @@ impl Default for RtcConfig {
 			max_stun_retransmits: None,
 			codec_config: CodecConfig::new_with_defaults(),
 			exts: ExtensionMap::standard(),
-			stats_interval: None,
 			intervals: RtcpReportIntervals {
 				audio: Duration::from_secs(5),
 				video: Duration::from_secs(1),

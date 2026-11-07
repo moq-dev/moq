@@ -6,13 +6,12 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use crate::vendor::str0m::_internal_test_exports::TestSrtp;
 use crate::vendor::str0m::change::SdpOffer;
 use crate::vendor::str0m::crypto::dtls::{KeyingMaterial, SrtpProfile};
 use crate::vendor::str0m::media::{Direction, MediaKind, Mid, Simulcast, SimulcastLayer};
 use crate::vendor::str0m::net::{Protocol, Receive};
 use crate::vendor::str0m::rtp::rtcp::Rtcp;
-use crate::vendor::str0m::rtp::{ExtensionValues, RawPacket, RtpHeader};
+use crate::vendor::str0m::rtp::{ExtensionMap, ExtensionValues, RawPacket, RtpHeader};
 use crate::vendor::str0m::{Event, Input, Output};
 
 use super::common;
@@ -23,7 +22,6 @@ const MAIN_SSRC: u32 = 2869047233;
 const L_ADDR: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 1000);
 const R_ADDR: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)), 2000);
 const FEEDBACK_WAIT: Duration = Duration::from_millis(50);
-const STATS_INTERVAL: Duration = Duration::from_millis(200);
 
 #[test]
 fn authenticated_padding_is_reported_before_main_ssrc_discovery() {
@@ -53,15 +51,11 @@ fn authenticated_padding_is_reported_before_main_ssrc_discovery() {
 			assert_eq!(raw_receipts(&receiver), 5, "replays must be rejected");
 			assert_no_stream(&mut receiver, mid);
 
-			advance(&mut receiver, STATS_INTERVAL);
-			assert_loss(&receiver, 0.0);
 			for (_, event) in &receiver.events {
 				match event {
-					Event::PeerStats(stats) => assert_eq!(stats.bytes_rx, 0),
-					Event::MediaIngressStats(_)
-					| Event::MediaData(_)
-					| Event::RtpPacket(_)
-					| Event::StreamPaused(_) => panic!("early padding emitted media: {event:?}"),
+					Event::MediaData(_) | Event::RtpPacket(_) | Event::StreamPaused(_) => {
+						panic!("early padding emitted media: {event:?}")
+					}
 					_ => {}
 				}
 			}
@@ -98,8 +92,6 @@ fn failed_authentication_and_invalid_padding_are_not_reported_received() {
 	assert_eq!(received, [(40, true), (43, true)]);
 	assert_eq!(raw_receipts(&receiver), 2);
 	assert_no_stream(&mut receiver, mid);
-	advance(&mut receiver, STATS_INTERVAL);
-	assert_loss(&receiver, 0.5);
 }
 
 #[test]
@@ -187,7 +179,6 @@ fn receiver(rtp_mode: bool, profile: SrtpProfile) -> (TestRtc, TestSrtp, Mid) {
 			.enable_vp8(true)
 			.set_rtp_mode(rtp_mode)
 			.set_reordering_size_video(0)
-			.set_stats_interval(Some(STATS_INTERVAL))
 			.enable_raw_packets(true)
 	};
 	let mut sender = TestRtc::new_with_config(Peer::Left, configure);
@@ -230,7 +221,11 @@ fn receiver(rtp_mode: bool, profile: SrtpProfile) -> (TestRtc, TestSrtp, Mid) {
 	let crypto = crate::vendor::str0m::crypto::from_feature_flags();
 	let material = KeyingMaterial::new(&vec![42; len]);
 	let srtp = TestSrtp::new(&crypto, profile, &material);
-	receiver._set_srtp_keys(material, profile, false);
+	let crypto_provider = receiver.rtc.crypto_provider.clone();
+	receiver
+		.rtc
+		.session
+		.set_keying_material(material, &crypto_provider, profile, false);
 	drain(&mut receiver);
 	receiver.events.clear();
 	assert_no_stream(&mut receiver, mid);
@@ -259,7 +254,27 @@ fn header(mid: Mid, repair: bool, seq: u16, twcc: u16) -> RtpHeader {
 }
 
 fn protect(receiver: &TestRtc, srtp: &mut TestSrtp, header: RtpHeader, seq: u64, payload: &[u8]) -> Vec<u8> {
-	srtp.protect(header, seq, payload, receiver._exts())
+	srtp.protect(header, seq, payload, &receiver.rtc.session.exts)
+}
+
+/// Construct authenticated RTP packets with controlled headers and payloads.
+struct TestSrtp(crate::vendor::str0m::rtp_::SrtpContext);
+
+impl TestSrtp {
+	/// Use the same keys and profile as the test receiver's incoming SRTP context.
+	fn new(crypto: &crate::vendor::str0m::crypto::CryptoProvider, profile: SrtpProfile, mat: &KeyingMaterial) -> Self {
+		Self(crate::vendor::str0m::rtp_::SrtpContext::new(crypto, profile, mat, true))
+	}
+
+	/// Serialize and encrypt a supplied packet, including deliberately malformed payloads.
+	fn protect(&mut self, mut header: RtpHeader, seq: u64, payload: &[u8], exts: &ExtensionMap) -> Vec<u8> {
+		let mut buf = vec![0; 1500];
+		let header_len = header.write_to(&mut buf, exts);
+		buf[header_len..header_len + payload.len()].copy_from_slice(payload);
+		header.header_len = header_len;
+		let packet = &buf[..header_len + payload.len()];
+		self.0.protect_rtp(packet, &header, seq)
+	}
 }
 
 fn inject(receiver: &mut TestRtc, packet: &[u8]) {
@@ -328,23 +343,6 @@ fn raw_receipts(receiver: &TestRtc) -> usize {
 fn assert_no_stream(receiver: &mut TestRtc, mid: Mid) {
 	let mut direct = receiver.direct_api();
 	assert!(direct.stream_rx_by_mid(mid, Some("h".into())).is_none());
-}
-
-fn assert_loss(receiver: &TestRtc, expected: f32) {
-	let losses: Vec<_> = receiver
-		.events
-		.iter()
-		.filter_map(|(_, event)| {
-			let Event::PeerStats(stats) = event else {
-				return None;
-			};
-			stats.ingress_loss_fraction
-		})
-		.collect();
-	assert!(!losses.is_empty(), "no ingress loss stats emitted");
-	for loss in losses {
-		assert_eq!(loss, expected);
-	}
 }
 
 fn assert_media_packets(receiver: &TestRtc, expected: &[(u64, &[u8])]) {

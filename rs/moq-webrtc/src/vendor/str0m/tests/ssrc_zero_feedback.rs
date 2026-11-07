@@ -14,7 +14,6 @@ fn next_timeout(rtc: &mut Rtc) -> (Instant, Reason) {
 fn receiver(ssrc: u32, now: Instant) -> Rtc {
 	let mut rtc = RtcConfig::new()
 		.set_rtp_mode(true)
-		.set_stats_interval(None)
 		.set_rtcp_report_interval_audio(Duration::from_secs(1))
 		.set_rtcp_report_interval_video(Duration::from_secs(1))
 		.build(now);

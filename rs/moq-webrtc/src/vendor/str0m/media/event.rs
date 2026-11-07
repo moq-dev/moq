@@ -329,20 +329,6 @@ pub enum KeyframeRequestKind {
 	Fir,
 }
 
-/// Incoming application-specific Payload-Specific Feedback (PSFB FMT=15, PT=206).
-///
-/// Emitted when a non-REMB FMT=15 RTCP PSFB message is received. The payload
-/// is opaque and application-defined (RFC 4585 Section 6.4).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppSpecificFeedback {
-	/// SSRC of the sender of this feedback message.
-	pub sender_ssrc: Ssrc,
-	/// SSRC of the media source this feedback relates to.
-	pub media_ssrc: Ssrc,
-	/// Application-dependent payload.
-	pub payload: Arc<[u8]>,
-}
-
 /// Incoming feedback from a sender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SenderFeedback {
