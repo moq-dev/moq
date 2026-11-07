@@ -1,6 +1,10 @@
 /**
  * Datagram tracks: live, unreliable payloads with their own sequence counter.
  *
+ * A datagram's sequence names no cached content, so the rule that an identity never names new
+ * content does not cover it: a recreated or restarted datagram track counts from 0 again, and a
+ * repeated sequence is delivered like any other datagram.
+ *
  * @module
  */
 import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
@@ -14,7 +18,7 @@ export { rescale } from "./rescale.ts";
 
 /** A single unreliable payload, addressed within its datagram track. */
 export interface Datagram {
-	/** The datagram track's own sequence number. */
+	/** The datagram track's own sequence number. It names no cached content and may repeat. */
 	sequence: bigint;
 	/** Presentation timestamp, present exactly when the track has a timescale. */
 	timestamp?: Timestamp;

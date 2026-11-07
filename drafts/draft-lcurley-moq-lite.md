@@ -868,7 +868,7 @@ A subscriber MUST silently drop a datagram with an unknown Subscribe ID, or one 
 
 **Sequence**:
 The datagram's sequence number within its datagram Track, which the publisher assigns in the order it produces them.
-It is the Track's own, not a Group Sequence.
+It is the Track's own, not a Group Sequence, and names no cached content: a Sequence may repeat, as from a restarted publisher, and a subscriber delivers a repeat like any other datagram.
 
 **Timestamp**:
 The absolute presentation timestamp of the datagram, in the Track's `Timescale`.
@@ -2276,6 +2276,7 @@ The `Message Length` describes the payload size on the wire.
 ### Delivery {#changelog-07-delivery}
 
 - Replaced group datagrams with datagram Tracks, a namespace apart from Tracks of Groups. A subscriber subscribes to one on the Datagrams Stream (0x9) with DATAGRAMS and DATAGRAMS_UPDATE, which carry only a priority, and the publisher answers with DATAGRAMS_INFO. A datagram carries the Track's own Sequence and a Timestamp, with no Group, Inflated Size, or Range. Datagrams no longer count toward SUBSCRIBE_DROP, and a subscriber no longer deduplicates them against Group Streams.
+- A datagram Sequence names no cached content and may repeat; a subscriber delivers a repeat.
 - Added a leading Type to datagrams: Track (0x0) or Padding (0x1), which either endpoint discards without changing session or subscription state.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop, so a group of an untimed Track expires by arrival age alone.
 - A publisher resets the Group Stream of an expired, unfinished group with OLD rather than finishing it, even after sending every frame it holds.

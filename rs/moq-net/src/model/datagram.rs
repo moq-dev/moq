@@ -5,6 +5,10 @@
 //! datagram: best-effort, unordered, and never retransmitted, cached, or fetched. It has a
 //! sequence from the track's own counter and a timestamp, and no group.
 //!
+//! A datagram's sequence names no cached content, so the rule that an identity never names
+//! new content does not cover it: a recreated or restarted datagram track counts from 0 again,
+//! and a repeated sequence is delivered like any other datagram.
+//!
 //! A broadcast creates a [`Producer`] with
 //! [`broadcast::Producer::create_datagrams`](crate::broadcast::Producer::create_datagrams),
 //! and a reader asks for a [`Consumer`] with
@@ -67,7 +71,7 @@ const DEFAULT_PRIORITY: i8 = 0;
 /// A single unreliable payload: its sequence, its timestamp, and the bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Datagram {
-	/// The datagram track's own sequence number.
+	/// The datagram track's own sequence number. It names no cached content and may repeat.
 	pub sequence: u64,
 	/// Presentation timestamp in the track's timescale, or `None` on a track without one.
 	pub timestamp: Option<Timestamp>,
