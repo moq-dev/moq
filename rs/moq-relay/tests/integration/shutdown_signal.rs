@@ -254,6 +254,14 @@ async fn a_failed_startup_leaves_the_signals_alone_inner() {
 
 async fn a_relay_without_signals_leaves_sigint_alone_inner() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
+	// A process started with SIGINT ignored, such as a background job of a script,
+	// passes that on: restore the default action, which the relay must then leave alone.
+	// SAFETY: nothing else in this fresh process watches SIGINT yet.
+	assert_ne!(
+		unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL) },
+		libc::SIG_ERR,
+		"failed to restore SIGINT's default action"
+	);
 
 	let relay = Relay::load(relay_config())
 		.await

@@ -481,7 +481,8 @@ struct Channel {
 	queued: usize,
 	/// How the channel closed, once it has.
 	end: Option<End>,
-	/// When a finish reaches the reader, under [`Config::latency`].
+	/// When a finish reaches the reader under [`Config::latency`], until the reader
+	/// takes it: the writer counts it acknowledged only then.
 	finished: Option<kio::clock::Instant>,
 }
 
@@ -533,12 +534,14 @@ impl Channel {
 		}
 		self.messages.clear();
 		self.queued = 0;
+		// Nothing is left in flight for the writer to wait on.
+		self.finished = None;
 	}
 
 	/// How the writer sees the channel close: reset, stopped, or finished and drained.
 	fn sent(&self) -> Poll<Result<(), Error>> {
 		match self.end {
-			Some(End::Fin) if self.messages.is_empty() => Poll::Ready(Ok(())),
+			Some(End::Fin) if self.messages.is_empty() && self.finished.is_none() => Poll::Ready(Ok(())),
 			Some(End::Reset(_)) => Poll::Ready(Ok(())),
 			Some(End::Stop(code)) => Poll::Ready(Err(Error::Stopped(code))),
 			_ => Poll::Pending,
@@ -647,7 +650,7 @@ impl poll::SendStream for SendStream {
 	}
 
 	/// Ready once this side reset the stream, the reader stopped it, or the reader took
-	/// every message of a finished stream. That stands in for a FIN acknowledgement, so a
+	/// every message of a finished stream and, under latency, the finish. That stands in for a FIN acknowledgement, so a
 	/// writer that waits for it before closing the session knows the peer has the data.
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Check the close first, so a drain that happened before it is still seen below.
@@ -663,7 +666,7 @@ impl poll::SendStream for SendStream {
 	fn acknowledged(&self) -> Option<bool> {
 		let channel = self.channel.lock();
 		// A reset on a closed session leaves the channel as it was, so only `done` records it.
-		let finished = matches!(channel.end, Some(End::Fin));
+		let finished = matches!(channel.end, Some(End::Fin)) && channel.finished.is_none();
 		let open = channel.end.is_none() && !self.done;
 		Some((open || finished) && channel.messages.is_empty())
 	}
@@ -751,6 +754,10 @@ impl poll::Chunks for Chunks {
 
 		let Some(front) = channel.messages.front_mut() else {
 			let end = channel.end.expect("checked above");
+			if matches!(end, End::Fin) && channel.finished.is_some() {
+				// The finish landed: tell the writer, which waits on it as an acknowledgement.
+				channel.finished = None;
+			}
 			drop(channel);
 			self.release();
 			return Poll::Ready(match end {
@@ -1060,6 +1067,38 @@ mod tests {
 			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
 			assert_eq!(landed(&mut recv).await, None);
 			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
+		});
+	}
+
+	#[test]
+	fn a_finish_is_acknowledged_once_the_reader_takes_it() {
+		kio::clock::sim::run(async {
+			const LATENCY: Duration = Duration::from_millis(10);
+			let (a, b) = pair(Config {
+				latency: LATENCY,
+				..Default::default()
+			});
+			let (mut send, mut recv) = uni(&a, &b);
+			ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+			assert_eq!(landed(&mut recv).await.unwrap(), "one");
+
+			// Every message is taken, but the finish is still in flight: a writer that
+			// closed the session now would beat its finish to the reader.
+			send.finish().unwrap();
+			assert!(send.poll_closed(&noop()).is_pending());
+			assert_eq!(send.acknowledged(), Some(false));
+			let start = kio::clock::now();
+			assert_eq!(landed(&mut recv).await, None);
+			assert_eq!(start.elapsed(), LATENCY);
+			assert!(ready(send.poll_closed(&noop())).is_ok());
+			assert_eq!(send.acknowledged(), Some(true));
+
+			// A reader that stops before the finish lands leaves the writer finished.
+			let (mut send, recv) = uni(&a, &b);
+			send.finish().unwrap();
+			assert!(send.poll_closed(&noop()).is_pending());
+			drop(recv);
+			assert!(ready(send.poll_closed(&noop())).is_ok());
 		});
 	}
 

@@ -1,6 +1,6 @@
 //! A relay [`Connection`] over moq-net's in-memory transport, on kio's simulator.
 //!
-//! No sockets and no Tokio: every task runs on [`kio::clock::sim`], whose clock only
+//! No traffic over sockets and no Tokio: every task runs on [`kio::clock::sim`], whose clock only
 //! advances once every message in flight has landed, so a test never waits on the host.
 
 #[cfg(feature = "test-support")]
@@ -163,7 +163,7 @@ impl Net {
 		drop(kio::clock::sim::spawn(async move {
 			while let Some(dial) = dials.next().await {
 				let mut hosts = routing.lock().unwrap();
-				let port = dial.url().port().map(usize::from);
+				let port = dial.url().port_or_known_default().map(usize::from);
 				let Some(name) = port.and_then(|port| hosts.ports.get(port.wrapping_sub(1))).cloned() else {
 					continue;
 				};

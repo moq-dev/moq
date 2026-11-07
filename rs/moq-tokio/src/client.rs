@@ -396,7 +396,9 @@ impl Client {
 		#[cfg(feature = "sim")]
 		if let Some(network) = &self.network {
 			let link = network.dial(addr.url().clone(), self.versions.clone()).await?;
-			let (session, driver) = client.moq.connect(moq_net::time::Instant::now(), link).await?;
+			// As a socket dial does, so a SETUP that carries the target carries this one.
+			let moq = client.moq.clone().with_url(addr.url().clone());
+			let (session, driver) = moq.connect(moq_net::time::Instant::now(), link).await?;
 			crate::runtime::Spawner::current().spawn(moq_net::time::run(driver));
 			// What the link stands in for: a session the relay labels as QUIC.
 			return Ok(Dialed::new(session, crate::Transport::Quic));

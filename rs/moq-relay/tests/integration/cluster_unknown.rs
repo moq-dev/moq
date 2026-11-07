@@ -47,11 +47,10 @@ impl Mesh {
 		for (name, dialed) in [("a", 2), ("b", 1), ("c", 1), ("d", 0)] {
 			assert_eq!(net.accepted(name), dialed, "{name} accepted the wrong number of peers");
 		}
-		Self {
-			auth,
-			a: relays.swap_remove(0),
-			d: relays.pop().unwrap(),
-		}
+		// Take D first: removing A first would move D into A's place.
+		let d = relays.pop().expect("d is up");
+		let a = relays.swap_remove(0);
+		Self { auth, a, d }
 	}
 }
 
