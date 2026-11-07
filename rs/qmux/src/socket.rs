@@ -123,20 +123,20 @@ mod unix {
 	mod sys {
 		use super::*;
 
+		/// Mask for `tcpi_delivery_rate_app_limited`, the first bitfield of its byte,
+		/// which C allocates from the low bit on little-endian targets and from the
+		/// high bit on big-endian ones.
+		#[cfg(target_endian = "little")]
+		pub const APP_LIMITED_MASK: u8 = 1 << 0;
+		#[cfg(target_endian = "big")]
+		pub const APP_LIMITED_MASK: u8 = 1 << 7;
+
 		/// `struct tcp_info` from `linux/tcp.h`.
 		///
 		/// Mirrored field-for-field rather than hand-computing offsets, so `repr(C)`
 		/// alignment places each member where the kernel put it. The kernel reports
 		/// how much it actually filled in, which is less than this on older
 		/// releases, so every read checks its field against that length.
-		/// `tcpi_delivery_rate_app_limited` is the byte's first bitfield, which C
-		/// allocates from the low bit on little-endian targets and from the high bit
-		/// on big-endian ones.
-		#[cfg(target_endian = "little")]
-		pub const APP_LIMITED_MASK: u8 = 1 << 0;
-		#[cfg(target_endian = "big")]
-		pub const APP_LIMITED_MASK: u8 = 1 << 7;
-
 		#[repr(C)]
 		#[derive(Default, Clone, Copy)]
 		pub struct TcpInfo {
