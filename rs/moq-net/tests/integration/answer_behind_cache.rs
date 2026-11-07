@@ -9,7 +9,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::{Error, Hop, Version, origin, track};
-use support::harness::peer;
+use support::harness::{MockConnectOptions, connect_mock, peer};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -25,8 +25,8 @@ fn write_group(track: &track::Producer, payload: &'static [u8]) {
 	group.finish().unwrap();
 }
 
-/// The first group `subscriber` receives, with its first frame.
-async fn first_group(subscriber: &mut track::Subscriber) -> moq_net::Result<(u64, Vec<u8>)> {
+/// The next group `subscriber` receives, with its first frame.
+async fn next_group(subscriber: &mut track::Subscriber) -> moq_net::Result<(u64, Vec<u8>)> {
 	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("the subscription waits forever")?
@@ -60,7 +60,7 @@ async fn an_empty_answer_fails_the_lingering_copy(version: &str) {
 			.await
 			.unwrap()
 			.unwrap();
-		assert_eq!(first_group(&mut subscriber).await.unwrap(), (0, b"old".to_vec()));
+		assert_eq!(next_group(&mut subscriber).await.unwrap(), (0, b"old".to_vec()));
 	}
 	// The relay cancels its idle upstream subscription; the copy lingers.
 	kio::clock::timeout(TIMEOUT, support::unwanted(old.demand()))
@@ -75,7 +75,7 @@ async fn an_empty_answer_fails_the_lingering_copy(version: &str) {
 		.await
 		.expect("the resubscribe waits forever");
 	let failed = match resumed {
-		Ok(mut subscriber) => first_group(&mut subscriber).await.map(|_| ()),
+		Ok(mut subscriber) => next_group(&mut subscriber).await.map(|_| ()),
 		Err(err) => Err(err),
 	};
 	assert!(matches!(failed, Err(Error::MalformedTrack)), "{version}: {failed:?}");
@@ -91,7 +91,7 @@ async fn an_empty_answer_fails_the_lingering_copy(version: &str) {
 		.unwrap()
 		.unwrap();
 	assert_eq!(
-		first_group(&mut subscriber).await.unwrap(),
+		next_group(&mut subscriber).await.unwrap(),
 		(0, b"new".to_vec()),
 		"{version}: a fresh copy accepts the feed from group 0"
 	);
@@ -105,4 +105,105 @@ async fn an_empty_answer_fails_the_lingering_copy_ietf18() {
 #[kio::test]
 async fn an_empty_answer_fails_the_lingering_copy_ietf22() {
 	an_empty_answer_fails_the_lingering_copy("moq-transport-22").await;
+}
+
+/// A relay whose upstream reset its newest group while it stayed live still holds the
+/// groups before it, so its moq-transport answer names the last of them as Largest. A
+/// downstream copy that lingered over the same groups is current with that answer and
+/// resumes rather than failing.
+async fn a_reset_newest_group_answers_the_group_before(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let upper = produce_origin(2);
+	let lower = produce_origin(3);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(upper.clone());
+	let _upper = connect_mock(options).await;
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(upper.consume());
+	options.client_subscribe = Some(lower.clone());
+	let _lower = connect_mock(options).await;
+
+	let route = publisher.route("room", origin::RouteOptions::hidden()).unwrap();
+	let track = route
+		.broadcast()
+		.create_track("audio", track::Info::default().with_timescale(None))
+		.unwrap();
+	route.announce().unwrap();
+	let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	g0.write_frame(None, &b"0a"[..]).unwrap();
+
+	// A reader on the upper relay keeps its copy live after the lower relay leaves.
+	let local = kio::clock::timeout(TIMEOUT, upper.consume().follow("room", None).unwrap().available())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	let mut keeper = kio::clock::timeout(TIMEOUT, local.track("audio").unwrap().subscribe(None))
+		.await
+		.unwrap()
+		.unwrap();
+	assert_eq!(next_group(&mut keeper).await.unwrap(), (0, b"0a".to_vec()));
+
+	let remote = kio::clock::timeout(TIMEOUT, lower.consume().follow("room", None).unwrap().available())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	{
+		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track("audio").unwrap().subscribe(None))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(next_group(&mut subscriber).await.unwrap(), (0, b"0a".to_vec()));
+		g0.finish().unwrap();
+		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		g1.write_frame(None, &b"1a"[..]).unwrap();
+		assert_eq!(next_group(&mut subscriber).await.unwrap(), (1, b"1a".to_vec()));
+		let mut kept = kio::clock::timeout(TIMEOUT, keeper.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(kept.sequence, 1);
+		g1.abort(Error::Cancel).unwrap();
+		// The upper relay's copy stays live with group 1 reset and group 0 held.
+		loop {
+			match kio::clock::timeout(TIMEOUT, kept.read_frame()).await.unwrap() {
+				Ok(Some(_)) => {}
+				Ok(None) => panic!("group 1 finished rather than reset"),
+				Err(_) => break,
+			}
+		}
+	}
+	// On the simulated clock: the lower relay cancels its upstream subscription and its copy
+	// lingers over group 0.
+	kio::clock::sleep(Duration::from_secs(1)).await;
+
+	let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track("audio").unwrap().subscribe(None))
+		.await
+		.expect("the resubscribe waits forever")
+		.unwrap();
+	// The upper relay answers the resubscription before the feed moves on.
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let mut g2 = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
+	g2.write_frame(None, &b"2a"[..]).unwrap();
+	loop {
+		let (sequence, payload) = next_group(&mut subscriber).await.unwrap();
+		if sequence == 2 {
+			assert_eq!(payload, b"2a".to_vec(), "{version}");
+			break;
+		}
+	}
+}
+
+#[kio::test]
+async fn a_reset_newest_group_answers_the_group_before_ietf18() {
+	a_reset_newest_group_answers_the_group_before("moq-transport-18").await;
+}
+
+#[kio::test]
+async fn a_reset_newest_group_answers_the_group_before_ietf22() {
+	a_reset_newest_group_answers_the_group_before("moq-transport-22").await;
 }
