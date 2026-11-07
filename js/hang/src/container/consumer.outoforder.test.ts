@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Micro, Milli, Nano, sleep } from "@moq/clock";
+import { Micro, Milli, Nano, sleep } from "@moq/clock";
 import { hostTime } from "@moq/clock/test";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
@@ -49,56 +49,54 @@ async function drain(consumer: Consumer): Promise<[bigint, number | undefined][]
 	return seen;
 }
 
-// A publisher serving a subscriber's max delay hands over the head of the window alongside
-// the live edge, and groups go out newest-first, so the head arrives *after* the group
-// that is already playing. Arriving in that order is not a reason to throw it away:
-// audio writes into a timestamp-indexed ring and video drops a late frame at render, and the
-// subscription's own max delay already bounds how far back one can be.
-test("out-of-order groups are delivered rather than dropped", async () => {
+// Groups go out newest first, so the head of a subscription's window arrives after the live edge
+// it was served alongside. A cursor taken from the first arrival would drop that head, so it starts
+// at the floor the subscription names, or the start the publisher reports, and waits for it under
+// the budget. A group below that floor is never delivered and adds no gap. Mirrors Rust's
+// `startup_at_the_publishers_start_over_a_newer_first_arrival`.
+test("the head of the window arriving after the live edge is delivered first", async () => {
 	hostTime();
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(5000) } }), {
-		format: new LegacyFormat("data"),
-		delay: { max: 5000 as Milli },
-	});
+	const consumer = new Consumer(
+		track.subscribe({ delay: { max: Milli(5000) }, ranges: [{ start: { absolute: 1n } }] }),
+		{ format: new LegacyFormat("data"), delay: { max: 5000 as Milli } },
+	);
 
-	// The live edge lands first, and delivery starts there rather than waiting.
+	// The live edge lands first, and delivery waits for the floor rather than starting there.
 	publish(track, 3n, 30);
-	expect((await nextFrame(consumer))?.frame.payload).toEqual(new Uint8Array([3]));
+	const waiting = consumer.next();
+	expect(await Promise.race([waiting, sleep(Nano.fromMilli(Milli(50))).then(() => "waiting")])).toBe("waiting");
 
-	// The window's head follows it. Every group is still within both budgets, so all three
-	// are handed over even though each sits below the group already delivered.
+	// The window's head follows, and a reordered group below the floor with it.
 	publish(track, 0n, 0);
 	publish(track, 1n, 10);
 	publish(track, 2n, 20);
+	track.finish();
 
-	expect(await drain(consumer)).toEqual([
-		[0n, 0],
-		[1n, 1],
-		[2n, 2],
-	]);
+	const reads: string[] = [];
+	for (let read = await waiting; read; read = await consumer.next()) {
+		reads.push(read.kind === "frame" ? `${read.group}` : read.kind);
+	}
+	expect(reads).toEqual(["1", "2", "3"]);
 
 	consumer.close();
 });
 
-// A below-cursor group may still be downloading when its buffered frames are momentarily
-// drained (the decode loop consumes faster than the network delivers). Removing it at that
-// instant silently truncates its tail, so removal must wait for the group to finish.
-test("a below-cursor group still downloading is not truncated", async () => {
+// A group may still be downloading when its buffered frames are momentarily drained (the decode
+// loop consumes faster than the network delivers). Removing it at that instant silently truncates
+// its tail, so removal must wait for the group to finish.
+test("a head group still downloading is not truncated", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(5000) } }), {
-		format: new LegacyFormat("data"),
-		delay: { max: 5000 as Milli },
-	});
+	const consumer = new Consumer(
+		track.subscribe({ delay: { max: Milli(5000) }, ranges: [{ start: { absolute: 1n } }] }),
+		{ format: new LegacyFormat("data"), delay: { max: 5000 as Milli } },
+	);
 
-	// The live edge group arrives first and starts delivery (still open).
+	// The live edge group arrives first (still open), and the head after it, one frame at a time.
 	const live = track.createGroup(3n);
 	publishFrame(live, 3000, 30);
-	expect((await nextFrame(consumer))?.frame.payload[0]).toBe(30);
-
-	// A backlog group lands below the cursor, one frame at a time (mid-download).
-	const backlog = track.createGroup(1n);
-	publishFrame(backlog, 1000, 10);
+	const head = track.createGroup(1n);
+	publishFrame(head, 1000, 10);
 	const first = await nextFrame(consumer);
 	expect(first?.group).toBe(1n);
 	expect(first?.frame.payload[0]).toBe(10);
@@ -106,8 +104,8 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	// The consumer finds the group's buffer empty while it is still open. It must wait
 	// rather than shift the group out, so the second frame still arrives.
 	const pending = nextFrame(consumer);
-	publishFrame(backlog, 1500, 11);
-	backlog.finish();
+	publishFrame(head, 1500, 11);
+	head.finish();
 
 	const second = await pending;
 	expect(second?.group).toBe(1n);
@@ -119,37 +117,40 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	consumer.close();
 });
 
-// The floor belongs to the latest group, not to delayed history within max delay.
-test("delayed older groups survive a floor established by two newer groups", async () => {
-	const clock = new Manual();
-	clock.jump(Nano.fromMilli(Milli(200)));
-	const installed = clock.install();
+// A gap between two ranges is never read, so the reader walks over it at once rather than waiting a
+// budget, or forever on an open track, for groups it never gets. Mirrors Rust's
+// `an_excluded_gap_between_ranges_does_not_stall`.
+test("an excluded gap between ranges does not stall", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(5000) } }), {
-		format: new LegacyFormat("data"),
-		delay: { max: Milli(5000) },
-	});
-	try {
-		publish(track, 3n, 30);
-		expect((await nextFrame(consumer))?.group).toBe(3n);
+	const consumer = new Consumer(
+		track.subscribe({
+			delay: { max: Milli(10_000) },
+			ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }, { start: { absolute: 10n } }],
+		}),
+		{ format: new LegacyFormat("data"), delay: { max: 10_000 as Milli } },
+	);
+	for (const sequence of [0n, 5n, 10n]) publish(track, sequence, Number(sequence) * 100);
 
-		const latest = track.createGroup(4n);
-		publishFrame(latest, 40, 4);
-		expect((await nextFrame(consumer))?.group).toBe(4n);
+	expect(await drain(consumer)).toEqual([
+		[0n, 0],
+		[10n, 10],
+	]);
+	consumer.close();
+});
 
-		// Group 1's 10ms frame is valid history, below group 4's 30ms floor.
-		publish(track, 1n, 10);
-		const backlog = await nextFrame(consumer);
-		expect(backlog?.group).toBe(1n);
-		expect(backlog?.frame.timestamp).toBe(Micro(10_000));
+// A relative floor already resolved here still rises to where the publisher says its feed starts,
+// which counts a newest group that held no frame yet, rather than wait under the budget for a group
+// below it that never comes. Mirrors Rust's `a_resolved_relative_floor_rises_to_the_publishers_start`.
+test("a resolved relative floor rises to the publisher's start", async () => {
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	for (const sequence of [0n, 1n, 2n, 3n, 4n]) publish(track, sequence, Number(sequence) * 100);
+	const subscriber = track.subscribe({ delay: { max: Milli(10_000) }, ranges: [{ start: { relative: 0n } }] });
+	expect(subscriber.floor()).toBe(4n);
+	// A session declares the publisher's start; a local track has none, so stand in for it.
+	subscriber.start = async () => 5n;
+	const consumer = new Consumer(subscriber, { format: new LegacyFormat("data"), delay: { max: 10_000 as Milli } });
 
-		// Delivering the backlog must not erase the floor for group 4 itself.
-		publishFrame(latest, 29, 5);
-		await expect(nextFrame(consumer)).rejects.toThrow("below the previous group start");
-	} finally {
-		consumer.close();
-		track.finish();
-		track.close();
-		installed.close();
-	}
+	publish(track, 5n, 500);
+	expect(await drain(consumer)).toEqual([[5n, 5]]);
+	consumer.close();
 });
