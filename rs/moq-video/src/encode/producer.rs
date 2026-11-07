@@ -689,6 +689,8 @@ async fn capture_loop<S: CaptureSource>(
 	let on_demand = options.on_demand;
 	// The published track's demand, followed onto the next track when a frame moves the rendition.
 	let mut demand = producer.demand();
+	// The last timestamp sent to an encoder, which a reopened camera's frames must exceed.
+	let mut last: Option<Timestamp> = None;
 
 	loop {
 		// On demand, idle until a viewer subscribes. The catalog rendition was published when
@@ -706,7 +708,7 @@ async fn capture_loop<S: CaptureSource>(
 		// Capture timestamps use a private monotonic timeline. Sample both clocks
 		// once at open so every queued frame maps to the shared broadcast epoch
 		// without mistaking dequeue time for acquisition time.
-		let capture_epoch =
+		let mut capture_epoch =
 			u64::try_from(clock.now().as_micros().saturating_sub(camera.now().as_micros())).unwrap_or(u64::MAX);
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
@@ -803,7 +805,19 @@ async fn capture_loop<S: CaptureSource>(
 				producer.report_skipped(skipped - reported);
 			}
 			reported = Some(skipped);
-			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+			let mut mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+			// A camera never rewinds its own stream, but a reopened one maps from the shared clock,
+			// which the previous stream can lead: a device re-anchor floors just past its last
+			// timestamp, ahead of arrival. Shift the new stream past it, keeping its spacing.
+			if let Some(last) = last
+				&& mapped <= last
+			{
+				let behind = u64::try_from(last.as_micros() - mapped.as_micros()).unwrap_or(u64::MAX);
+				capture_epoch = capture_epoch.saturating_add(behind).saturating_add(1);
+				mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+			}
+			last = Some(mapped);
+			frame.timestamp = mapped;
 			// A backend that cannot cut leaves every group to its cadence.
 			let wanted = cuts.then(|| producer.wanted()).flatten();
 			if forced.due(wanted) {
@@ -1454,8 +1468,8 @@ mod tests {
 					let second = read(&mut track).await;
 					assert_eq!(second - first, 40_000, "the device's spacing survives");
 
-					// A period later, the device restarts its clock without the stream ending.
-					fixture.time.advance(Duration::from_millis(40)).unwrap();
+					// The device restarts its clock without the stream ending, re-anchoring just past
+					// the last timestamp and so ahead of the clock.
 					camera.push_native(surface(), us(0));
 					let restarted = read(&mut track).await;
 					assert!(restarted >= second, "{restarted}us rewound behind {second}us");
