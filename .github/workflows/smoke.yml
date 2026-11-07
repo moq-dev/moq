@@ -210,6 +210,8 @@ jobs:
         # a cache miss on a commit that was uploaded: the daily Cache refresh
         # keeps that commit's closure inside the bucket's 30-day expiry
         # (infra/nix/lifecycle.json), so check its runs before calling it a cache bug.
+        # The repository root, where `just gh` resolves.
+        working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
