@@ -24602,7 +24602,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject() != 9727) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_route() != 2402) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_route() != 53132) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_serve() != 10832) {
@@ -24641,7 +24641,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqroute_cancel() != 41411) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqroute_instance_id() != 18728) {
+  if (uniffi_moq_ffi_checksum_method_moqroute_instance_id() != 6842) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqroute_requested() != 49558) {
