@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -101,17 +100,6 @@ async function readAll(group: GroupConsumer | undefined): Promise<string[]> {
 
 /** Let every pending microtask run, so a parked read gets a turn without a timer. */
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
-
-/** Whether `promise` settles within `ms`. */
-async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
-	return await timeout(Nano.fromMilli(Milli(ms)), promise).then(
-		() => true,
-		(error: unknown) => {
-			if (error instanceof Elapsed) return false;
-			throw error;
-		},
-	);
-}
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
 	test("the source start waits for SUBSCRIBE_START where it resolves the start", async () => {
@@ -261,6 +249,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a subscription ends without waiting once every group is accounted for", async () => {
+		using clock = manual();
 		// A max delay far past the test's patience: only the accounting may end it.
 		const { subscriber, reader, respond, fin } = await subscribed(version, Milli(60_000));
 		await respond({ start: new SubscribeStart([0n]) });
@@ -272,7 +261,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await fin();
 
 		expect((await reader.recvGroup())?.sequence).toBe(1n);
-		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+		expect(await settlesWithin(reader.recvGroup(), clock, Milli(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 	});
 
@@ -305,18 +294,19 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a subscription that served nothing ends at SUBSCRIBE_FINISH", async () => {
+		using clock = manual();
 		const { reader, respond, fin } = await subscribed(version, Milli(60_000));
 		await respond({ finish: new SubscribeFinish(0n) });
 		await fin();
 
-		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+		expect(await settlesWithin(reader.recvGroup(), clock, Milli(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 		expect(hooks.subscriberEnd(reader)).toEqual({ group: 0n, frame: 0 });
 	});
 
 	// lite-05 specified an inclusive end, so there the group costs only its own stream.
 	test(`a group at or past SUBSCRIBE_FINISH ${version === Version.DRAFT_05 ? "is dropped" : "aborts the track"}`, async () => {
-		hostTime();
+		using clock = manual();
 		const { subscriber, reader, respond } = await subscribed(version);
 		await respond({ start: new SubscribeStart([0n]) });
 		await respond({ finish: new SubscribeFinish(2n) });
@@ -325,7 +315,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const handled = groupStream(subscriber, 2n).handled;
 		if (version === Version.DRAFT_05) {
 			await handled;
-			expect(await settlesWithin(Promise.resolve(reader.closed), 50)).toBe(false);
+			expect(await settlesWithin(Promise.resolve(reader.closed), clock, Milli(50))).toBe(false);
 		} else {
 			// The violation escapes to the connection, which closes the session on it.
 			expect(
@@ -339,6 +329,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a floor below SUBSCRIBE_START owes nothing below it", async () => {
+		using clock = manual();
 		const { subscriber, reader, respond, fin } = await subscribed(version, Milli(60_000), {
 			start: { absolute: 1n },
 		});
@@ -350,12 +341,12 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await fin();
 
 		expect((await reader.recvGroup())?.sequence).toBe(3n);
-		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+		expect(await settlesWithin(reader.recvGroup(), clock, Milli(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 	});
 
 	test("a lowered floor owes the groups it newly asked for", async () => {
-		hostTime();
+		using clock = manual();
 		const maxDelay = Milli(60_000);
 		const { subscriber, respond, update, fin } = await subscribed(version, maxDelay, {
 			start: { absolute: 3n },
@@ -380,7 +371,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await respond({ finish: new SubscribeFinish(4n) });
 		await fin();
 		// Long enough for a subscription that owed nothing more to have ended.
-		await sleep(Nano.fromMilli(Milli(50)));
+		await clock.advance(Nano.fromMilli(Milli(50)));
 
 		// QUIC does not order streams, so the lowered groups land after the FIN.
 		for (const sequence of [1n, 2n]) {
@@ -404,7 +395,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so there an end
 	// below a received group only costs the early boundary.
 	test(`a SUBSCRIBE_FINISH below a group already received ${version === Version.DRAFT_05 ? "finishes clean" : "aborts the track"}`, async () => {
-		hostTime();
+		using clock = manual();
 		const { subscriber, reader, respond, fin } = await subscribed(version);
 		await respond({ start: new SubscribeStart([0n]) });
 		const group = groupStream(subscriber, 3n);
@@ -414,7 +405,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 		if (version === Version.DRAFT_05) {
 			await fin();
-			expect(await reader.closed).toBeNull();
+			// Groups 0 and 1 never arrive, so the subscription ends once their grace runs out.
+			expect(await clock.drive(Promise.resolve(reader.closed))).toBeNull();
 		} else {
 			expect(await reader.closed).toBeInstanceOf(ProtocolViolation);
 		}
@@ -422,6 +414,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 });
 
 test("lite-07 settles a skipped group with SUBSCRIBE_DROP", async () => {
+	using clock = manual();
 	const { subscriber, reader, respond, fin } = await subscribed(Version.DRAFT_07, Milli(60_000));
 	await respond({ start: new SubscribeStart([0n]) });
 	for (const sequence of [0n, 2n]) {
@@ -436,18 +429,19 @@ test("lite-07 settles a skipped group with SUBSCRIBE_DROP", async () => {
 
 	expect((await reader.recvGroup())?.sequence).toBe(0n);
 	expect((await reader.recvGroup())?.sequence).toBe(2n);
-	expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+	expect(await settlesWithin(reader.recvGroup(), clock, Milli(1000))).toBe(true);
 	expect(await reader.closed).toBeNull();
 });
 
 test("lite-07 settles a dropped range without grace", async () => {
+	using clock = manual();
 	const { reader, respond, fin } = await subscribed(Version.DRAFT_07, Milli(60_000));
 	await respond({ start: new SubscribeStart([0n]) });
 	await respond({ finish: new SubscribeFinish(3n) });
 	await respond({ drop: new SubscribeDrop({ start: 0n, end: 2n, error: 0 }) });
 	await fin();
 
-	expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+	expect(await settlesWithin(reader.recvGroup(), clock, Milli(1000))).toBe(true);
 	expect(await reader.closed).toBeNull();
 	expect(hooks.subscriberEnd(reader)).toEqual({ group: 3n, frame: 0 });
 });
