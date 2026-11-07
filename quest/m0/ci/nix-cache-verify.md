@@ -54,14 +54,23 @@ built main as of 16:28Z (2916531c19), whose Cache run was cancelled, rather
 than its own head. Any Smoke that starts while main is ahead of its last
 completed Runtime upload misses the same way.
 
+Confirmed 2026-11-06 (/quest-start, [moq-dev/moq#8114](https://github.com/moq-dev/moq/pull/8114)):
+the miss was a commit mismatch, not a cache bug. The relay resolved
+2916531c19 (Cache [42251988901](https://github.com/moq-dev/moq/actions/runs/42251988901)
+cancelled) and the CLI, built five minutes later, resolved 809994ba84, whose
+Cache run [42253517707](https://github.com/moq-dev/moq/actions/runs/42253517707)
+finished at 16:46Z, after the build. #8114 pins both Smoke builds to the newest
+`main` commit with a successful push Cache run, so the next scheduled run is a
+direct test: any `building '...moq-relay-...drv'` line in that step is a real miss.
+
 ## Waiting
 
 - moq-dev/moq: a scheduled Smoke run (08:00 UTC) whose `ubuntu-latest / nix`
-  job copies `moq-relay` and `moq` from `https://nix.moq.dev` instead of
-  compiling them. Check with `gh run list --workflow smoke.yml --event schedule`,
-  and confirm the main commit it built had a completed Cache
-  `Runtime (ubuntu-24.04)` upload; a miss on a commit without one says nothing
-  about the cache.
+  job, after #8114 merges, copies `moq-relay` and `moq` from
+  `https://nix.moq.dev` instead of compiling them. Check with
+  `gh run list --workflow smoke.yml --event schedule`: its "Build moq from the
+  flake" step names the pinned commit, which already had a successful Cache run,
+  so a `building` line for either binary is a cache bug.
 
 ## Related
 

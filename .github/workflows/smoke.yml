@@ -30,6 +30,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 defaults:
   run:
@@ -200,11 +201,20 @@ jobs:
 
       - name: Build moq from the flake (nix channel)
         if: matrix.channel == 'nix'
-        # --refresh so we always build the latest moq, never a cached eval; the
-        # moq flake is referenced ad-hoc here, so its version is never locked.
+        # Pin both builds to the newest main commit whose Cache run succeeded, so
+        # its runtime closures are already on nix.moq.dev: an unpinned ref can
+        # resolve a commit whose upload is still running (or was cancelled), and
+        # the relay and CLI could even resolve different commits.
+        # --print-build-logs is off, so a "building ...moq-relay" line here means
+        # a cache miss on a commit that was uploaded.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          relay=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq-relay')
-          cli=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq')
+          rev=$(gh run list --repo moq-dev/moq --workflow cache.yml --branch main --event push \
+            --status success --limit 1 --json headSha --jq '.[0].headSha')
+          echo "Building github:moq-dev/moq/$rev (newest main commit with a successful Cache run)"
+          relay=$(nix build --no-link --print-out-paths "github:moq-dev/moq/$rev#moq-relay")
+          cli=$(nix build --no-link --print-out-paths "github:moq-dev/moq/$rev#moq")
           {
             echo "RELAY_BIN=$relay/bin/moq-relay"
             echo "CLI_BIN=$cli/bin/moq"
