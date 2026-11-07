@@ -377,7 +377,9 @@ old one in `flake.nix`. Drop the old key once nothing signed with it matters:
 
 ## Bootstrapping the video corpus
 
-The nightly video-quality job reads its clips from two buckets.
+The nightly video-quality job, which [the harness
+quest](../quest/m3/video-quality/harness.md) adds, reads its clips from two
+buckets.
 `corpus-moq-dev` holds open clips and is public at `corpus.moq.dev`.
 `corpus-private-moq-dev` holds clips that cannot be redistributed. It has no
 custom domain and its r2.dev URL is off, since R2's public access exposes a
@@ -388,7 +390,7 @@ The private bucket's read key lives in the `corpus` Environment, deployable
 from `main` only. A dispatched run uses the workflow file from the branch it
 names, so a job-level `if` cannot keep the key from other branches.
 
-All of this runs once, by a maintainer. Step 1 is done.
+All of this runs once, by a maintainer. All four steps are done.
 
 1. **Create the buckets and the custom domain** under your `wrangler login`:
 
