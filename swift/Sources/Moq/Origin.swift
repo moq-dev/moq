@@ -68,8 +68,10 @@ public final class BroadcastRequest: Sendable {
 
     /// Answer with the path's own exact route, owning a new broadcast.
     ///
-    /// It serves a fresh instance unless `instance` names one. Created visible, it announces
-    /// now and answers the waiting requesters; created `hidden`, they wait until
+    /// Unless `instance` names one, it takes the instance its prefix route lends when it first
+    /// announces, so readers that resolved the path through the prefix route continue on it;
+    /// its end moves the prefix route to a fresh instance, so a restarted job is a new stream.
+    /// Created visible, it announces now and answers the waiting requesters; created `hidden`, they wait until
     /// `Route.announce()`, so the job can fill its catalog first.
     public func route(
         hidden: Bool = false, cost: UInt64 = 0, instance: String? = nil, epoch: UInt64 = 0

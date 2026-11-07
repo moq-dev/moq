@@ -162,8 +162,11 @@ func (r *BroadcastRequest) Path() (string, error) {
 
 // Route answers with the path's own exact route, owning a new broadcast.
 //
-// It serves a fresh instance unless options names one. Created visible, it
-// announces now and answers the waiting requesters; created hidden, they wait
+// Unless options names an instance, it takes the one its prefix route lends
+// when it first announces, so readers that resolved the path through the prefix
+// route continue on it; its end moves the prefix route to a fresh instance, so a
+// restarted job is a new stream. Created visible, it announces now and answers
+// the waiting requesters; created hidden, they wait
 // until [Route.Announce], so the job can fill its catalog first.
 func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
 	inner, err := r.inner.Route(options)
