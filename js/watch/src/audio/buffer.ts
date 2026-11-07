@@ -359,7 +359,10 @@ export class AudioBuffer {
 		this.#backpressure.dropped();
 	}
 
-	/** Insert audio samples at the given timestamp, transferring their buffers. Handles out-of-order writes. */
+	/**
+	 * Insert audio samples at the given timestamp, transferring their buffers. A write may land out of
+	 * order, but samples behind what live playback already staged, up to 30 ms past the playhead, are dropped.
+	 */
 	insert(timestamp: Micro, data: Float32Array[]): void {
 		const end = (timestamp + Micro.fromSecond(((data[0]?.length ?? 0) / this.rate) as Second)) as Micro;
 		this.#backpressure.inserted(timestamp, end);

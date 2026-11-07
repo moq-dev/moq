@@ -958,6 +958,32 @@ describe("time stretch", () => {
 		expect(buffer.length).toBe(frames(100));
 	});
 
+	// The ring past the read index holds less than the floor, but the staged window lifts the total a
+	// chunk above it, so the catch-up over the declared silence must count the staged output too.
+	it("catches up over a declared silence without rewinding behind a staged window", () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(120), { value: 0.25 });
+		while (Milli.fromMicro(buffer.timestamp) <= 90) read(buffer, QUANTUM, 1);
+		const staged = buffer.length;
+		expect(staged).toBeGreaterThan(frames(20));
+
+		// The next utterance lands 80 ms after the last, 10 ms long: 90 ms of ring behind the window.
+		buffer.next();
+		const playhead = buffer.timestamp;
+		write(buffer, 200 as Milli, frames(10), { value: 0.5 });
+		expect(buffer.timestamp).toBeGreaterThanOrEqual(playhead);
+		expect(buffer.length).toBe(frames(100));
+		expect(buffer.skips).toBe(0);
+
+		// The staged window plays out once, then the rest of the silence, then the utterance.
+		const [output] = read(buffer, frames(100), 1);
+		expect(output.length).toBe(frames(100));
+		const silence = output.findIndex((sample) => sample === 0);
+		expect(silence).toBe(staged);
+		expect(output.slice(silence).every((sample) => sample === 0 || sample === 0.5)).toBe(true);
+		expect(output.at(-1)).toBe(0.5);
+	});
+
 	// Past NetEq's fast threshold, four times the floor plus its band, or three quarters of the
 	// headroom above the floor, whichever is lower, stretching back would take seconds, so the ring
 	// re-anchors on its floor as moq-audio does. With 1000 ms of capacity, a 100 ms floor reaches the

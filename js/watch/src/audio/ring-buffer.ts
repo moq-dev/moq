@@ -188,7 +188,8 @@ export class AudioRingBuffer {
 			this.#anchored = true;
 		}
 
-		// Ignore samples that are too old (before the read index)
+		// Ignore samples behind the read index, which runs ahead of the playhead by the staged window:
+		// that part is already staged to play, so a late write there is dropped too.
 		let offset = this.#readIndex - start;
 		if (offset > samples) {
 			// All samples are too old, ignore them
@@ -231,7 +232,9 @@ export class AudioRingBuffer {
 		if (end - this.#readIndex > this.capacity) {
 			this.#skip(end - this.capacity);
 		} else if (band && pause && pause.start <= this.#readIndex && queued > latency + this.#chunk) {
-			this.#readIndex = Math.min(pause.end, end - latency);
+			// Skip only the silence past the queued floor, which the staged window counts toward, so the
+			// read index only moves forward and never re-stages PCM the window already holds.
+			this.#readIndex = Math.min(pause.end, this.#readIndex + queued - latency);
 			this.#prune();
 		} else if (
 			band &&

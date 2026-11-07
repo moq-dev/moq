@@ -82,8 +82,11 @@ export class Stretch {
 	/** Copy staged frames into `output` from `offset`, as many as fit, and return how many. */
 	read(output: Float32Array[], offset: number): number {
 		const frames = Math.min(output[0].length - offset, this.available);
+		// Index loops rather than `set(subarray(...))`, since each `subarray` allocates a view.
 		for (let channel = 0; channel < output.length; channel++) {
-			output[channel].set(this.#output[channel].subarray(this.#position, this.#position + frames), offset);
+			const src = this.#output[channel];
+			const dst = output[channel];
+			for (let i = 0; i < frames; i++) dst[offset + i] = src[this.#position + i];
 		}
 		this.#position += frames;
 		this.cooldown = Math.max(0, this.cooldown - frames);
@@ -103,7 +106,9 @@ export class Stretch {
 		this.#length = frames;
 		if (lag === 0) {
 			for (let channel = 0; channel < this.input.length; channel++) {
-				this.#output[channel].set(this.input[channel].subarray(0, frames));
+				const input = this.input[channel];
+				const output = this.#output[channel];
+				for (let i = 0; i < frames; i++) output[i] = input[i];
 			}
 			return;
 		}
@@ -119,14 +124,14 @@ export class Stretch {
 		for (let channel = 0; channel < this.input.length; channel++) {
 			const input = this.input[channel];
 			const output = this.#output[channel];
-			output.set(input.subarray(0, seam));
+			for (let i = 0; i < seam; i++) output[i] = input[i];
 			// NetEq's AudioVector::CrossFade, in floating point. The endpoints stay inside the seam
 			// rather than duplicating either neighbour.
 			for (let i = 0; i < lag; i++) {
 				const weight = (i + 1) / (lag + 1);
 				output[seam + i] = input[first + i] * (1 - weight) + input[second + i] * weight;
 			}
-			output.set(input.subarray(tail, frames), seam + lag);
+			for (let i = tail; i < frames; i++) output[seam + lag + i - tail] = input[i];
 		}
 		this.cooldown = this.#rest;
 	}
