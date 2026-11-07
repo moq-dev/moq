@@ -50,13 +50,8 @@ the bug on its own side and the bug is reported upstream (decided
 2026-10-30, maintainer): [austinleroy/webm-iterable#11](https://github.com/austinleroy/webm-iterable/issues/11),
 [therishidesai/h264-parser#9](https://github.com/therishidesai/h264-parser/issues/9),
 [ScuffleCloud/scuffle#653](https://github.com/ScuffleCloud/scuffle/issues/653)
-(scuffle-h265), and [ScuffleCloud/scuffle#654](https://github.com/ScuffleCloud/scuffle/issues/654)
-(scuffle-expgolomb). Posting anything further on those repos still needs the
+(scuffle-h265), [ScuffleCloud/scuffle#654](https://github.com/ScuffleCloud/scuffle/issues/654)
+(scuffle-expgolomb), and [ScuffleCloud/scuffle#655](https://github.com/ScuffleCloud/scuffle/issues/655)
+(scuffle-av1 `read_uvlc`, approved 2026-11-07 by the maintainer in /quest-unblock). Posting anything further on those repos still needs the
 maintainer's approval.
 
-## Waiting
-
-- Maintainer: approve reporting the scuffle-av1 `read_uvlc` overflow fixed by
-  [moq-dev/moq#8042](https://github.com/moq-dev/moq/pull/8042) to ScuffleCloud/scuffle,
-  which has no issue for it; an agent cannot post there without approval. Recommend
-  approving, matching the scuffle-h265 and scuffle-expgolomb reports above. Done once the issue is filed and linked above.

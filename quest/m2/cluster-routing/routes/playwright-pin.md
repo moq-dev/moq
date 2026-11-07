@@ -36,4 +36,10 @@ rebuild and pin browser binaries outside nixpkgs.
 ## Waiting
 
 - nixpkgs: `playwright-driver` at 1.65.0 or later on `nixpkgs-unstable`;
-  check `pkgs/development/web/playwright/driver.nix` there.
+  check `pkgs/development/web/playwright/driver.nix` there. nixpkgs'
+  `update.sh` takes the driver version from playwright-python's latest
+  release, and `python3Packages.playwright` is coupled to the driver, so the
+  bump waits on a playwright-python v1.65 release (none as of 2026-11-07).
+  Once one exists, an agent opens the nixpkgs bump PR with that script from
+  the kixelated/nixpkgs fork (approved by the maintainer 2026-11-07 in
+  /quest-unblock).
