@@ -1,7 +1,9 @@
 language js
 
 // Bun.sleep arms a host timer behind @moq/clock's back, so the test preload can't see it.
+// The declarator form catches `const { sleep } = Bun`, renamed or not.
 or {
 	`Bun.sleep`,
-	`Bun.sleepSync`
+	`Bun.sleepSync`,
+	JsVariableDeclarator() as $d where { $d <: r"(?s)\{[^}]*\bsleep(?:Sync)?\b[^}]*\}\s*=\s*Bun" }
 } as $sleep where { register_diagnostic(span=$sleep, message="Use sleep() from @moq/clock") }

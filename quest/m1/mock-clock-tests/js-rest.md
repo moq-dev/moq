@@ -19,8 +19,9 @@ As of 2026-11-06:
   scan.
 - `js/clock/src/index.test.ts` (2), `js/json/src/snapshot/snapshot.test.ts`,
   `js/signals/src/index.test.ts`, and
-  `test/audio-quality/clients/js/src/capture.test.ts` (2), whose
-  `performance.now` stub should become a `Manual` clock.
+  `test/audio-quality/clients/js/src/capture.test.ts` (2). Its
+  `performance.now` stub becomes a `Manual` clock once `capture.ts` reads
+  time through `@moq/clock`'s `now()`.
 
 `git grep -n "hostTime();$" -- js test demo ':!js/net'` lists the guard's
 remaining opt-outs here.

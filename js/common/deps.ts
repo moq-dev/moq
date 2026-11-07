@@ -155,7 +155,7 @@ function main() {
 	for (const { workspace, pkg } of workspaces) {
 		const dir = join(root, workspace);
 
-		const tested = Object.values(pkg.scripts ?? {}).some((script) => script.includes("bun test"));
+		const tested = Object.values(pkg.scripts ?? {}).some((script) => /\bbun\s+test\b/.test(script));
 		const clock = pkg.name === "@moq/clock" || reachable(pkg, manifests).has("@moq/clock");
 		if (tested && clock && !preloaded(dir)) {
 			problems.add(
