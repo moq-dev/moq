@@ -146,3 +146,80 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 		assert_eq!(group.sequence, 0, "{version}");
 	}
 }
+
+/// Abandoning setup returns credit without ending earlier publishers or their route.
+#[kio::test]
+async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
+	// lite-07 needs 4: session-long AUTH and ANNOUNCE plus TRACK held until SUBSCRIBE answers.
+	for (version, credit) in [("moq-lite-07-wip", 4)] {
+		let version: Version = version.parse().unwrap();
+		let publisher = origin(1);
+		let viewer = origin(2);
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
+		let first = broadcast.broadcast().create_track("first", info.clone()).unwrap();
+		let second = broadcast.broadcast().create_track("second", info.clone()).unwrap();
+		let third = broadcast.broadcast().create_track("third", info).unwrap();
+		broadcast.announce().unwrap();
+
+		let mut options = MockConnectOptions::new(version);
+		options.transport.max_concurrent_bi_streams = Some(credit);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(viewer.clone());
+		let _pair = connect_mock(options).await;
+
+		let remote = viewer
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let prefs =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+		let held = remote.track("first").unwrap().subscribe(prefs.clone()).await.unwrap();
+		let mut waiting = Box::pin(remote.track("second").unwrap().subscribe(prefs.clone()));
+		assert!(
+			kio::clock::timeout(Duration::from_secs(5), waiting.as_mut())
+				.await
+				.is_err(),
+			"{version}: the second subscription had no credit to wait for"
+		);
+
+		drop(waiting);
+		drop(held);
+		let waiting = remote.track("third").unwrap().subscribe(prefs);
+		let mut subscriber = kio::clock::timeout(Duration::from_secs(60), waiting)
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the waiting subscription never got credit"))
+			.unwrap_or_else(|err| panic!("{version}: the waiting subscription failed: {err}"));
+		let mut group = third.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		group.finish().unwrap();
+		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: no group after credit returned"))
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.sequence, 0, "{version}");
+		drop(group);
+		drop(subscriber);
+		let mut resumed = remote.track("second").unwrap().subscribe(None).await.unwrap();
+		let mut group = second.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, b"still live".as_slice()).unwrap();
+		group.finish().unwrap();
+		let group = kio::clock::timeout(Duration::from_secs(5), resumed.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.sequence, 0);
+		// Keep the first publisher alive through the resumed wire request too.
+		drop(first);
+	}
+}

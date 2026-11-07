@@ -3,7 +3,6 @@
 // rule, and inside the copy, once it evicted what it received.
 import { expect, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
@@ -89,10 +88,11 @@ async function take(reader: Subscriber, count: number): Promise<Map<bigint, stri
 	return got;
 }
 
-// Whether `reader` hands out no group for a while.
-async function idle(reader: Subscriber): Promise<boolean> {
+// Whether `reader` hands out no group once every pending task has settled: `clock` fires the
+// deadline only after draining them.
+async function idle(clock: Manual, reader: Subscriber): Promise<boolean> {
 	try {
-		(await timeout(Nano.fromMilli(Milli(200)), reader.recvGroup()))?.close();
+		(await clock.drive(timeout(Nano.fromMilli(Milli(200)), reader.recvGroup())))?.close();
 		return false;
 	} catch (err) {
 		if (err instanceof Elapsed) return true;
@@ -155,7 +155,8 @@ test("copy fill: lite-06 asks nothing below a start resolved from the budget, an
 });
 
 test("copy fill: lite-05 fills below the live edge only what a reader's ranges name", async () => {
-	hostTime();
+	const clock = new Manual();
+	const installed = clock.install();
 	const peer = await peers(Lite.ALPN_05);
 	try {
 		populate(peer.track);
@@ -166,7 +167,7 @@ test("copy fill: lite-05 fills below the live edge only what a reader's ranges n
 		// Reaching back to the oldest group names no floor, so the live edge bounds it.
 		const oldest = peer.remote.track("video").subscribe(WIDE);
 		expect((await oldest.recvGroup())?.sequence).toBe(4n);
-		expect(await idle(oldest)).toBe(true);
+		expect(await idle(clock, oldest)).toBe(true);
 		expect(peer.fetches()).toBe(before);
 
 		// A floor the ranges name is filled.
@@ -178,6 +179,7 @@ test("copy fill: lite-05 fills below the live edge only what a reader's ranges n
 		named.close();
 	} finally {
 		peer.close();
+		installed.close();
 	}
 });
 
@@ -298,6 +300,8 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 });
 
 test("copy fill: a filled group nobody holds any more stops downloading", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -340,11 +344,13 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		history.close();
 		write(track.createGroup(2n), 2n, "live");
 		expect((await live.nextGroup())?.sequence).toBe(2n);
-		await timeout(
-			Nano.fromMilli(Milli(2000)),
-			(async () => {
-				while (hooks.holdsGroup(reader, 0n)) await sleep(Nano.fromMilli(Milli(10)));
-			})(),
+		await clock.drive(
+			timeout(
+				Nano.fromMilli(Milli(2000)),
+				(async () => {
+					while (hooks.holdsGroup(reader, 0n)) await sleep(Nano.fromMilli(Milli(10)));
+				})(),
+			),
 		);
 		source.abort(new Error("done"));
 		live.close();
@@ -356,5 +362,6 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		client.abort();
 		server.abort();
 		origin.close();
+		installed.close();
 	}
 });
