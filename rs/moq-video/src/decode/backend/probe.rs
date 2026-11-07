@@ -60,6 +60,10 @@ static LOG: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 #[cfg(not(apple))]
 static FLUSH_ENTERED: AtomicBool = AtomicBool::new(false);
 
+/// Wakes [`flush_entered`] once [`FLUSH_ENTERED`] is set.
+#[cfg(not(apple))]
+static FLUSH_ENTERING: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 #[cfg(not(apple))]
 static FLUSH_RELEASED: AtomicBool = AtomicBool::new(false);
 
@@ -89,10 +93,17 @@ pub(crate) fn prepare_blocking_flush() {
 	FLUSH_RELEASED.store(false, Ordering::SeqCst);
 }
 
-/// Whether the blocking flush has started on the codec thread.
+/// Resolves once the blocking flush has started on the codec thread.
 #[cfg(not(apple))]
-pub(crate) fn flush_entered() -> bool {
-	FLUSH_ENTERED.load(Ordering::SeqCst)
+pub(crate) async fn flush_entered() {
+	loop {
+		let mut entering = std::pin::pin!(FLUSH_ENTERING.notified());
+		entering.as_mut().enable();
+		if FLUSH_ENTERED.load(Ordering::SeqCst) {
+			return;
+		}
+		entering.await;
+	}
 }
 
 /// Let the blocking flush finish so the codec thread can be joined.
@@ -294,6 +305,7 @@ impl Backend for BlockingFlush {
 
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 		FLUSH_ENTERED.store(true, Ordering::SeqCst);
+		FLUSH_ENTERING.notify_waiters();
 		while !FLUSH_RELEASED.load(Ordering::SeqCst) {
 			std::thread::yield_now();
 		}
