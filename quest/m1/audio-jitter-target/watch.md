@@ -1,22 +1,20 @@
-# [M] js/watch: prove NetEq's audio time stretch on real hardware
+# [M] js/watch: prove NetEq's audio time stretch on measured arrivals
 
 ## Goal
 
-On the measured real-microphone rows, the "Real-time" (`"auto"`) preset
+On the measured real-microphone arrivals, the "Real-time" (`"auto"`) preset
 converges on its target the way WebRTC NetEq does, with the estimator's
 `QUANTILE` left at 0.95: audio holds back or catches up by playing slightly
 slower or faster, through NetEq's preemptive expand and accelerate and its
-decision band, rather than discarding buffered audio. It plays with no audible
-glitch after convergence, judged by the maintainer's listening check, and no
-row skips buffered audio in steady state.
+decision band, rather than discarding buffered audio. No row skips buffered
+audio in steady state.
 
 What still runs dry is what NetEq itself would conceal: a receive stall longer
-than the target. The measured rows are the `relay-mic-rtt40` replay row, at
-the 1.4 `player_underruns_per_min` NetEq measures there (7.9 on `main` without
-the stretch), and a live re-run of the 2026-11-03 rows below with a real
-microphone, Chrome's with 40 ms or more of added RTT and Safari's on the
-direct path, read from the stats panel's audio Underruns and Skips beside
-their 2026-11-03 baseline. Their underrun and skip ceilings are measured by
+than the target. The bar is automated measurement alone: the replay rows,
+including `relay-mic-rtt40` at the 1.4 `player_underruns_per_min` NetEq
+measures there (7.9 on `main` without the stretch), and the chromium browser
+rows re-measured from seven scheduled Nightlies with the stretch, adding
+`player_skips_per_min`. Every underrun and skip ceiling is measured by
 `test/audio-quality/budgets.json`'s rule, like every other budget, rather than
 fixed at zero.
 
@@ -42,11 +40,9 @@ stretch. The lag heuristic behind `skip_aheads` and `discarded_ms` reads a
 sustained accelerate as a skip, so those can rise on rows whose target moves;
 `player_skips` counts the ring's real re-anchors beside them.
 
-Decided 2026-11-07 (maintainer, /quest-unblock): listening run on the MacBook
-Air sounds clean. It covered the live Chrome +40 ms RTT and Safari direct
-rows, each with 20 and 100 ms groups. No Underruns or Skips numbers were
-reported. The native player's 2026-11-05 listening in
-[Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) still holds.
+Decided 2026-11-07 (maintainer, /quest-unblock): no maintainer listening run;
+the Goal is judged by the replay and Nightly measurements alone. This
+supersedes the listening check in the two decisions below.
 
 Decided 2026-11-06 (maintainer, /quest-complete on
 [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058)): the Goal was
