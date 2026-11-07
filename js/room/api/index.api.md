@@ -72,7 +72,7 @@ export type Kind = typeof KIND[keyof typeof KIND];
 export class Local {
 	constructor(props: LocalProps);
 	readonly audio: {
-		readonly camera: {
+		readonly microphone: {
 			readonly root: Getter<AudioNode | undefined>;
 			readonly volume: Signal<number>;
 		};
