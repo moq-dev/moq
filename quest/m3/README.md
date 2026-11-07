@@ -61,6 +61,7 @@ federation) land.
 - [Plan: watch worker](/quest/m3/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m3/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
+- [H.265 encodes respect the encoder's minimum size](/quest/m3/h265-min-width.md) - an H.265 encode below AMD's 384-wide minimum is skipped by `Kind::Auto`, and the error names it
 - [VA-API encodes an external Vulkan image](/quest/m3/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
 - [C++ FFI reuse](/quest/m3/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
 - [OBS native codecs](/quest/m3/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
@@ -89,7 +90,7 @@ federation) land.
 - [A moq-transport group head fills its hole in place](/quest/m3/ietf-fill-refill.md) - fills and joining FETCHes write into the tail's group, deleting the `Fill` handoff
 - [One port](/quest/m3/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [WebSocket caps](/quest/m3/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
-- [moq-rtc pacing](/quest/m3/rtc-pacing.md) - a capped WHEP viewer never receives more than its cap plus burst, NACK resends included
+- [moq-webrtc pacing](/quest/m3/rtc-pacing.md) - a capped WHEP viewer never receives more than its cap plus burst, NACK resends included
 - [SRT rate handle](/quest/m3/srt-rate-handle.md) - a per-connection cap paces SRT pulls, retransmits included, and closes SRT publishers past it
 - [One port on the io_uring workers](/quest/m3/uring-demux.md) - `moq-uring`'s workers host the UDP demux, so a ring relay keeps WebRTC media and SRT on its QUIC port
 - [Synced data playback](/quest/m3/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
@@ -136,13 +137,14 @@ federation) land.
 - [Lint override and deprecation audit](/quest/m3/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
 - [Clean ALSA playback onset](/quest/m3/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Read a bus source's own samples](/quest/m3/audio-strip-tap.md) - a tap reads one source's samples before its delay with their bus-clock positions, for the studio's clap sync
+- [Pan a bus source](/quest/m3/audio-strip-pan.md) - a strip's constant-power pan places its source between left and right in every mix, for the studio's Audio panel
 - [Interop audit](/quest/m3/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [moq-hls exposes each rendition's bound source](/quest/m3/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The memory bench finishes at 1 MiB frames](/quest/m3/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
 - [Audio's Latest start reaches back](/quest/m3/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
 - [moq-lite tails count drops](/quest/m3/lite-tail-drop-count.md) - SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
 - [Audio track changes are gapless](/quest/m3/gapless-audio-switch.md) - no silence beyond a frame on audio format or rendition changes, enforced by media QA
-- [We own our WebRTC stack](/quest/m3/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
+- [We own our WebRTC stack](/quest/m3/webrtc/README.md) - one moq-webrtc crate holds the gateway, its ICE module, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [PUBLISH_DONE says why](/quest/m3/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
 - [A revoked announce resets instead of FINning](/quest/m3/announce-revoke-reset.md) - a PUBLISH_NAMESPACE revoked after its OK resets with INTERNAL_ERROR, per draft-22 §6.4.2.3
 - [moq repair refuses a live recording](/quest/m3/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair mp4` off a file still being written

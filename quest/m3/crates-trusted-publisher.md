@@ -10,7 +10,7 @@ Delete this quest once every crate has one.
 ## Waiting
 
 - Maintainer: after [the cut](/quest/m3/release/cut.md) publishes kio-macros, moq-bench,
-  moq-c, moq-congestion, moq-crypto, moq-ice, moq-quic, and moq-rtsp by token, add
+  moq-c, moq-congestion, moq-crypto, moq-quic, moq-rtsp, and moq-webrtc by token, add
   their trusted publishers the same way. Settings pages need a crates.io
   login, so check with a `release-rs.yml` run that publishes through OIDC.
 
@@ -36,14 +36,14 @@ such crate here.
 
 Decided 2026-11-02 (maintainer, /quest-unblock): the maintainer is adding the publishers now,
 each with repository `moq-dev/moq`, workflow `release-rs.yml`, and environment
-`publish` (the job runs in it). Already on crates.io (31): hang, kio, libmoq,
+`publish` (the job runs in it). Already on crates.io (30): hang, kio, libmoq,
 moq-archive, moq-audio, moq-auth, moq-boy, moq-cli, moq-ffi, moq-gst, moq-hls,
 moq-json, moq-loc, moq-msf, moq-mux, moq-native, moq-net, moq-nvenc,
-moq-pattern, moq-relay, moq-rtc, moq-rtmp, moq-sock, moq-srt, moq-stats,
+moq-pattern, moq-relay, moq-rtmp, moq-sock, moq-srt, moq-stats,
 moq-tokio, moq-transcode, moq-uring, moq-v4l, moq-video, qmux. Not yet
 published (7), so their first publish needs the token and they get a trusted
-publisher after it: kio-macros, moq-c, moq-congestion, moq-crypto, moq-ice,
-moq-quic, moq-rtsp. moq-crypto became publishable in
+publisher after it: kio-macros, moq-c, moq-congestion, moq-crypto,
+moq-quic, moq-rtsp, moq-webrtc. moq-crypto became publishable in
 [moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733). `CARGO_REGISTRY_TOKEN` is revoked only after all of them have one.
 Settings pages need a crates.io login, so the check is a `release-rs.yml` run
 publishing through OIDC.

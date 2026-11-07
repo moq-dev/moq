@@ -17,16 +17,22 @@ class CoverageTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        for script in ("sh/js/coverage.py", "sh/rs/coverage.sh", "sh/rs/nextest.sh", "sh/local.sh"):
+        for script in ("sh/js/install.py", "sh/js/coverage.py", "sh/rs/coverage.sh", "sh/rs/nextest.sh", "sh/local.sh"):
             target = self.root / script
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / script, target)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         stub = """#!/usr/bin/env python3
 import json, os
 from pathlib import Path
 import sys
+if sys.argv[1:] == ["--version"]:
+    print("fixture")
+    sys.exit(0)
+if "install" in sys.argv:
+    Path("node_modules").mkdir(exist_ok=True)
 with open(os.environ["COVERAGE_CALLS"], "a") as log:
     log.write(json.dumps([Path(sys.argv[0]).name, str(Path.cwd()), *sys.argv[1:]]) + "\\n")
 if os.environ.get("COVERAGE_FAIL") and ("nextest" in sys.argv or "test" in sys.argv):

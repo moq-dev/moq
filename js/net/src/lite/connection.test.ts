@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
@@ -101,6 +102,7 @@ async function sendGoaway(server: WebTransport, uri: string): Promise<void> {
 }
 
 test("a lite GOAWAY keeps the session open, and a second one closes it", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN_04);
 	const connection = new Connection({
 		url: new URL("https://relay.example/"),

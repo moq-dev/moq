@@ -98,7 +98,7 @@ A bystander's e-stop, a command the gate refused, or an accepted `respawn`
 ```json
 { "accepted": { "steering": .., "throttle": .., "brake": .., "gear": ".." },
   "autonomy": "autonomous|manual", "estopped": true,
-  "driver": "driver-ab12cd", "estop_by": "driver-ef34gh",
+  "driver": "driver-3eb1bd43", "estop_by": "driver-9c0a7f12",
   "map": "Town10HD_Opt",
   "pose": { "x": 12.35, "y": -78.9, "yaw": 180.1, "speed": 9.88 },
   "measured": { "steering": .., "throttle": .., "brake": .., "gear": ".." },
@@ -149,13 +149,15 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
   e-stop latched, that has not moved 2 m in 5 minutes of a running world
   returns to a free spawn point under autonomy, its e-stop cleared.
 
-The lease is cooperative. Anonymous drivers share one grant, publish
-`carla/.client/*`, so anyone can announce a client endpoint under the id that
-`status` names as the holder. That never continues the holder's lease, since a
-lease is one session, but it can disrupt it: the relay may route the truck's
-accept of the holder's next session to the impostor. The grant covers only
-client endpoints, so no driver can announce a truck's server endpoint, whatever
-its name. So the lease stops two honest drivers fighting over a
+The lease is cooperative. Anonymous drivers share one grant to publish
+`carla/.client/*`, so an endpoint id is all it takes to announce in a driver's
+place and win the relay's route to its next session. Each driver's id is
+therefore 128 random bits, and `status` names the holder and the e-stop's
+sender by a handle instead: `driver-` and 8 hex digits of the SHA-256 of the
+session's secret id, which the driver derives the same way to recognize its
+own lease. The grant covers only client endpoints, so no driver can announce a
+truck's server endpoint, whatever its name. Anyone may still claim a free truck
+or press its e-stop, so the lease stops two honest drivers fighting over a
 truck, not a deliberate disruption. Anything beyond a simulator needs
 per-driver tokens scoped to the driver's own endpoint.
 

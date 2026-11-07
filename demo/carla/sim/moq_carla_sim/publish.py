@@ -233,7 +233,7 @@ def _parse_timestamps(raw: Any) -> tuple[TimestampEntry, ...]:
     return tuple(entries.values())
 
 
-def parse_command(driver_id: str, message: Any, session: str | None = None) -> Command | None:
+def parse_command(driver_id: str, message: Any, session: str) -> Command | None:
     """Turn one control message from a driver's session into a Command.
 
     Returns None for anything unrecognized. A driver is an untrusted publisher,

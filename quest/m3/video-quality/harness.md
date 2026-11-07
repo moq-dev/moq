@@ -42,20 +42,21 @@ Decisions are recorded in the [epic](/quest/m3/video-quality/README.md).
   `just gh benchmark-report`, as the other nightly sources do.
 - Corpus manifest: synthetic clips generated at run time (cheap, always
   available), open clips such as Blender open movies (CC-BY) with each license
-  checked before listing, and private clips from the
-  [bucket](/quest/m3/video-quality/corpus-bucket.md). Cover screen content,
+  checked before listing, and private clips from `corpus-private-moq-dev`
+  (see `infra/README.md`, "Bootstrapping the video corpus"). Open clips go in
+  `corpus-moq-dev`, served at `corpus.moq.dev`. Cover screen content,
   talking head, high motion, and fades. Keep clips short: nightly CPU time
   is a budget.
+- The job reads private clips with `CORPUS_R2_*` from the `corpus`
+  Environment, which admits only `main`. Its first dispatched run must read
+  `probe.txt` from `corpus-private-moq-dev` through that Environment, and a
+  dispatch on an unprotected branch must not get the secret.
 - A run selects clips by name. A selected clip that cannot be fetched, or
   whose sha256 differs from the manifest, fails the run.
 - OpenH264 is deterministic, so its floors can sit close to the measured
   value. Set no fixed acceptance number up front; measure, then record.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Corpus bucket](/quest/m3/video-quality/corpus-bucket.md) - where open and private clips live
 
 ## Related
 
