@@ -1019,20 +1019,18 @@ mod tests {
 		.unwrap();
 
 		let mut read = Box::pin(consumer.next_frame());
-		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(1);
-		loop {
+		let entered = async {
 			tokio::select! {
 				_result = &mut read => panic!("flush returned before cancellation"),
-				_ = kio::clock::sleep(std::time::Duration::from_millis(1)) => {
-					if probe::flush_entered() {
-						break;
-					}
-					if kio::clock::Instant::now() >= deadline {
-						probe::release_flush();
-						panic!("flush never reached the codec thread");
-					}
-				}
+				_ = probe::flush_entered() => {}
 			}
+		};
+		if kio::clock::timeout(std::time::Duration::from_secs(1), entered)
+			.await
+			.is_err()
+		{
+			probe::release_flush();
+			panic!("flush never reached the codec thread");
 		}
 		drop(read);
 		probe::release_flush();
@@ -1198,19 +1196,30 @@ mod tests {
 	/// Let the decoders run with nothing new to show until the max-delay one
 	/// has caught up, or fail after ten seconds of trying.
 	async fn catch_up(consumer: &mut Consumer) {
-		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(10);
-		while consumer.selector.source() != Lane::Max {
-			assert!(
-				kio::clock::Instant::now() < deadline,
-				"the max-delay decoder never caught up"
-			);
-			if let Ok(frame) = kio::clock::timeout(std::time::Duration::from_millis(20), consumer.next_frame()).await {
-				panic!(
-					"nothing new was published, yet read returned {:?}",
-					frame.map(|f| f.map(|f| f.timestamp))
-				);
+		let mut sleep = None;
+		let caught_up = std::future::poll_fn(|cx| {
+			loop {
+				match consumer.poll_read(cx, &mut sleep) {
+					// Breaks carry no picture, so `next_frame` would skip them too.
+					Poll::Ready(Ok(Some(Read::Gap { .. } | Read::End { .. }))) => {}
+					Poll::Ready(read) => panic!(
+						"nothing new was published, yet read returned {:?}",
+						read.map(|read| read.map(|read| match read {
+							Read::Frame(frame) => frame.timestamp,
+							_ => unreachable!("matched above"),
+						}))
+					),
+					Poll::Pending => break,
+				}
 			}
-		}
+			match consumer.selector.source() {
+				Lane::Max => Poll::Ready(()),
+				Lane::Min => Poll::Pending,
+			}
+		});
+		kio::clock::timeout(std::time::Duration::from_secs(10), caught_up)
+			.await
+			.expect("the max-delay decoder never caught up");
 	}
 
 	/// A cold join shows the min-delay decoder's pictures at the live edge first,
