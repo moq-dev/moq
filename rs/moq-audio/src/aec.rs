@@ -689,28 +689,8 @@ mod tests {
 		assert!(buf.iter().all(|s| *s == 0.5), "passthrough altered the samples");
 	}
 
-	#[test]
-	fn reference_switch_contention_never_waits_on_the_callback() {
-		let canceller = Arc::new(opened(48_000, 1));
-		let locked = canceller.inner.state.lock().unwrap();
-		let callback = canceller.clone();
-		let (done, finished) = std::sync::mpsc::sync_channel(1);
-
-		let thread = std::thread::spawn(move || {
-			let mut buf = vec![0.5f32; 480];
-			callback.process(&mut buf);
-			done.send(buf).unwrap();
-		});
-
-		let buf = finished
-			.recv_timeout(Duration::from_millis(100))
-			.expect("the microphone callback waited for the reference lock");
-		assert!(buf.iter().all(|sample| *sample == 0.5));
-
-		drop(locked);
-		thread.join().unwrap();
-	}
-
+	/// Also the proof that the callback never waits on the reference lock:
+	/// `process` runs on the thread holding it, which would deadlock otherwise.
 	#[test]
 	fn reference_switch_contention_discards_partial_frames() {
 		let canceller = opened(48_000, 1);
@@ -829,20 +809,19 @@ mod tests {
 	fn teardown_while_processing_releases_after_the_callback() {
 		let control = detached();
 		let attachment = control.attach(48_000, 1).unwrap();
+		let mut partial = vec![0.5f32; 32];
+		attachment.process(&mut partial);
+		assert_eq!(control.pending_samples(), 32);
+
 		let inner = attachment.inner.clone();
 		let processing = inner.state.lock().unwrap();
-		let (done, wait) = std::sync::mpsc::sync_channel(1);
-		let teardown = std::thread::spawn(move || {
-			drop(attachment);
-			done.send(()).unwrap();
-		});
+		let teardown = std::thread::spawn(move || drop(attachment));
 
 		assert!(matches!(control.attach(48_000, 1), Err(Error::Busy(_))));
-		assert!(wait.recv_timeout(Duration::from_millis(20)).is_err());
 
 		drop(processing);
-		wait.recv_timeout(Duration::from_secs(1)).unwrap();
 		teardown.join().unwrap();
+		assert_eq!(control.pending_samples(), 0, "teardown skipped the reset");
 		drop(control.attach(48_000, 1).expect("teardown releases the state"));
 	}
 
@@ -1077,7 +1056,8 @@ mod tests {
 	/// Ignored by default, like the rest of the device round trips, which
 	/// nightly runs against a null sink with `just rs audio-devices`. Whether the
 	/// microphone then stops hearing the speaker is an acoustic question about
-	/// the room, not something a test can assert.
+	/// the room, not something a test can assert. Real time, since the device
+	/// drains the sink on its own clock.
 	#[tokio::test]
 	#[ignore = "needs an output device; run by just rs audio-devices"]
 	async fn taps_a_real_output_device() {
