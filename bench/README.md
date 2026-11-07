@@ -224,10 +224,9 @@ come from Linux interfaces. The default worker count is the number of logical
 CPUs the run may use.
 
 `moq-uring`'s `worker_turns` target also measures QUIC request/reply on one
-worker, sweeping 1 or 16 connections against 64 B or 256 KiB replies with
-1 or 4 task passes. It prints rounds and counter deltas for turns, passes,
-enters and received datagrams, so counts per round can be compared alongside
-timing. The existing nightly `rust-shared` group runs these cases.
+worker, sweeping 1 or 16 connections against 64 B or 256 KiB replies. It
+prints rounds and counter deltas for turns, passes, enters and received
+datagrams, so counts per round can be compared alongside timing. The existing nightly `rust-shared` group runs these cases.
 
 ```bash
 nix develop --command cargo bench --locked -p moq-uring --bench worker_turns -- worker_request_reply

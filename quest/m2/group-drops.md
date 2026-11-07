@@ -53,7 +53,7 @@ every run; the 256-stream cell sometimes does.
   ordered reader and resume keep using it internally. Its first consumer is
   the receive-windows benchmark. Mirror it in `@moq/net` and the bindings only
   for a named consumer (for example a player or container reader that skips
-  gaps), per the [API audit](/quest/m1/api-audit/README.md) rule that new
+  gaps), per the [API audit](https://github.com/moq-dev/moq/blob/1a1940c45a87f2470a322c089de428f54c34e522/quest/m1/api-audit/README.md) rule that new
   surface needs one; name it in the PR or leave the mirror out.
 - **Order with the [drop set](/quest/m1/drop-set.md).** The drop set
   replaces `poll_drop`'s `Delivered` argument and the skipped record, and

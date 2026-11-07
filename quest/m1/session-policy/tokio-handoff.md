@@ -29,7 +29,7 @@ moq-net rather than a copy of the policy.
   at that point.
 - Its consumer is the WebRTC transport: moq-tokio's `webrtc` module here, and
   moq-webrtc once the rename moves it, so the
-  [API audit](/quest/m1/api-audit/README.md) rule (a new public surface needs a
+  [API audit](https://github.com/moq-dev/moq/blob/1a1940c45a87f2470a322c089de428f54c34e522/quest/m1/api-audit/README.md) rule (a new public surface needs a
   consumer) is met.
 
 Public API: moq-tokio adds `accept_with` and `connect_with` and drops internals
