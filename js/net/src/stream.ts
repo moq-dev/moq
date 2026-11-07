@@ -813,9 +813,10 @@ export class Writer implements OpenStream {
 	async write(v: Uint8Array) {
 		// Yield before handing the bytes over, so a write still pending is one the transport has
 		// not taken: a caller racing it against the peer's end never abandons bytes already sent.
+		// Count it synchronously, so acknowledged() never treats a pending write as acknowledged.
+		this.#written += v.byteLength;
 		const pause = writeBudget.poll();
 		if (pause !== undefined) await pause;
-		this.#written += v.byteLength;
 		// Mirrors Reader.#fill: every write funnels through here, so a STOP_SENDING from the
 		// peer surfaces as a typed code rather than the transport's own error shape.
 		await this.#writer.write(v).catch((err: unknown) => {
