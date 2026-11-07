@@ -891,6 +891,19 @@ describe("time stretch", () => {
 		expect(buffer.underruns).toBe(0);
 	});
 
+	it("holds a ring inside the band its arrivals' lateness widens, accelerating only past it", async () => {
+		const buffer = live(100);
+		buffer.setLateness(100 as Milli);
+		write(buffer, 0 as Milli, frames(300), { value: 0.5 });
+		await converge(buffer, frames(300), 8);
+
+		// Above the 100 ms floor but inside 100 ms of lateness plus the 20 ms band, give or take the
+		// 20 ms frame just written, where without the lateness it accelerates down to the floor.
+		expect(buffer.length).toBeGreaterThanOrEqual(frames(200) - frames(20));
+		expect(buffer.length).toBeLessThan(frames(220) + frames(20));
+		expect(buffer.underruns).toBe(0);
+	});
+
 	it("fast-accelerates a ring four times past the band, even straight after a stretch", async () => {
 		const buffer = live(100);
 		write(buffer, 0 as Milli, frames(600), { value: 0.5 });
@@ -899,16 +912,19 @@ describe("time stretch", () => {
 		expect(buffer.length).toBeLessThan(frames(480));
 	});
 
-	// Past NetEq's fast threshold, four times the floor plus its 20 ms band, or three quarters of the
+	// Past NetEq's fast threshold, four times the floor plus its band, or three quarters of the
 	// headroom above the floor, whichever is lower, stretching back would take seconds, so the ring
 	// re-anchors on its floor as moq-audio does. With 1000 ms of capacity, a 100 ms floor reaches the
-	// first at 480 ms and a 300 ms floor the second at 825 ms.
-	for (const [floor, threshold] of [
-		[100, 480],
-		[300, 825],
+	// first at 480 ms, or 560 ms with 20 ms of lateness widening its band, and a 300 ms floor the
+	// second at 825 ms.
+	for (const [floor, lateness, threshold] of [
+		[100, 0, 480],
+		[100, 20, 560],
+		[300, 0, 825],
 	]) {
-		it(`re-anchors a ${floor} ms floor only once the ring holds ${threshold} ms`, () => {
+		it(`re-anchors a ${floor} ms floor ${lateness} ms late only once the ring holds ${threshold} ms`, () => {
 			const buffer = live(floor);
+			buffer.setLateness(lateness as Milli);
 			write(buffer, 0 as Milli, frames(floor), { value: 0.5 });
 			read(buffer, QUANTUM, 1);
 			const playhead = buffer.timestamp;

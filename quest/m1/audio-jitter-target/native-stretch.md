@@ -32,11 +32,10 @@ The port retains WebRTC's BSD notice and patent grant, 4 kHz analysis,
 8192/16384 fast admission thresholds, passive-speech VAD, 20 ms decision
 band, 4x fast threshold, and 60 ms startup / 50 ms successful-stretch
 cooldowns.
-[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) departs from
-NetEq's preemptive expand in both players, recorded in the shared spec:
-below the target, expand ignores the cooldown and takes every whole period
-that fits at the lower threshold. It also drains a declared end's tail
-unstretched, as finishing does. Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) widens that band
+by NetEq's maximum delay in both players, from the decode consumer's new
+`lateness`, and drains a declared end's tail unstretched, as finishing does.
+Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
 device rates and uses floating-point peak refinement and fades. Those
 arithmetic adaptations are documented, not claimed bit-identical to int16
 WebRTC. No threshold was tuned.
@@ -101,9 +100,8 @@ The player's metrics confirm the stretch was active: media per render second
 was 1.0020 (fast, direct) and 1.0018 (fast, shaped) against a 1.002
 publisher, and 0.9981 and 0.9979 against 0.998; the shaped runs raised the
 target delay from 120 to 260 ms. Each direct run stalled once at startup,
-none in steady state. That predates the expand departure above, so
-[Watch](/quest/m1/audio-jitter-target/watch.md)'s listening check repeats these
-runs; the calibration and bench waits below remain.
+none in steady state. This settles the perceptual check; the calibration and
+bench waits below remain.
 
 ## Waiting
 

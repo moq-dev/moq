@@ -212,9 +212,9 @@ and clock checks have nothing to void. Decoding is taken as instant. A replay is
 its budgets are exactly what it measured.
 
 The ring time-stretches live playback as the page's does, but the replay's audio is a constant, so
-every seam admits at the shortest pitch period, 2.5 ms. Accelerate therefore removes less per stretch
-than it would from speech, and expand, which repeats every whole period that fits, adds the most it
-can. `skip_aheads` also reads a sustained accelerate as a skip; `player_skips` counts only the ring's
+every seam admits at the shortest pitch period, 2.5 ms. Accelerate and expand therefore move less
+per stretch than they would from speech; only fast accelerate, which takes every whole period that
+fits, moves its most. `skip_aheads` also reads a sustained accelerate as a skip; `player_skips` counts only the ring's
 own re-anchors.
 
 ```bash

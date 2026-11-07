@@ -202,16 +202,17 @@ describe("ring replay", () => {
 		expect(replay(build(await settled(t)), t, 2000)).toMatchObject({ underruns: 0, skips: 0 });
 	});
 
-	it("covers a target that ignores the arrival spread by stretching", () => {
+	it("still underruns when the target ignores the arrival spread, but drops nothing", () => {
 		// 46ms is what the round-trip formula produced on the connection this was measured on: it
 		// describes the network and says nothing about a sender that flushes five frames at once.
-		// Every flush's trough falls below it, which ran the ring dry on each flush until time stretch
-		// expanded through the troughs. A flush still swings the ring by its whole 100 ms, so this
-		// stretches as much as the measured target does, accelerating off each peak and expanding
-		// through each trough.
+		// Every flush's trough falls below it. Preemptive expand lengthens the ring by one pitch period
+		// a window at most, as NetEq's does, which cannot cover a 100 ms trough, so the ring runs dry
+		// on most flushes; accelerate brings each peak back down rather than skipping it.
 		const t = trace(600, 5, 5);
 		const result = replay(build(46), t, 2000);
-		expect(result).toMatchObject({ underruns: 0, skips: 0 });
+		const flushes = (t.length - 2000 / CHUNK_MS) / 5;
+		expect(result.underruns).toBeGreaterThan(flushes / 2);
+		expect(result.skips).toBe(0);
 		expect(result.stretched).toBeGreaterThan(0);
 	});
 });

@@ -20,6 +20,7 @@ export class Consumer {
 	constructor(track: Net.Track.Subscriber, props: ConsumerProps);
 	readonly buffered: Signals.Getter<BufferedRanges>;
 	close(): void;
+	readonly lateness: Signals.Getter<Milli>;
 	next(): Promise<Read | undefined>;
 	readonly spread: Signals.Getter<Milli>;
 }

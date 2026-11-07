@@ -1,7 +1,7 @@
 import type { Micro, Milli } from "@moq/clock";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = Init | Data | Latency | Reset | Truncate | Playing | End;
+export type Message = Init | Data | Latency | Lateness | Reset | Truncate | Playing | End;
 
 /** Create the worklet's ring. */
 export interface Init {
@@ -51,6 +51,12 @@ export interface Latency {
 	// When set, also hold playback, keeping what is buffered, until the next latency message without
 	// it. Echoed like a reset's epoch, so state from before the park cannot report the ring playing.
 	park?: number;
+}
+
+/** How late the slowest recent arrival was against the fastest, which widens the stretch's band. */
+export interface Lateness {
+	type: "lateness";
+	lateness: Milli;
 }
 
 /** State update from the worklet back to the main thread. */

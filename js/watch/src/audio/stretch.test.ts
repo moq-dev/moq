@@ -11,6 +11,8 @@ interface Vector {
 	input: number[];
 	buffered: number;
 	target: number;
+	/** The arrivals' lateness in frames, zero when the vector leaves it out. */
+	lateness?: number;
 	cooldown: number;
 	decision: Decision;
 	lag: number;
@@ -35,9 +37,10 @@ for (const vector of vectors) {
 			stretch.input[channel].set(samples);
 		});
 		stretch.cooldown = vector.cooldown;
-		expect(stretch.decide(vector.buffered, vector.target)).toBe(vector.decision);
+		const lateness = vector.lateness ?? 0;
+		expect(stretch.decide(vector.buffered, vector.target, lateness)).toBe(vector.decision);
 
-		stretch.process(stretch.window, vector.buffered, vector.target, true);
+		stretch.process(stretch.window, vector.buffered, vector.target, lateness, true);
 		expect(Math.abs(stretch.available - stretch.window)).toBe(vector.lag);
 
 		const output = Array.from({ length: vector.channels }, () => new Float32Array(stretch.available));
@@ -59,16 +62,16 @@ it("passes a short, disabled, or exhausted window through unchanged", () => {
 		stretch.cooldown = 0;
 
 		// A ring well short of its target expands a full window of received PCM.
-		stretch.process(stretch.window, stretch.window, rate, true);
+		stretch.process(stretch.window, stretch.window, rate, 0, true);
 		expect(stretch.available).toBeGreaterThan(stretch.window);
 		const output = [new Float32Array(rate), new Float32Array(rate)];
 		expect(stretch.read(output, 0)).toBe(stretch.length);
 		expect(stretch.read(output, 0)).toBe(0);
 
 		stretch.cooldown = 0;
-		stretch.process(stretch.window, stretch.window, rate, false);
+		stretch.process(stretch.window, stretch.window, rate, 0, false);
 		expect(stretch.available).toBe(stretch.window);
-		stretch.process(stretch.window >> 1, stretch.window, rate, true);
+		stretch.process(stretch.window >> 1, stretch.window, rate, 0, true);
 		expect(stretch.available).toBe(stretch.window >> 1);
 	}
 });

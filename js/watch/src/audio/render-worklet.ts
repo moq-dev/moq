@@ -36,6 +36,8 @@ class Render extends AudioWorkletProcessor {
 					this.#ring?.park();
 					this.#epoch = msg.park;
 				}
+			} else if (msg.type === "lateness") {
+				this.#ring?.setLateness(msg.lateness);
 			} else if (msg.type === "end") {
 				this.#ring?.end(msg.timestamp);
 			} else if (msg.type === "truncate") {

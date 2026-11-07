@@ -38,7 +38,7 @@ export class Stretch {
 	readonly #rate: number;
 	// 15 ms: the seam's position, and the longest pitch period.
 	readonly #middle: number;
-	// 20 ms: the band above the target that holds before accelerating.
+	// 20 ms: NetEq's adjustment granularity, which the band above the target adds to the lateness.
 	readonly #band: number;
 	// 50 ms: NetEq's five 10 ms ticks between stretches.
 	readonly #rest: number;
@@ -92,12 +92,13 @@ export class Stretch {
 
 	/**
 	 * Stage the first `frames` of {@link input}, stretched toward `target` given `buffered` frames
-	 * queued including them. Only a full window of received PCM can stretch, so a short block, or one
-	 * that is not `enabled`, passes unchanged and a finite input never becomes concealment.
+	 * queued including them and the arrivals' `lateness`. Only a full window of received PCM can
+	 * stretch, so a short block, or one that is not `enabled`, passes unchanged and a finite input
+	 * never becomes concealment.
 	 */
-	process(frames: number, buffered: number, target: number, enabled: boolean): void {
-		const decision = enabled && frames === this.window ? this.decide(buffered, target) : "Hold";
-		const lag = decision === "Hold" ? 0 : this.#pitch(decision !== "Accelerate");
+	process(frames: number, buffered: number, target: number, lateness: number, enabled: boolean): void {
+		const decision = enabled && frames === this.window ? this.decide(buffered, target, lateness) : "Hold";
+		const lag = decision === "Hold" ? 0 : this.#pitch(decision === "Fast");
 		this.#position = 0;
 		this.#length = frames;
 		if (lag === 0) {
@@ -107,7 +108,7 @@ export class Stretch {
 			return;
 		}
 
-		// Expand repeats whole periods after the seam; accelerate removes one, or fast as many as fit.
+		// Expand repeats one period after the seam; accelerate removes one, or fast as many as fit.
 		const middle = this.#middle;
 		const expand = decision === "Expand";
 		const seam = expand ? middle : middle - lag;
@@ -131,25 +132,20 @@ export class Stretch {
 	}
 
 	/**
-	 * What a full window with `buffered` frames queued decides against `target`, both in frames.
-	 *
-	 * Expand departs from NetEq's preemptive expand, which repeats one period per cooldown. A ring
-	 * below its target is short of the cushion its arrivals need, and running dry re-stalls it for a
-	 * whole target of silence, so it expands the way fast accelerate shrinks: every window, as many
-	 * whole periods as fit, at the lower admission threshold.
+	 * What a full window with `buffered` frames queued decides against `target`, all in frames. The
+	 * band above the target is NetEq's: its 20 ms granularity plus the arrivals' `lateness`.
 	 */
-	decide(buffered: number, target: number): Decision {
-		const high = target + this.#band;
+	decide(buffered: number, target: number, lateness: number): Decision {
+		const high = target + lateness + this.#band;
 		if (buffered >= high * 4) return "Fast";
-		if (buffered < target) return "Expand";
 		if (this.cooldown > 0) return "Hold";
 		if (buffered >= high) return "Accelerate";
+		if (buffered < target) return "Expand";
 		return "Hold";
 	}
 
 	// Search the first channel at 4 kHz, then admit the full-rate seam, returning its length or zero.
-	// Fast mode, for fast accelerate and every expand, admits a weaker match and takes every whole
-	// period that fits before the middle.
+	// Fast mode admits a weaker match and takes every whole period that fits before the middle.
 	#pitch(fast: boolean): number {
 		const middle = this.#middle;
 		if (middle === 0) return 0;

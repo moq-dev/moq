@@ -84,6 +84,9 @@ struct Shared {
 	/// on opposite sides of a window transfer.
 	consumed: AtomicUsize,
 	target: AtomicUsize,
+	/// How late the slowest recent arrival was against the fastest, in output
+	/// frames, which widens the stretch's band above the target.
+	lateness: AtomicUsize,
 	finished: AtomicBool,
 	stretch: AtomicBool,
 	/// Declared ends, counted. See [`Producer::end`].
@@ -315,6 +318,13 @@ impl Producer {
 		};
 		self.shared.finished.store(true, Ordering::Relaxed);
 		flushed
+	}
+
+	/// Widen the stretch's band above the target by how late the slowest recent
+	/// arrival was against the fastest, as NetEq does.
+	pub(crate) fn set_lateness(&mut self, lateness: Duration) {
+		let frames = (lateness.as_secs_f64() * self.rate as f64).floor() as usize;
+		self.shared.lateness.store(frames, Ordering::Relaxed);
 	}
 
 	/// Change the target without reallocating the queue. Leave one stretch window
@@ -650,7 +660,9 @@ impl Consumer {
 			let read = self.ring.pop_slice(&mut stretch.input[..frames * channels]);
 			debug_assert_eq!(read, frames * channels);
 			self.position = self.position.wrapping_add(frames);
-			stretch.process(frames, buffered, self.shared.target.load(Ordering::Relaxed), enabled);
+			let target = self.shared.target.load(Ordering::Relaxed);
+			let lateness = self.shared.lateness.load(Ordering::Relaxed);
+			stretch.process(frames, buffered, target, lateness, enabled);
 			// The writer still counts the input while it is being analysed.
 			// Publish only the resulting duration change, then the rendered
 			// frames. Moving PCM into staging never makes it disappear.
@@ -942,6 +954,43 @@ mod tests {
 					}
 				}
 			}
+		}
+	}
+
+	/// NetEq's band above the target widens by the arrivals' lateness, so a queue
+	/// inside it holds where it would otherwise accelerate down to the target.
+	#[test]
+	fn lateness_widens_the_band_above_the_target() {
+		for (lateness, low, high) in [(0, 80.0, 140.0), (100, 180.0, 240.0)] {
+			let (mut prod, mut cons) = channel(
+				2,
+				48_000,
+				48_000,
+				Config {
+					latency: Duration::from_millis(100),
+					capacity: Duration::from_secs(3),
+					pad: false,
+					trim: false,
+				},
+			);
+			cons.stretch(48_000);
+			cons.start();
+			prod.set_lateness(Duration::from_millis(lateness));
+			// 200 ms on top of the 100 ms the queue primes with.
+			assert_eq!(prod.push(&vec![0.25; 9600 * 2]), Push::Ok);
+			let mut out = [0.0; 480 * 2];
+			// Fed at the real-time rate, so only the stretch moves the depth.
+			for tick in 0..800 {
+				if tick % 2 == 0 {
+					assert_eq!(prod.push(&[0.25; 960 * 2]), Push::Ok);
+				}
+				assert_eq!(cons.read(&mut out), Read::Ok, "{lateness} ms late, tick {tick}");
+			}
+			let buffered = prod.buffered().as_secs_f64() * 1000.0;
+			assert!(
+				(low..high).contains(&buffered),
+				"{lateness} ms late: {buffered} ms buffered"
+			);
 		}
 	}
 

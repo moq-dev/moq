@@ -52,6 +52,9 @@ export class AudioRingBuffer {
 	readonly #buffered: boolean;
 	// Un-stall threshold in samples (how much to buffer before playback starts).
 	#latencySamples: number;
+	// How late the slowest recent arrival was against the fastest, in samples, which widens the band
+	// the stretch holds above the floor.
+	#latenessSamples = 0;
 	// Whether the read/write indices have been anchored to the first inserted sample.
 	#anchored = false;
 
@@ -153,6 +156,11 @@ export class AudioRingBuffer {
 		if (this.length >= latencySamples) this.#stalled = false;
 	}
 
+	/** Widen the band above the floor by how late the slowest recent arrival was, as NetEq does. */
+	setLateness(lateness: Milli): void {
+		this.#latenessSamples = Math.max(0, Math.floor(this.rate * Second.fromMilli(lateness)));
+	}
+
 	/**
 	 * Hold playback until the next floor update, keeping what is buffered.
 	 *
@@ -207,8 +215,8 @@ export class AudioRingBuffer {
 
 		// Bound the ring. While playing live, the read path stretches the ring back onto its floor, so
 		// dropping the oldest audio and landing on the floor is an emergency re-anchor, as moq-audio
-		// does: at NetEq's fast threshold, four times the floor plus its 20 ms band, or once the ring
-		// holds three quarters of its headroom above the floor, whichever comes first. While stalled the
+		// does: at NetEq's fast threshold, four times the floor plus its band, or once the ring holds
+		// three quarters of its headroom above the floor, whichever comes first. While stalled the
 		// reader is not consuming, so only the hard capacity applies; dropping would throw away the very
 		// audio the refill is accumulating. Buffered mode plays through everything, so it is
 		// capacity-bound too.
@@ -229,7 +237,7 @@ export class AudioRingBuffer {
 			band &&
 			queued >=
 				Math.min(
-					4 * (latency + Math.floor((this.rate * 20) / 1000)),
+					4 * (latency + this.#latenessSamples + Math.floor((this.rate * 20) / 1000)),
 					latency + Math.floor(((this.capacity - latency) * 3) / 4),
 				)
 		) {
@@ -429,7 +437,7 @@ export class AudioRingBuffer {
 			const dst = this.#stretch.input[channel];
 			for (let i = 0; i < frames; i++) dst[i] = src[(this.#readIndex + i) % src.length];
 		}
-		this.#stretch.process(frames, buffered, this.#latencySamples, enabled);
+		this.#stretch.process(frames, buffered, this.#latencySamples, this.#latenessSamples, enabled);
 		this.#readIndex += frames;
 		this.#window = frames;
 		this.#windowQuiet = quiet;
