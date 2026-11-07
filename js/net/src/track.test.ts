@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { race } from "@moq/signals";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -2450,6 +2451,7 @@ test("end is group 0 for an empty track and undefined after an abort", async () 
 });
 
 test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
+	hostTime();
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe().ordered();
 

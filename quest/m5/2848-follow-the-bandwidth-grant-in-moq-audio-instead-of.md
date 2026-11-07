@@ -7,7 +7,8 @@ share of the connection's estimate: a grant below the configured bitrate
 lowers the encoder at once, room coming back raises it gradually, and a link
 too small for the configured audio rate sheds audio bits instead of stalling.
 The reservation's ceiling stays the configured bitrate. A grant below the
-codec floor disables the rendition (catalog `enabled: false`) until it recovers. PCM keeps reserve-only
+codec floor holds the encoder at the floor, and the transport sheds what the
+link cannot carry; the rendition stays enabled. PCM keeps reserve-only
 usage: it claims its fixed rate and never reads the grant.
 
 The rate policy has one home shared by every sender, so audio and video back
@@ -41,15 +42,10 @@ grant; `Options::bandwidth` documents that
   `opus::bitrate_floor(codec_rate, frame_size).max(500)` to
   `300_000 * channels` (`backend/libopus.rs`, `rs/moq-audio/src/opus.rs`). `Policy::min` defaults to a tenth of
   the ceiling (`rs/moq-mux/src/rate.rs`); for Opus it is the codec floor. A
-  grant below it disables the rendition until bandwidth recovers (decided
-  2026-10-04 with the enabled flag), through the rung disable and re-enable
-  rule in `moq_mux::rate::Control` rather than a second one; the encoder never errors. This
-  assumed viewers with no enabled alternative hold it, so its demand stays while its grant is
-  below the floor, but [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) retired that
-  hold: players deselect a disabled rendition again. Settle how demand survives the disable
-  before building this. Recovery evaluates a hypothetical share against the current estimate,
-  as the ladder controller does. The reservation's ceiling is
-  the configured bitrate; only the policy target moves.
+  grant below it holds the encoder at the floor; the encoder never errors and
+  the rendition is never disabled, so `moq_mux::rate::Control`'s rung disable
+  rule does not apply to audio. The reservation's ceiling is the configured
+  bitrate; only the policy target moves.
 - PCM: `pcm::bitrate(sample_rate, channels)` is `pub(crate)`
   (`rs/moq-audio/src/pcm.rs`), `Settings::bitrate` is refused for it
   and so is `set_bitrate` (`encoder.rs`, `backend/pcm.rs`). A PCM
@@ -62,9 +58,25 @@ grant; `Options::bandwidth` documents that
 
 Decided 2026-10-08: moved to m2, since that tail is the only gain.
 
+Decided 2026-11-07 (maintainer, /quest-plan of the follow-ups from the
+/quest-complete run, after [moq-dev/moq#8123](https://github.com/moq-dev/moq/pull/8123)):
+a grant below the Opus floor holds the encoder at the floor and never
+disables the rendition. This replaces the 2026-10-04 disable-and-re-enable
+rule. Recovery alone would work: an unwatched reservation still reads the slice
+it would get back (`an_idle_track_claims_nothing` in
+`rs/moq-net/src/model/bandwidth.rs`). The cost is the catalog flip. Players
+now deselect a disabled rendition, so each flip makes every listener drop the
+track and subscribe again, losing what it was playing. That is the
+`enabled`-toggle cost [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942)
+removed from push-to-talk.
+
+- ✅ Hold the floor, no disable
+- Keep the disable; the Producer keeps reserving at the floor while disabled
+- Keep the disable; players keep a passive subscription to a grant-disabled rendition
+- Drop the follow-up
+
 Tests: retain the shared `Control` tests; an Opus Producer whose
 grant drops below its configured bitrate reports the lower `bitrate()` after
 one policy step, holds it on a `None` grant, and ramps back when the grant
-returns; a grant below the Opus floor disables the rendition, and recovered
-bandwidth enables it again even after the last viewer unsubscribed; a PCM Producer
-ignores every grant.
+returns; a grant below the Opus floor holds the encoder at the floor with the rendition
+still enabled; a PCM Producer ignores every grant.

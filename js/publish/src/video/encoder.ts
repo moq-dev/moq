@@ -22,7 +22,7 @@ import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
 
 // The keyframe interval when the config sets none.
-const DEFAULT_KEYFRAME_INTERVAL = Milli.fromSecond(2 as Second);
+const DEFAULT_JOIN = Milli.fromSecond(2 as Second);
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
 export interface Stats {
@@ -63,13 +63,14 @@ export interface Config {
 	maxScale?: number;
 
 	/**
-	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
-	 * group's deltas outweigh the track's refresh ratio. The broadcast declares the longest
-	 * interval as its catalog's `media.join.interval` when media is first listed, which then bounds
-	 * every GOP: a live change past it, including to infinite, is capped there until a new network
-	 * broadcast declares again. (default: 2000 milliseconds)
+	 * The time between join points: the longest a group runs before the next keyframe. A joining
+	 * subscriber forces one sooner once the group's deltas outweigh the track's refresh ratio. The
+	 * broadcast declares the longest as its catalog's `media.join.interval` when media is first
+	 * listed, which then bounds every group: a live change past it, including to infinite, is capped
+	 * there until a new network broadcast declares again. Anything but a positive duration refuses
+	 * the rendition. (default: 2000 milliseconds)
 	 */
-	keyframeInterval?: Milli;
+	join?: Milli;
 
 	/** If not provided, the encoder will use the best bitrate for the given width, height, and framerate. */
 	maxBitrate?: number;
@@ -354,10 +355,10 @@ export class Encoder {
 		effect.proxy(this.#slot, rendition.slot);
 		effect.cleanup(() => this.#slot.set(undefined));
 
-		// The longest GOP, which the broadcast declares as the catalog's join interval.
+		// The longest group, which the broadcast declares as the catalog's join interval. Keyframes
+		// follow timestamps rather than a frame count, so the requested join is the effective one.
 		effect.run((effect) => {
-			const interval = effect.get(this.config)?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
-			rendition.joinInterval.set(interval);
+			rendition.join.set(effect.get(this.config)?.join ?? DEFAULT_JOIN);
 		});
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
@@ -539,7 +540,10 @@ export class Encoder {
 
 							// The catalog's declared join interval is the longest GOP, fixed for the network
 							// broadcast, so a live raise past it stops there.
-							const requested = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							const requested = config?.join ?? DEFAULT_JOIN;
+							// Refused with the config (see #runDimensions), so an encoder already running stops
+							// rather than keyframing every frame.
+							if (!(requested > 0)) continue;
 							const declared = join.peek();
 							const interval = declared === undefined ? requested : Milli(Math.min(requested, declared));
 
@@ -766,6 +770,10 @@ export class Encoder {
 		if (!source) return;
 
 		const user = effect.get(this.config);
+		// Refused here, with the other knobs, so an invalid join settles the encoder without a config.
+		if (user?.join !== undefined && !(user.join > 0)) {
+			throw new Error(`join must be greater than 0 ms: ${user.join}`);
+		}
 
 		const sourcePixels = display.width * display.height;
 
@@ -903,7 +911,7 @@ export class Encoder {
 	/**
 	 * Request a keyframe, opening a new group at a frame no earlier than this call.
 	 *
-	 * For a resume, a recording cut, or a known tune-in moment; {@link Config.keyframeInterval} is the
+	 * For a resume, a recording cut, or a known tune-in moment; {@link Config.join} is the
 	 * longest a group runs, and a joining subscriber already opens one through the track's refresh
 	 * ratio. Requests between two frames coalesce into one keyframe on the next, with no spacing: a
 	 * caller in a loop pins the encoder at all-keyframe. A request while not encoding is served by the

@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
@@ -87,6 +88,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	});
 
 	test(`${versionName(version)} a request stream's messages are taken whole, around a GOAWAY`, async () => {
+		hostTime();
 		// An empty REQUEST_OK, then FIN.
 		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, 7, 0, 0), "fin");
 		const framed = await request.next();
@@ -94,7 +96,10 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(await framed?.reader.u16()).toBe(0);
 		expect(await request.next()).toBeUndefined();
 		// FIN cancels a draft-18 request; a draft-22 one lasts until reset.
-		const ended = await Promise.race([request.ended.then(() => true), Bun.sleep(10).then(() => false)]);
+		const ended = await Promise.race([
+			request.ended.then(() => true),
+			sleep(Nano.fromMilli(Milli(10))).then(() => false),
+		]);
 		expect(ended).toBe(version === Version.DRAFT_18);
 		expect(closes).toEqual([]);
 	});
