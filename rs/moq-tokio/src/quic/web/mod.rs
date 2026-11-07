@@ -45,9 +45,6 @@ mod settings;
 use connect::*;
 use settings::*;
 
-// Required to access proto::ConnectError wrapped in ClientError
-pub use connect::ConnectError;
-
 /// The HTTP/3 ALPN is required when negotiating a QUIC connection.
 pub const ALPN: &str = "h3";
 

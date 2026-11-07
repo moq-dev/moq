@@ -23,6 +23,11 @@ if ! command -v rsync >/dev/null 2>&1; then
     exit 0
 fi
 
+# Keep the host's git config out: a global `tag.gpgsign = true`, for one, turns
+# the wrapper's `git tag` into a signed annotated tag that opens an editor and
+# fails. The scratch repos set the identity they need themselves.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 

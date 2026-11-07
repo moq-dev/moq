@@ -9,9 +9,8 @@
 //! emits.
 
 use bytes::{Bytes, BytesMut};
-use scuffle_h265::NALUnitType;
 
-use super::Error;
+use super::{Error, NalType};
 use crate::Result;
 use crate::codec::annexb::{InBandCodec, NalIterator, ParameterSets, START_CODE};
 
@@ -163,33 +162,33 @@ impl Split {
 			return Err(Error::ForbiddenZeroBit.into());
 		}
 
-		let nal_type = nal_unit_type(*header);
+		let nal_type = NalType::of(*header);
 
 		match nal_type {
-			NALUnitType::VpsNut => {
+			NalType::VPS => {
 				self.maybe_start_frame(pts)?;
 				InBandCodec::H265.insert_parameter_set(&mut self.current.vps_seen, &nal)?;
 			}
-			NALUnitType::SpsNut => {
+			NalType::SPS => {
 				self.maybe_start_frame(pts)?;
 				InBandCodec::H265.insert_parameter_set(&mut self.current.sps_seen, &nal)?;
 			}
-			NALUnitType::PpsNut => {
+			NalType::PPS => {
 				self.maybe_start_frame(pts)?;
 				InBandCodec::H265.insert_parameter_set(&mut self.current.pps_seen, &nal)?;
 			}
 			// Access-unit openers: each precedes the next picture's VCL data, so any
 			// unit still open belongs to the previous picture and is emitted here.
-			NALUnitType::AudNut | NALUnitType::PrefixSeiNut => {
+			NalType::AUD | NalType::PREFIX_SEI => {
 				self.maybe_start_frame(pts)?;
 			}
 			// Suffix SEI trails the picture it describes, so it stays on the open
 			// access unit. Closing here would hand it to the next picture, and at end
 			// of stream would drop it: `flush` closes the unit it was moved out of,
 			// then finds no slice in the one holding it.
-			NALUnitType::SuffixSeiNut => {}
+			NalType::SUFFIX_SEI => {}
 			// Keyframe containing slices.
-			nal_type if super::is_irap(nal_type) => {
+			nal_type if nal_type.is_irap() => {
 				// first_slice_segment_in_pic_flag (bit 7 of the third byte, after the
 				// 2-byte header) marks the first slice of a new picture: close any access
 				// unit still open. A bare IDR arriving right after a delta picture in the
@@ -218,17 +217,8 @@ impl Split {
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
-			// All other slice types (both N and R variants).
-			NALUnitType::TrailN
-			| NALUnitType::TrailR
-			| NALUnitType::TsaN
-			| NALUnitType::TsaR
-			| NALUnitType::StsaN
-			| NALUnitType::StsaR
-			| NALUnitType::RadlN
-			| NALUnitType::RadlR
-			| NALUnitType::RaslN
-			| NALUnitType::RaslR => {
+			// All other slice types, TRAIL_N through RASL_R (both N and R variants).
+			NalType(0..=9) => {
 				// Check first_slice_segment_in_pic_flag (bit 7 of third byte, after 2-byte header).
 				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
@@ -301,11 +291,6 @@ impl Split {
 		let zero = self.zero.get_or_insert_with(kio::clock::Instant::now);
 		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
-}
-
-/// Extract the HEVC `nal_unit_type` from the first header byte (bits 1..=6).
-pub(super) fn nal_unit_type(header: u8) -> NALUnitType {
-	NALUnitType::from((header >> 1) & 0b111111)
 }
 
 #[cfg(test)]
@@ -452,10 +437,7 @@ mod tests {
 	/// True for the NAL types [`Hvc1`](crate::codec::h265::Hvc1) lifts out of the
 	/// sample and into the hvcC.
 	fn is_param_set(nal: &[u8]) -> bool {
-		matches!(
-			nal_unit_type(nal[0]),
-			NALUnitType::VpsNut | NALUnitType::SpsNut | NALUnitType::PpsNut
-		)
+		matches!(NalType::of(nal[0]), NalType::VPS | NalType::SPS | NalType::PPS)
 	}
 
 	/// One suffix-SEI case: name, the NALs fed to the splitter, and the access
