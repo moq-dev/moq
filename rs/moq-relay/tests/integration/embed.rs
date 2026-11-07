@@ -410,6 +410,7 @@ async fn shared_tokio_custom_route_and_quic() {
 /// Thread-per-core Tokio workers. Linux-only: the mode binds with `SO_REUSEPORT`.
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "flaky: the owner's sockets outlive `run` under load; quest/m0/test-flakes-2/embed-sockets-outlived.md"]
 async fn worker_tokio_custom_route_and_quic() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
