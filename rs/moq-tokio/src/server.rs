@@ -63,6 +63,19 @@ impl crate::listen::Config {
 		}
 	}
 
+	/// The moq-net server every listener accepts sessions with: its versions, the
+	/// extensions and implementation its SETUP offers, and its accept deadline.
+	pub fn server(&self) -> moq_net::Server {
+		let mut server = moq_net::Server::new()
+			.with_timeout(self.resolved_timeout())
+			.with_versions(self.versions())
+			.with_extensions(self.extensions);
+		if let Some(implementation) = &self.implementation {
+			server = server.with_implementation(implementation);
+		}
+		server
+	}
+
 	/// Whether a QUIC, TCP, or Unix bind is explicitly configured.
 	pub fn has_explicit_bind(&self) -> bool {
 		self.bind.is_some() || self.has_stream_listener()
@@ -278,7 +291,6 @@ impl Server {
 		config.validate()?;
 
 		let versions = config.versions();
-		let timeout = config.resolved_timeout();
 
 		// Build a QUIC backend when `--listen` is set, or when nothing else
 		// is (the default). A stream-only server (`--listen-unix-bind` with no
@@ -408,14 +420,7 @@ impl Server {
 		#[cfg(all(feature = "tcp", feature = "_certs"))]
 		let tls_stream = tls.map(|tls| TcpTls::new(&config, &versions, tls)).transpose()?;
 
-		let mut moq = moq_net::Server::new()
-			.with_timeout(timeout)
-			.with_versions(versions.clone())
-			.with_extensions(config.extensions)
-			.with_stats(stats);
-		if let Some(implementation) = &config.implementation {
-			moq = moq.with_implementation(implementation);
-		}
+		let mut moq = config.server().with_stats(stats);
 		if let Some(window) = window {
 			moq = moq.with_receive_window(window);
 		}
@@ -2202,10 +2207,11 @@ mod tests {
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
 		let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-		(
-			crate::spawn_qmux(qmux::ws::Upgraded::new(client, ALPN).connect().unwrap()),
-			crate::spawn_qmux(qmux::ws::Upgraded::new(server, ALPN).accept().unwrap()),
-		)
+		let (client, server) = tokio::join!(
+			qmux::ws::Upgraded::new(client, ALPN).connect(),
+			qmux::ws::Upgraded::new(server, ALPN).accept(),
+		);
+		(crate::spawn_qmux(client.unwrap()), crate::spawn_qmux(server.unwrap()))
 	}
 
 	/// HTTP connection facts and the admission guard survive the upgraded-socket handoff.
@@ -2232,6 +2238,7 @@ mod tests {
 		let client = crate::spawn_qmux(
 			qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
 				.connect()
+				.await
 				.unwrap(),
 		);
 		let mut setup = client.open_uni(SendOptions::default()).await.unwrap();
@@ -2271,7 +2278,7 @@ mod tests {
 				);
 				options.link.alpn = Some(protocol.into());
 				let accept = tokio::spawn(crate::websocket::accept(server, options));
-				let client = crate::spawn_qmux(qmux::ws::Upgraded::new(client, protocol).connect().unwrap());
+				let client = crate::spawn_qmux(qmux::ws::Upgraded::new(client, protocol).connect().await.unwrap());
 				// A single Path parameter, including the empty value: lite uses a
 				// counted parameter bag; IETF uses a u16-sized SETUP option block.
 				let mut bytes = if protocol.contains("moq-lite") {

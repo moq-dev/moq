@@ -477,11 +477,11 @@ async fn import_export_import_roundtrip() {
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
 	// subscribe to the finished, retained tracks.
-	let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-		.await
-		.unwrap()
-		.with_delay(RECORDING_MAX_AGE)
-		.with_replay();
+	let mut exporter =
+		crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
+			.await
+			.unwrap()
+			.with_replay();
 	let mut out = BytesMut::new();
 	while let Ok(res) = kio::clock::timeout(DRAIN, exporter.next()).await {
 		match res.expect("exporter error") {

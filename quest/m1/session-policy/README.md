@@ -1,4 +1,4 @@
-# Session policy lives in moq-net
+# [M] Session policy lives in moq-net
 
 ## Goal
 
@@ -7,9 +7,7 @@ SETUP, admission and the reply, closing with Timeout), the admission bound,
 widening the receive window on admit, and reconnect with backoff come from
 moq-net for tokio, io_uring and WebRTC sessions alike. moq-tokio keeps only
 sockets, DNS, TLS, accept loops, the fallback runtime and spawning. The epic is
-done when moq-relay's hand-copied policy in `uring.rs` is deleted in favour of
-the moq-net calls, and the WebRTC transport's session runs through the same
-policy.
+done when the WebRTC transport's session runs through the same policy.
 
 ## Plan
 
@@ -28,8 +26,8 @@ in moq-net, and decided:
 - ✅ **Reconnect is in scope**: the reconnect, backoff and GOAWAY candidate
   walk move too, as a poll machine. Not chosen: leaving them in moq-tokio
   until io_uring dials.
-- ✅ **Fold** the m2 relay-serve-path quest into
-  [the io_uring path](/quest/m1/session-policy/uring.md) and the
+- ✅ **Fold** the m2 relay-serve-path quest into the io_uring path, which landed
+  in [moq-dev/moq#8082](https://github.com/moq-dev/moq/pull/8082), and the
   poll-first server-machines quest into accept policy, which landed in
   [moq-dev/moq#8003](https://github.com/moq-dev/moq/pull/8003).
 - ✅ **Break moq-net's public API in m1**, before the cut, with MIGRATE notes.
@@ -47,13 +45,7 @@ Research (2026-11-04, `origin/main` at e6be13d5f8):
   `Goaway`, `run`). All of it runs on `kio::clock`, so none of it needs tokio.
   Only sockets, DNS, Happy Eyeballs, TLS, accept loops, `runtime::scope`,
   spawning and WebRTC's own UDP socket are tokio-specific.
-- moq-relay's io_uring path re-implements the server side by hand
-  (`rs/moq-relay/src/uring.rs`: its own `Deadline`, the admission bound,
-  the drain-bounded reply, and the `with_deadline` and `set_limits` calls
-  that wire them up). Eight commits
-  patched drift between the copies (58eaa6afd5, 8a13d58910, 6bd1306d6e,
-  1f56330d21, d17b84ee7f, 4576bb1231, c11192c7e6, 67df70012d). moq-uring
-  itself has no client side.
+- moq-uring has no client side.
 - Widening on admit needs a transport hook: moq-net's `transport::poll`
   session exposes only `receive_window()`, while tokio QUIC, qmux and uring's
   `web::Session` all have `set_limits`. Add a trait method whose default
@@ -62,7 +54,3 @@ Research (2026-11-04, `origin/main` at e6be13d5f8):
 - moq-net stays poll-first and spawns nothing
   ([libraries spawn nothing](https://github.com/moq-dev/moq/pull/6849)):
   policy returns drivers and machines, and the caller spawns and does the I/O.
-
-## Required
-
-- [The io_uring relay path uses moq-net's policy](/quest/m1/session-policy/uring.md) - deletes `uring.rs`'s copy

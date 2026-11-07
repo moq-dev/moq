@@ -321,7 +321,7 @@ impl Hops {
 	}
 
 	/// The entries' ids, in hop order, reusing the list's allocation.
-	#[cfg(any(test, feature = "fuzz"))]
+	#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 	pub(crate) fn into_ids(self) -> Vec<u64> {
 		self.0.into_iter().map(|hop| hop.id).collect()
 	}
@@ -3931,8 +3931,9 @@ impl TrackIo {
 	}
 
 	/// End the track: cleanly with `Ok`, or failed for good. Readers drain what the
-	/// serving copy still holds.
-	fn end(&mut self, result: Result<(), Error>) {
+	/// serving copy still holds. A request still waiting is refused with `retry`, the Retry
+	/// Interval an upstream refusal asked for, when there is one.
+	fn end(&mut self, result: Result<(), Error>, retry: Option<Duration>) {
 		self.ready.wake_by_ref();
 		self.query = None;
 		self.staged = None;
@@ -3942,7 +3943,11 @@ impl TrackIo {
 			// Ended before any route served it: nothing to read, nor to fetch.
 			Some(request) => {
 				self.routes.end(result.clone());
-				request.reject(result.err().unwrap_or(Error::NotFound));
+				let err = result.err().unwrap_or(Error::NotFound);
+				match retry {
+					Some(retry) => request.refuse(err, retry),
+					None => request.reject(err),
+				}
 			}
 			None => {
 				if let Some(accepted) = self.accepted.take() {
@@ -4757,6 +4762,7 @@ impl kio::Task for FrontServe {
 									source,
 									closing,
 									result: Err(err),
+									retry: None,
 								}),
 								None => {}
 							}
@@ -4804,13 +4810,17 @@ impl kio::Task for FrontServe {
 						}
 						Action::Finish { track: name } => {
 							if let Some(io) = self.tracks.get_mut(&name) {
-								io.end(Ok(()));
+								io.end(Ok(()), None);
 							}
 						}
-						Action::Abort { track: name, err } => {
+						Action::Abort {
+							track: name,
+							err,
+							retry,
+						} => {
 							if let Some(io) = self.tracks.get_mut(&name) {
 								tracing::debug!(name = %name, %err, "aborting track");
-								io.end(Err(err));
+								io.end(Err(err), retry);
 							}
 						}
 						Action::Arm { at } => self.deadline.set(at),
@@ -4864,7 +4874,7 @@ impl kio::Task for FrontServe {
 									// A track that already ended keeps its copy, which subscribes
 									// nothing any more, so a fetch still reads what it cached.
 									let ended = io.routes.ended();
-									io.end(Err(err.clone()));
+									io.end(Err(err.clone()), None);
 									// An unread track the front has not parked yet still holds
 									// its copy, which would keep its source subscribed.
 									if !wanted && !ended {
@@ -5004,6 +5014,7 @@ impl kio::Task for FrontServe {
 					let closing = self.sources.get(&source).is_some_and(|s| s.is_closing());
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					let Some(asked) = io.query.take() else { continue };
+					let retry = asked.query.retry();
 					// An aborted copy with history still splices, so its readers drain that
 					// history before the outcome, as local readers do. One that delivered
 					// nothing is a refusal, which leaves a draining incumbent serving.
@@ -5028,6 +5039,7 @@ impl kio::Task for FrontServe {
 						track: name,
 						source,
 						closing,
+						retry: result.as_ref().err().and(retry),
 						result,
 					}
 				}
@@ -8683,7 +8695,7 @@ mod tests {
 				wanted: true,
 			};
 			let mut subscriber = consumer.subscribe(None).now_or_never().unwrap().unwrap();
-			io.end(Ok(()));
+			io.end(Ok(()), None);
 
 			let mut group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
 			assert_eq!(group.sequence, 7);
