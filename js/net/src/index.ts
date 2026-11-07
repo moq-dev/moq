@@ -5,7 +5,7 @@
  * @module
  */
 
-/** Re-export of {@link https://jsr.io/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
+/** Re-export of {@link https://www.npmjs.com/package/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
 /** Broadcast announcement streams. */
 export * as Announce from "./announce.ts";

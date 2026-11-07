@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import {
 	type Computed,
@@ -145,7 +145,8 @@ export class Encoder {
 	/**
 	 * The minimum timestamp span before a frame opens the next group, closing the previous one. 0 puts every frame in its own group. A longer group costs the
 	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
-	 * negative or non-finite duration refuses the rendition.
+	 * group also ends early at the per-group frame or byte cap. A negative or non-finite duration
+	 * refuses the rendition.
 	 */
 	groupDuration: Signal<Time.Milli>;
 
@@ -186,9 +187,12 @@ export class Encoder {
 	// marker and are dropped.
 	#floor: Time.Micro | undefined;
 
-	// The group still accepting frames and the track it belongs to, with its first timestamp. Only
-	// held while groupDuration is positive; otherwise each frame's group closes once written.
-	#group: { track: Moq.Track.Producer; group: Moq.Group.Producer; start: Time.Micro } | undefined;
+	// The group still accepting frames and the track it belongs to, with its first timestamp and the
+	// frames and bytes written so far. Only held while groupDuration is positive; otherwise each
+	// frame's group closes once written.
+	#group:
+		| { track: Moq.Track.Producer; group: Moq.Group.Producer; start: Time.Micro; frames: number; bytes: number }
+		| undefined;
 
 	// The last valid group duration. #runConfig refuses the rendition on an invalid one, so a bad
 	// value never reaches the writer.
@@ -575,23 +579,32 @@ export class Encoder {
 
 	// Every audio frame decodes on its own, so any of them can open a group: the first one at or past
 	// the minimum after the open group's start. Frames forward as they are written rather than
-	// waiting for the group to fill. A dropped group leaves a gap for the codec's PLC.
+	// waiting for the group to fill. A dropped group leaves a gap for the codec's PLC. A group also
+	// ends before it would pass the net per-group caps, which abort it with GroupTooLarge.
 	#write(track: Moq.Track.Producer, data: EncodedAudioChunk, timestamp: Time.Micro): void {
 		const frame = {
 			payload: Container.Legacy.encodeFrame(data, timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		};
 
+		const bytes = frame.payload.byteLength;
 		const open = this.#group;
-		if (open?.track === track && timestamp - open.start < this.#groupDuration) {
+		if (
+			open?.track === track &&
+			timestamp - open.start < this.#groupDuration &&
+			open.frames < Moq.Group.MAX_GROUP_FRAMES &&
+			open.bytes + bytes <= Moq.Group.MAX_GROUP_CACHE_BYTES
+		) {
 			open.group.writeFrame(frame);
+			open.frames += 1;
+			open.bytes += bytes;
 			return;
 		}
 
 		this.#closeGroup();
 		const group = track.appendGroup();
 		group.writeFrame(frame);
-		if (this.#groupDuration > 0) this.#group = { track, group, start: timestamp };
+		if (this.#groupDuration > 0) this.#group = { track, group, start: timestamp, frames: 1, bytes };
 		else group.close();
 	}
 

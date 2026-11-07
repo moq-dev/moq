@@ -115,6 +115,6 @@ ARTIFACTS_DIR=artifacts \
 Or trigger the GitHub Actions workflow manually:
 
 ```bash
-gh workflow run apt-repo.yml -f tag=moq-relay-v1.2.3
-gh workflow run rpm-repo.yml -f tag=moq-relay-v1.2.3
+gh workflow run apt-repo.yml --ref release -f tag=moq-relay-v1.2.3
+gh workflow run rpm-repo.yml --ref release -f tag=moq-relay-v1.2.3
 ```
