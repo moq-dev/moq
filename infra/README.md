@@ -186,7 +186,7 @@ is done for `main`.
    just infra mbx create
    ```
 
-   `lifecycle.json` deletes every object 30 days after upload and aborts
+   `lifecycle.json` deletes every object 14 days after upload and aborts
    multipart uploads left incomplete for a day. mbx writes each compilation
    once and never refreshes it, so a result still in use expires too; the
    next writer that misses it compiles and uploads it again. After editing

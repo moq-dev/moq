@@ -58,10 +58,11 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
 - moq-ffi depends on the `rust2-uniffi*` crates directly, with no `[patch]` and
   no git dependency, so crates.io moq-ffi still builds.
 - **Generated code stays identical**: Kotlin package names, library symbol
-  prefixes, and every wrapper's API do not change. Diff the regenerated
-  bindings for every language against `main`'s, and run each wrapper's check
-  plus `just test interop --all`. The C names below are the only expected
-  differences.
+  prefixes, and every wrapper's API do not change, except Dart's
+  `MoqRoute.instanceId()` below. Diff the regenerated bindings for every
+  language against `main`'s, and run each wrapper's check plus
+  `just test interop --all`. The C names and that Dart rename below are the
+  only expected differences.
 - **C names** (maintainer, 2026-10-24 and 2026-10-25): rust2's C generator
   names in GLib style
   ([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)).
@@ -74,6 +75,17 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   [moq-dev/moq#6052](https://github.com/moq-dev/moq/pull/6052) worked around
   the old clash with `moq_audio_encoder_finish`; every wrapper's
   `EncoderFinish` alias follows, so wrapper APIs do not change.
+- **Dart `MoqRoute.instanceId()`** (maintainer, 2026-11-07, from
+  [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088)'s API audit):
+  the switch renames it to the exporter's name for moq-net's
+  `Route::instance()`, a Dart API change the PR's Impact section records for
+  the release cut's `MIGRATE.md`. Open: rust2's C++ generator declares a
+  private `uint64_t instance` field in every object class
+  (`uniffi/cpp/bindgen/src/bindings/cpp/templates/obj.hpp`), which is why
+  moq-ffi names the method `instance_id` (`rs/moq-ffi/src/origin.rs`). Before
+  the rename, either rename rust2's private field (recommended, since rust2
+  is ours and the clash would hit any `instance` method), or keep the
+  generated `instance_id` and add the Dart name as a wrapper alias.
 - rust2's C backend still refuses `Duration`, which moq-ffi's audio configs
   use (moq's current generator accepts it), so the fork must accept it before
   the switch can generate C.
@@ -126,8 +138,8 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
 
 Public API: moq-ffi's dependency names change, generated C type names become
 CamelCase, and the generated record `MoqAudioEncoderFinished` becomes
-`MoqAudioEncoderFinish` in every language; wrapper APIs do not change. Wire:
-none.
+`MoqAudioEncoderFinish` in every language; wrapper APIs do not change except
+Dart's `MoqRoute.instanceId()`, which takes the exporter's name. Wire: none.
 
 ## Required
 

@@ -19,7 +19,7 @@ Placements decided in the re-cut: read-backfill (a JS fix that matches Rust),
 buffered-ascending (lite-07 already carries the order field), webrtc-vendor
 (internal, though it requires the m2 rename), and the crates.io trusted
 publisher and OIDC quests (setup after the cut's first publishes) are
-additive. [video-vaapi](/quest/m1/video-vaapi.md) moved up from later work
+additive. video-vaapi moved up from later work
 because a downstream iGPU transcode trial needs it now.
 
 Held here by open claims: a quest's branch is its path, so a claimed quest
@@ -34,6 +34,8 @@ moves what remains of them once their claims merge.
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
+- [moq-relay's tests pass without default features](/quest/m1/relay-no-default-features.md) - QUIC-only tests are gated on `quic`, and the nightly matrix runs the no-default build
+- [moq-webrtc drops the ICE wire counters nothing reads](/quest/m1/ice-wire-counters.md) - the per-packet `Wire` atomics go once #8122 makes the ICE module private
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame
 - [Group errors are cached by kind](/quest/m1/group-error-cache.md) - permanent group errors bind every reader, retryable ones are kept only for a bounded time, and a live SUBSCRIBE_DROP or FETCH answered `Old` no longer caches it for good
@@ -49,7 +51,6 @@ moves what remains of them once their claims merge.
 - [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-webrtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
-- [VAAPI encode and decode](/quest/m1/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - AMD's VA-API H.264 encode decodes, or the node is refused for OpenH264
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [moq-mux reads H.265 SPS without scuffle](/quest/m1/h265-sps-reader.md) - moq-mux's own SPS reader replaces scuffle-h265 and scuffle-expgolomb, and the fuzz regressions still pass

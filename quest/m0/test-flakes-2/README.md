@@ -126,7 +126,10 @@ group stale, and the warmup then trimmed all the audio left. The test now asks
 for no max delay, fixed by [moq-dev/moq#8050](https://github.com/moq-dev/moq/pull/8050).
 
 Added 2026-11-06: `js/net`'s flate tail-shed test, which timed out in a
-merge-queue batch, one child.
+merge-queue batch. It was CPU-bound, not racy: 100 one-MiB frames of pako
+deflate and inflate against a 32 MiB tail budget that sheds from the 33rd. It
+now writes four frames past the budget, fixed by
+[moq-dev/moq#8137](https://github.com/moq-dev/moq/pull/8137).
 
 Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
 `js/net`'s datagram-end close case, which failed
@@ -141,7 +144,8 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Flate's tail-shed test passes under load](/quest/m0/test-flakes-2/flate-tail-shed.md) - `js/net`'s compressed tail-shed cases finish within bun's timeout under load, re-enabled once fixed
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
+- [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
+- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
