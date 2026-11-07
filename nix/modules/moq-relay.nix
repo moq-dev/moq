@@ -224,6 +224,8 @@ in
             "--key ${authKey}"
             "--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer"
           ]
+          # The cluster token a leaf signs at start is presented for as long as it runs.
+          ++ lib.optionals (cfg.cluster.mode != "none") [ "--allow-unbounded-tokens" ]
           ++ lib.optionals (cfg.auth.publicPath != null) [
             "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"
           ]
@@ -256,7 +258,7 @@ in
               keyPath = authKey;
             in
             ''
-              ${pkgs.moq-cli}/bin/moq auth sign --key "${keyPath}" \
+              ${pkgs.moq-cli}/bin/moq auth sign --key "${keyPath}" --unbounded \
                 --subscribe '**' --publish '**' \
                 > "${cfg.stateDir}/cluster.jwt"
               chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/cluster.jwt"
