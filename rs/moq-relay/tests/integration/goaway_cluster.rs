@@ -223,12 +223,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		loop {
 			let event = announced.next().await.expect("announce update");
 			// Under another instance, B's route is another source: a restart.
-			if let moq_net::origin::RouteEvent::Start(update)
-			| moq_net::origin::RouteEvent::Update(update)
-			| moq_net::origin::RouteEvent::Restart(update)
-			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
-				&& update.route.cost() != moq_net::origin::Cost::DRAIN
-			{
+			if !event.is_end() && event.announce().route.cost() != moq_net::origin::Cost::DRAIN {
 				break;
 			}
 		}
@@ -890,11 +885,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
-	match announced.next().await? {
-		moq_net::origin::RouteEvent::Start(route)
-		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route)
-		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
-		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
-	}
+	let event = announced.next().await?;
+	let active = !event.is_end();
+	Some((event.into_announce(), active))
 }

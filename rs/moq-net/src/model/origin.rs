@@ -3698,21 +3698,14 @@ impl OwnClaims {
 	/// The route not learned upstream changed at a prefix: whether the claim there may
 	/// go to an upstream peer follows it.
 	fn local(&mut self, event: RouteEvent) {
-		match event {
-			RouteEvent::End(announce) => {
-				self.local.remove(&announce.prefix);
-				self.feed(announce.prefix, None);
-			}
-			RouteEvent::Start(announce)
-			| RouteEvent::Update(announce)
-			| RouteEvent::Restart(announce)
-			| RouteEvent::Takeover { announce, .. } => {
-				if let Some(instance) = announce.route.instance {
-					self.local.insert(announce.prefix.clone(), instance);
-				}
-				self.feed(announce.prefix, None);
-			}
+		let end = event.is_end();
+		let announce = event.into_announce();
+		if end {
+			self.local.remove(&announce.prefix);
+		} else if let Some(instance) = announce.route.instance {
+			self.local.insert(announce.prefix.clone(), instance);
 		}
+		self.feed(announce.prefix, None);
 	}
 
 	/// Feed the node the claim at `prefix`, marked as learned upstream unless a route

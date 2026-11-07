@@ -304,16 +304,9 @@ fn waiting(c: &mut Criterion) {
 								let mut announced = receive.consume().routes();
 								let mut seen = std::collections::HashSet::new();
 								while seen.len() < paths {
-									match announced.next().await.unwrap() {
-										moq_net::origin::RouteEvent::Start(update)
-										| moq_net::origin::RouteEvent::Update(update)
-										| moq_net::origin::RouteEvent::Restart(update)
-										| moq_net::origin::RouteEvent::Takeover { announce: update, .. }
-											if update.prefix.as_str().starts_with(&prefix) =>
-										{
-											seen.insert(update.prefix);
-										}
-										_ => {}
+									let event = announced.next().await.unwrap();
+									if !event.is_end() && event.announce().prefix.as_str().starts_with(&prefix) {
+										seen.insert(event.into_announce().prefix);
 									}
 								}
 								drop(broadcasts);

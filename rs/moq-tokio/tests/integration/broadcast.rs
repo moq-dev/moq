@@ -818,13 +818,8 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
-	match event {
-		moq_net::origin::RouteEvent::End(announce) => (announce, false),
-		moq_net::origin::RouteEvent::Start(announce)
-		| moq_net::origin::RouteEvent::Update(announce)
-		| moq_net::origin::RouteEvent::Restart(announce)
-		| moq_net::origin::RouteEvent::Takeover { announce, .. } => (announce, true),
-	}
+	let active = !event.is_end();
+	(event.into_announce(), active)
 }
 
 /// Wait for the next announce event, failing the test on a timeout or a closed origin.

@@ -404,16 +404,12 @@ async fn granted(session: &Session) -> Grant {
 async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let mut announced = origin.routes();
 	let mut live = std::collections::HashSet::new();
-	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::origin::RouteEvent| match event {
-		moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update)
-		| moq_net::origin::RouteEvent::Takeover { announce: update, .. } => {
-			live.insert(update.prefix.to_string());
-		}
-		moq_net::origin::RouteEvent::End(update) => {
-			live.remove(update.prefix.as_str());
-		}
+	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::origin::RouteEvent| {
+		let prefix = event.announce().prefix.to_string();
+		match event.is_end() {
+			true => live.remove(&prefix),
+			false => live.insert(prefix),
+		};
 	};
 	// Take in the replay first, so a retraction is judged against what is announced now
 	// rather than against an empty start.

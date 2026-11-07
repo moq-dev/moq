@@ -983,12 +983,8 @@ async fn serve_announced(
 	let mut broadcasts = Vec::new();
 
 	while let Some(event) = announced.try_next() {
-		if let moq_net::origin::RouteEvent::Start(update)
-		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update)
-		| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
-		{
-			broadcasts.push(update.prefix);
+		if !event.is_end() {
+			broadcasts.push(event.into_announce().prefix);
 		}
 	}
 

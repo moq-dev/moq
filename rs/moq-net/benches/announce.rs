@@ -33,13 +33,8 @@ mod replay;
 fn scanned(events: Vec<origin::RouteEvent>) -> Vec<announce::Announce> {
 	let mut initial: Vec<announce::Announce> = Vec::new();
 	for event in events {
-		let (update, active) = match event {
-			origin::RouteEvent::Start(update)
-			| origin::RouteEvent::Update(update)
-			| origin::RouteEvent::Restart(update)
-			| origin::RouteEvent::Takeover { announce: update, .. } => (update, true),
-			origin::RouteEvent::End(update) => (update, false),
-		};
+		let active = !event.is_end();
+		let update = event.into_announce();
 		initial.retain(|held| held.prefix != update.prefix);
 		if active {
 			initial.push(update);

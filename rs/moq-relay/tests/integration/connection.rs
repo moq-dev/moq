@@ -97,16 +97,12 @@ fn publish(
 /// The next active route's prefix.
 async fn next_active(announced: &mut moq_net::origin::Routes) -> String {
 	loop {
-		match kio::clock::timeout(TIMEOUT, announced.next())
+		let event = kio::clock::timeout(TIMEOUT, announced.next())
 			.await
 			.expect("announcement timeout")
-			.expect("origin closed")
-		{
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route)
-			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => return route.prefix.to_string(),
-			moq_net::origin::RouteEvent::End(_) => {}
+			.expect("origin closed");
+		if !event.is_end() {
+			return event.into_announce().prefix.to_string();
 		}
 	}
 }

@@ -1905,7 +1905,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 							while let Ok(Some(event)) =
 								kio::clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
-								assert!(matches!(event, moq_net::origin::RouteEvent::End(_)), "{event:?}");
+								assert!(event.is_end(), "{event:?}");
 								retracted += 1;
 							}
 							let elapsed = start.elapsed();

@@ -350,16 +350,10 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 				Poll::Pending => routes.poll_synced(waiter).map(|()| None),
 			})
 			.await;
-			use moq_net::origin::RouteEvent;
-			match next {
-				Some(RouteEvent::End(route)) => listed.remove(route.prefix.as_str()),
-				Some(
-					RouteEvent::Start(route)
-					| RouteEvent::Update(route)
-					| RouteEvent::Restart(route)
-					| RouteEvent::Takeover { announce: route, .. },
-				) => listed.insert(route.prefix.to_string()),
-				None => return,
+			let Some(event) = next else { return };
+			match event.is_end() {
+				true => listed.remove(event.announce().prefix.as_str()),
+				false => listed.insert(event.into_announce().prefix.to_string()),
 			};
 		}
 	})

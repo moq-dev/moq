@@ -131,15 +131,8 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timest
 
 /// Whether the route passes through the preferred CDN, the only link priced at
 /// [`A_COST`]: a lite-07 route names its origin node rather than the relays between.
-fn via_a(announce: &origin::RouteEvent) -> bool {
-	let route = match announce {
-		origin::RouteEvent::Start(a)
-		| origin::RouteEvent::Update(a)
-		| origin::RouteEvent::Restart(a)
-		| origin::RouteEvent::Takeover { announce: a, .. } => &a.route,
-		origin::RouteEvent::End(_) => return false,
-	};
-	route.cost().value() >= A_COST
+fn via_a(event: &origin::RouteEvent) -> bool {
+	!event.is_end() && event.announce().route.cost().value() >= A_COST
 }
 
 struct Topology {

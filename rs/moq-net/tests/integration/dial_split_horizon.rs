@@ -99,13 +99,10 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> u64 {
 	let event = kio::clock::timeout(SETTLE, async {
 		loop {
 			let event = announced.next().await.expect("announce cursor closed");
-			let announce = match event {
-				moq_net::origin::RouteEvent::Start(announce)
-				| moq_net::origin::RouteEvent::Update(announce)
-				| moq_net::origin::RouteEvent::Restart(announce)
-				| moq_net::origin::RouteEvent::Takeover { announce, .. } => announce,
-				moq_net::origin::RouteEvent::End(_) => continue,
-			};
+			if event.is_end() {
+				continue;
+			}
+			let announce = event.into_announce();
 			if announce.prefix.as_str() == path {
 				return announce;
 			}

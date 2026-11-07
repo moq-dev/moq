@@ -80,14 +80,8 @@ async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &st
 async fn until(announced: &mut origin::Routes, path: &str, active: bool) {
 	let wait = async {
 		loop {
-			let (announce, now_active) = match announced.next().await.expect("origin closed") {
-				origin::RouteEvent::Start(announce)
-				| origin::RouteEvent::Update(announce)
-				| origin::RouteEvent::Restart(announce)
-				| origin::RouteEvent::Takeover { announce, .. } => (announce, true),
-				origin::RouteEvent::End(announce) => (announce, false),
-			};
-			if announce.prefix.as_str() == path && now_active == active {
+			let event = announced.next().await.expect("origin closed");
+			if event.announce().prefix.as_str() == path && event.is_end() != active {
 				return;
 			}
 		}

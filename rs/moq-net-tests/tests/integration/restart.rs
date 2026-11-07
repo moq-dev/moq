@@ -603,7 +603,7 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 		write(&produced, "old:0");
 		assert_eq!(read(&mut subscription).await, "old:0");
 		source.withdraw();
-		assert!(matches!(next_event(&mut announced).await, origin::RouteEvent::End(_)));
+		assert!(next_event(&mut announced).await.is_end());
 		assert!(track.fetch_group(1, None).await.is_err(), "{version}");
 		write(&produced, "old:1");
 		assert_eq!(read(&mut subscription).await, "old:1");

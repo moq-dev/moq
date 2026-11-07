@@ -1364,13 +1364,9 @@ mod tests {
 
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
-		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route)
-			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
-		}
+		let event = announced.next().await?;
+		let active = !event.is_end();
+		Some((event.into_announce(), active))
 	}
 
 	/// An `Config` whose listener is enabled, so `Internal` registers its own.

@@ -4333,9 +4333,7 @@ mod session_tests {
 			matches!(event, moq_net::origin::RouteEvent::Start(_))
 		});
 		drop(first);
-		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut follow, moq_net::origin::RouteEvent::is_end);
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
@@ -4394,9 +4392,7 @@ mod session_tests {
 			matches!(event, moq_net::origin::RouteEvent::Start(_))
 		});
 		drop(first);
-		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut follow, moq_net::origin::RouteEvent::is_end);
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 3), pad, "the return moved to another pad");
 		assert_eq!(
@@ -4493,9 +4489,7 @@ mod session_tests {
 			matches!(event, moq_net::origin::RouteEvent::Start(_))
 		});
 		first.route.as_ref().unwrap().withdraw();
-		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut follow, moq_net::origin::RouteEvent::is_end);
 		first.route.as_ref().unwrap().announce().unwrap();
 		await_event(&mut follow, |event| {
 			matches!(event, moq_net::origin::RouteEvent::Start(_))
@@ -4578,9 +4572,7 @@ mod session_tests {
 			matches!(event, moq_net::origin::RouteEvent::Start(_))
 		});
 		drop(first);
-		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut follow, moq_net::origin::RouteEvent::is_end);
 
 		let mut second = Publisher::sibling(&origin, Default::default());
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
@@ -4845,9 +4837,7 @@ mod session_tests {
 			matches!(event, moq_net::origin::RouteEvent::Start(_))
 		});
 		drop(first);
-		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut follow, moq_net::origin::RouteEvent::is_end);
 
 		room.catalog.modify().unwrap().video.renditions.clear();
 		for _ in 0..200 {
@@ -4893,9 +4883,7 @@ mod session_tests {
 			matches!(event, moq_net::origin::RouteEvent::Start(_))
 		});
 		drop(first);
-		await_event(&mut follow, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut follow, moq_net::origin::RouteEvent::is_end);
 
 		let listed = room.catalog.modify().unwrap().video.renditions.clone();
 		room.catalog.modify().unwrap().video.renditions.clear();
@@ -5264,9 +5252,7 @@ mod session_tests {
 		block(Duration::from_millis(100));
 		old.catalog.finish().unwrap();
 		drop(old);
-		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut announced, moq_net::origin::RouteEvent::is_end);
 
 		let mut new = Publisher::new(&origin, Default::default(), video_rendition());
 		assert_eq!(
@@ -5294,9 +5280,7 @@ mod session_tests {
 		let pad = recorder.written(&mut old, 1);
 
 		old.route.as_ref().unwrap().withdraw();
-		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut announced, moq_net::origin::RouteEvent::is_end);
 		drop(old);
 
 		let mut new = Publisher::new(&origin, Default::default(), video_rendition());
@@ -5369,9 +5353,7 @@ mod session_tests {
 			let mut announced = announced(&origin);
 			let route = next.route.as_ref().unwrap();
 			route.withdraw();
-			await_event(&mut announced, |event| {
-				matches!(event, moq_net::origin::RouteEvent::End(_))
-			});
+			await_event(&mut announced, moq_net::origin::RouteEvent::is_end);
 			route.announce().unwrap();
 			assert_eq!(
 				recorder.written(&mut next, tag + 2),
@@ -5865,9 +5847,7 @@ mod session_tests {
 
 		let mut announced = announced(&relay.origin);
 		session.abort(moq_net::Error::App(1));
-		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
-		});
+		await_event(&mut announced, moq_net::origin::RouteEvent::is_end);
 
 		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		rendered(&sink, &mut new, 2);
