@@ -117,7 +117,7 @@ federation) land.
 - [The remaining library spawns](/quest/m3/spawn-audit.md) - every async spawn left in a library crate becomes a polled `kio::Tasks` child or is listed with why it stays
 - [DVR rewind](/quest/m3/archive-dvr.md) - follow-on capability after the release contract is stable
 - [Publisher timeliness at relay ingest](/quest/m3/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable
-- [The relay refuses a cluster peer it cannot dial](/quest/m3/relay-undialable-peers.md) - moq-tokio reports the schemes it can dial, and the relay refuses an undialable peer at startup instead of retrying forever
+- [The relay refuses a cluster peer it cannot dial](/quest/m3/relay-undialable-peers.md) - moq-tokio reports the schemes it can dial and names the missing feature when one can't, and the relay refuses an undialable peer at startup instead of retrying forever
 - [moq-transport finish interop](/quest/m3/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [JS joining FETCH](/quest/m3/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
 - [An Absolute join never races an older-history FETCH](/quest/m3/ietf-absolute-join-race.md) - reproduce #7680's suspected collision on main, then fix it or keep the test and delete

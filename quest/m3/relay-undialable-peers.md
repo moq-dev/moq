@@ -5,7 +5,9 @@
 moq-tokio exposes which URL schemes its build can dial, and moq-relay
 refuses to start when a configured cluster peer uses a scheme it can't
 dial (for example `iroh://` once the iroh backend is gone, or `ftp://`),
-naming the peer, instead of retrying it forever.
+naming the peer, instead of retrying it forever. A dial of a scheme the
+build can't carry fails with an error naming the scheme and the feature
+that would carry it.
 
 ## Plan
 
@@ -32,6 +34,15 @@ check every peer in `Config::connect`
 by an `api.url` endpoint can't fail startup; decide in the PR what it does
 (recommended: log once and skip it rather than retry). Test a config naming
 an unsupported scheme.
+
+Decided 2026-11-07 (maintainer, /quest-complete), a follow-up of
+[moq-dev/moq#8162](https://github.com/moq-dev/moq/pull/8162): ✅ fold the
+dial-time error into this quest rather than a separate one, since both
+read the same dispatch. In a build without `websocket`, dialing `ws://`
+falls through to `NoBackend("no QUIC backend matched; this should not
+happen")` (`connect_inner`), which is reachable. Drive that error from the
+dialability check, so `Client::connect` on an undialable scheme names the
+scheme and the missing feature. Test it in a build without `websocket`.
 
 Public API: additive in moq-tokio. Wire: none.
 
