@@ -524,7 +524,11 @@ impl Subscriber {
 				let error = ietf::RequestError {
 					error_code: code,
 					reason_phrase: reason.into(),
-					retry_interval: 0,
+					// The rule judges the refusal as the peer reads it.
+					retry_interval: request::retry_interval(
+						&request::from_code(code, request::Kind::Publish, self.version),
+						code,
+					),
 				};
 				request_stream::Reject::new(stream, error)
 			}
@@ -2116,6 +2120,26 @@ mod tests {
 			let _video = h.publish("video", 3).await;
 			let (_, id, body) = h.offer(offered("bcast", "video", 5)).await;
 			assert_eq!(refusal(id, &body, version), duplicate, "{version}: redundant");
+		}
+	}
+
+	/// A PUBLISH over the listed-track limit is refused as EXCESSIVE_LOAD, which may pass once
+	/// the peer unlists a track, so it invites a retry (draft-18 section 10.6.2).
+	#[kio::test]
+	async fn an_over_limit_publish_invites_a_retry() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let mut h = harness(version);
+			h.subscriber.announces = crate::session::Slots::new(0);
+			let _listing = h.establish().await;
+			let (_, id, body) = h.offer(offered("bcast", "video", 1)).await;
+			assert_eq!(id, ietf::RequestError::ID, "{version}: accepted");
+			let refused: ietf::RequestError = body.message(version).unwrap();
+			assert_eq!(refused.error_code, request::EXCESSIVE_LOAD, "{version}");
+			assert_eq!(
+				refused.retry_interval,
+				crate::auth::RETRY_INITIAL.as_millis() as u64,
+				"{version}"
+			);
 		}
 	}
 

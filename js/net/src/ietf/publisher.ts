@@ -1315,6 +1315,7 @@ export class Publisher {
 					version: this.#session.version,
 					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned, excluded.promise]),
+					group: true,
 				});
 			} finally {
 				opened.resolve();

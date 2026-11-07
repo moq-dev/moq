@@ -85,6 +85,20 @@ planned break. Dart's tests and both staged publish dry-runs passed with no
 warnings. Neither main is the cut tree, and the full Linux gate was not run:
 repeat these checks after the documented release-to-main merge.
 
+The [2026-10-24 pre-cut audit](https://github.com/moq-dev/moq/pull/6707)
+closed with its 37 findings' regression tests re-run together in
+[moq-dev/moq#8059](https://github.com/moq-dev/moq/pull/8059). At
+[main 1ae5c5f808](https://github.com/moq-dev/moq/commit/1ae5c5f808f5fb695a42dcb451611edce81802d7),
+each fix's test still exists or was replaced by a later deliberate change.
+These passed: the moq-net, moq-net-tests, moq-mux, moq-rtmp, moq-tokio,
+moq-uring, hang, and moq-audio suites (7,027 tests, with the fuzz regression
+replays), every JS package's unit tests (5,745), the `just test harness`
+browser checks (48), and `just test video` (11). Nightly's harness step fails
+before it reaches its browser checks, which is how two of them stayed broken
+after [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) until the
+re-run fixed them. Run those browser checks by hand on the cut tree, along
+with the suites above.
+
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
