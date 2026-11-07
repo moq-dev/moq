@@ -12,7 +12,7 @@ use stun_types::message::{BINDING, Message, MessageClass, MessageWriteVec, Trans
 use stun_types::prelude::*;
 use tokio::net::UdpSocket;
 
-use crate::{Inbound, Socket, Wire};
+use super::{Inbound, Socket};
 
 /// Backstop deadline for reaching a connected ICE state, covering the one case
 /// str0m's agent deliberately never times out: a peer that provides no remote
@@ -38,7 +38,6 @@ const STUN_LAST_WAIT: u32 = 16;
 
 /// Why an [`Agent`] stopped.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum Error {
 	/// The peer disconnected, str0m closed the connection, or the inbound queue ended.
 	#[error("peer connection closed")]
@@ -62,7 +61,6 @@ impl Error {
 
 /// What [`Agent::next`] surfaced.
 #[derive(Debug)]
-#[non_exhaustive]
 #[expect(
 	clippy::large_enum_variant,
 	reason = "moved once per poll; boxing would allocate for every data channel message"
@@ -71,6 +69,10 @@ pub enum Event {
 	/// An event from str0m. ICE disconnection is reported as [`Error::Closed`] instead.
 	Rtc(str0m::Event),
 	/// A server-reflexive candidate, already added locally, to signal to the peer.
+	#[cfg_attr(
+		not(feature = "p2p"),
+		allow(dead_code, reason = "only the p2p transport gathers server-reflexive candidates")
+	)]
 	Candidate(Candidate),
 	/// Every STUN server answered or gave up: no more local candidates follow.
 	Gathered,
@@ -150,6 +152,10 @@ impl Agent {
 	/// Ask each STUN server for this socket's public mapping, offering what comes
 	/// back as a server-reflexive candidate. Servers of a family with no host
 	/// candidate are skipped.
+	#[cfg_attr(
+		not(feature = "p2p"),
+		allow(dead_code, reason = "only the p2p transport gathers server-reflexive candidates")
+	)]
 	pub fn with_stun(mut self, servers: &[SocketAddr]) -> Self {
 		let now = Instant::now();
 		for &server in servers {
@@ -180,6 +186,7 @@ impl Agent {
 
 	/// Hold off the deadline for ICE to connect until the first [`Agent::rtc_mut`],
 	/// for an offer whose answer has yet to arrive: signaling time is the caller's.
+	#[cfg_attr(not(feature = "p2p"), allow(dead_code, reason = "only the p2p transport offers"))]
 	pub fn awaiting_answer(mut self) -> Self {
 		self.started = None;
 		self
@@ -195,11 +202,6 @@ impl Agent {
 	/// [`Agent::rtc_mut`] for the agent's own changes, which never start the deadline.
 	fn change(&mut self) -> RtcMut<'_> {
 		RtcMut(self)
-	}
-
-	/// The counters of the bytes exchanged with the peer.
-	pub fn wire(&self) -> &Wire {
-		&self.inbound.wire
 	}
 
 	/// Drive the connection until it surfaces an [`Event`].
@@ -317,7 +319,7 @@ impl Agent {
 			Ok(len) => self.inbound.wire.sent(len),
 			// Changes can keep coming while the socket stays full, so the backlog is
 			// bounded like the inbound queue; ICE, SCTP, and RTP recover the loss.
-			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock && self.outbox.len() < crate::INBOX => {
+			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock && self.outbox.len() < crate::ice::INBOX => {
 				self.outbox.push_back((data.to_vec(), dst))
 			}
 			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -479,7 +481,7 @@ mod tests {
 		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let local = socket.local_addr().unwrap();
-		let inbound = crate::reader(socket.clone());
+		let inbound = crate::ice::reader(socket.clone());
 		let wire = inbound.wire.clone();
 		let socket = Socket::new(socket, vec![local], inbound).unwrap();
 		let mut agent = Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap();
@@ -489,13 +491,13 @@ mod tests {
 		agent.send(&[42; 73], peer.local_addr().unwrap());
 		// UDP refuses an oversized datagram, which is never counted as sent.
 		agent.send(&vec![0; 65_536], peer.local_addr().unwrap());
-		assert_eq!(wire.stats(), crate::Stats { tx: 73, rx: 0 });
+		assert_eq!(wire.stats(), crate::ice::Stats { tx: 73, rx: 0 });
 
 		peer.send_to(&[7; 11], local).await.unwrap();
 		let (data, _) = agent.inbound.packets.recv().await.unwrap();
 		assert_eq!(data.len(), 11);
 		drop(agent);
-		assert_eq!(wire.stats(), crate::Stats { tx: 73, rx: 11 });
+		assert_eq!(wire.stats(), crate::ice::Stats { tx: 73, rx: 11 });
 	}
 
 	/// An agent on a fresh socket, which tokio reports unwritable until the runtime
@@ -505,7 +507,7 @@ mod tests {
 		socket.set_nonblocking(true).unwrap();
 		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
 		let local = socket.local_addr().unwrap();
-		let socket = Socket::new(socket.clone(), vec![local], crate::reader(socket)).unwrap();
+		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
 		Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap()
 	}
 
@@ -513,10 +515,10 @@ mod tests {
 	async fn outbox_is_bounded() {
 		let mut agent = unpolled();
 		let dst = agent.locals[0];
-		for _ in 0..crate::INBOX + 10 {
+		for _ in 0..crate::ice::INBOX + 10 {
 			agent.send(&[1; 100], dst);
 		}
-		assert_eq!(agent.outbox.len(), crate::INBOX);
+		assert_eq!(agent.outbox.len(), crate::ice::INBOX);
 	}
 
 	#[tokio::test]
@@ -559,7 +561,7 @@ mod tests {
 
 		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let local = socket.local_addr().unwrap();
-		let socket = Socket::new(socket.clone(), vec![local], crate::reader(socket)).unwrap();
+		let socket = Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap();
 		// A STUN server that never answers holds the deadline past the handshake's
 		// retransmissions, so DTLS deterministically gives up first.
 		let stun = UdpSocket::bind("127.0.0.1:0").await.unwrap();

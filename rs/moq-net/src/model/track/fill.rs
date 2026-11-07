@@ -815,7 +815,7 @@ pub(super) fn poll_requested(
 /// [`max_delay`](Self::max_delay), and [`order`](Self::order) follow its readers as they
 /// change, so read them as each group is served. The handler calls [`accept`](Self::accept) for each group
 /// it has and [`drop_groups`](Self::drop_groups) for the rest, one group at a time as
-/// [`wanted_changed`](Self::wanted_changed) yields them, so it writes no faster than its
+/// [`poll_wanted_changed`](Self::poll_wanted_changed) yields them, so it writes no faster than its
 /// readers read. Serve the fills you take concurrently: each waits on its own readers, so
 /// serving them in turn holds every fill behind the readers of the one before. Dropping the fill names
 /// whatever is left as dropped while a reader still wants it; once nobody does, the fill is
@@ -972,7 +972,7 @@ impl Fill {
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
 	/// no reader waits on the fill, so stop serving it. It does not wait for the readers to
-	/// pick up what was served before it; [`wanted_changed`](Self::wanted_changed) does.
+	/// pick up what was served before it; [`poll_wanted_changed`](Self::poll_wanted_changed) does.
 	pub fn wanted(&self) -> Option<u64> {
 		self.wanted_except(None)
 	}
@@ -1058,6 +1058,17 @@ impl Fill {
 				_ => Poll::Ready(()),
 			})
 			.map(drop)
+	}
+
+	/// Poll until a run's next group may be written: at once until a reader of the track lost
+	/// a group to eviction, then as [`Self::poll_paced`]. An unpaced run moves at its source's
+	/// speed, which is fine while every reader keeps up.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_run_paced(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.inner.state.read().evictions == 0 {
+			return Poll::Ready(());
+		}
+		self.poll_paced(waiter)
 	}
 
 	/// Refuse every group still owed with `err`, which says nothing about whether the source

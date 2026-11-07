@@ -43,8 +43,9 @@ history it retained stays on the track until it is subscribed or expires; a devi
 it the same way before the encoder returns the error. Its consumer can be swapped without
 changing the track subscribers know. Opus packs 20 ms per packet by default,
 or 10 ms with a shorter `frame_duration`. Groups carry at least 20 ms by default,
-so 10 ms packets pair up. `encode::Options::group_duration`
-changes that minimum; zero puts every packet in its own group. Longer groups
+so 10 ms packets pair up. `encode::Options::join`
+changes that minimum; a join shorter than a packet puts every packet in its own
+group, and zero is refused. Longer groups
 mean fewer streams per relay but coarser loss. There is no AAC encoder, so an
 AAC encode request is refused; AAC decode is for broadcasts from the ingest gateways.
 

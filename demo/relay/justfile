@@ -10,7 +10,7 @@ default:
 
 # Cluster peers still authenticate to each other via mTLS (the cert/ca recipes).
 cluster:
-    bun install
+    uv run --no-project python ../../sh/js/install.py update
 
     bun run concurrently --kill-others --names root,leaf0,leaf1,bbb,tos,web --prefix-colors auto \
     	"just root" \

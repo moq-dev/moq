@@ -1,6 +1,6 @@
 //! str0m session driver shared by every HTTP role / media direction.
 //!
-//! [`moq_ice::Agent`] drives the sans-IO [`str0m::Rtc`] over UDP;
+//! [`crate::ice::Agent`] drives the sans-IO [`str0m::Rtc`] over UDP;
 //! [`Session::run`] feeds it egress writes and handles the media events it surfaces.
 //!
 //! The session itself doesn't care whether the [`Rtc`] was populated by
@@ -93,7 +93,7 @@ impl MediaFlow {
 /// `inbound` rather than being read off the socket directly, so several
 /// sessions can share one socket behind the `crate::server::mux`.
 pub struct Session {
-	agent: moq_ice::Agent,
+	agent: crate::ice::Agent,
 	role: MediaRole,
 	opened_media: HashSet<str0m::media::Mid>,
 	/// Egress write requests. `Some` only for [`MediaRole::Egress`]
@@ -116,10 +116,10 @@ pub struct Session {
 
 impl Session {
 	/// Convenience for the ingest case (WHIP server, WHEP client). The socket's
-	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
-	pub fn ingest(rtc: Rtc, socket: moq_ice::Socket, sink: Box<dyn MediaSink>) -> Result<Self> {
+	/// `inbound` comes from the server mux, or [`crate::ice::reader`] for a 1:1 client socket.
+	pub fn ingest(rtc: Rtc, socket: crate::ice::Socket, sink: Box<dyn MediaSink>) -> Result<Self> {
 		Ok(Self {
-			agent: moq_ice::Agent::new(rtc, socket)?,
+			agent: crate::ice::Agent::new(rtc, socket)?,
 			role: MediaRole::Ingest(sink),
 			opened_media: HashSet::new(),
 			writes_rx: None,
@@ -131,12 +131,12 @@ impl Session {
 	}
 
 	/// Convenience for the egress case (WHEP server, WHIP client). The socket's
-	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
-	pub fn egress(rtc: Rtc, socket: moq_ice::Socket, mut source: EgressSource) -> Result<Self> {
+	/// `inbound` comes from the server mux, or [`crate::ice::reader`] for a 1:1 client socket.
+	pub fn egress(rtc: Rtc, socket: crate::ice::Socket, mut source: EgressSource) -> Result<Self> {
 		let writes_rx = source.take_writes();
 		let catalog_end = source.take_catalog_end();
 		Ok(Self {
-			agent: moq_ice::Agent::new(rtc, socket)?,
+			agent: crate::ice::Agent::new(rtc, socket)?,
 			role: MediaRole::Egress(Box::new(source)),
 			opened_media: HashSet::new(),
 			writes_rx: Some(writes_rx),
@@ -253,12 +253,12 @@ impl Session {
 				} => self.send_remb(),
 
 				event = self.agent.next() => match event {
-					Ok(moq_ice::Event::Rtc(event)) => self.handle_event(event)?,
+					Ok(crate::ice::Event::Rtc(event)) => self.handle_event(event)?,
 					// No STUN servers are configured, so there is nothing to trickle.
 					Ok(_) => {}
-					Err(moq_ice::Error::Closed) => return Err(Error::SessionClosed),
-					Err(moq_ice::Error::Timeout) => return Err(Error::IceTimeout),
-					Err(err) => return Err(Error::rtc(err)),
+					Err(crate::ice::Error::Closed) => return Err(Error::SessionClosed),
+					Err(crate::ice::Error::Timeout) => return Err(Error::IceTimeout),
+					Err(crate::ice::Error::Rtc(err)) => return Err(Error::Rtc(err)),
 				},
 			}
 		}
@@ -681,16 +681,16 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 }
 
 /// Bind an ephemeral UDP socket for a single client session, read by its own
-/// [`moq_ice::reader`], with the ICE candidates to advertise.
+/// [`crate::ice::reader`], with the ICE candidates to advertise.
 ///
 /// The client paths are 1:1 (one socket per dialed session, no demux); the
 /// server paths share one socket via `crate::server::mux` instead. `advertise`
 /// IPs are used verbatim (reusing the bound port); empty falls back to the
 /// bound address, substituting loopback when that address is unspecified.
-pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<moq_ice::Socket> {
+pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<crate::ice::Socket> {
 	let udp = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await?);
 	let locals = advertised_candidates(advertise, udp.local_addr()?)?;
-	Ok(moq_ice::Socket::new(udp.clone(), locals, moq_ice::reader(udp))?)
+	Ok(crate::ice::Socket::new(udp.clone(), locals, crate::ice::reader(udp))?)
 }
 
 /// Pair configured ICE candidates with the bound UDP port and validate them.
