@@ -129,4 +129,3 @@ Public API: none. Wire: none.
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
 - [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
 - [lite-05 copy fill checks idleness without wall time](/quest/m0/test-flakes-2/copy-fill-idle.md) - the copy-fill test proves no FETCH went out on the `Manual` clock, not a 200 ms real-time wait
-- [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load
