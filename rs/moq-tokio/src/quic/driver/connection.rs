@@ -205,11 +205,11 @@ impl Future for ConnectionDriver {
 			this.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
 		}
 
+		// A local close still reaches a driver whose socket holds output back, which skips
+		// `poll_transmit` and so parks nothing there, to re-arm the timer for its closing
+		// period. Waiting on the close consumes no transmit.
+		conn.check_lost(waiter);
 		if !conn.inner.is_drained() {
-			// A local close still reaches a driver whose socket holds output back, which skips
-			// `poll_transmit` and so parks nothing there, to re-arm the timer for its closing
-			// period. Waiting on the close consumes no transmit.
-			let _ = conn.inner.poll_closed(waiter);
 			// Otherwise `poll_transmit` parked the waiter for the application's next call, and the
 			// ingress channel, the timer, and the socket hold the context.
 			if keep_going {
@@ -218,25 +218,36 @@ impl Future for ConnectionDriver {
 			}
 			return Poll::Pending;
 		}
-		if !conn.is_lost() {
-			unreachable!("drained connections always have an error");
-		}
+		// A close moq-quic never managed to send (the server's anti-amplification limit can
+		// withhold it) is published here too.
+		let reason = conn.inner.error().cloned();
+		conn.publish(reason.expect("drained connections always have an error"));
 		Poll::Ready(Ok(()))
 	}
 }
 
 impl Drop for ConnectionDriver {
 	fn drop(&mut self) {
-		// A panic poisoned the state, and without a driver nothing will time the connection out:
-		// fail every waiter now, so it reaches the poisoned lock instead of hanging.
-		if let Some(mut conn) = self.conn.state.poisoned() {
-			let reason = TransportError::new(
-				TransportErrorCode::INTERNAL_ERROR,
-				"connection driver panicked".to_string(),
-			);
-			conn.terminate(Error::TransportError(reason));
+		// Nothing drives the connection anymore, so no close goes out and no timer fires: publish
+		// its end now rather than leave every waiter hanging. After a normal end it is already
+		// published, and this keeps it.
+		if let Some(mut conn) = self.conn.state.lock_for_drop() {
+			match conn.inner.error().cloned() {
+				Some(reason) => conn.publish(reason),
+				None => conn.terminate(internal("connection driver stopped")),
+			}
+		} else if let Some(mut conn) = self.conn.state.poisoned() {
+			// A panic poisoned the state: fail every waiter, so it reaches the poisoned lock.
+			conn.terminate(internal("connection driver panicked"));
 		}
 	}
+}
+
+fn internal(reason: &str) -> Error {
+	Error::TransportError(TransportError::new(
+		TransportErrorCode::INTERNAL_ERROR,
+		reason.to_string(),
+	))
 }
 
 /// A QUIC connection.
@@ -346,14 +357,20 @@ impl Connection {
 
 	/// The error the connection closed with, for any reason.
 	///
+	/// A local close resolves this only once the driver has sent its CONNECTION_CLOSE, so a caller
+	/// may stop the runtime the moment it resolves and the peer still hears the close.
+	///
 	/// Despite the return type's name, closed connections are often not an error condition at the
 	/// application layer. Cases that might be routine include [`Error::LocallyClosed`]
 	/// and [`Error::ApplicationClosed`].
 	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let mut state = self.0.state.lock();
-		let err = ready!(state.inner.poll_closed(waiter));
-		Poll::Ready(state.lost_as(err))
+		if let Some(err) = &state.closed {
+			return Poll::Ready(err.clone());
+		}
+		waiter.register(&mut state.closed_waiters);
+		Poll::Pending
 	}
 
 	/// Whether the connection is closed, and why.
@@ -361,7 +378,8 @@ impl Connection {
 	/// The close_reason is always set to `Some(Error)` when a socket is
 	/// closed; whether it was closed manually by calling [`Connection::close()`] or due to
 	/// an internal error (such as an idle timeout or the peer closing the
-	/// connection).
+	/// connection). Unlike [`closed`](Self::closed), a local close counts from the moment it
+	/// was asked for.
 	///
 	/// Note: when the connection is closed, `connection.close_reason().is_some()` will always be true.
 	pub fn close_reason(&self) -> Option<Error> {
@@ -656,10 +674,14 @@ pub(crate) struct State {
 	timer_deadline: Option<Instant>,
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
-	/// Why the connection failed, when moq-quic did not see it fail: the endpoint driver went away
+	/// The terminal error [`Connection::poll_closed`] reports, set once by the driver: moq-quic's
+	/// reason, a local close only once its CONNECTION_CLOSE is on the socket, or why the driver
+	/// stopped, which moq-quic cannot take and so wins over its reason everywhere.
 	///
-	/// moq-quic takes no foreign error, so this wins over its reason when handles report the loss.
-	external: Option<Error>,
+	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a local close as
+	/// soon as it is asked for, before anything sent it.
+	closed: Option<Error>,
+	closed_waiters: kio::WaiterList,
 	/// The endpoint's socket, sent through without keeping it open
 	slot: Arc<Slot>,
 	send_buffer: Vec<u8>,
@@ -682,7 +704,8 @@ impl State {
 			timer_deadline: None,
 			conn_events,
 			endpoint_events,
-			external: None,
+			closed: None,
+			closed_waiters: kio::WaiterList::new(),
 			slot,
 			send_buffer: Vec::new(),
 			buffered_transmit: None,
@@ -733,6 +756,11 @@ impl State {
 				}
 				Poll::Ready(Err(e)) => return Err(e),
 				Poll::Ready(Ok(())) => {}
+			}
+			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE, which the socket
+			// now has.
+			if let Some(reason) = self.inner.error() {
+				self.publish(reason.clone());
 			}
 
 			if transmits >= MAX_TRANSMIT_DATAGRAMS {
@@ -824,19 +852,39 @@ impl State {
 		true
 	}
 
-	/// Why the connection was lost, if it was: the driver's external reason, or moq-quic's
+	/// Why the connection was lost, if it was: the published reason, or moq-quic's
 	pub(crate) fn error(&self) -> Option<Error> {
-		self.external.clone().or_else(|| self.inner.error().cloned())
+		self.closed.clone().or_else(|| self.inner.error().cloned())
 	}
 
 	/// Whether the connection was lost, without cloning why
 	pub(crate) fn is_lost(&self) -> bool {
-		self.external.is_some() || self.inner.error().is_some()
+		self.closed.is_some() || self.inner.error().is_some()
 	}
 
 	/// The error handles report for a loss moq-quic reported as `err`
 	fn lost_as(&self, err: Error) -> Error {
-		self.external.clone().unwrap_or(err)
+		self.closed.clone().unwrap_or(err)
+	}
+
+	/// Publish `reason` as the terminal error, unless one already is, waking every
+	/// [`Connection::poll_closed`].
+	fn publish(&mut self, reason: Error) {
+		if self.closed.is_none() {
+			self.closed = Some(reason);
+			self.closed_waiters.wake();
+		}
+	}
+
+	/// Publish a loss moq-quic recorded, parking `waiter` until it records one.
+	///
+	/// A local close waits for `drive_transmit` to put its CONNECTION_CLOSE on the socket.
+	fn check_lost(&mut self, waiter: &kio::Waiter) {
+		if let Poll::Ready(reason) = self.inner.poll_closed(waiter)
+			&& !matches!(reason, Error::LocallyClosed { .. })
+		{
+			self.publish(reason);
+		}
 	}
 
 	/// The error handles report for a loss moq-quic reported without a reason, as a stream's
@@ -845,13 +893,15 @@ impl State {
 		self.error().expect("moq-quic reported a loss without a reason")
 	}
 
-	/// Fail the connection for `reason`, which moq-quic did not see: the endpoint driver went away
+	/// Fail the connection for `reason`, which moq-quic did not see: the endpoint driver or this
+	/// connection's driver went away
 	///
-	/// The reason is kept to win over moq-quic's, and a local close makes moq-quic wake every
-	/// waiter. The driver exits right after, so the close is never sent.
+	/// The reason is published to win over moq-quic's, unless a loss already was, and a local
+	/// close makes moq-quic wake every waiter. The driver exits right after, so the close is never
+	/// sent.
 	fn terminate(&mut self, reason: Error) {
 		let message = reason.to_string();
-		self.external = Some(reason);
+		self.publish(reason);
 		self.inner.close(Instant::now(), 0u32.into(), message);
 	}
 

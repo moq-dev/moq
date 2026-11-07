@@ -2745,3 +2745,26 @@ async fn finished_waits_keep_the_terminal_outcome() {
 		}
 	}
 }
+
+/// A local close resolves `closed` once the driver has sent the CONNECTION_CLOSE, as on the
+/// other backends, so a caller that exits the moment it resolves still tells the peer.
+#[tokio::test]
+async fn closed_waits_for_the_close_to_be_sent() {
+	use futures::FutureExt;
+
+	let _guard = subscribe();
+	let endpoint = endpoint();
+	let (conn, server) = connect_self(&endpoint).await;
+	let sent = conn.stats().udp_tx.datagrams;
+	conn.close(7u32.into(), "bye");
+	assert!(conn.closed().now_or_never().is_none(), "nothing has sent the close yet");
+	assert!(matches!(
+		wait_closed(&conn).await,
+		crate::quic::driver::connection::Error::LocallyClosed { .. }
+	));
+	assert!(conn.stats().udp_tx.datagrams > sent, "resolved before the close was sent");
+	assert!(matches!(
+		wait_closed(&server).await,
+		crate::quic::driver::connection::Error::ApplicationClosed(_)
+	));
+}
