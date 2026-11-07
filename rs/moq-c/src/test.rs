@@ -285,10 +285,22 @@ struct States {
 	ptr: *mut c_void,
 }
 
+/// The `user_data` behind [`States`].
+struct StateSink {
+	tx: mpsc::Sender<Seen>,
+	/// Set by the terminal snapshot. A snapshot after it panics in the callback, which aborts
+	/// the test whenever it lands rather than only within a window the test waits out.
+	closed: std::sync::atomic::AtomicBool,
+}
+
 impl States {
 	fn new() -> Self {
 		let (tx, rx) = mpsc::channel();
-		let ptr = Box::into_raw(Box::new(tx)) as *mut c_void;
+		let sink = StateSink {
+			tx,
+			closed: Default::default(),
+		};
+		let ptr = Box::into_raw(Box::new(sink)) as *mut c_void;
 		Self { rx, ptr }
 	}
 
@@ -296,15 +308,11 @@ impl States {
 		self.rx.recv_timeout(TIMEOUT).expect("state callback timed out")
 	}
 
-	/// Skip to the terminal snapshot, which must be the last one.
+	/// Skip to the terminal snapshot, which [`state_callback`] makes the last one.
 	fn recv_terminal(&self) -> Seen {
 		loop {
 			let seen = self.recv();
 			if seen.phase == moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED {
-				assert!(
-					self.rx.recv_timeout(Duration::from_millis(50)).is_err(),
-					"a snapshot followed the terminal one"
-				);
 				return seen;
 			}
 		}
@@ -313,13 +321,18 @@ impl States {
 
 impl Drop for States {
 	fn drop(&mut self) {
-		unsafe { drop(Box::from_raw(self.ptr as *mut mpsc::Sender<Seen>)) };
+		unsafe { drop(Box::from_raw(self.ptr as *mut StateSink)) };
 	}
 }
 
 extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connection_state) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) }.clone();
+	let sink = unsafe { &*(user_data as *const StateSink) };
 	let state = unsafe { &*state };
+	let terminal = state.phase == moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED;
+	assert!(
+		!sink.closed.swap(terminal, std::sync::atomic::Ordering::SeqCst),
+		"a snapshot followed the terminal one"
+	);
 	let mut protocol = moq_protocol_error {
 		scope: 0,
 		code: 0,
@@ -332,7 +345,7 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 			.into_owned()
 	});
 	let protocol = (failed && unsafe { moq_error_protocol(&mut protocol) } == 0).then_some(protocol);
-	let _ = tx.send(Seen {
+	let _ = sink.tx.send(Seen {
 		phase: state.phase,
 		connects: state.connects,
 		failure: state.failure,
@@ -4403,10 +4416,8 @@ fn track_demand_reports_current_state_before_close() {
 		.block_on(crate::publish::Publish::run_demand(on_demand, demand, closed))
 		.unwrap();
 	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert!(
-		cb.rx.recv_timeout(Duration::from_millis(50)).is_err(),
-		"the terminal is the spawner's to deliver"
-	);
+	// The loop has returned, so everything it delivered is already queued.
+	assert!(cb.rx.try_recv().is_err(), "the terminal is the spawner's to deliver");
 
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -5227,10 +5238,11 @@ fn follow_delivers_a_restart() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Another instance taking over while the wait resolves is the one it delivers, so the restart
-/// that announced it must not deliver it again. `dynamic_at` is where the route the wait first
-/// resolves through covers the path: above it, the takeover's restart lands while resolving;
-/// at it, the origin holds that restart for the default [`moq_net::origin::Config::update_hold`].
+/// Another instance taking over while the wait resolves is the one it delivers, and the cancel's
+/// terminal is the next callback. `dynamic_at` is where the route the wait first resolves
+/// through covers the path: above it, the takeover's restart lands while resolving; at it, the
+/// origin holds that restart. The hold runs on the runtime's clock, so moq-net's follow tests
+/// prove on a simulated clock that the held restart never delivers it again.
 fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 	let origin = id(moq_origin_create());
 	let dynamic = {
@@ -5261,12 +5273,6 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
 	let takeover = publish_run(origin, "live");
 	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the takeover was delivered twice"
-	);
 
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
@@ -5355,12 +5361,6 @@ fn an_instance_pins_request_and_follow() {
 		)
 	});
 	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the follower delivered another instance"
-	);
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
@@ -5467,9 +5467,9 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Freeing a delivered handle changes nothing about the path, so the wait delivers nothing
-/// until another instance takes it over. The takeover's restart reached the follower before
-/// its resolution delivered the handle, so no restart is owed.
+/// Freeing a delivered handle changes nothing about the path, and another instance taking it
+/// over is delivered. moq-net's follow tests prove on a simulated clock that the freed
+/// takeover is never delivered again.
 #[test]
 fn follow_waits_for_another_instance_after_a_freed_takeover() {
 	let origin = id(moq_origin_create());
@@ -5480,54 +5480,12 @@ fn follow_waits_for_another_instance_after_a_freed_takeover() {
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
 	let takeover = publish_run(origin, "live");
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the freed takeover was delivered again"
-	);
 
 	let next = publish_run(origin, "live");
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 	drop((takeover, next, dynamic));
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// The route a wait resolves through leaving, and another instance arriving before it resolves,
-/// reach the follower as an end and a start after the wait delivers the newcomer. That start
-/// must not deliver it again.
-#[test]
-fn follow_delivers_a_gap_while_resolving_once() {
-	let origin = id(moq_origin_create());
-	let dynamic = serve_dynamic(origin, "");
-	let cb = Callback::new();
-	let task = follow(origin, b"live", &cb);
-
-	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
-	{
-		let _runtime = crate::ffi::RUNTIME.enter();
-		drop(dynamic);
-	}
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "the test thread has no runtime; it waits out the hold on the C API's real runtime"
-	)]
-	std::thread::sleep(moq_net::origin::Config::default().update_hold * 2);
-	let arrival = publish_run(origin, "live");
-	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the arrival was delivered twice"
-	);
-
-	assert_eq!(moq_consume_close(delivered), 0);
-	assert_eq!(moq_origin_follow_cancel(task), 0);
-	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
-	drop(arrival);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

@@ -485,7 +485,7 @@ impl Subscribe {
 		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
 		let catalog = self.source.catalog::<moq_mux::container::ts::Ext>(self.catalog).await?;
-		let mut ts = moq_mux::container::ts::Export::new(self.source, catalog).with_delay(self.args.max_delay);
+		let mut ts = moq_mux::container::ts::Export::new(self.source, catalog, self.args.max_delay);
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
@@ -550,9 +550,7 @@ impl Subscribe {
 	/// time on the source's PCR comes round.
 	async fn run_ts_passthrough(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
-		let mut release = moq_mux::container::ts::Release::new(self.source, self.catalog)
-			.await?
-			.with_delay(self.args.max_delay);
+		let mut release = moq_mux::container::ts::Release::new(self.source, self.catalog, self.args.max_delay).await?;
 		let report = |stats: &moq_mux::container::ts::stats::Release| {
 			if let Some(sections) = &self.sections {
 				sections.set(|report| report.release = Some(stats.clone()));

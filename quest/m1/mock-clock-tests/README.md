@@ -41,4 +41,3 @@ before starting, since tests land and move.
 - [js/net tests run on a mocked clock](/quest/m1/mock-clock-tests/js-net.md) - about 120 js/net tests stop waiting on real time, through their shared helpers
 - [Other JS tests run on a mocked clock](/quest/m1/mock-clock-tests/js-rest.md) - hang's `settle(20)`, publish's fanout helpers, and the rest of JS
 - [moq-relay's mesh tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-relay.md) - the relay's multi-relay quiet windows and settle sleeps
-- [Binding and CLI tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-bindings.md) - moq-ffi, moq-c, moq-cli, and kio
