@@ -16,8 +16,10 @@ latency code reset its sleep on every poll and spun the simulator.
 always disarms the entry and wakes its waker, so the parked task re-polls,
 resets again, and loops without the clock advancing. The host backend
 (tokio's `Sleep::reset`) doesn't wake, so only tests see it. When the new
-deadline equals the armed one, keep the entry and skip the wake. Test on both
-clocks that a task resetting to the same deadline on every poll is polled a
-bounded number of times before the deadline fires.
+deadline equals the armed one, keep the entry and skip the wake; a different
+deadline still wakes, so the task re-arms. Test on both clocks that a task
+resetting to the same deadline on every poll is polled a bounded number of
+times and completes at that deadline, and that a reset to an earlier
+deadline from another task completes at the earlier one.
 
 Public API: none. Wire: none.
