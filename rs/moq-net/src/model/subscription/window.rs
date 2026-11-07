@@ -57,6 +57,13 @@ pub(in crate::model) trait Holdings {
 		false
 	}
 
+	/// Whether this hop resolves ranges against groups of its own, so it refuses an
+	/// [`Anchor::Oldest`] end, which names no group. A hop whose copies resolve them leaves
+	/// the refusal to them.
+	fn resolves(&self) -> bool {
+		true
+	}
+
 	/// Whether a [`Requests`](crate::track::Requests) handler serving the track's history
 	/// may look up a time its groups can't resolve: a time start before every group with a
 	/// known start then waits on that lookup, and a sequence the live feed never delivered,
@@ -129,6 +136,10 @@ pub(in crate::model) enum Held {
 pub(in crate::model) struct Unheld;
 
 impl Holdings for Unheld {
+	fn resolves(&self) -> bool {
+		false
+	}
+
 	fn timed(&self) -> bool {
 		true
 	}
@@ -568,7 +579,8 @@ impl Walk {
 impl Window {
 	/// Resolve `ranges`, counting relative anchors back from `latest`.
 	///
-	/// Refuses an [`Anchor::Oldest`] end with [`Error::InvalidRange`], a time anchor on an
+	/// Refuses an [`Anchor::Oldest`] end with [`Error::InvalidRange`] where the hop
+	/// [resolves](Holdings::resolves) ranges itself, a time anchor on an
 	/// untimed track with [`Error::TimestampMismatch`], and an anchor a received copy's wire
 	/// drops with [`Error::Unsupported`].
 	pub fn new(ranges: &[Range], latest: Option<u64>, holdings: &impl Holdings) -> Result<Self> {
@@ -1063,7 +1075,7 @@ impl Window {
 	}
 
 	fn place(&mut self, latest: Option<u64>, holdings: &impl Holdings) -> Result<()> {
-		if self.ranges.iter().any(|range| range.end == Some(Anchor::Oldest)) {
+		if holdings.resolves() && self.ranges.iter().any(|range| range.end == Some(Anchor::Oldest)) {
 			return Err(Error::InvalidRange);
 		}
 		let time = |anchor: Option<Anchor>| matches!(anchor, Some(Anchor::Time(_)));
@@ -1290,7 +1302,8 @@ fn end(anchor: Option<Anchor>, latest: Option<u64>) -> Option<End> {
 			.checked_add(1)
 			.map_or(End::Open, End::Before),
 		Some(Anchor::Time(pts)) => End::Time(pts),
-		// Refused before any range resolves; ending before group 0 would deliver nothing.
+		// Refused where groups are held; a hop that holds none lets its copies refuse it, and
+		// delivers nothing meanwhile.
 		Some(Anchor::Oldest) => End::Before(0),
 	})
 }

@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
 	Error, Path, Timescale, Timestamp, bandwidth,
-	coding::{Decode as _, Reader, Stream, varint::MAX_QUIC},
+	coding::{Decode as _, Reader, Stream},
 	lite,
 	track::{Anchor, Position, Subscription},
 };
@@ -7711,8 +7711,7 @@ mod tests {
 		};
 		assert!(matches!(wire_ranges(&timed, None), Err(Error::TimestampMismatch)));
 
-		// Only the oldest start goes out without an anchor; a count back past the varint
-		// stays one, clamped to the largest it can spell.
+		// Only the oldest start goes out without an anchor; any count back stays one.
 		let start = |start| {
 			let subscription = Subscription::default().with_ranges([track::Range { start, end: None }]);
 			wire_ranges(&subscription, None).unwrap().unwrap()[0].start
@@ -7720,7 +7719,7 @@ mod tests {
 		assert_eq!(start(Anchor::Oldest), None);
 		assert_eq!(
 			start(Anchor::Relative(u64::MAX)),
-			Some(lite::Anchor::Relative(MAX_QUIC))
+			Some(lite::Anchor::Relative(u64::MAX))
 		);
 	}
 
@@ -9332,9 +9331,7 @@ fn wire_ranges(subscription: &Subscription, timescale: Option<Timescale>) -> Res
 		}
 		let start = match range.start {
 			Anchor::Oldest => None,
-			// No group sequence reaches past the varint, so a count back that does clamps to
-			// group 0 just as the largest one it can spell.
-			Anchor::Relative(back) => Some(lite::Anchor::Relative(back.min(MAX_QUIC))),
+			Anchor::Relative(back) => Some(lite::Anchor::Relative(back)),
 			Anchor::Absolute(group) => Some(lite::Anchor::Absolute(Position::group(group))),
 			Anchor::Time(pts) => Some(time(pts)?),
 		};

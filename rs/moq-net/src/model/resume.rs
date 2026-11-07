@@ -7042,6 +7042,34 @@ mod test {
 		assert_eq!(sub.floor(), Some(0));
 	}
 
+	/// No hop can place an oldest end: a routed reader's copy refuses it, rather than the
+	/// reader's own window panicking on it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_routed_reader_refuses_an_oldest_end() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		routes.serve(a.consume());
+		let subscription = Subscription::default().with_ranges([track::Range {
+			start: Anchor::Absolute(0),
+			end: Some(Anchor::Oldest),
+		}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let result = sub.poll_recv_group(&kio::Waiter::noop());
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::InvalidRange))),
+			"{:?}",
+			result.map(|r| r.map(|g| g.map(|g| g.sequence)))
+		);
+	}
+
 	/// A time end resolves on the serving copy even when the start is already absolute.
 	#[test]
 	#[cfg(feature = "async")]
