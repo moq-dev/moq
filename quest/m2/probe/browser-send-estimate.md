@@ -24,22 +24,15 @@ Reason: one rule decided at setup fixes the RTT, the polling, and the counters. 
 What remains once the waits clear:
 
 - In stable Chrome (no flag) and Firefox, verify through a shaped link that a publisher's bitrate follows a capacity drop. Reuse the [probe epic](/quest/m2/probe/README.md)'s shaped-uplink harness if it has landed.
-- The WebSocket fallback has no estimate whatever the browsers ship, so its publishers still hold their rate, as decided below.
+- The WebSocket fallback has no estimate whatever the browsers ship, so its publishers still hold their rate; the maintainer decision below covers it.
 
-Decided 2026-11-07 (maintainer, /quest-unblock): Safari publishers and the WebSocket fallback get no estimate before WebKit reports one.
-
-- ✅ (a) Wait for WebKit, as today.
-- (b) A lite-07 receiver report, where the relay sends back the rate it receives from us, which can only lower the estimate while app-limited.
-- (c) Estimate locally from how fast the transport drains our writes, which depends on each browser's buffering.
-
-Reason: Chrome and Firefox need nothing, and (b) and (c) each build an app-layer controller above the browser's own that a later WebKit release makes redundant.
-
-Public API: none expected. Wire: none.
+Public API: none expected. Wire: none, unless the decision below picks a receiver report.
 
 ## Waiting
 
 - Chrome: ships `WebTransport.getStats()` with `estimatedSendRate` enabled for all users in 159, per the 2026-11-05 Intent to Ship. Check that stable Chrome's `getStats()` reports a non-null `estimatedSendRate` on a connection that has been sending media for a few seconds.
 - WebKit: Safari's `getStats()` reports a non-null `estimatedSendRate`. Check the `return_object_property_estimatedSendRate` entry under `api.WebTransport.getStats` in browser-compat-data, or a Safari publisher's `Reservation.rate`.
+- Maintainer: whether Safari publishers (and the WebSocket fallback) get an estimate before WebKit reports one. An agent can't pick this because each option changes the wire or adds a congestion estimator above the browser's own. Options: (a) wait for WebKit, as today; (b) a lite-07 receiver report, where the relay sends back the rate it receives from us, which can only lower the estimate while app-limited; (c) estimate locally from how fast the transport drains our writes, which depends on each browser's buffering. Recommendation: (a), since Chrome and Firefox need nothing, and (b) and (c) each build an app-layer controller that a later WebKit release makes redundant.
 
 ## Related
 
