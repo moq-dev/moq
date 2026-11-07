@@ -45,8 +45,9 @@ or `uds` (such as moq-relay built `--no-default-features`) it falls through
 to `NoBackend("no QUIC backend matched; this should not happen")`
 (`connect_inner`). Drive both from the dialability check, so
 `Client::connect` on an undialable scheme names the scheme and, when one
-exists, the missing feature (`ws`/`wss` to `websocket`, `tcp`/`tls` to
-`tcp`, `unix` to `uds`). Test both feature sets.
+exists, the missing feature (`moqt`/`moql` to `quic`, `http`/`https` to
+`quic` or `websocket`, `ws`/`wss` to `websocket`, `tcp`/`tls` to `tcp`,
+`unix` to `uds`). Test both feature sets.
 
 Public API: additive in moq-tokio. Wire: none.
 
