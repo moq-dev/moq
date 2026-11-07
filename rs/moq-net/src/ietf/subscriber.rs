@@ -17143,8 +17143,9 @@ mod stitch_tests {
 
 	/// What a slow reader of a FETCH run ten times wider than the cache gets, taking a group
 	/// each time the run's stream is polled, once a reader of the track lost a group to
-	/// eviction or not.
-	async fn read_a_fetch_run_slowly(outran: bool) -> Vec<u64> {
+	/// eviction or not. An ascending reader reads in sequence, a descending one as groups
+	/// arrive.
+	async fn read_a_fetch_run_slowly(outran: bool, order: track::Order) -> Vec<u64> {
 		const GROUPS: u64 = 40;
 		const SIZE: usize = 10_000;
 		let payload = vec![0u8; SIZE];
@@ -17185,16 +17186,24 @@ mod stitch_tests {
 			run.track.evict(GROUPS);
 		}
 
-		let mut reader = run
-			.track
-			.subscribe(
-				track::Subscription::default()
-					.with_ranges([track::Range::groups(0..GROUPS)])
-					.with_order(track::Order::Ascending)
-					.with_delay(track::Delay::default().with_max(None)),
-			)
-			.ordered();
-		assert!(reader.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
+		let subscriber = run.track.subscribe(
+			track::Subscription::default()
+				.with_ranges([track::Range::groups(0..GROUPS)])
+				.with_order(order)
+				.with_delay(track::Delay::default().with_max(None)),
+		);
+		type Read = Box<dyn FnMut(&kio::Waiter) -> Poll<crate::Result<Option<group::Consumer>>>>;
+		let mut reader: Read = match order {
+			track::Order::Ascending => {
+				let mut ordered = subscriber.ordered();
+				Box::new(move |waiter| ordered.poll_next_group(waiter))
+			}
+			track::Order::Descending => {
+				let mut subscriber = subscriber;
+				Box::new(move |waiter| subscriber.poll_recv_group(waiter))
+			}
+		};
+		assert!(reader(&waiter).is_pending(), "group 0 is a miss");
 		let fill = dynamic.requested_fill().await.expect("the reader asked for the run");
 		assert_eq!((fill.start().group, fill.end()), (0, GROUPS));
 		let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
@@ -17213,7 +17222,7 @@ mod stitch_tests {
 				res.expect("the run is received");
 				received = true;
 			}
-			match reader.poll_next_group(&waiter) {
+			match reader(&waiter) {
 				Poll::Ready(Ok(Some(group))) => read.push(group.sequence),
 				// What it lost is given up, which ends its range.
 				Poll::Ready(Ok(None)) => break,
@@ -17231,9 +17240,15 @@ mod stitch_tests {
 	/// at the stream's speed and evicts what the reader has yet to take.
 	#[kio::test]
 	async fn a_fetch_run_waits_for_its_reader_once_one_lost_a_group() {
-		assert_eq!(read_a_fetch_run_slowly(true).await, (0..40).collect::<Vec<_>>());
-		let unpaced = read_a_fetch_run_slowly(false).await;
-		assert!(unpaced.len() < 40, "the unpaced run outran its reader: {unpaced:?}");
+		for order in [track::Order::Ascending, track::Order::Descending] {
+			let paced = read_a_fetch_run_slowly(true, order).await;
+			assert_eq!(paced, (0..40).collect::<Vec<_>>(), "{order:?}");
+			let unpaced = read_a_fetch_run_slowly(false, order).await;
+			assert!(
+				unpaced.len() < 40,
+				"the unpaced run outran its {order:?} reader: {unpaced:?}"
+			);
+		}
 	}
 
 	#[kio::test]
