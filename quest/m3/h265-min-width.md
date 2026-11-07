@@ -2,29 +2,36 @@
 
 ## Goal
 
-A moq-transcode ladder whose H.265 rung is narrower than the hardware
-encoder's minimum never fails that rendition. The encoder probe reports the
-driver's minimum width and height, and the ladder widens or drops the rung
-below it instead of failing to open an encoder.
+An H.265 encode narrower than the hardware encoder's minimum never fails
+with an opaque driver error. moq-video's encoder probe reports the driver's
+minimum width and height, `Kind::Auto` passes over a hardware candidate
+whose minimum the frame is below, and with no candidate left the error names
+the minimum. The caller today is `moq-cli publish --video-codec h265`
+(`rs/moq-cli/src/publish.rs`).
 
 ## Plan
 
 Found 2026-11-06 in [moq-dev/moq#8013](https://github.com/moq-dev/moq/pull/8013).
 AMD's VCN 5 (radeonsi, Mesa `si_get.c`) does not encode H.265 narrower than
-384. moq-video has no software H.265 encoder, so on an AMD-only host a
-rendition below that fails to open. The default ladder's 240p rung is 320
-wide for a 4:3 source.
+384. moq-video has no software H.265 encoder, so on an AMD-only host an
+H.265 encode below that fails to open.
+
+moq-transcode cannot hit this yet: its `Config` has no output codec, and
+`catalog::rung_entry` (`rs/moq-transcode/src/catalog.rs`) and `Rung::encode`
+(`rs/moq-transcode/src/rung.rs`) leave `encode::Config` at its H.264
+default. Adding an H.265 output to the ladder is out of this quest's scope.
+Whoever adds it applies the probe's minimum per rung (the default 240p rung
+is 320 wide for a 4:3 source), and a failed rung probe must fail only that
+rung: today `Pipeline::new` propagates it and aborts the whole transcode.
 
 Decided 2026-11-06 (maintainer, /quest-unblock): ✅ an S quest in m3. Not
 chosen: folding it into [the radeonsi quest](/quest/m1/vaapi-radeonsi.md),
 or dropping it.
 
-- Read the minimum from the driver rather than hard-coding 384, such as
-  through VA-API's `VAConfigAttribMaxPictureWidth` and minimum picture
-  attributes, or the encoder's open error. Check what NVENC and VideoToolbox
-  report for the same case.
-- Choose between widening the rung to the minimum and dropping it, and
-  record why. A dropped rung must stay out of the catalog.
+- Learn the minimum rather than hard-coding 384. libva has no minimum
+  picture-size attribute (only `VAConfigAttribMaxPictureWidth`/`Height`), so
+  it comes from the failed open or a per-driver table. Check what NVENC and
+  VideoToolbox report for the same case.
 
 Public API: maybe a minimum size on the encoder probe in moq-video. Wire:
 none.

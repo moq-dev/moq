@@ -4,7 +4,8 @@
 
 On an AMD RX 9070 (radeonsi), moq-video's VA-API H.264 encoder either
 produces a stream that ffmpeg decodes, or refuses the node, so `Kind::Auto`
-falls to OpenH264. Its VPP NV12 conversion carries no chroma offset, and its
+falls to the next H.264 encoder (OpenH264 in a build that has it; a build
+without one gets `NoEncoder` naming the refused driver). Its VPP NV12 conversion carries no chroma offset, and its
 rate control stays near the target bitrate. The ignored VA-API encode tests
 in `rs/moq-video/src/encode/backend/vaapi.rs` pass on that card with
 `MOQ_VAAPI_DEVICE` naming its node, or skip with a reason that names the
