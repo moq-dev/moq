@@ -129,6 +129,14 @@ mod unix {
 		/// alignment places each member where the kernel put it. The kernel reports
 		/// how much it actually filled in, which is less than this on older
 		/// releases, so every read checks its field against that length.
+		/// `tcpi_delivery_rate_app_limited` is the byte's first bitfield, which C
+		/// allocates from the low bit on little-endian targets and from the high bit
+		/// on big-endian ones.
+		#[cfg(target_endian = "little")]
+		pub const APP_LIMITED_MASK: u8 = 1 << 0;
+		#[cfg(target_endian = "big")]
+		pub const APP_LIMITED_MASK: u8 = 1 << 7;
+
 		#[repr(C)]
 		#[derive(Default, Clone, Copy)]
 		pub struct TcpInfo {
@@ -139,6 +147,7 @@ mod unix {
 			pub backoff: u8,
 			pub options: u8,
 			pub wscale: u8,
+			/// `tcpi_delivery_rate_app_limited:1` then `tcpi_fastopen_client_fail:2`.
 			pub app_limited: u8,
 
 			pub rto: u32,
@@ -301,9 +310,7 @@ mod unix {
 				if !sys::has_field(len, offset, size_of::<u64>()) {
 					return None;
 				}
-				// Bit 0 of this byte is `tcpi_delivery_rate_app_limited`; the others hold
-				// `tcpi_fastopen_client_fail`.
-				let app_limited = info.app_limited & 1 != 0;
+				let app_limited = info.app_limited & sys::APP_LIMITED_MASK != 0;
 				// The kernel reports bytes per second; the trait wants bits.
 				let rate = info.delivery_rate.saturating_mul(8);
 				let mut filter = self.rate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -330,6 +337,12 @@ mod unix {
 		fn linux_tcp_info_layout() {
 			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, rtt), 68);
 			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, delivery_rate), 160);
+			// The app-limited flag shares byte 7 with `tcpi_fastopen_client_fail`.
+			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, app_limited), 7);
+			#[cfg(target_endian = "little")]
+			assert_eq!(super::sys::APP_LIMITED_MASK, 0x01);
+			#[cfg(target_endian = "big")]
+			assert_eq!(super::sys::APP_LIMITED_MASK, 0x80);
 		}
 
 		/// Offsets from macOS `netinet/tcp.h`.
