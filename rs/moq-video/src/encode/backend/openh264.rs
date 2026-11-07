@@ -14,7 +14,7 @@ use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 #[cfg(test)]
 use openh264_sys2::{ENCODER_OPTION_COMPLEXITY, LOW_COMPLEXITY, MEDIUM_COMPLEXITY};
 
-use super::super::encoder::{Applied, Config, Gop, Preset};
+use super::super::encoder::{Applied, Config, Preset};
 use super::{Backend, Encoded};
 use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::{Error, Frame};
@@ -38,7 +38,7 @@ impl Openh264 {
 	}
 
 	fn new(config: &Config) -> Result<Self, Error> {
-		let Gop::Keyframe { interval } = config.gop;
+		let interval = config.keyframe_interval();
 		let color = config.resolved_color();
 		// State the color space in the SPS so a decoder doesn't fall back to
 		// guessing it from the frame height. The SDR curve goes out as BT.709 (1)
@@ -368,9 +368,8 @@ mod tests {
 	/// the flag agrees with the bitstream.
 	#[test]
 	fn keyframes_are_flagged_on_the_cadence_and_on_a_cut() {
-		let framerate = crate::FrameRate::new(30, 1).unwrap();
 		let config = Config {
-			gop: Gop::keyframe_every(std::time::Duration::from_secs(1), framerate),
+			join: std::time::Duration::from_secs(1),
 			..config()
 		};
 		let mut enc = Openh264::new(&config).unwrap();

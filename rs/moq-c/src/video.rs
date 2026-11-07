@@ -93,8 +93,8 @@ pub struct moq_video_encoder_input {
 	pub width: u32,
 	/// Encoded height in pixels. Must be even.
 	pub height: u32,
-	/// Nominal frames per second, used for the codec time base and the default
-	/// bitrate and keyframe interval. Must be non-zero.
+	/// Nominal frames per second, used for the codec time base, the default
+	/// bitrate, and rounding the join to whole frames. Must be non-zero.
 	pub framerate: moq_video_frame_rate,
 }
 
@@ -107,9 +107,10 @@ pub struct moq_video_encoder_output {
 	/// Target bitrate in bits per second. 0 derives one from the resolution and
 	/// framerate.
 	pub bitrate: u64,
-	/// Keyframe interval in frames: a subscriber joining mid-stream waits at
-	/// most this many frames before it can decode. 0 uses ~2 seconds.
-	pub gop: u32,
+	/// The time between join points, in microseconds: a keyframe opens a group
+	/// this often, rounded to whole frames, so a subscriber joining mid-stream
+	/// waits at most this long before it can decode. 0 uses 2 seconds.
+	pub join_us: u64,
 	/// `moq_video_encoder_kind` discriminant.
 	pub kind: u32,
 	/// Backend name, UTF-8, e.g. `"videotoolbox"`, `"nvenc"`, `"mediafoundation"`,
@@ -693,7 +694,7 @@ impl Video {
 		let reserved = target
 			.catalog
 			.reserve()
-			.with_interval(config.gop.duration(config.framerate));
+			.with_interval(config.effective_join());
 		let ceiling = video_ceiling(config, &rendition);
 		let (lower, priority) = match lower {
 			Some(lower) => {
@@ -972,12 +973,10 @@ pub unsafe extern "C" fn moq_encode_video(
 		config.codec = codec_from_u32(raw_output.codec)?;
 		config.kind = unsafe { encoder_kind(raw_output)? };
 		// The C ABI spells an unset knob as 0, which neither field accepts as a real
-		// value: a zero bitrate or GOP is the default, not a request.
+		// value: a zero bitrate or join is the default, not a request.
 		config.bitrate = (raw_output.bitrate != 0).then(|| moq_net::bandwidth::Rate::from_bps(raw_output.bitrate));
-		if raw_output.gop != 0 {
-			config.gop = moq_video::encode::Gop::Keyframe {
-				interval: raw_output.gop,
-			};
+		if raw_output.join_us != 0 {
+			config.join = std::time::Duration::from_micros(raw_output.join_us);
 		}
 
 		// Both before the global lock is taken: bringing up a hardware encoder is slow
@@ -1082,8 +1081,8 @@ pub unsafe extern "C" fn moq_encode_video_frame(producer: u32, frame: *const moq
 
 /// Cut a new group at the next published frame.
 ///
-/// Optional. The encoder already keyframes every `moq_video_encoder_output.gop`
-/// frames, and each of those cuts a group, so a subscriber can always join
+/// Optional. The encoder already keyframes every `moq_video_encoder_output.join_us`,
+/// and each of those cuts a group, so a subscriber can always join
 /// without you calling this. Reach for it only to place the boundaries yourself:
 /// aligning groups with something the encoder cannot see, such as a scene change,
 /// a source switch, or resuming after an idle gap.
@@ -1094,7 +1093,7 @@ pub unsafe extern "C" fn moq_encode_video_frame(producer: u32, frame: *const moq
 ///
 /// Fails when the selected encoder cannot force a keyframe (a V4L2 driver
 /// without the control): nothing is queued, and groups keep falling every
-/// `gop` frames.
+/// `join_us`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_video_cut(producer: u32) -> i32 {
 	ffi::enter(move || {
@@ -1315,7 +1314,7 @@ mod tests {
 		// Probed rather than hand-built, so the test track carries what a real one would.
 		let encode = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 		let rendition = encode.probe().await.unwrap();
-		let reserved = catalog.reserve().with_interval(encode.gop.duration(encode.framerate));
+		let reserved = catalog.reserve().with_interval(encode.effective_join());
 		let producer = moq_video::encode::Producer::new(broadcast, reserved, rendition).unwrap();
 
 		let name = producer.demand().name().to_string();

@@ -48,56 +48,6 @@ pub enum Kind {
 	Named(String),
 }
 
-/// How the encoded stream is divided into groups.
-///
-/// Every mode opens a group at a point a subscriber can start decoding, and
-/// [`Encoder::cut`] opens one on demand in any of them. `#[non_exhaustive]`: a
-/// later mode adds a variant here rather than replacing the field, so match
-/// with a fallback arm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Gop {
-	/// A keyframe (an IDR with its parameter sets in band) every `interval`
-	/// frames, each opening a group. A subscriber joining mid-stream waits at
-	/// most that many frames for a picture it can decode.
-	Keyframe {
-		/// Frames per group. Must be at least 1; [`Encoder::new`] refuses 0.
-		interval: u32,
-	},
-}
-
-impl Gop {
-	/// Keyframes every `interval` of wall time at `framerate`, rounded down to
-	/// whole frames and never below one.
-	pub fn keyframe_every(interval: std::time::Duration, framerate: FrameRate) -> Self {
-		Self::Keyframe {
-			interval: framerate.frames(interval).max(1),
-		}
-	}
-
-	/// The nominal time between groups at `framerate`.
-	pub fn duration(self, framerate: FrameRate) -> std::time::Duration {
-		match self {
-			Self::Keyframe { interval } => std::time::Duration::from_nanos(
-				(u128::from(interval) * 1_000_000_000 * u128::from(framerate.denominator())
-					/ u128::from(framerate.numerator()))
-				.try_into()
-				.unwrap_or(u64::MAX),
-			),
-		}
-	}
-
-	/// Refuse a configuration no backend can honor, before one is opened.
-	pub(crate) fn validate(&self) -> Result<(), Error> {
-		match *self {
-			Self::Keyframe { interval: 0 } => Err(Error::InvalidGop(
-				"a keyframe interval of 0 frames opens no group".to_owned(),
-			)),
-			Self::Keyframe { .. } => Ok(()),
-		}
-	}
-}
-
 /// How an encoder trades latency for compression at the configured bitrate.
 ///
 /// Bitrate is set separately, via [`Config::bitrate`]. Presets differ in the
@@ -200,9 +150,13 @@ pub struct Config {
 	/// Target bitrate. `None` derives a sane default
 	/// from resolution and framerate (~0.07 bits per pixel per second).
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
-	/// How the stream is divided into groups. Defaults to a keyframe every two
-	/// seconds at `framerate`.
-	pub gop: Gop,
+	/// The time between join points: a keyframe (an IDR with its parameter sets
+	/// in band) opens a group this often, so a subscriber joining mid-stream waits
+	/// at most this long for a picture it can decode. [`Encoder::cut`] opens one
+	/// sooner. Rounded to whole frames at `framerate`, never below one; see
+	/// [`effective_join`](Self::effective_join). [`Encoder::new`] refuses zero.
+	/// Defaults to two seconds.
+	pub join: std::time::Duration,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
 	/// Which encoder implementation to use. Defaults to [`Kind::Auto`].
@@ -245,14 +199,14 @@ pub struct Config {
 
 impl Config {
 	/// A config encoding `width` x `height` at `framerate`, with the default
-	/// codec, GOP, and bitrate.
+	/// codec, join, and bitrate.
 	pub fn new(width: u32, height: u32, framerate: FrameRate) -> Self {
 		Self {
 			width,
 			height,
 			framerate,
 			bitrate: None,
-			gop: Gop::keyframe_every(std::time::Duration::from_secs(2), framerate),
+			join: std::time::Duration::from_secs(2),
 			codec: Codec::default(),
 			kind: Kind::Auto,
 			preset: Preset::default(),
@@ -266,6 +220,21 @@ impl Config {
 	/// The encoded resolution.
 	pub fn size(&self) -> Size {
 		Size::new(self.width, self.height)
+	}
+
+	/// The time between join points the encoder holds to: [`join`](Self::join)
+	/// rounded to whole frames at `framerate`, the value a catalog declares.
+	pub fn effective_join(&self) -> std::time::Duration {
+		let nanos = u128::from(self.keyframe_interval()) * 1_000_000_000 * u128::from(self.framerate.denominator())
+			/ u128::from(self.framerate.numerator());
+		std::time::Duration::from_nanos(nanos.try_into().unwrap_or(u64::MAX))
+	}
+
+	/// Frames between keyframes: [`join`](Self::join) rounded to the nearest
+	/// frame, and never below one, since a positive join shorter than a frame
+	/// still opens a group per frame.
+	pub(crate) fn keyframe_interval(&self) -> u32 {
+		self.framerate.frames(self.join).max(1)
 	}
 
 	/// The catalog rendition an encoder for this config produces.
@@ -392,7 +361,9 @@ impl Encoder {
 		let size = config.size();
 		size.validate("encoder")?;
 		size.validate_encodable("encoder", config.framerate)?;
-		config.gop.validate()?;
+		if config.join.is_zero() {
+			return Err(Error::ZeroJoin);
+		}
 
 		let backend = backend::open(config)?;
 		let applied = backend.applied();
@@ -466,7 +437,7 @@ impl Encoder {
 	}
 
 	/// Cut a new group at the next frame, on top of the boundaries
-	/// [`Config::gop`] places on its own. Today that means encoding it as a
+	/// [`Config::join`] places on its own. Today that means encoding it as a
 	/// keyframe (an IDR), so a subscriber can start decoding there.
 	///
 	/// Rarely needed: the encoder opens groups automatically, so reach for this
@@ -484,7 +455,7 @@ impl Encoder {
 	///
 	/// Returns [`Error::CutUnsupported`] when this backend cannot force a group
 	/// boundary (a V4L2 driver without the force-keyframe control), in which case
-	/// nothing is queued: groups keep falling where [`Config::gop`] puts them, and
+	/// nothing is queued: groups keep falling where [`Config::join`] puts them, and
 	/// the caller decides whether that layout is acceptable rather than finding
 	/// out from the stream.
 	pub fn cut(&mut self) -> Result<(), Error> {
@@ -1253,7 +1224,7 @@ mod tests {
 		};
 		let mut encoder = encoder_with(Box::new(backend), &config);
 
-		// Nothing asked for: `Config::gop` places the boundaries on its own.
+		// Nothing asked for: `Config::join` places the boundaries on its own.
 		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
 
 		// Asked twice before a frame exists: one cut, on the next frame.
@@ -1321,41 +1292,40 @@ mod tests {
 		assert_eq!(*log.lock().unwrap(), vec![false]);
 	}
 
-	/// An interval of zero opens no group, so it is refused at open rather than
+	/// A join of zero opens no group, so it is refused at open rather than
 	/// handed to a backend, each of which would do something different with it
 	/// (openh264 keys every frame, V4L2 rejects the control, VideoToolbox reads
 	/// it as unlimited).
 	#[test]
-	fn a_zero_keyframe_interval_is_refused() {
+	fn a_zero_join_is_refused() {
 		let config = Config {
-			gop: Gop::Keyframe { interval: 0 },
+			join: std::time::Duration::ZERO,
 			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let Err(err) = Encoder::new(&config) else {
 			panic!("an empty group cannot open");
 		};
-		assert!(matches!(err, Error::InvalidGop(_)), "unexpected error: {err:?}");
+		assert!(matches!(err, Error::ZeroJoin), "unexpected error: {err:?}");
 	}
 
-	/// The wall-time constructor never produces the interval `Encoder::new`
-	/// refuses: a window shorter than a frame rounds up to one frame, not down
-	/// to none.
+	/// The catalog declares the join after rounding to whole frames, since that
+	/// is the spacing the stream actually has: a fractional frame rate stretches
+	/// the default two seconds, and a positive join shorter than a frame rounds
+	/// up to one frame rather than down to none.
 	#[test]
-	fn a_sub_frame_keyframe_window_rounds_up_to_one_frame() {
-		let framerate = crate::FrameRate::new(30, 1).unwrap();
-		assert_eq!(
-			Gop::keyframe_every(std::time::Duration::from_millis(1), framerate),
-			Gop::Keyframe { interval: 1 }
-		);
-		assert_eq!(
-			Gop::keyframe_every(std::time::Duration::from_secs(2), framerate),
-			Gop::Keyframe { interval: 60 }
-		);
-		assert!(
-			Gop::keyframe_every(std::time::Duration::ZERO, framerate)
-				.validate()
-				.is_ok()
-		);
+	fn the_effective_join_is_whole_frames() {
+		let join = |ms, framerate| {
+			let config = Config {
+				join: std::time::Duration::from_millis(ms),
+				..Config::new(320, 240, framerate)
+			};
+			(config.keyframe_interval(), config.effective_join())
+		};
+		let ntsc = crate::FrameRate::new(30_000, 1001).unwrap();
+		let thirty = crate::FrameRate::new(30, 1).unwrap();
+		assert_eq!(join(2000, ntsc), (60, std::time::Duration::from_millis(2002)));
+		assert_eq!(join(2000, thirty), (60, std::time::Duration::from_secs(2)));
+		assert_eq!(join(1, thirty), (1, std::time::Duration::from_nanos(33_333_333)));
 	}
 
 	/// `cut()` has to reach the codec on a *warm* encoder, which is the case that
@@ -1369,10 +1339,10 @@ mod tests {
 			kind: Kind::Software,
 			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
-		// A GOP far longer than the run, so any IDR here was asked for rather than
+		// A join far longer than the run, so any IDR here was asked for rather than
 		// inserted on schedule.
 		let mut encoder = Encoder::new(&Config {
-			gop: Gop::Keyframe { interval: 1000 },
+			join: std::time::Duration::from_secs(60),
 			..config
 		})
 		.unwrap();

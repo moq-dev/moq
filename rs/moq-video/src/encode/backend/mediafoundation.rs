@@ -43,7 +43,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use super::super::encoder::{Applied, Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config};
 use super::{Backend, Encoded, keyframe_annexb};
 use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::{Surface, interleave_uv};
@@ -141,10 +141,7 @@ impl MediaFoundation {
 			height: config.height,
 			framerate: config.framerate,
 			bitrate: clamp_u32(config.resolved_bitrate().as_bps()),
-			gop: {
-				let Gop::Keyframe { interval } = config.gop;
-				interval
-			},
+			gop: config.keyframe_interval(),
 			color: config.resolved_color(),
 			started: false,
 			provides_samples: false,

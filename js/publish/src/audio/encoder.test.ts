@@ -59,8 +59,8 @@ describe("resolve", () => {
 		}
 	});
 
-	// A frame opens a group once it is at least the group duration past the open one's start, so
-	// groups start a whole number of frames apart: that, not the duration, is the join interval.
+	// A frame opens a group once it is at least `join` past the open one's start, so groups start a
+	// whole number of frames apart: that, not the requested join, is the effective one.
 	test("groups start a whole number of frames apart", () => {
 		const opus = (frame: number) => resolve(captured, { mime: "opus", frameDuration: Milli(frame) });
 		for (const [frame, duration, spacing] of [
@@ -68,8 +68,8 @@ describe("resolve", () => {
 			[20, 30, 40],
 			[60, 20, 60],
 			[2.5, 20, 20],
-			// A zero duration opens a group per frame.
-			[20, 0, 20],
+			// A join shorter than a frame opens a group per frame.
+			[20, 1, 20],
 		] as const) {
 			expect(groupSpacing(Milli(duration), opus(frame))).toBe(Milli(spacing));
 		}
@@ -295,7 +295,7 @@ function configured(): Promise<AudioEncoderConfig> {
 
 // An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes]
 // and how many frames each group carries.
-async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) {
+async function setup(order = new Order(), codec?: Codec, join?: Milli) {
 	const configuring = configured();
 
 	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
@@ -324,7 +324,7 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -344,7 +344,7 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 		capture: capture as never,
 		enabled,
 		codec,
-		groupDuration,
+		join,
 	});
 
 	const config = await configuring;
@@ -737,7 +737,7 @@ test("a push completing several frames stays one stream", async () => {
 
 // The first frame at the minimum opens the next group. A timeline break closes the group early,
 // so the first frame after it opens a fresh one.
-test("a group duration packs frames until the minimum and restarts after a break", async () => {
+test("a join packs frames until the minimum and restarts after a break", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup(new Order(), undefined, Milli(100));
 	const { enabled, feed, written, groups, appended } = env;
@@ -778,7 +778,7 @@ test("default audio groups carry twenty milliseconds", async () => {
 		[2.5, 8, undefined],
 		[10, 2, undefined],
 		[20, 1, undefined],
-		[2.5, 1, 0],
+		[2.5, 1, 1],
 	] as const) {
 		using env = await setup(
 			new Order(),
@@ -902,6 +902,39 @@ test("settles when the codec settings can't resolve", async () => {
 		encoder.close();
 		error.mockRestore();
 	}
+});
+
+// A join of zero would open a group per frame, so it refuses the rendition like any invalid knob,
+// settling the gate without a config until a valid join arrives.
+test("refuses a join that is not a positive duration", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	for (const join of [0, -20, Number.NaN]) {
+		const capture = {
+			in: { source: new Signal(undefined) },
+			out: {
+				root: new Signal(undefined),
+				format: new Signal<Format>({ sampleRate: 48_000, channelCount: 1 }),
+				frames: new Signal(undefined),
+			},
+			blocked: new Signal(false),
+		};
+		const encoder = new Encoder("audio", { capture: capture as never, join: join as Milli });
+		try {
+			await settle();
+			expect(encoder.out.catalog.peek()).toBeUndefined();
+			expect(encoder.settled.peek()).toBe(true);
+
+			const ready = encoder.out.catalog.changed();
+			encoder.join.set(Milli(20));
+			await ready;
+			expect(encoder.out.catalog.peek()).toBeDefined();
+		} finally {
+			encoder.close();
+		}
+	}
+	expect(error).toHaveBeenCalled();
+	error.mockRestore();
 });
 
 test("settles while the capture waits on a gesture", async () => {
@@ -1202,8 +1235,8 @@ test("an audio-only broadcast declares its group spacing as the join interval", 
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("join.hang") });
 	const feed = new Feed();
 	const configuring = configured();
-	// 20 ms Opus frames start a group every two frames for a 30 ms duration.
-	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never, groupDuration: Milli(30) });
+	// 20 ms Opus frames start a group every two frames for a 30 ms join.
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never, join: Milli(30) });
 	let catalog: Json.Snapshot.Consumer<Catalog.Root> | undefined;
 	try {
 		await configuring;

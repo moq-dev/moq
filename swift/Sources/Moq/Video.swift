@@ -18,8 +18,6 @@ public enum Video {
     public typealias Read = MoqVideoRead
     /// One encoded access unit from an `Encoder`.
     public typealias Packet = MoqVideoPacket
-    /// How pictures are split into independently decodable groups.
-    public typealias Gop = MoqVideoGop
     /// A video codec identifier (H.264 or H.265).
     public typealias Codec = VideoCodec
     /// A CPU pixel layout (I420 or RGBA).
@@ -68,7 +66,7 @@ public enum Video {
 
         /// Start a new group at the next written frame.
         ///
-        /// Optional: the encoder starts groups on its own per `output.gop`, so a
+        /// Optional: the encoder starts groups on its own per `output.join`, so a
         /// subscriber can always join without this. Reach for it only to place the
         /// boundaries yourself, aligning groups with something the encoder can't
         /// see such as a scene change. Throws if the selected encoder cannot force

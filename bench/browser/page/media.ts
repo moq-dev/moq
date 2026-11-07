@@ -70,7 +70,7 @@ async function publish(config: Media): Promise<void> {
 			codec: config.codec,
 			frameRate: config.fps,
 			maxPixels: config.width * config.height,
-			keyframeInterval: Milli(config.keyframe_ms),
+			join: Milli(config.keyframe_ms),
 			maxBitrate: config.bitrate,
 		},
 	});
