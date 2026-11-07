@@ -73,10 +73,21 @@ export class Local {
 	readonly cameraCapture: Publish.Video.Capture;
 	/** Shared capture feeding the screen renditions. */
 	readonly screenCapture: Publish.Video.Capture;
-	/** Camera microphone encoder, including its volume and capture graph. */
-	readonly cameraAudio: Publish.Audio.Encoder;
-	/** Screenshare audio encoder, including its volume and capture graph. */
-	readonly screenAudio: Publish.Audio.Encoder;
+	/** Microphone gain and captured audio graphs for custom playback. */
+	readonly audio: {
+		/** Microphone gain and capture graph. */
+		readonly camera: {
+			/** Linear gain applied before encoding, where 1 is unity. */
+			readonly volume: Signal<number>;
+			/** Captured microphone graph before gain, while a track is available. */
+			readonly root: Getter<AudioNode | undefined>;
+		};
+		/** Screenshare capture graph. */
+		readonly screen: {
+			/** Captured screen audio graph before gain, while a track is available. */
+			readonly root: Getter<AudioNode | undefined>;
+		};
+	};
 
 	#preview = new Signal<Preview>({});
 	#cameraVideo = new Signal<Publish.Video.Source | undefined>(undefined);
@@ -214,13 +225,13 @@ export class Local {
 		// reaches them at once; its capture is still released.
 		const microphoneMuted = new Signal(!this.microphoneEnabled.peek());
 		this.#signals.run((effect) => microphoneMuted.set(!effect.get(this.microphoneEnabled)));
-		this.cameraAudio = new Publish.Audio.Encoder("audio", {
+		const cameraAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.camera,
 			capture: cameraAudioCapture,
 			muted: microphoneMuted,
 			bandwidth,
 		});
-		this.#signals.cleanup(() => this.cameraAudio.close());
+		this.#signals.cleanup(() => cameraAudio.close());
 
 		const screenHd = new Publish.Video.Encoder("video/hd", {
 			broadcast: this.screen,
@@ -246,13 +257,18 @@ export class Local {
 		});
 		this.#signals.cleanup(() => screenAudioCapture.close());
 
-		this.screenAudio = new Publish.Audio.Encoder("audio", {
+		const screenAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.screen,
 			capture: screenAudioCapture,
 			enabled: this.#screenLive,
 			bandwidth,
 		});
-		this.#signals.cleanup(() => this.screenAudio.close());
+		this.#signals.cleanup(() => screenAudio.close());
+
+		this.audio = {
+			camera: { volume: cameraAudio.volume, root: cameraAudio.out.root },
+			screen: { root: screenAudio.out.root },
+		};
 
 		this.#signals.run((effect) => {
 			const source = effect.get(this.share.out.source);

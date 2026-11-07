@@ -1,6 +1,7 @@
 # `@moq/room`
 
 ```ts
+import { Audio } from "@moq/watch";
 import { Connection } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { Getter } from "@moq/signals";
@@ -70,8 +71,16 @@ export type Kind = typeof KIND[keyof typeof KIND];
 
 export class Local {
 	constructor(props: LocalProps);
+	readonly audio: {
+		readonly camera: {
+			readonly root: Getter<AudioNode | undefined>;
+			readonly volume: Signal<number>;
+		};
+		readonly screen: {
+			readonly root: Getter<AudioNode | undefined>;
+		};
+	};
 	readonly camera: import("@moq/publish").Broadcast;
-	readonly cameraAudio: import("@moq/publish").Audio.Encoder;
 	readonly cameraCapture: import("@moq/publish").Video.Capture;
 	readonly cameraEnabled: Signal<boolean>;
 	readonly chatting: Signal<boolean>;
@@ -82,7 +91,6 @@ export class Local {
 	readonly microphoneEnabled: Signal<boolean>;
 	get preview(): Getter<Preview>;
 	readonly screen: import("@moq/publish").Broadcast;
-	readonly screenAudio: import("@moq/publish").Audio.Encoder;
 	readonly screenCapture: import("@moq/publish").Video.Capture;
 	readonly screenEnabled: Signal<boolean>;
 	readonly share: Source.Screen;
@@ -103,11 +111,11 @@ export interface LocalProps {
 
 export class Member {
 	constructor(kind: Kind, path: Path.Valid, connection: Connection);
-	readonly audio: import("@moq/watch").Audio.Decoder;
+	readonly audio: Audio.Decoder;
 	readonly broadcast: import("@moq/watch").Broadcast;
 	readonly canvas: Signal<HTMLCanvasElement | undefined>;
 	close(): void;
-	readonly emitter: import("@moq/watch").Audio.Emitter;
+	readonly emitter: Audio.Emitter;
 	readonly kind: Kind;
 	readonly muted: Signal<boolean>;
 	readonly path: Path.Valid;
