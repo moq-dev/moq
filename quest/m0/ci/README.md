@@ -182,5 +182,5 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - hosted Cache uploads `main`'s relay and CLI, and Smoke's nix channel substitutes them
 - [Drop main from the publish Environment](/quest/m0/ci/publish-release-only.md) - the maintainer narrows `publish` to `release` and release tags once no job naming it runs as `main`
-- [Release tags push to nix.moq.dev, and Cachix stops taking writes](/quest/m0/ci/cachix-retire.md) - backport `release-nix.yml` and its Just module to `release`, drop `cachix.yml`, prove a tag substitutes from nix.moq.dev, then revoke the Cachix token (the cache stays for old tags)
+- [Release tags push to nix.moq.dev, and Cachix stops taking writes](/quest/m0/ci/cachix-retire.md) - release tags now substitute from nix.moq.dev and the Cachix token is deleted; record both bucket sizes
 - [Measure the Linux cache effect of native media exclusions](/quest/m0/ci/hakari-followups.md) - scheduled Linux jobs measure cache reuse after unrelated tests stop compiling PipeWire and libclang
