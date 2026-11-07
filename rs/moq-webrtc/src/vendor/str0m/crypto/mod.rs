@@ -15,7 +15,6 @@ pub mod dtls {
 	pub use crate::vendor::dimpl::ProtocolVersion;
 	pub use crate::vendor::dimpl::SrtpProfile;
 	// Note: crate::vendor::dimpl::Error is renamed to DtlsImplError to avoid conflict with str0m's DtlsError
-	pub use super::provider::DtlsVersion;
 	pub use crate::vendor::dimpl::{Error as DtlsImplError, Output as DtlsOutput};
 }
 

@@ -111,7 +111,7 @@ impl Nonce {
 
 	/// Create a nonce by XORing the IV with the padded sequence number.
 	///
-	/// Used by both DTLS 1.2 (ChaCha20-Poly1305) and DTLS 1.3:
+	/// Used by DTLS 1.2 ChaCha20-Poly1305:
 	/// nonce = iv XOR pad_left(sequence_number, 12)
 	/// See RFC 8446 Section 5.3 / RFC 7905.
 	pub(crate) fn xor(iv: &[u8; 12], seq: u64) -> Self {
@@ -127,7 +127,7 @@ impl Nonce {
 
 /// Additional Authenticated Data for DTLS records.
 ///
-/// Variable-length to support both DTLS 1.2 (13 bytes) and DTLS 1.3 (3-5 bytes).
+/// DTLS 1.2 uses 13 bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Aad(pub ArrayVec<u8, 13>);
 
@@ -155,16 +155,6 @@ impl Aad {
 		// Payload length (2 bytes) at indexes 11-12
 		aad.try_extend_from_slice(&length.to_be_bytes()).unwrap();
 
-		Aad(aad)
-	}
-
-	/// Create Additional Authenticated Data for a DTLS 1.3 record.
-	///
-	/// The AAD is the raw unified header bytes (3-5 bytes).
-	pub(crate) fn new_dtls13(header_bytes: &[u8]) -> Self {
-		let mut aad = ArrayVec::new();
-		// unwrap: header_bytes is at most 5 bytes, well within capacity 13
-		aad.try_extend_from_slice(header_bytes).unwrap();
 		Aad(aad)
 	}
 }

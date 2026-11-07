@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::vendor::str0m_proto::crypto::CryptoError;
-use crate::vendor::str0m_proto::crypto::DtlsVersion;
 use crate::vendor::str0m_proto::crypto::dtls::ProtocolVersion;
 use crate::vendor::str0m_proto::crypto::dtls::{DtlsCert, DtlsImplError, DtlsInstance, DtlsOutput, DtlsProvider};
 
@@ -30,7 +29,6 @@ impl DtlsProvider for AwsLcRsDtlsProvider {
 		&self,
 		cert: &DtlsCert,
 		now: Instant,
-		dtls_version: DtlsVersion,
 		mtu: Option<usize>,
 	) -> Result<Box<dyn DtlsInstance>, CryptoError> {
 		let dimpl_cert = crate::vendor::dimpl::DtlsCertificate {
@@ -54,14 +52,7 @@ impl DtlsProvider for AwsLcRsDtlsProvider {
 			.map_err(|e| CryptoError::Other(format!("dimpl config creation failed: {}", e)))?;
 
 		let config = Arc::new(config);
-		let dtls = match dtls_version {
-			DtlsVersion::Dtls12 => crate::vendor::dimpl::Dtls::new_12(config, dimpl_cert, now),
-			DtlsVersion::Dtls13 => crate::vendor::dimpl::Dtls::new_13(config, dimpl_cert, now),
-			DtlsVersion::Auto => crate::vendor::dimpl::Dtls::new_auto(config, dimpl_cert, now),
-			_ => {
-				return Err(CryptoError::Other(format!("Unsupported DTLS version: {dtls_version}")));
-			}
-		};
+		let dtls = crate::vendor::dimpl::Dtls::new_12(config, dimpl_cert, now);
 
 		Ok(Box::new(AwsLcRsDtlsInstance { dtls }))
 	}

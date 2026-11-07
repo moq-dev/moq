@@ -1,16 +1,14 @@
 //! Cipher suite implementations using aws-lc-rs.
 
-use aws_lc_rs::aead::quic::{self as aws_quic, HeaderProtectionKey};
 use aws_lc_rs::aead::{AES_128_GCM, AES_256_GCM, CHACHA20_POLY1305, UnboundKey};
 use aws_lc_rs::aead::{Aad as AwsAad, LessSafeKey, Nonce as AwsNonce};
-use aws_lc_rs::cipher::{self as aws_cipher, AES_128, AES_256, EncryptingKey, UnboundCipherKey};
 
-use super::super::{Cipher, SupportedDtls12CipherSuite, SupportedDtls13CipherSuite};
+use super::super::{Cipher, SupportedDtls12CipherSuite};
 use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
 use crate::vendor::dimpl::crypto::{Aad, Nonce};
 use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
 use crate::vendor::dimpl::error::bounded_error_len;
-use crate::vendor::dimpl::types::{Dtls13CipherSuite, HashAlgorithm};
+use crate::vendor::dimpl::types::HashAlgorithm;
 use crate::vendor::dimpl::{CryptoError, CryptoOperation};
 
 /// AES-GCM cipher implementation using aws-lc-rs.
@@ -283,145 +281,6 @@ pub(super) static ALL_CIPHER_SUITES: &[&dyn SupportedDtls12CipherSuite] = &[
 	&CHACHA20_POLY1305_SHA256,
 	&PSK_AES_128_CCM_8,
 ];
-
-// ============================================================================
-// DTLS 1.3 Cipher Suites
-// ============================================================================
-
-/// TLS_AES_128_GCM_SHA256 cipher suite (TLS 1.3 / DTLS 1.3).
-#[derive(Debug)]
-struct Tls13Aes128GcmSha256;
-
-impl SupportedDtls13CipherSuite for Tls13Aes128GcmSha256 {
-	fn suite(&self) -> Dtls13CipherSuite {
-		Dtls13CipherSuite::AES_128_GCM_SHA256
-	}
-
-	fn hash_algorithm(&self) -> HashAlgorithm {
-		HashAlgorithm::SHA256
-	}
-
-	fn key_len(&self) -> usize {
-		16 // AES-128
-	}
-
-	fn iv_len(&self) -> usize {
-		12 // GCM IV
-	}
-
-	fn tag_len(&self) -> usize {
-		16 // GCM tag
-	}
-
-	fn create_cipher(&self, key: &[u8]) -> Result<Box<dyn Cipher>, CryptoError> {
-		Ok(Box::new(AesGcm::new(key)?))
-	}
-
-	fn encrypt_sn(&self, sn_key: &[u8], sample: &[u8; 16]) -> [u8; 16] {
-		aes_ecb_encrypt(&AES_128, sn_key, sample)
-	}
-}
-
-/// TLS_AES_256_GCM_SHA384 cipher suite (TLS 1.3 / DTLS 1.3).
-#[derive(Debug)]
-struct Tls13Aes256GcmSha384;
-
-impl SupportedDtls13CipherSuite for Tls13Aes256GcmSha384 {
-	fn suite(&self) -> Dtls13CipherSuite {
-		Dtls13CipherSuite::AES_256_GCM_SHA384
-	}
-
-	fn hash_algorithm(&self) -> HashAlgorithm {
-		HashAlgorithm::SHA384
-	}
-
-	fn key_len(&self) -> usize {
-		32 // AES-256
-	}
-
-	fn iv_len(&self) -> usize {
-		12 // GCM IV
-	}
-
-	fn tag_len(&self) -> usize {
-		16 // GCM tag
-	}
-
-	fn create_cipher(&self, key: &[u8]) -> Result<Box<dyn Cipher>, CryptoError> {
-		Ok(Box::new(AesGcm::new(key)?))
-	}
-
-	fn encrypt_sn(&self, sn_key: &[u8], sample: &[u8; 16]) -> [u8; 16] {
-		aes_ecb_encrypt(&AES_256, sn_key, sample)
-	}
-}
-
-/// TLS_CHACHA20_POLY1305_SHA256 cipher suite (TLS 1.3 / DTLS 1.3).
-#[derive(Debug)]
-struct Tls13ChaCha20Poly1305Sha256;
-
-impl SupportedDtls13CipherSuite for Tls13ChaCha20Poly1305Sha256 {
-	fn suite(&self) -> Dtls13CipherSuite {
-		Dtls13CipherSuite::CHACHA20_POLY1305_SHA256
-	}
-
-	fn hash_algorithm(&self) -> HashAlgorithm {
-		HashAlgorithm::SHA256
-	}
-
-	fn key_len(&self) -> usize {
-		32 // ChaCha20 key
-	}
-
-	fn iv_len(&self) -> usize {
-		12 // Poly1305 nonce
-	}
-
-	fn tag_len(&self) -> usize {
-		16 // Poly1305 tag
-	}
-
-	fn create_cipher(&self, key: &[u8]) -> Result<Box<dyn Cipher>, CryptoError> {
-		Ok(Box::new(ChaCha20Poly1305Cipher::new(key)?))
-	}
-
-	fn encrypt_sn(&self, sn_key: &[u8], sample: &[u8; 16]) -> [u8; 16] {
-		// RFC 9001 Section 5.4.4: ChaCha20 header protection
-		// counter = sample[0..4] (LE), nonce = sample[4..16]
-		// mask = ChaCha20(sn_key, counter, nonce, <5 zero bytes>)
-		// unwrap: sn_key length is validated by caller (32 bytes for ChaCha20)
-		let hp_key = HeaderProtectionKey::new(&aws_quic::CHACHA20, sn_key).unwrap();
-		// unwrap: sample is exactly 16 bytes as required
-		let mask = hp_key.new_mask(sample).unwrap();
-		let mut out = [0u8; 16];
-		out[..5].copy_from_slice(&mask);
-		out
-	}
-}
-
-/// Static instances of supported DTLS 1.3 cipher suites.
-static TLS13_AES_128_GCM_SHA256: Tls13Aes128GcmSha256 = Tls13Aes128GcmSha256;
-static TLS13_AES_256_GCM_SHA384: Tls13Aes256GcmSha384 = Tls13Aes256GcmSha384;
-static TLS13_CHACHA20_POLY1305_SHA256: Tls13ChaCha20Poly1305Sha256 = Tls13ChaCha20Poly1305Sha256;
-
-/// All supported DTLS 1.3 cipher suites.
-pub(super) static ALL_DTLS13_CIPHER_SUITES: &[&dyn SupportedDtls13CipherSuite] = &[
-	&TLS13_AES_128_GCM_SHA256,
-	&TLS13_AES_256_GCM_SHA384,
-	&TLS13_CHACHA20_POLY1305_SHA256,
-];
-
-/// AES-ECB single block encryption for record number protection.
-fn aes_ecb_encrypt(algorithm: &'static aws_cipher::Algorithm, key: &[u8], input: &[u8; 16]) -> [u8; 16] {
-	// unwrap: key length is validated by caller (matches algorithm)
-	let unbound = UnboundCipherKey::new(algorithm, key).unwrap();
-	// unwrap: ECB key construction cannot fail for valid AES keys
-	let ecb_key = EncryptingKey::ecb(unbound).unwrap();
-	let mut block = *input;
-	// unwrap: 16-byte input is exactly one AES block
-	ecb_key.encrypt(&mut block).unwrap();
-	block
-}
 
 #[cfg(test)]
 mod test {

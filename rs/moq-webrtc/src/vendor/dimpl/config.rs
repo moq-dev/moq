@@ -3,10 +3,10 @@ use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::vendor::dimpl::crypto::SupportedKxGroup;
 use crate::vendor::dimpl::crypto::{CryptoProvider, SupportedDtls12CipherSuite};
-use crate::vendor::dimpl::crypto::{SupportedDtls13CipherSuite, SupportedKxGroup};
 use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
-use crate::vendor::dimpl::types::{Dtls13CipherSuite, NamedGroup};
+use crate::vendor::dimpl::types::NamedGroup;
 use crate::vendor::dimpl::{ConfigError, Error};
 
 const MAX_TIMING_DURATION: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
@@ -27,8 +27,8 @@ pub trait PskResolver: Send + Sync + UnwindSafe + RefUnwindSafe {
 /// Use [`Psk::Client`] for endpoints that initiate PSK handshakes (send identity),
 /// and [`Psk::Server`] for endpoints that resolve incoming identities.
 ///
-/// `#[non_exhaustive]` so new variants (e.g. DTLS 1.3 external PSKs) or new
-/// fields can be added without a major version bump.
+/// `#[non_exhaustive]` so new variants or fields can be added without a major
+/// version bump.
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum Psk {
@@ -73,9 +73,7 @@ pub struct Config {
 	handshake_timeout: Duration,
 	crypto_provider: CryptoProvider,
 	rng_seed: Option<u64>,
-	aead_encryption_limit: u64,
 	dtls12_cipher_suites: Option<Vec<Dtls12CipherSuite>>,
-	dtls13_cipher_suites: Option<Vec<Dtls13CipherSuite>>,
 	kx_groups: Option<Vec<NamedGroup>>,
 	psk: Option<Psk>,
 }
@@ -94,9 +92,7 @@ impl Config {
 			handshake_timeout: Duration::from_secs(40),
 			crypto_provider: None,
 			rng_seed: None,
-			aead_encryption_limit: 1 << 23,
 			dtls12_cipher_suites: None,
-			dtls13_cipher_suites: None,
 			kx_groups: None,
 			psk: None,
 		}
@@ -138,8 +134,7 @@ impl Config {
 	/// Whether the server sends a cookie exchange before the handshake.
 	///
 	/// When true (the default), the server requires a stateless cookie
-	/// roundtrip for DoS protection: HelloVerifyRequest in DTLS 1.2,
-	/// HelloRetryRequest with a cookie in DTLS 1.3.
+	/// roundtrip for DoS protection: HelloVerifyRequest.
 	///
 	/// When false, the server proceeds directly to ServerHello without
 	/// a cookie exchange.
@@ -188,16 +183,6 @@ impl Config {
 	#[inline(always)]
 	pub fn rng_seed(&self) -> Option<u64> {
 		self.rng_seed
-	}
-
-	/// Maximum number of AEAD encryptions before triggering a KeyUpdate.
-	///
-	/// When the number of application-epoch ciphertext records reaches this
-	/// limit, the endpoint automatically initiates a KeyUpdate to rotate keys.
-	/// Defaults to 2^23 (8,388,608).
-	#[inline(always)]
-	pub fn aead_encryption_limit(&self) -> u64 {
-		self.aead_encryption_limit
 	}
 
 	/// PSK configuration, if any.
@@ -250,23 +235,6 @@ impl Config {
 			.filter(move |cs| has_psk || !cs.suite().is_psk())
 	}
 
-	/// Allowed DTLS 1.3 cipher suites, filtered by the config's allow-list.
-	///
-	/// Returns all provider DTLS 1.3 cipher suites when no filter is set.
-	/// When a filter is set via the builder's `dtls13_cipher_suites` method,
-	/// only suites in both the provider and the filter are returned.
-	pub fn dtls13_cipher_suites(&self) -> impl Iterator<Item = &'static dyn SupportedDtls13CipherSuite> + '_ {
-		let filter = self.dtls13_cipher_suites.as_ref();
-		self.crypto_provider
-			.dtls13_cipher_suites
-			.iter()
-			.copied()
-			.filter(move |cs| match filter {
-				Some(list) => list.contains(&cs.suite()),
-				None => true,
-			})
-	}
-
 	/// Allowed key exchange groups, filtered by the config's allow-list.
 	///
 	/// Returns all provider-supported key exchange groups when no filter
@@ -295,9 +263,7 @@ pub struct ConfigBuilder {
 	handshake_timeout: Duration,
 	crypto_provider: Option<CryptoProvider>,
 	rng_seed: Option<u64>,
-	aead_encryption_limit: u64,
 	dtls12_cipher_suites: Option<Vec<Dtls12CipherSuite>>,
-	dtls13_cipher_suites: Option<Vec<Dtls13CipherSuite>>,
 	kx_groups: Option<Vec<NamedGroup>>,
 	psk: Option<Psk>,
 }
@@ -346,8 +312,7 @@ impl ConfigBuilder {
 	/// Set whether the server sends a cookie exchange before the handshake.
 	///
 	/// When true (the default), the server requires a stateless cookie
-	/// roundtrip for DoS protection: HelloVerifyRequest in DTLS 1.2,
-	/// HelloRetryRequest with a cookie in DTLS 1.3.
+	/// roundtrip for DoS protection: HelloVerifyRequest.
 	///
 	/// When false, the server proceeds directly to ServerHello without
 	/// a cookie exchange.
@@ -362,7 +327,7 @@ impl ConfigBuilder {
 	/// interval doubles after every retry, with independent +/-25% jitter on
 	/// each interval. This is proportional even for sub-second values; the
 	/// minimum jittered interval is 1 nanosecond. Backoff arithmetic saturates
-	/// on overflow. Also governs DTLS 1.3 KeyUpdate flights.
+	/// on overflow.
 	///
 	/// Defaults to 1 second. Must be nonzero and at most ten years (3650 days).
 	pub fn flight_start_rto(mut self, rto: Duration) -> Self {
@@ -376,7 +341,7 @@ impl ConfigBuilder {
 	/// Timer-driven and duplicate-triggered retransmissions share this budget.
 	/// Once the handshake has completed locally, the final flight is still
 	/// resent in answer to the peer's retransmitted final flight, as
-	/// RFC 6347 §4.2.4 requires. Also governs DTLS 1.3 KeyUpdate flights.
+	/// RFC 6347 §4.2.4 requires.
 	/// Defaults to 4.
 	pub fn flight_retries(mut self, retries: usize) -> Self {
 		self.flight_retries = retries;
@@ -392,9 +357,9 @@ impl ConfigBuilder {
 	/// Construction and idle time consume no budget. Uses the logical time
 	/// supplied to [`crate::vendor::dimpl::Dtls::handle_timeout`].
 	///
-	/// The absolute deadline survives Auto version selection, cookie exchanges,
-	/// later flights, and retransmissions. It is disabled after completion and
-	/// does not apply to application traffic or DTLS 1.3 KeyUpdate.
+	/// The absolute deadline survives cookie exchanges, later flights, and
+	/// retransmissions. It is disabled after completion and does not apply to
+	/// application traffic.
 	///
 	/// Retry exhaustion may fail earlier; increasing this timeout does not
 	/// increase [`Self::flight_retries`]. With the defaults, an unanswered flight
@@ -429,35 +394,14 @@ impl ConfigBuilder {
 		self
 	}
 
-	/// Set the maximum number of AEAD encryptions before triggering a KeyUpdate.
-	///
-	/// Defaults to 2^23 (8,388,608).
-	pub fn aead_encryption_limit(mut self, limit: u64) -> Self {
-		self.aead_encryption_limit = limit;
-		self
-	}
-
 	/// Restrict which DTLS 1.2 cipher suites are offered and accepted.
 	///
 	/// Only cipher suites present in both this list and the provider will
-	/// be used. Passing an empty slice disables DTLS 1.2 (as long as
-	/// DTLS 1.3 suites remain).
+	/// be used. Passing an empty slice leaves no suites and fails the build.
 	///
 	/// By default all provider-supported DTLS 1.2 cipher suites are used.
 	pub fn dtls12_cipher_suites(mut self, suites: &[Dtls12CipherSuite]) -> Self {
 		self.dtls12_cipher_suites = Some(suites.to_vec());
-		self
-	}
-
-	/// Restrict which DTLS 1.3 cipher suites are offered and accepted.
-	///
-	/// Only cipher suites present in both this list and the provider will
-	/// be used. Passing an empty slice disables DTLS 1.3 (as long as
-	/// DTLS 1.2 suites remain).
-	///
-	/// By default all provider DTLS 1.3 cipher suites are used.
-	pub fn dtls13_cipher_suites(mut self, suites: &[Dtls13CipherSuite]) -> Self {
-		self.dtls13_cipher_suites = Some(suites.to_vec());
 		self
 	}
 
@@ -534,12 +478,7 @@ impl ConfigBuilder {
 			}));
 		}
 
-		// Validate aead_encryption_limit: must be at least 1
-		if self.aead_encryption_limit == 0 {
-			return Err(Error::ConfigError(ConfigError::AeadEncryptionLimitTooSmall));
-		}
-
-		// Validate cipher suite filters: at least one version must have suites.
+		// Validate cipher suite filters: at least one suite must remain.
 		// Mirror Config::dtls12_cipher_suites() by dropping PSK suites when no PSK
 		// is configured, so a PSK-only filter without a PSK resolver fails fast.
 		let has_psk = self.psk.is_some();
@@ -553,23 +492,13 @@ impl ConfigBuilder {
 				None => all.filter(|cs| has_psk || !cs.suite().is_psk()).collect(),
 			}
 		};
-		let dtls12_count = dtls12_suites.len();
-		let dtls13_count = {
-			let all = crypto_provider.dtls13_cipher_suites.iter();
-			match &self.dtls13_cipher_suites {
-				Some(list) => all.filter(|cs| list.contains(&cs.suite())).count(),
-				None => all.count(),
-			}
-		};
-		if dtls12_count + dtls13_count == 0 {
+		if dtls12_suites.is_empty() {
 			return Err(Error::ConfigError(ConfigError::NoCipherSuitesAfterFiltering));
 		}
 
 		// When PSK is configured, at least one negotiable DTLS 1.2 suite must be
-		// a PSK suite. The only PSK suite we implement today is DTLS 1.2 (0xC0A8),
-		// so a surviving DTLS 1.3 suite is not a fallback: Dtls::new_12_psk only
-		// speaks DTLS 1.2, and under AuthMode::Psk every non-PSK suite is rejected
-		// by CryptoContext::is_cipher_suite_compatible.
+		// a PSK suite: under AuthMode::Psk every non-PSK suite is rejected by
+		// CryptoContext::is_cipher_suite_compatible.
 		if has_psk && !dtls12_suites.iter().any(|cs| cs.suite().is_psk()) {
 			return Err(Error::ConfigError(ConfigError::PskConfiguredWithoutPskCipherSuite));
 		}
@@ -580,8 +509,8 @@ impl ConfigBuilder {
 		// compatible key exchange group, even when PSK is also configured.
 		let has_non_psk_dtls12 = dtls12_suites.iter().any(|cs| !cs.suite().is_psk());
 
-		// Validate kx_groups filter: each enabled version needs compatible groups
-		// (PSK-only DTLS 1.2 configs don't need key exchange groups)
+		// Validate kx_groups filter: certificate suites need compatible groups
+		// (PSK-only configs don't need key exchange groups)
 		let filtered_kx = |kx: &&'static dyn SupportedKxGroup| -> bool {
 			match &self.kx_groups {
 				Some(list) => list.contains(&kx.name()),
@@ -592,12 +521,6 @@ impl ConfigBuilder {
 			let dtls12_kx_count = crypto_provider.supported_kx_groups().filter(&filtered_kx).count();
 			if dtls12_kx_count == 0 {
 				return Err(Error::ConfigError(ConfigError::NoDtls12KeyExchangeGroupsAfterFiltering));
-			}
-		}
-		if dtls13_count > 0 {
-			let kx_count = crypto_provider.supported_kx_groups().filter(filtered_kx).count();
-			if kx_count == 0 {
-				return Err(Error::ConfigError(ConfigError::NoDtls13KeyExchangeGroupsAfterFiltering));
 			}
 		}
 
@@ -612,9 +535,7 @@ impl ConfigBuilder {
 			handshake_timeout: self.handshake_timeout,
 			crypto_provider,
 			rng_seed: self.rng_seed,
-			aead_encryption_limit: self.aead_encryption_limit,
 			dtls12_cipher_suites: self.dtls12_cipher_suites,
-			dtls13_cipher_suites: self.dtls13_cipher_suites,
 			kx_groups: self.kx_groups,
 			psk: self.psk,
 		})
@@ -659,9 +580,7 @@ impl fmt::Debug for Config {
 			.field("handshake_timeout", &self.handshake_timeout)
 			.field("crypto_provider", &self.crypto_provider)
 			.field("rng_seed", &self.rng_seed)
-			.field("aead_encryption_limit", &self.aead_encryption_limit)
 			.field("dtls12_cipher_suites", &self.dtls12_cipher_suites)
-			.field("dtls13_cipher_suites", &self.dtls13_cipher_suites)
 			.field("kx_groups", &self.kx_groups)
 			.field("psk", &self.psk)
 			.finish()
@@ -681,9 +600,7 @@ impl fmt::Debug for ConfigBuilder {
 			.field("handshake_timeout", &self.handshake_timeout)
 			.field("crypto_provider", &self.crypto_provider)
 			.field("rng_seed", &self.rng_seed)
-			.field("aead_encryption_limit", &self.aead_encryption_limit)
 			.field("dtls12_cipher_suites", &self.dtls12_cipher_suites)
-			.field("dtls13_cipher_suites", &self.dtls13_cipher_suites)
 			.field("kx_groups", &self.kx_groups)
 			.field("psk", &self.psk)
 			.finish()
@@ -773,23 +690,6 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_zero_aead_limit() {
-		match Config::builder().aead_encryption_limit(0).build() {
-			Err(Error::ConfigError(ConfigError::AeadEncryptionLimitTooSmall)) => {}
-			Err(other) => panic!("expected ConfigError, got: {other:?}"),
-			Ok(_) => panic!("expected error for aead_encryption_limit=0"),
-		}
-	}
-
-	#[test]
-	fn accepts_minimum_aead_limit() {
-		Config::builder()
-			.aead_encryption_limit(1)
-			.build()
-			.expect("aead_encryption_limit 1 should be accepted");
-	}
-
-	#[test]
 	fn filter_dtls12_cipher_suite() {
 		let config = Config::builder()
 			.dtls12_cipher_suites(&[Dtls12CipherSuite::ECDHE_ECDSA_AES128_GCM_SHA256])
@@ -797,16 +697,6 @@ mod tests {
 			.expect("should accept single DTLS 1.2 suite");
 		let suites: Vec<_> = config.dtls12_cipher_suites().map(|cs| cs.suite()).collect();
 		assert_eq!(suites, &[Dtls12CipherSuite::ECDHE_ECDSA_AES128_GCM_SHA256]);
-	}
-
-	#[test]
-	fn filter_dtls13_cipher_suite() {
-		let config = Config::builder()
-			.dtls13_cipher_suites(&[Dtls13CipherSuite::AES_256_GCM_SHA384])
-			.build()
-			.expect("should accept single DTLS 1.3 suite");
-		let suites: Vec<_> = config.dtls13_cipher_suites().map(|cs| cs.suite()).collect();
-		assert_eq!(suites, &[Dtls13CipherSuite::AES_256_GCM_SHA384]);
 	}
 
 	#[test]
@@ -820,45 +710,18 @@ mod tests {
 	}
 
 	#[test]
-	fn empty_dtls12_filter_disables_version() {
-		let config = Config::builder()
-			.dtls12_cipher_suites(&[])
-			.build()
-			.expect("should accept empty DTLS 1.2 when 1.3 has suites");
-		assert_eq!(config.dtls12_cipher_suites().count(), 0);
-		assert!(config.dtls13_cipher_suites().count() > 0);
-	}
-
-	#[test]
-	fn empty_dtls13_filter_disables_version() {
-		let config = Config::builder()
-			.dtls13_cipher_suites(&[])
-			.build()
-			.expect("should accept empty DTLS 1.3 when 1.2 has suites");
-		assert!(config.dtls12_cipher_suites().count() > 0);
-		assert_eq!(config.dtls13_cipher_suites().count(), 0);
-	}
-
-	#[test]
-	fn both_empty_filters_rejected() {
-		match Config::builder()
-			.dtls12_cipher_suites(&[])
-			.dtls13_cipher_suites(&[])
-			.build()
-		{
+	fn empty_filter_rejected() {
+		match Config::builder().dtls12_cipher_suites(&[]).build() {
 			Err(Error::ConfigError(ConfigError::NoCipherSuitesAfterFiltering)) => {}
 			Err(other) => panic!("expected ConfigError, got: {other:?}"),
-			Ok(_) => panic!("expected error when both versions are empty"),
+			Ok(_) => panic!("expected error when no suites remain"),
 		}
 	}
 
 	#[test]
 	fn empty_kx_groups_filter_rejected() {
 		match Config::builder().kx_groups(&[]).build() {
-			Err(Error::ConfigError(
-				ConfigError::NoDtls12KeyExchangeGroupsAfterFiltering
-				| ConfigError::NoDtls13KeyExchangeGroupsAfterFiltering,
-			)) => {}
+			Err(Error::ConfigError(ConfigError::NoDtls12KeyExchangeGroupsAfterFiltering)) => {}
 			Err(other) => panic!("expected ConfigError, got: {other:?}"),
 			Ok(_) => panic!("expected error for empty kx groups"),
 		}
@@ -868,22 +731,9 @@ mod tests {
 	fn x25519_only_accepted_for_dtls12() {
 		// X25519 is supported for DTLS 1.2 and should be accepted.
 		let config = Config::builder()
-			.dtls13_cipher_suites(&[])
 			.kx_groups(&[NamedGroup::X25519])
 			.build()
 			.expect("X25519-only should be accepted for DTLS 1.2");
-		let groups: Vec<_> = config.kx_groups().map(|g| g.name()).collect();
-		assert_eq!(groups, &[NamedGroup::X25519]);
-	}
-
-	#[test]
-	fn x25519_only_accepted_for_dtls13_only() {
-		// X25519-only is fine when DTLS 1.2 is disabled.
-		let config = Config::builder()
-			.dtls12_cipher_suites(&[])
-			.kx_groups(&[NamedGroup::X25519])
-			.build()
-			.expect("X25519-only should be accepted for DTLS 1.3-only config");
 		let groups: Vec<_> = config.kx_groups().map(|g| g.name()).collect();
 		assert_eq!(groups, &[NamedGroup::X25519]);
 	}
@@ -903,10 +753,9 @@ mod tests {
 	#[test]
 	fn no_filter_returns_all() {
 		let config = Config::default();
-		// Default provider should have at least 2 DTLS 1.2 and 2 DTLS 1.3 suites
+		// Default provider should have at least 2 DTLS 1.2 suites
 		// (PSK suites are excluded without a resolver, so only non-PSK count)
 		assert!(config.dtls12_cipher_suites().count() >= 2);
-		assert!(config.dtls13_cipher_suites().count() >= 2);
 		assert!(config.kx_groups().count() >= 2);
 	}
 
@@ -947,45 +796,17 @@ mod tests {
 			}
 		}
 
-		// PSK config but the user filtered DTLS 1.2 down to a cert-only suite
-		// and disabled DTLS 1.3. AuthMode::Psk would reject every surviving
+		// PSK config but the user filtered DTLS 1.2 down to a cert-only suite.
+		// AuthMode::Psk would reject every surviving
 		// suite at runtime, so build() should fail fast here.
 		let result = Config::builder()
 			.with_psk_client(b"identity".to_vec(), Arc::new(DummyResolver))
 			.dtls12_cipher_suites(&[Dtls12CipherSuite::ECDHE_ECDSA_AES128_GCM_SHA256])
-			.dtls13_cipher_suites(&[])
 			.build();
 		match result {
 			Err(Error::ConfigError(ConfigError::PskConfiguredWithoutPskCipherSuite)) => {}
 			Err(other) => panic!("expected ConfigError, got: {other:?}"),
 			Ok(_) => panic!("expected error for PSK config with only non-PSK suites"),
-		}
-	}
-
-	#[test]
-	fn psk_with_dtls13_but_no_psk_dtls12_suite_rejected() {
-		struct DummyResolver;
-		impl PskResolver for DummyResolver {
-			fn resolve(&self, _identity: &[u8]) -> Option<Vec<u8>> {
-				Some(b"key".to_vec())
-			}
-		}
-
-		// PSK configured, DTLS 1.2 filtered to cert-only, DTLS 1.3 left enabled.
-		// The surviving DTLS 1.3 suite is not a fallback for Dtls::new_12_psk,
-		// so build() must reject this config instead of producing one that can
-		// never complete a PSK handshake.
-		let result = Config::builder()
-			.with_psk_client(b"identity".to_vec(), Arc::new(DummyResolver))
-			.dtls12_cipher_suites(&[Dtls12CipherSuite::ECDHE_ECDSA_AES128_GCM_SHA256])
-			.build();
-		match result {
-			Err(Error::ConfigError(ConfigError::PskConfiguredWithoutPskCipherSuite)) => {}
-			Err(other) => panic!("expected ConfigError, got: {other:?}"),
-			Ok(_) => panic!(
-				"expected error for PSK config with only non-PSK DTLS 1.2 suites, \
-                 even when DTLS 1.3 is enabled"
-			),
 		}
 	}
 
@@ -1008,7 +829,6 @@ mod tests {
 				Dtls12CipherSuite::ECDHE_ECDSA_AES128_GCM_SHA256,
 				Dtls12CipherSuite::PSK_AES128_CCM_8,
 			])
-			.dtls13_cipher_suites(&[])
 			.kx_groups(&[])
 			.build();
 		match result {
@@ -1031,12 +851,11 @@ mod tests {
 		}
 
 		// PSK suites don't need ECDHE groups. A truly PSK-only endpoint (with
-		// the DTLS 1.2 filter narrowed to PSK suites and DTLS 1.3 disabled)
+		// the DTLS 1.2 filter narrowed to PSK suites)
 		// should be able to opt out of kx_groups entirely.
 		Config::builder()
 			.with_psk_client(b"identity".to_vec(), Arc::new(DummyResolver))
 			.dtls12_cipher_suites(&[Dtls12CipherSuite::PSK_AES128_CCM_8])
-			.dtls13_cipher_suites(&[])
 			.kx_groups(&[])
 			.build()
 			.expect("PSK-only client with empty kx_groups should build");
@@ -1044,19 +863,15 @@ mod tests {
 
 	#[test]
 	fn filter_with_explicit_provider() {
-		#[cfg(all())]
 		{
 			let config = Config::builder()
 				.with_crypto_provider(aws_lc_rs::default_provider())
 				.dtls12_cipher_suites(&[Dtls12CipherSuite::ECDHE_ECDSA_AES256_GCM_SHA384])
-				.dtls13_cipher_suites(&[Dtls13CipherSuite::AES_128_GCM_SHA256])
 				.kx_groups(&[NamedGroup::X25519, NamedGroup::Secp256r1])
 				.build()
 				.expect("should accept filtered config with explicit provider");
 			let suites12: Vec<_> = config.dtls12_cipher_suites().map(|cs| cs.suite()).collect();
 			assert_eq!(suites12, &[Dtls12CipherSuite::ECDHE_ECDSA_AES256_GCM_SHA384]);
-			let suites13: Vec<_> = config.dtls13_cipher_suites().map(|cs| cs.suite()).collect();
-			assert_eq!(suites13, &[Dtls13CipherSuite::AES_128_GCM_SHA256]);
 			let groups: Vec<_> = config.kx_groups().map(|g| g.name()).collect();
 			assert_eq!(groups, &[NamedGroup::X25519, NamedGroup::Secp256r1]);
 		}

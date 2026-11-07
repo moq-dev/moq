@@ -43,12 +43,9 @@ impl HandshakeTimers {
 		}
 	}
 
+	#[cfg(test)]
 	pub fn handshake_deadline(&self) -> Timeout {
 		self.handshake
-	}
-
-	pub fn set_handshake_deadline(&mut self, timeout: Timeout) {
-		self.handshake = timeout;
 	}
 
 	pub fn begin_flight(&mut self, rng: &mut SeededRng) {
@@ -217,7 +214,7 @@ mod test {
 	}
 
 	#[test]
-	fn flights_fragments_and_handoffs_preserve_deadline() {
+	fn flights_and_fragments_preserve_deadline() {
 		let (mut timers, mut rng) = timers(1);
 		let now = Instant::now();
 		timers.start_handshake(now);
@@ -242,16 +239,6 @@ mod test {
 		assert_eq!(timers.handshake_deadline(), original);
 		timers.stop_flight();
 		assert_eq!(timers.poll_timeout(last_retry), now + Duration::from_secs(2));
-
-		let config = Config::default();
-		let mut inherited = HandshakeTimers::new(&config, &mut rng);
-		inherited.set_handshake_deadline(original);
-		inherited.start_handshake(last_retry);
-		assert_eq!(inherited.poll_timeout(last_retry), now + Duration::from_secs(2));
-		assert_eq!(
-			inherited.handle_timeout(now + Duration::from_secs(2), &mut rng),
-			Err(TimeoutError::Connect)
-		);
 	}
 
 	#[test]

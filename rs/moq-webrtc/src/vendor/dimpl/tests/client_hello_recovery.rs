@@ -1,5 +1,3 @@
-#![cfg(all())]
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,20 +19,14 @@ fn corrected_client_hello_completes_after_malformed_extension_with_cookie() {
 }
 
 fn assert_client_hello_recovery(use_cookie: bool) {
-	let constructors = [Dtls::new_12, Dtls::new_13, Dtls::new_auto];
 	let certificate = generate_self_signed_certificate().expect("certificate");
 	let config = Arc::new(Config::builder().use_server_cookie(use_cookie).build().expect("config"));
-	for (client_version, server_version) in [(0, 0), (1, 1), (0, 2), (1, 2), (2, 0), (2, 1), (2, 2)] {
-		for kind in [10u16, 13, 14, 43, 44, 51] {
-			// DTLS 1.2 servers ignore the DTLS 1.3 extensions an Auto client
-			// offers, so malformed payloads there do not exercise rejection.
-			if (client_version == 0 || server_version == 0) && matches!(kind, 43 | 44 | 51) {
-				continue;
-			}
+	{
+		for kind in [10u16, 13, 14] {
 			for fragmented in [false, true] {
 				let now = Instant::now();
-				let mut client = constructors[client_version](config.clone(), certificate.clone(), now);
-				let mut server = constructors[server_version](config.clone(), certificate.clone(), now);
+				let mut client = Dtls::new_12(config.clone(), certificate.clone(), now);
+				let mut server = Dtls::new_12(config.clone(), certificate.clone(), now);
 				client.set_active(true);
 				client.handle_timeout(now).expect("client clock");
 				let mut hello = drain_outputs(&mut client).packets;
@@ -54,19 +46,15 @@ fn assert_client_hello_recovery(use_cookie: bool) {
 						hello.extend(drain_outputs(&mut client).packets);
 					}
 					assert_eq!(hello.len(), 1, "second ClientHello");
-					// The legacy cookie follows the session id in DTLS 1.2;
-					// DTLS 1.3 carries its cookie in extension 44 instead.
+					// The legacy cookie follows the session id.
 					let cookie_start = 60 + hello[0][59] as usize;
 					assert!(
-						hello[0][cookie_start] != 0 || extension_start(&hello[0], 44).is_some(),
+						hello[0][cookie_start] != 0,
 						"second ClientHello must include the cookie"
 					);
 				}
 				let mut malformed = hello[0].clone();
-				let Some(start) = extension_start(&malformed, kind) else {
-					assert!(kind == 44 && !use_cookie, "required test extension {kind}");
-					continue;
-				};
+				let start = extension_start(&malformed, kind).expect("required test extension");
 				malformed[start] = 0xff;
 				let chunk = if fragmented {
 					(malformed.len() - 25).div_ceil(2)
@@ -83,8 +71,7 @@ fn assert_client_hello_recovery(use_cookie: bool) {
 					server.handle_packet(&fragment).expect("discard malformed hello");
 					assert!(
 						drain_outputs(&mut server).packets.is_empty(),
-						"{client_version}->{server_version}, extension {kind}, \
-                         fragmented={fragmented}, cookie={use_cookie}"
+						"extension {kind}, fragmented={fragmented}, cookie={use_cookie}"
 					);
 				}
 				server.handle_packet(&hello[0]).expect("corrected hello");
@@ -106,8 +93,7 @@ fn assert_client_hello_recovery(use_cookie: bool) {
 				assert_eq!(
 					connected,
 					[true, true],
-					"{client_version}->{server_version}, extension {kind}, \
-                     fragmented={fragmented}, cookie={use_cookie}"
+					"extension {kind}, fragmented={fragmented}, cookie={use_cookie}"
 				);
 			}
 		}

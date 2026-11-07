@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use crate::vendor::netem::{NetemConfig, Probability, RandomLoss};
 use crate::vendor::str0m::RtcError;
-use crate::vendor::str0m::config::DtlsVersion;
 use crate::vendor::str0m::{Candidate, Input, Output, Reason, Rtc};
 use tracing::info_span;
 
@@ -108,36 +107,12 @@ fn dtls_retransmit_emitted_in_same_poll_pass() {
 /// previously caused an immediate-wake loop after dimpl had exhausted its
 /// retry budget.
 #[test]
-fn terminal_dtls_12_to_auto_timeout_does_not_rearm_expired_deadline() {
-	terminal_dtls_timeout_does_not_rearm_expired_deadline_for(DtlsVersion::Dtls12, DtlsVersion::Auto);
-}
-
-#[test]
-fn terminal_dtls_13_to_auto_timeout_does_not_rearm_expired_deadline() {
-	terminal_dtls_timeout_does_not_rearm_expired_deadline_for(DtlsVersion::Dtls13, DtlsVersion::Auto);
-}
-
-#[test]
-fn terminal_dtls_auto_to_auto_timeout_does_not_rearm_expired_deadline() {
-	terminal_dtls_timeout_does_not_rearm_expired_deadline_for(DtlsVersion::Auto, DtlsVersion::Auto);
-}
-
-#[test]
-fn terminal_dtls_12_to_12_timeout_does_not_rearm_expired_deadline() {
-	terminal_dtls_timeout_does_not_rearm_expired_deadline_for(DtlsVersion::Dtls12, DtlsVersion::Dtls12);
-}
-
-#[test]
-fn terminal_dtls_13_to_13_timeout_does_not_rearm_expired_deadline() {
-	terminal_dtls_timeout_does_not_rearm_expired_deadline_for(DtlsVersion::Dtls13, DtlsVersion::Dtls13);
-}
-
-fn terminal_dtls_timeout_does_not_rearm_expired_deadline_for(client_dtls: DtlsVersion, server_dtls: DtlsVersion) {
+fn terminal_dtls_timeout_does_not_rearm_expired_deadline() {
 	init_crypto_default();
 
 	let now = Instant::now();
-	let left_rtc = Rtc::builder().set_dtls_version(client_dtls).build(now);
-	let right_rtc = Rtc::builder().set_dtls_version(server_dtls).build(now);
+	let left_rtc = Rtc::builder().build(now);
+	let right_rtc = Rtc::builder().build(now);
 	let mut left = TestRtc::new_with_rtc(info_span!("L"), left_rtc);
 	let mut right = TestRtc::new_with_rtc(info_span!("R"), right_rtc);
 

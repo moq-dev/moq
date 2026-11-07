@@ -19,7 +19,6 @@ use tracing::{debug, trace};
 use arrayvec::ArrayVec;
 use subtle::ConstantTimeEq;
 
-use crate::vendor::dimpl::auto::HybridClientHello;
 use crate::vendor::dimpl::buffer::{Buf, ToBuf};
 use crate::vendor::dimpl::crypto::SrtpProfile;
 use crate::vendor::dimpl::dtls12::Server;
@@ -52,9 +51,6 @@ pub struct Client {
 	/// Cookie is sent by the server in the optional HelloVerifyRequest.
 	/// It might remain null if there is no HelloVerifyRequest.
 	cookie: Option<Cookie>,
-
-	/// Original auto-sense offer, retained for cookie retries.
-	hybrid: Option<Box<HybridClientHello>>,
 
 	/// Storage for extension data
 	extension_data: Buf,
@@ -107,66 +103,6 @@ impl Client {
 			random: None,
 			session_id: None,
 			cookie: None,
-			hybrid: None,
-			extension_data,
-			negotiated_srtp_profile: None,
-			server_random: None,
-			server_certificates: Vec::with_capacity(3),
-			defragment_buffer,
-			certificate_verify: false,
-			captured_session_hash: None,
-			last_now: now,
-			local_events: VecDeque::new(),
-			queued_data: Vec::new(),
-		}
-	}
-
-	/// Create a client from a hybrid ClientHello probe (DTLS 1.2 fork).
-	///
-	/// Accepts the hybrid's random and DTLS-framed handshake bytes so that:
-	/// - The with-cookie ClientHello uses the same random (HMAC cookie verification).
-	/// - The transcript contains the initial ClientHello (needed when the
-	///   server skips HelloVerifyRequest and sends ServerHello directly).
-	///
-	/// If the server does send HVR, `reset_client_for_hello_verify_request`
-	/// clears the transcript anyway, so the injected bytes are harmless.
-	pub(crate) fn new_from_hybrid(
-		hybrid: HybridClientHello,
-		config: std::sync::Arc<Config>,
-		certificate: DtlsCertificate,
-		now: Instant,
-		timers: HandshakeTimers,
-	) -> Client {
-		assert!(
-			!certificate.certificate.is_empty(),
-			"Client certificate cannot be empty"
-		);
-		// unwrap: malformed private_key bytes are a programmer error from the
-		// caller who constructed DtlsCertificate; panic matches the prior
-		// CryptoContext::new behavior which also panicked on empty/invalid
-		// key material.
-		let private_key = config
-			.crypto_provider()
-			.key_provider
-			.load_private_key(&certificate.private_key)
-			.expect("Failed to parse client private key");
-		let auth = AuthMode::Certificate {
-			certificate: certificate.certificate,
-			private_key,
-		};
-		let mut engine = Engine::new(config, auth);
-		engine.set_client(true);
-		engine.inject_hybrid_client_hello(&hybrid.handshake_fragment, timers);
-		let extension_data = engine.pop_buffer();
-		let defragment_buffer = engine.pop_buffer();
-
-		Client {
-			state: State::AwaitHelloVerifyRequest,
-			engine,
-			random: Some(hybrid.random),
-			session_id: None,
-			cookie: None,
-			hybrid: Some(Box::new(hybrid)),
 			extension_data,
 			negotiated_srtp_profile: None,
 			server_random: None,
@@ -367,11 +303,6 @@ impl State {
 		client
 			.engine
 			.create_handshake(MessageType::ClientHello, |body, engine| {
-				if let Some(hybrid) = &mut client.hybrid {
-					hybrid.set_legacy_cookie(cookie);
-					hybrid.serialize(body);
-					return Ok(());
-				}
 				handshake_create_client_hello(body, engine, cookie, random, session_id, &mut client.extension_data)
 			})?;
 
@@ -519,8 +450,6 @@ impl State {
 			debug!("Negotiated SRTP profile: {:?}", profile);
 		}
 		trace!("Extended Master Secret enabled");
-
-		client.hybrid = None;
 
 		// PSK suites skip Certificate; go directly to ServerKeyExchange
 		if cs.is_psk() {

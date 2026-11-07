@@ -1,5 +1,3 @@
-#![cfg(all())]
-
 use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
@@ -12,18 +10,10 @@ use super::dtls12::common;
 
 use common::{DrainedOutputs, drain_outputs};
 
-const VERSIONS: &[Version] = &[Version::Dtls12, Version::Dtls13, Version::Auto];
+const VERSIONS: &[Version] = &[Version::Dtls12];
 const BUDGET: Duration = Duration::from_millis(100);
 const LONG_RTO: Duration = Duration::from_secs(1);
-const PAIRS: &[(Version, Version)] = &[
-	(Version::Dtls12, Version::Dtls12),
-	(Version::Dtls13, Version::Dtls13),
-	(Version::Auto, Version::Dtls12),
-	(Version::Auto, Version::Dtls13),
-	(Version::Dtls12, Version::Auto),
-	(Version::Dtls13, Version::Auto),
-	(Version::Auto, Version::Auto),
-];
+const PAIRS: &[(Version, Version)] = &[(Version::Dtls12, Version::Dtls12)];
 
 // Offsets in a datagram holding one plaintext record (RFC 6347 §4.1, §4.2.2).
 const CONTENT_TYPE: usize = 0;
@@ -43,16 +33,12 @@ const SESSION_ID_LENGTH: usize = HANDSHAKE_BODY + 34;
 #[derive(Clone, Copy, Debug)]
 enum Version {
 	Dtls12,
-	Dtls13,
-	Auto,
 }
 
 impl Version {
 	fn endpoint(self, config: Arc<Config>, certificate: DtlsCertificate, now: Instant) -> Dtls {
 		match self {
 			Self::Dtls12 => Dtls::new_12(config, certificate, now),
-			Self::Dtls13 => Dtls::new_13(config, certificate, now),
-			Self::Auto => Dtls::new_auto(config, certificate, now),
 		}
 	}
 }
@@ -254,12 +240,10 @@ fn initial_poll_schedules_client_progress_without_spinning_idle_servers() {
 		assert!(idle.0.is_empty());
 		assert!(idle.1 > base);
 		endpoint.set_active(true);
-		if !matches!(version, Version::Auto) {
-			let initial = drain(&mut endpoint);
-			assert!(initial.0.is_empty());
-			assert_eq!(initial.1, base);
-			endpoint.handle_timeout(initial.1).expect("initial client progress");
-		}
+		let initial = drain(&mut endpoint);
+		assert!(initial.0.is_empty());
+		assert_eq!(initial.1, base);
+		endpoint.handle_timeout(initial.1).expect("initial client progress");
 		let initial = drain(&mut endpoint);
 		assert!(!initial.0.is_empty());
 		assert_eq!(initial.1, base + BUDGET);
@@ -561,12 +545,10 @@ fn configured_rto_jitter_and_exact_retry_counts_apply_to_every_role() {
 						assert!(before.0.is_empty());
 						assert_eq!(before.1, deadline);
 						if attempt == retries {
-							let reason = if active && matches!(version, Version::Auto) {
-								TimeoutError::HybridClientHello
-							} else {
-								TimeoutError::Handshake
-							};
-							assert_eq!(endpoint.handle_timeout(deadline), Err(Error::Timeout(reason)));
+							assert_eq!(
+								endpoint.handle_timeout(deadline),
+								Err(Error::Timeout(TimeoutError::Handshake))
+							);
 						} else {
 							endpoint.handle_timeout(deadline).expect("retry available");
 							now = deadline;
@@ -769,166 +751,6 @@ fn zero_retry_servers_answer_every_retransmitted_final_flight() {
 }
 
 #[test]
-fn delayed_auto_client_selection_keeps_only_the_original_remaining_budget() {
-	let base = Instant::now();
-	let certificate = generate_self_signed_certificate().expect("certificate");
-	for peer_version in [Version::Dtls12, Version::Dtls13] {
-		let mut client = Version::Auto.endpoint(config(), certificate.clone(), base);
-		client.set_active(true);
-		client.handle_timeout(base).expect("initial clock");
-		let (hello, original_deadline) = drain(&mut client);
-		assert_eq!(client.protocol_version(), None);
-		let selection = base + Duration::from_millis(70);
-		client.handle_timeout(selection).expect("remaining initial budget");
-		assert_eq!(drain(&mut client).1, original_deadline);
-		let mut server = peer_version.endpoint(config(), certificate.clone(), selection);
-		server.handle_timeout(selection).expect("server clock");
-		drain(&mut server);
-		let mut responses = Vec::new();
-		for packet in hello {
-			server.handle_packet(&packet).expect("peer accepts hybrid ClientHello");
-			responses.extend(drain(&mut server).0);
-		}
-		assert!(!responses.is_empty());
-		let mut second_hello = Vec::new();
-		for packet in responses {
-			client.handle_packet(&packet).expect("version handoff");
-			let output = drain(&mut client);
-			second_hello.extend(output.0);
-			assert_eq!(output.1, original_deadline);
-		}
-		assert!(!second_hello.is_empty());
-		let expected = match peer_version {
-			Version::Dtls12 => ProtocolVersion::DTLS1_2,
-			Version::Dtls13 => ProtocolVersion::DTLS1_3,
-			Version::Auto => unreachable!(),
-		};
-		assert_eq!(client.protocol_version(), Some(expected));
-		assert_eq!(
-			client.handle_timeout(original_deadline),
-			Err(Error::Timeout(TimeoutError::Connect))
-		);
-	}
-}
-
-#[test]
-fn delayed_auto_client_without_cookie_keeps_deadline_while_waiting_for_server_flight() {
-	let base = Instant::now();
-	let certificate = generate_self_signed_certificate().expect("certificate");
-	for (peer_version, expected_version) in [
-		(Version::Dtls12, ProtocolVersion::DTLS1_2),
-		(Version::Dtls13, ProtocolVersion::DTLS1_3),
-	] {
-		let mut client = Version::Auto.endpoint(config(), certificate.clone(), base);
-		client.set_active(true);
-		client.handle_timeout(base).expect("client clock");
-		let (hello, original_deadline) = drain(&mut client);
-		let selection = base + Duration::from_millis(70);
-		client.handle_timeout(selection).expect("remaining initial budget");
-		assert_eq!(drain(&mut client).1, original_deadline);
-
-		let server_config = Arc::new(
-			Config::builder()
-				.dangerously_set_rng_seed(42)
-				.use_server_cookie(false)
-				.mtu(128)
-				.max_queue_tx(30)
-				.build()
-				.expect("fragmented server flight"),
-		);
-		let mut server = peer_version.endpoint(server_config, certificate.clone(), selection);
-		server.handle_timeout(selection).expect("server clock");
-		drain(&mut server);
-		let mut responses = Vec::new();
-		for packet in hello {
-			server.handle_packet(&packet).expect("hybrid ClientHello");
-			responses.extend(drain(&mut server).0);
-		}
-		assert!(responses.len() > 1, "withhold part of the server flight");
-		client
-			.handle_packet(&responses[0])
-			.expect("version selection without a cookie");
-		let output = drain_outputs(&mut client);
-		assert!(!output.connected);
-		assert!(output.packets.is_empty());
-		assert_eq!(client.protocol_version(), Some(expected_version));
-		assert_eq!(output.timeout, Some(original_deadline));
-		assert_expires_at(&mut client, original_deadline);
-	}
-}
-
-#[test]
-fn auto_handoff_preserves_outstanding_flight_retries() {
-	let base = Instant::now();
-	let certificate = generate_self_signed_certificate().expect("certificate");
-	let initial_rto = Duration::from_millis(20);
-	for peer_version in [Version::Dtls12, Version::Dtls13] {
-		for (retries, used) in [(0, 0), (2, 0), (2, 1)] {
-			let config = Arc::new(
-				Config::builder()
-					.dangerously_set_rng_seed(42)
-					.flight_start_rto(initial_rto)
-					.flight_retries(retries)
-					.handshake_timeout(Duration::from_secs(1))
-					.build()
-					.expect("client config"),
-			);
-			let mut client = Version::Auto.endpoint(config, certificate.clone(), base);
-			client.set_active(true);
-			client.handle_timeout(base).expect("client clock");
-			let (mut hello, mut retry_at) = drain(&mut client);
-			let mut now = base;
-			for _ in 0..used {
-				client.handle_timeout(retry_at).expect("pending Auto retry");
-				now = retry_at;
-				(hello, retry_at) = drain(&mut client);
-			}
-			assert_eq!(hello.len(), 1);
-			let selection = now + Duration::from_millis(1);
-			client.handle_timeout(selection).expect("before outstanding retry");
-			assert_eq!(drain(&mut client).1, retry_at);
-			let server_config = Arc::new(
-				Config::builder()
-					.use_server_cookie(false)
-					.mtu(128)
-					.max_queue_tx(30)
-					.build()
-					.expect("fragmented server config"),
-			);
-			let mut server = peer_version.endpoint(server_config, certificate.clone(), selection);
-			server.handle_timeout(selection).expect("server clock");
-			drain(&mut server);
-			server.handle_packet(&hello[0]).expect("hybrid ClientHello");
-			let (responses, _) = drain(&mut server);
-			assert!(responses.len() > 1);
-			client
-				.handle_packet(&responses[0])
-				.expect("partial server flight handoff");
-			assert_eq!(
-				drain(&mut client).1,
-				retry_at,
-				"{peer_version:?}, retries={retries}, used={used}"
-			);
-			for attempt in used..retries {
-				client.handle_timeout(retry_at).expect("remaining retry after handoff");
-				let sent_at = retry_at;
-				let output = drain(&mut client);
-				assert_eq!(output.0.len(), 1);
-				assert_eq!(&output.0[0][RECORD_HEADER_LEN..], &hello[0][RECORD_HEADER_LEN..]);
-				let nominal = initial_rto * (1 << (attempt + 1));
-				assert!(output.1 >= sent_at + nominal.mul_f64(0.75));
-				assert!(output.1 <= sent_at + nominal.mul_f64(1.25));
-				retry_at = output.1;
-			}
-			assert_eq!(
-				client.handle_timeout(retry_at),
-				Err(Error::Timeout(TimeoutError::Handshake))
-			);
-		}
-	}
-}
-
-#[test]
 fn first_client_fragment_starts_deadline_and_later_emissions_do_not_refresh_it() {
 	let base = Instant::now();
 	let certificate = generate_self_signed_certificate().expect("certificate");
@@ -942,7 +764,7 @@ fn first_client_fragment_starts_deadline_and_later_emissions_do_not_refresh_it()
 			.build()
 			.expect("fragmented configuration"),
 	);
-	for version in [Version::Dtls12, Version::Dtls13] {
+	for &version in VERSIONS {
 		let mut client = version.endpoint(config.clone(), certificate.clone(), base);
 		client.set_active(true);
 		client.handle_timeout(base).expect("queue fragments");
@@ -969,7 +791,7 @@ fn first_client_fragment_starts_deadline_and_later_emissions_do_not_refresh_it()
 }
 
 #[test]
-fn server_fragments_duplicates_and_auto_fallback_preserve_first_reception() {
+fn server_fragments_and_duplicates_preserve_first_reception() {
 	let base = Instant::now();
 	let certificate = generate_self_signed_certificate().expect("certificate");
 	let config = Arc::new(
@@ -982,12 +804,7 @@ fn server_fragments_duplicates_and_auto_fallback_preserve_first_reception() {
 			.build()
 			.expect("fragmented configuration"),
 	);
-	for (client_version, server_version) in [
-		(Version::Dtls12, Version::Dtls12),
-		(Version::Dtls13, Version::Dtls13),
-		(Version::Dtls12, Version::Auto),
-		(Version::Dtls13, Version::Auto),
-	] {
+	for &(client_version, server_version) in PAIRS {
 		for reverse in [false, true] {
 			for complete in [false, true] {
 				let reception = base + Duration::from_secs(60);
@@ -1027,16 +844,7 @@ fn server_fragments_duplicates_and_auto_fallback_preserve_first_reception() {
 						assert_eq!(output.1, first_output.1);
 					}
 					assert!(!responses.is_empty());
-					if matches!(server_version, Version::Auto) && matches!(client_version, Version::Dtls13) {
-						assert_eq!(server.protocol_version(), None);
-					} else {
-						let expected = if matches!(client_version, Version::Dtls12) {
-							ProtocolVersion::DTLS1_2
-						} else {
-							ProtocolVersion::DTLS1_3
-						};
-						assert_eq!(server.protocol_version(), Some(expected));
-					}
+					assert_eq!(server.protocol_version(), Some(ProtocolVersion::DTLS1_2));
 				}
 				assert_eq!(
 					server.handle_timeout(first_output.1),
@@ -1208,7 +1016,7 @@ fn cookie_exchanges_and_fresh_flights_reset_only_retry_state() {
 }
 
 #[test]
-fn completed_handshakes_stay_connected_after_deadline_and_key_updates() {
+fn completed_handshakes_stay_connected_after_deadline() {
 	let base = Instant::now();
 	let certificate = generate_self_signed_certificate().expect("certificate");
 	for use_cookie in [false, true] {
@@ -1219,9 +1027,8 @@ fn completed_handshakes_stay_connected_after_deadline_and_key_updates() {
 				.handshake_timeout(BUDGET)
 				.flight_start_rto(Duration::from_millis(20))
 				.flight_retries(3)
-				.aead_encryption_limit(3)
 				.build()
-				.expect("small key-update threshold"),
+				.expect("small handshake budget"),
 		);
 		for &versions in PAIRS {
 			let (mut client, mut server) = connected_pair(versions, config.clone(), &certificate, base);
@@ -1242,128 +1049,6 @@ fn completed_handshakes_stay_connected_after_deadline_and_key_updates() {
 				assert!(received.0.timeout.expect("client timeout") > now);
 				assert!(received.1.timeout.expect("server timeout") > now);
 			}
-		}
-	}
-}
-
-#[test]
-fn key_update_uses_configured_retries_without_restarting_handshake_budget() {
-	let base = Instant::now();
-	let certificate = generate_self_signed_certificate().expect("certificate");
-	let rto = Duration::from_millis(20);
-	for retries in [0, 2] {
-		let config = Arc::new(
-			Config::builder()
-				.dangerously_set_rng_seed(42)
-				.handshake_timeout(Duration::from_millis(5))
-				.flight_start_rto(rto)
-				.flight_retries(retries)
-				.aead_encryption_limit(3)
-				.build()
-				.expect("small handshake budget and key-update threshold"),
-		);
-		for versions in [
-			(Version::Dtls13, Version::Dtls13),
-			(Version::Auto, Version::Dtls13),
-			(Version::Dtls13, Version::Auto),
-			(Version::Auto, Version::Auto),
-		] {
-			for client_sends in [false, true] {
-				let (mut client, mut server) = connected_pair(versions, config.clone(), &certificate, base);
-				let now = base + Duration::from_secs(60);
-				client.handle_timeout(now).expect("client idle after completion");
-				server.handle_timeout(now).expect("server idle after completion");
-				exchange(&mut client, &mut server, now);
-				let sender = if client_sends { &mut client } else { &mut server };
-				let mut next_retry = None;
-				for _ in 0..3 {
-					sender
-						.send_application_data(b"trigger key update")
-						.expect("application data");
-					assert!(!drain(sender).0.is_empty());
-					sender.handle_timeout(now).expect("trigger KeyUpdate");
-					let output = drain(sender);
-					if output.1 < now + Duration::from_secs(1) {
-						assert!(!output.0.is_empty());
-						next_retry = Some(output.1);
-						break;
-					}
-				}
-				let mut deadline = next_retry.expect("AEAD threshold must trigger a KeyUpdate flight");
-				let mut sent_at = now;
-				for attempt in 0..=retries {
-					let nominal = rto * (1 << attempt);
-					assert!(deadline >= sent_at + nominal.mul_f64(0.75));
-					assert!(deadline <= sent_at + nominal.mul_f64(1.25));
-					if attempt == retries {
-						assert_eq!(
-							sender.handle_timeout(deadline),
-							Err(Error::Timeout(TimeoutError::Handshake))
-						);
-					} else {
-						sender.handle_timeout(deadline).expect("KeyUpdate retry");
-						sent_at = deadline;
-						let output = drain(sender);
-						assert!(!output.0.is_empty());
-						deadline = output.1;
-					}
-				}
-			}
-		}
-	}
-}
-
-#[test]
-fn server_deadline_survives_client_certificate_until_finished() {
-	let base = Instant::now();
-	let certificate = generate_self_signed_certificate().expect("certificate");
-	for use_cookie in [false, true] {
-		let config = Arc::new(
-			Config::builder()
-				.dangerously_set_rng_seed(42)
-				.use_server_cookie(use_cookie)
-				.mtu(128)
-				.max_queue_tx(30)
-				.handshake_timeout(BUDGET)
-				.flight_start_rto(LONG_RTO)
-				.flight_retries(100)
-				.build()
-				.expect("fragmented certificate configuration"),
-		);
-		for (client_version, server_version) in [
-			(Version::Dtls13, Version::Dtls13),
-			(Version::Auto, Version::Dtls13),
-			(Version::Dtls13, Version::Auto),
-			(Version::Auto, Version::Auto),
-		] {
-			let mut client = client_version.endpoint(config.clone(), certificate.clone(), base);
-			let mut server = server_version.endpoint(config.clone(), certificate.clone(), base);
-			client.set_active(true);
-			client.handle_timeout(base).expect("start client");
-			server.handle_timeout(base).expect("server clock");
-			let mut client_output = drain_outputs(&mut client);
-			let mut server_output = drain_outputs(&mut server);
-			let mut saw_certificate = false;
-			'handshake: for _ in 0..20 {
-				for packet in mem::take(&mut client_output.packets) {
-					server.handle_packet(&packet).expect("receive client flight");
-					let output = drain_outputs(&mut server);
-					if output.peer_cert.is_some() {
-						assert!(!output.connected, "Finished must still be withheld");
-						assert_eq!(output.timeout, Some(base + BUDGET));
-						saw_certificate = true;
-						break 'handshake;
-					}
-					merge_output(&mut server_output, output);
-				}
-				deliver_queued(&mut server_output, &mut client, &mut client_output);
-			}
-			assert!(saw_certificate, "must stop between Certificate and Finished");
-			server
-				.handle_timeout(base + Duration::from_millis(70))
-				.expect("remaining handshake budget");
-			assert_eq!(drain(&mut server).1, base + BUDGET);
-			assert_expires_at(&mut server, base + BUDGET);
 		}
 	}
 }

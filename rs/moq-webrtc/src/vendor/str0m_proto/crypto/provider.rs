@@ -123,29 +123,6 @@ pub trait Sha256Provider: CryptoSafe {
 	fn sha256(&self, data: &[u8]) -> [u8; 32];
 }
 
-/// Which DTLS version(s) to use for the handshake.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum DtlsVersion {
-	/// Use only DTLS 1.2.
-	#[default]
-	Dtls12,
-	/// Use only DTLS 1.3.
-	Dtls13,
-	/// Auto-detect: the first incoming ClientHello determines the version.
-	Auto,
-}
-
-impl fmt::Display for DtlsVersion {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			DtlsVersion::Dtls12 => write!(f, "DTLS 1.2"),
-			DtlsVersion::Dtls13 => write!(f, "DTLS 1.3"),
-			DtlsVersion::Auto => write!(f, "DTLS Auto-detect"),
-		}
-	}
-}
-
 /// Factory for DTLS instances and certificates.
 pub trait DtlsProvider: CryptoSafe {
 	/// Generate a new self-signed DTLS certificate.
@@ -154,17 +131,12 @@ pub trait DtlsProvider: CryptoSafe {
 	/// In that case, the user must supply a certificate via `RtcConfig::set_dtls_cert`.
 	fn generate_certificate(&self) -> Option<DtlsCert>;
 
-	/// Create a new DTLS instance with the given certificate.
+	/// Create a new DTLS 1.2 instance with the given certificate.
 	///
 	/// mtu: Backends that can size their record layer according to the provided MTU should do so;
 	/// backends that cannot ignore it. `None` means use the backend's default.
-	fn new_dtls(
-		&self,
-		cert: &DtlsCert,
-		now: Instant,
-		dtls_version: DtlsVersion,
-		mtu: Option<usize>,
-	) -> Result<Box<dyn DtlsInstance>, CryptoError>;
+	fn new_dtls(&self, cert: &DtlsCert, now: Instant, mtu: Option<usize>)
+	-> Result<Box<dyn DtlsInstance>, CryptoError>;
 
 	/// Whether the provider is used in a test context.
 	fn is_test(&self) -> bool {

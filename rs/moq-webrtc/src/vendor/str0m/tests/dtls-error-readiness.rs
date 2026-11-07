@@ -4,7 +4,6 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use crate::vendor::str0m::config::DtlsVersion;
 use crate::vendor::str0m::net::{Protocol, Receive};
 use crate::vendor::str0m::{Input, Output, Reason, Rtc, RtcError};
 
@@ -15,7 +14,7 @@ use common::init_crypto_default;
 fn rejected_client_hello_still_exposes_new_handshake_deadline() {
 	init_crypto_default();
 	let now = Instant::now();
-	let mut rtc = Rtc::builder().set_dtls_version(DtlsVersion::Dtls12).build(now);
+	let mut rtc = Rtc::builder().build(now);
 	rtc.direct_api().start_dtls(false).unwrap();
 	match rtc.poll_output().unwrap() {
 		Output::Timeout(deadline) => assert!(deadline > now + Duration::from_secs(60)),

@@ -149,7 +149,7 @@ use std::sync::OnceLock;
 use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
 use crate::vendor::dimpl::crypto::{Aad, Nonce};
 use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
-use crate::vendor::dimpl::types::{Dtls13CipherSuite, HashAlgorithm, NamedGroup, SignatureAlgorithm};
+use crate::vendor::dimpl::types::{HashAlgorithm, NamedGroup, SignatureAlgorithm};
 use crate::vendor::dimpl::{CertificateError, CryptoError};
 
 /// OID for the P-256 elliptic curve (secp256r1 / prime256v1).
@@ -331,34 +331,6 @@ pub fn check_verify_scheme(
 	}
 }
 
-/// Extract the EC curve ([`NamedGroup`]) from a DER-encoded X.509 certificate.
-///
-/// Used by DTLS 1.3 to verify that the [`SignatureScheme`](crate::vendor::dimpl::types::SignatureScheme)
-/// in `CertificateVerify` is consistent with the peer's certificate key.
-#[cfg(all())]
-pub fn cert_named_group(cert_der: &[u8]) -> Result<NamedGroup, CertificateError> {
-	use der::Decode;
-	use spki::ObjectIdentifier;
-	use x509_cert::Certificate as X509Certificate;
-
-	let cert = X509Certificate::from_der(cert_der).map_err(|_| CertificateError::ParseFailed)?;
-	let spki = cert.tbs_certificate().subject_public_key_info();
-
-	let curve_oid: ObjectIdentifier = spki
-		.algorithm
-		.parameters
-		.as_ref()
-		.ok_or(CertificateError::MissingEcCurveParameter)?
-		.decode_as()
-		.map_err(|_| CertificateError::InvalidEcCurveParameter)?;
-
-	match curve_oid {
-		OID_P256 => Ok(NamedGroup::Secp256r1),
-		OID_P384 => Ok(NamedGroup::Secp384r1),
-		_ => Err(CertificateError::UnsupportedEcCurve),
-	}
-}
-
 /// Private key parser (factory for SigningKey).
 pub trait KeyProvider: CryptoSafe {
 	/// Parse and load a private key from DER/PEM bytes.
@@ -393,54 +365,6 @@ pub trait HmacProvider: CryptoSafe {
 }
 
 // ============================================================================
-// DTLS 1.3 Factory Traits
-// ============================================================================
-
-/// Cipher suite support for DTLS 1.3 (factory for Cipher instances).
-///
-/// Unlike DTLS 1.2 cipher suites, TLS 1.3 cipher suites only specify the
-/// AEAD algorithm and hash function. Key exchange is negotiated separately.
-pub trait SupportedDtls13CipherSuite: CryptoSafe {
-	/// The cipher suite this supports.
-	fn suite(&self) -> Dtls13CipherSuite;
-
-	/// Hash algorithm used by this suite.
-	fn hash_algorithm(&self) -> HashAlgorithm;
-
-	/// AEAD key length in bytes.
-	fn key_len(&self) -> usize;
-
-	/// AEAD nonce/IV length in bytes.
-	fn iv_len(&self) -> usize;
-
-	/// AEAD tag length in bytes.
-	fn tag_len(&self) -> usize;
-
-	/// Minimum length, in bytes, of a protected record's encrypted fragment.
-	/// DTLS 1.3 has no explicit nonce in the record, so this equals
-	/// [`Self::tag_len`]. Records shorter than this cannot hold a valid
-	/// ciphertext + tag and are rejected at the record boundary.
-	fn min_protected_fragment_len(&self) -> usize {
-		self.tag_len()
-	}
-
-	/// Create a cipher instance with the given key.
-	fn create_cipher(&self, key: &[u8]) -> Result<Box<dyn Cipher>, CryptoError>;
-
-	/// Compute a mask for record number encryption (RFC 9147 Section 4.2.3).
-	///
-	/// The mask is XORed over the sequence number bytes in the header.
-	/// `sample` is the first 16 bytes of the ciphertext.
-	///
-	/// For AES-based suites: `mask = AES-ECB(sn_key, sample)`.
-	///
-	/// For ChaCha20-based suites (RFC 9001 Section 5.4.4):
-	/// `counter = sample[0..4]` (LE u32), `nonce = sample[4..16]`,
-	/// `mask = ChaCha20(sn_key, counter, nonce, <zero bytes>)`.
-	fn encrypt_sn(&self, sn_key: &[u8], sample: &[u8; 16]) -> [u8; 16];
-}
-
-// ============================================================================
 // Core Provider Struct
 // ============================================================================
 
@@ -450,12 +374,10 @@ pub trait SupportedDtls13CipherSuite: CryptoSafe {
 /// for DTLS. Users can provide custom implementations of each component
 /// to replace the default aws-lc-rs-based provider.
 ///
-/// # Version-Specific Components
+/// # Components
 ///
-/// Shared components like `kx_groups`, `signature_verification`, `key_provider`,
-/// `secure_random`, `hash_provider`, and `hmac_provider` are used by both versions.
-/// PRF (TLS 1.2) and HKDF (TLS 1.3) key derivation are built generically on top
-/// of `hmac_provider` — see the [`prf_hkdf`](super::prf_hkdf) module.
+/// PRF key derivation is built generically on top of `hmac_provider` — see the
+/// [`prf_hkdf`](super::prf_hkdf) module.
 ///
 /// # Design
 ///
@@ -484,8 +406,6 @@ pub trait SupportedDtls13CipherSuite: CryptoSafe {
 ///     hmac_provider: provider.hmac_provider,
 ///     // DTLS 1.2 components
 ///     cipher_suites: provider.cipher_suites,
-///     // DTLS 1.3 components
-///     dtls13_cipher_suites: provider.dtls13_cipher_suites,
 /// };
 /// # }
 /// # #[cfg(not(all()))]
@@ -494,11 +414,11 @@ pub trait SupportedDtls13CipherSuite: CryptoSafe {
 #[derive(Debug, Clone)]
 pub struct CryptoProvider {
 	// =========================================================================
-	// Shared components (used by both DTLS 1.2 and DTLS 1.3)
+	// Shared components
 	// =========================================================================
 	/// Supported key exchange groups (P-256, P-384, X25519).
 	///
-	/// Used for ECDHE key exchange in both DTLS versions.
+	/// Used for ECDHE key exchange.
 	pub kx_groups: &'static [&'static dyn SupportedKxGroup],
 
 	/// Signature verification for certificates.
@@ -524,15 +444,6 @@ pub struct CryptoProvider {
 	/// These cipher suites bundle key exchange, authentication, encryption,
 	/// and MAC algorithms together (e.g., TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256).
 	pub cipher_suites: &'static [&'static dyn SupportedDtls12CipherSuite],
-
-	// =========================================================================
-	// DTLS 1.3 specific components
-	// =========================================================================
-	/// Supported DTLS 1.3 cipher suites (for negotiation).
-	///
-	/// TLS 1.3 cipher suites only specify the AEAD and hash algorithms
-	/// (e.g., TLS_AES_128_GCM_SHA256). Key exchange is negotiated separately.
-	pub dtls13_cipher_suites: &'static [&'static dyn SupportedDtls13CipherSuite],
 }
 
 /// Static storage for the default crypto provider.
@@ -590,43 +501,5 @@ impl CryptoProvider {
 	/// ```
 	pub fn get_default() -> Option<&'static CryptoProvider> {
 		DEFAULT.get()
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	#[cfg(all())]
-	fn cert_named_group_p256() {
-		use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
-
-		let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-		let params = CertificateParams::new(Vec::<String>::new()).unwrap();
-		let cert = params.self_signed(&key_pair).unwrap();
-
-		let group = cert_named_group(cert.der()).unwrap();
-		assert_eq!(group, NamedGroup::Secp256r1);
-	}
-
-	#[test]
-	#[cfg(all())]
-	fn cert_named_group_p384() {
-		use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P384_SHA384};
-
-		let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
-		let params = CertificateParams::new(Vec::<String>::new()).unwrap();
-		let cert = params.self_signed(&key_pair).unwrap();
-
-		let group = cert_named_group(cert.der()).unwrap();
-		assert_eq!(group, NamedGroup::Secp384r1);
-	}
-
-	#[test]
-	#[cfg(all())]
-	fn cert_named_group_invalid_der() {
-		let result = cert_named_group(&[0x00, 0x01, 0x02]);
-		assert!(result.is_err());
 	}
 }

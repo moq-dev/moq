@@ -1,7 +1,6 @@
-//! Shared types used by both DTLS 1.2 and DTLS 1.3.
+//! Shared DTLS types.
 //!
-//! These types represent cryptographic primitives and protocol elements
-//! that are common across DTLS versions.
+//! These types represent cryptographic primitives and protocol elements.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -24,12 +23,10 @@ pub type NamedGroupVec = ArrayVec<NamedGroup, { NamedGroup::supported().len() }>
 
 /// ClientHello / ServerHello random value (32 bytes on the wire).
 ///
-/// Used by both DTLS 1.2 and DTLS 1.3. Construction differs:
-/// - DTLS 1.2: first 4 bytes are `gmt_unix_time` ([`Random::new_with_time`]).
-/// - DTLS 1.3: all 32 bytes are random ([`Random::new`]).
+/// The first 4 bytes are `gmt_unix_time` ([`Random::new_with_time`]).
 ///
-/// After construction neither version accesses sub-fields — all consumers
-/// use [`bytes`](Self::bytes) or [`serialize`](Self::serialize).
+/// After construction nothing accesses sub-fields — all consumers use
+/// [`bytes`](Self::bytes) or [`serialize`](Self::serialize).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Random {
 	/// The 32 raw bytes of the random value.
@@ -37,11 +34,6 @@ pub struct Random {
 }
 
 impl Random {
-	/// All-random (DTLS 1.3 / hybrid style).
-	pub fn new(rng: &mut SeededRng) -> Self {
-		Self { bytes: rng.random() }
-	}
-
 	/// Timestamp in first 4 bytes (DTLS 1.2 style).
 	pub fn new_with_time(now: Instant, rng: &mut SeededRng) -> Self {
 		let gmt_duration = now.to_unix_duration();
@@ -509,268 +501,6 @@ impl PartialOrd for Sequence {
 }
 
 // ============================================================================
-// Signature Schemes (TLS 1.3)
-// ============================================================================
-
-/// Signature schemes used in TLS 1.3/DTLS 1.3 (RFC 8446).
-///
-/// In TLS 1.3, signature schemes combine the signature algorithm with the
-/// hash algorithm into a single identifier, unlike TLS 1.2 where they were
-/// separate.
-#[repr(transparent)]
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct SignatureScheme(u16);
-
-impl SignatureScheme {
-	/// ECDSA with P-256 and SHA-256.
-	pub const ECDSA_SECP256R1_SHA256: Self = Self(0x0403);
-	/// ECDSA with P-384 and SHA-384.
-	pub const ECDSA_SECP384R1_SHA384: Self = Self(0x0503);
-	/// ECDSA with P-521 and SHA-512.
-	pub const ECDSA_SECP521R1_SHA512: Self = Self(0x0603);
-	/// Ed25519.
-	pub const ED25519: Self = Self(0x0807);
-	/// Ed448.
-	pub const ED448: Self = Self(0x0808);
-	/// RSA-PSS with SHA-256 (rsaEncryption OID).
-	pub const RSA_PSS_RSAE_SHA256: Self = Self(0x0804);
-	/// RSA-PSS with SHA-384 (rsaEncryption OID).
-	pub const RSA_PSS_RSAE_SHA384: Self = Self(0x0805);
-	/// RSA-PSS with SHA-512 (rsaEncryption OID).
-	pub const RSA_PSS_RSAE_SHA512: Self = Self(0x0806);
-	/// RSA-PSS with SHA-256 (id-rsassa-pss OID).
-	pub const RSA_PSS_PSS_SHA256: Self = Self(0x0809);
-	/// RSA-PSS with SHA-384 (id-rsassa-pss OID).
-	pub const RSA_PSS_PSS_SHA384: Self = Self(0x080a);
-	/// RSA-PSS with SHA-512 (id-rsassa-pss OID).
-	pub const RSA_PSS_PSS_SHA512: Self = Self(0x080b);
-	/// RSA PKCS#1 v1.5 with SHA-256 (legacy).
-	pub const RSA_PKCS1_SHA256: Self = Self(0x0401);
-	/// RSA PKCS#1 v1.5 with SHA-384 (legacy).
-	pub const RSA_PKCS1_SHA384: Self = Self(0x0501);
-	/// RSA PKCS#1 v1.5 with SHA-512 (legacy).
-	pub const RSA_PKCS1_SHA512: Self = Self(0x0601);
-
-	/// Convert a wire format u16 value to a `SignatureScheme`.
-	pub const fn from_u16(value: u16) -> Self {
-		Self(value)
-	}
-
-	/// Convert this `SignatureScheme` to its wire format u16 value.
-	pub const fn as_u16(&self) -> u16 {
-		self.0
-	}
-
-	/// Returns true if this is not a known TLS signature scheme wire value.
-	pub const fn is_unknown(&self) -> bool {
-		!matches!(
-			*self,
-			Self(0x0401 | 0x0403 | 0x0501 | 0x0503 | 0x0601 | 0x0603 | 0x0804..=0x080b)
-		)
-	}
-
-	/// Parse a `SignatureScheme` from wire format.
-	pub fn parse(input: &[u8]) -> IResult<&[u8], SignatureScheme> {
-		let (input, value) = be_u16(input)?;
-		Ok((input, SignatureScheme::from_u16(value)))
-	}
-
-	/// Returns true if this signature scheme is supported by this implementation.
-	pub fn is_supported(&self) -> bool {
-		Self::SUPPORTED.contains(self)
-	}
-
-	/// All recognized signature schemes (every non-`Unknown` variant).
-	pub const fn all() -> &'static [SignatureScheme] {
-		&[
-			SignatureScheme::ECDSA_SECP256R1_SHA256,
-			SignatureScheme::ECDSA_SECP384R1_SHA384,
-			SignatureScheme::ECDSA_SECP521R1_SHA512,
-			SignatureScheme::ED25519,
-			SignatureScheme::ED448,
-			SignatureScheme::RSA_PSS_RSAE_SHA256,
-			SignatureScheme::RSA_PSS_RSAE_SHA384,
-			SignatureScheme::RSA_PSS_RSAE_SHA512,
-			SignatureScheme::RSA_PSS_PSS_SHA256,
-			SignatureScheme::RSA_PSS_PSS_SHA384,
-			SignatureScheme::RSA_PSS_PSS_SHA512,
-			SignatureScheme::RSA_PKCS1_SHA256,
-			SignatureScheme::RSA_PKCS1_SHA384,
-			SignatureScheme::RSA_PKCS1_SHA512,
-		]
-	}
-
-	const SUPPORTED: &[SignatureScheme] = &[
-		SignatureScheme::ECDSA_SECP256R1_SHA256,
-		SignatureScheme::ECDSA_SECP384R1_SHA384,
-	];
-
-	/// Supported signature schemes in preference order.
-	pub fn supported() -> ArrayVec<SignatureScheme, 2> {
-		let mut schemes = ArrayVec::new();
-		schemes.push(SignatureScheme::ECDSA_SECP256R1_SHA256);
-		schemes.push(SignatureScheme::ECDSA_SECP384R1_SHA384);
-		schemes
-	}
-
-	/// Returns the named group (EC curve) implied by this signature scheme, if any.
-	///
-	/// In DTLS 1.3, ECDSA signature schemes encode the expected curve.
-	/// Returns `None` for non-ECDSA schemes.
-	pub fn named_group(&self) -> Option<NamedGroup> {
-		match *self {
-			SignatureScheme::ECDSA_SECP256R1_SHA256 => Some(NamedGroup::Secp256r1),
-			SignatureScheme::ECDSA_SECP384R1_SHA384 => Some(NamedGroup::Secp384r1),
-			_ => None,
-		}
-	}
-
-	/// Returns the hash algorithm associated with this signature scheme.
-	pub fn hash_algorithm(&self) -> HashAlgorithm {
-		match *self {
-			SignatureScheme::ECDSA_SECP256R1_SHA256
-			| SignatureScheme::RSA_PSS_RSAE_SHA256
-			| SignatureScheme::RSA_PSS_PSS_SHA256
-			| SignatureScheme::RSA_PKCS1_SHA256 => HashAlgorithm::SHA256,
-			SignatureScheme::ECDSA_SECP384R1_SHA384
-			| SignatureScheme::RSA_PSS_RSAE_SHA384
-			| SignatureScheme::RSA_PSS_PSS_SHA384
-			| SignatureScheme::RSA_PKCS1_SHA384 => HashAlgorithm::SHA384,
-			SignatureScheme::ECDSA_SECP521R1_SHA512
-			| SignatureScheme::RSA_PSS_RSAE_SHA512
-			| SignatureScheme::RSA_PSS_PSS_SHA512
-			| SignatureScheme::RSA_PKCS1_SHA512 => HashAlgorithm::SHA512,
-			// Ed25519 and Ed448 have intrinsic hash algorithms
-			SignatureScheme::ED25519 | SignatureScheme::ED448 => HashAlgorithm::None,
-			_ => HashAlgorithm::UNKNOWN_DERIVED,
-		}
-	}
-}
-
-impl fmt::Debug for SignatureScheme {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match *self {
-			SignatureScheme::ECDSA_SECP256R1_SHA256 => f.write_str("ECDSA_SECP256R1_SHA256"),
-			SignatureScheme::ECDSA_SECP384R1_SHA384 => f.write_str("ECDSA_SECP384R1_SHA384"),
-			SignatureScheme::ECDSA_SECP521R1_SHA512 => f.write_str("ECDSA_SECP521R1_SHA512"),
-			SignatureScheme::ED25519 => f.write_str("ED25519"),
-			SignatureScheme::ED448 => f.write_str("ED448"),
-			SignatureScheme::RSA_PSS_RSAE_SHA256 => f.write_str("RSA_PSS_RSAE_SHA256"),
-			SignatureScheme::RSA_PSS_RSAE_SHA384 => f.write_str("RSA_PSS_RSAE_SHA384"),
-			SignatureScheme::RSA_PSS_RSAE_SHA512 => f.write_str("RSA_PSS_RSAE_SHA512"),
-			SignatureScheme::RSA_PSS_PSS_SHA256 => f.write_str("RSA_PSS_PSS_SHA256"),
-			SignatureScheme::RSA_PSS_PSS_SHA384 => f.write_str("RSA_PSS_PSS_SHA384"),
-			SignatureScheme::RSA_PSS_PSS_SHA512 => f.write_str("RSA_PSS_PSS_SHA512"),
-			SignatureScheme::RSA_PKCS1_SHA256 => f.write_str("RSA_PKCS1_SHA256"),
-			SignatureScheme::RSA_PKCS1_SHA384 => f.write_str("RSA_PKCS1_SHA384"),
-			SignatureScheme::RSA_PKCS1_SHA512 => f.write_str("RSA_PKCS1_SHA512"),
-			_ => f.debug_tuple("Unknown").field(&self.0).finish(),
-		}
-	}
-}
-
-// ============================================================================
-// DTLS 1.3 Cipher Suites
-// ============================================================================
-
-/// Cipher suites for DTLS 1.3 (RFC 9147).
-///
-/// Unlike DTLS 1.2, TLS 1.3 cipher suites only specify the AEAD algorithm
-/// and hash function. Key exchange is negotiated separately via key_share.
-#[repr(transparent)]
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct Dtls13CipherSuite(u16);
-
-impl Dtls13CipherSuite {
-	/// TLS_AES_128_GCM_SHA256.
-	pub const AES_128_GCM_SHA256: Self = Self(0x1301);
-	/// TLS_AES_256_GCM_SHA384.
-	pub const AES_256_GCM_SHA384: Self = Self(0x1302);
-	/// TLS_CHACHA20_POLY1305_SHA256.
-	pub const CHACHA20_POLY1305_SHA256: Self = Self(0x1303);
-	/// TLS_AES_128_CCM_SHA256.
-	pub const AES_128_CCM_SHA256: Self = Self(0x1304);
-	/// TLS_AES_128_CCM_8_SHA256 (shorter tag, for constrained devices).
-	pub const AES_128_CCM_8_SHA256: Self = Self(0x1305);
-
-	/// Convert a wire format u16 value to a `Dtls13CipherSuite`.
-	pub const fn from_u16(value: u16) -> Self {
-		Self(value)
-	}
-
-	/// Convert this `Dtls13CipherSuite` to its wire format u16 value.
-	pub const fn as_u16(&self) -> u16 {
-		self.0
-	}
-
-	/// Returns true if this is not a known DTLS 1.3 cipher suite wire value.
-	pub const fn is_unknown(&self) -> bool {
-		!matches!(*self, Self(0x1301..=0x1305))
-	}
-
-	/// Parse a `Dtls13CipherSuite` from wire format.
-	pub fn parse(input: &[u8]) -> IResult<&[u8], Dtls13CipherSuite> {
-		let (input, value) = be_u16(input)?;
-		Ok((input, Dtls13CipherSuite::from_u16(value)))
-	}
-
-	/// Returns the hash algorithm used by this cipher suite.
-	pub fn hash_algorithm(&self) -> HashAlgorithm {
-		match *self {
-			Dtls13CipherSuite::AES_128_GCM_SHA256
-			| Dtls13CipherSuite::CHACHA20_POLY1305_SHA256
-			| Dtls13CipherSuite::AES_128_CCM_SHA256
-			| Dtls13CipherSuite::AES_128_CCM_8_SHA256 => HashAlgorithm::SHA256,
-			Dtls13CipherSuite::AES_256_GCM_SHA384 => HashAlgorithm::SHA384,
-			_ => HashAlgorithm::UNKNOWN_DERIVED,
-		}
-	}
-
-	/// Returns true if this cipher suite is supported by this implementation.
-	pub fn is_supported(&self) -> bool {
-		Self::supported().contains(self)
-	}
-
-	/// All recognized DTLS 1.3 cipher suites (every non-`Unknown` variant).
-	pub const fn all() -> &'static [Dtls13CipherSuite] {
-		&[
-			Dtls13CipherSuite::AES_128_GCM_SHA256,
-			Dtls13CipherSuite::AES_256_GCM_SHA384,
-			Dtls13CipherSuite::CHACHA20_POLY1305_SHA256,
-			Dtls13CipherSuite::AES_128_CCM_SHA256,
-			Dtls13CipherSuite::AES_128_CCM_8_SHA256,
-		]
-	}
-
-	/// Supported DTLS 1.3 cipher suites in preference order.
-	pub const fn supported() -> &'static [Dtls13CipherSuite] {
-		&[
-			Dtls13CipherSuite::AES_128_GCM_SHA256,
-			Dtls13CipherSuite::AES_256_GCM_SHA384,
-			Dtls13CipherSuite::CHACHA20_POLY1305_SHA256,
-		]
-	}
-
-	/// Length in bytes of verify_data for Finished messages.
-	pub fn verify_data_length(&self) -> usize {
-		self.hash_algorithm().output_len()
-	}
-}
-
-impl fmt::Debug for Dtls13CipherSuite {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match *self {
-			Dtls13CipherSuite::AES_128_GCM_SHA256 => f.write_str("AES_128_GCM_SHA256"),
-			Dtls13CipherSuite::AES_256_GCM_SHA384 => f.write_str("AES_256_GCM_SHA384"),
-			Dtls13CipherSuite::CHACHA20_POLY1305_SHA256 => f.write_str("CHACHA20_POLY1305_SHA256"),
-			Dtls13CipherSuite::AES_128_CCM_SHA256 => f.write_str("AES_128_CCM_SHA256"),
-			Dtls13CipherSuite::AES_128_CCM_8_SHA256 => f.write_str("AES_128_CCM_8_SHA256"),
-			_ => f.debug_tuple("Unknown").field(&self.0).finish(),
-		}
-	}
-}
-
-// ============================================================================
 // Protocol Version
 // ============================================================================
 
@@ -1081,62 +811,6 @@ mod tests {
 	}
 
 	#[test]
-	fn signature_scheme_newtype_shape() {
-		assert_eq!(std::mem::size_of::<SignatureScheme>(), 2);
-		assert_eq!(SignatureScheme::default().as_u16(), 0);
-		assert!(SignatureScheme::default().is_unknown());
-	}
-
-	#[test]
-	fn signature_scheme_wire_roundtrip() {
-		for scheme in SignatureScheme::all() {
-			assert_eq!(SignatureScheme::from_u16(scheme.as_u16()), *scheme);
-			assert!(!scheme.is_unknown());
-		}
-
-		let unknown = SignatureScheme::from_u16(0xFFFF);
-		assert_eq!(unknown.as_u16(), 0xFFFF);
-		assert!(unknown.is_unknown());
-	}
-
-	#[test]
-	fn signature_scheme_debug_stays_enum_like() {
-		assert_eq!(
-			format!("{:?}", SignatureScheme::ECDSA_SECP256R1_SHA256),
-			"ECDSA_SECP256R1_SHA256"
-		);
-		assert_eq!(format!("{:?}", SignatureScheme::from_u16(0xFFFF)), "Unknown(65535)");
-	}
-
-	#[test]
-	fn dtls13_cipher_suite_newtype_shape() {
-		assert_eq!(std::mem::size_of::<Dtls13CipherSuite>(), 2);
-		assert_eq!(Dtls13CipherSuite::default().as_u16(), 0);
-		assert!(Dtls13CipherSuite::default().is_unknown());
-	}
-
-	#[test]
-	fn dtls13_cipher_suite_wire_roundtrip() {
-		for suite in Dtls13CipherSuite::all() {
-			assert_eq!(Dtls13CipherSuite::from_u16(suite.as_u16()), *suite);
-			assert!(!suite.is_unknown());
-		}
-
-		let unknown = Dtls13CipherSuite::from_u16(0xFFFF);
-		assert_eq!(unknown.as_u16(), 0xFFFF);
-		assert!(unknown.is_unknown());
-	}
-
-	#[test]
-	fn dtls13_cipher_suite_debug_stays_enum_like() {
-		assert_eq!(
-			format!("{:?}", Dtls13CipherSuite::AES_128_GCM_SHA256),
-			"AES_128_GCM_SHA256"
-		);
-		assert_eq!(format!("{:?}", Dtls13CipherSuite::from_u16(0xFFFF)), "Unknown(65535)");
-	}
-
-	#[test]
 	fn protocol_version_newtype_shape() {
 		assert_eq!(std::mem::size_of::<ProtocolVersion>(), 2);
 		assert_eq!(ProtocolVersion::default().as_u16(), 0);
@@ -1204,26 +878,6 @@ mod tests {
 			&[CompressionMethod::Null],
 			"Only Null compression should be supported"
 		);
-	}
-
-	#[test]
-	fn signature_scheme_named_group_ecdsa() {
-		assert_eq!(
-			SignatureScheme::ECDSA_SECP256R1_SHA256.named_group(),
-			Some(NamedGroup::Secp256r1)
-		);
-		assert_eq!(
-			SignatureScheme::ECDSA_SECP384R1_SHA384.named_group(),
-			Some(NamedGroup::Secp384r1)
-		);
-	}
-
-	#[test]
-	fn signature_scheme_named_group_non_ecdsa() {
-		assert_eq!(SignatureScheme::RSA_PSS_RSAE_SHA256.named_group(), None);
-		assert_eq!(SignatureScheme::ED25519.named_group(), None);
-		assert_eq!(SignatureScheme::ECDSA_SECP521R1_SHA512.named_group(), None);
-		assert_eq!(SignatureScheme::from_u16(0xFFFF).named_group(), None);
 	}
 
 	#[test]

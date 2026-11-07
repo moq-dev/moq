@@ -186,10 +186,6 @@ impl Server {
 		Client::new_with_engine(self.engine, self.last_now)
 	}
 
-	pub fn set_handshake_deadline(&mut self, deadline: Timeout) {
-		self.engine.set_handshake_deadline(deadline);
-	}
-
 	pub(crate) fn state_name(&self) -> &'static str {
 		self.state.name()
 	}

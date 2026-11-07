@@ -5,12 +5,10 @@ use tracing::debug;
 
 use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
 use crate::vendor::dimpl::types::CompressionMethod;
-use crate::vendor::dimpl::types::Dtls13CipherSuite;
 use crate::vendor::dimpl::types::HashAlgorithm;
 use crate::vendor::dimpl::types::NamedGroup;
 use crate::vendor::dimpl::types::ProtocolVersion;
 use crate::vendor::dimpl::types::SignatureAlgorithm;
-use crate::vendor::dimpl::types::SignatureScheme;
 
 pub(crate) fn bounded_error_len(len: usize) -> u16 {
 	len.min(u16::MAX as usize) as u16
@@ -36,8 +34,6 @@ pub enum Error {
 	ReceiveQueueFull,
 	/// Outgoing queue exceeded capacity.
 	TransmitQueueFull,
-	/// A saved DTLS 1.3 handshake record exhausted its bounded transmission history.
-	TransmitHistoryFull,
 	/// Missing fields when parsing ServerHello.
 	IncompleteServerHello,
 	/// Something timed out.
@@ -48,26 +44,12 @@ pub enum Error {
 	RenegotiationAttempt,
 	/// The connection has been closed (close_notify sent or received).
 	ConnectionClosed,
-	/// If we are in auto-sense mode for a server and we received too
-	/// many client hello fragments that haven't made a packet.
-	TooManyClientHelloFragments,
-	/// The DTLS 1.3 server received a ClientHello that does not offer
-	/// DTLS 1.3 in `supported_versions`. In auto-sense mode the caller
-	/// should fall back to a DTLS 1.2 server and replay the buffered
-	/// packets.
-	///
-	/// This value should never be seen outside dimpl. It's an internal
-	/// value to communicate from dtls13/server.rs to lib.rs.
-	#[doc(hidden)]
-	Dtls12Fallback,
 }
 
 /// Fine-grained reason for an [`Error::UnexpectedMessage`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnexpectedMessageError {
-	/// Auto-detection received a server response that was neither DTLS 1.2 nor DTLS 1.3.
-	UnrecognizedAutoServerResponse,
 	/// A record from a handshake epoch remained when entering application data.
 	UnexpectedEpoch,
 	/// A DTLS 1.2 `ServerKeyExchange` omitted its required signature.
@@ -80,10 +62,6 @@ pub enum UnexpectedMessageError {
 	PskClientKeyExchangeInEcdhePath,
 	/// An ECDHE `ClientKeyExchange` was received while processing a PSK suite.
 	EcdheClientKeyExchangeInPskPath,
-	/// A DTLS 1.3 `CertificateRequest` context was shorter than declared.
-	CertificateRequestContextTruncated,
-	/// A DTLS 1.3 `CertificateRequest` extension block was shorter than declared.
-	CertificateRequestExtensionsTruncated,
 }
 
 /// Fine-grained reason for an [`Error::InvalidState`].
@@ -98,26 +76,6 @@ pub enum InvalidStateError {
 	NoClientRandom,
 	/// The server random was required but not available.
 	NoServerRandom,
-	/// The handshake key schedule was used before a shared secret existed.
-	NoSharedSecretForHandshakeKeyDerivation,
-	/// The server handshake traffic secret was required but not available.
-	NoServerHandshakeTrafficSecret,
-	/// The server handshake traffic secret was required to verify or create `Finished`.
-	NoServerHandshakeTrafficSecretForFinished,
-	/// The client handshake traffic secret was required but not available.
-	NoClientHandshakeTrafficSecret,
-	/// The client handshake traffic secret was required to verify or create `Finished`.
-	NoClientHandshakeTrafficSecretForFinished,
-	/// Application traffic keys were requested before the handshake secret existed.
-	NoHandshakeSecretForApplicationKeyDerivation,
-	/// A key exchange was required but no exchange was active.
-	NoActiveKeyExchange,
-	/// A DTLS 1.3 key update was requested before current send keys existed.
-	NoCurrentAppSendKeysForKeyUpdate,
-	/// A DTLS 1.3 peer key update was processed before current receive keys existed.
-	NoCurrentAppRecvKeysForKeyUpdate,
-	/// Exported keying material was requested before the exporter secret was derived.
-	ExporterMasterSecretNotDerived,
 	/// Extended master secret was negotiated, but the session hash was not captured.
 	ExtendedMasterSecretSessionHashMissing,
 }
@@ -126,29 +84,8 @@ pub enum InvalidStateError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CryptoError {
-	/// No supported key exchange group is available.
-	NoSupportedKeyExchangeGroups,
 	/// DTLS 1.2 needs a key exchange group but none is configured.
 	NoDtls12KeyExchangeGroupsConfigured,
-	/// The epoch 0 sequence number space has been exhausted.
-	Epoch0SequenceNumberExhausted,
-	/// The send sequence number space for an epoch has been exhausted.
-	SendSequenceNumberExhausted {
-		/// The epoch whose send sequence number was exhausted.
-		epoch: u16,
-	},
-	/// Send keys are not available for an epoch.
-	SendKeysNotAvailable {
-		/// The epoch whose send keys are unavailable.
-		epoch: u16,
-	},
-	/// Receive keys are not available for an epoch.
-	RecvKeysNotAvailable {
-		/// The epoch whose receive keys are unavailable.
-		epoch: u16,
-	},
-	/// No provider key exchange group matches the negotiated group.
-	KeyExchangeGroupNotFound(NamedGroup),
 	/// A key exchange operation was requested before initialization.
 	KeyExchangeNotInitialized,
 	/// The requested key exchange group is unsupported.
@@ -169,13 +106,6 @@ pub enum CryptoError {
 		expected: SignatureAlgorithm,
 		/// The signature algorithm actually present.
 		actual: SignatureAlgorithm,
-	},
-	/// The signature and hash algorithm pair is unsupported.
-	UnsupportedSignaturePair {
-		/// The requested signature algorithm.
-		signature: SignatureAlgorithm,
-		/// The requested hash algorithm.
-		hash: HashAlgorithm,
 	},
 	/// The signature, hash, and key group combination is unsupported for verification.
 	UnsupportedSignatureVerification {
@@ -207,8 +137,6 @@ pub enum CryptoError {
 	InvalidEcCurveParameter,
 	/// A certificate had an invalid subject public key.
 	InvalidSubjectPublicKey,
-	/// A signature was not encoded in the expected format.
-	InvalidSignatureFormat,
 	/// A public key could not be parsed for the given group.
 	InvalidPublicKey(NamedGroup),
 	/// A private key could not be parsed in any supported format.
@@ -219,13 +147,6 @@ pub enum CryptoError {
 		key_hash: HashAlgorithm,
 		/// The hash algorithm requested by the caller.
 		requested: HashAlgorithm,
-	},
-	/// A signing key group does not support the requested hash algorithm.
-	SigningKeyUnsupportedHash {
-		/// The key group used for signing.
-		group: NamedGroup,
-		/// The requested hash algorithm.
-		hash: HashAlgorithm,
 	},
 	/// An AES-GCM key had the wrong length.
 	InvalidAesGcmKeySize {
@@ -257,14 +178,6 @@ pub enum CryptoError {
 		/// The actual ciphertext length in bytes.
 		actual: u8,
 	},
-	/// The requested HKDF output length is too large.
-	HkdfOutputTooLong,
-	/// The HKDF label is too long to encode.
-	HkdfLabelTooLong,
-	/// The HKDF context is too long to encode.
-	HkdfContextTooLong,
-	/// The HKDF-Expand-Label output length is too large to encode.
-	HkdfOutputLengthTooLarge,
 	/// The `Finished` verify-data length was invalid.
 	InvalidVerifyDataLength,
 	/// The `Finished` verify-data is too long to encode.
@@ -303,8 +216,6 @@ pub enum CryptoError {
 	NoPrivateKeyConfigured,
 	/// A PSK operation was requested before a PSK was set.
 	PskNotSet,
-	/// The exporter master secret is not available.
-	ExporterMasterSecretNotDerived,
 	/// A provider operation failed without a more specific reason.
 	OperationFailed(CryptoOperation),
 }
@@ -321,66 +232,16 @@ pub enum CryptoOperation {
 	Decrypt,
 	/// Sign a transcript or payload.
 	Sign,
-	/// Verify a signature.
-	VerifySignature,
-	/// Load a private key.
-	LoadPrivateKey,
-	/// Start a key exchange.
-	StartKeyExchange,
-	/// Complete a key exchange.
-	CompleteKeyExchange,
 	/// Generate an ephemeral key.
 	GenerateEphemeralKey,
 	/// Compute a public key.
 	ComputePublicKey,
 	/// Fill a buffer with random bytes.
 	FillRandom,
-	/// Compute an HMAC.
-	ComputeHmac,
-	/// Run the TLS 1.2 PRF.
-	Prf,
-	/// Run HKDF-Extract.
-	HkdfExtract,
-	/// Run HKDF-Expand.
-	HkdfExpand,
-	/// Run TLS HKDF-Expand-Label.
-	HkdfExpandLabel,
-	/// Derive a DTLS 1.3 early secret.
-	DeriveEarlySecret,
-	/// Derive a DTLS 1.3 derived secret.
-	DeriveDerivedSecret,
-	/// Derive a DTLS 1.3 handshake secret.
-	DeriveHandshakeSecret,
-	/// Derive a DTLS 1.3 traffic secret.
-	DeriveTrafficSecret,
-	/// Derive a DTLS 1.3 master secret.
-	DeriveMasterSecret,
-	/// Derive a DTLS 1.3 exporter master secret.
-	DeriveExporterMasterSecret,
-	/// Derive a DTLS 1.3 next-generation traffic secret.
-	DeriveNextTrafficSecret,
-	/// Derive an AEAD key.
-	DeriveKey,
-	/// Derive an AEAD IV.
-	DeriveIv,
-	/// Derive a record sequence-number encryption key.
-	DeriveSequenceNumberKey,
-	/// Derive a Finished-message key.
-	DeriveFinishedKey,
-	/// Compute Finished verify data.
-	ComputeVerifyData,
-	/// Verify Finished verify data.
-	VerifyData,
-	/// Compute a PSK pre-master secret.
-	ComputePskPreMasterSecret,
 	/// Compute a DTLS cookie.
 	ComputeCookie,
-	/// Extract SRTP keying material.
-	ExtractSrtpKeyingMaterial,
 	/// Encode a key.
 	EncodeKey,
-	/// Decode a key.
-	DecodeKey,
 }
 
 /// Fine-grained reason for an [`Error::CertificateError`].
@@ -393,16 +254,8 @@ pub enum CertificateError {
 	NoClientCertificateReceived,
 	/// Client certificate verification was requested with no client certificate.
 	NoClientCertificateForVerification,
-	/// Server certificate verification was requested with no server certificate.
-	NoServerCertificateForVerification,
-	/// A DTLS 1.3 server certificate carried a non-empty context.
-	ServerCertificateContextMustBeEmpty,
-	/// A DTLS 1.3 client certificate carried a non-empty context.
-	ClientCertificateContextMustBeEmpty,
 	/// The certificate operation needs an unsupported hash algorithm.
 	UnsupportedHashAlgorithm(HashAlgorithm),
-	/// Certificate parsing failed.
-	ParseFailed,
 	/// A certificate omitted its EC curve parameter.
 	MissingEcCurveParameter,
 	/// A certificate had an invalid EC curve parameter.
@@ -435,70 +288,18 @@ pub enum SecurityError {
 	ServerSelectedIncompatibleCipherSuite(Dtls12CipherSuite),
 	/// The server selected a DTLS 1.2 cipher suite disallowed by configuration.
 	ServerSelectedDisallowedCipherSuite(Dtls12CipherSuite),
-	/// The server selected a DTLS 1.3 cipher suite disallowed by configuration.
-	ServerSelectedDisallowedDtls13CipherSuite(Dtls13CipherSuite),
 	/// DTLS 1.2 extended master secret was required but not negotiated.
 	ExtendedMasterSecretNotNegotiated,
 	/// No mutually acceptable cipher suite was found.
 	NoMutuallyAcceptableCipherSuite,
-	/// A DTLS 1.3 ClientHello did not use the required DTLS 1.2 legacy version.
-	ClientHelloLegacyVersionNotDtls12,
-	/// A DTLS 1.3 ServerHello did not use the required DTLS 1.2 legacy version.
-	ServerHelloLegacyVersionNotDtls12,
-	/// A DTLS 1.3 ClientHello did not contain a recognized DTLS 1.3 version.
-	ClientHelloMissingDtls13SupportedVersions,
-	/// A ClientHello did not offer null compression.
-	ClientHelloMustOfferNullCompression,
-	/// The ClientHello cookie did not match the expected cookie.
-	InvalidCookieInClientHello,
-	/// A DTLS 1.3 ClientHello carried a non-empty legacy_cookie field.
-	InvalidLegacyCookieInClientHello,
-	/// The server attempted to send a second HelloRetryRequest.
-	CannotSendSecondHelloRetryRequest,
-	/// The client received a second HelloRetryRequest.
-	UnexpectedSecondHelloRetryRequest,
-	/// No common DTLS 1.3 cipher suite was found.
-	NoCommonCipherSuite,
-	/// No common DTLS 1.3 key exchange group was found.
+	/// No common key exchange group was found.
 	NoCommonKeyExchangeGroup,
-	/// A HelloRetryRequest selected a disallowed cipher suite.
-	HrrSelectedDisallowedCipherSuite,
-	/// A HelloRetryRequest did not select DTLS 1.3.
-	HrrDidNotSelectDtls13,
-	/// A ServerHello selected a non-null compression method.
-	ServerHelloCompressionMustBeNull,
-	/// A server did not negotiate DTLS 1.3.
-	ServerDidNotNegotiateDtls13,
-	/// A DTLS 1.3 server did not send a key share.
-	ServerMissingKeyShare,
-	/// The server key share group did not match the expected group.
-	ServerKeyShareGroupMismatch {
-		/// The expected key exchange group.
-		expected: NamedGroup,
-		/// The key exchange group in the server key share.
-		actual: NamedGroup,
-	},
-	/// A signature was too large to encode.
-	SignatureTooLarge,
-	/// A signature scheme was used even though the peer did not offer it.
-	SignatureSchemeNotOffered(SignatureScheme),
 	/// A signature algorithm did not match the expected algorithm.
 	SignatureAlgorithmMismatch {
 		/// The expected signature algorithm.
 		expected: SignatureAlgorithm,
 		/// The actual signature algorithm.
 		actual: SignatureAlgorithm,
-	},
-	/// The signature scheme is unsupported.
-	UnsupportedSignatureScheme(SignatureScheme),
-	/// The signature scheme and certificate curve are incompatible.
-	SignatureSchemeCertificateCurveMismatch {
-		/// The signature scheme used for the operation.
-		scheme: SignatureScheme,
-		/// The certificate curve required by the signature scheme.
-		expected: NamedGroup,
-		/// The actual certificate curve.
-		actual: NamedGroup,
 	},
 	/// Server Finished verification failed.
 	ServerFinishedVerificationFailed,
@@ -527,8 +328,6 @@ pub enum PskError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TimeoutError {
-	/// Timeout while waiting for an auto client hybrid ClientHello to resolve.
-	HybridClientHello,
 	/// Timeout while connecting.
 	Connect,
 	/// Timeout while handshaking.
@@ -546,8 +345,6 @@ pub enum ConfigError {
 		/// The minimum accepted MTU.
 		minimum: u16,
 	},
-	/// The configured AEAD encryption limit is too small.
-	AeadEncryptionLimitTooSmall,
 	/// The handshake timeout is zero or greater than 3650 days.
 	InvalidHandshakeTimeout,
 	/// The initial flight RTO is zero or greater than 3650 days.
@@ -558,8 +355,6 @@ pub enum ConfigError {
 	PskConfiguredWithoutPskCipherSuite,
 	/// DTLS 1.2 suites are enabled but no compatible key exchange group remains enabled.
 	NoDtls12KeyExchangeGroupsAfterFiltering,
-	/// DTLS 1.3 suites are enabled but no key exchange group remains enabled.
-	NoDtls13KeyExchangeGroupsAfterFiltering,
 	/// Crypto provider validation failed.
 	CryptoProvider(CryptoProviderValidationError),
 }
@@ -572,8 +367,6 @@ pub enum CryptoProviderValidationError {
 	NoCipherSuites,
 	/// The provider has ECDH cipher suites but no key exchange groups.
 	EcdhCipherSuitesWithoutKeyExchangeGroups,
-	/// The provider has no DTLS 1.3 cipher suites.
-	NoDtls13CipherSuites,
 	/// No hash test vector exists for the hash algorithm.
 	MissingHashTestVector(HashAlgorithm),
 	/// The provider hash implementation returned an unexpected value.
@@ -605,46 +398,6 @@ pub enum CryptoProviderValidationError {
 		/// The underlying crypto failure.
 		source: CryptoError,
 	},
-	/// Provider HKDF validation failed.
-	HkdfFailed {
-		/// The DTLS 1.3 cipher suite under validation.
-		suite: Dtls13CipherSuite,
-		/// The underlying crypto failure.
-		source: CryptoError,
-	},
-	/// Provider HKDF returned empty output.
-	HkdfEmptyOutput(Dtls13CipherSuite),
-	/// No AEAD test vector exists for the suite.
-	NoAeadTestVector(Dtls13CipherSuite),
-	/// Creating the AEAD cipher failed.
-	AeadCreateFailed {
-		/// The DTLS 1.3 cipher suite under validation.
-		suite: Dtls13CipherSuite,
-		/// The underlying crypto failure.
-		source: CryptoError,
-	},
-	/// AEAD encryption failed.
-	AeadEncryptFailed {
-		/// The DTLS 1.3 cipher suite under validation.
-		suite: Dtls13CipherSuite,
-		/// The underlying crypto failure.
-		source: CryptoError,
-	},
-	/// AEAD encryption returned the wrong output.
-	AeadEncryptWrongOutput(Dtls13CipherSuite),
-	/// AEAD decryption failed.
-	AeadDecryptFailed {
-		/// The DTLS 1.3 cipher suite under validation.
-		suite: Dtls13CipherSuite,
-		/// The underlying crypto failure.
-		source: CryptoError,
-	},
-	/// AEAD decryption returned the wrong output.
-	AeadDecryptWrongOutput(Dtls13CipherSuite),
-	/// No record-number-encryption vector exists for the suite.
-	NoRecordNumberEncryptionTestVector(Dtls13CipherSuite),
-	/// Record-number encryption returned the wrong mask.
-	RecordNumberEncryptionWrongMask(Dtls13CipherSuite),
 	/// Starting key exchange failed.
 	KeyExchangeStartFailed {
 		/// The key exchange group under validation.
@@ -782,14 +535,11 @@ impl fmt::Display for Error {
 			Error::PskError(err) => write!(f, "psk error: {err}"),
 			Error::ReceiveQueueFull => write!(f, "receive queue full"),
 			Error::TransmitQueueFull => write!(f, "transmit queue full"),
-			Error::TransmitHistoryFull => write!(f, "transmit record-number history full"),
 			Error::IncompleteServerHello => write!(f, "incomplete ServerHello"),
 			Error::Timeout(err) => write!(f, "timeout: {err}"),
 			Error::ConfigError(err) => write!(f, "config error: {err}"),
 			Error::RenegotiationAttempt => write!(f, "peer attempted renegotiation"),
-			Error::TooManyClientHelloFragments => write!(f, "too many client hello fragments"),
 			Error::ConnectionClosed => write!(f, "connection closed"),
-			Error::Dtls12Fallback => write!(f, "dtls 1.2 fallback (internal)"),
 		}
 	}
 }
@@ -797,7 +547,6 @@ impl fmt::Display for Error {
 impl fmt::Display for UnexpectedMessageError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::UnrecognizedAutoServerResponse => write!(f, "unrecognized response from server"),
 			Self::UnexpectedEpoch => {
 				write!(f, "pending record in unexpected epoch at handshake completion")
 			}
@@ -816,12 +565,6 @@ impl fmt::Display for UnexpectedMessageError {
 			Self::EcdheClientKeyExchangeInPskPath => {
 				write!(f, "ECDHE ClientKeyExchange in PSK path")
 			}
-			Self::CertificateRequestContextTruncated => {
-				write!(f, "CertificateRequest context truncated")
-			}
-			Self::CertificateRequestExtensionsTruncated => {
-				write!(f, "CertificateRequest extensions truncated")
-			}
 		}
 	}
 }
@@ -833,34 +576,6 @@ impl fmt::Display for InvalidStateError {
 			Self::NoCipherSuite => write!(f, "no cipher suite"),
 			Self::NoClientRandom => write!(f, "no client random"),
 			Self::NoServerRandom => write!(f, "no server random"),
-			Self::NoSharedSecretForHandshakeKeyDerivation => {
-				write!(f, "no shared secret for handshake key derivation")
-			}
-			Self::NoServerHandshakeTrafficSecret => {
-				write!(f, "no server handshake traffic secret")
-			}
-			Self::NoServerHandshakeTrafficSecretForFinished => {
-				write!(f, "no server handshake traffic secret for Finished")
-			}
-			Self::NoClientHandshakeTrafficSecret => {
-				write!(f, "no client handshake traffic secret")
-			}
-			Self::NoClientHandshakeTrafficSecretForFinished => {
-				write!(f, "no client handshake traffic secret for Finished")
-			}
-			Self::NoHandshakeSecretForApplicationKeyDerivation => {
-				write!(f, "no handshake secret for application key derivation")
-			}
-			Self::NoActiveKeyExchange => write!(f, "no active key exchange"),
-			Self::NoCurrentAppSendKeysForKeyUpdate => {
-				write!(f, "no current app send keys for KeyUpdate")
-			}
-			Self::NoCurrentAppRecvKeysForKeyUpdate => {
-				write!(f, "no current app recv keys for KeyUpdate")
-			}
-			Self::ExporterMasterSecretNotDerived => {
-				write!(f, "exporter master secret not yet derived")
-			}
 			Self::ExtendedMasterSecretSessionHashMissing => {
 				write!(f, "extended master secret negotiated but session hash not captured")
 			}
@@ -871,24 +586,8 @@ impl fmt::Display for InvalidStateError {
 impl fmt::Display for CryptoError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::NoSupportedKeyExchangeGroups => write!(f, "no supported key exchange groups"),
 			Self::NoDtls12KeyExchangeGroupsConfigured => {
 				write!(f, "no DTLS 1.2 key exchange groups configured")
-			}
-			Self::Epoch0SequenceNumberExhausted => {
-				write!(f, "epoch 0 sequence number exhausted")
-			}
-			Self::SendSequenceNumberExhausted { epoch } => {
-				write!(f, "send sequence number exhausted for epoch {epoch}")
-			}
-			Self::SendKeysNotAvailable { epoch } => {
-				write!(f, "send keys not available for epoch {epoch}")
-			}
-			Self::RecvKeysNotAvailable { epoch } => {
-				write!(f, "recv keys not available for epoch {epoch}")
-			}
-			Self::KeyExchangeGroupNotFound(group) => {
-				write!(f, "key exchange group not found: {group:?}")
 			}
 			Self::KeyExchangeNotInitialized => write!(f, "key exchange not initialized"),
 			Self::UnsupportedKeyExchangeGroup(group) => {
@@ -912,9 +611,6 @@ impl fmt::Display for CryptoError {
 			Self::SignatureAlgorithmMismatch { expected, actual } => {
 				write!(f, "signature algorithm mismatch: {actual:?} != {expected:?}")
 			}
-			Self::UnsupportedSignaturePair { signature, hash } => {
-				write!(f, "unsupported signature algorithm: {signature:?}/{hash:?}")
-			}
 			Self::UnsupportedSignatureVerification { signature, hash, group } => write!(
 				f,
 				"unsupported signature verification: {signature:?} + {hash:?} + {group:?}"
@@ -934,7 +630,6 @@ impl fmt::Display for CryptoError {
 			Self::InvalidSubjectPublicKey => {
 				write!(f, "invalid EC subject_public_key bitstring")
 			}
-			Self::InvalidSignatureFormat => write!(f, "invalid signature format"),
 			Self::InvalidPublicKey(group) => write!(f, "invalid {group:?} public key"),
 			Self::InvalidPrivateKey => {
 				write!(f, "failed to parse private key in any supported format")
@@ -943,9 +638,6 @@ impl fmt::Display for CryptoError {
 				f,
 				"signing key is locked to {key_hash:?} but {requested:?} was requested"
 			),
-			Self::SigningKeyUnsupportedHash { group, hash } => {
-				write!(f, "{group:?} key does not support hash algorithm {hash:?}")
-			}
 			Self::InvalidAesGcmKeySize { actual } => {
 				write!(f, "invalid key size for AES-GCM: {actual}")
 			}
@@ -958,12 +650,6 @@ impl fmt::Display for CryptoError {
 			Self::InvalidNonce => write!(f, "invalid nonce"),
 			Self::CiphertextTooShort { minimum, actual } => {
 				write!(f, "ciphertext too short: got {actual}, minimum {minimum}")
-			}
-			Self::HkdfOutputTooLong => write!(f, "HKDF output too long"),
-			Self::HkdfLabelTooLong => write!(f, "label too long for HKDF-Expand-Label"),
-			Self::HkdfContextTooLong => write!(f, "context too long for HKDF-Expand-Label"),
-			Self::HkdfOutputLengthTooLarge => {
-				write!(f, "output length too large for HKDF-Expand-Label")
 			}
 			Self::InvalidVerifyDataLength => write!(f, "invalid verify data length"),
 			Self::VerifyDataTooLong => write!(f, "verify data too long"),
@@ -984,9 +670,6 @@ impl fmt::Display for CryptoError {
 			}
 			Self::NoPrivateKeyConfigured => write!(f, "no private key configured"),
 			Self::PskNotSet => write!(f, "PSK not set"),
-			Self::ExporterMasterSecretNotDerived => {
-				write!(f, "exporter master secret not yet derived")
-			}
 			Self::OperationFailed(op) => write!(f, "{op} failed"),
 		}
 	}
@@ -999,36 +682,11 @@ impl fmt::Display for CryptoOperation {
 			Self::Encrypt => "encryption",
 			Self::Decrypt => "decryption",
 			Self::Sign => "signing",
-			Self::VerifySignature => "signature verification",
-			Self::LoadPrivateKey => "private key loading",
-			Self::StartKeyExchange => "key exchange start",
-			Self::CompleteKeyExchange => "key exchange completion",
 			Self::GenerateEphemeralKey => "ephemeral key generation",
 			Self::ComputePublicKey => "public key computation",
 			Self::FillRandom => "random generation",
-			Self::ComputeHmac => "HMAC computation",
-			Self::Prf => "PRF",
-			Self::HkdfExtract => "HKDF extract",
-			Self::HkdfExpand => "HKDF expand",
-			Self::HkdfExpandLabel => "HKDF expand label",
-			Self::DeriveEarlySecret => "early secret derivation",
-			Self::DeriveDerivedSecret => "derived secret derivation",
-			Self::DeriveHandshakeSecret => "handshake secret derivation",
-			Self::DeriveTrafficSecret => "traffic secret derivation",
-			Self::DeriveMasterSecret => "master secret derivation",
-			Self::DeriveExporterMasterSecret => "exporter master secret derivation",
-			Self::DeriveNextTrafficSecret => "next traffic secret derivation",
-			Self::DeriveKey => "key derivation",
-			Self::DeriveIv => "IV derivation",
-			Self::DeriveSequenceNumberKey => "sequence number key derivation",
-			Self::DeriveFinishedKey => "Finished key derivation",
-			Self::ComputeVerifyData => "verify data computation",
-			Self::VerifyData => "verify data verification",
-			Self::ComputePskPreMasterSecret => "PSK pre-master secret computation",
 			Self::ComputeCookie => "cookie computation",
-			Self::ExtractSrtpKeyingMaterial => "SRTP keying material extraction",
 			Self::EncodeKey => "key encoding",
-			Self::DecodeKey => "key decoding",
 		};
 		write!(f, "{text}")
 	}
@@ -1042,19 +700,9 @@ impl fmt::Display for CertificateError {
 			Self::NoClientCertificateForVerification => {
 				write!(f, "no client certificate for verification")
 			}
-			Self::NoServerCertificateForVerification => {
-				write!(f, "no server certificate for verification")
-			}
-			Self::ServerCertificateContextMustBeEmpty => {
-				write!(f, "server certificate context must be empty")
-			}
-			Self::ClientCertificateContextMustBeEmpty => {
-				write!(f, "client certificate context must be empty")
-			}
 			Self::UnsupportedHashAlgorithm(hash) => {
 				write!(f, "unsupported hash algorithm: {hash:?}")
 			}
-			Self::ParseFailed => write!(f, "failed to parse certificate"),
 			Self::MissingEcCurveParameter => {
 				write!(f, "missing EC curve parameter in certificate")
 			}
@@ -1099,74 +747,16 @@ impl fmt::Display for SecurityError {
 			Self::ServerSelectedDisallowedCipherSuite(suite) => {
 				write!(f, "server selected disallowed cipher suite: {suite:?}")
 			}
-			Self::ServerSelectedDisallowedDtls13CipherSuite(suite) => {
-				write!(f, "server selected disallowed cipher suite: {suite:?}")
-			}
 			Self::ExtendedMasterSecretNotNegotiated => {
 				write!(f, "extended master secret not negotiated")
 			}
 			Self::NoMutuallyAcceptableCipherSuite => {
 				write!(f, "no mutually acceptable cipher suite")
 			}
-			Self::ClientHelloLegacyVersionNotDtls12 => {
-				write!(f, "ClientHello legacy_version must be DTLS 1.2")
-			}
-			Self::ServerHelloLegacyVersionNotDtls12 => {
-				write!(f, "ServerHello legacy_version must be DTLS 1.2")
-			}
-			Self::ClientHelloMissingDtls13SupportedVersions => {
-				write!(f, "ClientHello missing DTLS 1.3 supported_versions")
-			}
-			Self::ClientHelloMustOfferNullCompression => {
-				write!(f, "ClientHello must offer null compression")
-			}
-			Self::InvalidCookieInClientHello => write!(f, "invalid cookie in ClientHello"),
-			Self::InvalidLegacyCookieInClientHello => {
-				write!(f, "ClientHello legacy_cookie must be empty")
-			}
-			Self::CannotSendSecondHelloRetryRequest => {
-				write!(f, "cannot send second HelloRetryRequest")
-			}
-			Self::UnexpectedSecondHelloRetryRequest => {
-				write!(f, "received second HelloRetryRequest")
-			}
-			Self::NoCommonCipherSuite => write!(f, "no common cipher suite found"),
 			Self::NoCommonKeyExchangeGroup => write!(f, "no common key exchange group"),
-			Self::HrrSelectedDisallowedCipherSuite => {
-				write!(f, "HRR selected disallowed cipher suite")
-			}
-			Self::HrrDidNotSelectDtls13 => write!(f, "HRR did not select DTLS 1.3"),
-			Self::ServerHelloCompressionMustBeNull => {
-				write!(f, "ServerHello compression must be null")
-			}
-			Self::ServerDidNotNegotiateDtls13 => {
-				write!(f, "server did not negotiate DTLS 1.3")
-			}
-			Self::ServerMissingKeyShare => write!(f, "server missing key_share"),
-			Self::ServerKeyShareGroupMismatch { expected, actual } => {
-				write!(
-					f,
-					"server key_share group mismatch: expected {expected:?}, actual {actual:?}"
-				)
-			}
-			Self::SignatureTooLarge => write!(f, "signature too large"),
-			Self::SignatureSchemeNotOffered(scheme) => {
-				write!(f, "signature scheme {scheme:?} was not offered")
-			}
 			Self::SignatureAlgorithmMismatch { expected, actual } => {
 				write!(f, "signature algorithm mismatch: expected {expected:?}, got {actual:?}")
 			}
-			Self::UnsupportedSignatureScheme(scheme) => {
-				write!(f, "unsupported signature scheme: {scheme:?}")
-			}
-			Self::SignatureSchemeCertificateCurveMismatch {
-				scheme,
-				expected,
-				actual,
-			} => write!(
-				f,
-				"signature scheme {scheme:?} requires {expected:?} but certificate uses {actual:?}"
-			),
 			Self::ServerFinishedVerificationFailed => {
 				write!(f, "server Finished verification failed")
 			}
@@ -1193,7 +783,6 @@ impl fmt::Display for PskError {
 impl fmt::Display for TimeoutError {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::HybridClientHello => write!(f, "hybrid ClientHello"),
 			Self::Connect => write!(f, "connect"),
 			Self::Handshake => write!(f, "handshake"),
 		}
@@ -1206,9 +795,6 @@ impl fmt::Display for ConfigError {
 			Self::MtuTooSmall { mtu, minimum } => {
 				write!(f, "MTU {mtu} is too small (minimum {minimum})")
 			}
-			Self::AeadEncryptionLimitTooSmall => {
-				write!(f, "aead_encryption_limit must be at least 1")
-			}
 			Self::InvalidHandshakeTimeout => {
 				write!(f, "handshake_timeout must be nonzero and at most 3650 days")
 			}
@@ -1217,10 +803,7 @@ impl fmt::Display for ConfigError {
 			}
 			Self::NoCipherSuitesAfterFiltering => write!(
 				f,
-				concat!(
-					"no cipher suites remain after filtering; at least one DTLS 1.2 or ",
-					"DTLS 1.3 cipher suite must be available"
-				)
+				"no cipher suites remain after filtering; at least one DTLS 1.2 cipher suite must be available"
 			),
 			Self::PskConfiguredWithoutPskCipherSuite => write!(
 				f,
@@ -1232,10 +815,6 @@ impl fmt::Display for ConfigError {
 					"DTLS 1.2 cipher suites are enabled but no compatible key exchange ",
 					"groups remain after filtering"
 				)
-			),
-			Self::NoDtls13KeyExchangeGroupsAfterFiltering => write!(
-				f,
-				"DTLS 1.3 cipher suites are enabled but no key exchange groups remain after filtering"
 			),
 			Self::CryptoProvider(err) => write!(f, "crypto provider validation failed: {err}"),
 		}
@@ -1252,9 +831,6 @@ impl fmt::Display for CryptoProviderValidationError {
 				f,
 				"CryptoProvider has ECDH cipher suites but no supported key exchange groups"
 			),
-			Self::NoDtls13CipherSuites => {
-				write!(f, "CryptoProvider has no DTLS 1.3 cipher suites")
-			}
 			Self::MissingHashTestVector(hash) => {
 				write!(f, "no expected hash data for hash algorithm: {hash:?}")
 			}
@@ -1277,36 +853,6 @@ impl fmt::Display for CryptoProviderValidationError {
 				f,
 				"signature verification failed for {hash:?} + {signature:?}: {source}"
 			),
-			Self::HkdfFailed { suite, source } => {
-				write!(f, "HKDF failed for DTLS 1.3 suite {suite:?}: {source}")
-			}
-			Self::HkdfEmptyOutput(suite) => {
-				write!(f, "HKDF returned empty output for {suite:?}")
-			}
-			Self::NoAeadTestVector(suite) => {
-				write!(f, "no AEAD test vector for DTLS 1.3 suite {suite:?}")
-			}
-			Self::AeadCreateFailed { suite, source } => {
-				write!(f, "failed to create cipher for {suite:?}: {source}")
-			}
-			Self::AeadEncryptFailed { suite, source } => {
-				write!(f, "AEAD encrypt failed for {suite:?}: {source}")
-			}
-			Self::AeadEncryptWrongOutput(suite) => {
-				write!(f, "AEAD encrypt produced wrong output for {suite:?}")
-			}
-			Self::AeadDecryptFailed { suite, source } => {
-				write!(f, "AEAD decrypt failed for {suite:?}: {source}")
-			}
-			Self::AeadDecryptWrongOutput(suite) => {
-				write!(f, "AEAD decrypt produced wrong output for {suite:?}")
-			}
-			Self::NoRecordNumberEncryptionTestVector(suite) => {
-				write!(f, "no encrypt_sn test vector for DTLS 1.3 suite {suite:?}")
-			}
-			Self::RecordNumberEncryptionWrongMask(suite) => {
-				write!(f, "encrypt_sn produced wrong mask for {suite:?}")
-			}
 			Self::KeyExchangeStartFailed { group, source } => {
 				write!(f, "key exchange start failed for {group:?}: {source}")
 			}

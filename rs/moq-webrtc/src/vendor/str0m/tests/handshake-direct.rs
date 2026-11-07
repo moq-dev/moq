@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::vendor::str0m::channel::{ChannelConfig, ChannelId, Reliability};
-use crate::vendor::str0m::config::{DtlsVersion, Fingerprint};
+use crate::vendor::str0m::config::Fingerprint;
 use crate::vendor::str0m::crypto::dtls::ProtocolVersion;
 use crate::vendor::str0m::ice::IceCreds;
 use crate::vendor::str0m::net::{Protocol, Receive};
@@ -29,51 +29,16 @@ const DATA_CHANNEL_ID: u16 = 0;
 /// Set to `true` to save packet captures to `target/pcap/` for Wireshark analysis.
 const SAVE_PCAP: bool = false;
 
-#[test]
-pub fn handshake_dtls_auto_to_12() -> Result<(), RtcError> {
-	run_handshake_test(DtlsVersion::Auto, DtlsVersion::Dtls12)
-}
-
-#[test]
-pub fn handshake_dtls_auto_to_13() -> Result<(), RtcError> {
-	run_handshake_test(DtlsVersion::Auto, DtlsVersion::Dtls13)
-}
-
-#[test]
-pub fn handshake_dtls_auto_to_auto() -> Result<(), RtcError> {
-	run_handshake_test(DtlsVersion::Auto, DtlsVersion::Auto)
-}
-
-#[test]
-pub fn handshake_dtls_12_to_auto() -> Result<(), RtcError> {
-	run_handshake_test(DtlsVersion::Dtls12, DtlsVersion::Auto)
-}
-
-#[test]
-pub fn handshake_dtls_13_to_auto() -> Result<(), RtcError> {
-	run_handshake_test(DtlsVersion::Dtls13, DtlsVersion::Auto)
-}
-
-#[test]
-pub fn handshake_dtls_12_to_12() -> Result<(), RtcError> {
-	run_handshake_test(DtlsVersion::Dtls12, DtlsVersion::Dtls12)
-}
-
-#[test]
-pub fn handshake_dtls_13_to_13() -> Result<(), RtcError> {
-	run_handshake_test(DtlsVersion::Dtls13, DtlsVersion::Dtls13)
-}
-
 /// Standard direct API handshake (no SNAP).
 #[test]
 pub fn handshake_direct_api() -> Result<(), RtcError> {
-	run_direct_handshake(DtlsVersion::Auto, DtlsVersion::Auto, false)
+	run_direct_handshake(false)
 }
 
 /// Direct API handshake with SNAP (out-of-band SCTP INIT exchange, skips 4-way handshake).
 #[test]
 pub fn handshake_direct_api_snap() -> Result<(), RtcError> {
-	run_direct_handshake(DtlsVersion::Auto, DtlsVersion::Auto, true)
+	run_direct_handshake(true)
 }
 
 /// Returns the name of the default crypto provider based on compile-time feature flags.
@@ -95,12 +60,8 @@ fn default_crypto_name() -> &'static str {
 	"unknown"
 }
 
-fn run_handshake_test(client_dtls: DtlsVersion, server_dtls: DtlsVersion) -> Result<(), RtcError> {
-	run_direct_handshake(client_dtls, server_dtls, false)
-}
-
 /// Shared implementation for both standard and SNAP direct API handshake tests.
-fn run_direct_handshake(client_dtls: DtlsVersion, server_dtls: DtlsVersion, use_snap: bool) -> Result<(), RtcError> {
+fn run_direct_handshake(use_snap: bool) -> Result<(), RtcError> {
 	init_log();
 	init_crypto_default();
 
@@ -109,26 +70,9 @@ fn run_direct_handshake(client_dtls: DtlsVersion, server_dtls: DtlsVersion, use_
 	let client_crypto_name = std::env::var("L_CRYPTO").unwrap_or_else(|_| default_crypto_name().into());
 	let server_crypto_name = std::env::var("R_CRYPTO").unwrap_or_else(|_| default_crypto_name().into());
 
-	// Native openssl only supports DTLS 1.2 - skip tests requiring 1.3/Auto.
-	// Also skip Auto client -> 1.2-only server: dimpl advertises X25519 in the hybrid
-	// ClientHello but its DTLS 1.2 engine can't process X25519 in ServerKeyExchange.
-	let dtls12_only = |name: &str| matches!(name, "openssl");
-	let needs_13 = |v: DtlsVersion| matches!(v, DtlsVersion::Auto | DtlsVersion::Dtls13);
-
-	if (dtls12_only(&client_crypto_name) && needs_13(client_dtls))
-		|| (dtls12_only(&server_crypto_name) && needs_13(server_dtls))
-		|| (matches!(client_dtls, DtlsVersion::Auto) && dtls12_only(&server_crypto_name))
-	{
-		println!(
-			"\n=== SKIPPED: client={} ({}), server={} ({}) - DTLS 1.3/Auto not supported ===",
-			client_dtls, client_crypto_name, server_dtls, server_crypto_name
-		);
-		return Ok(());
-	}
-
 	println!(
-		"\n=== Test: client={} ({}), server={} ({}) ===",
-		client_dtls, client_crypto_name, server_dtls, server_crypto_name
+		"\n=== Test: client={}, server={} ===",
+		client_crypto_name, server_crypto_name
 	);
 
 	// Channels for communication between threads
@@ -144,11 +88,11 @@ fn run_direct_handshake(client_dtls: DtlsVersion, server_dtls: DtlsVersion, use_
 	let server_addr: SocketAddr = (Ipv4Addr::new(192, 168, 1, 2), 5001).into();
 
 	// Test name for pcap files
-	let test_name = format!(
-		"handshake_dtls_{}_to_{}",
-		dtls_version_short(client_dtls),
-		dtls_version_short(server_dtls)
-	);
+	let test_name = if use_snap {
+		"handshake_direct_api_snap"
+	} else {
+		"handshake_direct_api"
+	};
 
 	// Spawn server thread
 	// Returns (packets, Result) so pcap is available even on failure.
@@ -160,8 +104,7 @@ fn run_direct_handshake(client_dtls: DtlsVersion, server_dtls: DtlsVersion, use_
 
 		let result = (|| -> Result<TimingReport, RtcError> {
 			// Initialize server (is_client = false)
-			let (mut rtc, local_creds, local_fingerprint) =
-				init_rtc(false, server_addr, server_dtls, Peer::Right, &mut timing)?;
+			let (mut rtc, local_creds, local_fingerprint) = init_rtc(false, server_addr, Peer::Right, &mut timing)?;
 
 			// If SNAP, generate local SCTP INIT for out-of-band exchange
 			let snap = snap_init_data(use_snap);
@@ -240,8 +183,7 @@ fn run_direct_handshake(client_dtls: DtlsVersion, server_dtls: DtlsVersion, use_
 
 		let result = (|| -> Result<TimingReport, RtcError> {
 			// Initialize client (is_client = true)
-			let (mut rtc, local_creds, local_fingerprint) =
-				init_rtc(true, client_addr, client_dtls, Peer::Left, &mut timing)?;
+			let (mut rtc, local_creds, local_fingerprint) = init_rtc(true, client_addr, Peer::Left, &mut timing)?;
 
 			// If SNAP, generate local SCTP INIT for out-of-band exchange
 			let snap = snap_init_data(use_snap);
@@ -371,15 +313,8 @@ fn run_direct_handshake(client_dtls: DtlsVersion, server_dtls: DtlsVersion, use_
 	);
 	assert!(server_timing.sent_data.is_some(), "Server should have sent reply");
 
-	// Verify the negotiated DTLS protocol version matches the expected outcome
-	// for the requested (client, server) version combination. DTLS 1.3 and Auto
-	// variants are tested only with dimpl.
-	let expected = match (client_dtls, server_dtls) {
-		(DtlsVersion::Dtls12, _) | (_, DtlsVersion::Dtls12) => ProtocolVersion::DTLS1_2,
-		(DtlsVersion::Dtls13, _) | (_, DtlsVersion::Dtls13) => ProtocolVersion::DTLS1_3,
-		(DtlsVersion::Auto, DtlsVersion::Auto) => ProtocolVersion::DTLS1_3,
-		_ => unreachable!("unexpected DTLS version combo: {client_dtls:?}/{server_dtls:?}"),
-	};
+	// Only DTLS 1.2 is supported.
+	let expected = ProtocolVersion::DTLS1_2;
 	assert_eq!(
 		client_timing.dtls_protocol_version,
 		Some(expected),
@@ -400,15 +335,12 @@ fn run_direct_handshake(client_dtls: DtlsVersion, server_dtls: DtlsVersion, use_
 fn init_rtc(
 	is_client: bool,
 	local_addr: SocketAddr,
-	dtls_version: DtlsVersion,
 	peer: Peer,
 	timing: &mut TimingReport,
 ) -> Result<(Rtc, IceCreds, String), RtcError> {
 	let ice_creds = IceCreds::new();
 
-	let mut rtc_config = RtcConfig::new()
-		.set_local_ice_credentials(ice_creds.clone())
-		.set_dtls_version(dtls_version);
+	let mut rtc_config = RtcConfig::new().set_local_ice_credentials(ice_creds.clone());
 	if !is_client {
 		rtc_config = rtc_config.set_ice_lite(true);
 	}
@@ -759,15 +691,6 @@ fn handle_event(
 }
 
 // --- PCAP support ---
-
-fn dtls_version_short(v: DtlsVersion) -> &'static str {
-	match v {
-		DtlsVersion::Auto => "auto",
-		DtlsVersion::Dtls12 => "12",
-		DtlsVersion::Dtls13 => "13",
-		_ => "unknown",
-	}
-}
 
 /// A captured packet for pcap output.
 struct PcapPacket {

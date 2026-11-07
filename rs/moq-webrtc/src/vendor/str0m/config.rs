@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 use crate::vendor::str0m::Rtc;
 use crate::vendor::str0m::config::DtlsCert;
 use crate::vendor::str0m::crypto::CryptoProvider;
-use crate::vendor::str0m::crypto::dtls::DtlsVersion;
 use crate::vendor::str0m::format::CodecConfig;
 use crate::vendor::str0m::format::Vp9PacketizerMode;
 use crate::vendor::str0m::ice::IceCreds;
@@ -54,7 +53,6 @@ pub struct RtcConfig {
 	pub(crate) sctp_max_message_size: u32,
 	pub(crate) rtp_mode: bool,
 	pub(crate) enable_raw_packets: bool,
-	pub(crate) dtls_version: DtlsVersion,
 	pub(crate) vp9_packetizer_mode: Vp9PacketizerMode,
 	pub(crate) snap_enabled: bool,
 	pub(crate) mtu: RangeInclusive<usize>,
@@ -783,19 +781,6 @@ impl RtcConfig {
 		self
 	}
 
-	/// Set which DTLS version to use.
-	///
-	/// Defaults to [`DtlsVersion::Dtls12`].
-	pub fn set_dtls_version(mut self, version: DtlsVersion) -> Self {
-		self.dtls_version = version;
-		self
-	}
-
-	/// Get the configured DTLS version.
-	pub fn dtls_version(&self) -> DtlsVersion {
-		self.dtls_version
-	}
-
 	/// Set the MTU as a `target..=warn` inclusive range.
 	///
 	/// * `*range.start()` is the **target** MTU: the size str0m aims for when
@@ -901,7 +886,6 @@ impl Default for RtcConfig {
 			sctp_max_message_size: crate::vendor::str0m::sctp::LOCAL_MAX_MESSAGE_SIZE,
 			rtp_mode: false,
 			enable_raw_packets: false,
-			dtls_version: DtlsVersion::Dtls12,
 			vp9_packetizer_mode: Vp9PacketizerMode::default(),
 			snap_enabled: false,
 			mtu: DATAGRAM_MTU_TARGET..=DATAGRAM_MTU_WARN,

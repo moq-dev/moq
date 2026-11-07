@@ -39,13 +39,6 @@ pub enum SrtpProfile {
 }
 
 impl SrtpProfile {
-	/// All supported profiles ordered by preference.
-	pub const ALL: &'static [SrtpProfile] = &[
-		SrtpProfile::AEAD_AES_256_GCM,
-		SrtpProfile::AEAD_AES_128_GCM,
-		SrtpProfile::AES128_CM_SHA1_80,
-	];
-
 	/// The length of keying material to extract from the DTLS session in bytes.
     #[rustfmt::skip]
 	pub fn keying_material_len(&self) -> usize {

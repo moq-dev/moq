@@ -6,13 +6,8 @@ use std::ops::Deref;
 mod keying;
 
 // Provider traits and implementations
-#[cfg(all())]
 pub mod aws_lc_rs;
 
-#[cfg(any())]
-pub mod rust_crypto;
-
-#[cfg(any(all(), any()))]
 pub(crate) mod ccm_cipher;
 
 mod dtls_aead;
@@ -35,17 +30,13 @@ pub use crate::vendor::dimpl::buffer::{Buf, TmpBuf};
 // This allows users to do: use crate::vendor::dimpl::crypto::{CryptoProvider, SupportedDtls12CipherSuite, ...};
 pub use provider::{
 	ActiveKeyExchange, Cipher, CryptoProvider, CryptoSafe, HashContext, HashProvider, HmacProvider, KeyProvider,
-	SecureRandom, SignatureVerifier, SigningKey, SupportedDtls12CipherSuite, SupportedDtls13CipherSuite,
-	SupportedKxGroup, check_verify_scheme,
+	SecureRandom, SignatureVerifier, SigningKey, SupportedDtls12CipherSuite, SupportedKxGroup, check_verify_scheme,
 };
-#[cfg(all())]
-pub use provider::{OID_P256, OID_P384, cert_named_group};
+pub use provider::{OID_P256, OID_P384};
 
 // Re-export shared types for provider trait implementations
 pub use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
-pub use crate::vendor::dimpl::types::{
-	Dtls13CipherSuite, HashAlgorithm, NamedGroup, SignatureAlgorithm, SignatureScheme,
-};
+pub use crate::vendor::dimpl::types::{HashAlgorithm, NamedGroup, SignatureAlgorithm};
 
 impl Deref for Aad {
 	type Target = [u8];

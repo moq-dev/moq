@@ -168,27 +168,8 @@ impl Engine {
 		self.is_client = is_client;
 	}
 
-	pub fn set_handshake_deadline(&mut self, deadline: Timeout) {
-		self.timers.set_handshake_deadline(deadline);
-	}
-
 	pub fn start_handshake(&mut self, now: Instant) {
 		self.timers.start_handshake(now);
-	}
-
-	/// Restore an already emitted hybrid ClientHello and its outstanding timers.
-	pub fn inject_hybrid_client_hello(&mut self, fragment: &[u8], timers: HandshakeTimers) {
-		self.timers = timers;
-		self.transcript.extend_from_slice(fragment);
-		let mut saved_fragment = self.pop_buffer();
-		saved_fragment.extend_from_slice(fragment);
-		self.flight_saved_records.push(Entry {
-			content_type: ContentType::Handshake,
-			epoch: 0,
-			fragment: saved_fragment,
-		});
-		self.next_handshake_seq_no = 1;
-		self.sequence_epoch_0.sequence_number += 1;
 	}
 
 	pub fn config(&self) -> &Config {

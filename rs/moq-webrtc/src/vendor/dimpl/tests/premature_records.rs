@@ -1,5 +1,3 @@
-#![cfg(all())]
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -57,17 +55,12 @@ fn retry_handshake(
 	panic!("handshake must recover through retransmission");
 }
 
-fn split_records(packets: &[Vec<u8>], dtls13: bool) -> Vec<Vec<u8>> {
+fn split_records(packets: &[Vec<u8>]) -> Vec<Vec<u8>> {
 	let mut records = Vec::new();
 	for packet in packets {
 		let mut remaining = packet.as_slice();
 		while !remaining.is_empty() {
-			let length = if dtls13 && remaining[0] & 0xe0 == 0x20 {
-				assert_eq!(remaining[0] & 0x1c, 0x0c, "two-byte sequence and length");
-				5 + u16::from_be_bytes([remaining[3], remaining[4]]) as usize
-			} else {
-				13 + u16::from_be_bytes([remaining[11], remaining[12]]) as usize
-			};
+			let length = 13 + u16::from_be_bytes([remaining[11], remaining[12]]) as usize;
 			records.push(remaining[..length].to_vec());
 			remaining = &remaining[length..];
 		}
@@ -75,35 +68,26 @@ fn split_records(packets: &[Vec<u8>], dtls13: bool) -> Vec<Vec<u8>> {
 	records
 }
 
-fn pre_encryption_record(dtls13: bool, epoch: u16, sequence: u16) -> Vec<u8> {
+fn pre_encryption_record(epoch: u16, sequence: u16) -> Vec<u8> {
 	let mut packet = Vec::new();
-	if dtls13 {
-		packet.push(0x2c | (epoch as u8 & 3)); // unified header, S=1, L=1
-		packet.extend_from_slice(&sequence.to_be_bytes());
-	} else {
-		packet.push(23); // ApplicationData
-		packet.extend_from_slice(&[0xfe, 0xfd]);
-		packet.extend_from_slice(&epoch.to_be_bytes());
-		packet.extend_from_slice(&(sequence as u64).to_be_bytes()[2..]);
-	}
+	packet.push(23); // ApplicationData
+	packet.extend_from_slice(&[0xfe, 0xfd]);
+	packet.extend_from_slice(&epoch.to_be_bytes());
+	packet.extend_from_slice(&(sequence as u64).to_be_bytes()[2..]);
 	packet.extend_from_slice(&(UNAUTHENTICATED_INPUT.len() as u16).to_be_bytes());
 	packet.extend_from_slice(UNAUTHENTICATED_INPUT);
 	packet
 }
 
-fn assert_pre_encryption_records_need_no_queue_slot(dtls13: bool, capacity: usize) {
+fn assert_pre_encryption_records_need_no_queue_slot(capacity: usize) {
 	let now = Instant::now();
 	let config = Arc::new(Config::builder().max_queue_rx(capacity).build().expect("config"));
 	let certificate = generate_self_signed_certificate().expect("certificate");
-	let mut server = if dtls13 {
-		Dtls::new_13(config, certificate, now)
-	} else {
-		Dtls::new_12(config, certificate, now)
-	};
+	let mut server = Dtls::new_12(config, certificate, now);
 	server.set_active(false);
 	let mut observed = Observed::default();
-	let epoch = if dtls13 { 2 } else { 1 };
-	let packet = pre_encryption_record(dtls13, epoch, 0x1234);
+	let epoch = 1;
+	let packet = pre_encryption_record(epoch, 0x1234);
 	server.handle_packet(&packet).expect("discard premature record");
 	drain(&mut server, &mut observed);
 
@@ -111,7 +95,7 @@ fn assert_pre_encryption_records_need_no_queue_slot(dtls13: bool, capacity: usiz
 	// consume a queue slot or cause the duplicate-epoch-1 panic.
 	for sequence in [0x1234, 0x1235, 0x1234] {
 		server
-			.handle_packet(&pre_encryption_record(dtls13, epoch, sequence))
+			.handle_packet(&pre_encryption_record(epoch, sequence))
 			.expect("discard premature record without filling the queue");
 		drain(&mut server, &mut observed);
 	}
@@ -121,63 +105,12 @@ fn assert_pre_encryption_records_need_no_queue_slot(dtls13: bool, capacity: usiz
 
 #[test]
 fn dtls12_pre_encryption_duplicate_at_queue_capacity_is_dropped() {
-	assert_pre_encryption_records_need_no_queue_slot(false, 1);
+	assert_pre_encryption_records_need_no_queue_slot(1);
 }
 
 #[test]
 fn dtls12_premature_duplicate_does_not_panic() {
-	assert_pre_encryption_records_need_no_queue_slot(false, 8);
-}
-
-#[test]
-fn dtls13_pre_encryption_duplicate_at_queue_capacity_is_dropped() {
-	assert_pre_encryption_records_need_no_queue_slot(true, 1);
-}
-
-#[test]
-fn dtls13_premature_corrupted_copy_does_not_block_retransmission() {
-	let now = Instant::now();
-	let config = Arc::new(
-		Config::builder()
-			.mtu(200)
-			.use_server_cookie(false)
-			.build()
-			.expect("config"),
-	);
-	let client_cert = generate_self_signed_certificate().expect("client certificate");
-	let server_cert = generate_self_signed_certificate().expect("server certificate");
-	let mut client = Dtls::new_13(Arc::clone(&config), client_cert, now);
-	client.set_active(true);
-	let mut server = Dtls::new_13(config, server_cert, now);
-	server.set_active(false);
-	let mut client_out = Observed::default();
-	let mut server_out = Observed::default();
-	server.handle_timeout(now).expect("server timeout");
-	drain(&mut server, &mut server_out);
-	client.handle_timeout(now).expect("client timeout");
-	drain(&mut client, &mut client_out);
-	deliver_packets(&mut client_out, &mut server, &mut server_out);
-
-	let (ciphertext, plaintext): (Vec<_>, Vec<_>) = split_records(&std::mem::take(&mut server_out.packets), true)
-		.into_iter()
-		.partition(|record| record[0] & 0xe0 == 0x20);
-	assert!(!plaintext.is_empty(), "server emits ServerHello");
-	assert!(!ciphertext.is_empty(), "server emits encrypted handshake");
-
-	// A damaged copy arrives before the ServerHello needed to derive keys.
-	// Clean ciphertext also arrives before ServerHello and must be retransmitted.
-	let mut corrupted = ciphertext[0].clone();
-	*corrupted.last_mut().expect("ciphertext has tag") ^= 0x55;
-	client
-		.handle_packet(&corrupted)
-		.expect("discard premature damaged copy");
-	drain(&mut client, &mut client_out);
-	for record in ciphertext.iter().chain(&plaintext) {
-		client.handle_packet(record).expect("receive clean flight");
-		drain(&mut client, &mut client_out);
-	}
-	assert!(!client_out.connected, "early ciphertext was discarded");
-	retry_handshake(now, &mut client, &mut server, &mut client_out, &mut server_out);
+	assert_pre_encryption_records_need_no_queue_slot(8);
 }
 
 #[test]
@@ -205,7 +138,7 @@ fn dtls12_premature_short_copy_does_not_block_retransmission() {
 	deliver_packets(&mut client_out, &mut server, &mut server_out);
 	deliver_packets(&mut server_out, &mut client, &mut client_out);
 
-	let flight = split_records(&std::mem::take(&mut client_out.packets), false);
+	let flight = split_records(&std::mem::take(&mut client_out.packets));
 	let finished = flight
 		.iter()
 		.find(|record| record[0] == 22 && record[3..5] == [0, 1])
@@ -255,7 +188,7 @@ fn dtls12_pre_encryption_handshake_ciphertext_cannot_advance_the_handshake() {
 	drain(&mut client, &mut client_out);
 	deliver_packets(&mut client_out, &mut server, &mut server_out);
 
-	let flight = split_records(&std::mem::take(&mut server_out.packets), false);
+	let flight = split_records(&std::mem::take(&mut server_out.packets));
 	let hello_done = flight
 		.iter()
 		.find(|record| record[0] == 22 && record[13] == 14)
@@ -323,7 +256,7 @@ fn dtls12_pre_encryption_ciphertext_cannot_substitute_for_plaintext_ccs() {
 	deliver_packets(&mut client_out, &mut server, &mut server_out);
 	deliver_packets(&mut server_out, &mut client, &mut client_out);
 	deliver_packets(&mut client_out, &mut server, &mut server_out);
-	let flight = split_records(&std::mem::take(&mut server_out.packets), false);
+	let flight = split_records(&std::mem::take(&mut server_out.packets));
 	let ccs = flight.iter().find(|record| record[0] == 20).expect("server emits CCS");
 	let finished = flight
 		.iter()
@@ -351,7 +284,7 @@ fn dtls12_pre_encryption_ciphertext_cannot_substitute_for_plaintext_ccs() {
 	assert!(client_out.connected, "authenticated Finished completes the handshake");
 }
 
-fn assert_old_plaintext_hello_preserves_authenticated_data(dtls13: bool, plaintext_first: bool) {
+fn assert_old_plaintext_hello_preserves_authenticated_data(plaintext_first: bool) {
 	let now = Instant::now();
 	let config = Arc::new(
 		Config::builder()
@@ -362,17 +295,9 @@ fn assert_old_plaintext_hello_preserves_authenticated_data(dtls13: bool, plainte
 	);
 	let client_cert = generate_self_signed_certificate().expect("client certificate");
 	let server_cert = generate_self_signed_certificate().expect("server certificate");
-	let mut client = if dtls13 {
-		Dtls::new_13(Arc::clone(&config), client_cert, now)
-	} else {
-		Dtls::new_12(Arc::clone(&config), client_cert, now)
-	};
+	let mut client = Dtls::new_12(Arc::clone(&config), client_cert, now);
 	client.set_active(true);
-	let mut server = if dtls13 {
-		Dtls::new_13(config, server_cert, now)
-	} else {
-		Dtls::new_12(config, server_cert, now)
-	};
+	let mut server = Dtls::new_12(config, server_cert, now);
 	server.set_active(false);
 	let mut client_out = Observed::default();
 	let mut server_out = Observed::default();
@@ -380,7 +305,7 @@ fn assert_old_plaintext_hello_preserves_authenticated_data(dtls13: bool, plainte
 	drain(&mut server, &mut server_out);
 	client.handle_timeout(now).expect("client timeout");
 	drain(&mut client, &mut client_out);
-	let client_hello = split_records(&client_out.packets, dtls13)
+	let client_hello = split_records(&client_out.packets)
 		.into_iter()
 		.find(|record| record[0] == 22 && record[13] == 1)
 		.expect("client emits plaintext ClientHello");
@@ -436,20 +361,10 @@ fn assert_old_plaintext_hello_preserves_authenticated_data(dtls13: bool, plainte
 
 #[test]
 fn dtls12_old_plaintext_hello_does_not_discard_authenticated_data() {
-	assert_old_plaintext_hello_preserves_authenticated_data(false, true);
-}
-
-#[test]
-fn dtls13_old_plaintext_hello_does_not_discard_authenticated_data() {
-	assert_old_plaintext_hello_preserves_authenticated_data(true, true);
+	assert_old_plaintext_hello_preserves_authenticated_data(true);
 }
 
 #[test]
 fn dtls12_trailing_old_plaintext_hello_does_not_pin_receive_queue() {
-	assert_old_plaintext_hello_preserves_authenticated_data(false, false);
-}
-
-#[test]
-fn dtls13_trailing_old_plaintext_hello_does_not_pin_receive_queue() {
-	assert_old_plaintext_hello_preserves_authenticated_data(true, false);
+	assert_old_plaintext_hello_preserves_authenticated_data(false);
 }
