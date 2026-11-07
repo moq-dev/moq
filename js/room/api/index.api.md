@@ -1,7 +1,6 @@
 # `@moq/room`
 
 ```ts
-import { Audio } from "@moq/watch";
 import { Connection } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { Getter } from "@moq/signals";
@@ -104,11 +103,11 @@ export interface LocalProps {
 
 export class Member {
 	constructor(kind: Kind, path: Path.Valid, connection: Connection);
-	readonly audio: Audio.Decoder;
+	readonly audio: import("@moq/watch").Audio.Decoder;
 	readonly broadcast: import("@moq/watch").Broadcast;
 	readonly canvas: Signal<HTMLCanvasElement | undefined>;
 	close(): void;
-	readonly emitter: Audio.Emitter;
+	readonly emitter: import("@moq/watch").Audio.Emitter;
 	readonly kind: Kind;
 	readonly muted: Signal<boolean>;
 	readonly path: Path.Valid;
