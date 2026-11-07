@@ -538,6 +538,11 @@ impl Requests {
 
 	/// Block until there is something to do, or until `deadline` passes.
 	fn wait(&self, deadline: Option<Instant>) -> Work {
+		self.wait_with(deadline, park)
+	}
+
+	/// [`Self::wait`], sleeping through `park`, which may return early.
+	fn wait_with(&self, deadline: Option<Instant>, mut park: impl FnMut(Option<Duration>)) -> Work {
 		loop {
 			if let Some(work) = self.poll(deadline) {
 				return work;
@@ -548,11 +553,16 @@ impl Requests {
 			// below at once, or has yet to signal and will unpark us after it
 			// does. Either way the loop polls again before sleeping, so an
 			// early wake costs a lap rather than a spurious retry.
-			match deadline {
-				Some(at) => std::thread::park_timeout(at.saturating_duration_since(Instant::now())),
-				None => std::thread::park(),
-			}
+			park(deadline.map(|at| at.saturating_duration_since(Instant::now())));
 		}
+	}
+}
+
+/// Park the current thread for up to `timeout`, or until unparked.
+fn park(timeout: Option<Duration>) {
+	match timeout {
+		Some(timeout) => std::thread::park_timeout(timeout),
+		None => std::thread::park(),
 	}
 }
 
@@ -1297,13 +1307,19 @@ mod tests {
 		let (commands, requests) = channel();
 		let (sent, arrived) = std::sync::mpsc::channel();
 
+		let (parking, parked) = std::sync::mpsc::channel();
+
 		let waker = commands.clone();
 		let driver = std::thread::spawn(move || {
 			requests.attach();
 
 			// Deadlines rather than a plain park, so a lost wake fails the test
 			// instead of hanging it.
-			let woken = matches!(requests.wait(Some(Instant::now() + PATIENCE)), Work::Sync);
+			let first = requests.wait_with(Some(Instant::now() + PATIENCE), |timeout| {
+				let _ = parking.send(());
+				park(timeout);
+			});
+			let woken = matches!(first, Work::Sync);
 			sent.send(()).unwrap();
 
 			// Syncs racing in behind the first are fine; only silence is not.
@@ -1318,13 +1334,9 @@ mod tests {
 			(woken, stopped)
 		});
 
-		// Let the driver reach `park` with an empty mailbox, then race a flood
-		// of notifications against it.
-		#[expect(
-			clippy::disallowed_methods,
-			reason = "the driver is a real OS thread that parks outside any runtime"
-		)]
-		std::thread::sleep(Duration::from_millis(10));
+		// Once the driver has found its mailbox empty and is on its way into
+		// `park`, race a flood of notifications against it.
+		parked.recv_timeout(PATIENCE).expect("the driver never parked");
 		std::thread::scope(|s| {
 			for _ in 0..8 {
 				s.spawn(|| waker.sync());
@@ -1380,25 +1392,19 @@ mod tests {
 	fn an_early_wake_does_not_fake_a_retry() {
 		let (commands, requests) = channel();
 
-		let waker = commands.clone();
-		let driver = std::thread::spawn(move || {
-			requests.attach();
-			// A deadline far enough out that only the unpark below can end the
-			// park, so a Retry here would mean the deadline was misread.
-			requests.wait(Some(Instant::now() + PATIENCE))
+		// The deadline is never reached: the first park returns with nothing
+		// pending, as a spurious wake does, and the second brings the sync.
+		let mut parks = 0;
+		let work = requests.wait_with(Some(Instant::now() + PATIENCE), |_| {
+			parks += 1;
+			match parks {
+				1 => {}
+				2 => commands.sync(),
+				_ => panic!("the sync did not end the wait"),
+			}
 		});
 
-		#[expect(
-			clippy::disallowed_methods,
-			reason = "the driver is a real OS thread that parks outside any runtime"
-		)]
-		std::thread::sleep(Duration::from_millis(10));
-		waker.sync();
-
-		assert!(
-			matches!(driver.join().unwrap(), Work::Sync),
-			"an early wake was reported as a retry"
-		);
+		assert!(matches!(work, Work::Sync), "an early wake was reported as a retry");
 	}
 
 	/// A driver that unwinds takes the mailbox down with it. Without that, a
