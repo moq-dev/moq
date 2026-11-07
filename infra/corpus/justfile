@@ -1,0 +1,12 @@
+set fallback
+
+# No Worker config names the account here, so wrangler would ask.
+export CLOUDFLARE_ACCOUNT_ID := "dd618f5dbd5da77b8296f1613c301f5c"
+
+# Create the open corpus bucket on corpus.moq.dev and the private one, which has no public access. Run once.
+create:
+    bun install --frozen-lockfile
+    bun wrangler r2 bucket create corpus-moq-dev
+    bun wrangler r2 bucket create corpus-private-moq-dev
+    # The zone id is moq.dev's.
+    bun wrangler r2 bucket domain add corpus-moq-dev --domain corpus.moq.dev --zone-id 6e4171f84c4faa5bb2c9549723eda5d7 --min-tls 1.2 --force

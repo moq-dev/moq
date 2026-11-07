@@ -41,7 +41,7 @@ driver_dependencies() {
 run driver_dependencies
 # Every isolated permutation, which `just rs features` asks for.
 if ((all)); then
-    for feature in net quic tcp uds websocket webrtc; do
+    for feature in net qmux quic tcp uds websocket; do
         run cargo clippy --locked -p moq-tokio --no-default-features --features "$feature" -- -D warnings
     done
 fi

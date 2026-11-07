@@ -2327,10 +2327,12 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	drop(g);
 	drop(sub1);
 
-	// Yield a few times so the subscriber task can observe the demand going away
-	// and send the FIN. A small real sleep also makes the test less
-	// scheduler-dependent across runtimes.
-	kio::clock::sleep(Duration::from_millis(20)).await;
+	// Resubscribe only once the publisher has seen the cancel, so the second
+	// subscription is a fresh SUBSCRIBE rather than the one being torn down.
+	kio::clock::timeout(TIMEOUT, crate::unwanted(track.demand()))
+		.await
+		.expect("upstream never canceled")
+		.expect("track open");
 
 	let mut sub2 = bc.track("video").unwrap().subscribe(None).await.expect("subscribe2");
 
@@ -2632,7 +2634,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	// A tiny backoff so a buggy redial happens well within the sleep below.
+	// A tiny backoff, so a buggy redial lands well before the close times out.
 	client_config.backoff.initial = Some((Duration::from_millis(10)).into());
 	let client = client_config
 		.init(Default::default())
@@ -2651,8 +2653,9 @@ async fn one_shot_connect_surfaces_the_session_close() {
 		.expect_err("a severed session must surface as an error");
 	assert!(!connection.connected());
 
-	// Give a buggy reconnect loop ample time to redial before counting accepts.
-	kio::clock::sleep(Duration::from_millis(200)).await;
+	// `closed` resolved, so the loop has stopped: its own count is final, and a
+	// redial that landed before then would also have reached the server.
+	assert_eq!(connection.connects(), 1, "one-shot mode must dial exactly once");
 	assert_eq!(
 		accepts.load(Ordering::SeqCst),
 		1,
@@ -2780,8 +2783,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		let session = request.with_publisher(publish).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
-		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(())
+		Ok::<_, anyhow::Error>(session.closed().await)
 	});
 
 	let client = client.with_subscriber(consume);
@@ -2798,19 +2800,20 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	assert_eq!(update.prefix.as_str(), "allowed/test");
 	assert!(active, "expected announce, got retraction");
 
-	// The unauthorized "denied" interest must not have torn down the session.
-	assert!(
-		kio::clock::timeout(Duration::from_millis(200), connection.closed())
-			.await
-			.is_err(),
-		"session closed after unauthorized announce interest",
-	);
-
-	drop(connection);
-	server_handle
+	// Leave cleanly. Had the unauthorized "denied" interest torn the session down,
+	// the server would see that failure rather than our clean close.
+	kio::clock::timeout(TIMEOUT, connection.close())
+		.await
+		.expect("close timed out")
+		.expect("close failed");
+	let reason = server_handle
 		.await
 		.expect("server task panicked")
 		.expect("server task failed");
+	assert!(
+		matches!(reason, moq_net::Error::Cancel),
+		"session closed after unauthorized announce interest: {reason}"
+	);
 }
 
 /// A wildcard grant on both ends of a session. The subscriber asks for the grant's
@@ -2894,12 +2897,6 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		Some(vec!["alice".parse::<moq_net::Pattern>().unwrap()])
 	);
 	assert!(active);
-	assert!(
-		kio::clock::timeout(Duration::from_millis(200), next_update(&mut announcements))
-			.await
-			.is_err(),
-		"a path outside one of the grants was announced"
-	);
 
 	// The granted path serves; the excluded ones are refused before the wire.
 	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("room/alice/chat", None))
@@ -2930,7 +2927,20 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		);
 	}
 
+	// Ending the session retracts alice's chat after every announcement the session
+	// delivered, so anything outside the grants shows up before that retraction.
 	drop(connection);
+	loop {
+		let (update, active) = next_announce(&mut announcements).await;
+		assert_eq!(
+			update.prefix.as_str(),
+			"room/alice/chat",
+			"a path outside one of the grants was announced"
+		);
+		if !active {
+			break;
+		}
+	}
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -3022,14 +3032,9 @@ async fn publish_only_client_to_subscribe_only_server() {
 			.expect("group closed prematurely");
 		assert_eq!(&frame.payload[..], b"hello");
 
-		// The disjoint "denied" interest must not have torn down the session.
-		assert!(
-			kio::clock::timeout(Duration::from_millis(200), session.closed())
-				.await
-				.is_err(),
-			"server session closed after unauthorized announce interest",
-		);
-
+		// A clean close ends a live session; had the disjoint "denied" interest torn
+		// it down, this returns that failure instead.
+		session.close().await?;
 		Ok::<_, anyhow::Error>(())
 	});
 
@@ -3064,7 +3069,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 	server_handle
 		.await
 		.expect("server task panicked")
-		.expect("server task failed");
+		.expect("server session failed after unauthorized announce interest");
 
 	drop(connection);
 	drop(track);

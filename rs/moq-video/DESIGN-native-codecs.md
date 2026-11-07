@@ -344,8 +344,8 @@ Where the implementation differs from the plan above:
   publish time, so a buffering backend and the `finish()` tail stay in step. The
   separate `encode_rgba` / `encode_i420` entry points collapsed into
   `Surface::rgba` plus the single `Encoder::encode`.
-- **Group boundaries are the encoder's, not the application's.** `Config::gop`
-  (a `Gop` enum, keyframes at an interval today) places them on its own and
+- **Group boundaries are the encoder's, not the application's.** `Config::join`
+  (a `Duration` the encoder rounds to a keyframe every so many frames) places them on its own and
   `encode` takes no per-frame flag; `Encoder::cut()` opens one at the next frame
   for the callers that genuinely need a decodable starting point (a new output
   group), and refuses on a backend that cannot force one.

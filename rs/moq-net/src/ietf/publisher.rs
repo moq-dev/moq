@@ -16,8 +16,8 @@ use crate::transport::poll::SendGroup as _;
 use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
-	DecodeError, Error, Timescale, Timestamp,
-	coding::{Encode as _, Encoder, Stream, Writer},
+	DecodeError, Error, StreamError, Timescale, Timestamp,
+	coding::{Encode as _, Encoder, Stream, StreamCodes as _, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
@@ -7700,10 +7700,12 @@ impl GroupServe {
 		}
 		// The current rank, so a move while parked applies to the stream as it opens.
 		let _ = self.rank.poll_moved(waiter);
-		let stream = match ready!(
-			self.session
-				.poll_open_group(&mut self.open, waiter, self.rank.options())
-		) {
+		let stream = match ready!(self.session.poll_open_group(
+			&mut self.open,
+			waiter,
+			self.rank.options(),
+			self.version.encode_stream_code(&StreamError::TooFarBehind),
+		)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;

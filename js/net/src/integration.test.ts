@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -331,6 +332,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 });
 
 test("integration: lite applies initial and updated group bounds", async () => {
+	hostTime();
 	const GROUP_COUNT = 6n;
 	const INITIAL_START_GROUP = 1n;
 	const INITIAL_END_GROUP = 3n; // exclusive: groups 1 and 2
@@ -649,6 +651,7 @@ test("integration: lite draft-06", async () => {
 test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	"integration: %s demand holds across a subscription's TRACK and SUBSCRIBE",
 	async (protocol) => {
+		hostTime();
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const [client, server] = await Promise.all([
@@ -1465,16 +1468,19 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 }
 
 test("integration: lite subscriber teardown on last unsubscribe", async () => {
+	hostTime();
 	await runSubscriberTeardown(Lite.ALPN_06);
 });
 
 test("integration: ietf subscriber teardown on last unsubscribe", async () => {
+	hostTime();
 	await runSubscriberTeardown(Ietf.ALPN.DRAFT_18);
 });
 
 // A fetched group can stay open indefinitely (a catalog track, a JSON stream), so abandoning the
 // fetch must cancel the FETCH stream rather than wait for a stream end that never comes.
 test("integration: lite fetch teardown when the reader abandons an open group", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1509,12 +1515,14 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 // Older drafts have no TRACK stream or SUBSCRIBE_UPDATE, so the demand loop must still tear the
 // subscription down through the plain stream-close path.
 test("integration: lite draft-01 subscriber teardown on last unsubscribe", async () => {
+	hostTime();
 	await runSubscriberTeardown("", Lite.Version.DRAFT_01);
 });
 
 // Two subscribers to one track dedupe onto a single wire subscription: closing one keeps it alive
 // for the other, and only the last close tears it down.
 test("integration: lite fan-out keeps the upstream until the last subscriber leaves", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1552,6 +1560,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 // Repeated subscribe/unsubscribe cycles must each tear down and re-open cleanly (the 40-toggle
 // scenario in the issue), never wedging the shared cache or leaking a subscription.
 test("integration: lite re-subscribe re-opens the upstream after each teardown", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1583,6 +1592,7 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 // Coalesced fetches of one open group share a single FETCH stream: closing one keeps it flowing
 // for the other, and only the last abandon cancels it.
 test("integration: lite coalesced fetch stays until every reader abandons the open group", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1733,6 +1743,7 @@ async function waitFor<T>(signal: Getter<T>, pred: (value: T) => boolean): Promi
 }
 
 test("integration: a follower waits for a late publisher", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -2163,6 +2174,7 @@ test("origin: remote entries retract when the session dies, local ones survive",
 });
 
 test("origin: one origin on both directions consumes locally and never echoes", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 
 	// The client routes both directions through one origin, the FFI default shape.
@@ -2448,6 +2460,7 @@ test.each([Ietf.ALPN.DRAFT_18])(
 );
 
 test("origin: a blind request ends with its session, and the next session answers a fresh one", async () => {
+	hostTime();
 	withoutDiscovery();
 	const original = globalThis.WebTransport;
 	const reconnectUrl = new URL("https://example.com/re-request");
@@ -2499,6 +2512,7 @@ test("origin: a blind request ends with its session, and the next session answer
 });
 
 test("origin: a reactive handle follows announcements across a republish", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const serverOrigin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -2537,6 +2551,7 @@ test("origin: a reactive handle follows announcements across a republish", async
 });
 
 test("origin: overlapping sessions carrying one path fail over", async () => {
+	hostTime();
 	// Two live relays announce the same broadcast into one origin, the redundant-relay
 	// shape (and the GOAWAY drain shape, where old and new sessions briefly overlap).
 	const clientOrigin = new OriginProducer();
@@ -2870,6 +2885,7 @@ for (const [name, protocol, version] of [
 	// continues past it.
 	for (const kill of ["remote", "local"] as const) {
 		test(`integration: ${name} cancels the track on a ${kill} session close`, async () => {
+			hostTime();
 			const [closed, groupEnd, end] = await runSessionDeath(protocol, version, kill);
 			expect(closed).toBeInstanceOf(SessionError);
 			expect((closed as SessionError).code).toBe(SessionCode.Cancel);

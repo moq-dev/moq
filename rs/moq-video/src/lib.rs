@@ -10,7 +10,7 @@
 //! [`Surface`] holding the pixels. Capture and [`decode`] produce them, [`encode`]
 //! consumes them and hands back the compressed [`encode::Encoded`], and [`Size`]
 //! names a resolution. Group boundaries are the encoder's business: it places
-//! them per [`encode::Config::gop`], and [`encode::Encoder::cut`] is there for
+//! them per [`encode::Config::join`], and [`encode::Encoder::cut`] is there for
 //! the rarer case where a caller needs one at a specific frame.
 //!
 //! - `capture` describes a frame source and grabs frames per platform:

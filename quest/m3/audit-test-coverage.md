@@ -80,6 +80,10 @@ Lines covered / measured:
 | moq-v4l | 9 / 1457 | moq-video | 6462 / 9988 |
 | carla bridge (demo) | 923 / 1676 | | |
 
+moq-rtc, moq-ice, and moq-tokio's `webrtc` module have since merged into
+moq-webrtc, so its report compares with moq-rtc plus moq-ice, and moq-tokio's
+row above still counts the moved module.
+
 | JS package | Lines | Unloaded files | JS package | Lines | Unloaded files |
 | --- | --- | --- | --- | --- | --- |
 | common | 200 / 250 | 5 | loc | 127 / 145 | 0 |

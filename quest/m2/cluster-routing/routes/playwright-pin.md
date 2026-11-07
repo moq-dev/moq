@@ -1,12 +1,15 @@
-# [S] Playwright bundles the spec exporters
+# [S] Playwright bundles Chromium's spec exporter
 
 ## Goal
 
 The toolchain's Playwright moves to a release whose bundled Chromium is 158
-or later and Firefox 160 or later, the first builds whose
-`exportKeyingMaterial` follows draft-ietf-webtrans-http3, so the
-[browser proof lane](/quest/m2/cluster-routing/routes/browser-proof.md) can
-assert both tabs proven.
+or later, the first build whose `exportKeyingMaterial` follows
+draft-ietf-webtrans-http3, so the route key lane
+(`test/interop/clients/js/route-key.ts`) proves the Chromium tab. The lane
+already requires a proof from Chromium 158 on, so the bump changes no
+expectation. Firefox's exporter departs from the draft in every build so far;
+[its own quest](/quest/m2/cluster-routing/routes/browser-proof.md) carries
+that bump.
 
 The root flake's `pkgs.playwright-driver` supplies `PLAYWRIGHT_BROWSERS_PATH`
 and `PLAYWRIGHT_VERSION` (`flake.nix`), and the npm pins
@@ -24,11 +27,9 @@ Playwright, and the lite-07 cut waits for it. Not chosen: running installed
 Chrome and Firefox channels instead of the bundled builds; leaving the lane
 informational so the cut does not wait.
 
-Take each step as nixpkgs carries it: 1.65.0 or later proves the Chromium
-tab, and the first release bundling Firefox 160 or later proves the Firefox
-tab. With each bump, move the lane's expectation for that browser from "not
-yet covered" or "sends no proof" to "proven". Refresh the flake lock and the
-npm pins together, as `smoke-toolchain.yml` describes. Overriding
+Take the bump once nixpkgs carries 1.65.0 or later, and check that the lane
+passes the Chromium tab. Refresh the flake lock and the npm pins together, as
+`smoke-toolchain.yml` describes. Overriding
 `playwright-driver` in the flake was considered and not chosen: it would
 rebuild and pin browser binaries outside nixpkgs.
 
@@ -36,6 +37,3 @@ rebuild and pin browser binaries outside nixpkgs.
 
 - nixpkgs: `playwright-driver` at 1.65.0 or later on `nixpkgs-unstable`;
   check `pkgs/development/web/playwright/driver.nix` there.
-- Playwright: a release whose bundled Firefox is 160 or later; check
-  `browsers.json` in `npm view playwright-core dist-tags.latest`'s tarball,
-  then wait for nixpkgs to carry it.
