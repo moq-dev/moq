@@ -1,11 +1,14 @@
-# [L] moq play reaches zero steady-state underruns by time-stretching
+# [L] moq play converges inaudibly by time-stretching
 
 ## Goal
 
 `rs/moq-audio`'s playback converges on its playout target by time-stretching
 received audio, as WebRTC NetEq does, instead of running its ring dry and
 padding with silence or trimming buffered audio. `moq play`'s native rows in
-`test/audio-quality` reach zero underruns once the target settles. The
+`test/audio-quality` play with no audible glitch once the target settles,
+with underrun ceilings measured by `budgets.json`'s rule rather than fixed at
+zero, as decided 2026-11-06 in
+[Watch](/quest/m1/audio-jitter-target/watch.md). The
 stretch shares one algorithm and one set of test vectors with the browser's.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is
@@ -48,8 +51,8 @@ capacity watermark and an incoming excess at the fast threshold trim.
 
 Remaining verification:
 
-- Native `test/audio-quality` rows must show zero steady-state underruns
-  once their targets settle. Keep a failed or void row explicit and fix
+- Native `test/audio-quality` rows must meet their measured underrun
+  ceilings once their targets settle. Keep a failed or void row explicit and fix
   any implementation cause before calling this complete.
 - Re-measure the provisional native budgets from seven scheduled nightly
   artifacts using `budgets.json`'s rule: worst clean run times 1.25, plus

@@ -820,6 +820,23 @@ describe("latency increase", () => {
 });
 
 describe("time stretch", () => {
+	it("truncate replaces the unplayed part of a staged window", () => {
+		// Live, so the first read stages a whole 30 ms window though it plays only 128 samples.
+		const buffer = new AudioRingBuffer({ rate: 48000, channels: 1, latency: 100 as Milli });
+		write(buffer, 0 as Milli, 4800, { channels: 1, value: 0.1 });
+		read(buffer, 128, 1);
+
+		buffer.truncate(Micro.fromMilli(10 as Milli));
+		write(buffer, 10 as Milli, 960, { channels: 1, value: 0.9 });
+
+		// The predecessor plays to the truncation, then the successor in full.
+		const out = read(buffer, 480 - 128 + 960, 1)[0];
+		expect(out.length).toBe(480 - 128 + 960);
+		expect(out[480 - 128 - 1]).toBeCloseTo(0.1, 5);
+		expect(out[480 - 128]).toBeCloseTo(0.9, 5);
+		expect(buffer.length).toBe(0);
+	});
+
 	// 48 kHz: 30 ms windows of 1440 frames, and a constant signal stretches by its shortest pitch
 	// period, 2.5 ms or 120 frames.
 	const RATE = 48000;
