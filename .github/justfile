@@ -47,9 +47,8 @@ check:
     python3 sh/gh/test-inventory.py
     python3 bench/relay.test.py
 
-# Tests of repository tooling; every `just check` and `just ci` runs them.
+# Fast repository tooling tests for every `just check` and `just ci`.
 test:
-    python3 sh/version.test.py
     python3 sh/local.test.py
     python3 test/smoke/runner.test.py
     python3 sh/coverage.test.py
@@ -57,7 +56,6 @@ test:
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
-    bash sh/local.sh python3 bench/build.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
     python3 bench/fanout.test.py
@@ -68,7 +66,6 @@ test:
     python3 sh/large-files.test.py
     python3 sh/text.test.py
     python3 sh/dispatch-query.test.py
-    python3 sh/dispatch-query.test.py --bench
     python3 sh/gh/test-inventory.test.py
     bun test ./sh/gh/setup.test.ts
     bun sh/gh/queue.test.ts
@@ -81,11 +78,8 @@ test:
     python3 sh/kt/gradle.test.py
     python3 sh/rs/select.test.py
     python3 sh/rs/config.test.py
-    python3 sh/rs/hakari.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
-    python3 sh/rs/test-lints.test.py
-    python3 sh/gh/nightly.test.py
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
     python3 sh/gh/ts-paths.test.py
@@ -93,6 +87,15 @@ test:
     bash .claude/hooks/direnv.test.sh
     bash .codex/hooks/direnv.test.sh
     python3 sh/rs/uring.test.py
+
+# Tooling integration tests and selector timing, run nightly outside the merge gate.
+test-integration:
+    python3 sh/version.test.py
+    bash sh/local.sh python3 bench/build.test.py
+    python3 sh/rs/hakari.test.py
+    python3 sh/rs/test-lints.test.py
+    python3 sh/gh/nightly.test.py
+    python3 sh/dispatch-query.test.py --bench
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
 [positional-arguments]
