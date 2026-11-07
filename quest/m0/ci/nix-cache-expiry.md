@@ -16,7 +16,3 @@ newer commits still need it. Then fix it so the guarantee also holds when no
 upload runs for 30 days: refreshing reused paths on upload alone does not
 cover such a gap. For example, a scheduled job refreshes the newest cached
 commit's closure, or the expiry deletes only paths no recent commit references.
-
-## Related
-
-- [Verify the Nix runtime cache](/quest/m0/ci/nix-cache-verify.md) - the scheduled Smoke check this protects

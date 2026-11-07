@@ -42,5 +42,4 @@ before starting, since tests land and move.
 
 ## Required
 
-- [Other JS tests run on a mocked clock](/quest/m1/mock-clock-tests/js-rest.md) - hang's `settle(20)`, publish's fanout helpers, and the rest of JS
 - [moq-relay's mesh tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-relay.md) - the relay's multi-relay quiet windows and settle sleeps
