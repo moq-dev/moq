@@ -328,6 +328,12 @@ export class AudioRingBuffer {
 	// Move the read index forward to `index`, dropping any queued audio it passes.
 	#skip(index: number): void {
 		if (index > this.#readIndex && this.#readIndex < this.#writeIndex) this.#skips++;
+		// The staged window lies behind the new index, so it is dropped with the rest, as moq-audio's
+		// trim discards staged output first.
+		if (index > this.#readIndex) {
+			this.#stretch.clear();
+			this.#window = 0;
+		}
 		this.#readIndex = index;
 		this.#prune();
 	}

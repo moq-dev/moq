@@ -692,9 +692,9 @@ time. During a receive stall `buffered` drains while the playout delay holds,
 so this expands into the stall, and once the stall's frames land together
 `buffered` jumps while the playout delay holds, so this can accelerate away the
 cushion they bring. Deciding on the playout delay instead cut the
-`relay-mic-rtt40` replay from 1.0 to 0.7 player underruns a minute, but the
-browser's worklet would need the arrival clock mapped onto its render clock to
-do it, so neither player does yet.
+`relay-mic-rtt40` replay's player underruns by about a third in a prototype,
+but the browser's worklet would need the arrival clock mapped onto its render
+clock to do it, so neither player does yet.
 
 ### Pitch search and admission
 

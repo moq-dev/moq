@@ -12,7 +12,7 @@ row skips buffered audio in steady state.
 
 What still runs dry is what NetEq itself would conceal: a receive stall longer
 than the target. The measured rows are the `relay-mic-rtt40` replay row, at
-the 1.0 `player_underruns_per_min` NetEq measures there (7.9 on `main` without
+the 1.4 `player_underruns_per_min` NetEq measures there (7.9 on `main` without
 the stretch), and a live re-run of the 2026-11-03 rows below with a real
 microphone, Chrome's with 40 ms or more of added RTT and Safari's on the
 direct path, read from the stats panel's audio Underruns and Skips beside
@@ -32,8 +32,9 @@ NetEq's maximum-delay term to the decision band in both players: the estimator
 reports its `lateness`, how late the slowest frame of the last two seconds
 arrived against the fastest, and the band above the target widens by it, as
 NetEq's `DecisionLogic` adds `GetMaxDelayMs`. Without it `relay-mic-rtt40` ran
-dry 2.1 times a minute; with it, 1.0. Every replay row is budgeted at what it
-measures. The one difference from NetEq left, deciding on the ring's depth
+dry three times in its 175 s window; with it, twice, which the player counts
+as 1.4 underruns a minute, the quantum each ran dry in and its re-stall. Every
+replay row is budgeted at what it measures. The one difference from NetEq left, deciding on the ring's depth
 rather than NetEq's playout delay, is recorded in the shared spec, and the PR
 lists it as a follow-up. What remains is proof outside the replay:
 
@@ -116,7 +117,7 @@ on the direct path. Underruns are the stats panel's counter after the first
 | Safari, direct, 100 ms groups | WebSocket | 5 ms | 12 in 119 s (6.1/min) | 0 | 120 / 140 ms |
 
 The Chrome +40 ms, 20 ms-group capture is checked in as the `relay-mic-rtt40`
-replay row: 7.9 player underruns a minute on `main`, 1.0 with the stretch.
+replay row: 7.9 player underruns a minute on `main`, 1.4 with the stretch.
 
 ## Waiting
 

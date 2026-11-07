@@ -929,6 +929,21 @@ describe("time stretch", () => {
 		expect(buffer.length).toBeLessThan(frames(480));
 	});
 
+	it("drops the staged window with the audio a re-anchor skips", () => {
+		const buffer = live(100);
+		write(buffer, 0 as Milli, frames(100), { value: 0.25 });
+		read(buffer, QUANTUM, 1);
+
+		// 400 ms more crosses the 480 ms fast threshold with a 30 ms window still staged.
+		write(buffer, 100 as Milli, frames(400), { value: 0.5 });
+		expect(buffer.skips).toBe(1);
+		expect(buffer.length).toBe(frames(100));
+		expect(Milli.fromMicro(buffer.timestamp)).toBeCloseTo(400, 6);
+		const [output] = read(buffer, QUANTUM, 1);
+		expect(output.length).toBe(QUANTUM);
+		expect(output.every((sample) => sample === 0.5)).toBe(true);
+	});
+
 	// Past NetEq's fast threshold, four times the floor plus its band, or three quarters of the
 	// headroom above the floor, whichever is lower, stretching back would take seconds, so the ring
 	// re-anchors on its floor as moq-audio does. With 1000 ms of capacity, a 100 ms floor reaches the
