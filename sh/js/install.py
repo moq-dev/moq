@@ -58,37 +58,8 @@ args = parser.parse_args()
 
 (ROOT / ".tmp").mkdir(exist_ok=True)
 with (ROOT / ".tmp/bun-install.lock").open("ab") as lock:
-    if os.name == "nt":
-        import ctypes
-        import msvcrt
-        from ctypes import wintypes
-
-        class Overlapped(ctypes.Structure):
-            _fields_ = [
-                ("Internal", ctypes.c_size_t),
-                ("InternalHigh", ctypes.c_size_t),
-                ("Offset", wintypes.DWORD),
-                ("OffsetHigh", wintypes.DWORD),
-                ("hEvent", wintypes.HANDLE),
-            ]
-
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        acquire = kernel.LockFileEx
-        acquire.argtypes = [
-            wintypes.HANDLE,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            ctypes.POINTER(Overlapped),
-        ]
-        acquire.restype = wintypes.BOOL
-        overlapped = Overlapped()
-        # A synchronous, exclusive byte-range lock waits until the owning
-        # process closes its handle, including when that process crashes.
-        if not acquire(msvcrt.get_osfhandle(lock.fileno()), 2, 0, 1, 0, ctypes.byref(overlapped)):
-            raise ctypes.WinError(ctypes.get_last_error())
-    else:
+    # Native Windows supports sequential recipes; Unix coordinates parallel runs.
+    if os.name != "nt":
         import fcntl
 
         fcntl.flock(lock, fcntl.LOCK_EX)

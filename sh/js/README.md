@@ -47,5 +47,5 @@ installation under one checkout lock, including libav output. Separate Worker,
 smoke-client, and disposable baseline workspaces keep their own installs.
 
 The concurrency guarantee applies to unchanged dependency inputs. Stop active
-consumers before changing dependencies or postinstall inputs. The installer uses
-OS locks on Unix and Windows; uv supplies Python on both setup paths.
+consumers before changing dependencies or postinstall inputs. Unix installers share an OS lock. Native Windows runs one recipe at a time,
+matching its existing development support; uv supplies Python on both setup paths.

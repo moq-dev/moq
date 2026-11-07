@@ -88,7 +88,7 @@ if [[ -z $RELAY ]]; then
 fi
 
 cd "$WORKSPACE"
-python3 sh/js/install.py frozen
+uv run --no-project python sh/js/install.py frozen
 # BROWSER_BIN overrides the Chromium provided by the root devShell.
 
 cd "$HERE"

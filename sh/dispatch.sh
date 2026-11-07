@@ -135,12 +135,12 @@ module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi
 # that fix runs it first, since Biome can fix sources that the package build
 # rejects, such as a type-only export.
 module biome '' \
-    tools='bun' lane=bun fix
+    tools='bun uv' lane=bun fix
 # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
 # fails a check that reads a cross-tree input this pattern misses.
 # Root Nix inputs own the browser version every npm Playwright pin matches.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
-    tools='bun python3' lane=bun fix
+    tools='bun python3 uv' lane=bun fix
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
@@ -161,11 +161,11 @@ module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|rs/uniffi-bin
 module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
     tools='cargo go uniffi-bindgen-go' compiles=check fix
 module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
-    tools='bun kramdown-rfc xml2rfc' lane=bun
+    tools='bun uv kramdown-rfc xml2rfc' lane=bun
 module markdown '' \
-    tools='bun' lane=bun fix
+    tools='bun uv' lane=bun fix
 module gh '' \
-    tools='actionlint zizmor bun python3 cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
+    tools='actionlint zizmor bun python3 uv cargo release-plz clippy-driver dpkg-deb nfpm rpm' lane=bun
 # The drill mutations patch Rust source, so a Rust change can move the code
 # they target. Only nightly runs the drills; this catches a stale patch.
 module drill '^(rs/|test/drill/)'
