@@ -320,7 +320,7 @@ export class AudioRingBuffer {
 	// Move the read index forward to `index`, dropping any queued audio it passes, the staged window
 	// included, so what plays next is what the playhead reports.
 	#skip(index: number): void {
-		if (index > this.#readIndex && this.#readIndex < this.#writeIndex) {
+		if (index > this.#readIndex && this.length > 0) {
 			this.#skips++;
 			this.#stretch.clear();
 			this.#window = 0;

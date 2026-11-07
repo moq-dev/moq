@@ -941,16 +941,19 @@ describe("time stretch", () => {
 		});
 	}
 
-	it("a re-anchor drops the staged window", () => {
-		const buffer = live(100);
-		write(buffer, 0 as Milli, frames(100), { value: 0.25 });
-		read(buffer, QUANTUM, 1);
+	// At a 20 ms floor the first read stages everything queued, leaving the ring itself empty.
+	for (const floor of [100, 20]) {
+		it(`a re-anchor drops the staged window at a ${floor} ms floor`, () => {
+			const buffer = live(floor);
+			write(buffer, 0 as Milli, frames(floor), { value: 0.25 });
+			read(buffer, QUANTUM, 1);
 
-		write(buffer, 100 as Milli, frames(400), { value: 0.75 });
-		expect(buffer.skips).toBe(1);
-		expect(buffer.timestamp).toBe(Micro.fromMilli(400 as Milli));
-		const out = read(buffer, QUANTUM, 1)[0];
-		expect(out[0]).toBeCloseTo(0.75, 5);
-		expect(out[QUANTUM - 1]).toBeCloseTo(0.75, 5);
-	});
+			write(buffer, floor as Milli, frames(400), { value: 0.75 });
+			expect(buffer.skips).toBe(1);
+			expect(buffer.timestamp).toBe(Micro.fromMilli(400 as Milli));
+			const out = read(buffer, QUANTUM, 1)[0];
+			expect(out[0]).toBeCloseTo(0.75, 5);
+			expect(out[QUANTUM - 1]).toBeCloseTo(0.75, 5);
+		});
+	}
 });
