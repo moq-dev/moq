@@ -73,6 +73,16 @@ bypassed, 5 remote failures, about 12m0s avoided; several builds hit the 5 GiB
 download budget. It failed only on the `moq-uring` socket-queue benchmark's 60 s
 test timeout, as the baseline did.
 
+Checked 2026-11-07: the next scheduled run,
+[42377867523](https://github.com/moq-dev/moq/actions/runs/42377867523/job/128419087851)
+(2026-11-07), cancelled the job at the 60-minute timeout while compiling
+`moq-ffi` for its tenth workload, so it is incomplete evidence. Its nine
+printed summaries total 343 hits and 572 misses (37.49%), 126 not looked up,
+3 bypassed, 1 remote failure, about 8m49s avoided; four builds hit the 5 GiB
+download budget. The baseline took 57m24s and the 2026-11-06 run 58m38s, so
+the job already sat near its limit before the merge. The two post-merge
+timeouts are not attributable to the exclusions on their own.
+
 Public API: none. Wire: none.
 
 ## Waiting
