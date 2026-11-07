@@ -240,6 +240,9 @@ export class Endpoint {
 		for (const role of ["server", "client"] as const) endpointPath(this.prefix, role, id);
 		this.#origin = origin;
 		this.#withheld = hooks.hiddenWithheld(origin);
+		// Before the first dial or accept no route watches the origin, so watch its close here.
+		this.#unclose.push(origin.closed.subscribe(() => this.close()));
+		if (origin.closed.peek() !== undefined) this.close();
 	}
 
 	// This endpoint's broadcast in role, announced on first use.

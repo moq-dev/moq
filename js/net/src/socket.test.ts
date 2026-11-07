@@ -66,6 +66,14 @@ test("socket namespace exposes endpoint and both stream roles", () => {
 	expect(socket.TrackStream).toBeFunction();
 });
 
+test("an endpoint closes with its origin before it dials or accepts", async () => {
+	const origin = new Origin.Producer();
+	const endpoint = new socket.Endpoint(origin, Path.from("room"), "alice");
+	origin.close();
+	expect(await endpoint.closed).toBeNull();
+	expect(new socket.Endpoint(origin, Path.from("room"), "bob").closed.peek()).toBeNull();
+});
+
 test("TCP carries ordered frames in both directions, with independent FIN", async () => {
 	const { a, b, local, remote } = await tcp();
 	expect(local.peer).toBe("bob");
