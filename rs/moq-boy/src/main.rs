@@ -13,10 +13,9 @@
 //!
 //! Pause/resume state machine:
 //! ```text
-//!   video_active ─┐
-//!                  ├─ both false → paused (emulation stops, condvar blocks)
-//!   audio_active ─┘
-//!                    either true → resumed (condvar notified)
+//!   Demand { video, audio } under the condvar's mutex
+//!     both false → paused (emulation stops, condvar blocks)
+//!     either true → resumed (condvar notified)
 //!
 //!   On resume → force video keyframe, reanchor audio
 //! ```
@@ -29,7 +28,6 @@ use bytes::Bytes;
 use kio::clock::Instant;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -151,17 +149,62 @@ struct Session {
 	video_track: moq_net::track::Demand,
 	audio_track: moq_net::track::Demand,
 
-	/// Whether anyone is subscribed to the video/audio tracks.
-	video_active: AtomicBool,
-	audio_active: AtomicBool,
-
-	/// True when no viewers are watching (both tracks unused).
-	paused: AtomicBool,
-	/// Condvar to wake the emulator thread on resume.
-	resume: (Mutex<()>, Condvar),
+	/// Which tracks viewers want, guarded by the mutex the emulator waits on.
+	pause: Pause,
 
 	/// Location label for status reporting.
 	location: Option<String>,
+}
+
+/// Which tracks some viewer wants. Paused means neither is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Wanted {
+	video: bool,
+	audio: bool,
+	/// A track's demand ended (shutdown): never block the emulator again.
+	closed: bool,
+}
+
+impl Wanted {
+	fn paused(&self) -> bool {
+		!(self.video || self.audio || self.closed)
+	}
+}
+
+/// The demand, guarded by the mutex the emulator waits on.
+#[derive(Default)]
+struct Pause {
+	wanted: Mutex<Wanted>,
+	cvar: Condvar,
+}
+
+impl Pause {
+	/// Change the demand under the lock, then wake the emulator.
+	fn update(&self, f: impl FnOnce(&mut Wanted)) {
+		f(&mut self.wanted.lock().unwrap());
+		self.cvar.notify_all();
+	}
+
+	/// Current demand, read under the lock.
+	fn get(&self) -> Wanted {
+		*self.wanted.lock().unwrap()
+	}
+
+	/// Block until some track is wanted (or demand closed).
+	fn wait(&self) {
+		drop(
+			self.cvar
+				.wait_while(self.wanted.lock().unwrap(), |d| d.paused())
+				.unwrap(),
+		);
+	}
+}
+
+/// Which track a monitor updates.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+	Video,
+	Audio,
 }
 
 /// Wait until some viewer wants the track, or none does.
@@ -172,54 +215,33 @@ async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net:
 }
 
 impl Session {
-	/// Monitor a single track's subscription state.
-	/// Sets the flag when a viewer subscribes, clears it when all unsubscribe.
-	async fn run_track_monitor(&self, name: &str, track: &moq_net::track::Demand, flag: &AtomicBool) {
+	/// Mirror one track's subscription state into the shared demand.
+	async fn run_track_monitor(&self, kind: Kind) {
+		let track = match kind {
+			Kind::Video => &self.video_track,
+			Kind::Audio => &self.audio_track,
+		};
+		let set = |wanted: bool| {
+			self.pause.update(|d| match kind {
+				Kind::Video => d.video = wanted,
+				Kind::Audio => d.audio = wanted,
+			})
+		};
 		loop {
 			if until_wanted(track, true).await.is_err() {
 				break;
 			}
-			tracing::info!("resuming {name}: viewer subscribed");
-			flag.store(true, Ordering::Release);
-			self.paused.store(false, Ordering::Release);
-			self.resume.1.notify_all();
+			tracing::info!(?kind, "viewer subscribed");
+			set(true);
 
 			if until_wanted(track, false).await.is_err() {
 				break;
 			}
-			tracing::info!("pausing {name}: no viewers");
-			flag.store(false, Ordering::Release);
+			tracing::info!(?kind, "no viewers");
+			set(false);
 		}
-	}
-
-	/// Monitor overall pause state.
-	/// Pauses when BOTH tracks are unused, resumes when EITHER becomes used.
-	async fn run_pause_monitor(&self) {
-		loop {
-			// Wait for BOTH tracks to become unused.
-			let (v, a) = tokio::join!(
-				until_wanted(&self.video_track, false),
-				until_wanted(&self.audio_track, false)
-			);
-			if v.is_err() || a.is_err() {
-				break;
-			}
-			tracing::info!("pausing emulation: no viewers");
-			self.paused.store(true, Ordering::Release);
-
-			// Wait for EITHER track to become used.
-			tokio::select! {
-				Err(_) = until_wanted(&self.video_track, true) => break,
-				Err(_) = until_wanted(&self.audio_track, true) => break,
-				else => {},
-			}
-			tracing::info!("resuming emulation: viewer connected");
-			self.paused.store(false, Ordering::Release);
-			self.resume.1.notify_all();
-		}
-		// Ensure emulator thread isn't stuck waiting on resume.
-		self.paused.store(false, Ordering::Release);
-		self.resume.1.notify_all();
+		// Ensure the emulator thread isn't stuck waiting on resume.
+		self.pause.update(|d| d.closed = true);
 	}
 
 	/// Block the emulator thread until viewers connect.
@@ -228,11 +250,7 @@ impl Session {
 	/// joins mid-playthrough rather than a fresh boot.
 	fn wait_for_resume(&self) {
 		tracing::info!("pausing encoding");
-		let (lock, cvar) = &self.resume;
-		let mut guard = lock.lock().unwrap();
-		while self.paused.load(Ordering::Acquire) {
-			guard = cvar.wait(guard).unwrap();
-		}
+		self.pause.wait();
 		tracing::info!("resuming encoding");
 	}
 
@@ -310,22 +328,16 @@ async fn run(config: &Config) -> Result<()> {
 		video_encoder,
 		video_track,
 		audio_track,
-		video_active: AtomicBool::new(false),
-		audio_active: AtomicBool::new(false),
-		paused: AtomicBool::new(true), // Start paused until first viewer.
-		resume: (Mutex::new(()), Condvar::new()),
+		pause: Pause::default(), // Paused until the first viewer.
 		location: config.location.clone(),
 	});
 
 	// Monitor track subscriptions.
 	let s = session.clone();
-	tokio::spawn(async move { s.run_track_monitor("video", &s.video_track, &s.video_active).await });
+	tokio::spawn(async move { s.run_track_monitor(Kind::Video).await });
 
 	let s = session.clone();
-	tokio::spawn(async move { s.run_track_monitor("audio", &s.audio_track, &s.audio_active).await });
-
-	let s = session.clone();
-	tokio::spawn(async move { s.run_pause_monitor().await });
+	tokio::spawn(async move { s.run_track_monitor(Kind::Audio).await });
 
 	// Run the emulator on a blocking thread.
 	let emulator_handle = tokio::task::spawn_blocking({
@@ -375,7 +387,7 @@ fn run_emulator(
 
 	loop {
 		// Block when no viewers are watching. See state diagram in module docs.
-		if session.paused.load(Ordering::Acquire) {
+		if session.pause.get().paused() {
 			// Mark the break BEFORE parking, not after resuming. Our PTS is the emulator
 			// clock, which keeps running while we sleep, so the next frame lands however
 			// long the pause was into the future. Published as a marker group that gap
@@ -472,8 +484,11 @@ fn run_emulator(
 		let elapsed = start.elapsed();
 
 		// Accumulate stats for this frame.
-		let is_video = session.video_active.load(Ordering::Relaxed);
-		let is_audio = session.audio_active.load(Ordering::Relaxed);
+		let Wanted {
+			video: is_video,
+			audio: is_audio,
+			..
+		} = session.pause.get();
 		game_stats.tick(is_video, is_audio);
 
 		// Tick the emulator.
@@ -544,6 +559,36 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A viewer subscribing while the emulator parks always wakes it: the demand
+	/// changes under the lock the emulator waits on, so no notify is lost between
+	/// its check and its wait.
+	#[test]
+	fn subscribe_always_wakes() {
+		for _ in 0..2_000 {
+			let pause = Arc::new(Pause::default());
+			let waiter = std::thread::spawn({
+				let pause = pause.clone();
+				move || pause.wait()
+			});
+			pause.update(|d| d.video = true);
+			waiter.join().unwrap();
+		}
+	}
+
+	/// Paused only while neither track is wanted and demand is open.
+	#[test]
+	fn paused_is_derived() {
+		let mut d = Wanted::default();
+		assert!(d.paused());
+		d.audio = true;
+		assert!(!d.paused());
+		d = Wanted {
+			closed: true,
+			..Wanted::default()
+		};
+		assert!(!d.paused());
+	}
 
 	/// `--connect` is the only way to reach the relay: it must parse without
 	/// a connect flag of our own alongside it, and the URL must land where `run`

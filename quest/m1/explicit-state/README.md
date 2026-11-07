@@ -69,7 +69,6 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 ## Required
 
 - [Review and agent rule](/quest/m1/explicit-state/rule.md) - REVIEW.md and AGENTS.md ask for one enum per lifecycle, terminal transitions after fallible work, and one lock per value
-- [moq-boy pause state](/quest/m1/explicit-state/boy-pause.md) - a new viewer always wakes a paused emulator
 - [Transport close](/quest/m1/explicit-state/transport-close.md) - connection status ends with its error, and every Rust QUIC backend agrees when a connection is closed
 - [Video codec drains](/quest/m1/explicit-state/video-drain.md) - a hardware codec whose drain fails is ready for input again or terminally failed, never left stuck
 - [Watch playback phases](/quest/m1/explicit-state/watch-playback.md) - watch counts a stall only while a rendition plays
