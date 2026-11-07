@@ -14398,7 +14398,7 @@ mod serve_tests {
 		IdleEnded,
 		/// An idle copy whose track ends after its newest group: that group's last object.
 		IdleFinished,
-		/// A live feed whose newest group was aborted mid-write: unknown.
+		/// A live feed whose newest group was aborted mid-write: the last object before it.
 		Aborted,
 	}
 
@@ -14464,7 +14464,7 @@ mod serve_tests {
 				)
 				.await;
 				match largest {
-					Largest::Finished | Largest::Live | Largest::IdleFinished => assert_eq!(
+					Largest::Finished | Largest::Live | Largest::IdleFinished | Largest::Aborted => assert_eq!(
 						fetch_refusal(buf, version),
 						INVALID_RANGE,
 						"{version} {largest:?} start={start}"
