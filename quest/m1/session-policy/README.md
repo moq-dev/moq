@@ -1,4 +1,4 @@
-# Session policy lives in moq-net
+# [M] Session policy lives in moq-net
 
 ## Goal
 
@@ -6,7 +6,7 @@ Session policy lives once, in moq-net. Accept and connect deadlines (spanning
 SETUP, admission and the reply, closing with Timeout), the admission bound,
 widening the receive window on admit, and reconnect with backoff come from
 moq-net for tokio, io_uring and WebRTC sessions alike. moq-tokio keeps only
-sockets, DNS, TLS, accept loops, the fallback runtime and spawning. The epic is
+sockets, DNS, TLS, accept loops, the fallback runtime and spawning. This work is
 done when the WebRTC transport's session runs through the same policy.
 
 ## Plan
