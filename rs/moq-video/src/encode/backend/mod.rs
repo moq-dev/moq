@@ -240,7 +240,7 @@ const HARDWARE: &[Candidate] = &[
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	Candidate {
 		name: vaapi::NAME,
-		codecs: &[Codec::H264],
+		codecs: &[Codec::H264, Codec::H265],
 		open: vaapi::Vaapi::open,
 		cuts: true,
 		#[cfg(target_os = "linux")]

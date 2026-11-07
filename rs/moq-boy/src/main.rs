@@ -61,8 +61,9 @@ pub struct Config {
 	#[usage(long, default = "boy")]
 	pub prefix: String,
 
-	/// Path prefix for game broadcasts ("{prefix-game}/{name}") and the game's socket endpoint
-	/// ("{prefix-game}/.socket/{name}"), which viewers dial. Defaults to "{prefix}/game".
+	/// Path prefix for game broadcasts ("{prefix-game}/{name}"), the game's server endpoint
+	/// ("{prefix-game}/.server/{name}"), which viewers dial, and the viewers' client endpoints
+	/// ("{prefix-game}/.client/{id}"). Defaults to "{prefix}/game".
 	#[usage(long)]
 	pub prefix_game: Option<String>,
 
@@ -131,20 +132,11 @@ impl Config {
 	}
 }
 
-/// Viewer endpoints take ids under this prefix, which the relay lets anonymous sessions
-/// publish, so no viewer can announce a game's endpoint.
-const VIEWER_ID_PREFIX: &str = "viewer-";
-
-/// Refuse a name that can't be the game's endpoint id: one path segment, outside the ids
-/// viewers may announce.
+/// Refuse a name that can't be the game's endpoint id: one path segment.
 fn check_name(name: &str) -> Result<()> {
 	anyhow::ensure!(
 		!name.is_empty() && !name.contains(['/', '\\']),
 		"invalid --name {name:?}: a name is one path segment"
-	);
-	anyhow::ensure!(
-		!name.starts_with(VIEWER_ID_PREFIX),
-		"invalid --name {name:?}: {VIEWER_ID_PREFIX}* ids belong to viewers"
 	);
 	Ok(())
 }
@@ -296,7 +288,7 @@ async fn run(config: &Config) -> Result<()> {
 		.context("failed to announce broadcast")?;
 	tracing::info!(broadcast = %broadcast_path, instance = %route.instance(), "announced");
 
-	// The endpoint viewers dial, at "{prefix-game}/.socket/{name}".
+	// The server endpoint viewers dial, at "{prefix-game}/.server/{name}" from its first accept.
 	let endpoint = moq_net::socket::Endpoint::new(&origin, game_prefix, &name).context("failed to open endpoint")?;
 
 	tracing::info!(url = %moq_tokio::RedactedUrl::new(&url), %name, broadcast = %broadcast_path, "connecting to relay");
@@ -596,12 +588,14 @@ mod tests {
 		assert!(parse(&["--prefix", "/boy"]).game_prefix().is_err());
 	}
 
-	/// A game's endpoint id is its name, so a name is one segment outside the ids viewers
-	/// may announce.
+	/// A game's endpoint id is its name, so a name is one segment. Viewers are clients,
+	/// so even a name like theirs can't collide with one.
 	#[test]
 	fn names_are_game_endpoint_ids() {
-		check_name("tetris").unwrap();
-		for name in ["viewer-1", "", "a/b", "a\\b"] {
+		for name in ["tetris", "viewer-1"] {
+			check_name(name).unwrap();
+		}
+		for name in ["", "a/b", "a\\b"] {
 			check_name(name).expect_err(name);
 		}
 	}

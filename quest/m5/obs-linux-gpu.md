@@ -24,4 +24,3 @@ the bottleneck.
 
 - [Video hardware validation](/quest/m5/video-hardware.md) - native input and encoder acceptance need hardware evidence
 - [VA-API encodes an external Vulkan image](/quest/m3/vaapi-vulkan-import.md) - explicit sync for an external DMA-BUF, and the public `DmaBuf` constructor from #4975
-- [VAAPI encode and decode](/quest/m1/video-vaapi.md) - H.265 and checked-in bindings. The DMA-BUF encoder import this quest needs is already on main (moq-vaapi 0.1.1).
