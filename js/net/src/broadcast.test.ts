@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { NotFound, StreamCode } from "./error.ts";
+import { NotFound, Reused, StreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -106,6 +106,26 @@ test("a replacement producer starts over", async () => {
 	const third = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	third.finishAt({ group: 0n, frame: 0 });
 	third.close();
+	broadcast.close();
+});
+
+test("a recreated track never reuses a sequence", () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media");
+	first.appendGroup().finish();
+	first.createGroup(4n).finish();
+	first.close();
+
+	const second = broadcast.createTrack("media");
+	expect(() => second.appendGroup()).toThrow(Reused);
+	expect(() => second.createGroup(4n)).toThrow(Reused);
+	expect(() => second.createGroup(2n)).toThrow(Reused);
+	second.createGroup(5n).finish();
+	expect(second.appendGroup().sequence).toBe(6n);
+	second.abort(new Error("gone"));
+
+	// A name never used starts at 0.
+	expect(broadcast.createTrack("other").appendGroup().sequence).toBe(0n);
 	broadcast.close();
 });
 

@@ -48,7 +48,7 @@ use std::{
 	sync::OnceLock,
 	sync::PoisonError,
 	sync::Weak,
-	sync::atomic::{AtomicBool, Ordering},
+	sync::atomic::{AtomicBool, AtomicU64, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -422,6 +422,11 @@ pub(crate) struct TrackState {
 	// The highest sequence number successfully appended to the track, which can run ahead
 	// of any cached group.
 	max_sequence: Option<u64>,
+
+	// Every sequence an earlier track of this name used in its broadcast, which this track
+	// refuses since a name never reuses a group identity; see [`Used`]. `None` for a track
+	// the broadcast's producer did not create.
+	used: Option<Used>,
 
 	// The newest group the publisher produced, which fetched backfill never moves: where
 	// relative starts count back from (see `latest_live`).
@@ -2247,6 +2252,9 @@ impl TrackState {
 	/// is released.
 	fn advance(&mut self, sequence: u64, answers: bool) {
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		if let Some(used) = &self.used {
+			used.raise(sequence);
+		}
 		self.cache.advance_largest(Position::group(sequence));
 		let wakes = self.subscriptions.lock().wrote(sequence, answers);
 		if !wakes.is_empty() {
@@ -2257,6 +2265,14 @@ impl TrackState {
 	/// Take the wakes [`Self::advance`] deferred, to fire once the state guard is released.
 	pub(super) fn deferred(&mut self) -> Deferred {
 		Deferred(std::mem::take(&mut self.deferred))
+	}
+
+	/// Refuse a sequence an earlier track of the name used; see [`Used`].
+	fn unused(&self, sequence: u64) -> Result<()> {
+		match &self.used {
+			Some(used) if sequence < used.floor => Err(Error::Reused),
+			_ => Ok(()),
+		}
 	}
 
 	/// The sequence the next append takes: one past this track's own writes.
@@ -3497,6 +3513,27 @@ pub(crate) enum Received {
 	Held(group::Handle),
 }
 
+/// The sequences the tracks of one name used in their broadcast, shared by every track the
+/// broadcast's producer creates under it: a replacement refuses everything below `floor`.
+pub(super) struct Used {
+	/// One past the highest sequence any track of the name created, 0 before any.
+	next: Arc<AtomicU64>,
+	/// `next` when this track was created, after its predecessor closed.
+	floor: u64,
+}
+
+impl Used {
+	/// Join the name's record as its newest track.
+	pub(super) fn join(next: Arc<AtomicU64>) -> Self {
+		let floor = next.load(Ordering::Relaxed);
+		Self { next, floor }
+	}
+
+	fn raise(&self, sequence: u64) {
+		self.next.fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
+	}
+}
+
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct Producer {
@@ -3561,6 +3598,14 @@ impl Producer {
 		self
 	}
 
+	/// Refuse the sequences earlier tracks of the name used; see [`Used`].
+	pub(super) fn used(self, used: Used) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.used = Some(used);
+		}
+		self
+	}
+
 	/// Keep the broadcast's listing of this track until it leaves the table.
 	pub(super) fn listed(self, unlist: broadcast::Unlist) -> Self {
 		self.alive.list(unlist);
@@ -3587,7 +3632,9 @@ impl Producer {
 	/// It says nothing about the sequences around it: groups may be created out of order, and
 	/// an aborted or evicted sequence created again. A gap it leaves is skipped only once the
 	/// producer says it will not fill it, with [`Self::skip_groups`] or [`Self::append_group`].
-	/// A sequence already skipped is refused with [`Error::Skipped`].
+	/// A sequence already skipped is refused with [`Error::Skipped`], and one an earlier track
+	/// of the name used in the broadcast with [`Error::Reused`], since a name never gives new
+	/// content an identity it already used.
 	///
 	/// Readers and group demand reach it at once, but the track counts it as content (its
 	/// live edge, or the successor that ages the group before it) only once its first frame
@@ -3618,6 +3665,7 @@ impl Producer {
 		if state.skipped(info.sequence) {
 			return Err(Error::Skipped);
 		}
+		state.unused(info.sequence)?;
 		let start = received.unwrap_or(0);
 		let content = if received.is_some() {
 			if let Some(holding) = state.holding_group(info.sequence, start) {
@@ -3655,9 +3703,9 @@ impl Producer {
 	/// there. Those sequences are then final: creating one is refused. Appending alone never
 	/// leaves such a gap; one left by out-of-order [`Self::create_group`] calls is what it names.
 	///
-	/// The broadcast remembers nothing of an earlier producer of the name, so a replacement
-	/// starts at 0. Since a name always means the same content, a replacement continues past
-	/// its predecessor's groups with [`Self::create_group`].
+	/// A track that replaces an earlier one of its name in the broadcast has no writes of its
+	/// own yet, so its first append would reuse sequence 0 and is refused with
+	/// [`Error::Reused`]: it starts past its predecessor's groups with [`Self::create_group`].
 	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		let sequence = state.next_sequence()?;
@@ -3669,6 +3717,7 @@ impl Producer {
 		if state.skipped(sequence) {
 			return Err(Error::Skipped);
 		}
+		state.unused(sequence)?;
 
 		let track = state.info.clone().unwrap();
 
@@ -9924,6 +9973,14 @@ impl Request {
 			idle: false,
 			list: None,
 		}
+	}
+
+	/// Refuse the sequences earlier tracks of the name used once accepted; see [`Used`].
+	pub(super) fn used(self, used: Used) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.used = Some(used);
+		}
+		self
 	}
 
 	/// List the track in its broadcast once accepted: the producer reserved it.

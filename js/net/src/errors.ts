@@ -10,6 +10,7 @@ export {
 	NotFound,
 	ProtocolViolation,
 	RefusedRedirect,
+	Reused,
 	Session,
 	Skipped,
 	Stream,

@@ -425,6 +425,25 @@ export class Skipped extends Error {
 }
 
 /**
+ * A group was created at a sequence an earlier track of its name used in the broadcast.
+ *
+ * A name never gives new content an identity it already used, so a replacement track starts
+ * past its predecessor's groups with an explicit `createGroup`. Mirrors the Rust `Error::Reused`.
+ *
+ * @public
+ */
+export class Reused extends Error {
+	/** The sequence that was refused. */
+	readonly sequence: bigint;
+
+	constructor(sequence: bigint) {
+		super(`sequence ${sequence} was already used`);
+		this.name = "Reused";
+		this.sequence = sequence;
+	}
+}
+
+/**
  * The {@link StreamCode | StreamCode.ControlTimeout} error for a control request the peer never answered.
  *
  * A control request that outlives its deadline is not late content, so it does not go out as
