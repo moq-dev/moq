@@ -24754,13 +24754,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_accept_track() != 3641) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_close() != 33296) {
+  if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_close() != 18581) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_dial_tcp() != 61959) {
+  if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_dial_tcp() != 44736) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_dial_track() != 5972) {
+  if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_dial_track() != 54786) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsocketendpoint_id() != 2699) {
@@ -24965,7 +24965,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_constructor_moqclient_new() != 48355) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqsocketendpoint_new() != 7442) {
+  if (uniffi_moq_ffi_checksum_constructor_moqsocketendpoint_new() != 25288) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqvideoconsumer_subscribe() !=

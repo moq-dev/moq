@@ -362,10 +362,13 @@ media-features *args:
 # default filter leaves the benches unrun. `build.warnings` denies warnings
 # without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
 
+# A test whose timer waits on the host clock aborts (see `kio::clock::host_time`).
+# The ignored tests are benchmarks and hardware tests, which run on real time by design.
+
 # Run library, binary, and integration tests, enforcing clippy from the same compile.
 [positional-arguments]
 test *args:
-    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked --tests "$@"
+    {{ if args =~ '--run-ignored' { '' } else { 'KIO_DENY_HOST_TIMERS=1' } }} CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked --tests "$@"
 
 # Exercise the ignored hardware tests for every GPU vendor on this Linux host.
 gpu:

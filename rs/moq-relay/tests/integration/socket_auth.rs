@@ -1,10 +1,12 @@
 //! Sockets through a relay that admits with `moq-auth` tokens, verified by the reference
 //! auth server, granting only the prefixes `doc/concept/socket.md` lists.
 //!
-//! Every token is rooted at the socket prefix `room`. An endpoint's token publishes its own
-//! endpoint, `.socket/<id>`, and subscribes to every endpoint, `.socket/**`, so the
-//! session track names are what keep third parties out: a forged dial never connects, and no
-//! listing gives a session's name away.
+//! Every token is rooted at the socket prefix `room`. A server's token publishes its own
+//! endpoint, `.server/<id>`, and subscribes to every client, `.client/**`; a client's token
+//! publishes `.client/<id>` and subscribes to every server, `.server/**`. So a client can't
+//! pose as a server or read another client, and the session track names are what keep
+//! third parties out of a server's sessions: a forged dial never connects, and no listing
+//! gives a session's name away.
 
 use std::time::Duration;
 
@@ -114,16 +116,32 @@ impl Fixture {
 		Ok(session)
 	}
 
-	/// The endpoint `id`'s client, holding the grants `doc/concept/socket.md` lists: publish
-	/// its own endpoint, subscribe to every endpoint.
-	async fn endpoint(&self, id: &str, version: &str) -> (Endpoint, moq_net::origin::Producer, moq_net::Session) {
+	/// The endpoint `id` in `role`, holding the grants `doc/concept/socket.md` lists for it:
+	/// publish its own endpoint, subscribe to every endpoint of the other role.
+	async fn endpoint(
+		&self,
+		role: Role,
+		id: &str,
+		version: &str,
+	) -> (Endpoint, moq_net::origin::Producer, moq_net::Session) {
+		let (own, peers) = match role {
+			Role::Server => (".server", ".client"),
+			Role::Client => (".client", ".server"),
+		};
 		let (origin, session) = self
-			.client(&self.token(&format!(".socket/{id}"), ".socket/**"), version)
+			.client(&self.token(&format!("{own}/{id}"), &format!("{peers}/**")), version)
 			.await;
 		// The session is rooted at the prefix, so the endpoint's prefix is the root.
 		let endpoint = Endpoint::new(&origin, "", id).expect("endpoint");
 		(endpoint, origin, session)
 	}
+}
+
+/// Which grants an endpoint's token holds.
+#[derive(Clone, Copy)]
+enum Role {
+	Server,
+	Client,
 }
 
 /// Dial `acceptor` from `dialer` in a `tcp` session while `acceptor` accepts, returning
@@ -190,8 +208,8 @@ async fn recv(reader: &mut moq_net::track::Ordered) -> Vec<u8> {
 async fn prefix_grants_admit_a_session() {
 	for (dialer, acceptor) in [(LITE, LITE), (LITE, IETF), (IETF, LITE)] {
 		let fixture = Fixture::new().await;
-		let (alice, _alice_origin, _alice_session) = fixture.endpoint("alice", dialer).await;
-		let (bob, _bob_origin, _bob_session) = fixture.endpoint("bob", acceptor).await;
+		let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", dialer).await;
+		let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", acceptor).await;
 		let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
 		dialed.producer.write_frame(None, &b"ping"[..]).expect("write");
 		assert_eq!(read(&mut accepted.consumer).await, b"ping", "{dialer} to {acceptor}");
@@ -210,25 +228,25 @@ async fn prefix_grants_admit_a_session() {
 	}
 }
 
-/// Mallory may read every endpoint, so she can ask bob for a session in alice's name. Bob
-/// sees a dial from alice, but alice never dialed it and resets his accept, so it never
-/// connects and mallory reads nothing.
+/// Mallory, a client, may dial every server, so she can ask bob for a session in alice's
+/// name. Bob sees a dial from alice, but alice never dialed it and resets his accept, so it
+/// never connects and mallory reads nothing.
 #[tokio::test]
 async fn a_forged_dial_never_connects() {
 	let fixture = Fixture::new().await;
-	let (alice, _alice_origin, _alice_session) = fixture.endpoint("alice", LITE).await;
-	let (bob, _bob_origin, _bob_session) = fixture.endpoint("bob", LITE).await;
-	let (_mallory, mallory_origin, _mallory_session) = fixture.endpoint("mallory", LITE).await;
-	// Alice keeps accepting, as a server would, which is how she resets the forged accept.
-	let alice_accepts = async {
-		let _ = alice.accept_tcp().await;
-		panic!("alice heard of a dial");
-	};
+	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
+	let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
+	let (_mallory, mallory_origin, _mallory_session) = fixture.endpoint(Role::Client, "mallory", LITE).await;
+	// Alice dials elsewhere, so her client endpoint is there to reset the forged accept.
+	let _elsewhere = alice.dial_tcp("carol").expect("dial");
+
+	// Bob's first accept announces his server endpoint.
+	assert!(bob.poll_accept_tcp(&kio::Waiter::noop()).is_pending());
 
 	let forge = async {
 		let broadcast = mallory_origin
 			.consume()
-			.request(".socket/bob", None)
+			.request(".server/bob", None)
 			.await
 			.expect("bob's endpoint");
 		let forged = broadcast
@@ -241,23 +259,71 @@ async fn a_forged_dial_never_connects() {
 		assert!(accepted.is_err(), "bob connected to a forged dial");
 		assert!(forged.is_err(), "mallory read bob's half");
 	};
-	kio::clock::timeout(TIMEOUT, async {
-		futures::select_biased! {
-			() = futures::FutureExt::fuse(Box::pin(forge)) => {}
-			() = futures::FutureExt::fuse(Box::pin(alice_accepts)) => {}
+	kio::clock::timeout(TIMEOUT, forge).await.expect("forge timeout");
+}
+
+/// A client's grant keeps it a client: an accept announces a server endpoint the relay
+/// never carries, so no dial reaches it, and another client's endpoint is out of reach.
+///
+/// Each absence is read by a session that connects once the relay holds everything it
+/// could have carried, so its first sync with the relay would have listed it.
+#[tokio::test]
+async fn a_client_grant_neither_serves_nor_reads_clients() {
+	let fixture = Fixture::new().await;
+	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
+	let (_bob, bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
+	// Bob, a server, reads a client endpoint once the relay carries it.
+	let carried = |id: &'static str| {
+		let origin = bob_origin.consume();
+		async move {
+			kio::clock::timeout(TIMEOUT, origin.request(id, None))
+				.await
+				.expect("request timeout")
+				.unwrap_or_else(|err| panic!("{id}: {err}"));
 		}
-	})
-	.await
-	.expect("forge timeout");
+	};
+
+	// Alice dials, which announces her client endpoint.
+	let _alice_dial = alice.dial_tcp("carol").expect("dial");
+	carried(".client/alice").await;
+
+	// Mallory, a client, can't read it.
+	let (mallory, mallory_origin, _mallory_session) = fixture.endpoint(Role::Client, "mallory", LITE).await;
+	let read = kio::clock::timeout(TIMEOUT, mallory_origin.consume().request(".client/alice", None))
+		.await
+		.expect("request timeout");
+	assert!(
+		matches!(read, Err(moq_net::Error::Unroutable)),
+		"mallory read alice's endpoint: {:?}",
+		read.err()
+	);
+
+	// Mallory accepts as a server would, then dials, announcing her client endpoint after
+	// her server one on the same session: once it is carried, the relay decided both.
+	assert!(mallory.poll_accept_tcp(&kio::Waiter::noop()).is_pending());
+	let _mallory_dial = mallory.dial_tcp("bob").expect("dial");
+	carried(".client/mallory").await;
+
+	// So no dial can reach her.
+	let (_dave, dave_origin, _dave_session) = fixture.endpoint(Role::Client, "dave", LITE).await;
+	let served = kio::clock::timeout(TIMEOUT, dave_origin.consume().request(".server/mallory", None))
+		.await
+		.expect("request timeout");
+	assert!(
+		matches!(served, Err(moq_net::Error::Unroutable)),
+		"the relay carried mallory's server endpoint: {:?}",
+		served.err()
+	);
 }
 
 /// A reader allowed every endpoint lists both ends of a running session and finds no
 /// track, so it cannot learn a session's name to read or forge it.
 #[tokio::test]
 async fn a_reader_of_everything_lists_no_session() {
+	kio::clock::host_time();
 	let fixture = Fixture::new().await;
-	let (alice, _alice_origin, _alice_session) = fixture.endpoint("alice", LITE).await;
-	let (bob, _bob_origin, _bob_session) = fixture.endpoint("bob", LITE).await;
+	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
+	let (bob, _bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
 	let (mut dialed, mut accepted) = connect_tcp(&alice, &bob).await;
 	dialed.producer.write_frame(None, &b"secret"[..]).expect("write");
 	assert_eq!(read(&mut accepted.consumer).await, b"secret");
@@ -265,9 +331,9 @@ async fn a_reader_of_everything_lists_no_session() {
 	send(&track_dialed.producer, b"secret");
 	assert_eq!(recv(&mut track_accepted.consumer.ordered()).await, b"secret");
 
-	let (eve_origin, _eve_session) = fixture.client(&fixture.token(".socket/eve", "**"), LITE).await;
-	for id in ["alice", "bob"] {
-		let broadcast = kio::clock::timeout(TIMEOUT, eve_origin.consume().request(format!(".socket/{id}"), None))
+	let (eve_origin, _eve_session) = fixture.client(&fixture.token(".client/eve", "**"), LITE).await;
+	for id in [".client/alice", ".server/bob"] {
+		let broadcast = kio::clock::timeout(TIMEOUT, eve_origin.consume().request(id, None))
 			.await
 			.expect("request timeout")
 			.expect("the endpoint");
