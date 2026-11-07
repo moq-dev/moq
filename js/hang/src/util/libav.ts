@@ -16,6 +16,8 @@ export async function polyfill(): Promise<boolean> {
 }
 
 async function load(): Promise<boolean> {
+	// Whether the browser decodes natively, read before the imports yield to anything that installs one.
+	const native = globalThis.AudioDecoder;
 	console.warn("using libav WebCodecs polyfill; performance may be degraded");
 
 	// @moq/libav is libav.js's opus-af variant plus the AAC decoder, which no published variant has.
@@ -24,7 +26,6 @@ async function load(): Promise<boolean> {
 		import("@moq/libav"),
 		import("@kixelated/libavjs-webcodecs-polyfill"),
 	]);
-	const native = globalThis.AudioDecoder;
 	await libav.load({ LibAV, polyfill: true });
 	if (native) return true;
 
