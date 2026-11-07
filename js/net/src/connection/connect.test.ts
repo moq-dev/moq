@@ -1063,12 +1063,7 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = sleep(Nano.fromMilli(Milli(100))).then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = sleep(Nano.fromMilli(Milli(100))).then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -1105,12 +1100,7 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = opened.then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = opened.then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -1229,6 +1219,20 @@ test("an invalid timeout throws before touching the caller's signal", async () =
 	await expect(connect(url, { timeout: -1 as Milli })).rejects.toThrow("invalid time: -1");
 });
 
+/** An opened WebSocketStream whose QMux server sent only its TRANSPORT_PARAMETERS (all
+ *  defaults), which a session's `ready` waits for. */
+function qmuxStreams() {
+	return {
+		readable: new ReadableStream({
+			start: (controller) =>
+				controller.enqueue(new Uint8Array([0xff, 0x51, 0x53, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0])),
+		}),
+		writable: new WritableStream(),
+		protocol: "qmux-01",
+		extensions: "",
+	};
+}
+
 type WebSocketDial = "hang" | "open" | { failAfter: Milli } | { openAfter: Milli };
 
 // Their own host: a WebSocket that wins drops WebTransport's head start for its host and port afterwards.
@@ -1243,12 +1247,7 @@ function webSocketPlan(clock: Manual, plan: (dial: number) => WebSocketDial) {
 	const originalTransport = native.WebTransport;
 	native.WebTransport = undefined;
 	const dials: { at: number; closes: number }[] = [];
-	const streams = () => ({
-		readable: new ReadableStream(),
-		writable: new WritableStream(),
-		protocol: "qmux-01",
-		extensions: "",
-	});
+	const streams = qmuxStreams;
 	native.WebSocketStream = class {
 		url: string;
 		opened: Promise<unknown>;
