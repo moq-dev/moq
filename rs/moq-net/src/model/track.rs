@@ -3917,6 +3917,17 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Abort the track as an upstream refusal that asked to be tried again after `retry`, so
+	/// a relay refuses the readers still waiting with that interval.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse(self, err: Error, retry: Duration) -> Result<()> {
+		self.alive.unlist(false);
+		let mut state = self.modify()?;
+		state.retry = Some(retry);
+		commit_abort(state, err).abort();
+		Ok(())
+	}
+
 	/// Abort an unwanted track, returning the producer unchanged if consumers remain.
 	///
 	/// Consumer creation and the unwanted check share a lock, so demand returning

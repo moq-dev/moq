@@ -631,7 +631,9 @@ export class Publisher {
 					if (!this.#gate.allows(name)) throw unauthorized(name);
 				} catch (err) {
 					if (left.signal.aborted) return;
-					await refuseUpdate(request.writer, version, "subscribe", this.#failed(err));
+					const refusal = this.#failed(err);
+					if (err instanceof SubscribeRefused) refusal.retryInterval = err.retryInterval;
+					await refuseUpdate(request.writer, version, "subscribe", refusal);
 					await this.#publishFailed(request, streams);
 					request.close();
 					return;

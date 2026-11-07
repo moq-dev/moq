@@ -25,6 +25,21 @@ use crate::{
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
 
+/// The REQUEST_ERROR refusing a SUBSCRIBE with `err`. Its Retry Interval is `retry` when an
+/// upstream refusal asked for one, and derived from `err` otherwise.
+fn subscribe_refusal<'a>(
+	err: &Error,
+	reason: &'a str,
+	version: Version,
+	retry: Option<Duration>,
+) -> ietf::RequestError<'a> {
+	let mut error = ietf::RequestError::refuse(err, request::Kind::Subscribe, reason, version);
+	if let Some(retry) = retry {
+		error.retry_interval = u64::try_from(retry.as_millis()).unwrap_or(u64::MAX);
+	}
+	error
+}
+
 /// Leave only the publisher's max age when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
@@ -1263,13 +1278,10 @@ impl SubscribeRequest {
 		SubscribeState::Serve(Box::new(Serving::new(&self.publisher, &self.msg)))
 	}
 
-	/// Refuse the request with `err`, delivering its REQUEST_ERROR next. Its Retry Interval
-	/// is `retry` when an upstream refusal asked for one, and derived from `err` otherwise.
+	/// Refuse the request with `err`, delivering its REQUEST_ERROR next, as
+	/// [`subscribe_refusal`] words it.
 	fn refuse(&mut self, err: &Error, reason: &str, retry: Option<Duration>) -> Result<SubscribeState, Error> {
-		let mut error = ietf::RequestError::refuse(err, request::Kind::Subscribe, reason, self.publisher.version);
-		if let Some(retry) = retry {
-			error.retry_interval = u64::try_from(retry.as_millis()).unwrap_or(u64::MAX);
-		}
+		let error = subscribe_refusal(err, reason, self.publisher.version, retry);
 		let stream = self.stream.as_mut().expect("open until PUBLISH_DONE");
 		let deliver = self.publisher.reject_subscribe(&mut stream.writer, &error)?;
 		Ok(SubscribeState::Refuse(deliver))
@@ -1576,7 +1588,7 @@ impl Serving {
 							&& let Some((err, retry)) = &self.stream_error
 						{
 							if self.resuming {
-								self.step = Self::resume_failed(request, err.clone())?;
+								self.step = Self::resume_failed(request, err.clone(), *retry)?;
 								continue;
 							}
 							return Poll::Ready(Ok(refused(err.clone(), request.msg.rendezvous, true, *retry)));
@@ -1816,12 +1828,16 @@ impl Serving {
 		Ok(Some(self.ended(served)))
 	}
 
-	/// Fail the update resuming the subscription with `err`, flushing its answer next.
-	fn resume_failed(request: &mut SubscribeRequest, err: Error) -> Result<ServingStep, Error> {
+	/// Fail the update resuming the subscription with `err`, flushing its answer next. Its
+	/// Retry Interval is `retry` when an upstream refusal asked for one.
+	fn resume_failed(
+		request: &mut SubscribeRequest,
+		err: Error,
+		retry: Option<Duration>,
+	) -> Result<ServingStep, Error> {
+		let error = subscribe_refusal(&err, "resume failed", request.publisher.version, retry);
 		let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
-		request
-			.publisher
-			.buffer_subscribe_error(&mut stream.writer, &err, "resume failed")?;
+		stream.writer.buffer_message(ietf::RequestError::ID, &error)?;
 		Ok(ServingStep::ResumeFailed(err))
 	}
 
@@ -9488,6 +9504,8 @@ mod serve_tests {
 		messages: Vec<(u64, std::ops::RangeInclusive<usize>)>,
 		/// PUBLISH_DONE's Status Code and Stream Count.
 		publish_done: Option<(u64, u64)>,
+		/// The last REQUEST_ERROR's Error Code and Retry Interval.
+		request_error: Option<(u64, u64)>,
 		/// Each data stream and the position where it was closed, if it was.
 		data: std::collections::BTreeMap<usize, Option<usize>>,
 	}
@@ -9515,6 +9533,7 @@ mod serve_tests {
 
 			let mut messages = Vec::new();
 			let mut publish_done = None;
+			let mut request_error = None;
 			let mut offset = 0;
 			while offset < bytes.len() {
 				let mut rest = &bytes[offset..];
@@ -9526,12 +9545,19 @@ mod serve_tests {
 						.unwrap();
 					publish_done = Some((done.status_code, done.stream_count));
 				}
+				if id == ietf::RequestError::ID {
+					let error =
+						ietf::RequestError::decode(&mut Decoder::new(&bytes[body..end], version.into()), version)
+							.unwrap();
+					request_error = Some((error.error_code, error.retry_interval));
+				}
 				messages.push((id, written_at[offset]..=written_at[end - 1]));
 				offset = end;
 			}
 			Self {
 				messages,
 				publish_done,
+				request_error,
 				data,
 			}
 		}
@@ -15946,6 +15972,68 @@ mod serve_tests {
 				);
 				assert_eq!(relayed.await, refusal, "{version}");
 			}
+		}
+	}
+
+	/// A relay refuses a resume with the Retry Interval its upstream's refusal of the resumed
+	/// track asked for, where `NotFound` would derive "never retry".
+	#[kio::test]
+	async fn a_relay_forwards_a_resume_refusal_s_retry_interval() {
+		for version in ALL_VERSIONS {
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let route = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let mut requests = route.broadcast().requests();
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+			let session = ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(session.clone()),
+				origin.consume(),
+				Control::new(false),
+				None,
+				peer_setup,
+				version,
+			);
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut serve = std::pin::pin!(
+				publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+
+			// The first subscription is served, then paused, which drops its track.
+			let request = {
+				let asked = std::pin::pin!(requests.requested_track());
+				match futures::future::select(asked, serve.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request.unwrap(),
+					futures::future::Either::Right((res, _)) => panic!("{version}: ended unasked: {res:?}"),
+				}
+			};
+			let track = request.accept(crate::track::Info::timed());
+			serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !log.trail().is_empty()).await;
+			session.push(&forward_update(version, 4, false));
+			serve_until(serve.as_mut(), "the pause", || track.subscription().is_none()).await;
+			track.abort(Error::Cancel).unwrap();
+			settle().await;
+
+			// The resume asks for the track again, which the upstream refuses.
+			session.push(&forward_update(version, 6, true));
+			let request = {
+				let asked = std::pin::pin!(requests.requested_track());
+				match futures::future::select(asked, serve.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request.unwrap(),
+					futures::future::Either::Right((res, _)) => panic!("{version}: ended before the resume: {res:?}"),
+				}
+			};
+			request.refuse(Error::NotFound, std::time::Duration::from_millis(5000));
+			let _ = kio::clock::timeout(std::time::Duration::from_secs(1), serve)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: outlived its refusal"));
+			assert_eq!(Wire::read(&log, version).request_error, Some((0x10, 5000)), "{version}");
 		}
 	}
 

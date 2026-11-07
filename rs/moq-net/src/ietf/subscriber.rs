@@ -4368,7 +4368,10 @@ impl SubscribeOnce {
 					return Some(Poll::Ready(self.resumed.take()));
 				}
 				if let Some(idle) = self.resumed.take() {
-					let _ = idle.track.abort(err);
+					let _ = match retry {
+						Some(retry) => idle.track.refuse(err, retry),
+						None => idle.track.abort(err),
+					};
 				}
 				if cancel {
 					self.step = OnceStep::Refuse(Subscriber::cancelling(self.stream()));
@@ -19107,6 +19110,33 @@ mod new_group_tests {
 		assert_eq!(sent, Some(6));
 		accept(&mut stream, true, 5).await;
 		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// A resumed copy refused upstream keeps the refusal's Retry Interval, so a relay refuses
+	/// the readers waiting on it with that interval rather than deriving one.
+	#[kio::test]
+	async fn a_refused_resume_keeps_the_retry_interval() {
+		let (mut relay, first) = relay().await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+		drop(first);
+		settle().await;
+
+		let resumed = relay.track.subscribe(None);
+		let (mut stream, _) = relay.accept().await;
+		stream.writer.varint(ietf::RequestError::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::RequestError {
+				error_code: 0x10,
+				reason_phrase: "gone for now".into(),
+				retry_interval: 5000,
+			})
+			.await
+			.unwrap();
+		settle().await;
+		assert_eq!(resumed.retry(), Some(Duration::from_millis(5000)));
 		relay.serving.abort();
 	}
 

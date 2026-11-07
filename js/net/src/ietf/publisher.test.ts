@@ -654,6 +654,56 @@ test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
 	}
 });
 
+// A resume refused upstream is refused downstream with the Retry Interval the upstream asked
+// for, where DOES_NOT_EXIST would derive "never retry".
+test("a relay forwards a resume refusal's retry interval", async () => {
+	for (const version of IETF_VERSIONS) {
+		const fx = fixture(version);
+		const client = await Stream.open(fx.pair.client, { version });
+		const server = await Stream.accept(fx.pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		const first = (async () => {
+			const request = await wireOf(fx.broadcast).requested();
+			if (!request) throw new Error("no track was requested");
+			return request.accept({ timescale: Timescale.MILLI });
+		})();
+		const serving = fx.pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				forward: false,
+			}),
+			server,
+		);
+		try {
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			await SubscribeOk.decode(client.reader, version);
+			const track = await first;
+			while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			track.finish();
+			track.close();
+			const second = wireOf(fx.broadcast).requested();
+			const parameters = new Parameters();
+			parameters.forward = true;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, version);
+			const resumed = await second;
+			if (!resumed) throw new Error("the resume asked for nothing");
+			resumed.reject(new SubscribeRefused(0x10, "upstream", 5000n, version));
+
+			expect(await client.reader.u53()).toBe(RequestError.id);
+			const refused = await RequestError.decode(client.reader, version);
+			expect([refused.errorCode, refused.retryInterval]).toEqual([0x10, 5000n]);
+			await serving;
+		} finally {
+			client.close();
+			fx.close();
+		}
+	}
+});
+
 test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () => {
 	for (const version of [Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
