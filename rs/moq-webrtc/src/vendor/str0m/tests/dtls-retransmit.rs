@@ -17,12 +17,14 @@
 //!
 //! The scenario asserted here is specific to dimpl's tx-queue semantics,
 //! so the test is compiled only under dimpl-backed crypto providers.
-#![cfg(any(all(), any(), any(), any(), any(),))]
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
+use crate::vendor::dimpl::TimeoutError;
 use crate::vendor::netem::{NetemConfig, Probability, RandomLoss};
 use crate::vendor::str0m::RtcError;
+use crate::vendor::str0m::crypto::dtls::DtlsImplError;
+use crate::vendor::str0m::crypto::{CryptoError, DtlsError};
 use crate::vendor::str0m::{Candidate, Input, Output, Reason, Rtc};
 use tracing::info_span;
 
@@ -187,10 +189,17 @@ fn terminal_dtls_timeout_does_not_rearm_expired_deadline() {
 		}
 	}
 
+	let terminal_error =
+		terminal_error.expect("terminal dimpl timeout was not returned within the bounded scheduler run");
+	// The vendored stack keeps dimpl's typed timeout rather than a string.
 	assert!(
-		terminal_error.is_some(),
-		"terminal dimpl timeout was not returned within the bounded scheduler run"
+		matches!(
+			terminal_error,
+			DtlsError::CryptoError(CryptoError::DtlsImpl(DtlsImplError::Timeout(TimeoutError::Handshake)))
+		),
+		"unexpected terminal DTLS error: {terminal_error:?}"
 	);
+	assert_eq!(terminal_error.to_string(), "DTLS error: timeout: handshake");
 	assert!(!left.rtc.is_alive(), "terminal DTLS error must close the RTC");
 
 	// After the error, callers that continue polling and feeding timeout input

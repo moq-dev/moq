@@ -27,7 +27,7 @@ impl fmt::Display for CryptoError {
 			#[cfg(any())]
 			CryptoError::OpenSsl(err) => write!(f, "{}", err),
 			CryptoError::Io(err) => write!(f, "{}", err),
-			CryptoError::DtlsImpl(err) => write!(f, "{}", err),
+			CryptoError::DtlsImpl(err) => write!(f, "DTLS error: {}", err),
 			CryptoError::Other(err) => write!(f, "{}", err),
 		}
 	}

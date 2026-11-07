@@ -161,7 +161,7 @@ impl Dtls {
 
 		self.instance
 			.handle_packet(packet)
-			.map_err(|e| DtlsError::CryptoError(CryptoError::Other(format!("DTLS error: {}", e))))
+			.map_err(|e| DtlsError::CryptoError(CryptoError::DtlsImpl(e)))
 	}
 
 	/// Send application data over DTLS.
@@ -178,7 +178,7 @@ impl Dtls {
 		let accepted = self
 			.instance
 			.send_application_data(data)
-			.map_err(|e| DtlsError::CryptoError(CryptoError::Other(format!("DTLS error: {}", e))))?;
+			.map_err(|e| DtlsError::CryptoError(CryptoError::DtlsImpl(e)))?;
 
 		if accepted != data.len() {
 			return Err(make_handshake_pending_err());
@@ -195,14 +195,14 @@ impl Dtls {
 
 		self.instance
 			.handle_timeout(now)
-			.map_err(|e| DtlsError::CryptoError(CryptoError::Other(format!("DTLS error: {}", e))))
+			.map_err(|e| DtlsError::CryptoError(CryptoError::DtlsImpl(e)))
 	}
 
 	/// Initiate graceful shutdown by sending a close_notify alert.
 	pub fn close(&mut self) -> Result<(), DtlsError> {
 		self.instance
 			.close()
-			.map_err(|e| DtlsError::CryptoError(CryptoError::Other(format!("DTLS error: {}", e))))
+			.map_err(|e| DtlsError::CryptoError(CryptoError::DtlsImpl(e)))
 	}
 }
 
