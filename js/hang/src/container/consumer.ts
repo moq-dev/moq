@@ -191,6 +191,8 @@ export class Consumer {
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
 	#mediaGroup?: bigint;
+	// The last item read was a declared end, so the timeline is paused until a frame resumes it.
+	#paused = false;
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	#lost = false;
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
@@ -805,6 +807,8 @@ export class Consumer {
 			// is proven: the head already reaches past where presentation left off by more than the
 			// max delay, so anything still missing in between would arrive too old to play. Proving it
 			// here matters: #checkMaxDelay would instead drop the head, the very group to play next.
+			// A declared end proves nothing: the jump past it is the pause, and the media that resumes
+			// it may still be in flight behind the group after it.
 			// After track termination no missing group can arrive, so drain across any remaining gap.
 			// A missing sequence also expires on elapsed monotonic time, so timestamp-free markers
 			// behind a hole can end a paused track without more arrivals. It is late since a group
@@ -821,7 +825,8 @@ export class Consumer {
 					const skipHole =
 						head.frames.length > 0 &&
 						(maxDelay === 0 ||
-							(this.#presentedEnd !== undefined &&
+							(!this.#paused &&
+								this.#presentedEnd !== undefined &&
 								head.latest !== undefined &&
 								head.latest - this.#presentedEnd > maxDelay));
 					const elapsed = Instant.durationSince(now(), this.#hole) >= maxDelay * 1000;
@@ -1038,6 +1043,7 @@ export class Consumer {
 		const edge = this.#edge;
 		const lost = this.#lost;
 		this.#lost = false;
+		this.#paused = read.kind === "end";
 		this.#advance(read.kind === "frame" ? Micro(resume + (read.frame.duration ?? Micro.zero)) : resume);
 		if (!lost || edge === undefined) return read;
 
