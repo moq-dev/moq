@@ -9,7 +9,7 @@ The wire layer: generic over the transport and media-agnostic.
 - The cache is only an optimization: a relay behaves the same warm or cold, reporting upstream state (such as the largest group) rather than what it holds.
 - A relay never blocks an answer on other nodes finishing something; it reports what it knows now.
 - New capabilities are additive SETUP extensions; receivers ignore unknown parameters.
-- A moq-transport feature with no moq-lite counterpart (e.g. FORWARD=0) gets the least code inside the IETF layer and nothing in the model.
+- A moq-transport feature with no moq-lite counterpart (e.g. FORWARD=0) gets the least code inside the IETF layer. It may keep crate-private state in the model so a moq-transport-to-moq-transport relay forwards it faithfully, but never adds public API.
 - Outside the crate, branch on `is_lite()` and `alpn()`. Inside, match draft enums with old drafts listed explicitly and the newest behavior as the fallthrough.
 - Respond to every feature a peer may use, but don't request new ones.
 - `Timestamp` is an instant with a scale: `.convert()` before arithmetic, and seed a max with `Option`, not `ZERO`. A peer's rewound timestamp must never panic or cost unbounded work, but needn't give correct results.

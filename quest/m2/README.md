@@ -22,7 +22,7 @@ naming abandoned groups on the wire lands on lite-07-wip) and the whole
 unbounded-groups epic, whose additive compressed-stream child rides with it.
 
 The cut gates that break nothing (main no slower than release, vendored
-fixes, the pre-cut audit re-run, and moq-c parity) live under the recurring
+fixes, and moq-c parity) live under the recurring
 [cut gate](/quest/m2/cut-gate/README.md), decided the same day.
 
 Held by open claims: the m1 epics and quests marked below stay where they
@@ -179,13 +179,12 @@ quests that require them.
 - [Cluster routing](/quest/m2/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - the wire names every abandoned group and the drop signal is public, so readers count losses instead of stalling
-- [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport (held in m1 by an open claim)
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them (held in m1 by an open claim)
 - [Rename moq-rtc to moq-webrtc](/quest/m2/webrtc-rename.md) - one published `moq-webrtc` crate holds the gateway, the ICE driver, and the data-channel transport
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
-- [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, the pre-cut audit re-run, and moq-c at parity
+- [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
 - [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge
