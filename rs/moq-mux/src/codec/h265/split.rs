@@ -623,4 +623,25 @@ mod tests {
 			annexb(&[VPS, SPS, PPS, IDR]).freeze().as_ref()
 		);
 	}
+
+	/// An enhancement layer's parameter sets are retained beside the base layer's and re-injected
+	/// on a bare keyframe, even one reusing the base SPS's id or using the multi-layer layout.
+	#[tokio::test(start_paused = true)]
+	async fn retains_enhancement_layer_parameter_sets() {
+		use crate::codec::h265::fixtures::{MV_PPS_LAYER1, MV_SPS_LAYER1};
+
+		// The base SPS moved to layer 1: the base layout, and the base SPS's id 0.
+		let mut same_id = SPS.to_vec();
+		same_id[1] = 0x09;
+		for layer1 in [MV_SPS_LAYER1, &same_id] {
+			let mut split = Split::new();
+			let au = [VPS, SPS, layer1, PPS, MV_PPS_LAYER1, IDR];
+			let first = decode_one(&mut split, &mut annexb(&au), ts());
+			assert_eq!(first[0].payload.as_ref(), annexb(&au).freeze().as_ref());
+
+			let bare = decode_one(&mut split, &mut annexb(&[IDR]), ts());
+			assert!(bare[0].keyframe);
+			assert_eq!(bare[0].payload.as_ref(), annexb(&au).freeze().as_ref());
+		}
+	}
 }

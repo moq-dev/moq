@@ -208,12 +208,14 @@ pub fn build_prefix<'a, I: IntoIterator<Item = &'a Bytes>>(nals: I) -> Bytes {
 	out.freeze()
 }
 
-/// Parameter sets of one type keyed by the id they define, in id order.
+/// Parameter sets of one type keyed by the layer (H.265 `nuh_layer_id`, always 0 for H.264) and
+/// id they define, base layer first and then in id order.
 ///
-/// A later set with an id replaces the earlier one, as it does in a decoder, so a source may
-/// define several (e.g. two PPS that slices reference by id) and a repeated or redefined id
-/// costs one entry rather than a growing list.
-pub(crate) type ParameterSets = BTreeMap<u32, Bytes>;
+/// A later set with a layer and id replaces the earlier one, as it does in a decoder, so a source
+/// may define several (e.g. two PPS that slices reference by id) and a repeated or redefined id
+/// costs one entry rather than a growing list. Each layer numbers its own sets, so an enhancement
+/// layer's never replaces the base layer's.
+pub(crate) type ParameterSets = BTreeMap<(u8, u32), Bytes>;
 
 /// The NAL syntax an [`InBand`] transform reads.
 #[derive(Debug, Clone, Copy)]
@@ -243,15 +245,18 @@ impl InBandCodec {
 		}
 	}
 
-	/// Insert parameter set `nal` (header included) under the id it defines, replacing any
-	/// earlier set with that id.
+	/// Insert parameter set `nal` (header included) under the layer and id it defines, replacing
+	/// any earlier set with both.
 	pub(crate) fn insert_parameter_set(self, sets: &mut ParameterSets, nal: &Bytes) -> Result<()> {
 		use h264_reader::rbsp::BitRead;
 
 		let nal_type = self.nal_type(nal);
-		let header = match self {
-			Self::H264 => 1,
-			Self::H265 => 2,
+		let (header, layer) = match self {
+			Self::H264 => (1, 0),
+			Self::H265 => (
+				2,
+				crate::codec::h265::layer_id(nal).ok_or(Error::ParameterSetId(nal_type))?,
+			),
 		};
 		let r = &mut rbsp(nal, header);
 		let id = match (self, nal_type) {
@@ -262,10 +267,10 @@ impl InBandCodec {
 			// pic_parameter_set_id opens a PPS in both codecs.
 			(Self::H264, 8) | (Self::H265, 34) => r.read_ue("pic_parameter_set_id"),
 			(Self::H265, 32) => r.read::<4, u32>("vps_video_parameter_set_id"),
-			(Self::H265, 33) => crate::codec::h265::sps_id(r),
+			(Self::H265, 33) => crate::codec::h265::sps_id(r, layer),
 			_ => return Err(Error::ParameterSetId(nal_type)),
 		};
-		sets.insert(id.map_err(|_| Error::ParameterSetId(nal_type))?, nal.clone());
+		sets.insert((layer, id.map_err(|_| Error::ParameterSetId(nal_type))?), nal.clone());
 		Ok(())
 	}
 
@@ -1132,15 +1137,15 @@ mod tests {
 			}
 		}
 		assert_eq!(sets.len(), 2);
-		assert_eq!(sets[&0].as_ref(), [0x68, 0xce, 0x3c, 0xff]);
-		assert_eq!(sets[&1].as_ref(), [0x68, 0x4e, 0x3c, 0xff]);
+		assert_eq!(sets[&(0, 0)].as_ref(), [0x68, 0xce, 0x3c, 0xff]);
+		assert_eq!(sets[&(0, 1)].as_ref(), [0x68, 0x4e, 0x3c, 0xff]);
 
 		for nal in [VPS, SPS, SPS_PYRAMID, PPS] {
 			let mut sets = ParameterSets::new();
 			InBandCodec::H265
 				.insert_parameter_set(&mut sets, &Bytes::from_static(nal))
 				.unwrap();
-			assert_eq!(sets.keys().collect::<Vec<_>>(), [&0]);
+			assert_eq!(sets.keys().collect::<Vec<_>>(), [&(0, 0)]);
 		}
 
 		let truncated = Bytes::from_static(&[0x67, 0x42, 0xc0]);

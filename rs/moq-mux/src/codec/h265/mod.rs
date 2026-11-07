@@ -66,6 +66,39 @@ pub(crate) fn hvc1_is_radl(data: &[u8], length_size: usize) -> bool {
 	slices.peek().is_some() && slices.all(|kind| matches!(kind, 6 | 7))
 }
 
+/// A NAL unit's `nuh_layer_id`, the six bits across both header bytes; `None` when it is shorter
+/// than its header.
+pub(crate) fn layer_id(nal: &[u8]) -> Option<u8> {
+	match nal {
+		[first, second, ..] => Some(((first & 0x01) << 5) | (second >> 3)),
+		_ => None,
+	}
+}
+
+/// True for a base-layer NAL unit (`nuh_layer_id` 0). An enhancement layer's SPS (MV-HEVC,
+/// SHVC) has another layout (H.265 F.7.3.2.2.1), so only the base layer's configures a rendition.
+pub(crate) fn is_base_layer(nal: &[u8]) -> bool {
+	layer_id(nal) == Some(0)
+}
+
+/// The first base-layer SPS among a stream's or record's SPS NAL units: `None` when there are
+/// none, and an error when every one is an enhancement layer's.
+pub(crate) fn base_sps<'a, T: AsRef<[u8]> + ?Sized + 'a>(
+	sps: impl IntoIterator<Item = &'a T>,
+) -> Result<Option<&'a T>> {
+	let mut any = false;
+	for nal in sps {
+		if is_base_layer(nal.as_ref()) {
+			return Ok(Some(nal));
+		}
+		any = true;
+	}
+	match any {
+		true => Err(Error::NoBaseLayerSps),
+		false => Ok(None),
+	}
+}
+
 /// An H.265 `nal_unit_type` (ITU-T H.265 Table 7-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NalType(pub u8);
@@ -159,6 +192,10 @@ pub enum Error {
 	/// Parsing or transforming the Annex B stream failed.
 	#[error("annexb: {0}")]
 	Annexb(#[from] crate::codec::annexb::Error),
+
+	/// Every SPS belongs to an enhancement layer (`nuh_layer_id` > 0); only the base layer imports.
+	#[error("no base-layer SPS: every SPS has nuh_layer_id > 0")]
+	NoBaseLayerSps,
 }
 
 /// A result using this module's error type.
@@ -217,23 +254,23 @@ impl Hvcc {
 /// catalog `description` (`in_band: false`).
 pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	let params = Hvcc::parse(hvcc)?;
-	let sps_nal = params.sps.first().ok_or(Error::MissingSps)?;
+	let sps_nal = base_sps(&params.sps)?.ok_or(Error::MissingSps)?;
 	let mut config = config_from_sps(sps_nal, false)?;
 	config.description = Some(Bytes::copy_from_slice(hvcc));
 	Ok(config)
 }
 
-/// Copy the frame rate, display aspect, colour, and reorder depth from a decoded hvcC's first SPS.
+/// Copy the frame rate, display aspect, colour, and reorder depth from a decoded hvcC's first
+/// base-layer SPS.
 ///
 /// An hev1 record may list no SPS, leaving them unset.
 pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::VideoConfig) -> Result<()> {
-	let Some(sps) = hvcc
+	let sps = hvcc
 		.arrays
 		.iter()
 		.filter(|array| NalType(array.nal_unit_type) == NalType::SPS)
-		.flat_map(|array| &array.nalus)
-		.next()
-	else {
+		.flat_map(|array| &array.nalus);
+	let Some(sps) = base_sps(sps)? else {
 		return Ok(());
 	};
 	let metadata = config_from_sps(sps, false)?;
@@ -452,11 +489,11 @@ fn process_nal(
 }
 
 /// Build an HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3).
-/// Single-layer streams only. Each NAL array (VPS, SPS, PPS) carries every
-/// distinct parameter set the stream defined, in arrival order; the profile/tier
-/// fields are read from the first SPS.
+/// Each NAL array (VPS, SPS, PPS) carries every distinct parameter set the
+/// stream defined, in the order given; the profile/tier fields are read from
+/// the first base-layer SPS.
 pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Bytes]) -> Result<Bytes> {
-	let first_sps = sps_nals.first().ok_or(Error::MissingSps)?;
+	let first_sps = base_sps(sps_nals)?.ok_or(Error::MissingSps)?;
 	// mp4-atom truncates the counts and lengths rather than refusing them.
 	for (label, nals) in [("VPS", vps_nals), ("SPS", sps_nals), ("PPS", pps_nals)] {
 		if nals.len() > u16::MAX as usize {
@@ -584,6 +621,18 @@ pub(crate) mod fixtures {
 		0x02, 0x00, 0x00, 0x03, 0x00, 0x3c, 0x10,
 	];
 	pub(crate) const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x62, 0x40];
+
+	/// The base-layer SPS from a 128x64 two-view MV-HEVC x265 4.2 encode (`--num-views 2 --format 1`).
+	pub(crate) const MV_SPS: &[u8] = &[
+		0x42, 0x01, 0x01, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0x9f, 0xa8, 0x00, 0x00, 0x03, 0x00, 0x00, 0x1e, 0xa0,
+		0x10, 0x20, 0x41, 0x65, 0xba, 0x92, 0x4c, 0xae, 0x01, 0x00, 0x00, 0x03, 0x03, 0xe8, 0x00, 0x00, 0x61, 0xa8,
+		0x14, 0x04,
+	];
+	/// The same encode's second-view SPS: `nuh_layer_id` 1, `sps_seq_parameter_set_id` 1, and the
+	/// multi-layer layout (`sps_ext_or_max_sub_layers_minus1` 7), which the base layout misreads.
+	pub(crate) const MV_SPS_LAYER1: &[u8] = &[0x42, 0x09, 0x0e, 0x85, 0x92, 0x4c, 0xae, 0x00, 0x50, 0x30];
+	/// The same encode's second-view PPS (`nuh_layer_id` 1, `pps_pic_parameter_set_id` 1).
+	pub(crate) const MV_PPS_LAYER1: &[u8] = &[0x44, 0x09, 0x48, 0x57, 0x2b, 0x02, 0x2a, 0x01, 0x40];
 
 	/// SPS from a 64x64 Main 10 x265 encode with `colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc`.
 	pub(crate) const SPS_HDR10: &[u8] = &[
@@ -883,5 +932,62 @@ mod tests {
 		assert!(catalog_hvcc(&hevc(2, true, 0)).is_none(), "Main 10");
 		assert!(catalog_hvcc(&hevc(1, true, 1)).is_none(), "profile space");
 		assert!(catalog_hvcc(&hevc(1, false, 0)).is_none(), "out of band");
+	}
+
+	/// An hvcC listing an SPS for each view, the enhancement layer's first: the catalog reads the
+	/// base layer's, an hvcC listing only the enhancement layer's is refused, and one listing no
+	/// SPS leaves the config to the in-band SPS.
+	#[test]
+	fn hvcc_reads_only_the_base_layer_sps() {
+		let layered = build_hvcc(
+			&[Bytes::from_static(fixtures::VPS)],
+			&[
+				Bytes::from_static(fixtures::MV_SPS_LAYER1),
+				Bytes::from_static(fixtures::MV_SPS),
+			],
+			&[Bytes::from_static(fixtures::PPS)],
+		)
+		.unwrap();
+		let config = config_from_hvcc(&layered).unwrap();
+		assert_eq!((config.coded_width, config.coded_height), (Some(128), Some(64)));
+		let mut applied = config.clone();
+		applied.reorder = Some(9);
+		apply_hvcc_sps(&decode_hvcc(&layered), &mut applied).unwrap();
+		assert_eq!(applied.reorder, config.reorder);
+
+		let mut record = decode_hvcc(&layered);
+		let with_sps = |record: &mp4_atom::Hvcc, sps: Vec<Vec<u8>>| {
+			let mut record = record.clone();
+			for array in &mut record.arrays {
+				if NalType(array.nal_unit_type) == NalType::SPS {
+					array.nalus = sps.clone();
+				}
+			}
+			record
+		};
+		let enhancement = with_sps(&record, vec![fixtures::MV_SPS_LAYER1.to_vec()]);
+		assert!(matches!(
+			config_from_hvcc(&encode_hvcc(&enhancement)),
+			Err(Error::NoBaseLayerSps)
+		));
+		assert!(matches!(
+			apply_hvcc_sps(&enhancement, &mut config.clone()),
+			Err(Error::NoBaseLayerSps)
+		));
+		assert!(matches!(
+			build_hvcc(
+				&[Bytes::from_static(fixtures::VPS)],
+				&[Bytes::from_static(fixtures::MV_SPS_LAYER1)],
+				&[Bytes::from_static(fixtures::PPS)],
+			),
+			Err(Error::NoBaseLayerSps)
+		));
+
+		record
+			.arrays
+			.retain(|array| NalType(array.nal_unit_type) != NalType::SPS);
+		let mut untouched = config.clone();
+		apply_hvcc_sps(&record, &mut untouched).unwrap();
+		assert_eq!(untouched, config);
 	}
 }
