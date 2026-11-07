@@ -53,6 +53,7 @@ else:
             os.mkfifo(root / "continue")
             env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
             recipe = subprocess.Popen(["just", "biome"], cwd=root, env=env, stdout=subprocess.PIPE, text=True)
+            self.addCleanup(recipe.stdout.close)
             self.addCleanup(lambda: recipe.kill() if recipe.poll() is None else None)
             self.assertEqual(recipe.stdout.readline(), "ready\n")
             test = subprocess.Popen(["just", "--justfile", "test/justfile", "media"], cwd=root, env=env)
