@@ -300,6 +300,8 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 });
 
 test("copy fill: a filled group nobody holds any more stops downloading", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -342,11 +344,13 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		history.close();
 		write(track.createGroup(2n), 2n, "live");
 		expect((await live.nextGroup())?.sequence).toBe(2n);
-		await timeout(
-			Nano.fromMilli(Milli(2000)),
-			(async () => {
-				while (hooks.holdsGroup(reader, 0n)) await sleep(Nano.fromMilli(Milli(10)));
-			})(),
+		await clock.drive(
+			timeout(
+				Nano.fromMilli(Milli(2000)),
+				(async () => {
+					while (hooks.holdsGroup(reader, 0n)) await sleep(Nano.fromMilli(Milli(10)));
+				})(),
+			),
 		);
 		source.abort(new Error("done"));
 		live.close();
@@ -358,5 +362,6 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		client.abort();
 		server.abort();
 		origin.close();
+		installed.close();
 	}
 });

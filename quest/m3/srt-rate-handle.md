@@ -31,7 +31,7 @@ enforcement needs it and nobody owned it.
   is released gradually instead of waiting forever or exceeding cap plus
   burst. Decide drops only before a group starts: past cap plus burst, skip
   to the next group; dropping 188-byte TS packets would leave partial
-  frames. As in [moq-rtc pacing](/quest/m3/rtc-pacing.md), a group (or
+  frames. As in [moq-webrtc pacing](/quest/m3/rtc-pacing.md), a group (or
   frame) larger than the burst is paced through to its end.
   Retransmissions draw from the same bucket, and one with no credit left is
   skipped, which needs the hook `srt-protocol`'s sender exposes when driven
@@ -60,5 +60,5 @@ Wire: none.
 
 ## Related
 
-- [moq-rtc pacing](/quest/m3/rtc-pacing.md) - the same pacing and retransmit charging on WHEP
+- [moq-webrtc pacing](/quest/m3/rtc-pacing.md) - the same pacing and retransmit charging on WHEP
 - [moq-srt wire source](/quest/m3/wire-stats/srt.md) - per-connection byte counts from the same socket

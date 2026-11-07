@@ -4493,7 +4493,6 @@ dependencies = [
  "moq-json",
  "moq-mux",
  "moq-relay",
- "moq-rtc",
  "moq-rtmp",
  "moq-rtsp",
  "moq-shaper",
@@ -4501,6 +4500,7 @@ dependencies = [
  "moq-tokio",
  "moq-transcode",
  "moq-video",
+ "moq-webrtc",
  "mpeg2ts",
  "object_store",
  "percent-encoding",
@@ -4650,19 +4650,6 @@ dependencies = [
  "tracing",
  "tracing-test",
  "url",
- "workspace-hack",
-]
-
-[[package]]
-name = "moq-ice"
-version = "0.1.0"
-dependencies = [
- "kio",
- "str0m",
- "stun-types",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
  "workspace-hack",
 ]
 
@@ -4965,30 +4952,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-rtc"
-version = "0.3.12"
-dependencies = [
- "aws-lc-rs",
- "axum",
- "bytes",
- "hang",
- "kio",
- "moq-ice",
- "moq-mux",
- "moq-net",
- "moq-tokio",
- "reqwest",
- "str0m",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "tracing-test",
- "url",
- "uuid",
- "workspace-hack",
-]
-
-[[package]]
 name = "moq-rtmp"
 version = "0.3.11"
 dependencies = [
@@ -5153,14 +5116,12 @@ dependencies = [
  "http",
  "humantime",
  "humantime-serde",
- "if-addrs",
  "jni",
  "kio",
  "libc",
  "mdns-sd",
  "moq-congestion",
  "moq-crypto",
- "moq-ice",
  "moq-net",
  "moq-quic",
  "moq-shaper",
@@ -5182,8 +5143,6 @@ dependencies = [
  "serde",
  "serde_with",
  "socket2 0.6.5",
- "str0m",
- "stun-types",
  "tempfile",
  "thiserror 2.0.21",
  "tikv-jemalloc-ctl",
@@ -5343,6 +5302,34 @@ dependencies = [
  "x11rb 0.14.0",
  "yuv",
  "zune-jpeg",
+]
+
+[[package]]
+name = "moq-webrtc"
+version = "0.3.12"
+dependencies = [
+ "aws-lc-rs",
+ "axum",
+ "bytes",
+ "futures",
+ "hang",
+ "if-addrs",
+ "kio",
+ "mdns-sd",
+ "moq-mux",
+ "moq-net",
+ "moq-tokio",
+ "qmux 0.7.0",
+ "reqwest",
+ "str0m",
+ "stun-types",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-test",
+ "url",
+ "uuid",
+ "workspace-hack",
 ]
 
 [[package]]
