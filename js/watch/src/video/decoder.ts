@@ -251,8 +251,11 @@ export class Decoder {
 				: undefined;
 		const key = identity && JSON.stringify(identity);
 
-		// A failure belongs to its source: selecting another clears it, even while disabled.
-		if (selection.kind === "failed") {
+		// A failure belongs to its source: selecting another clears it, even while disabled. Without a
+		// latched failure, any error shown is an outgoing rendition's, which a selection change clears.
+		if (selection.kind !== "failed") {
+			this.#out.error.set(undefined);
+		} else {
 			const selected = broadcast ? effect.get(broadcast.out.active)?.closed : undefined;
 			if (failureMoved(selection.failure, { broadcast: selected, media: active?.closed, track, identity: key })) {
 				this.#selection.set({ kind: "none" });

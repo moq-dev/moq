@@ -870,6 +870,23 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 
+	it(`clears an outgoing ${kind} failure once the source changes before the replacement plays`, async () => {
+		const playback = await guardedPlayback(kind, [sample(1n, 100_000)]);
+		try {
+			playback.switchRendition();
+			await microtasks();
+			const failure = new DOMException("outgoing decoder failed", "EncodingError");
+			playback.fail(failure, 0);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.catalog.set({});
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBeUndefined();
+		} finally {
+			playback.close();
+		}
+	});
+
 	it(`keeps a failed pending ${kind} rendition out of the active slot`, async () => {
 		const playback = await guardedPlayback(kind, [sample(1n, 100_000)]);
 		try {
