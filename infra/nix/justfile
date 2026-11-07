@@ -71,12 +71,13 @@ refresh bucket rev:
         echo "no closures recorded for {{ rev }}; a Cache push run records them" >&2
         exit 1
     fi
-    mapfile -t paths < <(rclone cat "${remote}roots/{{ rev }}/")
+    # Store paths hold no whitespace. No mapfile: macOS runners ship Bash 3.2.
+    paths=$(rclone cat "${remote}roots/{{ rev }}/")
 
     # Every narinfo in the closures and the NAR each points to. A path missing
     # from the bucket fails here: it already expired, and refreshing can't bring it back.
-    nix path-info --recursive --store "$store" "${paths[@]}" | sed -E 's|^/nix/store/([a-z0-9]{32})-.*|\1.narinfo|' >"$work/keys"
-    nix path-info --recursive --json --store "$store" "${paths[@]}" | jq -r '.. | objects | select(has("url")) | .url' >>"$work/keys"
+    nix path-info --recursive --store "$store" $paths | sed -E 's|^/nix/store/([a-z0-9]{32})-.*|\1.narinfo|' >"$work/keys"
+    nix path-info --recursive --json --store "$store" $paths | jq -r '.. | objects | select(has("url")) | .url' >>"$work/keys"
     cat "$work/roots" >>"$work/keys"
     sort -u -o "$work/keys" "$work/keys"
 
