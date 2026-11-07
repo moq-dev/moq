@@ -22,7 +22,7 @@ use hang::moq_net;
 
 use super::listed::{Listed, Watch};
 use super::pad::{CapsOutcome, Names, ProducerOptions, PushOutcome, caps_supported};
-use super::request_pad::{MoqSinkPad, Notifications, PadLifecycle};
+use super::request_pad::{MoqSinkPad, Notifications, PadLifecycle, Phase};
 use super::session::{
 	CAT, Completion, CompletionHandle, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionRegistration,
 	notify, sessions_structure,
@@ -77,13 +77,21 @@ struct State {
 	names: Names,
 	/// How long a clean end keeps the finished broadcast up before its EOS.
 	linger: Duration,
-	/// Whether the finished broadcast closed, so the EOS it owes may go out.
-	drained: bool,
-	/// The task serving the finished broadcast for its linger, aborted on stop.
-	lingering: Option<tokio::task::AbortHandle>,
-	/// Whether this publication's single EOS message already went out. One per publication, not per
-	/// entry to PLAYING: a finished publication is terminal here, so there is nothing to announce twice.
-	eos_delivered: bool,
+	/// How far a clean finish has wound the publication down.
+	drain: Drain,
+}
+
+/// How far a cleanly finished publication has wound down, ending in its one EOS.
+enum Drain {
+	/// The publication has not finished cleanly.
+	Open,
+	/// Serving the finished broadcast for its linger, until the task ends or a stop aborts it.
+	Lingering(tokio::task::AbortHandle),
+	/// The finished broadcast closed, so the EOS it owes may go out.
+	Closed,
+	/// The EOS went out. One per publication, not per entry to PLAYING: a finished publication is
+	/// terminal here, so there is nothing to announce twice.
+	Posted,
 }
 
 impl State {
@@ -117,10 +125,10 @@ fn claim_eos(control: &mut Control) -> Posted {
 		return Posted::Nothing;
 	};
 	// Only a clean finish drains, so a drained publication ended with EOS.
-	if state.eos_delivered || !state.drained {
+	if !matches!(state.drain, Drain::Closed) {
 		return Posted::Nothing;
 	}
-	state.eos_delivered = true;
+	state.drain = Drain::Posted;
 	Posted::Message {
 		session: state.session.completion(),
 		kind: MessageKind::Eos,
@@ -484,10 +492,10 @@ impl ElementImpl for MoqSink {
 			let mut control = self.control.lock().unwrap();
 			control.admissions.remove(sink_pad);
 			let mut lifecycle = sink_pad.lifecycle();
-			if lifecycle.releasing {
+			if lifecycle.is_released() {
 				return;
 			}
-			lifecycle.releasing = true;
+			lifecycle.phase = Phase::Released;
 			if let Err(err) = lifecycle.media.finalize() {
 				gst::warning!(CAT, "finalize on release {}: {err:?}", pad.name());
 			}
@@ -496,7 +504,6 @@ impl ElementImpl for MoqSink {
 		if self.obj().remove_pad(pad).is_ok() {
 			self.obj().child_removed(pad, pad.name().as_str());
 		}
-		sink_pad.lifecycle().releasing = false;
 		sink_pad.notify_changes(changes);
 		let finished = {
 			let mut control = self.control.lock().unwrap();
@@ -600,9 +607,7 @@ impl MoqSink {
 				watch,
 				names: Names::default(),
 				linger,
-				drained: false,
-				lingering: None,
-				eos_delivered: false,
+				drain: Drain::Open,
 			});
 			let pads = self.pads_locked(&control);
 			let state = control.live.as_ref().unwrap();
@@ -614,7 +619,7 @@ impl MoqSink {
 						let mut lifecycle = pad.lifecycle();
 						let changes = lifecycle.reset();
 						lifecycle.completion = Some(completion.clone());
-						if !lifecycle.releasing {
+						if !lifecycle.is_released() {
 							lifecycle.media.reserve(catalog, wall.clone(), &state.names);
 						}
 						changes
@@ -683,7 +688,7 @@ impl MoqSink {
 			gst::warning!(CAT, "finalize on stop: {err:?}");
 		}
 		// Close the broadcast before reaping the session task. This also ends a linger early.
-		if let Some(lingering) = state.lingering.take() {
+		if let Drain::Lingering(lingering) = &state.drain {
 			lingering.abort();
 		}
 		state.route.broadcast().close();
@@ -725,7 +730,7 @@ impl MoqSink {
 		let _rt = RUNTIME.enter();
 		let (outcome, changes) = {
 			let mut lifecycle = pad.lifecycle();
-			let Some(completion) = lifecycle.completion.as_ref().filter(|_| !lifecycle.releasing) else {
+			let Some(completion) = lifecycle.completion.as_ref().filter(|_| !lifecycle.is_released()) else {
 				return Err(gst::FlowError::Flushing);
 			};
 			// The element's own end comes before the pad's: a broken rendition is isolated so the others
@@ -802,7 +807,7 @@ impl MoqSink {
 							true => None,
 							false => {
 								let mut lifecycle = sink_pad.lifecycle();
-								match lifecycle.releasing {
+								match lifecycle.is_released() {
 									true => None,
 									false => {
 										lifecycle.media.invalidate();
@@ -826,7 +831,7 @@ impl MoqSink {
 						&& let Some(catalog) = state.catalog.as_ref()
 					{
 						let mut lifecycle = sink_pad.lifecycle();
-						if lifecycle.releasing {
+						if lifecycle.is_released() {
 							return false;
 						}
 						Some(observe_caps(state, catalog, sink_pad, &mut lifecycle, &caps))
@@ -847,7 +852,7 @@ impl MoqSink {
 				let control = self.control.lock().unwrap();
 				let completion = control.live.as_ref().map(|state| state.session.completion());
 				let mut lifecycle = sink_pad.lifecycle();
-				if !lifecycle.releasing {
+				if !lifecycle.is_released() {
 					// The link is which publication the pad belongs to, not whether that publication is
 					// still open. Dropping it after the end would answer the next buffer with Flushing
 					// instead of the terminal result it earned.
@@ -871,8 +876,8 @@ impl MoqSink {
 					if let Some(state) = control.live.as_ref().filter(|state| state.is_open()) {
 						let _rt = RUNTIME.enter();
 						let mut lifecycle = sink_pad.lifecycle();
-						if !lifecycle.releasing {
-							lifecycle.ended = true;
+						if !lifecycle.is_released() {
+							lifecycle.phase = Phase::Eos;
 							retired = lifecycle.retire_bandwidth();
 							if let Some(catalog) = &state.catalog
 								&& let Err(err) = lifecycle.media.end_unresolved(catalog)
@@ -907,8 +912,8 @@ impl MoqSink {
 				if let Some(state) = control.live.as_ref().filter(|state| state.is_open()) {
 					let _rt = RUNTIME.enter();
 					let mut lifecycle = sink_pad.lifecycle();
-					if !lifecycle.releasing {
-						lifecycle.ended = false;
+					if !lifecycle.is_released() {
+						lifecycle.phase = Phase::Streaming;
 						if let Some(catalog) = &state.catalog {
 							lifecycle.media.reserve(catalog, state.wall.clone(), &state.names);
 						}
@@ -929,10 +934,10 @@ impl MoqSink {
 						Some(state) => {
 							let _rt = RUNTIME.enter();
 							let mut lifecycle = sink_pad.lifecycle();
-							match lifecycle.releasing {
+							match lifecycle.is_released() {
 								true => None,
 								false => {
-									lifecycle.ended = false;
+									lifecycle.phase = Phase::Streaming;
 									lifecycle.media.flush();
 									let catalog = state.catalog.as_ref();
 									if let Some(catalog) = catalog {
@@ -995,9 +1000,9 @@ impl MoqSink {
 		let completion = control.live.as_ref().map(|state| state.session.completion());
 		let mut lifecycle = pad.lifecycle();
 		// Decided here, holding both locks. `owns_pad` cannot answer it: a pad stays the element's
-		// between being marked `releasing` and being removed, and a second look at the publication
+		// between being marked released and being removed, and a second look at the publication
 		// would read a different instant than the one this confirmation ran in.
-		let admission = match lifecycle.releasing {
+		let admission = match lifecycle.is_released() {
 			true => Admission::Rejected,
 			false => {
 				let failed = completion
@@ -1028,7 +1033,7 @@ impl MoqSink {
 			.into_iter()
 			.filter_map(|pad| pad.downcast::<MoqSinkPad>().ok())
 			.collect::<Vec<_>>();
-		let all_ended = !pads.is_empty() && pads.iter().all(|pad| pad.lifecycle().ended);
+		let all_ended = !pads.is_empty() && pads.iter().all(|pad| pad.lifecycle().phase == Phase::Eos);
 		if !all_ended || !state.is_open() {
 			return Finished::default();
 		}
@@ -1039,7 +1044,7 @@ impl MoqSink {
 		let mut closed = Vec::new();
 		for pad in pads {
 			let mut lifecycle = pad.lifecycle();
-			if lifecycle.releasing || !self.owns_pad(&pad) {
+			if lifecycle.is_released() || !self.owns_pad(&pad) {
 				continue;
 			}
 			let (track, result) = lifecycle.media.finish();
@@ -1101,7 +1106,7 @@ impl MoqSink {
 		let linger = state.linger;
 		if linger.is_zero() {
 			drop(finished);
-			state.drained = true;
+			state.drain = Drain::Closed;
 			return claim_eos(control);
 		}
 		gst::info!(
@@ -1114,7 +1119,7 @@ impl MoqSink {
 			self.obj().downgrade(),
 			state.session.completion(),
 		));
-		state.lingering = Some(task.abort_handle());
+		state.drain = Drain::Lingering(task.abort_handle());
 		Posted::Nothing
 	}
 
@@ -1123,7 +1128,12 @@ impl MoqSink {
 		let message = {
 			let mut control = self.control.lock().unwrap();
 			match control.live.as_mut() {
-				Some(state) if std::sync::Arc::ptr_eq(&state.session.completion(), session) => state.drained = true,
+				Some(state)
+					if std::sync::Arc::ptr_eq(&state.session.completion(), session)
+						&& matches!(state.drain, Drain::Lingering(_)) =>
+				{
+					state.drain = Drain::Closed
+				}
 				_ => return,
 			}
 			claim_eos(&mut control)
@@ -1214,7 +1224,7 @@ impl MoqSink {
 							.completion
 							.as_ref()
 							.is_some_and(|completion| std::sync::Arc::ptr_eq(completion, session));
-						(!lifecycle.releasing && belongs).then(|| PadUpdate {
+						(!lifecycle.is_released() && belongs).then(|| PadUpdate {
 							pad: pad.clone(),
 							changes: lifecycle.fail(format!("session failed: {error}")),
 						})
@@ -2177,7 +2187,7 @@ mod tests {
 		element.set_state(gst::State::Paused).expect("start session");
 		let pad = pad.downcast::<MoqSinkPad>().expect("MoqSinkPad");
 
-		pad.lifecycle().releasing = true;
+		pad.lifecycle().phase = Phase::Released;
 		sink.imp().control.lock().unwrap().admissions.insert(pad.clone());
 		let (admission, finished) = sink.imp().confirm_admission(&pad);
 		sink.imp().publish_finished(finished);
@@ -2188,7 +2198,6 @@ mod tests {
 			"and it did so while the pad still belonged to the element, which is the window \
 			 `owns_pad` cannot see"
 		);
-		pad.lifecycle().releasing = false;
 		let _ = element.set_state(gst::State::Null);
 	}
 
@@ -2460,6 +2469,8 @@ mod tests {
 		let start = kio::clock::now();
 		let finished = moq_mux::Linger::new([broadcast], track, linger);
 		let lingering = tokio::spawn(linger_task(finished, sink.downgrade(), session));
+		sink.imp().control.lock().unwrap().live.as_mut().expect("live session").drain =
+			Drain::Lingering(lingering.abort_handle());
 
 		kio::clock::sleep(linger - Duration::from_secs(1)).await;
 		let mut late = consumer.track("video").unwrap().subscribe(None).await.unwrap();
