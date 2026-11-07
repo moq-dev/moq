@@ -727,7 +727,11 @@ impl poll::Chunks for Chunks {
 			drop(channel);
 			let landing = match &mut self.landing {
 				Some(landing) => {
-					landing.as_mut().reset(lands);
+					// A reset wakes the task parked on the sleep, so resetting to the
+					// same instant on every poll would spin without time advancing.
+					if landing.deadline() != lands {
+						landing.as_mut().reset(lands);
+					}
 					landing
 				}
 				None => self.landing.insert(Box::pin(kio::clock::sleep_until(lands))),

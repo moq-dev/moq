@@ -192,26 +192,12 @@ async fn read_first_frame(relay: &cluster::Cluster, auth: &auth::Auth) -> Result
 	Ok(frame.payload.to_vec())
 }
 
-/// Record every route change `announced` delivers, and whether each is active, as
-/// it arrives: a cursor read only later would coalesce a retraction and its
-/// re-announce into nothing.
-fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>> {
-	let updates = std::sync::Arc::<std::sync::Mutex<Vec<(String, bool)>>>::default();
-	let recorded = updates.clone();
-	drop(kio::clock::sim::spawn(async move {
-		while let Some((update, active)) = next_update(&mut announced).await {
-			recorded.lock().unwrap().push((update.prefix.as_str().to_string(), active));
-		}
-	}));
-	updates
-}
-
 async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_net::Version>) {
 	let mesh = Mesh::start(cluster_version).await;
 
 	// Watched from before the publish, so nothing it announces can slip past.
 	let (_viewer, viewed) = viewer(&mesh.d, &mesh.auth).await;
-	let recorded = record(viewed.consume().routes());
+	let recorded = memory::record(viewed.consume().routes());
 	let publisher = publish_unknown(&mesh.a, &mesh.auth).await;
 
 	// The announce is only half the contract: the route it advertises must

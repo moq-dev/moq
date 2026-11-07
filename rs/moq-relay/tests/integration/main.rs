@@ -20,6 +20,7 @@ mod connection;
 #[cfg(feature = "test-support")]
 mod drain;
 mod embed;
+#[cfg(feature = "test-support")]
 mod goaway_cluster;
 mod hidden_cluster;
 mod implementation;
