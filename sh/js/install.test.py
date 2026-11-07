@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class Install(unittest.TestCase):
     def test_overlap(self):
+        (ROOT / ".tmp").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
             root = Path(directory)
             (root / "sh/js").mkdir(parents=True)
@@ -24,7 +26,7 @@ class Install(unittest.TestCase):
             test_setup = next(line for line in test_setup if "install.py" in line)
             (root / "justfile").write_text("biome:\n" + recipe_setup + "\n")
             (root / "test/justfile").write_text("media:\n" + test_setup + "\n")
-            (root / "package.json").write_text("{}")
+            (root / "package.json").write_text('{"workspaces": []}')
             (root / "bun.lock").write_text("before")
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             subprocess.run(["git", "-C", str(root), "add", "."], check=True)
@@ -51,12 +53,37 @@ else:
 """)
             bun.chmod(0o755)
             os.mkfifo(root / "continue")
-            env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
-            recipe = subprocess.Popen(["just", "biome"], cwd=root, env=env, stdout=subprocess.PIPE, text=True)
+            (root / "sitecustomize.py").write_text("""import fcntl, os
+flock = fcntl.flock
+def observed(fd, operation):
+    if os.environ.get('TRACE_LOCK'):
+        try:
+            flock(fd, operation | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('waiting', flush=True)
+            flock(fd, operation)
+    else:
+        flock(fd, operation)
+fcntl.flock = observed
+""")
+            env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"], "PYTHONPATH": str(root)}
+            recipe = subprocess.Popen(
+                ["just", "biome"], cwd=root, env=env, stdout=subprocess.PIPE, text=True, start_new_session=True
+            )
             self.addCleanup(recipe.stdout.close)
-            self.addCleanup(lambda: recipe.kill() if recipe.poll() is None else None)
+            self.addCleanup(lambda: os.killpg(recipe.pid, signal.SIGKILL) if recipe.poll() is None else None)
             self.assertEqual(recipe.stdout.readline(), "ready\n")
-            test = subprocess.Popen(["just", "--justfile", "test/justfile", "media"], cwd=root, env=env)
+            test = subprocess.Popen(
+                ["just", "--justfile", "test/justfile", "media"],
+                cwd=root,
+                env={**env, "TRACE_LOCK": "1"},
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            self.addCleanup(test.stdout.close)
+            self.addCleanup(lambda: os.killpg(test.pid, signal.SIGKILL) if test.poll() is None else None)
+            self.assertEqual(test.stdout.readline(), "waiting\n")
             with (root / "continue").open("w"):
                 pass
             self.assertEqual(recipe.wait(), 0)

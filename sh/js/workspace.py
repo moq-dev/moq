@@ -148,7 +148,7 @@ def run(action, plan):
         if directories:
             command("bun", "js/common/api.ts", "check", *directories)
 
-    command("python3", str(ROOT / "sh/js/install.py"), "frozen")
+    command("uv", "run", "--no-project", "python", str(ROOT / "sh/js/install.py"), "frozen")
     if action == "test":
         command("python3", "sh/js/playwright.test.py")
         command(

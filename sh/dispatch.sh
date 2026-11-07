@@ -372,7 +372,7 @@ step() {
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
         check:biome) just biome ;;
         check:markdown)
-            python3 sh/js/install.py frozen
+            uv run --no-project python sh/js/install.py frozen
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
@@ -392,7 +392,7 @@ step() {
         fix:js) just js fix-changed "$js_list" ;;
         fix:biome) just biome-fix ;;
         fix:markdown)
-            python3 sh/js/install.py update
+            uv run --no-project python sh/js/install.py update
             sh/markdown.sh fix
             ;;
         fix:python)

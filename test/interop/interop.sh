@@ -709,7 +709,7 @@ prepare_js() {
         return
     fi
     echo "installing js clients (workspace @moq/* via bun)..."
-    if ! python3 "$WORKSPACE/sh/js/install.py" frozen >"$HARNESS_RUN/js-install.log" 2>&1; then
+    if ! uv run --no-project python "$WORKSPACE/sh/js/install.py" frozen >"$HARNESS_RUN/js-install.log" 2>&1; then
         for v in js js-native js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
         sed 's/^/        /' "$HARNESS_RUN/js-install.log" >&2 || true
         return

@@ -8,5 +8,5 @@ MOQ_RESUME_CASES=${MOQ_RESUME_CASES:-4096}
 export MOQ_RESUME_SEED MOQ_RESUME_CASES
 echo "Resume model: MOQ_RESUME_SEED=$MOQ_RESUME_SEED MOQ_RESUME_CASES=$MOQ_RESUME_CASES"
 just rs test -p moq-net --features async --lib -E 'test(=model::resume_model::readers_match_the_logical_track)'
-python3 sh/js/install.py frozen
+uv run --no-project python sh/js/install.py frozen
 bun test ./js/net/src/resume.model.test.ts

@@ -94,7 +94,7 @@ bench-browser *args:
 
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
-    python3 sh/js/install.py update
+    uv run --no-project python sh/js/install.py update
     cargo install --locked cargo-shear cargo-sort cargo-semver-checks release-plz
 
 # Lints, compiles, and tests only the packages the branch changed plus
@@ -139,12 +139,12 @@ ci-select-platform $BASE="":
 
 # Check every supported source file; exclusions live in biome.jsonc.
 biome *args:
-    python3 sh/js/install.py frozen
+    uv run --no-project python sh/js/install.py frozen
     bun biome check --error-on-warnings {{ args }} .
 
 # Apply Biome's fixes; installs without a frozen lockfile, like the other fixers.
 biome-fix:
-    python3 sh/js/install.py update
+    uv run --no-project python sh/js/install.py update
     bun biome check --error-on-warnings --write .
 
 # Auto-fix lint and formatting for what the branch changed since BASE.

@@ -10,7 +10,7 @@ set fallback
 #
 # Run a local relay, both trucks, and the web player.
 default:
-    python3 ../../sh/js/install.py update
+    uv run --no-project python ../../sh/js/install.py update
     bun run concurrently --kill-others --names relay,trucks,web --prefix-colors auto \
     	"just relay" \
     	"just wait && just wait-port 127.0.0.1 2000 && just worker" \

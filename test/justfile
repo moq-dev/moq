@@ -52,7 +52,7 @@ harness:
     python3 interop/report.test.py
     python3 interop/tone.test.py
     cd .. && bun test {{ replace(harness_compat_tests, "\n", " ") }}
-    python3 ../sh/js/install.py frozen
+    uv run --no-project python ../sh/js/install.py frozen
     cd interop/clients/js && bash ../../../../sh/local.sh bun test {{ replace(harness_browser_tests, "\n", " ") }}
 
 # Cross-language media interop test, built from this checkout. Stands up a
@@ -66,7 +66,7 @@ harness:
 # Both runs first check the Rust/JS wire and session interop suites, in both directions.
 [positional-arguments]
 interop *args:
-    python3 ../sh/js/install.py frozen
+    uv run --no-project python ../sh/js/install.py frozen
     just rs test -p moq-net -p moq-crypto --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
@@ -250,7 +250,7 @@ drain *args:
 
 # The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
 video:
-    python3 ../sh/js/install.py frozen
+    uv run --no-project python ../sh/js/install.py frozen
     # A desktop display makes software Vulkan request unsupported window surfaces.
     cd video && bash ../../sh/local.sh env -u DISPLAY -u WAYLAND_DISPLAY bun test ./renderer.browser.ts
 
@@ -290,10 +290,10 @@ resume-model:
 # TypeScript-to-Rust qmux interop.
 qmux:
     cargo build --locked --quiet --manifest-path ../rs/qmux/Cargo.toml --example interop-server --example interop-client
-    python3 ../sh/js/install.py frozen
+    uv run --no-project python ../sh/js/install.py frozen
     cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test ./test/qmux/interop.test.ts
 
 # Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
 p2p:
-    python3 ../sh/js/install.py frozen
+    uv run --no-project python ../sh/js/install.py frozen
     cd p2p && bash ../../sh/local.sh bun test ./transport.browser.ts

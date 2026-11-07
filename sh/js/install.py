@@ -2,8 +2,9 @@
 """Install the workspace once per dependency configuration, under a checkout lock."""
 
 import argparse
-import fcntl
 import hashlib
+import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,24 +14,34 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def fingerprint():
     digest = hashlib.sha256(subprocess.check_output(["bun", "--version"]))
-    digest.update(str(shutil.which("nix")).encode())
+    digest.update(str(shutil.which("nix") is not None).encode())
     # Include the postinstall build inputs as well as dependency manifests.
+    manifest = json.loads((ROOT / "package.json").read_text())
+    manifests = {b"package.json"}
+    for workspace in manifest["workspaces"]:
+        matches = list(ROOT.glob(workspace))
+        # Exact workspace paths still contribute when their manifest was deleted.
+        for directory in matches or [ROOT / workspace]:
+            manifests.add(str((directory / "package.json").relative_to(ROOT)).encode())
     paths = subprocess.check_output(
         [
             "git",
             "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
             "-z",
             "--",
-            "*package.json",
             "bun.lock",
             "flake.nix",
             "flake.lock",
-            "nix",
+            "nix/overlay.nix",
             "js/libav",
             "patches",
         ],
         cwd=ROOT,
     ).split(b"\0")
+    paths = set(paths) | manifests
     for name in sorted(filter(None, paths)):
         digest.update(name)
         path = ROOT / name.decode()
@@ -46,12 +57,45 @@ parser.add_argument("mode", choices=("frozen", "update"))
 args = parser.parse_args()
 
 (ROOT / ".tmp").mkdir(exist_ok=True)
-with (ROOT / ".tmp/bun-install.lock").open("w") as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
+with (ROOT / ".tmp/bun-install.lock").open("ab") as lock:
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class Overlapped(ctypes.Structure):
+            _fields_ = [
+                ("Internal", ctypes.c_size_t),
+                ("InternalHigh", ctypes.c_size_t),
+                ("Offset", wintypes.DWORD),
+                ("OffsetHigh", wintypes.DWORD),
+                ("hEvent", wintypes.HANDLE),
+            ]
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        acquire = kernel.LockFileEx
+        acquire.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(Overlapped),
+        ]
+        acquire.restype = wintypes.BOOL
+        overlapped = Overlapped()
+        # A synchronous, exclusive byte-range lock waits until the owning
+        # process closes its handle, including when that process crashes.
+        if not acquire(msvcrt.get_osfhandle(lock.fileno()), 2, 0, 1, 0, ctypes.byref(overlapped)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    else:
+        import fcntl
+
+        fcntl.flock(lock, fcntl.LOCK_EX)
     current = fingerprint()
     stamp = ROOT / "node_modules/.moq-install"
-    # Another invocation must not relink dependencies or rebuild libav while
-    # the first invocation is importing them or playing its bundled page.
+    # Identical inputs reuse the tree while other invocations consume it.
+    # Dependency edits invalidate it; stop consumers before changing inputs.
     if (
         not stamp.exists()
         or stamp.read_text() != current

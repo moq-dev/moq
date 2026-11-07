@@ -214,7 +214,7 @@ js() {
     local manifest dir name version file entry surface
     # The renderer imports TypeDoc from this checkout's install, which a fresh runner lacks. The
     # current checkout uses the coordinated full install shared with other readers.
-    python3 sh/js/install.py frozen >&2
+    uv run --no-project python sh/js/install.py frozen >&2
     # Not local: the trap runs after a failure has unwound this function's locals.
     checkout=$out/js/checkout
     git worktree add --detach "$checkout" "$base" >&2
