@@ -6,7 +6,8 @@ moq-quic's public API loses the inherited surfaces nothing calls:
 `endpoint::{Accepting, Accepted}`, `Endpoint::{start_accept, finish_accept}`,
 `Connection::{side, is_handshaking}`, and `stream::Id::{new, dir, initiator}`.
 Each is removed, not just made private, unless a caller inside moq-quic needs
-it, in which case it becomes private. `MIGRATE.md` lists the removals.
+it, in which case it becomes private. The PR's Impact section says how to
+migrate; the release cut copies that into `MIGRATE.md`.
 
 ## Plan
 

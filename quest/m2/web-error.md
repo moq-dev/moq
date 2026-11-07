@@ -6,8 +6,9 @@ moq-tokio and moq-uring each expose one typed `quic::web::Error`, with
 `Connection`, `Closed`, `SessionGone`, `UnknownSession`, `Http3`, `Handshake`,
 `Read`, and `Write` variants, before the next cut. moq-uring's `Web` and
 `Http3` variants move out of its `quic::Error`, and the `SessionError` alias is
-dropped. Callers match on a variant instead of parsing a string. The break
-lists its migration in each crate's `MIGRATE.md`.
+dropped. Callers match on a variant instead of parsing a string. The PR's
+Impact section says how to migrate; the release cut copies that into each
+crate's `MIGRATE.md`.
 
 ## Plan
 

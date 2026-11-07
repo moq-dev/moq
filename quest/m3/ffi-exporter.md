@@ -77,7 +77,8 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
 - **Dart `MoqRoute.instanceId()`** (maintainer, 2026-11-07, from
   [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088)'s API audit):
   the switch renames it to the exporter's name for moq-net's
-  `Route::instance()`, a Dart API change listed in its `MIGRATE.md`.
+  `Route::instance()`, a Dart API change the PR's Impact section records for
+  the release cut's `MIGRATE.md`.
 - rust2's C backend still refuses `Duration`, which moq-ffi's audio configs
   use (moq's current generator accepts it), so the fork must accept it before
   the switch can generate C.
