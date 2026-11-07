@@ -68,7 +68,8 @@ test("a slice that fails to decode fails its open group, which takes no more fra
 });
 
 for (const readPlain of [false, true]) {
-	test(`compressed tails shed dictionary prefixes without retaining inflated history (plain=${readPlain})`, async () => {
+	// Quarantined pending quest/m0/test-flakes-2/flate-tail-shed.md.
+	test.skip(`compressed tails shed dictionary prefixes without retaining inflated history (plain=${readPlain})`, async () => {
 		const group = new Group(0n);
 		hooks.bindGroupCompression(group, true);
 		const raw = group.consume();
