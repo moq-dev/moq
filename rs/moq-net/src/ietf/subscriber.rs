@@ -17173,23 +17173,27 @@ mod stitch_tests {
 		let waiter = kio::Waiter::noop();
 		if outran {
 			// A reader judges the live edge cached and loses it before taking it.
-			let mut lost = run.track.subscribe(
-				track::Subscription::default()
-					.with_ranges([track::Range::groups(0..GROUPS + 1)])
-					.with_delay(track::Delay::default().with_max(None)),
-			)
-			.ordered();
+			let mut lost = run
+				.track
+				.subscribe(
+					track::Subscription::default()
+						.with_ranges([track::Range::groups(0..GROUPS + 1)])
+						.with_delay(track::Delay::default().with_max(None)),
+				)
+				.ordered();
 			assert!(lost.poll_next_group(&waiter).is_pending());
 			run.track.evict(GROUPS);
 		}
 
-		let mut reader = run.track.subscribe(
-			track::Subscription::default()
-				.with_ranges([track::Range::groups(0..GROUPS)])
-				.with_order(track::Order::Ascending)
-				.with_delay(track::Delay::default().with_max(None)),
-		)
-		.ordered();
+		let mut reader = run
+			.track
+			.subscribe(
+				track::Subscription::default()
+					.with_ranges([track::Range::groups(0..GROUPS)])
+					.with_order(track::Order::Ascending)
+					.with_delay(track::Delay::default().with_max(None)),
+			)
+			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
 		let fill = dynamic.requested_fill().await.expect("the reader asked for the run");
 		assert_eq!((fill.start().group, fill.end()), (0, GROUPS));
