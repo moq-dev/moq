@@ -226,7 +226,6 @@ send_wrapper = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = "3"
-signature = "3"
 slab = "0.4.12"
 socket2 = "0.6"
 spki = "0.8"

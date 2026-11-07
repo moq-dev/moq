@@ -1924,8 +1924,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
- "der_derive 0.7.3",
- "flagset",
  "pem-rfc7468 0.7.0",
  "zeroize",
 ]
@@ -1937,7 +1935,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
 dependencies = [
  "const-oid 0.10.2",
- "der_derive 0.8.0",
+ "der_derive",
  "flagset",
  "pem-rfc7468 1.0.0",
  "zeroize",
@@ -1955,17 +1953,6 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "rusticata-macros",
-]
-
-[[package]]
-name = "der_derive"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8034092389675178f570469e6c3b0465d3d30b4505c294a6550db47f3c17ad18"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -5348,7 +5335,6 @@ dependencies = [
  "sec1",
  "serde",
  "serde_json",
- "signature 3.0.0",
  "slab",
  "spki 0.8.1",
  "stun-types",
@@ -10952,6 +10938,7 @@ dependencies = [
  "anyhow",
  "aws-lc-rs",
  "aws-lc-sys",
+ "base16ct",
  "base64 0.22.1",
  "base64 0.23.1",
  "bitflags 2.13.2",
@@ -10964,7 +10951,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_builder",
- "const-oid 0.9.6",
+ "const-oid 0.10.2",
  "crossbeam-epoch",
  "crossbeam-utils",
  "crypto-common 0.1.7",
@@ -11046,7 +11033,6 @@ dependencies = [
  "quick-xml 0.41.0",
  "quote",
  "rand 0.8.8",
- "rand 0.9.5",
  "rand_chacha 0.3.1",
  "rcgen",
  "regex",
@@ -11057,6 +11043,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
+ "sec1",
  "security-framework-sys",
  "semver",
  "serde",

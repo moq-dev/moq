@@ -65,7 +65,6 @@ reqwest = { workspace = true, features = ["rustls"] }
 rustc-hash = { workspace = true }
 sec1 = { workspace = true }
 serde = { workspace = true }
-signature = { workspace = true }
 slab = { workspace = true }
 spki = { workspace = true }
 # The STUN Binding client the ICE agent runs for server-reflexive candidates.
