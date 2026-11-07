@@ -36,6 +36,7 @@ moves what remains of them once their claims merge.
 - [Only the relay's own stats publisher uses the stats prefix](/quest/m1/stats-prefix.md) - a broad grant can no longer publish unmetered media or spoof node stats under `.stats`
 - [js/net enforces the input checks Rust does](/quest/m1/js-net-input-checks.md) - GOAWAY redirects to loopback spellings, credential logging, ANNOUNCE_INIT size, sequence range, and version pinning match Rust
 - [Rust and JS accept exactly the same tokens and key sets](/quest/m1/token-parse-strict.md) - a null `exp` no longer means never-expiring in Rust, duplicate kids and bad scope roots are refused, and every relay lease is validated
+- [Resetting a kio sleep to its deadline does not wake it](/quest/m1/kio-reset-same-deadline.md) - a caller that resets on every poll no longer spins the simulator
 - [A refused lite SUBSCRIBE_UPDATE ends the subscription](/quest/m1/lite-update-refused.md) - the publisher no longer serves a removed range or reports the wrong start after the model refuses an update
 - [Cluster peers have one identity each and fresh inputs](/quest/m1/cluster-peer-identity.md) - a duplicate cluster id, a self-dial, or a rotated cluster token fails loud instead of partitioning or looping the mesh
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
@@ -48,9 +49,10 @@ moves what remains of them once their claims merge.
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; time-stretched browser playback without steady-state underruns and a native trace replay remain
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
+- [One assets() for every hosted file](/quest/m1/hosted-assets.md) - `@moq/hang` owns `assets()`, which also points the libav polyfill at the hosted wasm
+- [Watch sources default to the decoder's probe](/quest/m1/watch-supported-default.md) - a source built without `in.supported` plays instead of selecting nothing
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
-- [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-webrtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - AMD's VA-API H.264 encode decodes, once moq takes moq-vaapi 0.2.1
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time

@@ -20,6 +20,7 @@
 //! the peer's SCTP message limit. Ordered delivery means one lost chunk stalls
 //! every stream until SCTP retransmits it.
 
+use crate::vendor::str0m;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
