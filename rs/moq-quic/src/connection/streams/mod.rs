@@ -23,14 +23,15 @@ pub(crate) use state::StreamsState;
 /// Access to streams
 pub struct Streams<'a> {
 	pub(super) state: &'a mut StreamsState,
-	pub(super) conn_state: &'a super::State,
+	/// The connection ended, so no stream opens
+	pub(super) closed: bool,
 }
 
 impl<'a> Streams<'a> {
 	/// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
 	#[cfg(any(test, feature = "fuzz"))]
-	pub(crate) fn new(state: &'a mut StreamsState, conn_state: &'a super::State) -> Self {
-		Self { state, conn_state }
+	pub(crate) fn new(state: &'a mut StreamsState, closed: bool) -> Self {
+		Self { state, closed }
 	}
 
 	/// Open a single stream if possible, its sending half scheduled by `options`
@@ -41,7 +42,7 @@ impl<'a> Streams<'a> {
 	/// - when `options.group` was opened on another connection
 	pub fn open(&mut self, dir: Dir, options: send::Options<'_>) -> Option<StreamId> {
 		let group = options.group.map(|g| g.index(self.state.tag));
-		if self.conn_state.is_closed() {
+		if self.closed {
 			return None;
 		}
 

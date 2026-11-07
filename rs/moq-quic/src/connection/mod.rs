@@ -503,7 +503,7 @@ impl Connection {
 	pub fn streams(&mut self) -> Streams<'_> {
 		Streams {
 			state: &mut self.streams,
-			conn_state: &self.state,
+			closed: self.state.is_closed(),
 		}
 	}
 
@@ -534,7 +534,7 @@ impl Connection {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.spaces[SpaceId::Data].pending,
-			conn_state: &self.state,
+			closed: self.state.is_closed(),
 		}
 	}
 

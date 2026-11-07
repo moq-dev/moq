@@ -7,7 +7,7 @@ use thiserror::Error;
 use tracing::trace;
 
 use super::{StreamsState, schedule::Slot};
-use crate::connection::{ConnectionTag, State as ConnState, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
+use crate::connection::{ConnectionTag, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
 use crate::{StreamId, VarInt, frame};
 
 #[derive(Debug)]
@@ -331,23 +331,19 @@ pub struct Stream<'a> {
 	pub(crate) id: StreamId,
 	pub(crate) state: &'a mut StreamsState,
 	pub(crate) pending: &'a mut Retransmits,
-	pub(crate) conn_state: &'a ConnState,
+	/// The connection ended, so nothing more is written
+	pub(crate) closed: bool,
 }
 
 impl<'a> Stream<'a> {
 	/// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
 	#[cfg(any(test, feature = "fuzz"))]
-	pub(crate) fn new(
-		id: StreamId,
-		state: &'a mut StreamsState,
-		pending: &'a mut Retransmits,
-		conn_state: &'a ConnState,
-	) -> Self {
+	pub(crate) fn new(id: StreamId, state: &'a mut StreamsState, pending: &'a mut Retransmits, closed: bool) -> Self {
 		Self {
 			id,
 			state,
 			pending,
-			conn_state,
+			closed,
 		}
 	}
 
@@ -357,7 +353,7 @@ impl<'a> Stream<'a> {
 	/// splits off without copying. Fails with [`Error::Blocked`] when nothing fits;
 	/// [`Self::poll_write`] waits for room instead.
 	pub fn write(&mut self, data: &mut impl Buf) -> Result<usize, Error> {
-		if self.conn_state.is_closed() {
+		if self.closed {
 			trace!(%self.id, "write blocked; connection draining");
 			return Err(Error::Blocked);
 		}
@@ -544,7 +540,7 @@ impl<'a> Stream<'a> {
 			},
 		};
 		match acked {
-			Ok(false) if self.conn_state.is_closed() => Err(Error::Closed),
+			Ok(false) if self.closed => Err(Error::Closed),
 			acked => acked,
 		}
 	}
