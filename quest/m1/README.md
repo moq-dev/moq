@@ -36,7 +36,6 @@ moves what remains of them once their claims merge.
 - [Only the relay's own stats publisher uses the stats prefix](/quest/m1/stats-prefix.md) - a broad grant can no longer publish unmetered media or spoof node stats under `.stats`
 - [js/net enforces the input checks Rust does](/quest/m1/js-net-input-checks.md) - GOAWAY redirects to loopback spellings, credential logging, ANNOUNCE_INIT size, sequence range, and version pinning match Rust
 - [Rust and JS accept exactly the same tokens and key sets](/quest/m1/token-parse-strict.md) - a null `exp` no longer means never-expiring in Rust, duplicate kids and bad scope roots are refused, and every relay lease is validated
-- [A refused lite SUBSCRIBE_UPDATE ends the subscription](/quest/m1/lite-update-refused.md) - the publisher no longer serves a removed range or reports the wrong start after the model refuses an update
 - [Cluster peers have one identity each and fresh inputs](/quest/m1/cluster-peer-identity.md) - a duplicate cluster id, a self-dial, or a rotated cluster token fails loud instead of partitioning or looping the mesh
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
