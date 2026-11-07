@@ -484,85 +484,55 @@ mod tests {
 		assert!(crate::clock::now().checked_sub(Duration::from_secs(3_600)).is_some());
 	}
 
-	/// Run the ignored `guard::` case `name` in a child process that denies host timers,
-	/// returning whether the guard aborted it.
-	fn aborts(name: &str) -> bool {
-		let test = format!("clock::runtime::tests::guard::{name}");
+	/// Set in the child process [`guard`] starts, which runs the case itself.
+	const GUARD_CHILD: &str = "KIO_GUARD_TEST_CHILD";
+
+	/// Run `case` in a child process that denies host timers, and assert whether the guard
+	/// aborted it. In that child, run `case` and return.
+	///
+	/// Call it from the test's own thread, which libtest names after the test.
+	fn guard(aborts: bool, case: fn()) {
+		if std::env::var_os(GUARD_CHILD).is_some() {
+			case();
+			return;
+		}
+		let test = std::thread::current()
+			.name()
+			.expect("guard runs on the test's own thread")
+			.to_owned();
 		let output = std::process::Command::new(std::env::current_exe().unwrap())
-			.args([&test, "--exact", "--ignored", "--test-threads=1"])
+			.args([&test, "--exact", "--test-threads=1"])
 			.env("KIO_DENY_HOST_TIMERS", "1")
+			.env(GUARD_CHILD, "1")
 			.output()
 			.unwrap();
 		let stdout = String::from_utf8_lossy(&output.stdout);
 		let stderr = String::from_utf8_lossy(&output.stderr);
-		assert!(stdout.contains("running 1 test"), "no case named {name}: {stdout}");
+		assert!(stdout.contains("running 1 test"), "no test named {test}: {stdout}");
 		let aborted = stderr.contains("timer fired on the host clock");
 		assert_eq!(output.status.success(), !aborted, "{stdout}{stderr}");
-		aborted
+		assert_eq!(aborted, aborts, "{stdout}{stderr}");
+	}
+
+	fn real() -> tokio::runtime::Runtime {
+		tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.unwrap()
 	}
 
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
 	fn a_wait_on_the_host_clock_aborts() {
-		assert!(aborts("sleep"));
+		guard(true, || {
+			real().block_on(async { crate::clock::sleep(Duration::from_millis(1)).await });
+		});
 	}
 
 	#[test]
 	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
 	fn a_real_interval_aborts() {
-		assert!(aborts("interval"));
-	}
-
-	#[test]
-	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn a_resumed_runtime_aborts() {
-		assert!(aborts("resumed"));
-	}
-
-	#[test]
-	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn a_wait_in_a_spawned_task_aborts() {
-		assert!(aborts("spawned"));
-	}
-
-	#[test]
-	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn waits_that_never_run_out_pass() {
-		assert!(!aborts("unexpired"));
-	}
-
-	#[test]
-	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn a_paused_runtime_passes() {
-		assert!(!aborts("paused"));
-	}
-
-	#[test]
-	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
-	fn an_allowed_wait_passes() {
-		assert!(!aborts("allowed"));
-	}
-
-	/// The cases [`aborts`] runs, each in a process of its own.
-	mod guard {
-		use std::time::Duration;
-
-		fn real() -> tokio::runtime::Runtime {
-			tokio::runtime::Builder::new_current_thread()
-				.enable_time()
-				.build()
-				.unwrap()
-		}
-
-		#[test]
-		#[ignore = "aborts; a_wait_on_the_host_clock_aborts runs it in a child"]
-		fn sleep() {
-			real().block_on(async { crate::clock::sleep(Duration::from_millis(1)).await });
-		}
-
-		#[test]
-		#[ignore = "aborts; a_real_interval_aborts runs it in a child"]
-		fn interval() {
+		guard(true, || {
 			real().block_on(async {
 				let mut interval = crate::clock::interval(Duration::from_millis(1));
 				interval.set_missed_tick_behavior(crate::clock::MissedTickBehavior::Delay);
@@ -572,11 +542,13 @@ mod tests {
 					interval.tick().await;
 				}
 			});
-		}
+		});
+	}
 
-		#[test]
-		#[ignore = "aborts; a_resumed_runtime_aborts runs it in a child"]
-		fn resumed() {
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_resumed_runtime_aborts() {
+		guard(true, || {
 			tokio::runtime::Builder::new_current_thread()
 				.enable_time()
 				.start_paused(true)
@@ -587,21 +559,25 @@ mod tests {
 					tokio::time::resume();
 					crate::clock::sleep(Duration::from_millis(1)).await;
 				});
-		}
+		});
+	}
 
-		#[test]
-		#[ignore = "aborts; a_wait_in_a_spawned_task_aborts runs it in a child"]
-		fn spawned() {
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_wait_in_a_spawned_task_aborts() {
+		guard(true, || {
 			let runtime = real();
 			let task = runtime.spawn(async { crate::clock::sleep(Duration::from_millis(1)).await });
 			// The task's panic would reach the test only through its handle.
 			let _ = runtime.block_on(task);
-		}
+		});
+	}
 
-		/// A first interval tick, a zero sleep, and a watchdog its future beats.
-		#[test]
-		#[ignore = "waits_that_never_run_out_pass runs it in a child"]
-		fn unexpired() {
+	/// A first interval tick, a zero sleep, and a watchdog its future beats.
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn waits_that_never_run_out_pass() {
+		guard(false, || {
 			real().block_on(async {
 				crate::clock::interval(Duration::from_secs(1)).tick().await;
 				crate::clock::sleep(Duration::ZERO).await;
@@ -612,25 +588,29 @@ mod tests {
 					.await
 					.unwrap();
 			});
-		}
+		});
+	}
 
-		#[test]
-		#[ignore = "a_paused_runtime_passes runs it in a child"]
-		fn paused() {
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn a_paused_runtime_passes() {
+		guard(false, || {
 			tokio::runtime::Builder::new_current_thread()
 				.enable_time()
 				.start_paused(true)
 				.build()
 				.unwrap()
 				.block_on(async { crate::clock::sleep(Duration::from_secs(3_600)).await });
-		}
+		});
+	}
 
-		#[test]
-		#[ignore = "an_allowed_wait_passes runs it in a child"]
-		fn allowed() {
+	#[test]
+	#[cfg_attr(miri, ignore = "spawns a child process, which Miri cannot")]
+	fn an_allowed_wait_passes() {
+		guard(false, || {
 			crate::clock::host_time();
 			real().block_on(async { crate::clock::sleep(Duration::from_millis(1)).await });
-		}
+		});
 	}
 
 	/// Every worker of a multi-thread runtime, and a thread outside any runtime,
