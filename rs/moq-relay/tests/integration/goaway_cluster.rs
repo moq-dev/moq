@@ -63,8 +63,13 @@ async fn clustered(net: &Net, peers: &[&str], connect: moq_tokio::connect::Confi
 }
 
 /// The next session `accepted` hands over.
-async fn accept(step: &str, accepted: &mut futures::channel::mpsc::UnboundedReceiver<moq_net::Session>) -> moq_net::Session {
-	within(step, accepted.next()).await.expect("the upstream stopped accepting")
+async fn accept(
+	step: &str,
+	accepted: &mut futures::channel::mpsc::UnboundedReceiver<moq_net::Session>,
+) -> moq_net::Session {
+	within(step, accepted.next())
+		.await
+		.expect("the upstream stopped accepting")
 }
 
 /// The routes `recorded` saw retract.
@@ -103,9 +108,12 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let net = Net::new();
 	let mut accepted = net.upstream("upstream", &memory::origin());
 
-	let client_connection = within("client connects", connect_once(net.client(Default::default()), net.url("upstream")))
-		.await
-		.expect("connect");
+	let client_connection = within(
+		"client connects",
+		connect_once(net.client(Default::default()), net.url("upstream")),
+	)
+	.await
+	.expect("connect");
 	let server_session = accept("upstream accepts", &mut accepted).await;
 
 	let (_trigger, shutdown) = shutdown::Observer::new(Duration::ZERO);
@@ -373,7 +381,8 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mid_a_upstream = within(
 		"MID-A connects to TOP",
 		connect_once(
-			net.client(lite07.clone()).with_subscriber(mid_a_origin.clone().with_link(moq_net::origin::Link::Upstream)),
+			net.client(lite07.clone())
+				.with_subscriber(mid_a_origin.clone().with_link(moq_net::origin::Link::Upstream)),
 			net.url("top"),
 		),
 	)
@@ -396,7 +405,10 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let recorded = memory::record(sub_origin.consume().routes());
 	let sub_connection = within(
 		"subscriber connects to BOTTOM",
-		connect_once(net.client(Default::default()).with_subscriber(sub_origin.clone()), net.url("bottom")),
+		connect_once(
+			net.client(Default::default()).with_subscriber(sub_origin.clone()),
+			net.url("bottom"),
+		),
 	)
 	.await
 	.expect("subscriber connect");

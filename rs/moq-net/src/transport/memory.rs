@@ -1012,6 +1012,48 @@ mod tests {
 		));
 	}
 
+	/// The next chunk `recv` reads, once it lands.
+	async fn landed(recv: &mut RecvStream) -> Option<Bytes> {
+		kio::wait(|waiter| poll::Chunks::poll_read_chunk(recv.get_mut(), waiter, usize::MAX))
+			.await
+			.unwrap()
+	}
+
+	#[test]
+	fn latency_delays_each_message_and_the_finish() {
+		kio::clock::sim::run(async {
+			const LATENCY: Duration = Duration::from_millis(10);
+			let (a, b) = pair(Config {
+				latency: LATENCY,
+				..Default::default()
+			});
+			let (mut send, mut recv) = uni(&a, &b);
+			let start = kio::clock::now();
+
+			ready(write(&mut send, &Bytes::from_static(b"one"))).unwrap();
+			// Polling again while it is in flight must not wake the reader, or a task
+			// re-polling its stream would spin without simulated time moving.
+			let count = Arc::new(Count::default());
+			let waiter = kio::Waiter::new(Waker::from(count.clone()));
+			for _ in 0..2 {
+				let chunk = poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX);
+				assert!(chunk.is_pending(), "a message landed at once");
+			}
+			assert_eq!(count.0.load(Ordering::Relaxed), 0, "a re-poll woke the reader");
+			kio::clock::sleep(LATENCY / 2).await;
+			ready(write(&mut send, &Bytes::from_static(b"two"))).unwrap();
+			send.finish().unwrap();
+
+			// Each lands its latency after it was sent, in order, and the finish last.
+			assert_eq!(landed(&mut recv).await.unwrap(), "one");
+			assert_eq!(start.elapsed(), LATENCY);
+			assert_eq!(landed(&mut recv).await.unwrap(), "two");
+			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
+			assert_eq!(landed(&mut recv).await, None);
+			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
+		});
+	}
+
 	#[test]
 	fn finish_closes_once_drained() {
 		let (a, b) = pair(Config::default());

@@ -207,10 +207,7 @@ impl Net {
 	}
 
 	/// Bring `name` up, handing each link it accepts to the returned stream.
-	pub fn listen(
-		&self,
-		name: &str,
-	) -> futures::channel::mpsc::UnboundedReceiver<(memory::Session, moq_net::Version)> {
+	pub fn listen(&self, name: &str) -> futures::channel::mpsc::UnboundedReceiver<(memory::Session, moq_net::Version)> {
 		let (sender, accepted) = futures::channel::mpsc::unbounded();
 		self.up(name, Host::Accept(sender));
 		accepted
@@ -236,7 +233,13 @@ impl Net {
 
 	/// How many dials `name` has accepted, across every time it was up.
 	pub fn accepted(&self, name: &str) -> usize {
-		self.hosts.lock().unwrap().accepted.get(name).copied().unwrap_or_default()
+		self.hosts
+			.lock()
+			.unwrap()
+			.accepted
+			.get(name)
+			.copied()
+			.unwrap_or_default()
 	}
 
 	/// A client built from `config` that dials through this network.
@@ -270,7 +273,10 @@ impl Net {
 						return;
 					};
 					let request = Accepted::new(handshake, moq_auth::Transport::Quic);
-					Connection::new(request, cluster, auth).with_shutdown(shutdown).run().await;
+					Connection::new(request, cluster, auth)
+						.with_shutdown(shutdown)
+						.run()
+						.await;
 				}));
 			}
 		}));
@@ -321,7 +327,10 @@ pub fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::syn
 				| moq_net::origin::RouteEvent::Restart(route)
 				| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => (route, true),
 			};
-			recorded.lock().unwrap().push((update.prefix.as_str().to_string(), active));
+			recorded
+				.lock()
+				.unwrap()
+				.push((update.prefix.as_str().to_string(), active));
 		}
 	}));
 	updates

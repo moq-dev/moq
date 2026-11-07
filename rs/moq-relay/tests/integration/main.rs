@@ -10,6 +10,7 @@
 mod auth_lifetime;
 mod bitrate_caps;
 mod cluster_close;
+#[cfg(feature = "test-support")]
 mod cluster_drain;
 mod cluster_fresh_port;
 mod cluster_idle;

@@ -110,7 +110,12 @@ async fn publish_version(relay: &cluster::Cluster, auth: &auth::Auth, version: &
 	let version = version.parse().expect("parse version");
 	let session = kio::clock::timeout(
 		TIMEOUT,
-		memory::connect(moq_net::Client::new().with_publisher(origin.consume()), version, relay, auth),
+		memory::connect(
+			moq_net::Client::new().with_publisher(origin.consume()),
+			version,
+			relay,
+			auth,
+		),
 	)
 	.await
 	.expect("publisher connect timeout")
