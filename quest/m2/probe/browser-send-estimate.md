@@ -4,6 +4,8 @@
 
 A browser publisher on shipping Chrome, Firefox, and Safari gets a send-rate estimate, so its bandwidth reservations (`Reservation.rate`) follow the path and `@moq/publish` encoders adapt, instead of holding their ceiling because the estimate is always `undefined`.
 
+The WebSocket fallback is out of scope: it has no browser estimate to read, so its publishers keep holding their rate (decided 2026-11-07, below).
+
 ## Plan
 
 Found by [moq-dev/moq#7524](https://github.com/moq-dev/moq/pull/7524): `js/net`'s `Allocator` only reads `WebTransport.getStats()`'s `estimatedSendRate`, which shipping Chromium lacks (it is behind `--enable-blink-features=WebTransportStats`). qmux reports no counters, and WebRTC's `getStats` throws.
@@ -32,7 +34,7 @@ Decided 2026-11-07 (maintainer, /quest-unblock): Safari publishers and the WebSo
 - (b) A lite-07 receiver report, where the relay sends back the rate it receives from us, which can only lower the estimate while app-limited.
 - (c) Estimate locally from how fast the transport drains our writes, which depends on each browser's buffering.
 
-Reason: Chrome and Firefox need nothing, and (b) and (c) each build an app-layer controller above the browser's own that a later WebKit release makes redundant.
+Reason: Chrome and Firefox need nothing. For Safari, (b) and (c) each build an app-layer controller above the browser's own that a later WebKit release makes redundant. For the WebSocket fallback, (b) or (c) would be the only source, since it never reads WebTransport stats; building one waits until fallback adaptation is worth it on its own.
 
 Public API: none expected. Wire: none.
 
