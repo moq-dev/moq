@@ -355,6 +355,7 @@ impl<T> Inner<T> {
 
 impl<T: Serialize> Inner<T> {
 	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
+		self.open()?;
 		let timestamp = self.track.rescale(payload.at)?;
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
