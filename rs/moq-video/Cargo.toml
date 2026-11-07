@@ -278,6 +278,8 @@ cfg_aliases = "0.2.2"
 ash = { workspace = true }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
+# `Manual::install`, a clock the capture-loop tests move while the encoder thread works.
+kio = { path = "../kio", features = ["manual"] }
 # `clock_gettime`, so the GPU workload test can report CPU time next to wall
 # latency. std has no CPU clock and the dependency is optional at build time.
 libc = { workspace = true }
