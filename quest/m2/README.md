@@ -163,6 +163,13 @@ Added 2026-11-04 (maintainer): the relay reports the native sessions its
 drain deadline force-closes while still open, apart from those only finishing
 their end report, so an embedder's drain alert pages on real cuts.
 
+Added 2026-11-07 (maintainer, /quest-plan from an API shape audit of
+`release` against `main` and the open quests): the breaks it found that the
+cut would otherwise publish. A route's role becomes its type; JS durations
+and instants become objects; native playout sync decouples its tracks like
+the browser's; sentinels, moq-video's environment reads, and per-gateway
+ingest setters go; and an epic batches the small fixes per area.
+
 Decided 2026-11-05 (maintainer, /quest-audit): blockers rank above the
 quests that require them.
 
@@ -178,12 +185,19 @@ quests that require them.
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate (held in m1 by an open claim)
 - [Cluster routing](/quest/m2/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
+- [A route's role is its type](/quest/m2/route-roles.md) - no route method panics, throws, or errors because the other constructor made the route; prototypes of a single prefix route and an exact/prefix split decide the shape
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - the wire names every abandoned group and the drop signal is public, so readers count losses instead of stalling
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
 - [Publish reports rendition stats as hang's type](/quest/m2/rendition-stats-type.md) - `Rendition.stats` and `Report.Writer` take the rendition stats schema's input type, so encoders write plain numbers
+- [No sentinel values in public API](/quest/m2/no-sentinels.md) - receive windows, cache durations, reconnect timeouts, and the FFI test clock use `Option` instead of a huge value or zero
+- [moq-video takes devices, not environment variables](/quest/m2/video-devices.md) - VA-API and V4L2 device paths are config fields, and `moq_video::ENV` never ships
+- [Gateways share one ingest config and one rate cap](/quest/m2/gateway-ingest.md) - `moq_mux::Ingest` replaces 18 per-gateway setters, and the live rate cap moves to `moq_net::bandwidth`
+- [Native playout sync keeps tracks decoupled](/quest/m2/mux-sync.md) - `moq_mux::timeline` becomes `moq_mux::sync`, and one slow track no longer stalls or moves another
+- [JS time values are types, not numbers](/quest/m2/js-time-types.md) - every public JS duration and instant is a `Clock.Duration` or `Clock.Instant` object, so a unit mistake fails to compile
+- [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [A recreated or restarted track cannot reuse group sequences](/quest/m2/sequence-reuse.md) - recreating a track or restarting an instance cannot give new content an old group identity unless the app seeds past it, and datagrams are documented as exempt
 - [Subscriptions name the oldest group without a u64::MAX sentinel](/quest/m2/anchor-oldest.md) - `Anchor` gets an explicit oldest variant, decoded the same way on every wire

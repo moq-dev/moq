@@ -4,6 +4,7 @@
 //! request/response bodies. The only thing we add on top of str0m's offer/answer
 //! parse/serialize is a tiny wrapper to keep the call sites readable.
 
+use crate::vendor::str0m;
 use std::borrow::Cow;
 
 use crate::{Error, Result};
