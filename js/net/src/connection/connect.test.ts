@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -227,6 +228,7 @@ test("an http:// fingerprint of the wrong length or status is refused", async ()
 });
 
 test("aborting connect aborts a pending http:// fingerprint fetch", async () => {
+	hostTime(); // a real HTTP server
 	// Answer nothing, so only the abort ends the request.
 	const server = fingerprintServer(() => new Promise<Response>(() => {}));
 	const original = globalThis.WebTransport;
@@ -553,6 +555,7 @@ for (const protocol of ["", undefined]) {
 }
 
 test("SETUP refuses a version the client did not name", async () => {
+	hostTime();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
@@ -582,6 +585,7 @@ test("a peer without an ALPN is refused when no named version negotiates in SETU
 const IETF_VERSIONS = Object.values(Ietf.Version).map((v) => [Ietf.versionName(v), v] as const);
 
 test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async (_, version) => {
+	hostTime();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
@@ -647,13 +651,24 @@ test("the WebSocket fallback offers the same versions", async () => {
 	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
 });
 
+// Read wire parameters without making qmux's private codec part of net's TS project.
+const { decodeRecord } = require("../../../qmux/src/frame.ts");
+
+interface ReceiveWindows {
+	initialMaxData: bigint;
+	initialMaxStreamDataBidiLocal: bigint;
+	initialMaxStreamDataBidiRemote: bigint;
+	initialMaxStreamDataUni: bigint;
+}
+
 // How many streams the WebSocket fallback lets a server open in each direction: a qmux
 // server accepts the dial and opens streams until the client's limit refuses one.
-async function websocketStreamLimits(props: Omit<ConnectProps, "url">): Promise<{ bidi: number; uni: number }> {
+async function websocketStreamLimits(props: Omit<ConnectProps, "url">) {
 	const original = globalThis.WebTransport;
 	// No WebTransport, so the WebSocket attempt goes at once.
 	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
 	const accepted = Promise.withResolvers<Qmux>();
+	const parameters = Promise.withResolvers<ReceiveWindows>();
 	// Bun's server socket, shaped as the `WebSocketLike` that `Qmux.accept` adopts.
 	let adopted: WebSocketLike | undefined;
 	const server = Bun.serve<{ protocol: string }>({
@@ -691,6 +706,10 @@ async function websocketStreamLimits(props: Omit<ConnectProps, "url">): Promise<
 				accepted.resolve(Qmux.accept(adopted, { protocol: socket.data.protocol }));
 			},
 			message(_socket, data) {
+				if (typeof data === "string") throw new Error("expected binary QMux record");
+				for (const frame of decodeRecord(new Uint8Array(data))) {
+					if (frame.type === "transport_parameters") parameters.resolve(frame.params);
+				}
 				adopted?.onmessage?.({ data });
 			},
 			close(_socket, code, reason) {
@@ -723,21 +742,50 @@ async function websocketStreamLimits(props: Omit<ConnectProps, "url">): Promise<
 		controller.abort();
 		await attempt;
 		session.close();
-		return limits;
+		return { ...limits, params: await parameters.promise };
 	} finally {
 		globalThis.WebTransport = original;
 		server.stop(true);
 	}
 }
 
-test("the WebSocket fallback grants the server websocket.maxStreams in each direction", async () => {
-	expect(await websocketStreamLimits({})).toEqual({ bidi: 10_000, uni: 10_000 });
-	expect(await websocketStreamLimits({ websocket: { maxStreams: 3 } })).toEqual({ bidi: 3, uni: 3 });
+test("the WebSocket fallback grants stream limits and receive windows", async () => {
+	const defaults = await websocketStreamLimits({});
+	expect(defaults).toMatchObject({
+		bidi: 10_000,
+		uni: 10_000,
+		params: {
+			initialMaxData: 4_194_304n,
+			initialMaxStreamDataBidiLocal: 1_048_576n,
+			initialMaxStreamDataBidiRemote: 1_048_576n,
+			initialMaxStreamDataUni: 1_048_576n,
+		},
+	});
+	expect(
+		await websocketStreamLimits({
+			websocket: {
+				maxStreams: 3,
+				receiveWindow: 65_537,
+				streamReceiveWindow: 16_385,
+			},
+		}),
+	).toMatchObject({
+		bidi: 3,
+		uni: 3,
+		params: {
+			initialMaxData: 65_537n,
+			initialMaxStreamDataBidiLocal: 16_385n,
+			initialMaxStreamDataBidiRemote: 16_385n,
+			initialMaxStreamDataUni: 16_385n,
+		},
+	});
 });
 
-test("websocket.maxStreams must be a positive integer", async () => {
-	for (const maxStreams of [0, -1, 1.5, Number.NaN]) {
-		await expect(connect(url, { websocket: { maxStreams } })).rejects.toThrow(RangeError);
+test("WebSocket limits must be positive safe integers", async () => {
+	for (const key of ["maxStreams", "receiveWindow", "streamReceiveWindow"] as const) {
+		for (const value of [0, -1, 1.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+			await expect(connect(url, { websocket: { [key]: value } })).rejects.toThrow(RangeError);
+		}
 	}
 });
 
@@ -1019,12 +1067,7 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = sleep(Nano.fromMilli(Milli(100))).then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = sleep(Nano.fromMilli(Milli(100))).then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -1061,12 +1104,7 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = opened.then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = opened.then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -1185,6 +1223,20 @@ test("an invalid timeout throws before touching the caller's signal", async () =
 	await expect(connect(url, { timeout: -1 as Milli })).rejects.toThrow("invalid time: -1");
 });
 
+/** An opened WebSocketStream whose QMux server sent only its TRANSPORT_PARAMETERS (all
+ *  defaults), which a session's `ready` waits for. */
+function qmuxStreams() {
+	return {
+		readable: new ReadableStream({
+			start: (controller) =>
+				controller.enqueue(new Uint8Array([0xff, 0x51, 0x53, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0])),
+		}),
+		writable: new WritableStream(),
+		protocol: "qmux-01",
+		extensions: "",
+	};
+}
+
 type WebSocketDial = "hang" | "open" | { failAfter: Milli } | { openAfter: Milli };
 
 // Their own host: a WebSocket that wins drops WebTransport's head start for its host and port afterwards.
@@ -1199,12 +1251,7 @@ function webSocketPlan(clock: Manual, plan: (dial: number) => WebSocketDial) {
 	const originalTransport = native.WebTransport;
 	native.WebTransport = undefined;
 	const dials: { at: number; closes: number }[] = [];
-	const streams = () => ({
-		readable: new ReadableStream(),
-		writable: new WritableStream(),
-		protocol: "qmux-01",
-		extensions: "",
-	});
+	const streams = qmuxStreams;
 	native.WebSocketStream = class {
 		url: string;
 		opened: Promise<unknown>;

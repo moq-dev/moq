@@ -262,7 +262,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	.unwrap()
 	.unwrap();
 	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
-	let mut totals = consumer.totals().await.unwrap();
+	let mut totals = consumer.totals().unwrap();
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let frame = totals.next().await.unwrap().unwrap();
@@ -319,7 +319,7 @@ async fn peer_zero_close_is_clean_and_application_close_counts_once() {
 		.unwrap()
 		.unwrap();
 	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
-	let mut totals = consumer.totals().await.unwrap();
+	let mut totals = consumer.totals().unwrap();
 	for (index, error) in [moq_net::Error::Cancel, moq_net::Error::App(42)]
 		.into_iter()
 		.enumerate()
@@ -458,7 +458,7 @@ async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session
 
 /// Presence is forbidden even when Path is empty or matches the HTTP request.
 async fn uri_setup_paths(io_uring: bool) {
-	use moq_tokio::quic::web::{SessionError, WebTransportError};
+	use moq_tokio::quic::web::Error;
 
 	moq_tokio::crypto::install_default().unwrap();
 	let versions: Vec<moq_net::Version> = [
@@ -527,10 +527,7 @@ async fn uri_setup_paths(io_uring: bool) {
 				})
 				.await
 				.expect("forbidden SETUP Path must close the session");
-				assert!(
-					matches!(error, SessionError::WebTransportError(WebTransportError::Closed(3, _))),
-					"{version}, {path:?}: {error:?}"
-				);
+				assert!(matches!(error, Error::Closed(3, _)), "{version}, {path:?}: {error:?}");
 			} else {
 				let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
 				assert_eq!(admission.request.path, "/room", "{version}");

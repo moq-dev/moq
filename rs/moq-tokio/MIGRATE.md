@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A listener builds its peers' identities
+
+`tls::PeerIdentity::from_chain` is removed. A listener outside this crate that ran its own mTLS handshake, such as the `moq-uring` workers, calls `tls::Serve::peer(chain)` on the `Serve` its TLS config came from.
+The identity then carries the roots that listener trusts, so `PeerIdentity::lineage` ends at the root the chain verified against even when the client did not send it.
+
 ### The dial-side client certificate reloads from disk
 
 With the `watch` feature, `tls::Connect`'s `cert` and `key` files are watched like its roots: a rewritten pair is presented on the next handshake, and the last valid pair is kept while the files are missing, malformed, or mismatched.
@@ -20,7 +25,7 @@ Remove the `aws-lc-rs` and `ring` Cargo features. rind is always enabled.
 The `net` and `driver` features include certificate support, so an RTMPS-only embedder can use `net` without selecting a provider.
 Self-signed certificates and mDNS/QUIC-LB authentication use rind. Wire formats are unchanged.
 
-`crypto` now re-exports moq-crypto's `provider` module, and a CPU missing a feature rind needs is reported as `crypto::UnsupportedCpu` (`moq_crypto::provider::UnsupportedCpu`), which names the feature:
+`crypto` now re-exports moq-crypto's `provider` module, and a CPU missing a feature rind needs is reported as `crypto::UnsupportedCpu` (`moq_crypto::cpu::UnsupportedCpu`), which names the feature:
 
 - `crypto::provider()` returns `Result<Provider, UnsupportedCpu>`; add `?`. It always returns rind, independently of rustls' process default.
 - `crypto::install_default()` returns `Result<(), UnsupportedCpu>` instead of `Result<(), Provider>`. A provider the process already installed is kept and is no longer an error, so replace `let _ = crypto::install_default();` with `crypto::install_default()?;`.

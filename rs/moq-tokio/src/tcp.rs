@@ -247,25 +247,26 @@ async fn connect_addrs(
 #[derive(Clone)]
 pub struct TlsAcceptor {
 	config: std::sync::Arc<rustls::ServerConfig>,
+	/// Builds each accepted client's identity against the listener's current roots.
+	tls: crate::tls::Serve,
 	qmux: qmux::tls::Server,
 	server: moq_net::Server,
-	timeout: Option<std::time::Duration>,
 }
 
 #[cfg(feature = "_certs")]
 impl TlsAcceptor {
 	pub(crate) fn new(
 		config: std::sync::Arc<rustls::ServerConfig>,
+		tls: crate::tls::Serve,
 		session: qmux::Config,
 		server: moq_net::Server,
-		timeout: Option<std::time::Duration>,
 	) -> Self {
 		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(session);
 		Self {
 			config,
+			tls,
 			qmux,
 			server,
-			timeout,
 		}
 	}
 
@@ -297,7 +298,7 @@ impl TlsAcceptor {
 		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRef<tokio::net::TcpStream> + Send + Unpin + 'static,
 	{
 		crate::runtime::scope(async move {
-			let deadline = self.timeout.and_then(|timeout| kio::clock::now().checked_add(timeout));
+			let deadline = self.server.deadline(kio::clock::now());
 			let tcp: &tokio::net::TcpStream = stream.get_ref().0.as_ref();
 			let remote = tcp.peer_addr().ok();
 			let local = tcp.local_addr().ok();
@@ -316,8 +317,9 @@ impl TlsAcceptor {
 					.map_err(|err| Error::Accept(crate::error::message(err)))
 			};
 			let session = crate::server::within(deadline, handshake).await?;
-			let incoming = crate::server::Incoming::tcp(&session, remote, local, deadline, active).with_alpn(alpn);
-			crate::server::accept_stream(&self.server, session, incoming).await
+			let incoming = crate::server::Incoming::tcp(&session, Some(&self.tls), remote, local, deadline, active)
+				.with_alpn(alpn);
+			crate::server::Request::accept_qmux(&self.server, session, incoming).await
 		})
 		.await
 	}
@@ -332,6 +334,8 @@ pub struct Listener {
 	session: qmux::Config,
 	/// Present when the listener serves TLS; it negotiates the ALPN itself.
 	tls: Option<qmux::tls::Server>,
+	/// The TLS policy behind `tls`, which builds each accepted client's identity.
+	pub(crate) serve: Option<crate::tls::Serve>,
 }
 
 impl Listener {
@@ -345,15 +349,17 @@ impl Listener {
 				health: crate::accept::Health::new("tcp"),
 				session: crate::qmux_default(),
 				tls: None,
+				serve: None,
 			})
 		})
 		.await
 	}
 
-	/// Serve TLS with `config`, whose ALPN list already names each
-	/// `qmux-01.<protocol>` pair to accept.
-	pub(crate) fn with_tls(mut self, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
+	/// Serve TLS with `config`, built from `serve` with an ALPN list that already
+	/// names each `qmux-01.<protocol>` pair to accept.
+	pub(crate) fn with_tls(mut self, serve: crate::tls::Serve, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
 		self.tls = Some(qmux::tls::Server::new(config).with_session_config(self.session.clone()));
+		self.serve = Some(serve);
 		self
 	}
 
@@ -519,6 +525,9 @@ mod tests {
 		let fingerprint = crate::tls::PeerIdentity::from_chain(vec![client_cert.der().clone()])
 			.fingerprint()
 			.unwrap();
+		let ca_fingerprint = crate::tls::PeerIdentity::from_chain(vec![ca_cert.der().clone()])
+			.fingerprint()
+			.unwrap();
 		let ca = write("ca.pem", ca_cert.pem());
 		let cert = (
 			write("client.pem", client_cert.pem()),
@@ -545,6 +554,11 @@ mod tests {
 			.expect("CA-rooted certificate refused");
 		let identity = identity.expect("the chain is reported");
 		assert_eq!(identity.name().as_deref(), Some("client.example"));
+		assert_eq!(
+			identity.lineage().unwrap(),
+			[fingerprint.clone(), ca_fingerprint],
+			"lineage ends at the listener root the client did not send"
+		);
 		assert_eq!(sni.as_deref(), Some("localhost"));
 		let (_server, identity, _) = mtls_dial(server, None).await.expect("token-only client refused");
 		assert!(identity.is_none());
@@ -653,6 +667,7 @@ mod tests {
 	/// through to the loopback listener within the stagger delay.
 	#[tokio::test]
 	async fn failover_recovers_from_blackhole_candidate() {
+		kio::clock::host_time();
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
 			.await
 			.expect("bind listener")

@@ -21,10 +21,19 @@ async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
         pass
 
 
-def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProducer:
-    publication = origin.create_broadcast(path)
-    publication.announce()
-    return publication.broadcast
+async def polled() -> None:
+    """Return once every task started before this call has polled its native call
+    and taken any result that call had ready.
+
+    Native calls poll inline, so each task's first step makes its first poll. The
+    loop then hands back results in order, so a native call that is ready at
+    once, started after the others, finishes after theirs.
+    """
+    await asyncio.sleep(0)
+    track = moq.BroadcastProducer().publish_track("polled")
+    consumer = track.consume()
+    track.write_frame(b"ready")
+    assert await consumer.read_frame() is not None
 
 
 async def routes(announced: moq.AnnounceConsumer):
@@ -140,7 +149,7 @@ async def test_datagram_tracks_have_independent_sequences_and_priority():
 async def test_broadcast_consumer_closed_resolves_on_close():
     broadcast = moq.BroadcastProducer()
     closed = asyncio.create_task(broadcast.consume().closed())
-    await asyncio.sleep(0.01)
+    await polled()
     assert not closed.done()
     broadcast.close()
     await asyncio.wait_for(closed, 5)
@@ -231,7 +240,8 @@ def test_audio_rejects_bad_init_bytes():
 
 async def test_local_publish_consume_audio():
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "live")
+    route = origin.route("live")
+    broadcast = route.broadcast
     media = moq.media.TrackProducer.audio(
         broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
     )
@@ -269,7 +279,8 @@ async def test_local_publish_consume_audio():
 
 async def test_video_publish_consume():
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "video-test")
+    route = origin.route("video-test")
+    broadcast = route.broadcast
     media = moq.media.TrackProducer.video(
         broadcast, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=h264_init())
     )
@@ -306,7 +317,8 @@ async def test_video_publish_consume():
 
 async def test_video_publish_named_track():
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "video-named-test")
+    route = origin.route("video-named-test")
+    broadcast = route.broadcast
     media = moq.media.TrackProducer.video(
         broadcast,
         moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=h264_init()),
@@ -325,7 +337,8 @@ async def test_video_publish_named_track():
 
 async def test_multiple_frames_ordering():
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "ordering-test")
+    route = origin.route("ordering-test")
+    broadcast = route.broadcast
     media = moq.media.TrackProducer.audio(
         broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
     )
@@ -355,7 +368,8 @@ async def test_multiple_frames_ordering():
 
 async def test_catalog_update_on_new_track():
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "catalog-update")
+    route = origin.route("catalog-update")
+    broadcast = route.broadcast
     _media1 = moq.media.TrackProducer.audio(
         broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
     )
@@ -397,7 +411,7 @@ def test_close_twice_is_a_noop():
 
 async def test_announced_broadcast():
     origin = moq.OriginProducer()
-    _broadcast = create_announced(origin, "test/broadcast")
+    _route = origin.route("test/broadcast")
 
     consumer = origin.consume()
 
@@ -413,51 +427,53 @@ async def test_following_restarts_on_a_new_instance():
     consumer = origin.consume()
     announced = consumer.announced()
     following = consumer.follow("instance")
-    publication = origin.create_broadcast("instance")
 
-    # The broadcast mints its own instance and keeps it across re-announcing.
-    publication.announce()
+    # The route mints its own instance and keeps it across re-pricing.
+    first = origin.route("instance")
     present = await next_route(announced)
     assert isinstance(present, moq.AnnounceEventPresent)
     minted = present.announce.route.instance
-    assert minted
+    assert minted == first.instance
     assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
 
-    # Another instance is another stream: followers restart onto it, while the path
-    # stays present, so neither the re-price nor the restart is listed.
-    publication.announce(moq.AnnounceRoute(cost=1))
-    publication.announce(moq.AnnounceRoute(instance="cam", epoch=1))
+    # Another route is another stream: followers restart onto it, while the path stays
+    # present, so neither the re-price nor the restart is listed.
+    first.set_cost(1)
+    second = origin.route("instance", instance="cam", epoch=1)
+    assert second.instance == "cam"
     assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
-    publication.unannounce()
+    first.withdraw()
+    second.withdraw()
     absent = await next_route(announced)
     assert isinstance(absent, moq.AnnounceEventAbsent)
     assert absent.announce.route.instance == "cam"
 
     with pytest.raises(moq.Error.InvalidInstance):
-        publication.announce(moq.AnnounceRoute(instance=""))
+        origin.route("refused", instance="")
     following.cancel()
-    publication.broadcast.close()
+    first.broadcast.close()
+    second.broadcast.close()
 
 
 async def test_following_reports_the_path_offline_until_it_returns():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    publication = origin.create_broadcast("live")
-    publication.announce()
+    route = origin.route("live")
     async with consumer.follow("live") as following:
         assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
-        publication.unannounce()
+        route.withdraw()
         assert await asyncio.wait_for(following.available(), timeout=5.0) is None
-        publication.announce()
+        route.announce()
         assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
-    publication.broadcast.close()
+    route.broadcast.close()
 
 
 async def test_finish_serves_until_closed():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
-    broadcast = create_announced(origin, "finish")
+    route = origin.route("finish")
+    broadcast = route.broadcast
     assert isinstance(await next_route(announced), moq.AnnounceEventPresent)
 
     track = broadcast.publish_track("status")
@@ -814,18 +830,20 @@ async def test_dynamic_track_request_can_publish_media():
 
 async def test_dynamic_broadcast_request():
     origin = moq.OriginProducer(cache_capacity_bytes=4096)
-    dynamic = origin.requests("")
+    dynamic = origin.route_prefix("")
     consumer = origin.consume()
 
     requesting = asyncio.create_task(consumer.request("dynamic/broadcast"))
 
-    request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
+    request = await asyncio.wait_for(dynamic.requested(), timeout=5.0)
+    assert request is not None
     assert request.path == "dynamic/broadcast"
 
-    prepared = request.prepare()
-    track = prepared.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
-    served = prepared.publish()
-    assert served.broadcast is prepared.broadcast
+    # A hidden job route answers once it announces, under its own instance.
+    served = request.route(hidden=True)
+    assert served.instance != dynamic.instance
+    track = served.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
+    served.announce()
     with pytest.raises(Exception):
         _ = request.path
 
@@ -844,12 +862,13 @@ async def test_dynamic_broadcast_request():
 
 async def test_dynamic_serves_held_content_without_an_exact_route():
     origin = moq.OriginProducer()
-    dynamic = origin.requests("live")
+    dynamic = origin.route_prefix("live")
     held = moq.BroadcastProducer()
     track = held.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     source = held.consume()
     requesting = asyncio.create_task(origin.consume().request("live/cam"))
-    request = await dynamic.requested_broadcast()
+    request = await dynamic.requested()
+    assert request is not None
     request.serve(source)
     with pytest.raises(Exception):
         request.serve(source)
@@ -865,11 +884,12 @@ async def test_dynamic_serves_held_content_without_an_exact_route():
 
 async def test_dynamic_broadcast_request_can_reject():
     origin = moq.OriginProducer()
-    dynamic = origin.requests("")
+    dynamic = origin.route_prefix("")
     consumer = origin.consume()
 
     requesting = asyncio.create_task(consumer.request("missing"))
-    request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
+    request = await asyncio.wait_for(dynamic.requested(), timeout=5.0)
+    assert request is not None
     assert request.path == "missing"
 
     request.reject(404)
@@ -1013,7 +1033,8 @@ async def test_container_consumer_default_latency_and_context_manager():
     """TrackConsumer.subscribe defaults the
     latency; the returned consumer is also an async context manager."""
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "live")
+    route = origin.route("live")
+    broadcast = route.broadcast
     media = moq.media.TrackProducer.audio(
         broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
     )
@@ -1040,7 +1061,8 @@ async def test_container_consumer_default_latency_and_context_manager():
 
 async def test_raw_publish_consume():
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "robot/arm")
+    route = origin.route("robot/arm")
+    broadcast = route.broadcast
     raw = broadcast.publish_track("events")
 
     consumer = origin.consume()
@@ -1065,7 +1087,8 @@ async def test_raw_publish_consume():
 
 async def test_raw_multiple_frames():
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "robot/io")
+    route = origin.route("robot/io")
+    broadcast = route.broadcast
     raw = broadcast.publish_track("commands", moq.TrackInfo(max_age=None))
 
     consumer = origin.consume()
@@ -1194,7 +1217,8 @@ async def test_broadcast_producer_consume_direct():
 async def test_raw_group_sequence():
     """Consumer sees the same sequence numbers the producer assigned."""
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "track/seq")
+    route = origin.route("track/seq")
+    broadcast = route.broadcast
     raw = broadcast.publish_track("seq", moq.TrackInfo(max_age=None, timescale=1_000_000))
 
     consumer = origin.consume()
@@ -1231,7 +1255,8 @@ async def test_default_iteration_is_sequence_order():
     this fails if the default iteration ever reverts to recv_group.
     """
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "track/ordering")
+    route = origin.route("track/ordering")
+    broadcast = route.broadcast
     raw = broadcast.publish_track("ordering", moq.TrackInfo(max_age=None))
 
     subscription = moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0)
@@ -1356,7 +1381,8 @@ async def test_container_group_fails_loudly():
 async def test_raw_multi_frame_group():
     """A single group can carry multiple frames, not just one per group."""
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "stream/chunks")
+    route = origin.route("stream/chunks")
+    broadcast = route.broadcast
     raw = broadcast.publish_track("chunks")
 
     consumer = origin.consume()
@@ -1468,7 +1494,7 @@ async def test_read_frame_skips_empty_group_on_open_track():
     track.append_group().finish()
 
     read = asyncio.create_task(consumer.read_frame())
-    await asyncio.sleep(0.05)
+    await polled()
     assert not read.done(), "empty group must not end an open track"
 
     track.write_frame(b"after-empty", moq.Timestamp(1_000, 1_000_000))
@@ -1502,7 +1528,7 @@ async def test_read_frame_keeps_group_across_cancelled_call():
 
     group = track.append_group()
     read = asyncio.create_task(consumer.read_frame())
-    await asyncio.sleep(0.05)
+    await polled()
     assert not read.done()
     read.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1586,7 +1612,8 @@ def test_encode_audio_with_opus_object():
 async def test_audio_consumer_reports_its_playout_delay():
     """A fixed playout delay is reported back as is; an estimated one moves as frames are read."""
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "audio-delay")
+    route = origin.route("audio-delay")
+    broadcast = route.broadcast
     audio = moq.audio.Producer(
         moq.media.CatalogProducer(broadcast),
         moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1),
@@ -1601,10 +1628,13 @@ async def test_audio_consumer_reports_its_playout_delay():
     catalog = await asyncio.wait_for(moq.media.catalog(broadcast_consumer), timeout=5.0)
     rendition = catalog.audio["mic"]
 
+    # No max delay: a zero one skips a group once its successor is a warmup old by the wall
+    # clock, so a read that late starts on the second frame, and its warmup trims all the audio
+    # left. This test reads every frame it wrote, however late.
     def output(delay: timedelta | None) -> moq.audio.DecoderOutput:
         if delay is None:
-            return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
-        fixed = moq.Delay(min=delay)
+            return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=moq.Delay(max=None))
+        fixed = moq.Delay(min=delay, max=None)
         return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=fixed, estimate=False)
 
     fixed = await moq.audio.Consumer.subscribe(broadcast_consumer, "mic", rendition, output(timedelta(milliseconds=80)))
@@ -1630,7 +1660,8 @@ async def test_audio_consumer_reports_its_playout_delay():
 async def test_decode_video_frame():
     """A decoded frame owns its picture and converts to either layout, even after its consumer is cancelled."""
     origin = moq.OriginProducer()
-    broadcast = create_announced(origin, "video-decode-frame")
+    route = origin.route("video-decode-frame")
+    broadcast = route.broadcast
     video = moq.video.Producer(
         moq.media.CatalogProducer(broadcast),
         moq.VideoEncoderInput(
@@ -1686,39 +1717,39 @@ async def test_decode_video_frame():
 
 async def test_broadcast_is_reachable_only_while_announced():
     origin = moq.OriginProducer()
-    publication = origin.create_broadcast("live")
-    track = publication.broadcast.publish_track("events")
+    route = origin.route("live", hidden=True)
+    track = route.broadcast.publish_track("events")
     consumer = origin.consume()
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request("live"), timeout=5.0)
 
-    publication.announce()
+    route.announce()
     announced = consumer.announced()
     first = await next_route(announced)
     assert isinstance(first, moq.AnnounceEventPresent)
     assert first.announce.prefix == "live"
 
-    publication.unannounce()
+    route.withdraw()
     retracted = await next_route(announced)
     assert isinstance(retracted, moq.AnnounceEventAbsent)
     assert retracted.announce.prefix == "live"
     with pytest.raises(Exception):
         await asyncio.wait_for(consumer.request("live"), timeout=5.0)
 
-    publication.announce()
+    route.announce()
     back = await next_route(announced)
     assert isinstance(back, moq.AnnounceEventPresent)
+    assert back.announce.route.instance == route.instance
     await asyncio.wait_for(consumer.request("live"), timeout=5.0)
     announced.cancel()
     track.finish()
-    publication.broadcast.close()
+    route.broadcast.close()
 
 
 async def test_an_instance_pins_request_and_follow():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    publication = origin.create_broadcast("live")
-    publication.announce(moq.AnnounceRoute(instance="cam"))
+    route = origin.route("live", instance="cam")
 
     await asyncio.wait_for(consumer.request("live", instance="cam"), timeout=5.0)
     with pytest.raises(moq.Error.Protocol):
@@ -1728,39 +1759,53 @@ async def test_an_instance_pins_request_and_follow():
     async with consumer.follow("live", instance="cam") as following:
         assert await asyncio.wait_for(following.available(), timeout=5.0) is not None
         # Another instance taking the path over ends the pinned stream.
-        publication.announce(moq.AnnounceRoute(instance="other"))
+        other = origin.route("live", instance="other")
         assert await asyncio.wait_for(following.available(), timeout=5.0) is None
-    publication.broadcast.close()
+    other.broadcast.close()
+    route.broadcast.close()
 
 
-async def test_dropping_a_publication_keeps_its_route():
+async def test_the_route_keeps_its_broadcast_announced():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    publication = origin.create_broadcast("live")
-    broadcast = publication.broadcast
-    assert publication.broadcast is broadcast
-    publication.announce()
-    del publication
+    route = origin.route("live")
+    broadcast = route.broadcast
+    assert route.broadcast is broadcast
+    # The broadcast handle alone retracts nothing.
+    del broadcast
     await asyncio.wait_for(consumer.request("live"), timeout=5.0)
 
-    broadcast.close()
+    # Dropping the route retracts it; its broadcast lives on for its other handles.
+    broadcast = route.broadcast
+    del route
     with pytest.raises(moq.Error.Protocol):
         await asyncio.wait_for(consumer.request("live"), timeout=5.0)
+    broadcast.publish_track("data")
+    broadcast.close()
+
+    # Cancelling retracts it too, and later calls fail.
+    cancelled = origin.route("cancelled")
+    await asyncio.wait_for(consumer.request("cancelled"), timeout=5.0)
+    cancelled.cancel()
+    with pytest.raises(moq.Error.Protocol):
+        await asyncio.wait_for(consumer.request("cancelled"), timeout=5.0)
+    with pytest.raises(moq.Error.Cancelled):
+        cancelled.announce()
+    cancelled.broadcast.close()
 
 
-async def test_a_stale_publication_leaves_its_replacement_alone():
+async def test_a_closed_route_leaves_its_replacement_alone():
     origin = moq.OriginProducer()
     consumer = origin.consume()
-    stale = origin.create_broadcast("live")
-    stale.announce()
+    stale = origin.route("live")
     stale.broadcast.close()
 
-    replacement = origin.create_broadcast("live")
-    replacement.announce()
+    replacement = origin.route("live")
     with pytest.raises(moq.Error.Closed):
         stale.announce()
     with pytest.raises(moq.Error.Closed):
-        stale.unannounce()
+        stale.set_cost(1)
+    stale.withdraw()
     await asyncio.wait_for(consumer.request("live"), timeout=5.0)
     replacement.broadcast.close()
 
@@ -1771,10 +1816,10 @@ async def test_announced_pattern_captures():
     announced = consumer.announced("room", filter="*/chat")
 
     # A claim at "room" could serve a match, but its own name is none, so it is not listed.
-    dynamic = origin.requests("room")
+    dynamic = origin.route_prefix("room")
 
-    audio = create_announced(origin, "room/alice/audio")
-    chat = create_announced(origin, "room/alice/chat")
+    audio = origin.route("room/alice/audio")
+    chat = origin.route("room/alice/chat")
     match = await next_route(announced)
     assert isinstance(match, moq.AnnounceEventPresent)
     assert match.announce.prefix == "room/alice/chat"
@@ -1782,19 +1827,21 @@ async def test_announced_pattern_captures():
 
     announced.cancel()
     dynamic.cancel()
-    audio.close()
-    chat.close()
+    audio.broadcast.close()
+    chat.broadcast.close()
 
 
 async def test_dynamic_serves_a_request_under_a_prefix():
     origin = moq.OriginProducer()
-    dynamic = origin.requests("live")
+    dynamic = origin.route_prefix("live")
     consumer = origin.consume()
+    with pytest.raises(moq.Error.Internal):
+        _ = dynamic.broadcast
 
     pending = asyncio.create_task(consumer.request("live/cam"))
-    request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
+    request = await asyncio.wait_for(anext(dynamic), timeout=5.0)
     assert request.path == "live/cam"
-    served = request.prepare().publish()
+    served = request.route()
     await asyncio.wait_for(pending, timeout=5.0)
     dynamic.cancel()
     served.broadcast.close()
@@ -1809,9 +1856,9 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
         assert moq.is_shutdown(excinfo.value)
 
     origin = moq.OriginProducer()
-    async with origin.requests("live") as origin_dynamic:
+    async with origin.route_prefix("live") as origin_dynamic:
         pass
-    await assert_cancelled(origin_dynamic.requested_broadcast())
+    await assert_cancelled(origin_dynamic.requested())
 
     broadcast = moq.BroadcastProducer()
     async with broadcast.requests() as broadcast_dynamic:

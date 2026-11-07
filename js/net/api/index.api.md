@@ -1,17 +1,14 @@
 # `@moq/net`
 
 ```ts
-import { $ZodBranded } from "zod/v4/core";
 import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
-import { ZodMiniBigInt } from "zod/mini";
-import { infer } from "zod/mini";
 
 export namespace Announce {
 	export interface Announce {
 		captures: Path.Pattern[] | undefined;
 		prefix: Path.Valid;
-		route: Origin.Route;
+		route: Origin.RouteInfo;
 	}
 	export class Consumer {
 		[Symbol.asyncIterator](): AsyncGenerator<Announce.Event, void, undefined>;
@@ -220,6 +217,7 @@ export namespace Connection {
 		bytesLost?: number;
 		bytesReceived?: number;
 		bytesSent?: number;
+		datagramsUnrouted?: number;
 		estimatedSendRate?: number;
 		packetsLost?: number;
 		packetsReceived?: number;
@@ -232,6 +230,8 @@ export namespace Connection {
 		delay?: Milli;
 		enabled?: boolean;
 		maxStreams?: number;
+		receiveWindow?: number;
+		streamReceiveWindow?: number;
 		url?: URL;
 	}
 	export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
@@ -344,6 +344,10 @@ export namespace Error {
 			reason?: string;
 		});
 		readonly code: SessionCode;
+	}
+	export class Skipped extends Error {
+		constructor(sequence: bigint);
+		readonly sequence: bigint;
 	}
 	export class Stream extends Error {
 		constructor(code: StreamCode, options?: Error.StreamOptions);
@@ -462,38 +466,18 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
 	}
-	export type Hop = infer<typeof Origin.HopSchema>;
-	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
-	export class Prepared {
-		[Symbol.dispose](): void;
-		readonly broadcast: Broadcast.Producer;
-		close(): void;
-		publish(): Origin.Publication;
-	}
 	export class Producer implements Origin.Table {
 		constructor();
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Origin.Consumer;
-		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
-		requests(prefix: Path.Valid): Origin.Requests;
+		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
+		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
-	}
-	export class Publication {
-		announce(route?: Origin.Route | {
-			auth?: Origin.Route["auth"];
-			cost?: Origin.Route["cost"];
-			epoch?: Origin.Route["epoch"];
-			hops?: Origin.Route["hops"];
-			instance?: Origin.Route["instance"];
-		}): void;
-		readonly broadcast: Broadcast.Producer;
-		get route(): Origin.Route | undefined;
-		unannounce(): void;
 	}
 	export interface Reader {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -504,8 +488,8 @@ export namespace Origin {
 	}
 	export class Request {
 		readonly path: Path.Valid;
-		prepare(): Origin.Prepared;
 		reject(err: Error): void;
+		route(options?: Origin.RouteOptions): Origin.Route;
 		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
 	}
 	export interface RequestOptions {
@@ -517,24 +501,35 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
 	}
-	export class Requests {
+	export class Route {
+		[Symbol.dispose](): void;
+		announce(): void;
+		get announced(): boolean;
+		get broadcast(): Broadcast.Producer;
 		close(): void;
-		readonly prefix: Path.Valid;
+		get instance(): Instance.Valid;
 		requested(): AsyncIterableIterator<Origin.Request>;
-		get route(): Origin.Route;
+		setAuth(auth?: Auth.Credential): void;
+		setCost(cost: Origin.Cost): void;
+		withdraw(): void;
 	}
-	export interface Route {
+	export interface RouteInfo {
+		readonly anonymous: boolean;
+		readonly cost: Origin.Cost;
+		readonly hops: readonly bigint[];
+		readonly instance?: Instance.Valid;
+	}
+	export interface RouteOptions {
 		auth?: Auth.Credential;
-		cost: Origin.Cost;
+		cost?: Origin.Cost;
 		epoch?: bigint;
-		hops: Origin.Hop[];
+		hidden?: boolean;
 		instance?: Instance.Valid;
 	}
 	export interface Table extends Origin.Reader {
-		createBroadcast(path: Path.Valid): Origin.Publication;
-		requests(prefix: Path.Valid): Origin.Requests;
+		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
+		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 	}
-	export function isAnonymous(route: Origin.Route): boolean;
 }
 
 export namespace Path {
@@ -668,7 +663,7 @@ export namespace Track {
 	};
 	export class Consumer {
 		fetchGroup(sequence: bigint, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
-		info(): Promise<Track.Info>;
+		info(options?: Track.InfoOptions): Promise<Track.Info>;
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
@@ -716,6 +711,9 @@ export namespace Track {
 	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
 		maxAge?: Milli | null;
 	}
+	export interface InfoOptions {
+		signal?: AbortSignal;
+	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
 		close(abort?: Error): void;
@@ -757,6 +755,7 @@ export namespace Track {
 		readonly name: string;
 		get priority(): number;
 		requests(): Track.Requests;
+		skipGroups(start: bigint, end: bigint): void;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
@@ -783,11 +782,14 @@ export namespace Track {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		finished(): Promise<Track.Position>;
+		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
+		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
+		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryRecvGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
@@ -819,5 +821,40 @@ export namespace Varint {
 	export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
 	export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
 	export function size(v: number): number;
+}
+
+export namespace socket {
+	export class Endpoint {
+		constructor(origin: Origin.Producer, prefix: Path.Valid, id: string);
+		acceptTcp(options?: socket.Options): Promise<socket.Incoming<socket.TcpStream>>;
+		acceptTrack(options?: socket.Options): Promise<socket.Incoming<socket.TrackStream>>;
+		close(): void;
+		get closed(): Signals.GetPromise<Error | null>;
+		dialTcp(peer: string, options?: socket.Options): Promise<socket.TcpStream>;
+		dialTrack(peer: string, info?: Track.InfoInit, options?: socket.Options): Promise<socket.TrackStream>;
+		readonly id: string;
+		readonly prefix: Path.Valid;
+	}
+	export class Incoming<S extends socket.TcpStream | socket.TrackStream> {
+		accept(...args: S extends socket.TcpStream ? [options?: socket.Options] : [info?: Track.InfoInit, options?: socket.Options]): Promise<S>;
+		readonly peer: string;
+		reject(): void;
+		readonly session: string;
+	}
+	export interface Options {
+		signal?: AbortSignal;
+	}
+	export class TcpStream {
+		readonly consumer: Group.Consumer;
+		readonly peer: string;
+		readonly producer: Group.Producer;
+		readonly session: string;
+	}
+	export class TrackStream {
+		readonly consumer: Track.Subscriber;
+		readonly peer: string;
+		readonly producer: Track.Producer;
+		readonly session: string;
+	}
 }
 ```

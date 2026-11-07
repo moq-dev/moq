@@ -60,11 +60,9 @@ window.runRecovery = async (packets) => {
 	};
 	const origin = new Moq.Origin.Producer();
 	const name = Moq.Path.from("open-gop");
-	const publication = origin.createBroadcast(name);
-	publication.announce();
-	const producer = publication.broadcast;
+	const route = origin.route(name);
 	// Every group is written before the decoder reads from the first, so none may go stale.
-	const track = producer.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
+	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
 		if (group?.sequence !== BigInt(packet.group)) {
@@ -94,7 +92,7 @@ window.runRecovery = async (packets) => {
 		catalog: { video: { renditions: { video: config } } },
 	});
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay: Milli(0), buffer: Milli(10_000) });
+	const sync = new Sync({ delay: Milli(0), lookahead: Milli(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {
 		await inputDone;

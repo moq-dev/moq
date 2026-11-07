@@ -25,13 +25,16 @@ which JS cannot raise; Chrome stalled at 103, Firefox at 100):
 - ✅ Make room by taking over, else cancelling. Rejected: cancelling only
   (each reset frees credit only after the peer's MAX_STREAMS, a round trip
   later), and ordering waiting opens without making room.
-- ✅ Transports report the peer's stream credit and blocked state
-  (decided 2026-11-04, maintainer): moq-quic, Rust qmux and `@moq/qmux`
-  expose it, and the Rust entry point reads it through
-  `poll::Session::stream_credit`. Rejected: treating any waiting open as the
-  signal, since an open also waits on things other than credit. Browsers
-  report nothing and keep `createUnidirectionalStream()` pending without
-  credit, so there a waiting open stays the only signal.
+- ~~Transports report the peer's stream credit and blocked state~~,
+  reversed the same day (maintainer, on
+  [moq-dev/moq#7894](https://github.com/moq-dev/moq/pull/7894)): the signal
+  is the open line's waiting state (the head of the line is pending), with
+  no transport credit or blocked API.
+- Decided 2026-11-05 (maintainer, /quest-plan): "make room" splits into open
+  streams (ready now), reset fallback, and takeover (after
+  [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)), and the
+  browser test stays this README's own work. Not chosen: holding the whole
+  quest until #7670 merges.
 
 This epic owns the end-to-end test: a browser reader and a Rust relay over
 WebTransport, 300 live tracks of mixed priority, the highest-priority ones
@@ -39,5 +42,4 @@ receiving every group, and nothing hanging.
 
 ## Required
 
-- [A departed subscription releases its streams](/quest/m1/stream-credit/release-on-leave.md) - on lite-07 a subscription whose reader left frees its upstream streams, so 3 slots serve the next one
-- [A higher-priority group makes room](/quest/m1/stream-credit/make-room.md) - it takes over a lower-priority stream, or one is reset, without over-cancelling
+- [Takeover](/quest/m1/stream-credit/takeover.md) - on lite-07 a higher-priority group takes over an acknowledged stream, and a group that lost its stream resumes

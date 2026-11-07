@@ -16,8 +16,8 @@ use std::{
 	task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
+use crate::quic::driver::Duration;
 use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
-use crate::quic::driver::{Duration, Instant};
 use bytes::{Buf, Bytes};
 use kio::clock::{sleep, timeout};
 use moq_quic::RandomConnectionIdGenerator;
@@ -42,14 +42,11 @@ use super::{
 	recv, send, server, transport,
 };
 
-#[test]
-fn handshake_timeout() {
+/// Paused: nobody answers the dial, so only the handshake timer can end it.
+#[tokio::test(start_paused = true)]
+async fn handshake_timeout() {
 	let _guard = subscribe();
-	let runtime = rt_threaded();
-	let client = {
-		let _guard = runtime.enter();
-		client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap()
-	};
+	let client = client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
 
 	// Avoid NoRootAnchors error
 	let cert = (|| -> std::result::Result<_, rcgen::Error> {
@@ -71,24 +68,22 @@ fn handshake_timeout() {
 	transport_config.initial_rtt = Duration::from_millis(10);
 	client_config.transport = transport_config;
 
-	let start = Instant::now();
-	runtime.block_on(async move {
-		match client
-			.connect(
-				&client_config,
-				SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
-				"localhost",
-			)
-			.unwrap()
-			.await
-		{
-			Err(crate::quic::driver::connection::Error::HandshakeTimeout) => {}
-			Err(e) => panic!("unexpected error: {e:?}"),
-			Ok(_) => panic!("unexpected success"),
-		}
-	});
+	let start = kio::clock::now();
+	match client
+		.connect(
+			&client_config,
+			SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+			"localhost",
+		)
+		.unwrap()
+		.await
+	{
+		Err(crate::quic::driver::connection::Error::HandshakeTimeout) => {}
+		Err(e) => panic!("unexpected error: {e:?}"),
+		Ok(_) => panic!("unexpected success"),
+	}
 	let dt = start.elapsed();
-	assert!(dt > IDLE_TIMEOUT && dt < 2 * IDLE_TIMEOUT);
+	assert!(dt >= IDLE_TIMEOUT && dt < 2 * IDLE_TIMEOUT, "timed out after {dt:?}");
 }
 
 #[tokio::test]
@@ -208,7 +203,8 @@ fn read_after_close() {
 			.unwrap()
 			.await
 			.expect("connect");
-		sleep(Duration::from_millis(100)).await;
+		// The peer closes once its stream is acknowledged; read only after that close.
+		let _ = wait_closed(&new_conn).await;
 		let mut stream = new_conn.accept_uni().await.expect("incoming streams");
 		let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
 		assert_eq!(msg, MSG);
@@ -574,8 +570,14 @@ async fn await_connection(
 	timeout(Duration::from_secs(5), task).await.unwrap().unwrap()
 }
 
-async fn assert_wait_idle_pending(endpoint: &Endpoint) {
-	assert!(timeout(Duration::from_millis(50), endpoint.wait_idle()).await.is_err());
+/// Idleness is the endpoint's own state, so one poll reads it.
+fn assert_wait_idle_pending(endpoint: &Endpoint) {
+	let (waker, _) = new_count_waker();
+	assert!(
+		pin!(endpoint.wait_idle())
+			.poll(&mut Context::from_waker(&waker))
+			.is_pending()
+	);
 }
 
 async fn wait_idle(endpoint: &Endpoint) {
@@ -632,32 +634,34 @@ fn wait_idle_returns_when_the_driver_is_dropped() {
 	});
 	let _server_connection = accepted.join().expect("accept thread");
 
-	// Park `wait_idle`; it blocks while that connection is live.
-	let (done_tx, done_rx) = std::sync::mpsc::channel();
-	let waiter = {
-		let handle = endpoint_handle.clone();
-		let endpoint = endpoint.clone();
-		std::thread::spawn(move || {
-			handle.block_on(endpoint.wait_idle());
-			let _ = done_tx.send(());
-		})
-	};
-
-	// Otherwise a pass below would be vacuous.
+	// Park `wait_idle`; it blocks while that connection is live. Otherwise a pass
+	// below would be vacuous.
+	struct Signal(Mutex<std::sync::mpsc::Sender<()>>);
+	impl std::task::Wake for Signal {
+		fn wake(self: Arc<Self>) {
+			let _ = self.0.lock().unwrap().send(());
+		}
+	}
+	let (woken_tx, woken) = std::sync::mpsc::channel();
+	let waker = Waker::from(Arc::new(Signal(Mutex::new(woken_tx))));
+	let mut idle = pin!(endpoint.wait_idle());
 	assert!(
-		done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+		idle.as_mut().poll(&mut Context::from_waker(&waker)).is_pending(),
 		"wait_idle returned before the driver was dropped"
 	);
 
 	// Dropping the runtime drops the endpoint driver.
 	endpoint_runtime.shutdown_background();
 
-	let woke = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+	let woke = woken.recv_timeout(Duration::from_secs(10)).is_ok();
 	drop(connection);
 	drop(peer);
 	drop(peer_runtime);
-	assert!(woke, "wait_idle never returned after the endpoint driver was dropped");
-	let _ = waiter.join();
+	assert!(woke, "wait_idle was never woken after the endpoint driver was dropped");
+	assert!(
+		idle.as_mut().poll(&mut Context::from_waker(&waker)).is_ready(),
+		"wait_idle still pending after the endpoint driver was dropped"
+	);
 }
 
 async fn wait_closed(conn: &crate::quic::driver::connection::Connection) -> crate::quic::driver::connection::Error {
@@ -1065,7 +1069,7 @@ async fn split_accept_wait_idle_and_open_connections() {
 
 	wait_for_blocked_handshake(blocker.clone()).await;
 	assert_eq!(server.open_connections(), 0);
-	assert_wait_idle_pending(&server).await;
+	assert_wait_idle_pending(&server);
 
 	blocker.release();
 
@@ -1135,7 +1139,7 @@ async fn split_accept_close_during_pending_accept() {
 
 	wait_for_blocked_handshake(blocker.clone()).await;
 	drop(server.close(0u32.into(), "closing"));
-	assert_wait_idle_pending(&server).await;
+	assert_wait_idle_pending(&server);
 
 	blocker.release();
 

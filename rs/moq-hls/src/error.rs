@@ -179,16 +179,11 @@ pub enum Error {
 	},
 
 	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
-	#[error("unsupported CPU: {0}")]
-	UnsupportedCpu(String),
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }
 
 impl Error {
-	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
-	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
-		Self::UnsupportedCpu(err.to_string())
-	}
-
 	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
 	/// The import loop consults it: a `503` on a playlist fetch is worth another pass, a `404` is
@@ -207,6 +202,7 @@ impl Error {
 	/// another attempt: request timeout, rate limit, and the gateway/overload statuses. Every other
 	/// status, `404` and `403` included, is settled, as is a playlist that had already ended when
 	/// the import joined it. A failure with no answer at all is left to the backoff budget.
+	#[cfg(feature = "async")]
 	pub(crate) fn settled(&self) -> bool {
 		match self {
 			Self::PlaylistEnded => true,
@@ -221,6 +217,7 @@ impl Error {
 ///
 /// Every variant naming a resource stores it through here rather than redacting at display, so
 /// its `Debug` print is as safe as its `Display`.
+#[cfg(feature = "async")]
 pub(crate) fn redact(url: &url::Url) -> url::Url {
 	let mut url = url.clone();
 	// Fails only for a URL that cannot carry userinfo at all, such as `file:`.
@@ -260,9 +257,7 @@ mod tests {
 		drop(listener);
 
 		// reqwest reads rustls's process default, as the importer installs it.
-		let _ = rind_rustls::default_provider()
-			.expect("supported CPU")
-			.install_default();
+		moq_crypto::provider::install_default().expect("supported CPU");
 		let err: Error = reqwest::get(format!("http://user:pass@{address}/media.m3u8?jwt=secret"))
 			.await
 			.expect_err("dial a closed port")

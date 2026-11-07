@@ -1,7 +1,7 @@
 //! HLS / LL-HLS <-> MoQ gateway.
 //!
 //! Bridges HLS (and Low-Latency HLS) and [`moq_net`] broadcasts in both
-//! directions, mirroring the WHIP/WHEP split in `moq-rtc`:
+//! directions, mirroring the WHIP/WHEP split in `moq-webrtc`:
 //!
 //! - [`import`] pulls a remote HLS master/media playlist and publishes its CMAF
 //!   segments into MoQ (an HTTP *client* that *publishes*).
@@ -19,12 +19,24 @@
 //! record-driven playlist window, and the HTTP surface.
 //!
 //! Its cryptography is [rind](https://docs.rs/rind), so every constructor that first needs it
-//! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`].
+//! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`], carrying [`moq_crypto::cpu::UnsupportedCpu`].
+//!
+//! The gateway drives its HTTP fetches and background watchers as async code, so [`import`] and
+//! [`export`] need the `async` feature. The default `server` feature enables it.
 
 #![warn(missing_docs)]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		rustdoc::broken_intra_doc_links,
+		reason = "the docs link the gateways, which a poll-only build leaves out"
+	)
+)]
 
 mod error;
+#[cfg(feature = "async")]
 pub mod export;
+#[cfg(feature = "async")]
 pub mod import;
 #[cfg(feature = "server")]
 pub mod server;

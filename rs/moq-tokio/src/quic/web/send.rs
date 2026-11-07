@@ -11,7 +11,7 @@ use bytes::Buf;
 use futures::FutureExt;
 
 use crate::quic::driver::send;
-use crate::quic::web::{CloseReason, SessionError};
+use crate::quic::web::CloseReason;
 
 /// A stream that can be used to send bytes. See [`crate::quic::driver::send::Stream`].
 ///
@@ -56,12 +56,12 @@ impl Stream {
 			send::Error::Stopped(code) => match self.close.decode_stream_code(code) {
 				Some(code) => Error::Stopped(code),
 				None => match self.close.session_gone(code) {
-					Some(err) => Error::SessionError(err),
+					Some(err) => Error::Session(err),
 					None => Error::InvalidStopped(code),
 				},
 			},
 			e => match Error::from(e) {
-				Error::SessionError(e) => Error::SessionError(self.close.map(e)),
+				Error::Session(e) => Error::Session(self.close.map(e)),
 				e => e,
 			},
 		}
@@ -112,7 +112,9 @@ impl Stream {
 		self.state = State::Reset(stopped);
 	}
 
-	/// Poll until all data was acknowledged, the peer stopped the stream, or the session closed.
+	/// Resolves once all data was acknowledged, the peer stopped the stream (with its code), or the
+	/// session closed.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<u32>, Error>> {
 		let result = match &self.state {
 			State::Open(stream) => stream.poll_closed(waiter),
@@ -127,11 +129,6 @@ impl Stream {
 			},
 			Err(err) => Err(self.map_error(err)),
 		})
-	}
-
-	/// Wait until all data was acknowledged, the peer stopped the stream, or the session closed.
-	pub async fn closed(&self) -> Result<Option<u32>, Error> {
-		kio::wait(|w| self.poll_closed(w)).await
 	}
 
 	/// Finish sending, retaining a handle to acknowledgements and peer cancellation.
@@ -261,6 +258,13 @@ impl moq_net::transport::poll::SendStream for Stream {
 			Err(err) => Err(err),
 		})
 	}
+	fn acknowledged(&self) -> Option<bool> {
+		Some(match &self.state {
+			State::Open(stream) => stream.acknowledged(),
+			State::Finished(stream) => stream.acknowledged(),
+			State::Reset(_) => false,
+		})
+	}
 }
 
 impl moq_net::transport::poll::SendGroup for send::Group {
@@ -276,13 +280,10 @@ pub struct Finished {
 	park: kio::Park,
 }
 impl Finished {
-	/// Poll until the peer acknowledges or stops the stream, or the session closes.
+	/// Resolves once the peer acknowledges or stops the stream (with its code), or the session closes.
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<u32>, Error>> {
 		self.stream.poll_closed(waiter)
-	}
-	/// Wait until the peer acknowledges or stops the stream, or the session closes.
-	pub async fn closed(&self) -> Result<Option<u32>, Error> {
-		self.stream.closed().await
 	}
 	/// Reset the stream while still delivering its WebTransport header.
 	pub fn reset(self, code: u32) {
@@ -327,7 +328,7 @@ pub enum Error {
 
 	/// The session carrying the stream failed.
 	#[error("session error: {0}")]
-	SessionError(#[from] SessionError),
+	Session(#[from] super::Error),
 
 	/// The stream was already finished or reset.
 	#[error("stream closed")]
@@ -343,9 +344,9 @@ impl From<crate::quic::driver::send::Error> for Error {
 					None => Error::InvalidStopped(code),
 				}
 			}
-			crate::quic::driver::send::Error::Connection(e) => Error::SessionError(e.into()),
+			crate::quic::driver::send::Error::Connection(e) => Error::Session(e.into()),
 			// Only datagrams fail otherwise, and they report a session error.
-			e => Error::SessionError(e.into()),
+			e => Error::Session(e.into()),
 		}
 	}
 }
@@ -353,12 +354,12 @@ impl From<crate::quic::driver::send::Error> for Error {
 impl moq_net::transport::Error for Error {
 	fn close_kind(&self) -> moq_net::transport::CloseKind {
 		match self {
-			Self::SessionError(e) => e.close_kind(),
+			Self::Session(e) => e.close_kind(),
 			_ => moq_net::transport::CloseKind::Transport,
 		}
 	}
 	fn session_error(&self) -> Option<(u32, String)> {
-		if let Error::SessionError(e) = self {
+		if let Error::Session(e) = self {
 			return e.session_error();
 		}
 

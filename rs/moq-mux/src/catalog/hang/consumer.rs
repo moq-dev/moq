@@ -29,12 +29,13 @@ impl<E: CatalogExt> Consumer<E> {
 		}
 	}
 
-	/// Poll for the next catalog update.
+	/// Get the next catalog update, or `None` once the track ends.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
 	/// `broadcast` reference or echo prefix walks above the root, rejecting the whole catalog
 	/// (see [`hang::catalog::Consumer::poll_next`]). A transport failure is
 	/// [`Error::Moq`](crate::Error::Moq).
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
 		self.inner.poll_next(waiter).map_err(|err| match err {
 			// Lifted to this crate's variants, which `Source` reports for the same faults.
@@ -42,17 +43,6 @@ impl<E: CatalogExt> Consumer<E> {
 			hang::Error::EscapingBroadcast(rel) => crate::Error::EscapingBroadcast(rel),
 			err => crate::Error::Hang(err),
 		})
-	}
-
-	/// Get the next catalog update.
-	///
-	/// This method waits for the next catalog publication and returns the
-	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog<E>>>
-	where
-		Catalog<E>: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
@@ -115,8 +105,11 @@ mod test {
 	/// resolves against.
 	fn publish_catalog(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
-		let broadcast = origin.create_broadcast("a/pub").expect("broadcast should create");
+		let broadcast = origin
+			.route("a/pub", moq_net::origin::RouteOptions::hidden())
+			.expect("broadcast should create");
 		let track = broadcast
+			.broadcast()
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
 		let mut consumer = Consumer::new(track.consume());
@@ -148,27 +141,29 @@ mod test {
 	/// takes when it answers an origin request.
 	async fn publish_catalog_served(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
-		let dynamic = origin.requests("").unwrap();
+		let dynamic = origin
+			.route_prefix("", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let requesting = origin.consume().request("a/pub", None);
 		// The handler hands its route back: dropping it would retract the route and end
 		// the broadcast it just served.
 		let handler = tokio::spawn(async move {
-			let prepared = dynamic
-				.requested_broadcast()
+			let route = dynamic
+				.requested()
 				.await
 				.expect("handler should be asked for the path")
-				.prepare()
-				.expect("the answer should prepare");
-			let track = prepared
+				.route(moq_net::origin::RouteOptions::hidden())
+				.expect("the answer should route");
+			let track = route
 				.broadcast()
 				.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 				.expect("catalog track should create");
-			let broadcast = prepared.publish().expect("the answer should publish");
-			(dynamic, broadcast, track)
+			route.announce().expect("the answer should announce");
+			(dynamic, route, track)
 		});
 
 		let resolved = requesting.await;
-		let (_dynamic, _broadcast, track) = handler.await.expect("handler task");
+		let (_dynamic, _route, track) = handler.await.expect("handler task");
 		let catalog_track = resolved
 			.expect("the handler served it")
 			.track(hang::Catalog::DEFAULT_NAME)

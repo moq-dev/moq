@@ -1,3 +1,5 @@
+use std::task::{Poll, ready};
+
 use crate::driver::Transport;
 use crate::origin;
 use crate::time::{Deadlines, Instant};
@@ -19,7 +21,7 @@ pub struct Client {
 	url: Option<url::Url>,
 	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
-	peer_hop: Option<crate::Hop>,
+	peer_hop: Option<std::num::NonZeroU64>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	auth: Option<crate::auth::Handle>,
@@ -222,8 +224,9 @@ impl Client {
 	/// moq-transport via the MoQ Cluster extension).
 	///
 	/// The dialer is the side that knows what a link costs, because it chose the peer:
-	/// use `0` for a sibling in the same datacenter and something large for another
-	/// region across a metered backbone. So this prices both directions. We add it to
+	/// use `1` for a sibling in the same datacenter and something large for another
+	/// region across a metered backbone. Zero is refused on moq-lite-07, whose routing
+	/// needs every link to cost something. So this prices both directions. We add it to
 	/// the route cost of every announcement the peer sends us, and declare it in our
 	/// SETUP so the peer adds it to every announcement we send, which is what a server
 	/// accepting an anonymous connection needs: it cannot tell a sibling from a
@@ -237,7 +240,7 @@ impl Client {
 		self
 	}
 
-	/// Assign the identity this peer's routes are attributed to, overriding the fresh
+	/// Assign the hop id this peer's routes are attributed to, overriding the fresh
 	/// per-dial default.
 	///
 	/// A dialed session whose peer declares no hop gets a random one for that
@@ -253,7 +256,7 @@ impl Client {
 	/// really are one peer reconnecting or running redundant links, and a bug
 	/// otherwise. Derive it from the authenticated identity, never from something
 	/// coarser like the remote address.
-	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
+	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
 		self.peer_hop = Some(hop);
 		self
 	}
@@ -264,7 +267,7 @@ impl Client {
 	/// connection gets a fresh one, matching the per-session default an accepted
 	/// session already has.
 	fn assigned_hop(&self) -> crate::Hop {
-		self.peer_hop.unwrap_or_else(crate::Hop::random)
+		self.peer_hop.map_or_else(crate::Hop::random, crate::Hop::from)
 	}
 
 	/// The new session's side of its auth handle: the one from [`with_auth`](Self::with_auth),
@@ -329,6 +332,8 @@ impl Client {
 				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
+				// Filled by `lite::start` from the attached origin handles.
+				route_key: None,
 			}
 		} else {
 			lite::Setup::default()
@@ -369,6 +374,7 @@ impl Client {
 				bandwidth: self.allocator(),
 				viewers,
 				peer_implementation: start.peer_implementation,
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
 	}
@@ -385,8 +391,21 @@ impl Client {
 		self.connect_boxed(now, Transport::new(session))
 	}
 
-	async fn connect_boxed(&self, now: Instant, session: Transport) -> Result<(Session, crate::Driver), Error> {
-		let runtime = Deadlines::new(now);
+	fn connect_boxed(
+		&self,
+		now: Instant,
+		session: Transport,
+	) -> impl Future<Output = Result<(Session, crate::Driver), Error>> {
+		let mut connect = Connect::Start {
+			runtime: Deadlines::new(now),
+			session,
+		};
+		kio::wait(move |waiter| connect.poll(self, waiter))
+	}
+
+	/// Start the session the transport's ALPN picks, or begin negotiating moq-lite on a bidi
+	/// SETUP when it picks none.
+	fn start(&self, runtime: Deadlines, session: Transport) -> Result<Connect, Error> {
 		let peer_hop = self.assigned_hop();
 		let (publish, subscribe) = self.origins(peer_hop);
 
@@ -412,8 +431,8 @@ impl Client {
 					limits: self.limits,
 					session: session.clone(),
 					client: true,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
+					publish,
+					subscribe,
 					peer_hop: Some(peer_hop),
 					cost: self.cost,
 					version: draft,
@@ -430,7 +449,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(
+				return Ok(Connect::Started(Box::new(Session::new(
 					runtime,
 					session,
 					v,
@@ -446,8 +465,9 @@ impl Client {
 						bandwidth: self.allocator(),
 						viewers: self.viewers(),
 						peer_implementation,
+						datagrams_unrouted: None,
 					},
-				));
+				))));
 			}
 			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
 				let version = match alpn {
@@ -456,57 +476,60 @@ impl Client {
 					_ => lite::Version::Lite05,
 				};
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
-				return self.start_lite(runtime, session, version, peer_hop);
+				return self
+					.start_lite(runtime, session, version, peer_hop)
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
-				return self.start_lite(runtime, session, lite::Version::Lite04, peer_hop);
+				return self
+					.start_lite(runtime, session, lite::Version::Lite04, peer_hop)
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite03))
 					.ok_or(Error::Version)?;
-				return self.start_lite(runtime, session, lite::Version::Lite03, peer_hop);
+				return self
+					.start_lite(runtime, session, lite::Version::Lite03, peer_hop)
+					.map(|started| Connect::Started(Box::new(started)));
 			}
 			// No ALPN, or `moql`: negotiate moq-lite in a bidi SETUP.
 			Some(ALPN_LITE) | None => self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?,
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		// The SETUP keeps lite-01's framing whichever version it offers.
-		let mut stream = Stream::open(&session, Version::Lite(lite::Version::Lite01))
-			.await?
-			.with_stats(&self.stats);
+		Ok(Connect::Open {
+			negotiation: Negotiation {
+				runtime,
+				session,
+				peer_hop,
+				publish,
+				subscribe,
+				supported,
+			},
+			open: Default::default(),
+		})
+	}
 
-		let client = setup::Client {
-			versions: supported.clone().into(),
-			parameters: lite::Parameters::default().encode_bytes(lite::Version::Lite01)?,
-		};
-
-		stream.writer.encode(&client).await?;
-
-		let server: setup::Server = stream.reader.decode().await?;
-
-		let version = supported
-			.iter()
-			.find(|v| coding::Version::from(**v) == server.version)
-			.copied()
-			.ok_or(Error::Version)?;
-		let Version::Lite(v) = version else {
-			return Err(Error::Version);
-		};
-
-		// The server ends the stream after its SETUP. Reading to the end first keeps the drop
-		// from stopping a reply the server is still waiting to have acknowledged.
-		if version.hands_off() {
-			kio::wait(|waiter| stream.reader.poll_closed(waiter)).await?;
-			drop(stream);
-			return self.start_lite(runtime, session, v, peer_hop);
-		}
-
-		let stream = stream.with_version(v);
+	/// Start a lite-01/02 session on the negotiation stream the server's SETUP picked it on.
+	fn start_negotiated(
+		&self,
+		negotiation: Negotiation,
+		stream: Stream<Transport, Version>,
+		version: lite::Version,
+	) -> Result<(Session, crate::Driver), Error> {
+		let Negotiation {
+			runtime,
+			session,
+			peer_hop,
+			publish,
+			subscribe,
+			..
+		} = negotiation;
+		let stream = stream.with_version(version);
 		// One registry, which the subscriber sends and the session hands out.
 		let viewers = self.viewers();
 		let start = lite::start(lite::Config {
@@ -517,21 +540,21 @@ impl Client {
 			viewers: viewers.clone(),
 			session: session.clone(),
 			setup_stream: Some(stream),
-			publish: publish.clone(),
-			subscribe: subscribe.clone(),
+			publish,
+			subscribe,
 			peer_hop: Some(peer_hop),
-			version: v,
+			version,
 			// Lite 01/02 continue on the bidi SETUP stream and have no Setup Stream.
 			our_setup: lite::Setup::default(),
 			peer_setup: None,
 			// Lite 01/02 carry no AUTH.
-			auth: self.link(v.has_auth(), false)?,
+			auth: self.link(version.has_auth(), false)?,
 		})?;
 
 		Ok(Session::new(
 			runtime,
 			session,
-			version,
+			Version::Lite(version),
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
@@ -544,8 +567,143 @@ impl Client {
 				bandwidth: self.allocator(),
 				viewers,
 				peer_implementation: start.peer_implementation,
+				datagrams_unrouted: start.datagrams_unrouted,
 			},
 		))
+	}
+}
+
+/// What a client without a versioned ALPN negotiates moq-lite with, held until it starts.
+struct Negotiation {
+	runtime: Deadlines,
+	session: Transport,
+	peer_hop: crate::Hop,
+	publish: Option<origin::Consumer>,
+	subscribe: Option<origin::Producer>,
+	/// The versions offered in the client SETUP.
+	supported: Versions,
+}
+
+/// The client's side of a handshake: [`Client::connect`] as a poll. Dropped while pending, it
+/// releases what its step holds, resetting a negotiation stream still open.
+enum Connect {
+	/// Not polled yet: the transport's ALPN picks the path.
+	Start { runtime: Deadlines, session: Transport },
+	/// Started without waiting on the peer. Boxed, being several times the size of the
+	/// handshake steps.
+	Started(Box<(Session, crate::Driver)>),
+	/// Waiting its turn for credit to open the bidi stream the SETUP is negotiated on.
+	Open {
+		negotiation: Negotiation,
+		open: crate::transport::open::Open,
+	},
+	/// Flushing the client SETUP, already buffered, then reading the server's.
+	Exchange {
+		negotiation: Negotiation,
+		stream: Stream<Transport, Version>,
+	},
+	/// Reading the stream to its end once the server's SETUP hands the session off to a
+	/// versioned ALPN path, which keeps the drop from stopping a reply the server is still
+	/// waiting to have acknowledged.
+	HandOff {
+		negotiation: Negotiation,
+		stream: Stream<Transport, Version>,
+		version: lite::Version,
+	},
+	/// Resolved.
+	Done,
+}
+
+impl Connect {
+	/// The started session, or the error the handshake failed with.
+	fn poll(&mut self, client: &Client, waiter: &kio::Waiter) -> Poll<Result<(Session, crate::Driver), Error>> {
+		let res = ready!(self.poll_step(client, waiter));
+		// Release what the handshake held, even on a failure.
+		*self = Self::Done;
+		Poll::Ready(res)
+	}
+
+	fn poll_step(&mut self, client: &Client, waiter: &kio::Waiter) -> Poll<Result<(Session, crate::Driver), Error>> {
+		loop {
+			match self {
+				Self::Start { .. } => {
+					let Self::Start { runtime, session } = std::mem::replace(self, Self::Done) else {
+						unreachable!("matched above");
+					};
+					*self = client.start(runtime, session)?;
+				}
+				Self::Started(_) => {
+					let Self::Started(started) = std::mem::replace(self, Self::Done) else {
+						unreachable!("matched above");
+					};
+					return Poll::Ready(Ok(*started));
+				}
+				Self::Open { negotiation, open } => {
+					// The SETUP keeps lite-01's framing whichever version it offers.
+					let stream = ready!(Stream::poll_open(
+						&negotiation.session,
+						open,
+						Version::Lite(lite::Version::Lite01),
+						waiter
+					))?;
+					let mut stream = stream.with_stats(&client.stats);
+					let setup = setup::Client {
+						versions: negotiation.supported.clone().into(),
+						parameters: lite::Parameters::default().encode_bytes(lite::Version::Lite01)?,
+					};
+					stream.writer.buffer(&setup)?;
+					let Self::Open { negotiation, .. } = std::mem::replace(self, Self::Done) else {
+						unreachable!("matched above");
+					};
+					*self = Self::Exchange { negotiation, stream };
+				}
+				Self::Exchange { negotiation, stream } => {
+					ready!(stream.writer.poll_flush(waiter))?;
+					let server: setup::Server = ready!(stream.reader.poll_decode(waiter))?;
+					let version = negotiation
+						.supported
+						.iter()
+						.find(|v| coding::Version::from(**v) == server.version)
+						.copied()
+						.ok_or(Error::Version)?;
+					let Version::Lite(version) = version else {
+						return Poll::Ready(Err(Error::Version));
+					};
+					let Self::Exchange { negotiation, stream } = std::mem::replace(self, Self::Done) else {
+						unreachable!("matched above");
+					};
+					if !Version::Lite(version).hands_off() {
+						return Poll::Ready(client.start_negotiated(negotiation, stream, version));
+					}
+					*self = Self::HandOff {
+						negotiation,
+						stream,
+						version,
+					};
+				}
+				Self::HandOff { stream, .. } => {
+					// The server ends the stream after its SETUP.
+					ready!(stream.reader.poll_closed(waiter))?;
+					let Self::HandOff {
+						negotiation,
+						stream,
+						version,
+					} = std::mem::replace(self, Self::Done)
+					else {
+						unreachable!("matched above");
+					};
+					drop(stream);
+					let Negotiation {
+						runtime,
+						session,
+						peer_hop,
+						..
+					} = negotiation;
+					return Poll::Ready(client.start_lite(runtime, session, version, peer_hop));
+				}
+				Self::Done => panic!("handshake polled after it resolved"),
+			}
+		}
 	}
 }
 
@@ -890,7 +1048,7 @@ mod tests {
 			.with_protocol(crate::version::ALPN_LITE_05);
 
 		// A subscribe origin is what makes the client open an announce stream at all.
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let client = Client::new()
 			.with_versions([Version::Lite(lite::Version::Lite05)].into())
 			.with_subscriber(origin);

@@ -19,8 +19,7 @@ console.log("groups,subscribers,fill_us");
 for (const groups of [2, 16, 128]) {
 	for (const subscribers of [1, 8]) {
 		const origin = new Producer();
-		const publication = origin.createBroadcast(Path.from("fills"));
-		publication.announce();
+		const publication = origin.route(Path.from("fills"));
 		const track = publication.broadcast.createTrack("video", { maxAge: Milli(60_000) });
 		for (let i = 0; i < groups; i++) {
 			const group = track.appendGroup();

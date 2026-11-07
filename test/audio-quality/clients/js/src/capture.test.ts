@@ -1,5 +1,5 @@
-import { expect, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { expect, test } from "bun:test";
+import { Manual, Micro, Milli, Nano, yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
 import { Group, Error as NetError, Origin, Path, Time } from "@moq/net";
@@ -17,8 +17,9 @@ const config = Catalog.AudioConfigSchema.parse({
 });
 
 test("arrival capture stamps a later group before a stalled earlier group", async () => {
-	let now = 10;
-	const clock = spyOn(performance, "now").mockImplementation(() => now);
+	const clock = new Manual();
+	const installed = clock.install();
+	clock.jump(Nano.fromMilli(Milli(10)));
 	const early = new Group.Producer(0n);
 	const late = new Group.Producer(1n);
 	const captured: Arrival[] = [];
@@ -35,7 +36,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 		late.finish();
 		await read(late.consume());
 		expect(captured).toEqual([[10, 20, 1, 20]]);
-		now = 50;
+		clock.jump(Nano.fromMilli(Milli(40)));
 		early.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
@@ -49,7 +50,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 	} finally {
 		early.finish();
 		late.finish();
-		clock.mockRestore();
+		installed.close();
 	}
 });
 
@@ -74,10 +75,10 @@ test("arrival capture refuses an unsupported container", () => {
 
 test("the observer shares playback demand and closes without ending playback", async () => {
 	const origin = new Origin.Producer();
-	const publishedPublication = origin.createBroadcast(Path.from("tone.hang"));
-	const published = publishedPublication.broadcast;
+	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
+	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
-	publishedPublication.announce();
+	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
@@ -117,10 +118,10 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 	// A capture cut to the target would drop the frames later than it, which are what the target
 	// is measured from, so a trace recorded that way can never show the player falling short.
 	const origin = new Origin.Producer();
-	const publishedPublication = origin.createBroadcast(Path.from("tone.hang"));
-	const published = publishedPublication.broadcast;
+	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
+	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
-	publishedPublication.announce();
+	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
@@ -147,10 +148,10 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 /** Capture a legacy track, then end its first group with `end` once that group's reader is in flight. */
 async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<string | undefined> {
 	const origin = new Origin.Producer();
-	const publishedPublication = origin.createBroadcast(Path.from("tone.hang"));
-	const published = publishedPublication.broadcast;
+	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
+	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
-	publishedPublication.announce();
+	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
@@ -171,7 +172,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
 		});
-		while (capture.drain().length === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+		while (capture.drain().length === 0) await yieldNow();
 		end(group);
 		await capture.close();
 		return capture.error();

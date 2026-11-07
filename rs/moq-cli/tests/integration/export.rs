@@ -114,6 +114,8 @@ const LITE_07: &str = "moq-lite-07-wip";
 
 fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	// The guard on host timers is for tests, not the binaries they run.
+	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
 	for (name, _) in std::env::vars_os() {
 		if name.to_string_lossy().starts_with("MOQ_") {
@@ -520,18 +522,16 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 #[ignore = "real-time process test: just rs cli-export"]
 async fn the_same_instance_within_the_follow_continues() {
 	let relay = relay().await;
-	let instance = moq_net::Instance::random();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("demo").unwrap();
+	let broadcast = origin.route("demo", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let instance = broadcast.instance();
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(Some(Duration::from_secs(1)))
 		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
-	broadcast
-		.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
-		.unwrap();
+	broadcast.announce().unwrap();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.version = vec![LITE_07.parse().unwrap()];
@@ -1069,10 +1069,7 @@ async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Inst
 				moq_net::origin::RouteEvent::Start(announce)
 				| moq_net::origin::RouteEvent::Restart(announce)
 				| moq_net::origin::RouteEvent::Takeover { announce, .. } => {
-					return announce
-						.route
-						.instance
-						.expect("a lite-07 importer announces its instance");
+					return announce.route.instance().clone();
 				}
 				_ => continue,
 			}
@@ -1151,6 +1148,7 @@ async fn a_killed_mp4_recording_is_repaired() {
 
 	let repair = || async {
 		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
+			.env_remove("KIO_DENY_HOST_TIMERS")
 			.args(["repair", "mp4"])
 			.arg(&path)
 			.output();

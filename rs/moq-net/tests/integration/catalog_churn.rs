@@ -14,7 +14,7 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, origin, track};
+use moq_net::{Error, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const SEEDS: u64 = 32;
@@ -27,7 +27,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const STUCK_AFTER: Duration = Duration::from_secs(120);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -279,12 +279,12 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 	let relay_b = produce_origin(3);
 	let subscriber = produce_origin(4);
 
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-	let track = broadcast.create_track("catalog.json", info).unwrap();
-	broadcast
-		.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
+	let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+	let track = broadcast.broadcast().create_track("catalog.json", info).unwrap();
+	broadcast.announce().unwrap();
 
 	let upstream = vec![
 		link(version, &publisher, &relay_a).await,

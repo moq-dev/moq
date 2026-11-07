@@ -43,8 +43,9 @@ where
 /// A peer announcing one broadcast.
 async fn spawn_peer() -> SocketAddr {
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("peer").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
+	let broadcast = origin
+		.route("peer", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));

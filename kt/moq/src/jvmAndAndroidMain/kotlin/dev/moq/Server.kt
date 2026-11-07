@@ -9,8 +9,8 @@ import uniffi.moq.MoqServer
 /**
  * A listening MoQ server with publish/subscribe conveniences.
  *
- * Build one with [Server.listen]. Broadcasts created via [createBroadcast] are served to incoming
- * sessions, and [requests] streams each incoming [Request] for the caller to accept or reject.
+ * Build one with [Server.listen]. Broadcasts created via [route] are served to incoming sessions,
+ * and [requests] streams each incoming [Request] for the caller to accept or reject.
  *
  * [Server] is [AutoCloseable]; `use { ... }` (or [close]) stops accepting new sessions. In-flight
  * sessions stay alive until their handles are dropped or cancelled.
@@ -24,15 +24,15 @@ internal constructor(
     private val publishOrigin: OriginProducer?,
 ) : AutoCloseable {
     /**
-     * Create an unannounced broadcast at [path], served to incoming sessions once announced.
+     * Create a route at exactly [path], served to incoming sessions while announced.
      *
-     * Fill `broadcast()`, then advertise it with `announce`. The broadcast's `end()` ends it for
-     * good, as does releasing its last handle: the publication, each `broadcast()`, and
-     * `requests()`.
+     * Visible at once unless [options] is `hidden`: then fill `broadcast()` and advertise it with
+     * `announce()`. Hold the route while it should stay announced: closing it retracts it, and the
+     * broadcast's `end()` ends both.
      */
-    fun createBroadcast(path: String): Publication {
+    fun route(path: String, options: RouteOptions = RouteOptions()): Route {
         val origin = publishOrigin ?: throw IllegalStateException("no publish origin configured")
-        return origin.createBroadcast(path)
+        return origin.route(path, options)
     }
 
     /**

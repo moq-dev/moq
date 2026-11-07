@@ -109,7 +109,7 @@ pub(crate) struct Moving {
 	/// `other`'s track `a`.
 	pub(crate) other: crate::container::Producer<crate::catalog::hang::Container>,
 	origin: moq_net::origin::Producer,
-	_broadcasts: [moq_net::origin::Publication; 2],
+	_broadcasts: [moq_net::origin::Route; 2],
 }
 
 impl Moving {
@@ -119,8 +119,8 @@ impl Moving {
 
 	pub(crate) fn new() -> Self {
 		let origin = crate::source::produce_origin();
-		let live = origin.publish("live", Default::default()).unwrap();
-		let other = origin.publish("other", Default::default()).unwrap();
+		let live = origin.route("live", Default::default()).unwrap();
+		let other = origin.route("other", Default::default()).unwrap();
 		let catalog =
 			crate::catalog::Producer::new(&mut live.broadcast().clone(), crate::catalog::Config::default()).unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
@@ -317,7 +317,7 @@ pub(crate) fn common_offset(
 
 /// An origin at `hop`, its driver spawned.
 pub(crate) fn origin(hop: u64) -> moq_net::origin::Producer {
-	let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+	let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
 	producer
@@ -354,9 +354,10 @@ impl Link {
 			gate: gate.clone(),
 			answers: true,
 		};
+		// `from` may be a middle hop, so it forwards what it learned as well as its own.
 		let client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_publisher(from.consume());
+			.with_publisher(from.consume().with_proxy(true));
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_subscriber(to.clone());
@@ -408,7 +409,7 @@ impl Link {
 			.with_subscriber(to.clone());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_publisher(from.consume());
+			.with_publisher(from.consume().with_proxy(true));
 		let sessions = tokio::join!(
 			async {
 				let (session, driver) = client

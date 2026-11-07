@@ -4,6 +4,42 @@ How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### Selection never holds a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`select::Broadcast::retain` takes only the catalog, and `select::Selected` is gone: a rendition the catalog marks `enabled: false` is never selected, even one selected before, so `catalog::Select` drops it on the snapshot that disables it. Drop the second argument and any `Selected` you tracked.
+
+```rust
+// Before
+selection.retain(&mut catalog, &Selected::of(&previous));
+// After
+selection.retain(&mut catalog);
+```
+
+### Shared H.265 SPS parsing
+
+Use `codec::h265::Sps::parse` to read an SPS NAL unit through the same bounded
+walk as moq-mux before scuffle-h265 parses it. The `Sps` result exposes the
+checked picture size and any VUI `VideoSignal` without exposing scuffle-h265's
+types. moq-video clears the colour label when an SPS is refused. No wire change.
+
+### The async API is opt-in
+
+Enable the `async` Cargo feature to keep awaiting moq-mux:
+`moq-mux = { version = "...", features = ["async"] }`. This also applies with `default-features = false`.
+The feature is off by default, and every `poll_*` method stays available without it.
+It covers the `next`, `read`, `latest`, `refresh`, `ready`, `wait`, and `broadcast` methods beside each poll:
+the catalog consumers and `catalog::Stream::next`, the container `Consumer` and `GroupConsumer`,
+every exporter (`next`, and fMP4's `next_chunk`), `ts::Follower`, `ts::Release`, `follow::Instances`,
+`json::Consumer`, `json::Snapshot`, `rate::Follower`, `timeline::Resume`, `Binding`, and `Linger`.
+It also covers the async functions with no poll of their own: `catalog::Consumer::new`,
+`Source::{catalog, resolve, subscribe_track}`, `ts::Release::new`, and the JSON catalog entry's `subscribe`.
+`fmp4::Muxer::read` is async too; without the feature, drive `fmp4::Muxer::poll_read`, passing the same
+empty `Vec` to every poll of one group.
+
+`timeline::Resume::ready` borrows the resume instead of consuming it, and the hang catalog consumer's
+`next` no longer requires `Catalog<E>: Unpin`.
+moq-mux no longer enables `moq-json/async`: enable it yourself to await moq-json's readers directly.
+
 ### `follow::Instances` folds into `Following` ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `follow::Instances::new` is removed: call `origin.follow(path, instance)` and read `Following::available()`, which returns `Some(broadcast)` where `Event::Start` did and `None` where `Event::End` did.

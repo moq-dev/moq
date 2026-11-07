@@ -76,14 +76,15 @@ test("stats() snapshots the transport on demand", async () => {
 	}
 });
 
-test("stats() is empty on a transport without getStats", async () => {
+test("stats() has no transport counters on a transport without getStats", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	// Shadow the mock's getStats to imitate the qmux/WebSocket fallback.
 	(pair.client as unknown as { getStats?: unknown }).getStats = undefined;
 	const url = new URL("https://example.com/");
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 	try {
-		expect(await client.stats()).toEqual({});
+		// Only the session's own counter, which needs nothing from the transport.
+		expect(await client.stats()).toEqual({ datagramsUnrouted: 0 });
 	} finally {
 		client.abort();
 		server.abort();
@@ -155,6 +156,25 @@ for (const kind of kinds) {
 		});
 	}
 }
+
+// Safari's stub getStats() reports a 0 RTT: decided once at setup, it reads as no getStats().
+test("a session whose getStats reports a 0 RTT at setup is treated as having none", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { smoothedRtt: 0, bytesSent: 0 } });
+	const url = new URL("https://example.com/");
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+	try {
+		expect(estimates(client)).toBe(false);
+		const stats = await client.stats();
+		expect(stats.rtt).toBeUndefined();
+		expect(stats.bytesSent).toBeUndefined();
+		// A real RTT later doesn't revive it; only the setup-time answer counts.
+		pair.client.stats = { smoothedRtt: 20 };
+		expect(canEstimate(pair.client)).toBe(false);
+	} finally {
+		client.abort();
+		server.abort();
+	}
+});
 
 test("Reload exposes its established session stats and probe only while connected", async () => {
 	const original = globalThis.WebTransport;

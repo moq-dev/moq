@@ -10,8 +10,8 @@ import (
 )
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
-// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]) and take it
-// from the [Publication], then publish tracks onto it.
+// [OriginProducer.Route] (or [Client.Route]) and take it from the [Route], then
+// publish tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
@@ -19,7 +19,7 @@ type BroadcastProducer struct {
 // NewBroadcastProducer creates a standalone broadcast, not attached to any
 // origin: pass its [BroadcastProducer.Consume] result to [BroadcastRequest.Serve]
 // for a dynamic request, or use it for local pub/sub. To publish at a path, use
-// [OriginProducer.CreateBroadcast].
+// [OriginProducer.Route].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
@@ -205,6 +205,12 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 	return &GroupProducer{inner: inner}, nil
 }
 
+// SkipGroups declares that groups start up to the exclusive end will never be
+// produced, so readers move past them. Creating a group there then fails.
+func (t *TrackProducer) SkipGroups(start, end uint64) error {
+	return t.inner.SkipGroups(start, end)
+}
+
 // WriteFrame writes frame as a single-frame group.
 func (t *TrackProducer) WriteFrame(frame Frame) error {
 	return t.inner.WriteFrame(frame)
@@ -265,7 +271,18 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// WriteFrame appends frame to the group.
+// Ready blocks until a frame of size bytes fits a window ahead of the fastest
+// reader. Call it before each WriteFrame so that reader paces the writer, as TCP
+// backpressure does, instead of the group shedding frames it has not taken, which
+// fails it with Evicted; slower readers are not waited on. It also waits until a reader holds
+// the group, and returns once the group is closed so the next write reports why.
+// It fails with Closed after Abort.
+func (g *GroupProducer) Ready(ctx context.Context, size uint64) error {
+	return g.inner.Ready(ctx, size)
+}
+
+// WriteFrame appends frame to the group. It never blocks: without Ready, a writer
+// that outpaces its readers sheds the front of the group instead.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
 	return g.inner.WriteFrame(frame)
 }
@@ -306,11 +323,13 @@ func (d *TrackRequests) Cancel() {
 
 // Fill is a run of groups readers miss, for a TrackRequests to serve.
 //
-// Accept each group you have and DropGroups the rest; Wanted names what is still
-// owed, in the fill's order. Releasing the fill names whatever is left as dropped
+// Accept each group you have and DropGroups the rest, one group at a time as
+// WantedChanged returns them; Wanted names what is still owed, in the fill's
+// order. Releasing the fill names whatever is left as dropped
 // while a reader still wants it; once nobody does, it is withdrawn, so stop
 // serving it once Wanted is nil. Stop serving a single group when Unwanted
-// returns for it, and move on to Wanted.
+// returns for it, and move on to Wanted. Serve the fills you take
+// concurrently: each waits on its own readers.
 type Fill struct {
 	inner *ffi.MoqFill
 }
@@ -347,12 +366,16 @@ func (f *Fill) Order() Order {
 }
 
 // Wanted is the next group still owed in the fill's order, or nil once every
-// group is answered or no reader waits on the fill.
+// group is answered or no reader waits on the fill. It does not wait for the
+// readers; WantedChanged does.
 func (f *Fill) Wanted() *uint64 {
 	return f.inner.Wanted()
 }
 
-// WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
+// WantedChanged blocks until Wanted changed and every group this fill accepted
+// reached a reader, which picks it up when it next reads, and returns it. Nil,
+// once the fill is done, never waits; the first call returns at once unless an
+// accepted group has yet to reach a reader.
 func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
 	return f.inner.WantedChanged(ctx)
 }

@@ -9,8 +9,8 @@ import { Player } from "@moq/watch";
 async function poster(audio: boolean, buffered: boolean) {
 	const origin = new Origin.Producer();
 	const name = Path.from("poster");
-	const producerPublication = origin.createBroadcast(name);
-	const producer = producerPublication.broadcast;
+	const producerRoute = origin.route(name, { hidden: true });
+	const producer = producerRoute.broadcast;
 	const track = producer.createTrack("video");
 	const group = track.appendGroup();
 	const audioTrack = audio ? producer.createTrack("audio") : undefined;
@@ -39,7 +39,7 @@ async function poster(audio: boolean, buffered: boolean) {
 			},
 		}),
 	};
-	producerPublication.announce();
+	producerRoute.announce();
 	const canvas = document.createElement("canvas");
 	document.body.append(canvas);
 	const enabled = new Signal(true);
@@ -53,7 +53,7 @@ async function poster(audio: boolean, buffered: boolean) {
 		catalog,
 		video: { canvas, visible: "always", backend: "2d" },
 		delay: Milli(100),
-		buffer: Milli(buffered ? 1000 : 0),
+		lookahead: Milli(buffered ? 1000 : 0),
 	});
 	const chunks = new Map<number, Uint8Array>();
 	const encoder = new VideoEncoder({

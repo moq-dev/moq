@@ -93,11 +93,13 @@ async fn listen_tcp() -> (u16, moq_tokio::Listener) {
 
 #[test]
 fn cluster_migrates_on_upstream_goaway() {
+	kio::clock::host_time();
 	run_cluster_test(cluster_migrates_on_upstream_goaway_inner());
 }
 
 #[test]
 fn cluster_diamond_goaway_seamless_failover() {
+	kio::clock::host_time();
 	run_cluster_test(cluster_diamond_goaway_seamless_failover_inner());
 }
 
@@ -152,9 +154,13 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
-	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = upstream_origin
+		.route("cam", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 	let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -221,7 +227,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 			| moq_net::origin::RouteEvent::Update(update)
 			| moq_net::origin::RouteEvent::Restart(update)
 			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
-				&& update.route.cost != moq_net::origin::Cost::DRAIN
+				&& update.route.cost() != moq_net::origin::Cost::DRAIN
 			{
 				break;
 			}
@@ -251,7 +257,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 }
 
 /// A fake sibling upstream: a stream-only moq server publishing `origin`'s
-/// broadcasts to whoever connects. Returns its port, a receiver yielding each
+/// broadcasts to whoever connects, including those it learned from its own upstream,
+/// since a test may relay through it. Returns its port, a receiver yielding each
 /// accepted [`moq_net::Session`] (so the test can drain it), and the task.
 async fn spawn_upstream(
 	origin: moq_net::origin::Producer,
@@ -261,6 +268,7 @@ async fn spawn_upstream(
 	tokio::task::JoinHandle<()>,
 ) {
 	let (port, mut server) = listen_tcp().await;
+	let origin = origin.with_proxy(true);
 
 	let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -292,9 +300,13 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
 		let upstream_origin = moq_tokio::origin::spawn();
-		let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-		broadcast.announce(Default::default()).expect("create broadcast");
-		let track = broadcast.create_track("video", timed()).expect("create track");
+		let broadcast = upstream_origin
+			.route("cam", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
+		let track = broadcast
+			.broadcast()
+			.create_track("video", timed())
+			.expect("create track");
 
 		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 		let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -485,11 +497,13 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn();
-	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
-	broadcast
-		.announce(moq_net::origin::Route::default())
+	let broadcast = top_origin
+		.route("diamond", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone()).await;
 	let top_url = format!("tcp://127.0.0.1:{top_port}/");
@@ -793,8 +807,22 @@ fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
 /// old one still draining. Redirect that dial at a listener that accepts TCP and
 /// then says nothing, so the handshake hangs, and the predecessor must still be
 /// closed on schedule rather than held for as long as the dial takes.
+///
+/// Time passes only when the test moves the clock, by no more than the handover,
+/// so no dial timeout can end the hang first.
 async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
+	// The manual clock moves only when told, so the watchdog runs on tokio's.
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "real sockets settle on tokio's clock, beside the installed manual clock"
+	)]
+	async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
+		tokio::time::timeout(TEST_TIMEOUT, fut)
+			.await
+			.unwrap_or_else(|_| panic!("timed out: {step}"))
+	}
 
 	let upstream_origin = moq_tokio::origin::spawn();
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin).await;
@@ -802,11 +830,13 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	// Accepts the connection, then never speaks MoQ: the dial hangs in the handshake.
 	let black_hole = std::net::TcpListener::bind("127.0.0.1:0").expect("bind black hole");
 	let black_hole_port = black_hole.local_addr().expect("local addr").port();
+	let (dialed_tx, mut dialed) = tokio::sync::mpsc::unbounded_channel();
 	let _black_hole = std::thread::spawn(move || {
 		// Hold every accepted socket open and idle for the life of the test.
 		let mut held = Vec::new();
 		while let Ok((socket, _)) = black_hole.accept() {
 			held.push(socket);
+			let _ = dialed_tx.send(());
 		}
 	});
 
@@ -817,7 +847,8 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	// The GOAWAY has to land on a *healthy* session, which is the path that goes
 	// straight into the replacement dial. Below this bar it takes the immediate
 	// redirect path instead, whose sleep polls the drain either way.
-	client_config.backoff.initial = Some((Duration::from_millis(50)).into());
+	let healthy = Duration::from_millis(100);
+	client_config.backoff.healthy = Some((healthy).into());
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let url: Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
@@ -832,7 +863,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 
 	// Clear the healthy bar, so the GOAWAY continues straight into the replacement
 	// dial rather than sleeping first.
-	kio::clock::sleep(Duration::from_millis(120)).await;
+	clock.advance(healthy);
 
 	// Send the client somewhere that will never finish handshaking. No wire timeout:
 	// our own `--connect-goaway-handover` is then the only thing bounding the old session.
@@ -843,17 +874,16 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 		)))
 		.expect("send goaway");
 
-	// The predecessor must close on its own deadline, not whenever that dial gives
-	// up. The bound is generous against a loaded runner but far below the seconds a
-	// hanging handshake takes, which is the gap being measured.
-	let sent = kio::clock::now();
-	let closed = kio::clock::timeout(handover * 10, server_session.closed()).await;
-	let elapsed = sent.elapsed();
-	assert!(
-		closed.is_ok() && elapsed < handover * 5,
-		"the old session outlived its {handover:?} handover by {elapsed:?}: \
-		 the replacement dial was never interrupted to enforce it"
-	);
+	// The handover deadline is set before the replacement dial starts, so once the
+	// dial reaches the black hole, passing the handover must close the predecessor
+	// while the dial still hangs.
+	within("the replacement dial reaches the black hole", dialed.recv()).await;
+	clock.advance(handover);
+	within(
+		"the old session outlived its handover: the replacement dial was never interrupted to enforce it",
+		server_session.closed(),
+	)
+	.await;
 
 	drop(connection);
 }

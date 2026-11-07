@@ -4,13 +4,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
 use moq_net::{Path, broadcast, kio, origin, track};
 use serde::Serialize;
-use tracing::Instrument as _;
 
 use crate::{
 	Epoch, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
@@ -180,7 +179,7 @@ impl Producer {
 				registry: Registry::disabled(),
 				_keepalive: None,
 			};
-			return (producer, Publisher(None));
+			return (producer, Publisher(Run::Done));
 		};
 
 		// The prefix is a literal path, so its subtree claim cannot fail.
@@ -196,7 +195,11 @@ impl Producer {
 			linger,
 			interval,
 		};
-		let publisher = Publisher(Some((task, Arc::downgrade(&keepalive), tracing::Span::current())));
+		let publisher = Publisher(Run::Idle(
+			Box::new(task),
+			Arc::downgrade(&keepalive),
+			tracing::Span::current(),
+		));
 		let producer = Self {
 			registry,
 			_keepalive: Some(keepalive),
@@ -214,13 +217,93 @@ impl Producer {
 
 /// The publish task of one [`Producer`], returned by [`Producer::new`].
 #[must_use = "nothing is published until the publisher runs"]
-pub struct Publisher(Option<(Task, Weak<Keepalive>, tracing::Span)>);
+pub struct Publisher(Run);
+
+/// Where a [`Publisher`] is in its run.
+enum Run {
+	/// Not polled yet: announces on the first poll.
+	Idle(Box<Task>, Weak<Keepalive>, tracing::Span),
+	Running(Box<Running>),
+	Done,
+}
+
+/// A running publisher's drain and the interval it drains on.
+struct Running {
+	drain: Drain,
+	ticker: kio::clock::Interval,
+	weak: Weak<Keepalive>,
+	span: tracing::Span,
+}
 
 impl Publisher {
 	/// Publish until the last [`Producer`] clone drops; at once for a no-op producer.
-	pub async fn run(self) {
-		if let Some((task, weak, span)) = self.0 {
-			task.run(weak).instrument(span).await;
+	///
+	/// The broadcast is announced on the first poll and ends when this resolves or
+	/// the publisher drops.
+	pub fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Run::Idle(..) = self.0 {
+			let Run::Idle(task, weak, span) = std::mem::replace(&mut self.0, Run::Done) else {
+				unreachable!("matched above");
+			};
+			if let Some(running) = Running::start(*task, weak, span) {
+				self.0 = Run::Running(Box::new(running));
+			}
+		}
+		let Run::Running(running) = &mut self.0 else {
+			return Poll::Ready(());
+		};
+		if running.poll_run(waiter).is_pending() {
+			return Poll::Pending;
+		}
+		// Dropping the drain ends the broadcast, as dropping the publisher does.
+		self.0 = Run::Done;
+		Poll::Ready(())
+	}
+
+	/// Publish until the last [`Producer`] clone drops; at once for a no-op producer.
+	/// See [`Self::poll_run`].
+	#[cfg(feature = "async")]
+	pub async fn run(mut self) {
+		kio::wait(|waiter| self.poll_run(waiter)).await
+	}
+}
+
+impl Running {
+	/// Announce the stats broadcast, unless every [`Producer`] clone is already
+	/// gone or the origin refused it.
+	fn start(task: Task, weak: Weak<Keepalive>, span: tracing::Span) -> Option<Self> {
+		// A publisher first run after its last producer dropped announces nothing,
+		// so it cannot replace a newer producer's broadcast on the same path.
+		if weak.strong_count() == 0 {
+			return None;
+		}
+		let (drain, ticker) = span.in_scope(|| {
+			let interval = task.interval;
+			let drain = Drain::new(task)?;
+			let mut ticker = kio::clock::interval(interval);
+			ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
+			Some((drain, ticker))
+		})?;
+		Some(Self {
+			drain,
+			ticker,
+			weak,
+			span,
+		})
+	}
+
+	/// Write a frame per drain, until every [`Producer`] clone is dropped.
+	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let _entered = self.span.enter();
+		loop {
+			// Scheduled instants are at least an interval apart, even after a late tick,
+			// so each drain gets an interval of its own to open its groups in.
+			let scheduled = ready!(self.ticker.poll_tick(&mut waiter.context()));
+			if self.weak.upgrade().is_none() {
+				return Poll::Ready(());
+			}
+			self.drain.collect();
+			self.drain.publish(scheduled);
 		}
 	}
 }
@@ -234,39 +317,6 @@ struct Task {
 	depth: usize,
 	linger: Duration,
 	interval: Duration,
-}
-
-impl Task {
-	/// Publishes the stats broadcast and writes a frame per drain. Runs until
-	/// every [`Producer`] clone is dropped (`weak.upgrade()` returns `None`).
-	async fn run(self, weak: Weak<Keepalive>) {
-		// A publisher first run after its last producer dropped announces nothing,
-		// so it cannot replace a newer producer's broadcast on the same path.
-		if weak.strong_count() == 0 {
-			return;
-		}
-		let interval = self.interval;
-		let Some(mut drain) = Drain::new(self) else {
-			return;
-		};
-
-		let mut ticker = kio::clock::interval(interval);
-		ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
-
-		loop {
-			// Scheduled instants are at least an interval apart, even after a late tick,
-			// so each drain gets an interval of its own to open its groups in.
-			let scheduled = ticker.tick().await;
-
-			// Dropping the drain ends the broadcast, as cancelling this future does.
-			if weak.upgrade().is_none() {
-				return;
-			}
-
-			drain.collect();
-			drain.publish(scheduled);
-		}
-	}
 }
 
 /// The publish task's state, kept across drains so a steady-state drain
@@ -577,7 +627,8 @@ impl<V: Serialize> Output<V> {
 
 /// The node's stats broadcast and its change-detection state.
 struct NodePublisher {
-	broadcast: origin::Publication,
+	/// The node's route, which owns its broadcast.
+	route: origin::Route,
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
 	/// presence or prefix track parks until the next drain serves it instead
 	/// of being rejected `NotFound` on the spot.
@@ -955,9 +1006,8 @@ impl NodePublisher {
 			.ok()?;
 		// A fresh instance per announcement: a restart is a new broadcast, so no relay
 		// resumes it from groups cached under the old one.
-		let route = origin::Route::default();
-		let broadcast = match task.origin.publish(&advertised, route) {
-			Ok(broadcast) => broadcast,
+		let route = match task.origin.route(&advertised, origin::RouteOptions::default()) {
+			Ok(route) => route,
 			Err(err) => {
 				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
 				return None;
@@ -966,7 +1016,7 @@ impl NodePublisher {
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
 		let name = totals_track();
-		let totals = match Output::create(&broadcast, &name) {
+		let totals = match Output::create(route.broadcast(), &name) {
 			Ok(output) => TotalsTrack {
 				output,
 				sums: Cumulative::new(),
@@ -979,7 +1029,7 @@ impl NodePublisher {
 
 		let mut groups = HashMap::new();
 		if task.depth == 0 {
-			match GroupTrack::create(&broadcast, &Path::empty()) {
+			match GroupTrack::create(route.broadcast(), &Path::empty()) {
 				Ok(track) => {
 					groups.insert(String::new(), track);
 				}
@@ -990,10 +1040,10 @@ impl NodePublisher {
 			}
 		}
 
-		let dynamic = broadcast.requests();
+		let dynamic = route.broadcast().requests();
 
 		Some(Self {
-			broadcast,
+			route,
 			dynamic,
 			local: HashMap::new(),
 			totals,
@@ -1007,7 +1057,7 @@ impl NodePublisher {
 	/// and add them to the totals and every held presence and prefix track.
 	fn collect(&mut self, report: &Report, tick: u64, depth: usize) {
 		let Self {
-			broadcast,
+			route,
 			local,
 			totals,
 			presence,
@@ -1063,13 +1113,13 @@ impl NodePublisher {
 			let publisher = slots.publisher.observe(entry.publisher);
 			let subscriber = slots.subscriber.observe(entry.subscriber);
 			let key = group_key(&entry.path, depth);
-			if let Some(track) = Self::group(broadcast, groups, &key) {
+			if let Some(track) = Self::group(route.broadcast(), groups, &key) {
 				track.add_traffic(entry, publisher, subscriber);
 			}
 		}
 		for entry in &report.sessions {
 			let key = group_key(&entry.label, depth);
-			if let Some(track) = Self::group(broadcast, groups, &key) {
+			if let Some(track) = Self::group(route.broadcast(), groups, &key) {
 				track.add_sessions(&entry.label, &entry.tier, entry.presence, entry.closed);
 			}
 		}
@@ -1192,7 +1242,7 @@ impl NodePublisher {
 			return;
 		}
 		let name = presence_track(&label);
-		let output = match Output::adopt(&self.broadcast, &name, request) {
+		let output = match Output::adopt(self.route.broadcast(), &name, request) {
 			Ok(output) => output,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to adopt presence track");
@@ -1226,7 +1276,7 @@ impl NodePublisher {
 			return;
 		}
 		let name = prefix_track(&path);
-		let output = match Output::adopt(&self.broadcast, &name, request) {
+		let output = match Output::adopt(self.route.broadcast(), &name, request) {
 			Ok(output) => output,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to adopt prefix track");
@@ -1265,7 +1315,7 @@ impl Drop for NodePublisher {
 		for (_, track) in self.groups.drain() {
 			track.finish();
 		}
-		self.broadcast.close();
+		self.route.broadcast().close();
 	}
 }
 
@@ -1387,7 +1437,8 @@ mod tests {
 		let pool = config.pool.clone();
 		let (origin, driver) = origin::Producer::new(config);
 		tokio::spawn(moq_net::time::run(driver));
-		(origin, pool)
+		// A relay carries what it learned on to its other peers (moq-lite-07).
+		(origin.with_proxy(true), pool)
 	}
 
 	/// Drive `drain` until `future` resolves.
@@ -1648,7 +1699,7 @@ mod tests {
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: origin::Routes,
-		source: origin::Publication,
+		source: origin::Route,
 		consumer: broadcast::Consumer,
 		sub: Option<track::Subscriber>,
 	}
@@ -1673,9 +1724,10 @@ mod tests {
 		let egress = origin.consume().with_stats(ctx);
 
 		let mut announced = egress.routes();
-		let source = origin.create_broadcast(path).expect("create_broadcast");
-		source.announce(origin::Route::default()).expect("announce");
-		let producer = source.create_track("video", timed()).expect("create_track");
+		let source = origin
+			.route(path, moq_net::origin::RouteOptions::default())
+			.expect("route");
+		let producer = source.broadcast().create_track("video", timed()).expect("create_track");
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
@@ -2127,9 +2179,9 @@ mod tests {
 					.tier(Tier::default())
 					.session(moq_net::Path::from_static("publisher")),
 			)
-			.publish("foo/bar", origin::Route::default())
+			.route("foo/bar", moq_net::origin::RouteOptions::default())
 			.expect("publish");
-		let mut video = source.create_track("video", timed()).expect("create_track");
+		let mut video = source.broadcast().create_track("video", timed()).expect("create_track");
 		let egress = data.consume().with_stats(
 			registry
 				.tier(Tier::default())
@@ -2206,12 +2258,12 @@ mod tests {
 	}
 
 	/// The announce events buffered so far in delivery order, as
-	/// `(path, active, instance)`. Every stats route carries an instance.
+	/// `(path, active, instance)`.
 	fn take_instances(events: &mut origin::Routes) -> Vec<(String, bool, Instance)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
 		while let Some(Some((update, active))) = next_update(events).now_or_never() {
-			let instance = update.route.instance.expect("a stats route carries an instance");
+			let instance = update.route.instance().clone();
 			out.push((update.prefix.as_str().to_string(), active, instance));
 		}
 		out
@@ -2578,9 +2630,9 @@ mod tests {
 					.tier(Tier::default())
 					.session(moq_net::Path::from_static("publisher")),
 			)
-			.publish("acme/live", origin::Route::default())
+			.route("acme/live", moq_net::origin::RouteOptions::default())
 			.expect("publish");
-		let video = source.create_track("video", timed()).expect("create_track");
+		let video = source.broadcast().create_track("video", timed()).expect("create_track");
 		let egress = data.consume().with_stats(
 			registry
 				.tier(Tier::default())
@@ -3010,9 +3062,7 @@ mod tests {
 		drop(acme);
 		let lingering = start + Duration::from_secs(9);
 		let stats = crate::Consumer::new(broadcast.clone(), Default::default());
-		let mut acme = pumping_at(&mut drain, lingering, stats.group(moq_net::Path::from_static("acme")))
-			.await
-			.unwrap();
+		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
 		let mut frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
 		while !frame.tiers[""].labels.is_empty() {
 			frame = pumping_at(&mut drain, lingering, acme.next()).await.unwrap().unwrap();
@@ -3026,9 +3076,7 @@ mod tests {
 			("acme".into(), false)
 		);
 		assert!(pumping_at(&mut drain, lingered, acme.next()).await.unwrap().is_none());
-		let mut beta_reader = pumping_at(&mut drain, lingered, stats.group(moq_net::Path::from_static("beta")))
-			.await
-			.unwrap();
+		let mut beta_reader = stats.group(moq_net::Path::from_static("beta")).unwrap();
 		let frame = pumping_at(&mut drain, lingered, beta_reader.next())
 			.await
 			.unwrap()
@@ -3068,7 +3116,7 @@ mod tests {
 			.tier(Tier::default())
 			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
-		let mut reader = stats.group(moq_net::Path::from_static("acme")).await.expect("listed");
+		let mut reader = stats.group(moq_net::Path::from_static("acme")).expect("listed");
 		let first = reader.next().await.unwrap().unwrap();
 		assert_eq!(first.tiers[""].sessions.sessions_started, 1);
 		let old_sequence = sequence(&broadcast).await;
@@ -3089,7 +3137,6 @@ mod tests {
 		drive_tick().await;
 		let second = stats
 			.group(moq_net::Path::from_static("acme"))
-			.await
 			.expect("listed again")
 			.next()
 			.await
@@ -3131,7 +3178,7 @@ mod tests {
 			interval: Duration::from_secs(1),
 		})
 		.unwrap();
-		let stats = crate::Consumer::new(drain.node.broadcast.consume(), Default::default());
+		let stats = crate::Consumer::new(drain.node.route.broadcast().consume(), Default::default());
 
 		let _acme = registry
 			.tier(Tier::default())
@@ -3139,12 +3186,8 @@ mod tests {
 		let _big = registry
 			.tier(Tier::default())
 			.session(moq_net::Path::from_static("big"));
-		let mut acme = pumping(&mut drain, stats.group(moq_net::Path::from_static("acme")))
-			.await
-			.unwrap();
-		let mut big = pumping(&mut drain, stats.group(moq_net::Path::from_static("big")))
-			.await
-			.unwrap();
+		let mut acme = stats.group(moq_net::Path::from_static("acme")).unwrap();
+		let mut big = stats.group(moq_net::Path::from_static("big")).unwrap();
 		assert!(pumping(&mut drain, acme.next()).await.unwrap().is_some());
 		assert!(pumping(&mut drain, big.next()).await.unwrap().is_some());
 
@@ -3187,7 +3230,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("acme"))
-			.await
 			.unwrap()
 			.next()
 			.await
@@ -3201,7 +3243,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("beta"))
-			.await
 			.unwrap()
 			.next()
 			.await
@@ -3212,7 +3253,6 @@ mod tests {
 
 		let frame = stats
 			.group(moq_net::Path::from_static("feed"))
-			.await
 			.unwrap()
 			.next()
 			.await

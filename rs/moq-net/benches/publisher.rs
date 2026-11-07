@@ -22,13 +22,16 @@ fn bench_covered_before_start(c: &mut Criterion) {
 	let mut group = c.benchmark_group("publisher_covered_before_start");
 	group.throughput(Throughput::Elements(1));
 	for skipped in SKIPPED {
+		// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+		let mut run = None;
 		group.bench_function(BenchmarkId::new("wake", skipped), |b| {
-			let mut run = CoverageBench::new(RANGES, skipped);
+			let run = run.get_or_insert_with(|| CoverageBench::new(RANGES, skipped));
 			b.iter(|| run.wake());
 		});
 		// The same record within one range, each group its own entry.
+		let mut run = None;
 		group.bench_function(BenchmarkId::new("adjacent", skipped), |b| {
-			let mut run = CoverageBench::adjacent(skipped);
+			let run = run.get_or_insert_with(|| CoverageBench::adjacent(skipped));
 			b.iter(|| run.wake());
 		});
 	}

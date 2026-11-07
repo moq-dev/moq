@@ -1,3 +1,4 @@
+import { RETRY_INITIAL } from "../auth_session.ts";
 import { error, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { Reader, type Stream, type Writer } from "../stream.ts";
@@ -30,12 +31,21 @@ function finCancels(version: IetfVersion): boolean {
 export interface Refusal {
 	condition: RequestCondition;
 	reasonPhrase: string;
+	/** Whether asking again may pass, which invites the peer to retry. Absent is a verdict. */
+	retryable?: boolean;
+	/** The Retry Interval an upstream refusal asked for, sent in place of one derived here. */
+	retryInterval?: bigint;
 }
 
 async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
+	const errorCode = toRequestCode(refusal.condition, kind, version);
+	// 0 asks the peer never to retry. As in Rust's `retry_interval`, the code must leave the
+	// request open too: UNINTERESTED tells an offer to stop, and the rest are verdicts.
+	const open = errorCode === 0x0 || errorCode === 0x6 || errorCode === 0x10;
 	const err = new RequestError({
-		errorCode: toRequestCode(refusal.condition, kind, version),
+		errorCode,
 		reasonPhrase: refusal.reasonPhrase,
+		retryInterval: refusal.retryInterval ?? (refusal.retryable && open ? BigInt(RETRY_INITIAL) : 0n),
 	});
 	await Message.write(w, RequestError.id, err, version);
 }

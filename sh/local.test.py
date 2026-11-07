@@ -1,5 +1,6 @@
 """Admission must preserve failures and own the entire admitted command tree."""
 
+import json
 import os
 import shutil
 import signal
@@ -19,7 +20,15 @@ BASH = shutil.which("bash")
 class LocalGate(unittest.TestCase):
     def env(self, **changes):
         env = dict(os.environ)
-        for key in ("QUEST_GATE_ADMITTED", "LOCAL_SUPERVISED", "GITHUB_ACTIONS", "NEXTEST_TEST_THREADS"):
+        for key in (
+            "QUEST_GATE_ADMITTED",
+            "LOCAL_SUPERVISED",
+            "GITHUB_ACTIONS",
+            "NEXTEST_TEST_THREADS",
+            "DEV_SHELL_QUEST",
+            "ALLOW_HOST_TOOLCHAIN",
+            "BASH_ENV",
+        ):
             env.pop(key, None)
         env.update(changes)
         return env
@@ -53,7 +62,8 @@ class LocalGate(unittest.TestCase):
     def test_admission_precedes_launch_and_nested_calls_skip_it(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "bun").symlink_to(BUN)
-            quest = Path(directory) / "quest"
+            (Path(directory) / "bash").symlink_to(BASH)
+            quest = Path(directory) / "pinned-quest"
             quest.write_text(
                 f"#!{sys.executable}\n"
                 "import os, sys\n"
@@ -68,9 +78,100 @@ class LocalGate(unittest.TestCase):
                 f"sys.exit(subprocess.call([{BASH!r}, {str(LAUNCHER)!r}, "
                 'sys.executable, "-c", "print(\'inner\'); exit(11)"]))'
             )
-            result = self.run_command(script, PATH=directory)
+            result = self.run_command(script, PATH=directory, DEV_SHELL_QUEST=str(quest))
             self.assertEqual(result.returncode, 11, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["admitted", "outer", "inner"])
+
+    def test_pinned_review_preserves_arguments_cwd_and_failure_without_host_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            quest = root / "pinned-quest"
+            quest.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                'assert sys.argv[1:] == ["review", "--base", "origin/main", "--responses", "a file.json"]\n'
+                f"assert os.getcwd() == os.path.realpath({directory!r})\n"
+                'print("pinned build failed", file=sys.stderr)\n'
+                "sys.exit(7)\n"
+            )
+            quest.chmod(0o755)
+            host = root / "quest"
+            host.write_text(f"#!{sys.executable}\nraise RuntimeError('host quest must not run')\n")
+            host.chmod(0o755)
+            result = subprocess.run(
+                [BASH, str(ROOT / "sh/quest.sh"), "review", "--base", "origin/main", "--responses", "a file.json"],
+                cwd=directory,
+                env=self.env(PATH=directory, DEV_SHELL_QUEST=str(quest)),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual(result.stderr.splitlines(), [f"Dev-shell quest: {quest}", "pinned build failed"])
+
+    @unittest.skipIf(sys.platform in ("win32", "cygwin"), "quest.sh selects the host toolchain on msys and cygwin")
+    def test_outside_shell_resolves_the_checkout_pin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nix = root / "nix"
+            nix.write_text(
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                f'assert sys.argv[1:] == ["run", "--no-update-lock-file", "{ROOT}#quest", "--", "review"]\n'
+                'print("pinned input failed", file=sys.stderr)\n'
+                "sys.exit(7)\n"
+            )
+            nix.chmod(0o755)
+            result = subprocess.run(
+                [BASH, str(ROOT / "sh/quest.sh"), "review"],
+                env=self.env(PATH=directory),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual(result.stderr.strip(), "pinned input failed")
+            nix.unlink()
+            result = subprocess.run(
+                [BASH, str(ROOT / "sh/quest.sh"), "review"],
+                env=self.env(PATH=directory),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 127, result.stderr)
+            self.assertIn("run nix develop", result.stderr)
+            self.assertIn("ALLOW_HOST_TOOLCHAIN=1", result.stderr)
+
+    def test_explicit_host_toolchain_reports_its_unverified_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bun").symlink_to(BUN)
+            quest = root / "quest"
+            quest.write_text(
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                'if sys.argv[1:] == ["--version"]: print("quest host-test"); sys.exit(0)\n'
+                'assert sys.argv[1:] == ["check"]\n'
+                "sys.exit(9)\n"
+            )
+            quest.chmod(0o755)
+            result = subprocess.run(
+                [BASH, str(ROOT / "sh/quest.sh"), "check"],
+                env=self.env(PATH=directory, ALLOW_HOST_TOOLCHAIN="1"),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 9, result.stderr)
+            self.assertIn(f"quest host-test at {quest}", result.stderr)
+            pin = json.loads((ROOT / "flake.lock").read_text())["nodes"]["quest"]["locked"]["rev"]
+            self.assertIn(f"repository pin: {pin} (build identity unverified)", result.stderr)
+            quest.unlink()
+            result = subprocess.run(
+                [BASH, str(ROOT / "sh/quest.sh"), "check"],
+                env=self.env(PATH=directory, ALLOW_HOST_TOOLCHAIN="1"),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 127, result.stderr)
+            self.assertIn(f"quest not found on PATH for the host toolchain; repository pin: {pin}", result.stderr)
 
     def test_external_admission_keeps_descendant_supervision(self):
         with tempfile.TemporaryDirectory() as directory:

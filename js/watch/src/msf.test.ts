@@ -50,7 +50,7 @@ test.each(["mp4a.40.2", "flac", "future-audio"])("keeps MSF decoder warmup absen
 	expect(audio?.warmup).toBeUndefined();
 });
 
-test("rounds a fractional MSF delay up, and drops zero", () => {
+test("rounds a fractional MSF delay up, drops zero, and rejects a negative one", () => {
 	const catalog: Msf.Catalog = {
 		tracks: [
 			{
@@ -81,6 +81,14 @@ test("rounds a fractional MSF delay up, and drops zero", () => {
 	expect(hang.video?.renditions.video?.delay).toBe(u53(201));
 	expect(hang.audio?.renditions.audio?.delay).toBe(u53(1));
 	expect(hang.audio?.renditions.early?.delay).toBeUndefined();
+
+	// A rendition cannot trail the earliest by a negative amount, even between -1 and 0.
+	for (const delay of [-1, -0.5]) {
+		const negative: Msf.Catalog = {
+			tracks: [{ name: "audio", packaging: "loc", role: "audio", codec: "opus", delay }],
+		};
+		expect(() => toHang(negative)).toThrow();
+	}
 });
 
 test("rounds a fractional MSF jitter up, keeps zero, and rejects a negative one", () => {

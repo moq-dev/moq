@@ -5,11 +5,13 @@ import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
-import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
+import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
+import { hooks } from "../internal.ts";
+import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -24,6 +26,7 @@ import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
+import { proveRouteKey } from "./route_key.ts";
 import { SessionInfo } from "./session.ts";
 import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
@@ -36,8 +39,10 @@ import {
 	hasDatagrams,
 	hasDatagramTracks,
 	hasGoaway,
+	hasHidden,
 	hasPadding,
 	hasProbeRtt,
+	hasRouteKey,
 	hasSetupStream,
 	hasTrackStream,
 	hasTracks,
@@ -196,6 +201,8 @@ export class Connection implements Established {
 		detect(this, quic);
 
 		this.probe = this.#probe;
+		// Opens waiting for credit make room after about this RTT when the transport has none.
+		lines(quic).probe = this.#probe;
 
 		this.hop = randomHop();
 		// What the peer's connection credential earns by default: publishing anything to us,
@@ -213,6 +220,13 @@ export class Connection implements Established {
 		// finds this session still active.
 		const leave = () => this.#auth.close();
 		void quic.closed.then(leave, leave);
+		// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
+		// them, and a socket endpoint behind it is unreachable. A server leaves it to the
+		// client, whose origin holds that endpoint.
+		if (client && publish && !hasHidden(version)) {
+			const withholding = hooks.withholdHidden(publish);
+			void quic.closed.then(withholding, withholding);
+		}
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
 			closeViolation(this.#quic, err);
@@ -384,10 +398,14 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop, token: this.#token, implementation: this.#implementation }).encode(
-				writer,
-				this.#version,
-			);
+			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
+			await new Setup({
+				probe,
+				hop: this.hop,
+				token: this.#token,
+				implementation: this.#implementation,
+				routeKey,
+			}).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -534,7 +552,9 @@ export class Connection implements Established {
 
 	/** Snapshot the transport's counters; see {@link Established.stats}. */
 	async stats(): Promise<Stats> {
-		return transportStats(this.#quic);
+		const stats = await transportStats(this.#quic);
+		if (hasDatagrams(this.#version)) stats.datagramsUnrouted = this.#subscriber.datagramsUnrouted;
+		return stats;
 	}
 
 	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
@@ -564,17 +584,13 @@ export class Connection implements Established {
  * @internal
  */
 export async function probeLevel(quic: WebTransport, version: Version): Promise<ProbeLevel> {
-	const getStats = (
-		quic as unknown as {
-			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
-		}
-	).getStats;
-	if (typeof getStats !== "function") return ProbeLevel.None;
+	const getStats = statsOf(quic);
+	if (!getStats) return ProbeLevel.None;
 
 	// A transport that can't answer tells us nothing, which is itself an answer.
-	let stats: { estimatedSendRate: number | null; smoothedRtt?: number | null };
+	let stats: TransportStats;
 	try {
-		stats = await getStats.call(quic);
+		stats = await getStats();
 	} catch {
 		return ProbeLevel.None;
 	}

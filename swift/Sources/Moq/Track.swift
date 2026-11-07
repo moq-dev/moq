@@ -163,6 +163,12 @@ public final class TrackProducer: Sendable {
         GroupProducer(try ffi.createGroup(sequence: sequence))
     }
 
+    /// Declare that groups `start` up to the exclusive `end` will never be produced.
+    /// Readers move past them, and creating a group there then throws.
+    public func skipGroups(start: UInt64, end: UInt64) throws {
+        try ffi.skipGroups(start: start, end: end)
+    }
+
     /// Write a single-frame group with a presentation timestamp, or untimed when nil.
     public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
         try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
@@ -208,7 +214,19 @@ public final class GroupProducer: Sendable {
         GroupConsumer(try ffi.consume())
     }
 
-    /// Write a frame with a presentation timestamp, or untimed when nil.
+    /// Wait until a frame of `size` bytes fits a window ahead of the fastest reader.
+    ///
+    /// Await it before each `writeFrame` so that reader paces the writer, as TCP
+    /// backpressure does, instead of the group shedding frames it has not taken, which
+    /// fails it with `Evicted`; slower readers are not waited on. It also waits until a reader holds the
+    /// group, and returns once the group is closed so the next write throws why. Throws
+    /// `Closed` after `abort`.
+    public func ready(size: UInt64) async throws {
+        try await ffi.ready(size: size)
+    }
+
+    /// Write a frame with a presentation timestamp, or untimed when nil. Never blocks:
+    /// without `ready`, a writer that outpaces its readers sheds the group's front instead.
     public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
         try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }

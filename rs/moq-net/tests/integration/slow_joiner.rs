@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::{Hop, Timescale, Timestamp, Version, kio, origin, track};
+use moq_net::{Timescale, Timestamp, Version, kio, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
 
@@ -19,7 +19,7 @@ const VERSIONS: [&str; 3] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22
 const GROUPS: u64 = 5;
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }
@@ -30,8 +30,11 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let publisher = origin(1);
 	let relay = origin(2);
 	let viewer = origin(3);
-	let broadcast = publisher.create_broadcast("live").unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let source = broadcast
+		.broadcast()
 		.create_track(
 			"audio",
 			track::Info::default()
@@ -39,7 +42,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 				.with_max_age(None),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut upstream = MockConnectOptions::new(version);
 	upstream.client_publish = Some(publisher.consume());

@@ -124,6 +124,8 @@ pub(super) struct Entry {
 	played_at: Duration,
 	/// Gain actually applied, chasing [`Gain::target`] a step at a time.
 	applied: f32,
+	/// [`ring::Consumer::comfort`] as of the last read.
+	comfort: u64,
 }
 
 /// Something the audio thread is done with and must not free itself.
@@ -253,6 +255,7 @@ impl Mixer {
 					// doesn't click.
 					let entry = Entry {
 						id,
+						comfort: cons.comfort(),
 						cons,
 						gain,
 						completion,
@@ -322,6 +325,8 @@ impl Mixer {
 			let mut supplied = frames;
 			let mut playing = false;
 			let mut tail = 0;
+			// The most comfort noise any sink still being written played.
+			let mut comfort = 0;
 
 			for entry in entries.iter_mut() {
 				// Read even at zero volume: this is live audio, so a muted sink
@@ -335,12 +340,16 @@ impl Mixer {
 				let read = match status {
 					Read::NotReady => None,
 					Read::Underflow { frames: read } => Some(read),
-					Read::Ok | Read::Trimmed { .. } => Some(frames),
+					// A declared silence is played on purpose, so it is no gap.
+					Read::Ok | Read::Trimmed { .. } | Read::Comfort { .. } => Some(frames),
 				};
+				let comforted = entry.cons.comfort();
+				let filled = comforted - std::mem::replace(&mut entry.comfort, comforted);
 				match read {
 					Some(read) if entry.completion.writing() => {
 						playing = true;
 						supplied = supplied.min(read);
+						comfort = comfort.max(filled as usize);
 					}
 					Some(read) => tail = tail.max(read),
 					None => {}
@@ -373,7 +382,7 @@ impl Mixer {
 			if !playing && tail > 0 {
 				(playing, supplied) = (true, tail);
 			}
-			ledger.add(&bus[..samples], channels, supplied, playing);
+			ledger.add(&bus[..samples], channels, supplied, playing, comfort);
 
 			// Tap the mix on its way out. Overflow means the microphone stopped
 			// draining, which the canceller notices on its own; there is nothing
@@ -418,6 +427,7 @@ mod tests {
 		retired: Receiver<Retired>,
 		next: u64,
 		channels: usize,
+		observe: Arc<observe::Shared>,
 	}
 
 	impl Harness {
@@ -428,12 +438,14 @@ mod tests {
 		fn with_depth(layout: Layout, depth: usize) -> Self {
 			let (commands, rx) = sync_channel(depth);
 			let (retired_tx, retired) = sync_channel(MAX_SINKS);
+			let observe = Arc::new(observe::Shared::default());
 			Self {
-				mixer: Mixer::new(rx, retired_tx, RATE, layout, Default::default()).unwrap(),
+				mixer: Mixer::new(rx, retired_tx, RATE, layout, observe.clone()).unwrap(),
 				commands,
 				retired,
 				next: 0,
 				channels: layout.channels() as usize,
+				observe,
 			}
 		}
 
@@ -877,6 +889,33 @@ mod tests {
 			out[out.len() - 1].abs() < 1e-5,
 			"expected silence after underflow, got {}",
 			out[out.len() - 1]
+		);
+	}
+
+	/// A declared silence plays as comfort noise, which the observer times
+	/// apart from received audio and never counts as a gap.
+	#[test]
+	fn a_declared_silence_is_timed_as_comfort_noise() {
+		let mut harness = Harness::new(Layout::Stereo);
+		let mut observer = observe::Observer::new(harness.observe.clone()).unwrap();
+		let mut out = vec![0.0f32; 4096 * STEREO];
+
+		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
+		harness.fill(&mut out[..STEREO]);
+		push(&mut prod, 0.5, 960);
+		prod.end();
+		// The opening silence, the 960 pushed, then comfort noise.
+		harness.fill(&mut out);
+
+		let observation = observer.read().unwrap();
+		assert!(observation.gaps.is_empty(), "{observation:?}");
+		let loud = out.iter().rposition(|sample| sample.abs() > 0.01).unwrap() / STEREO;
+		let played = 4096 - 1 - loud;
+		let expected = played as f64 / RATE as f64;
+		assert!(
+			(observation.comfort.as_secs_f64() - expected).abs() < 1e-6,
+			"{:?}, want {played} frames",
+			observation.comfort
 		);
 	}
 }

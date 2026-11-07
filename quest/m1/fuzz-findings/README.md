@@ -11,14 +11,39 @@ Each fixed finding's minimized input is committed under the target's
 ## Plan
 
 [moq-dev/moq#7313](https://github.com/moq-dev/moq/pull/7313) added the
-targets and landed with six nightly jobs red (decided 2026-10-30,
-maintainer). Its short local runs found the bugs the children fix; the
-minimized inputs are in [its PR comment](https://github.com/moq-dev/moq/pull/7313#issuecomment-6520535160).
+targets, and its children fixed the findings from its short local runs.
+Each fix commits its input under `regressions/` with the fix, since an
+input committed before the fix would fail the merge gate.
 
-Each child commits its input under `regressions/` with its fix, since an
-input committed before the fix would fail the merge gate. Every known finding
-is now fixed: run every target nightly for a few sessions; a new finding
-becomes a child here.
+Decided 2026-11-05 (maintainer, /quest-plan): this epic stays an `[S]`
+watcher. An agent triages each red target into a child quest; an
+intermittent failure joins m0's [test flakes](/quest/m0/test-flakes-2/README.md)
+instead. The epic is deleted once every target runs green. Not chosen:
+deleting it once its last child merged.
+
+Triage of the 2026-11-03 to 2026-11-06 scheduled runs
+([moq-dev/moq#7961](https://github.com/moq-dev/moq/pull/7961) through
+2026-11-05, and [moq-dev/moq#8042](https://github.com/moq-dev/moq/pull/8042)
+with this triage for 2026-11-06):
+
+- `annexb` (scuffle-h265 SPS overflow) and `ts` (step look-ahead overflow),
+  2026-11-03: fixed by [moq-dev/moq#7685](https://github.com/moq-dev/moq/pull/7685)
+  and [moq-dev/moq#7683](https://github.com/moq-dev/moq/pull/7683), which
+  committed the inputs.
+- `cmaf` (out of memory on received metadata), 2026-11-04: fixed by
+  [moq-dev/moq#7843](https://github.com/moq-dev/moq/pull/7843); moq-dev/moq#7961
+  commits its input as `cmaf/metadata-preflight`.
+- `fmp4` (allocation bound), 2026-11-04 and 2026-11-05: a field-less `trun`
+  declared 65,792 samples in a 104-byte `moof`. Fixed in moq-dev/moq#7961 by
+  holding a fragment to one sample per metadata byte past a base.
+- `annexb` (scuffle-av1 UVLC overflow), 2026-11-06: an AV1 sequence header's
+  picture interval with 256 leading zeros overflows scuffle-av1's `u8`
+  counter. Fixed by [moq-dev/moq#8042](https://github.com/moq-dev/moq/pull/8042),
+  which merged after that run and committed its input; the other targets
+  passed.
+
+What remains: watch the next scheduled runs. When every media target has
+run green, delete this epic. A new finding becomes a child here.
 
 For the crates outside the `kixelated` and `moq-dev` orgs, moq-mux fixes
 the bug on its own side and the bug is reported upstream (decided
@@ -29,7 +54,9 @@ the bug on its own side and the bug is reported upstream (decided
 (scuffle-expgolomb). Posting anything further on those repos still needs the
 maintainer's approval.
 
-[moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234) replaced
-webm-iterable's block parsing with moq-mux's own block-header reader, which
-fixed the MKV block-header panic; its input is
-`rs/moq-mux/fuzz/regressions/mkv/short-block-header`.
+## Waiting
+
+- Maintainer: approve reporting the scuffle-av1 `read_uvlc` overflow fixed by
+  [moq-dev/moq#8042](https://github.com/moq-dev/moq/pull/8042) to ScuffleCloud/scuffle,
+  which has no issue for it; an agent cannot post there without approval. Recommend
+  approving, matching the scuffle-h265 and scuffle-expgolomb reports above. Done once the issue is filed and linked above.

@@ -825,6 +825,20 @@ impl Scrape {
 			counter(encoder, name, help, rows)?;
 		}
 
+		// Split by what costs work: a session forwarding media against one that only holds
+		// keepalives, announces, or quiet subscriptions. Regressed against process CPU and
+		// memory, the two give the marginal cost of each.
+		let activity = self.stats.activity();
+		gauge(
+			encoder,
+			"moq_relay_sessions_connected",
+			"Connected sessions; active if media payload moved through them within the last 10 seconds, idle otherwise.",
+			activity.iter().flat_map(|(tier, activity)| {
+				[("idle", activity.idle), ("active", activity.active)]
+					.map(|(state, count)| ([("tier", Label(tier.as_str())), ("state", Label(state))], count))
+			}),
+		)?;
+
 		counter(
 			encoder,
 			"moq_relay_sessions_failed",
@@ -1745,6 +1759,10 @@ mod tests {
 			body.contains("moq_relay_sessions_closed_total{tier=\"http\"} 0"),
 			"{body}"
 		);
+		assert!(
+			body.contains("moq_relay_sessions_connected{tier=\"http\",state=\"idle\"} 0"),
+			"{body}"
+		);
 	}
 
 	#[test]
@@ -1771,10 +1789,24 @@ mod tests {
 			};
 			check();
 			check();
+			let body = render_metrics(&registry.snapshot(), &[], &[]);
+			assert!(
+				body.contains(&format!(
+					"moq_relay_sessions_connected{{tier=\"{tier}\",state=\"idle\"}} 1"
+				)),
+				"transport bytes alone leave a session idle:\n{body}"
+			);
 			drop(guard);
 			drop(session);
 			registry.report(&mut Default::default());
 			check();
+			let body = render_metrics(&registry.snapshot(), &[], &[]);
+			assert!(
+				body.contains(&format!(
+					"moq_relay_sessions_connected{{tier=\"{tier}\",state=\"idle\"}} 0"
+				)),
+				"a pruned tier reports zero rather than vanishing:\n{body}"
+			);
 		}
 	}
 
@@ -1786,8 +1818,9 @@ mod tests {
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")))
 				.session(moq_net::Path::from_static("root")),
 		);
-		let broadcast = producer.create_broadcast("demo/retired").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = producer
+			.route("demo/retired", moq_net::origin::RouteOptions::default())
+			.unwrap();
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1799,7 +1832,7 @@ mod tests {
 			"live announce end:\n{body}"
 		);
 
-		broadcast.unannounce();
+		broadcast.withdraw();
 		drop(broadcast);
 		drop(producer);
 		let mut report = moq_net::stats::Report::default();
@@ -1832,9 +1865,10 @@ mod tests {
 		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.routes();
-		let pub_source = pub_origin.create_broadcast("demo/x").unwrap();
-		pub_source.announce(Default::default()).unwrap();
-		let pub_track = pub_source.create_track("video", timed()).unwrap();
+		let pub_source = pub_origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let pub_track = pub_source.broadcast().create_track("video", timed()).unwrap();
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
@@ -1842,9 +1876,10 @@ mod tests {
 			.tier(Tier::new(moq_net::Path::from_static("region/sjc")))
 			.session(moq_net::Path::from_static("peer"));
 		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
-		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
-		sub_source.announce(Default::default()).unwrap();
-		let sub_track = sub_source.create_track("audio", timed()).unwrap();
+		let sub_source = sub_origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
+		let sub_track = sub_source.broadcast().create_track("audio", timed()).unwrap();
 
 		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
@@ -1915,9 +1950,11 @@ mod tests {
 
 		let stats = Registry::new(Default::default());
 		let origin = moq_tokio::origin::spawn();
-		let source = origin.create_broadcast("demo/x").unwrap();
-		source.announce(Default::default()).unwrap();
+		let source = origin
+			.route("demo/x", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let track = source
+			.broadcast()
 			.create_track("catalog.json", timed().with_compress(true))
 			.unwrap();
 		let payload = format!("{{\"pad\":\"{}\"}}", "abc".repeat(300));
@@ -2019,8 +2056,7 @@ mod tests {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let edge = stats.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")));
 		let origin = moq_tokio::origin::spawn().with_stats(edge.session(moq_net::Path::from_static("root")));
-		let broadcast = origin.create_broadcast("demo").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let _broadcast = origin.route("demo", moq_net::origin::RouteOptions::default()).unwrap();
 		drop(edge.request(moq_net::Path::from_static("root")));
 		let refusals = crate::refusals::Refusals::default();
 		refusals.record(crate::refusals::RefusalKind::Unavailable);
@@ -2079,6 +2115,7 @@ mod tests {
 # TYPE moq_relay_panics_total counter
 # TYPE moq_relay_requests_total counter
 # TYPE moq_relay_sessions_closed_total counter
+# TYPE moq_relay_sessions_connected gauge
 # TYPE moq_relay_sessions_failed_total counter
 # TYPE moq_relay_sessions_opened_total counter
 # TYPE moq_relay_sessions_refused_total counter
@@ -2151,6 +2188,8 @@ counter moq_relay_wire_rx_bytes_total{tier="edge"} 0
 counter moq_relay_wire_tx_bytes_total{tier="edge"} 0
 gauge moq_relay_accept_stalled_seconds{listener="tcp"} 0
 gauge moq_relay_draining_sessions{} 0
+gauge moq_relay_sessions_connected{state="active",tier="edge"} 0
+gauge moq_relay_sessions_connected{state="idle",tier="edge"} 1
 "#;
 
 	#[cfg(all(target_os = "linux", feature = "_uring"))]

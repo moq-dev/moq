@@ -1001,7 +1001,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// configures the encoder and is not written into the catalog entry. With
 	/// [`deltas`](crate::json::Options::deltas), create `track` with a
 	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
-	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
+	/// [`Snapshot::poll_refresh`](crate::json::Snapshot::poll_refresh), so joiners get a fresh group.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
 	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, if the entry
@@ -1363,7 +1363,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.height = config.coded_height;
 		track.framerate = config.framerate;
 		track.bitrate = config.bitrate;
-		track.init_data = init_data;
+		track.init_data = init_data.map(Into::into);
 		track.render_group = Some(1);
 		track.alt_group = if has_multiple_video { Some(1) } else { None };
 		track.max_grp_sap_starting_type = sap_type;
@@ -1396,7 +1396,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.samplerate = Some(config.sample_rate);
 		track.channel_config = Some(config.channel_count.to_string());
 		track.bitrate = config.bitrate;
-		track.init_data = init_data;
+		track.init_data = init_data.map(Into::into);
 		track.render_group = Some(1);
 		track.alt_group = if has_multiple_audio { Some(1) } else { None };
 		track.max_grp_sap_starting_type = Some(1);
@@ -1419,7 +1419,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.lang = config.lang.clone();
 		track.label = config.label.clone();
 		if let hang::catalog::Container::Cmaf { init, .. } = &config.container {
-			track.init_data = Some(base64::engine::general_purpose::STANDARD.encode(init));
+			track.init_data = Some(base64::engine::general_purpose::STANDARD.encode(init).into());
 		}
 		track.render_group = Some(1);
 		track.jitter = config.jitter;
@@ -1459,7 +1459,11 @@ mod test {
 			let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 			let driver = tokio::spawn(moq_net::time::run(driver));
 			let mut broadcast = match path {
-				Some(path) => origin.create_broadcast(path).unwrap().broadcast().clone(),
+				Some(path) => origin
+					.route(path, moq_net::origin::RouteOptions::hidden())
+					.unwrap()
+					.broadcast()
+					.clone(),
 				None => moq_net::broadcast::Info::new().produce(),
 			};
 			let mut producer = Producer::new(&mut broadcast, Config::default()).unwrap();
@@ -2096,8 +2100,12 @@ mod test {
 		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
-		let front = origin.create_broadcast("robot/front.hang").unwrap();
-		let rear = origin.create_broadcast("robot/rear.hang").unwrap();
+		let front = origin
+			.route("robot/front.hang", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let rear = origin
+			.route("robot/rear.hang", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let catalogs = [
 			Producer::new(
 				&mut front.broadcast().clone(),
@@ -2115,6 +2123,7 @@ mod test {
 			assert_eq!(catalog.snapshot().media.clock, clock.wall());
 			let timestamp = catalog.clock().capture(captured).unwrap();
 			let track = broadcast
+				.broadcast()
 				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
 			let mut video = catalog
@@ -3075,7 +3084,7 @@ mod test {
 
 		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		let video = &msf.tracks[0];
-		assert_eq!(video.init_data, Some("AQID".to_string()));
+		assert_eq!(video.init_data.as_deref(), Some("AQID"));
 	}
 
 	#[test]
@@ -3111,7 +3120,7 @@ mod test {
 		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
-		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
+		assert_eq!(video.init_data.as_deref(), Some("AAAYZ2Z0eXA="));
 	}
 
 	#[test]

@@ -5,6 +5,7 @@ import { Gate } from "../auth_gate.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
+import { statsOf } from "../connection/stats.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -19,8 +20,19 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
-import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
+import { Cost, type Hop, routesEqual, type WireRoute } from "../hop.ts";
+import {
+	type DropRun,
+	finalSequence,
+	type Hole,
+	hiddenBelow,
+	hooks,
+	insertRun,
+	presented,
+	type Run,
+	removeRun,
+	runGaps,
+} from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { readSize, sendPayload } from "../payload.ts";
@@ -53,6 +65,8 @@ import {
 	SubscribeDrop,
 	SubscribeFinish,
 	SubscribeOk,
+	type SubscribeResponse,
+	SubscribeSkip,
 	SubscribeStart,
 	SubscribeStarted,
 	SubscribeUpdate,
@@ -73,6 +87,7 @@ import {
 	hasProbeRtt,
 	hasRanges,
 	hasRouteCost,
+	hasSkip,
 	hasSynced,
 	hasTrackStream,
 	keepsSubscribeOpen,
@@ -542,6 +557,17 @@ export class Publisher {
 	// A rejected lookup is evicted so a retry can re-probe.
 	#trackInfo = new WeakMap<broadcast.Consumer, Map<string, TrackInfoEntry>>();
 
+	// Lite-05/06: the datagram tracks this session's answered TRACKs hold, read from each
+	// answer on, oldest first. The requester reads TRACK_INFO as the publisher accepting the
+	// name, but the datagrams flow on the SUBSCRIBE it sends alongside, which can arrive later.
+	// That SUBSCRIBE reads from a clone of the hold, keeping its position, rather than from its
+	// own arrival, which would lose what was written in between. The requester keeps its TRACK
+	// open until the SUBSCRIBE has a response, so the hold outlasts its arrival. A hold is
+	// matched by the track it reads, not by name, so one left on a replaced track never stands
+	// in for the current one. It is a passive observer: it keeps a position without adding
+	// demand, which the SUBSCRIBE adds when it reads the track.
+	#heldDatagrams = new Set<datagram.Consumer>();
+
 	/**
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session to use
@@ -601,15 +627,15 @@ export class Publisher {
 		let nextAnnounceId = 0n;
 		const announceIds = new Map<Path.Valid, bigint>();
 
-		const wireHops = (route: Route): Hop[] => {
-			if (hasAnnounceOk(this.version)) return route.hops;
+		const wireHops = (route: WireRoute): Hop[] => {
+			if (hasAnnounceOk(this.version)) return [...route.hops];
 			return [...route.hops, this.hop];
 		};
 
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart.
 		// moq-lite carries no per-request auth, so a swap alone sends nothing.
-		const onWire = (route: Route): Route => ({
+		const onWire = (route: WireRoute): WireRoute => ({
 			...route,
 			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
 			auth: undefined,
@@ -621,7 +647,7 @@ export class Publisher {
 			!sameInstance(prev, next) ||
 			(hasInstance(this.version) && (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n));
 
-		const announce = async (suffix: Path.Valid, route: Route) => {
+		const announce = async (suffix: Path.Valid, route: WireRoute) => {
 			console.debug(`announce: broadcast=${suffix} active=true instance=${route.instance}`);
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
@@ -638,7 +664,7 @@ export class Publisher {
 			);
 		};
 
-		const update = async (suffix: Path.Valid, route: Route) => {
+		const update = async (suffix: Path.Valid, route: WireRoute) => {
 			if (!hasAnnounceId(this.version)) {
 				await retract(suffix);
 				await announce(suffix, route);
@@ -658,7 +684,7 @@ export class Publisher {
 		};
 
 		// Another instance or epoch: ANNOUNCE_RESTART on lite-07, an end and a start before it.
-		const restart = async (suffix: Path.Valid, route: Route) => {
+		const restart = async (suffix: Path.Valid, route: WireRoute) => {
 			const id = announceIds.get(suffix);
 			if (id === undefined || !hasAnnounceRestart(this.version)) {
 				await retract(suffix);
@@ -1010,6 +1036,7 @@ export class Publisher {
 			endFrame: msg.endFrame,
 		};
 		let legacy: datagram.Consumer | undefined;
+		const legacyPriority = new Signal(msg.priority);
 		let controls: SubscriptionControls | undefined;
 		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
@@ -1040,13 +1067,20 @@ export class Publisher {
 			}
 			const publisher = info.priority;
 			// A SUBSCRIBE can arrive before its track resolves, such as one a relay serves from a
-			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK, when no
-			// group is known yet: the newest once it resolves stands in, as it would for one
-			// sent after.
-			const resolved = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
-			if (latest === undefined && resolved !== floor) {
-				floor = resolved;
-				track.withRange({ start: { included: floor } });
+			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK: the newest
+			// group known once it resolves stands in, including a largest the upstream's answer
+			// reported, whether or not the copy already held a group. A newer group the answer
+			// brings later is not waited for. Lite-01/02 keep their arrival floor, as Rust does.
+			if (this.version !== Version.DRAFT_01 && this.version !== Version.DRAFT_02) {
+				let newest = latest;
+				for (const known of [hooks.latestSequence(track), hooks.peekLargest(track).largest?.group]) {
+					if (known !== undefined) newest = newest === undefined ? known : max(newest, known);
+				}
+				const resolved = cursorFloor(this.version, msg.startGroup, newest);
+				if (resolved !== floor) {
+					floor = resolved;
+					track.withRange({ start: { included: floor } });
+				}
 			}
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;
@@ -1078,10 +1112,11 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter && !hasDatagramTracks(this.version)) {
-				legacy = wireOf(front).liveDatagrams(msg.track);
+				const live = wireOf(front).liveDatagrams(msg.track);
+				legacy = live && this.#adopt(live);
 				if (legacy) {
-					legacy.setPriority(msg.priority);
-					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp })
+					if (wireOf(front).localDatagrams) legacy.setPriority(msg.priority);
+					datagrams = this.#runDatagrams(legacy, { sub: msg.id, stamp, priority: legacyPriority })
 						.then(() => {})
 						.catch((err) => console.debug(`datagram send stopped: ${reason(err)}`));
 				}
@@ -1098,7 +1133,8 @@ export class Publisher {
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
 				apply: (update, live) => {
-					legacy?.setPriority(update.priority);
+					legacyPriority.set(update.priority);
+					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					if (hasRanges(this.version)) {
 						const resolved = hooks.servingResolved(track);
 						const entries = live.map(({ id, entry }) => {
@@ -1133,6 +1169,7 @@ export class Publisher {
 				served,
 				floor,
 				bounds,
+				update: msg.update,
 				initial: BigInt(asked.length),
 			});
 
@@ -1303,11 +1340,14 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: bigint;
 			bounds: FrameBounds;
+			/** The SUBSCRIBE's update number (0), which a drop echoes until an update replaces it. */
+			update: bigint;
 			// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports.
 			initial: bigint;
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, served, bounds, initial } = serving;
+		let updateNumber = serving.update;
 		// The read cursor's floor; the subscription's ranges cap it.
 		let floor = serving.floor;
 		const moveCursor = () => track.withRange({ start: { included: floor } });
@@ -1322,7 +1362,7 @@ export class Publisher {
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Dispositions before START refine its boundary; later ones must be named as drops.
-		const skipped: { start: bigint; end: bigint; error: Error }[] = [];
+		const skipped: DropRun[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: bigint | undefined;
 		// The first group and the edge seen before it was popped, held until the source
@@ -1379,17 +1419,82 @@ export class Publisher {
 			return true;
 		};
 
-		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
-		// yet, given up with `err`.
-		const drop = async (start: bigint, end: bigint, err: Error): Promise<boolean> => {
+		// The message naming `[start, end]` given up as `hole` says: lite-07 skips what was never
+		// produced, and earlier versions drop it as not found.
+		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse =>
+			hole.skip && hasSkip(this.version)
+				? { skip: new SubscribeSkip({ start, end }) }
+				: { drop: SubscribeDrop.given(start, end, hole.error, this.version, updateNumber) };
+
+		// Whether lite-07 names `hole` stale: an OLD drop, which the next update reopens.
+		const sentStale = (hole: Hole) => !hole.skip && toStreamCode(hole.error) === StreamCode.Old;
+
+		// Lite-07: the part of `served` named in SUBSCRIBE_DROP, never served. A skip replaces a
+		// drop, so it is sent over one of these, but never over a group served.
+		let dropped: Run[] = [];
+		// Lite-07: the part of `dropped` named stale (OLD), which a final drop or a group replaces,
+		// as one a route the front switched to delivers after the update that reopens it.
+		let droppedStale: Run[] = [];
+		// Lite-07 groups whose stream expired as stale, which every update drops again under its
+		// number: the subscriber reopens each stale drop then, and the stream already reset.
+		const expired: Run[] = [];
+
+		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
+		// served or given up yet.
+		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!served) return true;
-			for (const gap of runGaps(served, start, end)) {
+			const gaps = runGaps(served, start, end);
+			if (hasSkip(this.version)) {
+				for (const gap of gaps) {
+					if (hole.skip) {
+						dropped = removeRun(dropped, gap.start, gap.end);
+						droppedStale = removeRun(droppedStale, gap.start, gap.end);
+						continue;
+					}
+					insertRun(dropped, gap.start, gap.end);
+					// The wire names every OLD drop stale, which the next update reopens. One the
+					// reader gave up as final, such as one relayed from a version whose drops are all
+					// final, is dropped again by each update, as an expired stream is.
+					if (!sentStale(hole)) {
+						droppedStale = removeRun(droppedStale, gap.start, gap.end);
+						continue;
+					}
+					insertRun(droppedStale, gap.start, gap.end);
+					if (hole.stale === undefined) insertRun(expired, gap.start, gap.end);
+				}
+			}
+			for (const gap of gaps) {
 				insertRun(served, gap.start, gap.end);
-				const msg = SubscribeDrop.given(gap.start, gap.end - 1n, err, this.version);
-				if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
-					return false;
+				const msg = holeMessage(gap.start, gap.end - 1n, hole);
+				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
 			}
 			return true;
+		};
+
+		// Forward a verdict the reader reached on `[start, end)`, as `drop` does. On lite-07 it also
+		// replaces what it overrides: a skip any drop already sent, and a final (non-OLD) drop a stale one,
+		// which the next update would otherwise reopen. A reader the earlier drop ended stays ended.
+		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
+			if (served && hasSkip(this.version)) {
+				const replaces = hole.skip ? dropped : sentStale(hole) ? [] : droppedStale;
+				for (const run of [...replaces]) {
+					const from = max(run.start, start);
+					const to = min(run.end, end);
+					if (from >= to) continue;
+					replaceStale(from, to);
+					served.splice(0, served.length, ...removeRun(served, from, to));
+				}
+			}
+			return drop(start, end, hole);
+		};
+
+		// Forget that `[start, end)` went out as a drop: a verdict or group replaces it. A stream of
+		// this subscription that expired there is no longer owed again on an update, since what
+		// replaced it settles it.
+		const replaceStale = (start: bigint, end: bigint) => {
+			dropped = removeRun(dropped, start, end);
+			droppedStale = removeRun(droppedStale, start, end);
+			expired.splice(0, expired.length, ...removeRun(expired, start, end));
 		};
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_FINISH
@@ -1439,7 +1544,10 @@ export class Publisher {
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
 		const drops = new Signal(0);
-		const pendingDrops: SubscribeDrop[] = [];
+		// Groups whose stream failed, with why, for the control stream to name, as runs.
+		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
+		// The expired groups an update re-offers, still cached and in range, served again in turn.
+		const reoffered: group.Consumer[] = [];
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1456,15 +1564,23 @@ export class Publisher {
 						// What was given up below the start is never named, so a wider budget may serve it.
 						if (range.start < startSequence)
 							hooks.unreport(track, range.start, min(range.end, startSequence));
-						if (!(await drop(max(range.start, startSequence), range.end, range.error))) return false;
+						if (!(await forward(max(range.start, startSequence), range.end, range))) return false;
 					}
 					skipped.length = 0;
 				}
 				if (pendingDrops.length > 0) {
-					for (const dropped of pendingDrops.splice(0)) {
-						if (
-							!(await controls.response(encodeSubscribeResponse(stream, { drop: dropped }, this.version)))
-						)
+					for (const { start, end, error } of pendingDrops.splice(0)) {
+						// A stream expired under this subscription's budget is a stale verdict, which
+						// a later verdict or group replaces as any stale drop sent.
+						if (hasSkip(this.version) && toStreamCode(error) === StreamCode.Old) {
+							insertRun(expired, start, end);
+							insertRun(dropped, start, end);
+							insertRun(droppedStale, start, end);
+						}
+						// A re-offer an update owed again is given up now, so the end sweep never names it.
+						if (served) insertRun(served, start, end);
+						const msg = SubscribeDrop.given(start, end - 1n, error, this.version, updateNumber);
+						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 							return false;
 					}
 				}
@@ -1488,6 +1604,7 @@ export class Publisher {
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
+							updateNumber = update.update;
 							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
 								const live = new Set(control.ids);
@@ -1524,6 +1641,45 @@ export class Publisher {
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
 							moveCursor();
+							// Lite-07 reopens every stale drop on any update, judged under its new terms
+							// (applied as the update was decoded): what was reported stale is offered
+							// again, and dropped again under this update's number if still stale.
+							if (hasSkip(this.version)) {
+								const owe = (start: bigint, end: bigint) => {
+									if (served) served.splice(0, served.length, ...removeRun(served, start, end));
+									dropped = removeRun(dropped, start, end);
+									droppedStale = removeRun(droppedStale, start, end);
+								};
+								for (const run of hooks.reofferStale(track)) owe(run.start, run.end);
+								// A stale drop not sent yet, such as one an earlier update left to drop
+								// again, is judged again under these terms too.
+								for (const pending of pendingDrops.filter(
+									(d) => toStreamCode(d.error) === StreamCode.Old,
+								))
+									insertRun(expired, pending.start, pending.end);
+								pendingDrops.splice(
+									0,
+									pendingDrops.length,
+									...pendingDrops.filter((d) => toStreamCode(d.error) !== StreamCode.Old),
+								);
+								// A group re-offered that has not opened yet is judged again too, since these
+								// terms may no longer admit it.
+								for (const group of reoffered.splice(0)) {
+									insertRun(expired, group.sequence, group.sequence + 1n);
+									group.close();
+								}
+								// A group whose stream already reset as stale: one still cached, in range, and
+								// fresh under the new budget is served again; the rest is dropped again, by run.
+								for (const run of expired.splice(0)) {
+									const { groups, givenUp } = hooks.reofferGroups(track, run.start, run.end);
+									for (const group of groups) {
+										owe(group.sequence, group.sequence + 1n);
+										reoffered.push(group);
+									}
+									for (const gone of givenUp)
+										pendingDrops.push({ ...gone, error: new StreamError(StreamCode.Old) });
+								}
+							}
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
 							// task boundary usually lets the decoder finish whatever the transport
@@ -1545,16 +1701,20 @@ export class Publisher {
 					!startSent && hasLargest(this.version)
 						? newer(first?.largest, newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest))
 						: undefined;
+				// A group an update re-offers goes ahead of new ones.
+				const again = first ? undefined : reoffered.shift();
 				const recv = first
 					? ({ kind: "group", group: first.group } as const)
-					: hooks.tryRecvGroup(track, emitRange);
+					: again
+						? ({ kind: "group", group: again } as const)
+						: hooks.tryRecvGroup(track, emitRange);
 				first = undefined;
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!startSent) skipped.push({ start: recv.start, end: recv.end, error: recv.error });
-						else if (!(await drop(recv.start, recv.end, recv.error))) return false;
+						if (!startSent) skipped.push(recv);
+						else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
@@ -1656,7 +1816,11 @@ export class Publisher {
 						// Name every sequence from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startSequence !== undefined) {
-							const unserved = new StreamError(StreamCode.NotFound, { message: "group not served" });
+							// A sequence the publisher declared skipped went out as a skip already; one
+							// it never declared might have existed, so it is not found.
+							const unserved: Hole = {
+								error: new StreamError(StreamCode.NotFound, { message: "group not served" }),
+							};
 							// Only the groups inside the ranges are owed.
 							for (const run of hooks.servingRuns(track, startSequence, boundary())) {
 								if (!(await drop(run.start, run.end, unserved))) return false;
@@ -1666,16 +1830,7 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						if (!(await drained())) {
-							// A lite-07 subscriber FINs once it read the finished track's tail, or once
-							// it wants nothing more. Either way the reply FIN goes out now and the groups
-							// still waiting for a slot are cancelled, but an opened stream may be a final
-							// group whose FIN is still being acknowledged, so a draining close still
-							// waits for it; a reader that wants none of it resets it.
-							if (keepsSubscribeOpen(this.version))
-								void this.owe(Promise.allSettled(groups).then(() => undefined));
-							return false;
-						}
+						if (!(await drained())) return false;
 						if (pendingDrops.length > 0) continue;
 						// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: an update may still ask
 						// for the ended track's history, and the subscriber FINs once it wants nothing
@@ -1691,6 +1846,18 @@ export class Publisher {
 				}
 
 				const group = recv.group;
+				// Never a second stream for a sequence this subscription already accounted for
+				// (served, sent as a datagram, or dropped): before lite-07 a subscriber settles a
+				// drop for good. A stale drop a lite-07 update reopened is owed again (see the update above).
+				// A lite-07 stale drop is no final verdict, and a Group Stream wins over it, so a group
+				// handed out after one is served, as one a route the front switched to delivers: the
+				// update that reopens the drop would never re-offer it.
+				if (runGaps(droppedStale, group.sequence, group.sequence + 1n).length === 0) {
+					replaceStale(group.sequence, group.sequence + 1n);
+				} else if (served && runGaps(served, group.sequence, group.sequence + 1n).length === 0) {
+					group.close();
+					continue;
+				}
 				const range = frameRange(bounds, group.sequence);
 
 				if (emitRange && !startSent) {
@@ -1747,7 +1914,7 @@ export class Publisher {
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					if (emitRange && failed instanceof Error) {
-						pendingDrops.push(SubscribeDrop.given(group.sequence, group.sequence, failed, this.version));
+						pendingDrops.push({ start: group.sequence, end: group.sequence + 1n, error: failed });
 						drops.update((revision) => revision + 1);
 					}
 				});
@@ -1759,6 +1926,15 @@ export class Publisher {
 			}
 		} finally {
 			if (!finished) unsubscribe();
+			// An update's re-offers are reads of their own, which closing the track leaves open.
+			for (const group of reoffered.splice(0)) group.close();
+			// A lite-07 subscriber FINs once it read the finished track's tail, or once it wants
+			// nothing more, even while a reply is still being written. Either way the groups still
+			// waiting for a slot are cancelled, but an opened stream may be a final group whose FIN
+			// is still being acknowledged, so a draining close still waits for it; a reader that
+			// wants none of it resets it.
+			if (keepsSubscribeOpen(this.version) && groups.size > 0)
+				void this.owe(Promise.allSettled(groups).then(() => undefined));
 			priority.close();
 		}
 	}
@@ -1807,6 +1983,7 @@ export class Publisher {
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			let info: TrackInfoMessage;
+			let datagrams: datagram.Consumer | undefined;
 			try {
 				info = await this.#resolveTrackInfo(front, msg.track, hold.signal);
 			} catch (err) {
@@ -1816,13 +1993,21 @@ export class Publisher {
 					toStreamCode(error(err)) !== StreamCode.NotFound
 				)
 					throw err;
-				const datagrams = front.datagrams(msg.track);
+				const asked = front.datagrams(msg.track);
 				try {
-					info = trackInfoMessage(await untilAborted(datagrams.info(), hold.signal), this.version);
-				} finally {
-					datagrams.close();
+					info = trackInfoMessage(await untilAborted(asked.info(), hold.signal), this.version);
+				} catch (err) {
+					asked.close();
+					throw err;
 				}
+				datagrams = asked;
 			}
+			// Lite-05/06: the name's datagram track, read from this answer on, held for the
+			// SUBSCRIBE alongside, beside a stream track too.
+			if (hasDatagrams(this.version) && !hasDatagramTracks(this.version)) {
+				datagrams ??= wireOf(front).liveDatagrams(msg.track);
+			}
+			if (datagrams) this.#holdDatagrams(datagrams, hold.signal);
 			if (watch.revoked()) throw unauthorized(msg.broadcast);
 			await info.encode(stream.writer, this.version);
 			console.debug(`track info: broadcast=${msg.broadcast} track=${msg.track}`);
@@ -1902,6 +2087,32 @@ export class Publisher {
 			tracks?.close();
 			watch.dispose();
 		}
+	}
+
+	// Hold `consumer`'s track from its position for the SUBSCRIBE alongside until `hold`
+	// aborts, as a passive observer in place of `consumer`.
+	#holdDatagrams(consumer: datagram.Consumer, hold: AbortSignal) {
+		const held = hooks.observeDatagramConsumer(consumer);
+		consumer.close();
+		this.#heldDatagrams.add(held);
+		const release = () => {
+			this.#heldDatagrams.delete(held);
+			held.close();
+		};
+		if (hold.aborted) release();
+		else hold.addEventListener("abort", release, { once: true });
+	}
+
+	// `consumer`, or a clone of the oldest hold of the same track, read from that hold's answer on.
+	// Several TRACKs of one track may be open, and the SUBSCRIBE could follow any of them, so it
+	// reads from the earliest answer: a replay only duplicates, a later one would lose.
+	#adopt(consumer: datagram.Consumer): datagram.Consumer {
+		for (const held of this.#heldDatagrams) {
+			if (!hooks.datagramSameTrack(held, consumer)) continue;
+			consumer.close();
+			return held.clone();
+		}
+		return consumer;
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
@@ -2020,7 +2231,7 @@ export class Publisher {
 		stream: Stream,
 		signal: AbortSignal,
 	): Promise<void> {
-		const track = front.datagrams(msg.track);
+		const track = this.#adopt(front.datagrams(msg.track));
 		track.setPriority(msg.priority);
 		const updates = (async () => {
 			for (;;) {
@@ -2053,12 +2264,16 @@ export class Publisher {
 	}
 
 	// Shared by dedicated lite-07 requests and the old SUBSCRIBE carry-both mapping.
-	async #runDatagrams(track: datagram.Consumer, options: { sub: bigint; stamp?: Stamp }): Promise<bigint> {
+	async #runDatagrams(
+		track: datagram.Consumer,
+		options: { sub: bigint; stamp?: Stamp; priority?: Getter<number> },
+	): Promise<bigint> {
 		if (!this.#datagramWriter) throw new Error("transport does not support datagrams");
 		const info = await track.info();
-		const rank = () => sendOrder({ priority: track.priority, publisher: info.priority });
+		const priority = options.priority ?? hooks.datagramPriority(track);
+		const rank = () => sendOrder({ priority: priority.peek(), publisher: info.priority });
 		const sender = this.#datagramWriter.open(rank());
-		const dispose = hooks.datagramPriority(track).subscribe(() => sender.setPriority(rank()));
+		const dispose = priority.subscribe(() => sender.setPriority(rank()));
 		const left = hooks.datagramClosed(track);
 		const { writer } = sender;
 		const maxSize = Math.min(DatagramMessage.MAX_SIZE, DatagramStream.maxDatagramSize(this.#quic));
@@ -2168,6 +2383,7 @@ export class Publisher {
 					version: this.version,
 					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned]),
+					group: true,
 				});
 			} finally {
 				opened.resolve();
@@ -2280,11 +2496,8 @@ export class Publisher {
 	 * @internal
 	 */
 	async runProbe(stream: Stream) {
-		// getStats is not yet in the TypeScript WebTransport type definitions.
-		const quic = this.#quic as unknown as {
-			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
-		};
-		if (!quic.getStats) {
+		const getStats = statsOf(this.#quic);
+		if (!getStats) {
 			// Best-effort: we can't supply bandwidth estimates, so close the
 			// whole bidi (FIN + STOP_SENDING) to let the peer release its end.
 			stream.close();
@@ -2335,7 +2548,7 @@ export class Publisher {
 				// unknown, so a transport exposing only one still has something to
 				// report. Anything this version can't carry is dropped here rather
 				// than by the encoder, so it reads as unknown to every check below.
-				const stats = await quic.getStats();
+				const stats = await getStats();
 				// `smoothedRtt` is a DOMHighResTimeStamp, i.e. a double, but the wire
 				// carries whole milliseconds and the varint encoder throws on a
 				// fractional value. Round before it ever reaches `Probe`.

@@ -12,7 +12,7 @@ use crate::support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Timestamp, Version, origin};
+use moq_net::{Timestamp, Version, origin};
 use support::harness::peer;
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -21,7 +21,7 @@ fn timed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -47,9 +47,9 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 		_pairs.push(peer(version, &pair[0], &pair[1]).await);
 	}
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let consumer = nodes[relays as usize].consume().request("room", None).await.unwrap();
@@ -172,9 +172,11 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	let relay = produce_origin(2);
 	let _pair = peer(version, &publisher, &relay).await;
 
-	let broadcast = publisher.create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let consumer = relay.consume().request("room", None).await.unwrap();

@@ -30,6 +30,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 defaults:
   run:
@@ -41,8 +42,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is just a safety net against a hung relay/client. The nix channel
-    # gets longer: nix.moq.dev serves the toolchain but not moq's packages at
-    # HEAD, and compiling them has taken 43 minutes.
+    # gets longer for a cold build when the pinned commit's closure misses
+    # nix.moq.dev (e.g. objects expired while Cache refresh was failing); compiling it
+    # has taken 43 minutes.
     timeout-minutes: ${{ matrix.channel == 'nix' && 75 || 45 }}
 
     # smoke.sh resolves the latest libmoq release via the GitHub API. Without a
@@ -74,7 +76,8 @@ jobs:
           - os: ubuntu-latest
             channel: docker
           # macOS cells temporarily disabled to cut CI spend (over budget this
-          # month). Re-enable by uncommenting; nothing else depends on them.
+          # month). Re-enable by uncommenting; the nix cell also needs its
+          # platform added to cache.yml's runtime job.
           # - os: macos-latest
           #   channel: cargo
           # - os: macos-latest
@@ -199,11 +202,23 @@ jobs:
 
       - name: Build moq from the flake (nix channel)
         if: matrix.channel == 'nix'
-        # --refresh so we always build the latest moq, never a cached eval; the
-        # moq flake is referenced ad-hoc here, so its version is never locked.
+        # Pin both builds to the newest main commit whose Cache run succeeded, so
+        # its runtime closures are already on nix.moq.dev: an unpinned ref can
+        # resolve a commit whose upload is still running (or was cancelled), and
+        # the relay and CLI could even resolve different commits.
+        # --print-build-logs is off, so a "building ...moq-relay" line here means
+        # a cache miss on a commit that was uploaded: the daily Cache refresh
+        # keeps that commit's closure inside the bucket's 30-day expiry
+        # (infra/nix/lifecycle.json), so check its runs before calling it a cache bug.
+        # The repository root, where `just gh` resolves.
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          relay=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq-relay')
-          cli=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq')
+          rev=$(just gh cache-rev)
+          echo "Building github:moq-dev/moq/$rev (newest main commit with a successful Cache run)"
+          relay=$(nix build --no-link --print-out-paths "github:moq-dev/moq/$rev#moq-relay")
+          cli=$(nix build --no-link --print-out-paths "github:moq-dev/moq/$rev#moq")
           {
             echo "RELAY_BIN=$relay/bin/moq-relay"
             echo "CLI_BIN=$cli/bin/moq"

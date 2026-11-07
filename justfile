@@ -49,6 +49,10 @@ dev:
 bench $BASE="" $TRANSPORTS="quic ws wss tcp tls":
     BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh "$BASE"
 
+# Run only the relay workloads, with the same paired rounds as `bench`.
+bench-relay $BASE="" $TRANSPORTS="quic ws wss tcp tls":
+    BENCH_TRANSPORTS="$TRANSPORTS" bench/run.sh --relay "$BASE"
+
 # Compare admitted suites across checkouts and worker counts; see bench/README.md.
 [positional-arguments]
 bench-local *args:
@@ -90,7 +94,7 @@ bench-browser *args:
 
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
-    bun install
+    uv run --no-project python sh/js/install.py update
     cargo install --locked cargo-shear cargo-sort cargo-semver-checks release-plz
 
 # Lints, compiles, and tests only the packages the branch changed plus
@@ -135,12 +139,12 @@ ci-select-platform $BASE="":
 
 # Check every supported source file; exclusions live in biome.jsonc.
 biome *args:
-    bun install --frozen-lockfile
+    uv run --no-project python sh/js/install.py frozen
     bun biome check --error-on-warnings {{ args }} .
 
 # Apply Biome's fixes; installs without a frozen lockfile, like the other fixers.
 biome-fix:
-    bun install
+    uv run --no-project python sh/js/install.py update
     bun biome check --error-on-warnings --write .
 
 # Auto-fix lint and formatting for what the branch changed since BASE.

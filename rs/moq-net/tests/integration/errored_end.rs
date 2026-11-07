@@ -10,7 +10,7 @@ use moq_net::track::Delay;
 use std::time::Duration;
 
 use moq_net::track::{Position, Subscription};
-use moq_net::{Error, Hop, StreamError, Timestamp, Version};
+use moq_net::{Error, StreamError, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,7 +18,8 @@ const GROUPS: u64 = 2;
 const FRAMES: [&[u8]; 2] = [b"first", b"second"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -78,12 +79,14 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let label = format!("{name} subscribe_first={subscribe_first}");
 		let version: Version = name.parse().unwrap();
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
-		let mut track = broadcast.create_track("video", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
+		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {
 			let mut group = track.append_group().unwrap();
 			for frame in FRAMES {

@@ -1,6 +1,6 @@
 import { Signal } from "@moq/signals";
 import { hooks } from "../internal.ts";
-import type { Demand } from "../track.ts";
+import type { Demand, Request } from "../track.ts";
 
 /** Resolve once no subscriber wants the track, or it closed. */
 export async function unwanted(demand: Demand): Promise<void> {
@@ -21,6 +21,18 @@ export async function abandoned(demand: Demand): Promise<void> {
 		await unwanted(demand);
 		if (isAbandoned(demand)) return;
 	}
+}
+
+/** Resolve once neither a subscriber nor an info lookup wants the request, or its track closed. */
+export async function unrequested(request: Request): Promise<void> {
+	const wanted = hooks.requestWanted(request);
+	const released = hooks.demandReleased(request.demand());
+	while (!isUnrequested(request)) await Signal.race(wanted, released);
+}
+
+/** Whether neither a subscriber nor an info lookup wants the request, or its track closed. */
+export function isUnrequested(request: Request): boolean {
+	return !hooks.requestWanted(request).peek() || hooks.demandReleased(request.demand()).peek() !== undefined;
 }
 
 /** Whether no subscriber wants the track now, or it closed. */

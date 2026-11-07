@@ -41,21 +41,46 @@ fn id(raw: i32) -> u32 {
 	raw as u32
 }
 
-/// Create a broadcast at `path` on `origin`, returning its publication and fill handles.
-fn create_broadcast(origin: u32, path: &[u8]) -> (u32, u32) {
-	let mut broadcast = 0;
-	let publication =
-		id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr() as *const c_char, path.len(), &mut broadcast) });
-	(publication, broadcast)
+/// Create a route at `path` on `origin`, returning its route and broadcast fill handles.
+fn create_route(origin: u32, path: &[u8], options: Option<&moq_route_options>) -> (u32, u32) {
+	let options = options.map_or(std::ptr::null(), |options| options as *const _);
+	let route = id(unsafe { moq_origin_route(origin, path.as_ptr() as *const c_char, path.len(), options) });
+	(route, id(moq_route_broadcast(route)))
 }
 
-/// Create a broadcast at `path` on `origin` and announce it, keeping only the fill handle:
-/// releasing the publication leaves the route up.
+/// Create a visible route at `path` on `origin`, keeping only the fill handle. The route handle
+/// stays registered for the rest of the test process, so the path stays announced until the
+/// broadcast closes.
 fn publish_broadcast(origin: u32, path: &[u8]) -> u32 {
-	let (publication, broadcast) = create_broadcast(origin, path);
-	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
-	assert_eq!(moq_publication_free(publication), 0);
-	broadcast
+	create_route(origin, path, None).1
+}
+
+/// Route options at `cost` under the stable `instance`, borrowing it.
+fn route_options(cost: u64, instance: &str, hidden: bool) -> moq_route_options {
+	moq_route_options {
+		cost,
+		instance: instance.as_ptr().cast(),
+		instance_len: instance.len(),
+		epoch: 0,
+		hidden,
+	}
+}
+
+/// Default route options, created hidden.
+fn hidden() -> moq_route_options {
+	route_options(0, "", true)
+}
+
+/// The instance a route serves.
+fn instance_of(route: u32) -> String {
+	let mut dst = moq_string {
+		data: std::ptr::null(),
+		len: 0,
+	};
+	assert_eq!(unsafe { moq_route_instance(route, &mut dst) }, 0);
+	unsafe { std::str::from_utf8(std::slice::from_raw_parts(dst.data.cast::<u8>(), dst.len)) }
+		.unwrap()
+		.to_string()
 }
 
 /// Request a published broadcast via `moq_origin_request` and return its handle.
@@ -166,7 +191,7 @@ fn announce_info(announced: u32) -> moq_announce_event {
 		captures: std::ptr::null(),
 		captures_len: 0,
 		kind: moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT,
-		route: moq_route {
+		route: moq_route_info {
 			hops: std::ptr::null(),
 			hops_len: 0,
 			cost: 0,
@@ -185,18 +210,8 @@ fn fresh_instance() -> String {
 	moq_net::Instance::random().to_string()
 }
 
-/// An announce route at `cost` under the stable `instance`, borrowing it.
-fn announce_route(cost: u64, instance: &str) -> moq_announce_route {
-	moq_announce_route {
-		cost,
-		instance: instance.as_ptr().cast(),
-		instance_len: instance.len(),
-		epoch: 0,
-	}
-}
-
 /// The instance a received route carries.
-fn route_instance(route: &moq_route) -> Option<String> {
+fn route_instance(route: &moq_route_info) -> Option<String> {
 	(route.instance.len > 0).then(|| unsafe {
 		std::str::from_utf8(std::slice::from_raw_parts(
 			route.instance.data.cast::<u8>(),
@@ -270,10 +285,22 @@ struct States {
 	ptr: *mut c_void,
 }
 
+/// The `user_data` behind [`States`].
+struct StateSink {
+	tx: mpsc::Sender<Seen>,
+	/// Set by the terminal snapshot. A snapshot after it panics in the callback, which aborts
+	/// the test whenever it lands rather than only within a window the test waits out.
+	closed: std::sync::atomic::AtomicBool,
+}
+
 impl States {
 	fn new() -> Self {
 		let (tx, rx) = mpsc::channel();
-		let ptr = Box::into_raw(Box::new(tx)) as *mut c_void;
+		let sink = StateSink {
+			tx,
+			closed: Default::default(),
+		};
+		let ptr = Box::into_raw(Box::new(sink)) as *mut c_void;
 		Self { rx, ptr }
 	}
 
@@ -281,15 +308,11 @@ impl States {
 		self.rx.recv_timeout(TIMEOUT).expect("state callback timed out")
 	}
 
-	/// Skip to the terminal snapshot, which must be the last one.
+	/// Skip to the terminal snapshot, which [`state_callback`] makes the last one.
 	fn recv_terminal(&self) -> Seen {
 		loop {
 			let seen = self.recv();
 			if seen.phase == moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED {
-				assert!(
-					self.rx.recv_timeout(Duration::from_millis(50)).is_err(),
-					"a snapshot followed the terminal one"
-				);
 				return seen;
 			}
 		}
@@ -298,13 +321,18 @@ impl States {
 
 impl Drop for States {
 	fn drop(&mut self) {
-		unsafe { drop(Box::from_raw(self.ptr as *mut mpsc::Sender<Seen>)) };
+		unsafe { drop(Box::from_raw(self.ptr as *mut StateSink)) };
 	}
 }
 
 extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connection_state) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) }.clone();
+	let sink = unsafe { &*(user_data as *const StateSink) };
 	let state = unsafe { &*state };
+	let terminal = state.phase == moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED;
+	assert!(
+		!sink.closed.swap(terminal, std::sync::atomic::Ordering::SeqCst),
+		"a snapshot followed the terminal one"
+	);
 	let mut protocol = moq_protocol_error {
 		scope: 0,
 		code: 0,
@@ -317,7 +345,7 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 			.into_owned()
 	});
 	let protocol = (failed && unsafe { moq_error_protocol(&mut protocol) } == 0).then_some(protocol);
-	let _ = tx.send(Seen {
+	let _ = sink.tx.send(Seen {
 		phase: state.phase,
 		connects: state.connects,
 		failure: state.failure,
@@ -413,6 +441,7 @@ fn publish_audio(broadcast: u32, format: moq_audio_format, init: &[u8], label: O
 fn publish_video(broadcast: u32, format: moq_video_format, init: &[u8], label: Option<&[u8]>) -> i32 {
 	let (label, label_len) = label_ptr(label);
 	let config = moq_video_init {
+		lower: 0,
 		format: format as u32,
 		init: init_ptr(init),
 		init_len: init.len(),
@@ -969,9 +998,10 @@ fn publish_catalog_config_null_pointer() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
-/// Enablement belongs to each catalog snapshot; holding a disabled rendition keeps its subscription usable.
+/// Enablement belongs to each catalog snapshot, and a snapshot that disables a rendition refuses to
+/// consume it.
 #[test]
-fn audio_enabled_snapshots_preserve_a_held_consumer() {
+fn audio_enabled_follows_each_snapshot() {
 	let origin = id(moq_origin_create());
 	let path = b"audio-enabled";
 	let broadcast = publish_broadcast(origin, path);
@@ -1029,9 +1059,11 @@ fn audio_enabled_snapshots_preserve_a_held_consumer() {
 		MOQ_ERROR_INVALID_POINTER
 	);
 
-	// A held rendition may be opened from a disabled snapshot, then re-enabled without resubscribing.
 	let frames = Callback::new();
-	let track = id(unsafe { moq_consume_audio(disabled, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) });
+	assert_eq!(
+		unsafe { moq_consume_audio(disabled, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) },
+		MOQ_ERROR_NOT_FOUND
+	);
 	set_enabled(true);
 	let resumed = id(catalogs.recv());
 	assert_eq!(
@@ -1044,6 +1076,7 @@ fn audio_enabled_snapshots_preserve_a_held_consumer() {
 		0
 	);
 	assert!(!unsafe { enabled.assume_init() });
+	let track = id(unsafe { moq_consume_audio(resumed, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) });
 	let payload = b"resumed-audio";
 	assert_eq!(
 		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(0)) },
@@ -2371,6 +2404,23 @@ fn raw_track_sparse_groups_and_known_end() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert!(moq_publish_track_group_at(track, 5) < 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+#[test]
+fn raw_track_skips_are_final() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"raw-track-skips-are-final");
+	let name = b"skipped";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	assert_eq!(moq_publish_track_skip(track, 1, 3), 0);
+	assert!(moq_publish_track_group_at(track, 2) < 0);
+	let group = id(moq_publish_track_group_at(track, 3));
+	assert_eq!(moq_publish_group_finish(group), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert!(moq_publish_track_skip(track, 4, 5) < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
@@ -3837,75 +3887,91 @@ fn announced_deactivation() {
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"deactivate/test";
-	let (publication, broadcast) = create_broadcast(origin, path);
-	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
+	let (route, broadcast) = create_route(origin, path, None);
+	let instance = instance_of(route);
 
 	let (announced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
+	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
 	assert_eq!(moq_origin_announced_free(announced_id), 0);
 
-	// Going non-live unannounces the broadcast without tearing it down: local
-	// consumers stop reaching it, exactly as peers do, until it announces again.
-	assert_eq!(moq_publication_unannounce(publication), 0);
+	// Withdrawing hides the route without tearing down its broadcast: local consumers stop
+	// reaching it, exactly as peers do, until it announces again.
+	assert_eq!(moq_route_withdraw(route), 0);
 
 	let (deactivated_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_ABSENT);
 	assert_eq!(moq_origin_announced_free(deactivated_id), 0);
-	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
+	assert!(request_once(origin, path) < 0, "a withdrawn broadcast is unroutable");
 
-	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
+	// Announcing again continues the same stream.
+	assert_eq!(moq_route_announce(route), 0);
 	let (reannounced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
+	assert_eq!(route_instance(&info.route), Some(instance));
 	assert_eq!(moq_origin_announced_free(reannounced_id), 0);
 	let _ = request_broadcast(origin, path);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
 	assert_eq!(moq_publish_close(broadcast), 0);
-	assert!(
-		unsafe { moq_publication_announce(publication, std::ptr::null()) } < 0,
-		"a closed broadcast cannot announce"
-	);
-	assert_eq!(moq_publication_free(publication), 0);
-	assert!(moq_publication_free(publication) < 0, "a freed publication is released");
+	assert!(moq_route_announce(route) < 0, "a closed broadcast cannot announce");
+	assert!(moq_route_broadcast(route) < 0, "a closed broadcast leaves the route");
+	assert_eq!(moq_route_free(route), 0);
+	assert!(moq_route_free(route) < 0, "a freed route is released");
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A publication outliving its closed broadcast cannot announce or withdraw the broadcast that
-/// replaced it at the same path.
+/// Freeing the route retracts it, though its broadcast handle stays the caller's to close.
 #[test]
-fn a_stale_publication_leaves_its_replacement_alone() {
+fn freeing_a_route_retracts_it() {
 	let origin = id(moq_origin_create());
-	let path = b"replaced";
-	let (stale, broadcast) = create_broadcast(origin, path);
-	assert_eq!(unsafe { moq_publication_announce(stale, std::ptr::null()) }, 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-
-	let (publication, replacement) = create_broadcast(origin, path);
-	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
-	assert!(unsafe { moq_publication_announce(stale, std::ptr::null()) } < 0);
-	assert!(moq_publication_unannounce(stale) < 0);
+	let path = b"freed";
+	let (route, broadcast) = create_route(origin, path, None);
 	let _ = request_broadcast(origin, path);
 
-	assert_eq!(moq_publication_free(stale), 0);
-	assert_eq!(moq_publication_free(publication), 0);
+	assert_eq!(moq_route_free(route), 0);
+	assert!(request_once(origin, path) < 0, "a freed route is unroutable");
+	assert!(moq_route_announce(route) < 0, "a freed route is released");
+	let track = b"data";
+	assert!(unsafe { moq_publish_track(broadcast, track.as_ptr().cast(), track.len(), std::ptr::null()) } > 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A route outliving its closed broadcast cannot announce, re-price, or withdraw the route that
+/// replaced it at the same path.
+#[test]
+fn a_closed_route_leaves_its_replacement_alone() {
+	let origin = id(moq_origin_create());
+	let path = b"replaced";
+	let (stale, broadcast) = create_route(origin, path, None);
+	assert_eq!(moq_publish_close(broadcast), 0);
+
+	let (route, replacement) = create_route(origin, path, None);
+	assert!(moq_route_announce(stale) < 0);
+	assert!(moq_route_set_cost(stale, 1) < 0);
+	assert_eq!(moq_route_withdraw(stale), 0);
+	let _ = request_broadcast(origin, path);
+
+	assert_eq!(moq_route_free(stale), 0);
+	assert_eq!(moq_route_free(route), 0);
 	assert_eq!(moq_publish_close(replacement), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
-fn create_broadcast_is_unroutable_until_announced() {
+fn a_hidden_route_is_unroutable_until_announced() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 
 	let path = b"quiet";
-	let (publication, broadcast) = create_broadcast(origin, path);
+	let (route, broadcast) = create_route(origin, path, Some(&hidden()));
 	// Nobody reaches it, locally included, until it announces.
-	assert!(request_once(origin, path) < 0, "an unannounced broadcast is unroutable");
+	assert!(request_once(origin, path) < 0, "a hidden route is unroutable");
 
-	assert_eq!(unsafe { moq_publication_announce(publication, std::ptr::null()) }, 0);
-	assert_eq!(moq_publication_free(publication), 0);
+	assert_eq!(moq_route_announce(route), 0);
 	let _ = request_broadcast(origin, path);
 	let (announced_id, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
@@ -3913,6 +3979,7 @@ fn create_broadcast_is_unroutable_until_announced() {
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0);
+	assert_eq!(moq_route_free(route), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -3920,15 +3987,14 @@ fn create_broadcast_is_unroutable_until_announced() {
 /// A locally announced route carries its cost and instance, and no hops: the hop chain is
 /// the origin's to build.
 #[test]
-fn announce_route_carries_cost_and_instance_without_hops() {
+fn route_options_carry_cost_and_instance_without_hops() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
-	let (publication, broadcast) = create_broadcast(origin, b"routed");
 
 	let instance = fresh_instance();
-	let route = announce_route(7, &instance);
-	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
+	let (route, broadcast) = create_route(origin, b"routed", Some(&route_options(7, &instance, false)));
+	assert_eq!(instance_of(route), instance);
 
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
@@ -3937,37 +4003,46 @@ fn announce_route_carries_cost_and_instance_without_hops() {
 	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
-	// A zeroed route is the default: cost 0 and the instance the publication minted.
-	let zeroed = moq_announce_route {
-		cost: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
-		epoch: 0,
-	};
-	let (publication2, broadcast2) = create_broadcast(origin, b"plain");
-	assert_eq!(unsafe { moq_publication_announce(publication2, &zeroed) }, 0);
+	// Re-pricing changes the route in place: the listing never reports it, but a fresh
+	// listing reads the new price under the same instance.
+	assert_eq!(moq_route_set_cost(route, 3), 0);
+	let repriced_cb = Callback::new();
+	let repriced_task =
+		id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), repriced_cb.ptr) });
+	let (announced, info) = repriced_cb.recv_route();
+	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
+	assert_eq!(info.route.cost, 3);
+	assert_eq!(route_instance(&info.route).as_ref(), Some(&instance));
+	assert_eq!(moq_origin_announced_free(announced), 0);
+	assert_eq!(moq_origin_announced_cancel(repriced_task), 0);
+	assert_eq!(repriced_cb.recv_announce_terminal(), 0);
+
+	// Zeroed options are the default: visible at once, cost 0, under a freshly minted instance.
+	let zeroed = route_options(0, "", false);
+	let (plain, broadcast2) = create_route(origin, b"plain", Some(&zeroed));
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.route.cost, 0);
-	assert!(route_instance(&info.route).is_some_and(|minted| minted != instance));
+	let minted = route_instance(&info.route).unwrap();
+	assert_ne!(minted, instance);
+	assert_eq!(minted, instance_of(plain));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv_announce_terminal(), 0);
-	assert_eq!(moq_publication_free(publication), 0);
-	assert_eq!(moq_publication_free(publication2), 0);
+	assert_eq!(moq_route_free(route), 0);
+	assert_eq!(moq_route_free(plain), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_publish_close(broadcast2), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Announcing under another instance is another stream: the path stays listed, and a follower
-/// is handed the new instance's broadcast.
+/// Another route at a path is another stream: the path stays listed, and a follower is
+/// handed the new route's broadcast.
 #[test]
-fn announce_under_a_new_instance_restarts() {
+fn a_new_route_at_a_path_restarts() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
-	let (publication, broadcast) = create_broadcast(origin, b"restarted");
 	let follow_cb = Callback::new();
 	let path = b"restarted";
 	let follow = id(unsafe {
@@ -3983,10 +4058,7 @@ fn announce_under_a_new_instance_restarts() {
 	});
 
 	let first = fresh_instance();
-	assert_eq!(
-		unsafe { moq_publication_announce(publication, &announce_route(0, &first)) },
-		0
-	);
+	let (first_route, first_broadcast) = create_route(origin, b"restarted", Some(&route_options(0, &first, false)));
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(route_instance(&info.route), Some(first));
@@ -3994,10 +4066,7 @@ fn announce_under_a_new_instance_restarts() {
 	let old = id(follow_cb.recv());
 
 	let second = fresh_instance();
-	assert_eq!(
-		unsafe { moq_publication_announce(publication, &announce_route(0, &second)) },
-		0
-	);
+	let (second_route, second_broadcast) = create_route(origin, b"restarted", Some(&route_options(0, &second, false)));
 	let new = id(follow_cb.recv());
 	assert_ne!(old, new);
 
@@ -4008,25 +4077,33 @@ fn announce_under_a_new_instance_restarts() {
 	// The path stayed present throughout: the cancel's terminal is the next callback.
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
 	assert_eq!(cb.recv(), 0, "a restart is not listed");
-	assert_eq!(moq_publication_free(publication), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_route_free(first_route), 0);
+	assert_eq!(moq_route_free(second_route), 0);
+	assert_eq!(moq_publish_close(first_broadcast), 0);
+	assert_eq!(moq_publish_close(second_broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Create a prefix route over `prefix` delivering its requests through `cb`.
+fn route_prefix(origin: u32, prefix: &[u8], cb: &Callback) -> u32 {
+	id(unsafe {
+		moq_origin_route_prefix(
+			origin,
+			prefix.as_ptr() as *const c_char,
+			prefix.len(),
+			std::ptr::null(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	})
 }
 
 #[test]
 fn dynamic_serves_a_request_under_a_prefix() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
-	let prefix = b"live";
-	let dynamic = id(unsafe {
-		moq_origin_requests(
-			origin,
-			prefix.as_ptr() as *const c_char,
-			prefix.len(),
-			Some(channel_callback),
-			cb.ptr,
-		)
-	});
+	let dynamic = route_prefix(origin, b"live", &cb);
+	assert!(moq_route_broadcast(dynamic) < 0, "a prefix route owns no broadcast");
 
 	let path = b"live/cam";
 	let req_cb = Callback::new();
@@ -4051,17 +4128,35 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let got = unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.data.cast::<u8>(), info.len)).unwrap() };
 	assert_eq!(got, "live/cam");
 
-	let mut served = 0;
-	let prepared = id(unsafe { moq_broadcast_request_prepare(request, &mut served) });
-	let publication = id(moq_broadcast_prepared_publish(prepared));
+	// Unreadable options leave the request to answer.
+	let invalid = [0xff];
+	let unreadable = moq_route_options {
+		instance: invalid.as_ptr().cast(),
+		instance_len: invalid.len(),
+		..hidden()
+	};
+	assert_eq!(
+		unsafe { moq_broadcast_request_route(request, &unreadable) },
+		crate::error::MOQ_ERROR_UTF8
+	);
+
+	// A hidden job route answers nobody until it announces, under its own fresh instance.
+	let job = id(unsafe { moq_broadcast_request_route(request, &hidden()) });
+	assert!(
+		unsafe { moq_broadcast_request_route(request, std::ptr::null()) } < 0,
+		"request is consumed"
+	);
+	assert_ne!(instance_of(job), instance_of(dynamic));
+	let served = id(moq_route_broadcast(job));
+	assert_eq!(moq_route_announce(job), 0);
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
-	// The answer's route is the publication's to withdraw.
-	assert_eq!(moq_publication_unannounce(publication), 0);
-	assert_eq!(moq_publication_free(publication), 0);
+	// The answer's route is the job's to withdraw.
+	assert_eq!(moq_route_withdraw(job), 0);
+	assert_eq!(moq_route_free(job), 0);
 
-	assert_eq!(moq_origin_requests_cancel(dynamic), 0);
-	assert!(moq_origin_requests_cancel(dynamic) < 0, "double-cancel should fail");
+	assert_eq!(moq_route_free(dynamic), 0);
+	assert!(moq_route_free(dynamic) < 0, "double-free should fail");
 	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(served), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4073,8 +4168,7 @@ fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
 	let broadcast = publish_broadcast(origin, b"source");
 	let held = consume_local(broadcast);
 	let cb = Callback::new();
-	let dynamic =
-		id(unsafe { moq_origin_requests(origin, b"live".as_ptr().cast(), 4, Some(channel_callback), cb.ptr) });
+	let dynamic = route_prefix(origin, b"live", &cb);
 	let result = Callback::new();
 	let _task = id(unsafe {
 		moq_origin_request(
@@ -4094,7 +4188,7 @@ fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
 	assert_eq!(moq_consume_close(held), 0, "source handle remains caller-owned");
 	result.recv_terminal();
 	assert_eq!(moq_consume_close(served), 0);
-	assert_eq!(moq_origin_requests_cancel(dynamic), 0);
+	assert_eq!(moq_route_free(dynamic), 0);
 	cb.recv_terminal();
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4105,10 +4199,11 @@ fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";
 	let code = unsafe {
-		moq_origin_requests(
+		moq_origin_route_prefix(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
+			std::ptr::null(),
 			None,
 			std::ptr::null_mut(),
 		)
@@ -4338,10 +4433,8 @@ fn track_demand_reports_current_state_before_close() {
 		.block_on(crate::publish::Publish::run_demand(on_demand, demand, closed))
 		.unwrap();
 	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert!(
-		cb.rx.recv_timeout(Duration::from_millis(50)).is_err(),
-		"the terminal is the spawner's to deliver"
-	);
+	// The loop has returned, so everything it delivered is already queued.
+	assert!(cb.rx.try_recv().is_err(), "the terminal is the spawner's to deliver");
 
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -5118,16 +5211,16 @@ fn follow_close_cancels() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Publish `path` on `origin` through `route` from Rust, keeping the Rust publication.
-fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::origin::Publication {
+/// Route `path` on `origin` with `options` from Rust, keeping the Rust route.
+fn publish(origin: u32, path: &str, options: moq_net::origin::RouteOptions) -> moq_net::origin::Route {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
-	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
+	State::lock().origin.get(origin).unwrap().route(path, options).unwrap()
 }
 
-/// Publish `path` on `origin` under a fresh instance, as each run of a publisher does.
-fn publish_run(origin: u32, path: &str) -> moq_net::origin::Publication {
-	publish(origin, path, moq_net::origin::Route::default())
+/// Route `path` on `origin` under a fresh instance, as each run of a publisher does.
+fn publish_run(origin: u32, path: &str) -> moq_net::origin::Route {
+	publish(origin, path, moq_net::origin::RouteOptions::default())
 }
 
 /// Another publisher instance taking the path delivers a fresh handle on the same wait.
@@ -5162,16 +5255,22 @@ fn follow_delivers_a_restart() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Another instance taking over while the wait resolves is the one it delivers, so the restart
-/// that announced it must not deliver it again. `dynamic_at` is where the route the wait first
-/// resolves through covers the path: above it, the takeover's restart lands while resolving;
-/// at it, the origin holds that restart for the default [`moq_net::origin::Config::update_hold`].
+/// Another instance taking over while the wait resolves is the one it delivers, and the cancel's
+/// terminal is the next callback. `dynamic_at` is where the route the wait first resolves
+/// through covers the path: above it, the takeover's restart lands while resolving; at it, the
+/// origin holds that restart. The hold runs on the runtime's clock, so moq-net's follow tests
+/// prove on a simulated clock that the held restart never delivers it again.
 fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 	let origin = id(moq_origin_create());
 	let dynamic = {
 		let _runtime = crate::ffi::RUNTIME.enter();
 		let origin = crate::Id::try_from(origin).unwrap();
-		State::lock().origin.get(origin).unwrap().requests(dynamic_at).unwrap()
+		State::lock()
+			.origin
+			.get(origin)
+			.unwrap()
+			.route_prefix(dynamic_at, moq_net::origin::RouteOptions::default())
+			.unwrap()
 	};
 	let cb = Callback::new();
 	let path = b"live";
@@ -5188,15 +5287,9 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 	});
 
 	// The wait is on the dynamic route's answer when the exact path takes over under another instance.
-	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
-	let takeover = publish(origin, "live", moq_net::origin::Route::default());
+	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
+	let takeover = publish_run(origin, "live");
 	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the takeover was delivered twice"
-	);
 
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
@@ -5251,7 +5344,7 @@ fn an_instance_pins_request_and_follow() {
 	let first = publish(
 		origin,
 		"live",
-		moq_net::origin::Route::default().with_instance(instance.clone(), 0),
+		moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0),
 	);
 	let instance = instance.to_string();
 
@@ -5285,12 +5378,6 @@ fn an_instance_pins_request_and_follow() {
 		)
 	});
 	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the follower delivered another instance"
-	);
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
@@ -5299,10 +5386,15 @@ fn an_instance_pins_request_and_follow() {
 }
 
 /// Serve `prefix` on `origin` dynamically.
-fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Requests {
+fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Route {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
-	State::lock().origin.get(origin).unwrap().requests(prefix).unwrap()
+	State::lock()
+		.origin
+		.get(origin)
+		.unwrap()
+		.route_prefix(prefix, moq_net::origin::RouteOptions::default())
+		.unwrap()
 }
 
 /// Wait for the broadcast at `path` on `origin`, delivering each instance through `cb`.
@@ -5369,16 +5461,16 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	});
 	let recv = || rx.recv_timeout(TIMEOUT).expect("callback timed out");
 
-	let route = moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0);
-	let run = publish(origin, "live", route.clone());
+	let options = moq_net::origin::RouteOptions::default().with_instance(moq_net::Instance::random(), 0);
+	let run = publish(origin, "live", options);
 	let first = id(recv());
 
 	// Hold the wait inside that delivery so both changes are on hand when it next looks: the
 	// same stream announcing again after its route left is still a gap.
 	{
 		let _runtime = crate::ffi::RUNTIME.enter();
-		run.unannounce();
-		run.announce(route.clone()).unwrap();
+		run.withdraw();
+		run.announce().unwrap();
 	}
 	release.send(()).unwrap();
 	assert_eq!(recv(), FOLLOW_OFFLINE, "the gap is reported before the return");
@@ -5392,9 +5484,9 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Freeing a delivered handle changes nothing about the path, so the wait delivers nothing
-/// until another instance takes it over. The takeover's restart reached the follower before
-/// its resolution delivered the handle, so no restart is owed.
+/// Freeing a delivered handle changes nothing about the path, and another instance taking it
+/// over is delivered. moq-net's follow tests prove on a simulated clock that the freed
+/// takeover is never delivered again.
 #[test]
 fn follow_waits_for_another_instance_after_a_freed_takeover() {
 	let origin = id(moq_origin_create());
@@ -5402,57 +5494,15 @@ fn follow_waits_for_another_instance_after_a_freed_takeover() {
 	let cb = Callback::new();
 	let task = follow(origin, b"live", &cb);
 
-	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
+	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
 	let takeover = publish_run(origin, "live");
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the freed takeover was delivered again"
-	);
 
 	let next = publish_run(origin, "live");
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 	drop((takeover, next, dynamic));
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// The route a wait resolves through leaving, and another instance arriving before it resolves,
-/// reach the follower as an end and a start after the wait delivers the newcomer. That start
-/// must not deliver it again.
-#[test]
-fn follow_delivers_a_gap_while_resolving_once() {
-	let origin = id(moq_origin_create());
-	let dynamic = serve_dynamic(origin, "");
-	let cb = Callback::new();
-	let task = follow(origin, b"live", &cb);
-
-	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
-	{
-		let _runtime = crate::ffi::RUNTIME.enter();
-		drop(dynamic);
-	}
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "the test thread has no runtime; it waits out the hold on the C API's real runtime"
-	)]
-	std::thread::sleep(moq_net::origin::Config::default().update_hold * 2);
-	let arrival = publish(origin, "live", moq_net::origin::Route::default());
-	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the arrival was delivered twice"
-	);
-
-	assert_eq!(moq_consume_close(delivered), 0);
-	assert_eq!(moq_origin_follow_cancel(task), 0);
-	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
-	drop(arrival);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -5795,7 +5845,7 @@ fn video_raw_publish_consume() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -5976,7 +6026,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	let encode_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6095,7 +6145,7 @@ fn video_raw_publish_from_many_threads() {
 		// An explicit ceiling so the retunes below stay under the rate the encoder
 		// opened at, which openh264 requires.
 		bitrate: 1_000_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6167,7 +6217,7 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6246,7 +6296,7 @@ fn closing_a_broadcast_does_not_block_unrelated_calls_behind_its_encoder() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6300,7 +6350,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6341,7 +6391,7 @@ fn video_raw_publish_rejects_invalid_config() {
 	let valid_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7433,7 +7483,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 4_000_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7491,7 +7541,7 @@ fn encode_video_rung_needs_a_grant_and_a_band() {
 	let output = |bitrate| moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7534,7 +7584,7 @@ fn encode_video_ceiling_wakes_a_rung_above() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 500_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7636,7 +7686,7 @@ fn announce_route_hops_cross_a_relay_session() {
 	let sink = id(moq_origin_create());
 	let hops = {
 		let state = State::lock();
-		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().id())
+		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().get())
 	};
 	let server_cb = Callback::new();
 	let (server, addr, fingerprint) = listen(&server_cb);
@@ -7660,14 +7710,7 @@ fn announce_route_hops_cross_a_relay_session() {
 
 	let announced_cb = Callback::new();
 	let task = id(unsafe { moq_origin_announced(sink, std::ptr::null(), Some(channel_callback), announced_cb.ptr) });
-	let (publication, broadcast) = create_broadcast(source, b"relayed");
-	let route = moq_announce_route {
-		cost: 7,
-		instance: std::ptr::null(),
-		instance_len: 0,
-		epoch: 0,
-	};
-	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
+	let (route, broadcast) = create_route(source, b"relayed", Some(&route_options(7, "", false)));
 	let (announced, info) = announced_cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_PRESENT);
 	assert_eq!(
@@ -7696,7 +7739,7 @@ fn announce_route_hops_cross_a_relay_session() {
 	}
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
-	assert_eq!(moq_publication_free(publication), 0);
+	assert_eq!(moq_route_free(route), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	for origin in [source, relay, sink] {
 		assert_eq!(moq_origin_close(origin), 0);
@@ -8218,8 +8261,8 @@ fn track_request_media_carries_hints() {
 		hint: moq_audio_hint {
 			bitrate: 96_000,
 			has_bitrate: true,
-			group_duration_us: 100_000,
-			has_group_duration: true,
+			join_us: 100_000,
+			has_join: true,
 		},
 	};
 	let audio = id(unsafe { moq_track_request_audio(request, &audio_config) });
@@ -8229,6 +8272,7 @@ fn track_request_media_carries_hints() {
 	let request = id(request_cb.recv());
 	let h264 = h264_init();
 	let video_config = moq_video_init {
+		lower: 0,
 		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
 		init: h264.as_ptr(),
 		init_len: h264.len(),
@@ -8237,8 +8281,8 @@ fn track_request_media_carries_hints() {
 		hint: moq_video_hint {
 			bitrate: 2_000_000,
 			has_bitrate: true,
-			group_duration_us: 3_000_000,
-			has_group_duration: true,
+			join_us: 3_000_000,
+			has_join: true,
 			..moq_video_hint::default()
 		},
 	};
@@ -8262,7 +8306,7 @@ fn track_request_media_carries_hints() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A hint flag set with a 0 value, or a group duration past what milliseconds hold for a
+/// A hint flag set with a 0 value, or a join past what milliseconds hold for a
 /// JavaScript reader, is an invalid config rather than a second encoding of "absent".
 #[test]
 fn invalid_hints_are_refused() {
@@ -8283,6 +8327,7 @@ fn invalid_hints_are_refused() {
 	};
 	let video = |hint: moq_video_hint| {
 		let config = moq_video_init {
+			lower: 0,
 			format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
 			init: h264.as_ptr(),
 			init_len: h264.len(),
@@ -8304,28 +8349,28 @@ fn invalid_hints_are_refused() {
 	);
 	assert_eq!(
 		audio(moq_audio_hint {
-			has_group_duration: true,
+			has_join: true,
 			..moq_audio_hint::default()
 		}),
 		invalid,
-		"audio group duration 0"
+		"audio join 0"
 	);
 	assert_eq!(
 		audio(moq_audio_hint {
-			group_duration_us: u64::MAX,
-			has_group_duration: true,
+			join_us: u64::MAX,
+			has_join: true,
 			..moq_audio_hint::default()
 		}),
 		invalid,
-		"audio group duration past milliseconds"
+		"audio join past milliseconds"
 	);
 	assert_eq!(
 		video(moq_video_hint {
-			has_group_duration: true,
+			has_join: true,
 			..moq_video_hint::default()
 		}),
 		invalid,
-		"video group duration 0"
+		"video join 0"
 	);
 	assert_eq!(
 		video(moq_video_hint {
@@ -8343,10 +8388,10 @@ fn invalid_hints_are_refused() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A group duration hint is the track's join interval, declared once its first window closes,
+/// A join hint is the track's join interval, declared once its first window closes,
 /// rather than the shorter groups it measured.
 #[test]
-fn group_duration_hint_declares_the_join_interval() {
+fn join_hint_declares_the_join_interval() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"group-duration");
 	let init = opus_head();
@@ -8357,8 +8402,8 @@ fn group_duration_hint_declares_the_join_interval() {
 		label: std::ptr::null(),
 		label_len: 0,
 		hint: moq_audio_hint {
-			group_duration_us: 500_000,
-			has_group_duration: true,
+			join_us: 500_000,
+			has_join: true,
 			..moq_audio_hint::default()
 		},
 	};
@@ -8389,6 +8434,104 @@ fn group_duration_hint_declares_the_join_interval() {
 	);
 
 	assert_eq!(moq_publish_media_finish(hinted), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn preencoded_rungs_and_rate_control() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"preencoded-rungs");
+	let init = h264_init();
+	let config = |lower| moq_video_init {
+		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		init: init.as_ptr(),
+		init_len: init.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_video_hint::default(),
+		lower,
+	};
+	let low = id(unsafe { moq_publish_video(broadcast, &config(0)) });
+	let high = id(unsafe { moq_publish_video(broadcast, &config(low)) });
+	{
+		let state = State::lock();
+		assert_eq!(
+			state
+				.publish
+				.media_video_priority(crate::ffi::parse_id(high).unwrap())
+				.unwrap(),
+			state
+				.publish
+				.media_video_priority(crate::ffi::parse_id(low).unwrap())
+				.unwrap() - 1
+		);
+	}
+	assert_eq!(moq_publish_media_set_enabled(high, false), 0);
+	assert_eq!(
+		published_catalog(broadcast)
+			.video
+			.renditions
+			.values()
+			.filter(|r| !r.enabled)
+			.count(),
+		1
+	);
+	assert_eq!(moq_publish_media_set_enabled(high, true), 0);
+	assert!(
+		published_catalog(broadcast)
+			.video
+			.renditions
+			.values()
+			.all(|r| r.enabled)
+	);
+	let (allocator, estimate) = test_allocator();
+	let reservation = id(moq_allocator_reserve_media(allocator, high, 4_000_000));
+	let control = id(moq_rate_control_create(
+		reservation,
+		moq_rate_policy {
+			max_bps: 4_000_000,
+			lower_bps: 2_000_000,
+			has_lower: true,
+		},
+	));
+	let mut target = moq_rate_target {
+		enabled: false,
+		bitrate_bps: 0,
+		changed: true,
+	};
+	assert!(
+		moq_rate_control_create(
+			reservation,
+			moq_rate_policy {
+				max_bps: 0,
+				lower_bps: 0,
+				has_lower: false,
+			},
+		) < 0
+	);
+	assert_eq!(unsafe { moq_rate_control_target(control, &mut target) }, 0);
+	assert!(target.enabled);
+	assert_eq!(target.bitrate_bps, 4_000_000);
+	assert!(!target.changed);
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 0);
+	assert!(!target.changed);
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
+		.unwrap();
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 0);
+	assert!(target.changed);
+	// Without a probing session a rung must stay on so its grant can recover.
+	assert!(target.enabled);
+	assert_eq!(target.bitrate_bps, 1_000_000);
+	assert_eq!(unsafe { moq_rate_control_update(control, &mut target) }, 0);
+	assert!(!target.changed);
+	assert_eq!(moq_reservation_close(reservation), 0);
+	assert_eq!(moq_rate_control_close(control), 0);
+	assert_eq!(moq_allocator_close(allocator), 0);
+	assert_eq!(moq_publish_media_finish(high), 0);
+	assert!(unsafe { moq_publish_video(broadcast, &config(high)) } < 0);
+	assert_eq!(moq_publish_media_finish(low), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

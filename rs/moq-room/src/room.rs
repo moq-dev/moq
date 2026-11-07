@@ -69,7 +69,8 @@ impl Room {
 		}
 	}
 
-	/// Poll for the next remote camera/screen (un)announce.
+	/// The next remote camera/screen (un)announce, or `None` once the announce stream ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Event>> {
 		loop {
 			match self.announced.poll_next(waiter) {
@@ -136,26 +137,21 @@ impl Room {
 		}
 		Poll::Pending
 	}
-
-	/// Wait for the next remote camera/screen (un)announce.
-	pub async fn next(&mut self) -> Option<Event> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::{Path, origin::Route};
+	use moq_net::Path;
 
 	fn origin() -> origin::Producer {
 		moq_tokio::origin::spawn()
 	}
 
-	fn publish(origin: &origin::Producer, path: &str) -> origin::Publication {
-		let broadcast = origin.create_broadcast(path).expect(path);
-		broadcast.announce(Route::default()).expect("announce");
-		broadcast
+	fn publish(origin: &origin::Producer, path: &str) -> origin::Route {
+		origin
+			.route(path, moq_net::origin::RouteOptions::default())
+			.expect(path)
 	}
 
 	#[tokio::test]
@@ -188,8 +184,10 @@ mod tests {
 		let origin = origin();
 		let mut room = Room::new(&origin.consume(), None);
 
-		let claim = origin.requests("bob/camera").expect("claim");
-		let (request, nothing) = tokio::join!(claim.requested_broadcast(), kio::clock::timeout(wait, room.next()));
+		let claim = origin
+			.route_prefix("bob/camera", moq_net::origin::RouteOptions::default())
+			.expect("claim");
+		let (request, nothing) = tokio::join!(claim.requested(), kio::clock::timeout(wait, room.next()));
 		assert!(nothing.is_err(), "nothing serves bob yet");
 		request.expect("requested").reject(moq_net::Error::NotFound);
 		// The refusal yields nothing.

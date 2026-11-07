@@ -9,6 +9,9 @@ class MockChannel extends EventTarget {
 	protocol: string;
 	partner!: MockChannel;
 	autoDrain = true;
+	// Chromium reports an announced channel open before its SCTP stream is, and drops what is
+	// sent in between while still counting it in bufferedAmount.
+	stream = true;
 	records: Uint8Array[] = [];
 	listeners = new Set<EventListenerOrEventListenerObject>();
 	constructor(protocol: string) {
@@ -40,9 +43,13 @@ class MockChannel extends EventTarget {
 		const record = data.slice();
 		this.records.push(record);
 		this.bufferedAmount += record.byteLength;
+		if (!this.stream) return;
 		queueMicrotask(() => {
-			if (this.partner.readyState === "open")
+			if (this.partner.readyState === "open") {
+				// A delivered record means the stream has opened.
+				this.partner.stream = true;
 				this.partner.dispatchEvent(new MessageEvent("message", { data: record.buffer }));
+			}
 			if (this.autoDrain) this.drain();
 		});
 	}

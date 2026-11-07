@@ -1,6 +1,6 @@
 import { Signal } from "@moq/signals";
 import type { Options, Routes } from "./announced";
-import type { Route } from "./hop";
+import type { WireRoute } from "./hop";
 import type * as Path from "./path";
 
 /** A closeable announcement snapshot for tests and benchmarks. @internal */
@@ -10,7 +10,7 @@ export async function announcedView(
 	options?: Options,
 ) {
 	const stream = origin.routes(scope, options);
-	const value = new Signal<ReadonlyMap<Path.Valid, Route>>(new Map());
+	const value = new Signal<ReadonlyMap<Path.Valid, WireRoute>>(new Map());
 	const done = (async () => {
 		for await (const event of stream)
 			value.update((previous) => {

@@ -604,6 +604,27 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
+ * Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
+ * SUBSCRIBE_DROP, which names the `Update` in effect when it was given up; SUBSCRIBE and
+ * SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07; earlier versions name every
+ * hole in SUBSCRIBE_DROP.
+ */
+export function hasSkip(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
  * Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end keeps its
  * history across a hop. Added in lite-07; earlier versions can only reset.
  */
@@ -644,6 +665,22 @@ export function wireTimescale(version: Version, timescale: Timescale | null | un
 
 /** Whether discovery streams mark their initial set with SYNCED rather than a count. */
 export function hasSynced(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether SETUP may carry a route key proof, added in lite-07. */
+export function hasRouteKey(version: Version): boolean {
+	// Explicitly list older versions so future versions default to carrying it.
 	switch (version) {
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:

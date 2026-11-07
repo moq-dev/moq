@@ -9,7 +9,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version, origin, setup::Extensions};
+use moq_net::{Version, origin, setup::Extensions};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
@@ -22,7 +22,7 @@ const MOQT: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 const AUTH: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -86,8 +86,10 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 			}
 			let pair = connect_mock(options).await;
 
-			let broadcast = publisher.create_broadcast("room/cam").unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher
+				.route("room/cam", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			broadcast.announce().unwrap();
 			kio::clock::sleep(SETTLE).await;
 
 			assert!(announced(&subscriber, "room/cam"), "{context}: never announced");

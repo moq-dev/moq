@@ -255,6 +255,44 @@ for (const version of VERSIONS) {
 		await receiving;
 	});
 
+	test(`${version}: a FETCH stops once its last reader narrows past the group, unread`, async () => {
+		const fx = fixture(version);
+		const reader = fx.broadcast.track("video").subscribe(ranges(1n, 2n));
+		fx.readers.push(reader);
+		const pending = reader.ordered().nextGroup();
+		await fx.status();
+		const { stream, request } = await fx.fetch();
+		await fx.answer(stream, 1n);
+		const prefix = await Writer.collect(version, async (writer) => {
+			await writer.u62(request.requestId);
+			await new FetchFrame({ payload: new Uint8Array([42]), priority: 0 }).encode(
+				writer,
+				{ group: 1n, object: 0, first: true },
+				undefined,
+				version,
+			);
+		});
+		const cancelled = Promise.withResolvers<unknown>();
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(prefix);
+			},
+			cancel: cancelled.resolve,
+		});
+		// A second reader of the group buffers its own copy of it.
+		const other = fx.broadcast.track("video").subscribe(ranges(1n, 2n));
+		fx.readers.push(other);
+		const receiving = fx.subscriber.handleFetch(new Reader(readable, new Uint8Array(), version));
+		const group = await pending;
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
+		group?.close();
+		reader.close();
+		// It never reads the group, and narrows past it: nobody will.
+		other.update(ranges(2n, 2n));
+		await cancelled.promise;
+		await receiving;
+	});
+
 	test(`${version}: cancellation before FETCH_OK ends the outstanding request`, async () => {
 		const fx = fixture(version);
 		const controller = new AbortController();

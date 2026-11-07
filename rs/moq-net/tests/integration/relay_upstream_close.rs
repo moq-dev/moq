@@ -19,7 +19,7 @@ use moq_net::track::Delay;
 use std::time::Duration;
 
 use moq_net::track::Subscription;
-use moq_net::{Error, Hop, Timestamp, Version};
+use moq_net::{Error, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -49,7 +49,8 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -93,15 +94,18 @@ async fn read(mut sub: moq_net::track::Subscriber) -> Outcome {
 async fn round(name: &str, end: End) -> Vec<Outcome> {
 	let version: Version = name.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let tracks: Vec<_> = (0..TRACKS)
 		.map(|index| {
 			broadcast
+				.broadcast()
 				.create_track(format!("track{index}").as_str(), timed())
 				.unwrap()
 		})
 		.collect();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);

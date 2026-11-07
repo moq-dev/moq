@@ -8,7 +8,6 @@ use std::{
 use bytes::{BufMut, Bytes};
 
 use super::Handles;
-use crate::quic::Error as SessionError;
 use crate::quic::driver::recv;
 
 /// A stream that can be used to receive bytes. See [`crate::quic::recv::Stream`].
@@ -82,12 +81,8 @@ impl Stream {
 		self.stop_mut(code);
 	}
 
-	/// Wait until the stream ends after its bytes are read, the peer resets it, or the session closes.
-	pub async fn closed(&mut self) -> Result<(), Error> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until the stream ends after its bytes are read, the peer resets it, or the session closes.
+	/// Resolves once the stream ends after its bytes are read, the peer resets it, or the session closes.
+	#[kio::wrapper]
 	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let close = &self.close;
 		let Some(inner) = &mut self.inner else {
@@ -171,12 +166,12 @@ fn map_error(close: &Handles, e: recv::Error) -> Error {
 		recv::Error::Reset(code) => match close.decode_stream_code(code) {
 			Some(code) => Error::Reset(code),
 			None => match close.session_gone(code) {
-				Some(err) => Error::SessionError(err),
+				Some(err) => Error::Session(err),
 				None => Error::InvalidReset(code),
 			},
 		},
 		e => match Error::from(e) {
-			Error::SessionError(e) => Error::SessionError(close.map(e)),
+			Error::Session(e) => Error::Session(close.map(e)),
 			e => e,
 		},
 	}
@@ -216,7 +211,7 @@ impl moq_net::transport::poll::Lease for recv::Lease<'_> {
 pub enum Error {
 	/// The session carrying the stream failed.
 	#[error("session error: {0}")]
-	SessionError(#[from] SessionError),
+	Session(#[from] super::Error),
 
 	/// The peer reset this stream with its application code.
 	#[error("RESET_STREAM: {0}")]
@@ -256,7 +251,7 @@ impl From<crate::quic::recv::Error> for Error {
 				Some(code) => Error::Reset(code),
 				None => Error::InvalidReset(code),
 			},
-			DriverError::Connection(e) => Error::SessionError(e),
+			DriverError::Connection(e) => Error::Session(e.into()),
 			DriverError::Evicted => Error::Evicted,
 			DriverError::FinishedEarly(n) => Error::FinishedEarly(n),
 			DriverError::TooLong => Error::TooLong,
@@ -269,12 +264,12 @@ impl moq_net::transport::Error for Error {
 	fn close_kind(&self) -> moq_net::transport::CloseKind {
 		match self {
 			Self::Evicted => moq_net::transport::CloseKind::Evicted,
-			Self::SessionError(e) => e.close_kind(),
+			Self::Session(e) => e.close_kind(),
 			_ => moq_net::transport::CloseKind::Transport,
 		}
 	}
 	fn session_error(&self) -> Option<(u32, String)> {
-		if let Error::SessionError(e) = self {
+		if let Error::Session(e) = self {
 			return e.session_error();
 		}
 

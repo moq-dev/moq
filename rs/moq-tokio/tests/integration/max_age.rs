@@ -9,7 +9,8 @@ const AGES: [Option<Duration>; 3] = [None, Some(Duration::ZERO), Some(Duration::
 async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::Result<()> {
 	let mut cache = moq_net::origin::Config::default();
 	cache.cache_duration = Duration::from_secs(1);
-	let relay = moq_tokio::origin::spawn_config(cache);
+	// A relay carries what it learned on to its other peers (moq-lite-07).
+	let relay = moq_tokio::origin::spawn_config(cache).with_proxy(true);
 	let ws = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?)
 		.await?
 		.with_protocols([version.alpn()])?;
@@ -36,13 +37,17 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 		Ok::<_, anyhow::Error>(())
 	});
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("age")?;
+	let broadcast = publisher.route("age", moq_net::origin::RouteOptions::hidden())?;
 	let tracks: Vec<_> = AGES
 		.into_iter()
 		.enumerate()
-		.map(|(i, age)| broadcast.create_track(i.to_string(), moq_net::track::Info::default().with_max_age(age)))
+		.map(|(i, age)| {
+			broadcast
+				.broadcast()
+				.create_track(i.to_string(), moq_net::track::Info::default().with_max_age(age))
+		})
 		.collect::<Result<_, _>>()?;
-	broadcast.announce(Default::default())?;
+	broadcast.announce()?;
 	let subscriber = moq_tokio::origin::spawn();
 	let consumer = subscriber.consume();
 	let mut announced = consumer.announced();
@@ -136,7 +141,9 @@ async fn max_age_relay_rust() {
 #[tokio::test]
 #[ignore = "requires Bun; run by just test max-age in the interop workflow"]
 async fn max_age_relay_javascript() {
-	for version in ["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+	// moq-lite-07-wip returns once js/net speaks its route layer
+	// (quest/m2/cluster-routing/routes/js.md).
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		for publish in [false, true] {
 			kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap(), Some(publish)))
 				.await

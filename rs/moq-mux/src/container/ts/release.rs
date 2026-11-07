@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
-use crate::catalog::{CatalogFormat, Stream};
+#[cfg(feature = "async")]
+use crate::catalog::CatalogFormat;
+use crate::catalog::Stream;
 use crate::container::consumer::Event;
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
@@ -41,35 +43,32 @@ pub struct Release {
 impl Release {
 	/// Subscribe to the catalog of `source`, waiting for the `m2ts` section that names its track.
 	///
+	/// Each object is written `delay` after its PCR time; late objects are dropped.
+	///
 	/// Fails for [`CatalogFormat::Msf`], which has no `m2ts` section.
-	pub async fn new(source: crate::Source, catalog_format: CatalogFormat) -> crate::Result<Self> {
+	#[cfg(feature = "async")]
+	pub async fn new(source: crate::Source, catalog_format: CatalogFormat, delay: Duration) -> crate::Result<Self> {
 		if catalog_format == CatalogFormat::Msf {
 			return Err(
 				anyhow::anyhow!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into(),
 			);
 		}
-		let catalog = source.catalog(catalog_format).await?;
-		let mut release = Self {
+		let mut subscribing = crate::catalog::Subscribing::new(&source.broadcast(), catalog_format);
+		let catalog = kio::wait(|waiter| subscribing.poll_ok(waiter)).await?;
+		let mut jitter = jitter::Buffer::new(delay);
+		jitter.expect([()]);
+		let release = Self {
 			source,
 			catalog: Some(catalog),
 			track: None,
 			subscribed: kio::clock::now(),
 			finished: false,
 			released: false,
-			delay: Duration::ZERO,
-			jitter: jitter::Buffer::new(Duration::ZERO),
+			delay,
+			jitter,
 			replay: false,
 		};
-		release.jitter = release.jitter();
 		Ok(release)
-	}
-
-	/// Write each object this long after its PCR time. An object that arrives later is dropped.
-	/// Defaults to [`Duration::ZERO`], which holds nothing.
-	pub fn with_delay(mut self, delay: Duration) -> Self {
-		self.delay = delay;
-		self.jitter = self.jitter();
-		self
 	}
 
 	/// Read the track from the oldest group the delay still reaches instead of the live edge,
@@ -81,6 +80,7 @@ impl Release {
 		self
 	}
 
+	#[cfg(test)]
 	fn jitter(&self) -> jitter::Buffer<(), Frame> {
 		let mut jitter = jitter::Buffer::new(self.delay);
 		#[cfg(test)]
@@ -123,11 +123,7 @@ impl Release {
 
 	/// The next object, at its time: whole TS packets, verbatim, stamped with the PCR time of
 	/// its first byte. Returns `None` once the track, or a catalog that never named one, ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Frame>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next original MPEG-TS frame at its release time, or `None` at end.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {

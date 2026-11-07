@@ -29,9 +29,17 @@ export class Backlog {
 		while (this.#samples > this.#limit) this.#evict();
 	}
 
-	/** Drop expired frames even when capture has stopped delivering samples. */
-	expire(now: Micro): void {
-		while (this.deadline !== undefined && this.deadline <= now) this.#evict();
+	/**
+	 * Drop expired frames even when capture has stopped delivering samples. A `budget` shorter than
+	 * the retention also drops what a subscriber that far behind the live edge would find stale.
+	 */
+	expire(now: Micro, budget: Micro = this.#retention): void {
+		const age = Math.min(budget, this.#retention);
+		for (;;) {
+			const first = this.#frames[this.#head];
+			if (!first || first.end + age > now) return;
+			this.#evict();
+		}
 	}
 
 	/** Whether frames were dropped unencoded since the last call, leaving a gap in the timeline. */

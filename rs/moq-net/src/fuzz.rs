@@ -82,6 +82,54 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
+/// A private frame batch for the model's batch read and write benchmarks.
+#[derive(Default)]
+pub struct FrameBatch<const N: usize>(frame::Buffer<N>);
+
+impl<const N: usize> FrameBatch<N> {
+	/// An empty batch for the private frame benchmark.
+	pub fn new() -> Self {
+		Self(frame::Buffer::new())
+	}
+	/// Queue a whole frame for the batch write benchmark.
+	pub fn push(&mut self, frame: frame::Frame) -> Result<(), frame::Frame> {
+		self.0.push(frame)
+	}
+	/// Write the queued frames through the private batch writer.
+	pub fn write(&mut self, group: &mut group::Producer) -> crate::Result<()> {
+		group.write_frames(&mut self.0)
+	}
+	/// Read through the private whole-frame batch reader.
+	pub async fn read(&mut self, group: &mut group::Consumer) -> crate::Result<&mut [frame::Frame]> {
+		group.read_frames(&mut self.0).await
+	}
+}
+
+/// The relay's private object batch, including metadata, for delivery benchmarks.
+#[derive(Default)]
+pub struct ObjectBatch<const N: usize>(arrayvec::ArrayVec<frame::Object, N>);
+
+impl<const N: usize> ObjectBatch<N> {
+	/// An empty relay object batch.
+	pub fn new() -> Self {
+		Self(arrayvec::ArrayVec::new())
+	}
+	/// Fill the batch exactly as relay egress does, preserving all object fields.
+	pub fn poll_read(
+		&mut self,
+		waiter: &kio::Waiter,
+		group: &mut group::Consumer,
+	) -> std::task::Poll<crate::Result<usize>> {
+		group.poll_read_objects(waiter, &mut self.0)
+	}
+	/// Visit every object without discarding its relay metadata.
+	pub fn inspect(&self) {
+		for object in &self.0 {
+			std::hint::black_box(object);
+		}
+	}
+}
+
 /// Private canonical-owner fixture for size and final-storage cleanup benchmarks.
 pub struct CanonicalStorage(crate::model::group::StorageBench);
 
@@ -137,7 +185,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 33;
+const LITE_KINDS: u8 = 34;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 27;
@@ -305,17 +353,26 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		30 => roundtrip::<lite::Datagrams<'_>, _>(rest, &mut Vec::new(), version),
 		31 => roundtrip::<lite::DatagramsUpdate, _>(rest, &mut Vec::new(), version),
 		32 => roundtrip::<lite::DatagramsInfo, _>(rest, &mut Vec::new(), version),
+		33 => roundtrip::<lite::AnnounceReply, _>(rest, &mut Vec::new(), version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
 
+/// The hop chain a session would decode from `ids`; panics on one it would refuse.
+fn hop_chain(ids: impl IntoIterator<Item = u64>) -> Hops {
+	Hops::try_from(ids.into_iter().map(crate::Hop::from_wire).collect::<Vec<_>>()).expect("a valid hop chain")
+}
+
 /// One announcement on an announce stream, resolved: what the application sees.
+///
+/// The hop chain travels only on lite-06: lite-07 names the claim's route instead, so
+/// its writer drops the chain and its reader decodes an empty one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
-	/// ANNOUNCE_START: a route's suffix and wire hop chain, taking the next id.
-	Start(Path, Hops),
-	/// ANNOUNCE_UPDATE: a live id's new wire hop chain.
-	Update(u64, Hops),
+	/// ANNOUNCE_START: a route's suffix and wire hop ids, taking the next id.
+	Start(Path, Vec<u64>),
+	/// ANNOUNCE_UPDATE: a live id's new wire hop ids.
+	Update(u64, Vec<u64>),
 	/// ANNOUNCE_END: a live id retired.
 	End(u64),
 }
@@ -348,19 +405,20 @@ impl AnnounceWriter {
 	pub fn write(&mut self, announced: &Announced, data: &mut Vec<u8>) {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
-				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
+				let (_, suffix) = self.encoder.start(suffix.clone());
 				// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
 				lite::AnnounceBroadcast::Active {
+					route: 0,
 					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
 					epoch: 0,
 					suffix,
-					hops,
+					hops: self.chain(hops),
 					cost: Default::default(),
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
-				hops: self.encoder.update(*id, hops.clone()),
+				hops: self.chain(hops),
 				cost: Default::default(),
 			},
 			Announced::End(id) => {
@@ -371,6 +429,14 @@ impl AnnounceWriter {
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
 	}
+
+	/// The hop chain as this version carries it: none on lite-07.
+	fn chain(&self, hops: &[u64]) -> Hops {
+		match self.version.has_routes() {
+			true => Hops::default(),
+			false => hop_chain(hops.iter().copied()),
+		}
+	}
 }
 
 /// Mark `track` as a copy received from a remote publisher, as a subscriber session does, for
@@ -379,18 +445,38 @@ pub fn received(track: &track::Producer) {
 	track.received();
 }
 
-/// `origin` as a session connected to `peer` serves it, for the viewers bench.
-pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
-	origin.excluding(peer)
+/// `origin` as a session connected to the peer with hop id `peer` serves it, for the
+/// viewers bench.
+pub fn excluding(origin: crate::origin::Consumer, peer: u64) -> crate::origin::Consumer {
+	origin.excluding(crate::Hop::from_wire(peer))
+}
+
+/// A peer's wire route: its hop ids, cost, and instance at an epoch, as a session
+/// decodes one, for benches and tests that land or update forwarded routes.
+///
+/// Panics on a chain no session would decode: longer than 32, or naming a non-zero id
+/// twice.
+pub fn route_info(
+	hops: impl IntoIterator<Item = u64>,
+	cost: u64,
+	instance: Option<(crate::Instance, u64)>,
+) -> crate::origin::RouteInfo {
+	let info = crate::origin::RouteInfo::default()
+		.with_hops(hop_chain(hops))
+		.with_cost(cost);
+	match instance {
+		Some((instance, epoch)) => info.with_instance(instance, epoch),
+		None => info,
+	}
 }
 
 /// Land a claim with a peer's wire route, as a session does, for the origin bench.
 pub fn requests_route(
 	origin: &crate::origin::Producer,
 	prefix: impl Into<crate::Path>,
-	route: crate::origin::Route,
-) -> Result<crate::origin::Requests, crate::Error> {
-	origin.requests_route(prefix, route, None)
+	route: crate::origin::RouteInfo,
+) -> Result<crate::origin::Route, crate::Error> {
+	origin.forward(prefix, route, None)
 }
 
 /// Land a claim taking over the peer's `predecessor` claim, as a session lands an
@@ -398,15 +484,15 @@ pub fn requests_route(
 pub fn takeover_route(
 	origin: &crate::origin::Producer,
 	prefix: impl Into<crate::Path>,
-	route: crate::origin::Route,
-	predecessor: &crate::origin::Requests,
-) -> Result<crate::origin::Requests, crate::Error> {
-	origin.requests_route(prefix, route, Some(predecessor))
+	route: crate::origin::RouteInfo,
+	predecessor: &crate::origin::Route,
+) -> Result<crate::origin::Route, crate::Error> {
+	origin.forward(prefix, route, Some(predecessor))
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
-pub fn update_route(dynamic: &crate::origin::Requests, route: crate::origin::Route) -> Result<(), crate::Error> {
-	dynamic.update_route(route)
+pub fn update_route(dynamic: &crate::origin::Route, route: crate::origin::RouteInfo) -> Result<(), crate::Error> {
+	dynamic.update(route)
 }
 
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
@@ -516,10 +602,10 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	while let Ok(msg) = lite::AnnounceBroadcast::decode(&mut data, version) {
 		let announced = match msg {
 			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
-				.start(suffix, hops)
-				.map(|(suffix, hops)| Announced::Start(suffix, hops)),
+				.start(suffix)
+				.map(|suffix| Announced::Start(suffix, hops.into_ids())),
 			lite::AnnounceBroadcast::Update { id, hops, .. } => {
-				decoder.update(id, hops).map(|(_, hops)| Announced::Update(id, hops))
+				decoder.get(id).map(|_| Announced::Update(id, hops.into_ids()))
 			}
 			lite::AnnounceBroadcast::EndedId { id } => decoder.end(id).map(|_| Announced::End(id)),
 			_ => continue,
@@ -623,6 +709,7 @@ impl LiteSample {
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -630,6 +717,7 @@ impl LiteSample {
 				max_delay: std::time::Duration::from_secs(10),
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
+				update: 0,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -821,6 +909,7 @@ impl Default for Messages {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -831,6 +920,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
 				}],
+				update: 0,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
@@ -843,6 +933,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
+				update: 0,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1003,12 +1094,14 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			id: 0,
 			broadcast: broadcast.clone(),
 			instance: None,
+			node: 0,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,
 			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
+			update: 0,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),
@@ -1220,6 +1313,22 @@ pub fn pattern(data: &[u8]) -> bool {
 	true
 }
 
+/// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
+/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message
+/// (the sweep sets ROUTE_START's type byte but fills its size byte with the body
+/// pattern, so none decodes whole), the ROUTE_END echo, and ROUTE_REQUEST.
+const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
+	(23, &[4, 0]),
+	(27, &[0, 3, 0, 0, 0]),
+	(5, &[6, 4, 1, 0, 1, 0]),
+	(5, &[7, 4, 0, 1, 2, 0]),
+	(5, &[8, 1, 0]),
+	(5, &[9, 2, 0, 1]),
+	(5, &[11, 1, 0]),
+	(33, &[8, 1, 0]),
+	(33, &[10, 2, 1, 0]),
+];
+
 /// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,
 /// bodied with byte patterns that decode as small valid fields.
 ///
@@ -1264,8 +1373,7 @@ pub fn seeds() -> Vec<Seed> {
 		}
 	}
 
-	// A typed empty TRACKS_SYNCED and AUTH_OK reply need nonuniform envelope bytes.
-	for (kind, body) in [(23, &[4, 0][..]), (27, &[0, 3, 0, 0, 0][..])] {
+	for &(kind, body) in TYPED_LITE_SEEDS {
 		let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, kind];
 		data.extend_from_slice(body);
 		seeds.push(Seed {
@@ -1410,14 +1518,11 @@ pub fn seeds() -> Vec<Seed> {
 	// Announce streams from our own encoder: routes sharing path heads and relay tails,
 	// with retractions and updates moving the bases around.
 	let mut announced = Vec::new();
-	let hop = |id: u64| crate::Hop::new(id).expect("a valid hop");
 	for n in 0..12u64 {
 		let suffix = Path::new(&format!("pid{}/private/channel_{}/health-{n}", n % 3, n % 2)).unwrap();
-		let hops = Hops::try_from(vec![hop(100 + n % 3), hop(1 << 40), hop(1 << 41)]).expect("valid hops");
-		announced.push(Announced::Start(suffix, hops));
+		announced.push(Announced::Start(suffix, vec![100 + n % 3, 1 << 40, 1 << 41]));
 		if n % 4 == 3 {
-			let hops = Hops::try_from(vec![hop(200), hop(1 << 41)]).expect("valid hops");
-			announced.push(Announced::Update(n, hops));
+			announced.push(Announced::Update(n, vec![200, 1 << 41]));
 		}
 		if n % 5 == 4 {
 			announced.push(Announced::End(n));
@@ -1823,7 +1928,7 @@ pub struct RequestValidity {
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
-	pub fn new(route: &crate::origin::Requests, path: &crate::Path) -> Self {
+	pub fn new(route: &crate::origin::Route, path: &crate::Path) -> Self {
 		Self {
 			watch: crate::model::broadcast::RequestValidity::for_source(route, path),
 			periods: Vec::new(),
@@ -1859,7 +1964,7 @@ mod tests {
 		let _driver = driver;
 		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
 		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
-		let _broadcast = origin.publish("room/1", crate::origin::Route::default()).unwrap();
+		let _broadcast = origin.route("room/1", crate::origin::RouteOptions::default()).unwrap();
 		let mut cursor = origin.consume().with_stats(session).routes();
 		while cursor.next().now_or_never().flatten().is_some() {}
 
@@ -1903,6 +2008,16 @@ mod tests {
 
 		let missing: Vec<_> = expected.difference(&decoded).collect();
 		assert!(missing.is_empty(), "no seed decodes for {missing:?}");
+	}
+
+	/// Each typed seed exists to reach one message, so each must decode whole.
+	#[test]
+	fn typed_lite_seeds_decode() {
+		for (kind, body) in TYPED_LITE_SEEDS {
+			let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, *kind];
+			data.extend_from_slice(body);
+			assert!(lite_wire(&data), "kind {kind} body {body:?} does not decode");
+		}
 	}
 
 	/// The stream seeds are built from our own framing, one per version and protocol, so

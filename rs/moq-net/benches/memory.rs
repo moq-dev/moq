@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Client, Hop, Server, Timestamp, Version, cache, origin, track, transport::memory};
+use moq_net::{Client, Server, Timestamp, Version, cache, origin, track, transport::memory};
 
 const VERSION: &str = "moq-lite-06";
 
@@ -100,22 +100,24 @@ fn now() -> moq_net::time::Instant {
 
 /// One publisher and one subscriber session over an in-memory pair.
 struct Link {
+	pools: Vec<cache::Pool>,
+	cache_now: moq_net::time::Instant,
 	tracks: Vec<track::Producer>,
 	subscribers: Vec<track::Subscriber>,
 	payload: Bytes,
-	_broadcast: origin::Publication,
+	_broadcast: origin::Route,
 	_sessions: (moq_net::Session, moq_net::Session),
 	_origins: (origin::Producer, origin::Producer),
 }
 
 impl Link {
 	async fn new(streams: usize, size: usize) -> Self {
+		let mut pools = Vec::new();
 		let version: Version = VERSION.parse().unwrap();
-		let origin = |hop: u64| {
-			let mut config = origin::Config::new(Hop::new(hop).unwrap());
-			// Hold one round's groups, with room for the handover, and no more.
-			config.pool =
-				cache::Pool::new(cache::Config::default().with_capacity((4 * streams * FRAMES * size) as u64));
+		let mut origin = |hop: u64| {
+			let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+			config.pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+			pools.push(config.pool.clone());
 			let (producer, driver) = origin::Producer::new(config);
 			tokio::spawn(moq_net::time::run(driver));
 			producer
@@ -147,14 +149,21 @@ impl Link {
 			}
 		);
 
-		let broadcast = publisher.create_broadcast("bench").unwrap();
+		let broadcast = publisher
+			.route("bench", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = track::Info::default()
 			.with_max_age(None)
 			.with_timescale(moq_net::Timescale::MILLI);
 		let tracks: Vec<_> = (0..streams)
-			.map(|index| broadcast.create_track(format!("{index}"), info.clone()).unwrap())
+			.map(|index| {
+				broadcast
+					.broadcast()
+					.create_track(format!("{index}"), info.clone())
+					.unwrap()
+			})
 			.collect();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let consumer = subscriber.consume();
 		let remote = consumer
@@ -171,6 +180,8 @@ impl Link {
 		}
 
 		let mut link = Self {
+			pools,
+			cache_now: now(),
 			tracks,
 			subscribers,
 			payload: Bytes::from(vec![0; size]),
@@ -180,6 +191,7 @@ impl Link {
 		};
 		// Warm every stream so the timed rounds skip first-group setup.
 		for _ in 0..4 {
+			link.tick();
 			link.round().await;
 		}
 		link
@@ -206,13 +218,31 @@ impl Link {
 		bytes
 	}
 
+	// Advance the cache/model clock between rounds to expire read history.
+	fn tick(&mut self) {
+		self.cache_now += cache::DEFAULT_EXPIRY;
+		for pool in &self.pools {
+			pool.poll(self.cache_now, &kio::Waiter::noop());
+		}
+	}
+
 	async fn measure(&mut self, iters: u64) -> Duration {
 		let expected = self.tracks.len() * FRAMES * self.payload.len();
-		let start = Instant::now();
+		let counting = std::env::var_os("MEMORY_ALLOCS").is_some();
+		let mut elapsed = Duration::ZERO;
 		for _ in 0..iters {
+			self.tick();
+			if counting {
+				COUNTING.store(true, Ordering::Relaxed);
+			}
+			let start = Instant::now();
 			assert_eq!(self.round().await, expected);
+			elapsed += start.elapsed();
+			if counting {
+				COUNTING.store(false, Ordering::Relaxed);
+			}
 		}
-		start.elapsed()
+		elapsed
 	}
 }
 
@@ -225,9 +255,7 @@ fn allocations() {
 		let mut link = rt.block_on(Link::new(streams, size));
 		ALLOCATIONS.store(0, Ordering::Relaxed);
 		ALLOCATED.store(0, Ordering::Relaxed);
-		COUNTING.store(true, Ordering::Relaxed);
 		rt.block_on(link.measure(ROUNDS as u64));
-		COUNTING.store(false, Ordering::Relaxed);
 
 		let frames = (ROUNDS * streams * FRAMES) as f64;
 		let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / frames;

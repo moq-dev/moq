@@ -618,8 +618,8 @@ pub struct SinkSession {
 	stats: Arc<Mutex<SinkStats>>,
 	/// Set by [`Self::with_probe`].
 	probe: Option<crate::transport::Probe>,
-	/// Set by [`Self::with_receive_window`].
-	receive_window: Option<crate::transport::ReceiveWindow>,
+	/// Set by [`Self::with_receive_window`], and widened by `set_limits`.
+	receive_window: Arc<Mutex<Option<crate::transport::ReceiveWindow>>>,
 }
 
 impl SinkSession {
@@ -651,7 +651,7 @@ impl SinkSession {
 
 	/// Report `window` as the receive windows in force.
 	pub fn with_receive_window(mut self, window: crate::transport::ReceiveWindow) -> Self {
-		self.receive_window = Some(window);
+		self.receive_window = Arc::new(Mutex::new(Some(window)));
 		self
 	}
 
@@ -831,7 +831,17 @@ impl poll::Session for SinkSession {
 	}
 
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
-		self.receive_window
+		*self.receive_window.lock().unwrap()
+	}
+
+	/// Set the connection window, on a transport that reports one.
+	fn set_limits(&self, limits: crate::transport::Limits) -> Result<(), crate::transport::LimitsError> {
+		let mut window = self.receive_window.lock().unwrap();
+		let (Some(window), Some(connection)) = (window.as_mut(), limits.receive_window) else {
+			return Err(crate::transport::LimitsError::Unsupported);
+		};
+		window.connection = connection.get();
+		Ok(())
 	}
 }
 
@@ -936,6 +946,7 @@ impl poll::Chunks for Script {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
+	max_datagram_size: usize,
 	/// Optional notifications for tests that drive per-stream readiness queues.
 	wake: Option<kio::Shared<()>>,
 	stats: SinkStats,
@@ -963,9 +974,16 @@ pub struct ScriptedSession {
 	groups: bool,
 	/// Set by [`Self::with_send_window`].
 	send_window: Option<usize>,
+	/// Set by [`Self::with_receive_window`].
+	receive_window: Option<crate::transport::ReceiveWindow>,
 }
 
 impl ScriptedSession {
+	pub fn with_datagrams(mut self, max_size: usize) -> Self {
+		self.max_datagram_size = max_size;
+		self
+	}
+
 	pub fn without_credit(self) -> Self {
 		*self.credit.write().ok().expect("credit is live") = false;
 		self
@@ -983,6 +1001,7 @@ impl ScriptedSession {
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
+			max_datagram_size: 0,
 			wake: None,
 			stats: SinkStats::default(),
 			close: Default::default(),
@@ -997,7 +1016,15 @@ impl ScriptedSession {
 			unacked_unis: Default::default(),
 			groups: false,
 			send_window: None,
+			receive_window: None,
 		}
+	}
+
+	/// Report `window` as the receive windows in force, so a stream the session stops reading
+	/// holds credit.
+	pub fn with_receive_window(mut self, window: crate::transport::ReceiveWindow) -> Self {
+		self.receive_window = Some(window);
+		self
 	}
 
 	/// Let each opened bidi stream send only its first `bytes`, then park its writes for good,
@@ -1130,6 +1157,10 @@ impl poll::Session for ScriptedSession {
 	type RecvStream = ScriptedRecv;
 	type Error = SinkError;
 
+	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
+		self.receive_window
+	}
+
 	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		let Some(script) = self.incoming_unis.lock().unwrap().pop_front() else {
 			return self.log.poll_closed(waiter).map(Err);
@@ -1243,7 +1274,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		0
+		self.max_datagram_size
 	}
 
 	fn address(&self) -> crate::transport::Address {

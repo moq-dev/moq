@@ -25,25 +25,35 @@ const records = {
 	presses: [] as { at: number; on: boolean; capture?: { at: number; end: number } }[],
 	captures: [] as { at: number; audio: boolean }[],
 	encoders: [] as number[],
+	// Each time the published rendition became unselectable (disabled or dropped) or selectable again.
+	catalog: [] as { at: number; selectable: boolean }[],
+	// The resolved playout delay since the measurement's start: "auto" moves it with the estimate.
+	delays: [] as { at: number; delay: number }[],
 	errors: [] as string[],
 };
 
 // Observe WebCodecs without changing its input, output, or scheduling. A probe or a rebuilt codec
-// constructs a new encoder; the live one flushes at each release, so a flush alone is no probe.
+// constructs a new encoder. Chrome and Firefox stamp output after an input gap as if it were
+// contiguous, so each chunk answers the oldest input still owed, as the publisher stamps it. Only a
+// flush, which the probe uses, emits a chunk past the inputs: the codec's lookahead tail.
 const NativeEncoder = globalThis.AudioEncoder;
 globalThis.AudioEncoder = class extends NativeEncoder {
+	#owed: number[] = [];
 	constructor(init: AudioEncoderInit) {
 		records.encoders.push(performance.now());
 		super({
 			...init,
 			output: (chunk, metadata) => {
-				records.encoded.push({ at: performance.now(), timestamp: chunk.timestamp, bytes: chunk.byteLength });
+				const timestamp = this.#owed.shift();
+				if (timestamp !== undefined)
+					records.encoded.push({ at: performance.now(), timestamp, bytes: chunk.byteLength });
 				init.output(chunk, metadata);
 			},
 		});
 	}
 	override encode(data: AudioData): void {
 		records.submitted.push({ at: performance.now(), timestamp: data.timestamp, duration: data.duration });
+		this.#owed.push(data.timestamp);
 		super.encode(data);
 	}
 };
@@ -145,12 +155,14 @@ async function attach() {
 	if (!root || root === attached) return;
 	attached = root;
 	const context = root.context as AudioContext;
-	// A constant microphone tone makes a nonzero output quantum the utterance's audible onset.
-	// Map its render timestamp through getOutputTimestamp, rather than timing the port message.
+	// A constant microphone tone makes a loud output quantum the utterance's audible onset. The
+	// threshold clears the comfort noise the player fills a declared silence with (at most -60 dBFS
+	// RMS) and sits far below the -12 dBFS tone. Map its render timestamp through
+	// getOutputTimestamp, rather than timing the port message.
 	const source = `class Tap extends AudioWorkletProcessor {
 		loud = false;
 		process(inputs) {
-			const loud = !!inputs[0]?.[0]?.some(s => Math.abs(s) > 0.001);
+			const loud = !!inputs[0]?.[0]?.some(s => Math.abs(s) > 0.01);
 			if (loud && !this.loud) this.port.postMessage(currentTime);
 			this.loud = loud;
 			return true;
@@ -191,6 +203,21 @@ async function attach() {
 }
 audio.out.root.subscribe(() => void attach().catch((error) => records.errors.push(String(error))));
 
+// A mute must not touch the catalog: a disabled or dropped rendition makes every listener wait for it.
+let selectable = true;
+publish.audio.out.catalog.subscribe((config) => {
+	const now = config !== undefined && config.enabled !== false;
+	if (now !== selectable) records.catalog.push({ at: performance.now(), selectable: now });
+	selectable = now;
+});
+watch.player.sync.out.delay.subscribe((delay) => records.delays.push({ at: performance.now(), delay }));
+// Playback counts from the measurement's start, so the warmup's tune-in is not charged to it.
+let baseline = { underruns: 0, stalls: 0 };
+const playback = () => {
+	const stats = audio.out.stats.peek();
+	return { underruns: (stats?.underruns ?? 0) - baseline.underruns, stalls: (stats?.stalls ?? 0) - baseline.stalls };
+};
+
 /** The finite measurement surface driven by ptt.ts. */
 export const measurement = {
 	press(on: boolean) {
@@ -217,12 +244,15 @@ export const measurement = {
 	},
 	reset() {
 		for (const list of Object.values(records)) list.length = 0;
+		records.delays.push({ at: performance.now(), delay: watch.player.sync.out.delay.peek() });
 		capture.drain();
 		arrivals.length = 0;
+		const stats = audio.out.stats.peek();
+		baseline = { underruns: stats?.underruns ?? 0, stalls: stats?.stalls ?? 0 };
 	},
 	result() {
 		arrivals.push(...capture.drain());
-		return { ...records, arrivals, captureError: capture.error() };
+		return { ...records, arrivals, playback: playback(), captureError: capture.error() };
 	},
 };
 

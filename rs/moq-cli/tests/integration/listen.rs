@@ -22,6 +22,8 @@ async fn listen(stage: &str, flags: &[&str]) -> Listening {
 	let directory = tempfile::tempdir().unwrap();
 	let socket = directory.path().join("moq.sock");
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	// The guard on host timers is for tests, not the binaries they run.
+	command.env_remove("KIO_DENY_HOST_TIMERS");
 	for (name, _) in std::env::vars_os() {
 		if name.to_string_lossy().starts_with("MOQ_") {
 			command.env_remove(name);
@@ -147,9 +149,11 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 	let listening = listen("export", &["--drain-timeout", "3s"]).await;
 	moq_tokio::crypto::install_default().unwrap();
 	let origin = moq_tokio::origin::spawn();
-	let source = origin.create_broadcast("demo.hang").unwrap();
-	let catalog = source.create_track("catalog.json", None).unwrap();
-	source.announce(Default::default()).unwrap();
+	let source = origin
+		.route("demo.hang", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let catalog = source.broadcast().create_track("catalog.json", None).unwrap();
+	source.announce().unwrap();
 	let publisher = moq_tokio::connect::Config::default()
 		.init(Default::default())
 		.unwrap()

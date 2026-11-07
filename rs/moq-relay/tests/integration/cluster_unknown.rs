@@ -28,7 +28,7 @@ struct Node {
 	task: tokio::task::JoinHandle<()>,
 }
 
-async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_net::Version>) -> Node {
+async fn spawn_relay(connect: Vec<String>, cluster_version: Option<moq_net::Version>) -> Node {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let mut config = Config::default();
@@ -38,7 +38,6 @@ async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_
 	config.connect.tls.insecure = Some(true);
 	config.connect.version.extend(cluster_version);
 	config.auth.public = vec![moq_auth::Pattern::all()];
-	config.cluster.id = Some(id);
 	config.cluster.connect = connect.into_iter().map(moq_relay::cluster::Peer::new).collect();
 
 	// `load` binds the TCP listener, so the port is ours before anyone dials it.
@@ -107,10 +106,9 @@ impl Mesh {
 	/// Start every relay and wait for every dial to land, so a publish crosses the
 	/// whole mesh rather than racing its links coming up.
 	async fn start(cluster_version: Option<moq_net::Version>) -> Self {
-		let a = spawn_relay(11, vec![], cluster_version).await;
-		let b = spawn_relay(12, vec![format!("tcp://127.0.0.1:{}", a.port)], cluster_version).await;
+		let a = spawn_relay(vec![], cluster_version).await;
+		let b = spawn_relay(vec![format!("tcp://127.0.0.1:{}", a.port)], cluster_version).await;
 		let c = spawn_relay(
-			13,
 			vec![
 				format!("tcp://127.0.0.1:{}", a.port),
 				format!("tcp://127.0.0.1:{}", b.port),
@@ -118,7 +116,7 @@ impl Mesh {
 			cluster_version,
 		)
 		.await;
-		let d = spawn_relay(14, vec![format!("tcp://127.0.0.1:{}", c.port)], cluster_version).await;
+		let d = spawn_relay(vec![format!("tcp://127.0.0.1:{}", c.port)], cluster_version).await;
 		// One client for every poll: building one loads the system trust roots.
 		let http = reqwest::Client::new();
 		for (node, dialed) in [(&b, 1), (&c, 2), (&d, 1)] {
@@ -159,7 +157,7 @@ fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 }
 
 struct Publisher {
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
@@ -167,8 +165,7 @@ struct Publisher {
 impl Drop for Publisher {
 	fn drop(&mut self) {
 		// The streaming task owns the track producer; stop it with the
-		// publisher so the broadcast actually ends (a live track producer
-		// would keep it announced).
+		// publisher so the track ends with the route.
 		self.streamer.abort();
 	}
 }
@@ -176,9 +173,13 @@ impl Drop for Publisher {
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast(PATH).expect("create broadcast");
-	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
+	let broadcast = origin
+		.route(PATH, moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let track = broadcast
+		.broadcast()
+		.create_track("video", timed())
+		.expect("create track");
 
 	// Stream like a real publisher: a fresh group every 100ms, so a subscriber
 	// that attaches at any point receives one (and the test doesn't depend on
@@ -403,11 +404,13 @@ async fn unknown_publisher_republish_stays_routable() {
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
+	kio::clock::host_time();
 	assert_unknown_publisher_stays_announced(None).await;
 }
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
+	kio::clock::host_time();
 	let version = "moq-transport-22".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version)).await;
 }
@@ -419,6 +422,7 @@ async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
 /// reflected UNKNOWN route could still replace the incumbent.
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
+	kio::clock::host_time();
 	let version = "moq-lite-04".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version)).await;
 }

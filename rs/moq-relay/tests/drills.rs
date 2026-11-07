@@ -452,9 +452,13 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	let url = path.url.clone();
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("create track");
 	let publish_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
@@ -584,9 +588,13 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	let url = path.url.clone();
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("create track");
 	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
 
 	let subscriber = moq_tokio::origin::spawn();
@@ -707,9 +715,13 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let mut announced = subscribed.routes();
 
 	let first = moq_tokio::origin::spawn();
-	let broadcast = first.create_broadcast("live").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
+	let broadcast = first
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("create track");
 	let first_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
@@ -745,9 +757,13 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn();
-	let broadcast = second.create_broadcast("live").expect("re-create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("re-create track");
+	let broadcast = second
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("re-create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("re-create track");
 	let second_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
@@ -1027,9 +1043,13 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let subscribe_path = Path::shaped(lane, &edge, bursty(), seed.wrapping_add(2)).await;
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
-	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
+	let mut track = broadcast
+		.broadcast()
+		.create_track(TRACK, timed())
+		.expect("create track");
 	let url = publish_path.url.clone();
 	let publish_session = kio::clock::timeout(
 		TIMEOUT,
@@ -1422,9 +1442,11 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	)
 	.await;
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut track = broadcast.create_track(TRACK, timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let mut track = broadcast.broadcast().create_track(TRACK, timed()).unwrap();
+	broadcast.announce().unwrap();
 	let mut dial = dial();
 	dial.version = vec![version];
 	let publish_url = relay.url();

@@ -28,8 +28,7 @@ async function peers(alpn: string) {
 		connectSession({ url, transport: pair.client }),
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const requests = track.requests();
@@ -89,10 +88,11 @@ async function take(reader: Subscriber, count: number): Promise<Map<bigint, stri
 	return got;
 }
 
-// Whether `reader` hands out no group for a while.
-async function idle(reader: Subscriber): Promise<boolean> {
+// Whether `reader` hands out no group once every pending task has settled: `clock` fires the
+// deadline only after draining them.
+async function idle(clock: Manual, reader: Subscriber): Promise<boolean> {
 	try {
-		(await timeout(Nano.fromMilli(Milli(200)), reader.recvGroup()))?.close();
+		(await clock.drive(timeout(Nano.fromMilli(Milli(200)), reader.recvGroup())))?.close();
 		return false;
 	} catch (err) {
 		if (err instanceof Elapsed) return true;
@@ -155,6 +155,8 @@ test("copy fill: lite-06 asks nothing below a start resolved from the budget, an
 });
 
 test("copy fill: lite-05 fills below the live edge only what a reader's ranges name", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
 	const peer = await peers(Lite.ALPN_05);
 	try {
 		populate(peer.track);
@@ -165,7 +167,7 @@ test("copy fill: lite-05 fills below the live edge only what a reader's ranges n
 		// Reaching back to the oldest group names no floor, so the live edge bounds it.
 		const oldest = peer.remote.track("video").subscribe(WIDE);
 		expect((await oldest.recvGroup())?.sequence).toBe(4n);
-		expect(await idle(oldest)).toBe(true);
+		expect(await idle(clock, oldest)).toBe(true);
 		expect(peer.fetches()).toBe(before);
 
 		// A floor the ranges name is filled.
@@ -177,6 +179,7 @@ test("copy fill: lite-05 fills below the live edge only what a reader's ranges n
 		named.close();
 	} finally {
 		peer.close();
+		installed.close();
 	}
 });
 
@@ -225,15 +228,87 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	},
 );
 
-test("copy fill: a filled group nobody holds any more stops downloading", async () => {
+// Resolve once nobody reads `group` any more.
+async function unwanted(group: { demand(): { wanted: { peek(): boolean; changed(): Promise<boolean> } } }) {
+	const wanted = group.demand().wanted;
+	while (wanted.peek()) await wanted.changed();
+}
+
+test("copy fill: a filled group stops downloading once every reader left or passed it, read again or not", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
 		connectSession({ url, transport: pair.client }),
 		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const publication = origin.createBroadcast(Path.from("room"));
-	publication.announce();
+	const publication = origin.route(Path.from("room"));
+	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	write(track.createGroup(1n), 1n, "live");
+	// The archive answers group 0 with one frame and keeps it open.
+	const requests = track.requests();
+	const fills: Fill[] = [];
+	const archived = (async () => {
+		const fill = await requests.requestedFill();
+		if (!fill) throw new Error("no fill");
+		fills.push(fill);
+		const group = fill.accept(0n);
+		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
+		return group;
+	})();
+	const remote = wireOf(client).consume(Path.from("room"));
+	try {
+		// A live reader keeps the copy up, and has read past group 0 before it lands. It never
+		// reads again, so the copy it still buffers is all that is left of it.
+		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
+		expect((await reader.ordered().nextGroup())?.sequence).toBe(1n);
+		const history = remote
+			.track("video")
+			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+		const group = await history.recvGroup();
+		expect(group?.sequence).toBe(0n);
+		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
+		const source = await archived;
+
+		// A reader that has yet to reach the group keeps it downloading once the first leaves.
+		const behind = remote
+			.track("video")
+			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+		group?.close();
+		history.close();
+		source.writeFrame({ payload: enc.encode("old 0 more"), timestamp: Timestamp.fromMillis(1) });
+		const reached = await behind.recvGroup();
+		expect(reached?.sequence).toBe(0n);
+		expect(dec.decode((await reached?.readFrame())?.payload)).toBe("old 0");
+		expect(dec.decode((await reached?.readFrame())?.payload)).toBe("old 0 more");
+
+		// Once it leaves too, the copy cancels its FETCH, and the publisher's reader goes with it.
+		reached?.close();
+		behind.close();
+		await unwanted(source);
+		expect(source.closed.peek()).toBeUndefined();
+		source.abort(new Error("done"));
+		reader.close();
+	} finally {
+		for (const fill of fills) fill.close();
+		remote.close();
+		requests.close();
+		publication.broadcast.close();
+		client.abort();
+		server.abort();
+		origin.close();
+	}
+});
+
+test("copy fill: a filled group nobody holds any more stops downloading", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client }),
+		acceptSession({ transport: pair.server, url, publish: origin.consume() }),
+	]);
+	const publication = origin.route(Path.from("room"));
 	const track = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and never finishes it.
@@ -269,11 +344,13 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		history.close();
 		write(track.createGroup(2n), 2n, "live");
 		expect((await live.nextGroup())?.sequence).toBe(2n);
-		await timeout(
-			Nano.fromMilli(Milli(2000)),
-			(async () => {
-				while (hooks.holdsGroup(reader, 0n)) await sleep(Nano.fromMilli(Milli(10)));
-			})(),
+		await clock.drive(
+			timeout(
+				Nano.fromMilli(Milli(2000)),
+				(async () => {
+					while (hooks.holdsGroup(reader, 0n)) await sleep(Nano.fromMilli(Milli(10)));
+				})(),
+			),
 		);
 		source.abort(new Error("done"));
 		live.close();
@@ -285,5 +362,6 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		client.abort();
 		server.abort();
 		origin.close();
+		installed.close();
 	}
 });

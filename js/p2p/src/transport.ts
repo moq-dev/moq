@@ -70,7 +70,7 @@ export class Transport implements WebTransport {
 		}
 		if (channel.protocol !== protocol) throw new TypeError("data-channel protocol does not match the agreed ALPN");
 		this.protocol = protocol;
-		this.#socket = new Channel(peer, channel, protocol);
+		this.#socket = new Channel({ peer, channel, protocol, accepted: server });
 		this.closed = this.#closed.promise;
 		// SCTP's negotiated limit is known only after the data channel opens.
 		this.#session = this.#socket.opened.then(() => {
@@ -92,6 +92,9 @@ export class Transport implements WebTransport {
 		});
 		this.ready = this.#session.then((session) => session.ready);
 		void this.ready.catch((error) => {
+			// A session that started settles `closed` and closes the channel itself, gracefully
+			// when closed before its handshake finished. Only a channel that never opened has none.
+			if (this.#active) return;
 			this.#closed.reject(error);
 			this.#socket.close();
 		});
@@ -152,6 +155,7 @@ export class Transport implements WebTransport {
 	close(info: WebTransportCloseInfo = {}) {
 		if (this.#closing) return;
 		if (this.#active) {
+			this.#socket.release();
 			this.#active.close(info);
 			this.#closing = true;
 		} else {

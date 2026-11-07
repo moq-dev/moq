@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// section (the broadcast's one wall-clock mapping and join interval), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
 /// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
-/// `echo` soliciting viewer feedback under a relative broadcast prefix, and `contributions` naming
+/// `echo` soliciting viewer feedback under a relative broadcast prefix, and `include` naming
 /// whole broadcasts for explicit selection.
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
@@ -85,11 +85,13 @@ pub struct Catalog<E = ()> {
 	/// An `echo` value without a string `path` decodes as absent, the same as [`stats`](Self::stats).
 	pub echo: Option<crate::catalog::Echo>,
 
-	/// Whole broadcasts listed for explicit, lazy selection, keyed by contribution ID.
+	/// Whole broadcasts listed for explicit, lazy selection, keyed by include ID.
 	///
-	/// Listing one subscribes to nothing; see [`Contribution`](crate::catalog::Contribution).
+	/// Each shares this catalog's PTS timeline and root settings, including `media.clock` and
+	/// `media.join.interval`; its own settings are ignored. Listing one subscribes to nothing;
+	/// see [`Include`](crate::catalog::Include).
 	/// Omitted from the wire when empty. A malformed entry refuses the catalog.
-	pub contributions: std::collections::BTreeMap<String, crate::catalog::Contribution>,
+	pub include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	///
@@ -166,7 +168,7 @@ struct Wire<E> {
 	echo: Option<crate::catalog::Echo>,
 
 	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-	contributions: std::collections::BTreeMap<String, crate::catalog::Contribution>,
+	include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
 	#[serde(flatten, serialize_with = "serialize_ext")]
 	ext: E,
@@ -202,7 +204,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			m2ts,
 			stats,
 			echo,
-			contributions,
+			include,
 			ext,
 		} = wire;
 		Self {
@@ -215,7 +217,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			m2ts,
 			stats,
 			echo,
-			contributions,
+			include,
 			ext,
 		}
 	}
@@ -344,6 +346,7 @@ impl<E: DeserializeOwned + Default> FromStr for Catalog<E> {
 
 impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Subscribe to catalog updates on a broadcast.
+	#[cfg(feature = "async")]
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
 		Ok(super::Consumer::new(broadcast.track(Catalog::DEFAULT_NAME)?))
 	}
@@ -440,11 +443,11 @@ mod test {
 		#[serde(default)]
 		binary: Vec<String>,
 		#[serde(default)]
-		contributions: Vec<String>,
+		include: Vec<String>,
 	}
 
 	/// The corpus `js/hang` also loads: both languages accept the same catalogs and keep the same
-	/// rendition, data track, and contribution IDs, so a divergence fails CI on whichever side drifts.
+	/// rendition, data track, and include IDs, so a divergence fails CI on whichever side drifts.
 	#[test]
 	fn shared_parity_fixtures() {
 		let cases: Vec<ParityCase> = serde_json::from_str(include_str!("../../fixtures/catalog-parity.json")).unwrap();
@@ -464,18 +467,18 @@ mod test {
 					let text: Vec<_> = catalog.text.renditions.keys().cloned().collect();
 					let json: Vec<_> = catalog.json.tracks.keys().cloned().collect();
 					let binary: Vec<_> = catalog.binary.tracks.keys().cloned().collect();
-					let contributions: Vec<_> = catalog.contributions.keys().cloned().collect();
-					if (&video, &audio, &text, &json, &binary, &contributions)
+					let include: Vec<_> = catalog.include.keys().cloned().collect();
+					if (&video, &audio, &text, &json, &binary, &include)
 						!= (
 							&case.video,
 							&case.audio,
 							&case.text,
 							&case.json,
 							&case.binary,
-							&case.contributions,
+							&case.include,
 						) {
 						failures.push(format!(
-							"{}: kept video {video:?} audio {audio:?} text {text:?} json {json:?} binary {binary:?} contributions {contributions:?}",
+							"{}: kept video {video:?} audio {audio:?} text {text:?} json {json:?} binary {binary:?} include {include:?}",
 							case.name
 						));
 					}
@@ -536,28 +539,28 @@ mod test {
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 	}
 
-	/// A contribution round-trips, stays off the wire when none is listed, and a malformed entry
+	/// An include round-trips, stays off the wire when none is listed, and a malformed entry
 	/// refuses the catalog rather than being dropped.
 	#[test]
-	fn contributions_roundtrip_and_refuse_malformed_entries() {
-		let json = r#"{"contributions":{"alice":{"broadcast":"./alice.hang"}},"video":{"renditions":{"alice":{"codec":"avc1.64001f","container":{"kind":"legacy"}}}}}"#;
+	fn includes_roundtrip_and_refuse_malformed_entries() {
+		let json = r#"{"include":{"alice":{"broadcast":"./alice.hang"}},"video":{"renditions":{"alice":{"codec":"avc1.64001f","container":{"kind":"legacy"}}}}}"#;
 		let catalog = Catalog::<()>::from_str(json).unwrap();
 		assert_eq!(
-			catalog.contributions["alice"],
-			crate::catalog::Contribution::new(moq_net::path::Relative::new("./alice.hang").unwrap())
+			catalog.include["alice"],
+			crate::catalog::Include::new(moq_net::path::Relative::new("./alice.hang").unwrap())
 		);
-		// Contribution IDs are their own namespace, so one may share a rendition's ID.
+		// Include IDs are their own namespace, so one may share a rendition's ID.
 		assert!(catalog.check_renditions().is_ok());
 		assert!(catalog.video.renditions.contains_key("alice"));
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
-		assert!(!Catalog::<()>::default().to_json().unwrap().contains("contributions"));
+		assert!(!Catalog::<()>::default().to_json().unwrap().contains("include"));
 
 		for bad in [
-			r#"{"contributions":[]}"#,
-			r#"{"contributions":{"alice":null}}"#,
-			r#"{"contributions":{"alice":{}}}"#,
-			r#"{"contributions":{"alice":{"broadcast":42}}}"#,
-			r#"{"contributions":{"alice":{"broadcast":"./alice.hang","instance":""}}}"#,
+			r#"{"include":[]}"#,
+			r#"{"include":{"alice":null}}"#,
+			r#"{"include":{"alice":{}}}"#,
+			r#"{"include":{"alice":{"broadcast":42}}}"#,
+			r#"{"include":{"alice":{"broadcast":"./alice.hang","instance":""}}}"#,
 		] {
 			assert!(Catalog::<()>::from_str(bad).is_err(), "{bad} must be refused");
 		}
@@ -571,7 +574,7 @@ mod test {
 		const INSTANCE: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
 		let encoded = format!(
 			r#"{{
-				"contributions": {{"c": {{"broadcast": "./a", "instance": "{INSTANCE}"}}}},
+				"include": {{"c": {{"broadcast": "./a", "instance": "{INSTANCE}"}}}},
 				"video": {{"renditions": {{"v": {{"broadcast": "./a", "instance": "{INSTANCE}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
 				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "instance": "{INSTANCE}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
 				"text": {{"renditions": {{"t": {{"broadcast": "./a", "instance": "{INSTANCE}", "format": "vtt"}}}}}},
@@ -591,7 +594,7 @@ mod test {
 		for reference in references {
 			assert_eq!(reference.instance(), Some(&instance));
 		}
-		assert_eq!(catalog.contributions["c"].instance.as_ref(), Some(&instance));
+		assert_eq!(catalog.include["c"].instance.as_ref(), Some(&instance));
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 
 		// Omitted stays omitted, and an empty instance refuses the catalog.

@@ -103,12 +103,19 @@ observe(arrival, media):
         origin = arrival; interval = 0; peak = delay; return
 
     index = floor((arrival - origin) / RESAMPLE)
+    resumed = ended; ended = false
     if index <= interval:
         peak = max(peak, delay); return
 
     fold(bucket of peak)
-    fold(nothing) for each elapsed empty interval, at most IDLE_MAX
+    if resumed:                         # a declared silence folds nothing
+        origin = arrival; index = 0
+    else:
+        fold(nothing) for each elapsed empty interval, at most IDLE_MAX
     interval = index; peak = delay
+
+end():                                  # a declared end precedes the next observation
+    if not first observation: ended = true
 
 fold(bucket):                           # prior starts at 1
     rest = 1 - FORGET * (1 - prior)     # what the decayed evidence leaves
@@ -383,10 +390,10 @@ them. The cost is over-buffering by the smallest subscribed `delay` when the
 broadcast's earliest rendition is not subscribed.
 
 The playout is recomputed when a rendition is subscribed, unsubscribed, or its
-catalog entry rises, so dropping a slow rendition lowers latency. The shared
-reference itself only ever moves earlier, so once the earliest subscribed track
-leaves, the clock stays anchored to it until playback re-anchors; that errs on
-the safe side.
+catalog entry rises, so dropping a slow rendition lowers latency. Each track's
+own arrivals only ever move its part of the shared reference earlier. A track
+that leaves, or whose timeline restarts, releases its part: the earliest
+remaining track's anchor takes over, or the next frame re-anchors.
 
 A track that replaces another in the same slot and on the same broadcast path,
 such as the new name a codec change publishes under, continues the outgoing
@@ -474,6 +481,25 @@ keeps decaying at the base rate. Only the weight the prior regained is replaced
 quickly, the same way it is at cold start, since it stands for no evidence at
 all.
 
+### Declared silence
+
+A publisher that stops sending on purpose, such as a muted push-to-talk
+speaker, marks the stop with a declared end. The silence after it says
+nothing about the path, so relaxing toward the prior would only make a
+listener who sat through a long mute come back over-buffered. `end()` tells
+the estimator that a declared end lies between the previous observation and
+the next. The next measured observation then folds the pending interval as
+usual and starts a fresh interval at its own arrival instead of folding the
+intervals in between. If it lands in the pending interval it is merged as
+usual, since there is nothing to skip. Either way the end is spent, so a
+later gap the publisher did not declare still relaxes the estimate. The
+reference history, the histogram, and the prior are untouched, and an end
+before the first observation, or under a fixed target, does nothing.
+
+The receiver calls `end()` before observing the first frame from a group later
+than the declared end's own: the stopped encoder's final packets may follow the
+marker in its group, and they belong to the speech before the silence, not after it.
+
 ## Fixed targets
 
 An explicit delay **fixes the target and disables adaptation**. It is taken
@@ -552,7 +578,8 @@ directly, so neither is graded against the other.
 `arrival` and `media` are parallel arrays in **delivery order**, the order the
 receiver observes them, so `media` is deliberately out of order in the
 `reorder` and `backlog` cases. `advertised` and `delay` are present only where the case uses
-them. `target` lists `[frame index, target]` at every frame where the target
+them, as is `ends`: the indices, ascending, of the frames observed right after a
+[declared end](#declared-silence), each of which calls `end()` before it is observed. `target` lists `[frame index, target]` at every frame where the target
 differs from the previous frame's, starting at frame 0, so an implementation
 folds the trace one frame at a time and compares its target at each listed
 index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
@@ -566,6 +593,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `reorder` | A run delivered after a newer one is measured against the frames before it, so the target covers waiting for it |
 | `backlog` | A backlog delivered newest first behind the live edge is not measured, so its media span never reaches the target |
 | `idle` | A 30 s gap relaxes the histogram toward the prior |
+| `silence` | A declared 60 s silence and a declared pause leave the target where it was, and a later undeclared gap still relaxes it |
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
 | `spike` | A recurring stall raises the target, and it decays once the stalls stop |
 | `straggler` | One late interval after the prior is spent leaves the target where it was |
@@ -705,3 +733,54 @@ cooldown, fast-mode bypass, linked stereo, passive noise, rejected active
 noise, and 8/44.1/48 kHz seams. Both implementations consume these exact
 vectors; generating expected output from the implementation under test is
 not conformance.
+
+## Comfort noise
+
+A [declared silence](#declared-silence) is not an underrun. A receiver whose
+playback runs dry at a declared end counts no underrun or stall, and fills the
+silence with comfort noise instead of plain silence, so a muted talker's
+background carries on rather than the line going dead. It keeps doing so
+through the refill before the next utterance plays.
+
+The publisher sends nothing while muted, so the level is measured from what the
+receiver itself played since playback last resumed:
+
+```
+played(samples):                  # audio just played, not comfort noise or startup padding
+    if filling: filling = false; quietest = infinity; sum = 0; frames = 0
+    for each frame:
+        sum += every channel's sample squared
+        frames += 1
+        if frames == BLOCK:
+            quietest = min(quietest, sum / (BLOCK * channels))
+            sum = 0; frames = 0
+
+fill(samples):
+    if not filling:
+        filling = true
+        if quietest is finite: level = min(sqrt(quietest), COMFORT_MAX)
+    each sample = uniform(-1, 1) * level * sqrt(3)
+```
+
+`BLOCK` is 20 ms at the output rate, rounded, and blocks count from the first
+frame played after a silence. `COMFORT_MAX` is 0.001 RMS, -60 dBFS: audio that
+never falls quiet, such as music, would otherwise fill a pause with noise as
+loud as itself. `level` starts at 0, so a source that was already silent, such
+as a noise-suppressed microphone, gets none, and a silence after too little
+audio to fill one block keeps the previous level. Uniform noise on `[-a, a]`
+has an RMS of `a / sqrt(3)`, so the noise sits at `level`. Sums are `f64` in
+the order written; the noise itself is not part of conformance.
+
+Decoded audio stops a codec's pre-skip short of the declared end when the
+publisher leaves its encoder's lookahead unflushed, so the browser's ring takes
+the end that early. Natively, `moq play` declares the end on the playback sink
+when it reads the marker, and the stopped encoder's final frames that follow
+the marker still play before the silence.
+
+### Comfort corpus
+
+`audio-jitter/comfort/corpus.json` holds cases of constant runs played, each
+followed by the level the next silence must fill at, within 1e-9. It covers the
+quietest block rather than the last, blocks straddling a level change, a stereo
+mean, the -60 dBFS cap, an already silent source, and a silence that keeps or
+remeasures the level.

@@ -158,8 +158,8 @@ fn groups(range: std::ops::Range<u64>) -> BTreeMap<u64, String> {
 
 async fn relay(version: Version) -> anyhow::Result<()> {
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast("history")?;
-	let track = broadcast.create_track(
+	let broadcast = publisher.route("history", moq_net::origin::RouteOptions::hidden())?;
+	let track = broadcast.broadcast().create_track(
 		"video",
 		Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
 	)?;
@@ -171,7 +171,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 		)?;
 		group.finish()?;
 	}
-	broadcast.announce(Default::default())?;
+	broadcast.announce()?;
 	let (upstream, upstream_serve) = listen(version, true, move || publisher.clone()).await?;
 	let (sessions, viewers) = tokio::sync::mpsc::unbounded_channel();
 	let (downstream, downstream_serve) = listen(version, false, move || {
@@ -275,7 +275,9 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "requires Bun; run by just test relay-fill in the interop workflow"]
 async fn relay_fill_javascript() {
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+	// moq-lite-07-wip returns once js/net speaks its route layer
+	// (quest/m2/cluster-routing/routes/js.md).
+	for version in ["moq-lite-05", "moq-lite-06"] {
 		kio::clock::timeout(TIMEOUT, relay(version.parse().unwrap()))
 			.await
 			.unwrap()

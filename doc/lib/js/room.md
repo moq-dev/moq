@@ -41,7 +41,9 @@ const room = new Room({ connection, identity: Path.from("alice") });
 the camera's hd and sd renditions encode even when nobody in the room watches,
 so a member who arrives late can fetch the last few seconds. While
 `microphoneEnabled` is on, the microphone keeps raw audio and encodes it once
-someone listens. Turn either off to stop that capture.
+someone listens. Turn either off to stop that capture. Turning the microphone
+off mutes it rather than removing it, so listeners stay subscribed and hear
+the next word at once.
 
 On a public prefix, skip the token and dial that path directly. The conferencing
 demo at [`demo/web`](https://github.com/moq-dev/moq/tree/main/demo/web) (`meet.html`)

@@ -175,15 +175,12 @@ pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super
 	if !matches!(namespace.as_str().split('/').next(), Some("." | ".session")) {
 		return None;
 	}
-	Some(super::RequestError {
-		error_code: super::error::request::to_code(
-			&crate::Error::NotFound,
-			super::error::request::Kind::Subscribe,
-			version,
-		),
-		reason_phrase: "reserved namespace does not exist".into(),
-		retry_interval: 0,
-	})
+	Some(super::RequestError::refuse(
+		&crate::Error::NotFound,
+		super::error::request::Kind::Subscribe,
+		"reserved namespace does not exist",
+		version,
+	))
 }
 
 #[cfg(test)]

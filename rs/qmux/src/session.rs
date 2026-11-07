@@ -25,6 +25,8 @@ pub(crate) struct Inner {
 	pub(crate) wire: net::Wire,
 	socket_stats: Option<SharedSocketStats>,
 	address: Address,
+	/// From [`Config::fixed_receive_window`].
+	fixed_receive_window: bool,
 }
 
 pub(crate) struct State {
@@ -150,21 +152,27 @@ impl Session {
 	/// if the peer completes the transport handshake but never sends its parameters, this
 	/// returns [`Error::HandshakeTimeout`] rather than hanging.
 	pub async fn connect<T: Transport>(transport: T, config: Config) -> Result<(Session, Driver<T>), Error> {
-		let (session, mut driver) = Self::new(transport, Side::Client, config)?;
-		let session = session.established(&mut driver).await?;
-		Ok((session, driver))
+		Self::start(transport, Side::Client, config).await
 	}
 
 	/// Open a server-side session over the given transport, waiting until it is
 	/// established. See [`Session::connect`] for the semantics.
 	pub async fn accept<T: Transport>(transport: T, config: Config) -> Result<(Session, Driver<T>), Error> {
-		let (session, mut driver) = Self::new(transport, Side::Server, config)?;
+		Self::start(transport, Side::Server, config).await
+	}
+
+	/// Start a session over the transport and wait until it is established.
+	pub(crate) async fn start<T: Transport>(
+		transport: T,
+		side: Side,
+		config: Config,
+	) -> Result<(Session, Driver<T>), Error> {
+		let (session, mut driver) = Self::new(transport, side, config)?;
 		let session = session.established(&mut driver).await?;
 		Ok((session, driver))
 	}
 
-	/// Start a session over the transport without waiting for the handshake, for callers
-	/// that resolved the protocol out of band (the WebSocket subprotocol, say).
+	/// Start a session over the transport without waiting for the handshake.
 	pub(crate) fn new<T: Transport>(mut transport: T, side: Side, config: Config) -> Result<(Self, Driver<T>), Error> {
 		let conn = mux::Connection::new(config.to_mux()?, side, kio::clock::now());
 		transport.bind(&config);
@@ -178,6 +186,7 @@ impl Session {
 			wire: net::Wire::new(),
 			socket_stats: transport.socket_stats(),
 			address: transport.address(),
+			fixed_receive_window: config.fixed_receive_window,
 		});
 		let session = Self {
 			_guard: Arc::new(Guard(inner.clone())),
@@ -223,9 +232,13 @@ impl Session {
 	///
 	/// Refuses, changing nothing, a rate cap (QMux never paces, so only
 	/// [`Rate::Unlimited`](moq_quic::Rate::Unlimited) is accepted), a receive window below
-	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW), and limits a peer would
-	/// refuse. A window only grows at once: credit already granted cannot be taken back.
+	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW) or on a session whose window
+	/// is [fixed](Config::fixed_receive_window), and limits a peer would refuse. A window only
+	/// grows at once: credit already granted cannot be taken back.
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), Error> {
+		if self.inner.fixed_receive_window && limits.receive_window.is_some() {
+			return Err(Error::InvalidConfig("this session's receive window is fixed"));
+		}
 		crate::config::check_limits(&limits)?;
 		let capped = |rate: Option<moq_quic::Rate>| matches!(rate, Some(moq_quic::Rate::BytesPerSecond(_)));
 		if capped(limits.receive_rate) || capped(limits.send_rate) {
@@ -391,6 +404,15 @@ impl poll::Session for Session {
 			state.conn.receive_window(),
 			state.conn.stream_receive_window(),
 		))
+	}
+
+	fn set_limits(&self, limits: net::Limits) -> Result<(), net::LimitsError> {
+		if self.inner.fixed_receive_window && limits.receive_window.is_some() {
+			return Err(net::LimitsError::Unsupported);
+		}
+		let mut quic = moq_quic::Limits::default();
+		quic.receive_window = limits.receive_window;
+		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
 	}
 
 	fn stream_credit(&self, dir: net::Dir) -> Option<net::StreamCredit> {
@@ -572,6 +594,18 @@ impl poll::SendStream for SendStream {
 			// The ID is only released on drop, so this does not happen.
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
+	}
+
+	/// Whether every byte written so far went to the transport, which acknowledges it on a
+	/// reliable transport.
+	fn acknowledged(&self) -> Option<bool> {
+		if self.reset {
+			return Some(false);
+		}
+		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
+		let offset = stream.offset();
+		Some(stream.acked(offset).unwrap_or(false))
 	}
 }
 

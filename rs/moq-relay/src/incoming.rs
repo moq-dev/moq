@@ -4,10 +4,14 @@ use crate::auth;
 
 /// A session whose SETUP awaits the relay's reply: what a [`Connection`](crate::Connection) serves.
 ///
-/// Sealed: native requests, plus in-memory accepted sessions with `test-support`.
+/// Sealed: native requests, io_uring workers' requests, plus in-memory accepted sessions
+/// with `test-support`.
 pub trait Incoming: Sealed {}
 
 impl Incoming for moq_tokio::server::Request {}
+
+#[cfg(all(target_os = "linux", feature = "_uring"))]
+impl Incoming for crate::uring::Request {}
 
 #[cfg(feature = "test-support")]
 impl Incoming for Accepted {}
@@ -40,19 +44,26 @@ impl Accepted {
 )]
 pub trait Sealed: Sized {
 	/// The running session's protocol driver.
-	type Driver;
+	type Driver: Send + 'static;
 
 	/// The peer's socket address, for the connection's log span.
 	fn remote(&self) -> Option<std::net::SocketAddr>;
 
 	/// The transport, for the line logged once the session is negotiated.
-	fn transport(&self) -> impl std::fmt::Display + use<Self>;
+	fn transport(&self) -> &'static str;
+
+	/// The tokio runtime that admits and supervises the session, when the connection's own
+	/// task cannot: one on an io_uring worker, which has no tokio reactor for the auth
+	/// client and stops before the drain ends. `None` does both in place.
+	fn shared(&self) -> Option<&tokio::runtime::Handle> {
+		None
+	}
 
 	/// What the auth decider is asked about this session.
 	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request;
 
 	/// Finish `work` before the handshake deadline, closing the session if it passes.
-	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
+	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
 
 	/// Refuse the session, closing it with `code`.
 	async fn reject(self, code: moq_net::SessionError);
@@ -81,7 +92,7 @@ pub trait Sealed: Sized {
 	async fn ok(self) -> anyhow::Result<(moq_net::Session, Self::Driver)>;
 
 	/// Run the session's protocol until it ends, alongside its supervision.
-	async fn drive(driver: Self::Driver) -> anyhow::Result<()>;
+	fn drive(driver: Self::Driver) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }
 
 impl Sealed for moq_tokio::server::Request {
@@ -92,15 +103,15 @@ impl Sealed for moq_tokio::server::Request {
 		self.remote_addr()
 	}
 
-	fn transport(&self) -> impl std::fmt::Display + use<> {
-		moq_tokio::server::Request::transport(self)
+	fn transport(&self) -> &'static str {
+		moq_tokio::server::Request::transport(self).as_str()
 	}
 
 	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request {
 		auth::request_for(auth, self)
 	}
 
-	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
 		Ok(moq_tokio::server::Request::within(self, work).await?)
 	}
 
@@ -173,7 +184,7 @@ impl Sealed for Accepted {
 		None
 	}
 
-	fn transport(&self) -> impl std::fmt::Display + use<> {
+	fn transport(&self) -> &'static str {
 		self.transport.as_str()
 	}
 
@@ -181,9 +192,8 @@ impl Sealed for Accepted {
 		auth::request_for_setup(auth, &self.handshake, self.transport)
 	}
 
-	/// No listener deadline: whoever owns the transport bounds the handshake.
-	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
-		Ok(work.await)
+	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+		within(&mut self.handshake, work).await
 	}
 
 	async fn reject(self, code: moq_net::SessionError) {
@@ -231,5 +241,18 @@ impl Sealed for Accepted {
 		// ending is only the protocol stopping.
 		moq_net::time::run(driver).await;
 		Ok(())
+	}
+}
+
+/// Finish `work` before `handshake`'s accept deadline, which refuses the session if it passes.
+#[cfg(any(feature = "test-support", all(target_os = "linux", feature = "_uring")))]
+pub(crate) async fn within<T>(
+	handshake: &mut moq_net::server::Handshake,
+	work: impl std::future::Future<Output = T>,
+) -> anyhow::Result<T> {
+	let expired = handshake.expired();
+	match futures::future::select(std::pin::pin!(work), std::pin::pin!(expired)).await {
+		futures::future::Either::Left((done, _)) => Ok(done),
+		futures::future::Either::Right(_) => Err(moq_net::Error::Timeout.into()),
 	}
 }

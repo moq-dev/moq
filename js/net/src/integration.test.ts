@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -33,9 +34,8 @@ import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -332,6 +332,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 });
 
 test("integration: lite applies initial and updated group bounds", async () => {
+	hostTime();
 	const GROUP_COUNT = 6n;
 	const INITIAL_START_GROUP = 1n;
 	const INITIAL_END_GROUP = 3n; // exclusive: groups 1 and 2
@@ -500,6 +501,47 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 	}
 });
 
+// A publisher counts a relative start back from its newest group, which may hold no frame yet and
+// so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
+// the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust
+// `a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group`.
+// Quarantined: once on main, the start resolved to 0 instead of the publisher's 5.
+// Investigation: quest/m0/test-flakes-2/lite07-relative-start.md.
+test.skip("integration: lite-07 reports a relative start over a frameless newest group", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { maxAge: null });
+	for (let sequence = 0; sequence < 5; sequence++) {
+		const group = producer.appendGroup();
+		group.writeFrame({ payload: new Uint8Array([sequence]) });
+		group.finish();
+	}
+	const newest = producer.appendGroup();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const reader = remote.track("video").subscribe({ delay: { max: null }, ranges: [{ start: { relative: 0n } }] });
+	try {
+		// Accepting the track subscribes it upstream, whose answer resolves the start.
+		await reader.info();
+		expect(await reader.start()).toBe(5n);
+		newest.writeFrame({ payload: new Uint8Array([5]) });
+		newest.finish();
+		expect((await reader.recvGroup())?.sequence).toBe(5n);
+	} finally {
+		reader.close();
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
 // A lite-07 publisher keeps a covered bounded subscription open for an update: the read ends
 // with its window, the same range reads again from the cache, and a wider one reaches upstream
 // for the rest, past a group that never existed. The demand goes with the readers. Mirrors the
@@ -611,6 +653,7 @@ test("integration: lite draft-06", async () => {
 test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	"integration: %s demand holds across a subscription's TRACK and SUBSCRIBE",
 	async (protocol) => {
+		hostTime();
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const [client, server] = await Promise.all([
@@ -891,10 +934,9 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const path = Path.from("test");
 	// One publisher instance, so the two compete on cost alone.
 	const instance = Instance.random();
-	const localPublication = origin.createBroadcast(path);
-	const local = localPublication.broadcast;
-	localPublication.announce({ instance, cost: 5n });
-	const dynamic = origin.requestsRoute(path, { instance, cost: 1n });
+	const localRoute = origin.route(path, { instance, cost: 5n });
+	const local = localRoute.broadcast;
+	const dynamic = origin.routePrefix(path, { instance, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -1264,8 +1306,7 @@ test("integration: ietf fetches a past group of a finished track", async () => {
 	for (const protocol of [Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ietf.ALPN.DRAFT_22]) {
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
-		const publication = origin.createBroadcast(Path.from("test"));
-		publication.announce();
+		const publication = origin.route(Path.from("test"));
 		// No publisher limit, so the superseded group stays fresh to fetch, and no MAX_CACHE_DURATION.
 		const published = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		for (let sequence = 0; sequence < 3; sequence++) {
@@ -1429,16 +1470,19 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 }
 
 test("integration: lite subscriber teardown on last unsubscribe", async () => {
+	hostTime();
 	await runSubscriberTeardown(Lite.ALPN_06);
 });
 
 test("integration: ietf subscriber teardown on last unsubscribe", async () => {
+	hostTime();
 	await runSubscriberTeardown(Ietf.ALPN.DRAFT_18);
 });
 
 // A fetched group can stay open indefinitely (a catalog track, a JSON stream), so abandoning the
 // fetch must cancel the FETCH stream rather than wait for a stream end that never comes.
 test("integration: lite fetch teardown when the reader abandons an open group", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1473,12 +1517,14 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 // Older drafts have no TRACK stream or SUBSCRIBE_UPDATE, so the demand loop must still tear the
 // subscription down through the plain stream-close path.
 test("integration: lite draft-01 subscriber teardown on last unsubscribe", async () => {
+	hostTime();
 	await runSubscriberTeardown("", Lite.Version.DRAFT_01);
 });
 
 // Two subscribers to one track dedupe onto a single wire subscription: closing one keeps it alive
 // for the other, and only the last close tears it down.
 test("integration: lite fan-out keeps the upstream until the last subscriber leaves", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1516,6 +1562,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 // Repeated subscribe/unsubscribe cycles must each tear down and re-open cleanly (the 40-toggle
 // scenario in the issue), never wedging the shared cache or leaking a subscription.
 test("integration: lite re-subscribe re-opens the upstream after each teardown", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1547,6 +1594,7 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 // Coalesced fetches of one open group share a single FETCH stream: closing one keeps it flowing
 // for the other, and only the last abandon cancels it.
 test("integration: lite coalesced fetch stays until every reader abandons the open group", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1697,6 +1745,7 @@ async function waitFor<T>(signal: Getter<T>, pred: (value: T) => boolean): Promi
 }
 
 test("integration: a follower waits for a late publisher", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -2127,6 +2176,7 @@ test("origin: remote entries retract when the session dies, local ones survive",
 });
 
 test("origin: one origin on both directions consumes locally and never echoes", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 
 	// The client routes both directions through one origin, the FFI default shape.
@@ -2412,6 +2462,7 @@ test.each([Ietf.ALPN.DRAFT_18])(
 );
 
 test("origin: a blind request ends with its session, and the next session answers a fresh one", async () => {
+	hostTime();
 	withoutDiscovery();
 	const original = globalThis.WebTransport;
 	const reconnectUrl = new URL("https://example.com/re-request");
@@ -2463,6 +2514,7 @@ test("origin: a blind request ends with its session, and the next session answer
 });
 
 test("origin: a reactive handle follows announcements across a republish", async () => {
+	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const serverOrigin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -2501,6 +2553,7 @@ test("origin: a reactive handle follows announcements across a republish", async
 });
 
 test("origin: overlapping sessions carrying one path fail over", async () => {
+	hostTime();
 	// Two live relays announce the same broadcast into one origin, the redundant-relay
 	// shape (and the GOAWAY drain shape, where old and new sessions briefly overlap).
 	const clientOrigin = new OriginProducer();
@@ -2617,12 +2670,12 @@ test("create then announce is discoverable on the wire", async () => {
 	]);
 
 	const announced = client.routes();
-	const broadcastPublication = origin.createBroadcast(Path.from("later"));
-	const broadcast = broadcastPublication.broadcast;
+	const broadcastRoute = origin.route(Path.from("later"), { hidden: true });
+	const broadcast = broadcastRoute.broadcast;
 	broadcast.createTrack("chat", { timescale: Timescale.MILLI });
 
 	const pending = announced.next();
-	broadcastPublication.announce();
+	broadcastRoute.announce();
 	const entry = await pending;
 	expect(entry?.prefix).toBe("later" as Path.Valid);
 	expect(entry?.kind).toBe("start");
@@ -2640,7 +2693,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.requests(Path.empty());
+		const handle = origin.routePrefix(Path.empty());
 		const held = new BroadcastProducer();
 		held.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		const serving = (async () => {
@@ -2674,14 +2727,15 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.requests(Path.empty());
+		const handle = origin.routePrefix(Path.empty());
 		const serving = (async () => {
 			const requests = handle.requested();
 			const request = (await requests.next()).value;
 			if (!request) throw new Error("missing job request");
-			const prepared = request.prepare();
-			prepared.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
-			return prepared.publish();
+			const job = request.route({ hidden: true });
+			job.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
+			job.announce();
+			return job;
 		})();
 		const [client, server] = await Promise.all([
 			connect(url, { transport: pair.client, consume: consumer }),
@@ -2692,11 +2746,11 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		if (!remote) throw new Error("request did not resolve");
 		const track = remote.track("chat").subscribe().ordered();
 		await expect(track.readString()).rejects.toBeInstanceOf(Error);
-		const publication = await serving;
+		const job = await serving;
 		track.close();
 		requested.close();
 		handle.close();
-		publication.broadcast.close();
+		job.close();
 		client.abort();
 		server.abort();
 		origin.close();
@@ -2780,6 +2834,7 @@ for (const [name, protocol, version] of [
 	// continues past it.
 	for (const kill of ["remote", "local"] as const) {
 		test(`integration: ${name} cancels the track on a ${kill} session close`, async () => {
+			hostTime();
 			const [closed, groupEnd, end] = await runSessionDeath(protocol, version, kill);
 			expect(closed).toBeInstanceOf(SessionError);
 			expect((closed as SessionError).code).toBe(SessionCode.Cancel);

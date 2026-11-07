@@ -52,7 +52,7 @@ pub use datagram::Datagram;
 pub use time::*;
 pub use timed::Timed;
 
-/// Publishing broadcasts, announcing routes, and consuming both through an origin.
+/// Routing broadcasts into an origin, and consuming them through it.
 pub mod origin {
 	pub use super::follow::Following;
 	pub(crate) use super::origin_impl::HiddenWithheld;
@@ -61,10 +61,16 @@ pub mod origin {
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::Mounted;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
-		Requesting, Requests, Route, Source,
+		Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
+		RouteOptions, Source,
 	};
+	pub use crate::route::RouteKey;
+
 	// Relay-level: every route change, for forwarding and stats. Apps read
 	// `announce` and `follow` instead.
 	#[doc(hidden)]
@@ -77,9 +83,13 @@ pub mod announce {
 	pub use super::origin_impl::Announce;
 }
 
-// Hop identity and the `Consume` conversion trait aren't part of a role
-// module; keep them flat at the crate root.
-pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
+// The `Consume` conversion trait isn't part of a role module; keep it flat at the
+// crate root.
+pub use origin_impl::Consume;
+
+// Hop chains are transit facts the origin and sessions fill in; applications see
+// plain ids.
+pub(crate) use origin_impl::{Hop, Hops, InvalidHop};
 
 // The announce-interest prefixes a scope needs on a prefix-shaped wire.
 #[cfg(feature = "async")]

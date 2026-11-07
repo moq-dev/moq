@@ -7,11 +7,12 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, connect_mock};
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -24,8 +25,10 @@ async fn release(version: Version) {
 	options.client_subscribe = Some(relay.clone());
 	let _pair = connect_mock(options).await;
 
-	let broadcast = publisher.publish("a/b", moq_net::origin::Route::default()).unwrap();
-	let track = broadcast.create_track("t", None).unwrap();
+	let broadcast = publisher
+		.route("a/b", moq_net::origin::RouteOptions::default())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("t", None).unwrap();
 
 	let consumer = relay.consume();
 	let remote = consumer
@@ -38,7 +41,7 @@ async fn release(version: Version) {
 	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
 	crate::support::wanted(track.demand()).await.unwrap();
 
-	broadcast.unannounce();
+	broadcast.withdraw();
 	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	drop(sub);

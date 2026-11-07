@@ -1,11 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Viewers } from "../bandwidth.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
-import { Route } from "../hop.ts";
+import { WireRoute } from "../hop.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
@@ -25,9 +26,8 @@ function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "tra
 }
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(path);
+	const broadcast = broadcastRoute.broadcast;
 	return broadcast;
 }
 
@@ -129,6 +129,7 @@ test("closing mid-connect aborts the pending attempt", async () => {
 });
 
 test("a peer that severs immediately keeps escalating the backoff", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;
@@ -174,6 +175,7 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 });
 
 test("an explicitly undefined delay field falls back to its default", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let dials = 0;
@@ -216,6 +218,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 }
 
 test("a follower follows the reconnect on the same handle", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -365,13 +368,11 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");
 		const closes: (Error | null)[] = [];
+		let server: MockTransport | undefined;
 		const stub = function StubWebTransport() {
 			const pair = createMockTransportPair(Lite.ALPN_06);
-			// Reject at the MoQ layer: accept the transport, then close with a code, the
-			// way a relay's Request::close does after it has already accepted the transport.
-			void accept(pair.server, url).then(() => {
-				pair.server.close({ closeCode: code, reason: "unauthorized" });
-			});
+			server = pair.server;
+			void accept(pair.server, url);
 			return pair.client;
 		};
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
@@ -389,6 +390,9 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 				effect.spawn(async () => {
 					closes.push(await conn.closed);
 				});
+				// Reject at the MoQ layer once both sides are set up, the way a relay's
+				// Request::close does after it has already accepted the transport.
+				server?.close({ closeCode: code, reason: "unauthorized" });
 			}
 		});
 
@@ -434,6 +438,7 @@ function refusing(refused: string, release: Promise<void>) {
 }
 
 test("a refused credential replaced since its dial redials with the new one", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
 	const { dialed, stub } = refusing("old", release);
@@ -462,6 +467,7 @@ test("a refused credential replaced since its dial redials with the new one", as
 });
 
 test("new tokens redial a URL that stopped on refusing the old ones", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const { dialed, stub } = refusing("old", Promise.resolve());
 	globalThis.WebTransport = stub;
@@ -540,6 +546,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 // disjoint. Reading a stream reset off the session table would call every SETUP-stream reset
 // an auth rejection and suppress reconnect for the life of the page.
 test("a setup stream reset is not mistaken for an unauthorized session", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;
@@ -577,6 +584,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 });
 
 test("origins span reconnects: local re-announces, remote re-populates", async () => {
+	hostTime();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/origins");
 
@@ -747,9 +755,8 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		await waitUntil(() => handle.origin.peek() !== undefined);
 		const origin = handle.origin.peek();
 		if (!origin) throw new Error("no origin");
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		await waitUntil(() => dials.length > 0);
 		const first = dials[0];
@@ -835,9 +842,8 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const origin = new OriginProducer();
-		const broadcastPublication = origin.createBroadcast(Path.from("room"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room"));
+		const broadcast = broadcastRoute.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const reload = new Reload({
 			url: new URL("https://example.com/a"),
@@ -896,9 +902,8 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 	const origin = new OriginProducer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
@@ -980,9 +985,8 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const origin = new OriginProducer();
 	const reload = new Reload({ url, websocket: { enabled: false }, publish: origin.consume() });
 	await reload.auth.add("token");
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const first = dials[0];
 	if (!first) throw new Error("no first dial");
@@ -1034,7 +1038,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 			prefix: Path.from("alice/camera.hang"),
 			captures: undefined,
 			kind: "start",
-			route: Route.default,
+			route: WireRoute.default,
 		});
 		await consumer.next();
 		upstream.close();
@@ -1068,6 +1072,7 @@ test("announced accepts a non-prefix scope before any session exists", () => {
  * a reconnect takes it back until the next session's set lands.
  */
 test("a watcher syncs with the server's initial set, and again after a reconnect", async () => {
+	hostTime();
 	// Through the consume origin, and through the handle's own stream without one.
 	for (const [alpn, viaOrigin] of [
 		[Lite.ALPN_06, true],
@@ -1140,7 +1145,7 @@ test("a pump owes the retractions of the upstream it replaces", async () => {
 	const consumer = producer.consume();
 
 	const first = new Announce.Producer();
-	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: Route.default });
+	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: WireRoute.default });
 	first.synced();
 	const upstream = new Signal(first);
 	const pump = new Effect((effect) => pumpAnnounced(effect, effect.get(upstream).consume(), producer));

@@ -42,8 +42,8 @@ hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 # Codecs only: the language wrappers do their own device I/O.
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
-moq-json = { workspace = true }
-moq-mux = { workspace = true }
+moq-json = { workspace = true, features = ["async"] }
+moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = true }
 # `nvidia` and `vaapi` back on, matching rs/moq-c: the workspace turns
@@ -52,8 +52,7 @@ moq-tokio = { workspace = true, default-features = true }
 # cudarc / moq-nvenc / libloading / moq-vaapi sit behind
 # `cfg(target_os = "linux")` and Android is `target_os = "android"`. On Linux
 # both dlopen the driver, so the wrappers still link GPU-less and start
-# driverless; `vaapi` alone costs the build something, since moq-vaapi's bindgen
-# needs libclang (the dev shell carries it).
+# driverless, and neither needs anything on the build host.
 moq-video = { workspace = true, optional = true, features = ["nvidia", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.

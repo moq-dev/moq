@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use moq_net::track::{Delay, Info, Range, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version, cache, kio};
+use moq_net::{Timescale, Timestamp, Version, cache, kio};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -20,7 +20,7 @@ const SUBSCRIBE: u8 = 2;
 const FETCH: u8 = 3;
 
 fn origin(hop: u64, pool: Option<cache::Pool>) -> moq_net::origin::Producer {
-	let mut config = moq_net::origin::Config::new(Hop::new(hop).unwrap());
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	if let Some(pool) = pool {
 		config.pool = pool;
 	}
@@ -34,7 +34,7 @@ struct Fixture {
 	track: moq_net::track::Producer,
 	remote: moq_net::broadcast::Consumer,
 	pair: MockPair,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_origins: (moq_net::origin::Producer, moq_net::origin::Producer),
 }
 
@@ -42,14 +42,17 @@ impl Fixture {
 	/// A lite-07 publisher holding `groups` for good, and a copy whose cache expires them.
 	async fn new(groups: u64) -> Self {
 		let publisher = origin(1, Some(cache::Pool::unbounded()));
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"video",
 				Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
 			)
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 		for sequence in 0..groups {
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			group

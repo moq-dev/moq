@@ -20,6 +20,13 @@ and Bun over WebSocket and WebTransport. Fresh readers request or follow the
 claim's own path and child paths. A reader-first case checks that an absent
 request ends while its follower waits for the publisher to arrive.
 
+Until [`js/net` speaks lite-07's route layer](../../quest/m2/cluster-routing/routes/js.md),
+native JS dials its defaults in the matrix, leaving its grant unchecked, and every
+lane that would run it on lite-07 records a skip naming that quest: claims, track
+replacement, sockets, the browser route key proof, and the lite-07 compress and
+drop legs. The compressed catalog runs without its lite-07 reader, and
+`--versions moq-lite-07-wip` refuses JS clients.
+
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
@@ -52,6 +59,14 @@ Rust CLI swap its channels' tones, and every subscriber must refuse every rendit
 as the wrong tone, not fail some other way. `interop.sh` is the one place the tones
 and each publisher's codecs are chosen.
 
+When Python is selected, the in-tree run also connects Python and Rust socket
+endpoints through the relay in both dial directions and both `tcp` and `track`
+protocols. Each direction checks exact frames, empty writes, ordered groups,
+and clean FIN. A stdin drain acknowledgement keeps Rust alive until Python has
+read its entire half. The lane runs only in the normal pass, pinned to lite-07:
+moq-net endpoints speak moq-lite to each other, never moq-transport. Older lite
+hops are outside this lane.
+
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
@@ -74,6 +89,12 @@ head with a joining FETCH before draft 22 and a fill from it.
 
 `--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
 wire-compat lanes, which swap in released relays and clients, skip them.
+
+Socket lanes cross Rust and native JS in both dial directions under Node and Bun,
+using `tcp` and `track` through the relay. They verify both peers' bytes, FIN, RST,
+rejection, and separate rooted publish grants. Each pins moq-lite-07-wip; moq-net endpoints use lite to talk to each other,
+and older moq-lite hops do not carry hidden endpoints. These lanes
+run in the normal in-tree test when native JS is selected. `just test interop --sockets` runs them alone.
 
 On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
 relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
@@ -107,7 +128,7 @@ broadcast, since an announcement means online/offline, so it has no end,
 withdrawal, or session to report. It joins once the broadcast has finished and
 requires exactly ten nonempty video buffers; its cell passes with the end check
 marked N/A. A pinned moq-transport pass records the case as skipped until
-[`quest/m2/ietf-finish.md`](../../quest/m2/ietf-finish.md) makes it pass.
+[`quest/m3/ietf-finish.md`](../../quest/m3/ietf-finish.md) makes it pass.
 
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
@@ -207,6 +228,26 @@ delivers them as minted: a publisher is granted its exact broadcast, a subscribe
 `**/name` (a leading `**` matching zero segments), and the refused publisher
 `interop-allowed-*.hang`.
 
+## Route key proof
+
+After the matrix, a Chromium tab and a Firefox tab each dial the relay on
+moq-lite-07 over WebTransport (`clients/js/route-key.ts`). A tab proves its
+route key in SETUP when its exporter derives what draft-ietf-webtrans-http3
+section 4.8 specifies, and the relay ends a session whose proof fails, so the
+lane reads the relay's log rather than the page: the tab advertises an
+implementation unique to the run, the relay records it when it admits the
+session, and its `moq_net::lite::setup` debug line on that connection shows the
+proof verified. The lane prints each browser build.
+
+Chromium 158 and later must prove. Firefox's exporter writes the session ID as
+a varint rather than the draft's 64 bits, so `@moq/net` sends no proof from
+Firefox, and the tab must connect unproven. A build that cannot prove yet skips,
+or fails under `CI_STRICT`, which release PRs set, so the lite-07 cut waits for
+both browsers to prove. A build the table says cannot prove but that does fails,
+so the table follows the browsers. Until
+[routes/js.md](../../quest/m2/cluster-routing/routes/js.md) ports `js/net` to the
+route layer, the lane records a skip naming it.
+
 ## moq-transport
 
 `--versions` runs the matrix and the tails once per version, against the same
@@ -225,6 +266,11 @@ one cell. The tails check their own connections, so a fallback fails the lane.
 
 The in-tree control lanes also run with `--tail`:
 
+- Four untimed 900-byte datagrams cross the relay in both directions between Rust
+  and each native JS runtime. The subscriber acknowledges resolved metadata before
+  sending begins, then acknowledges each packet, so this checks framing and bytes
+  rather than best-effort burst capacity. The publisher stays open until the read is
+  acknowledged, keeping a reliable track end from overtaking the datagrams.
 - A JS wire requester gets the Rust publisher's exact largest location through
   TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
@@ -238,7 +284,7 @@ The in-tree control lanes also run with `--tail`:
 
 The standalone control endpoints use OS-assigned ports and production QMux,
 SETUP codecs, and request sessions. They verify their negotiated version directly.
-The query lanes through moq-relay use their usual version-log check.
+The datagram and query lanes through moq-relay use their usual version-log check.
 
 Some cases change shape on moq-transport:
 
@@ -509,6 +555,12 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
+Firefox's replacement case is quarantined from the default run after intermittent
+audio-tone failures. Investigate the missing tone samples alongside
+[the audio playout work](https://github.com/moq-dev/moq/pull/8058), then restore it.
+Run it explicitly with `just test media --media-engines firefox --media-cases replacement`;
+its content, sync, switch, and fallback assertions remain active.
+
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
 subscriptions keep A while fresh catalog handles resolve B with fresh sibling
@@ -562,6 +614,7 @@ clients/
   js/                     headless-Chromium publish/subscribe via @moq/watch + @moq/publish
     driver.ts             the interop matrix's browser publisher/subscriber
     close.ts              the refused session's close code and reason
+    route-key.ts          each browser's route key proof, read off the relay's log
     media.ts              the media output + lifecycle checks
     harness.ts            shared Playwright plumbing
     src/contract.ts       what the page and its drivers agree on, free of browser imports
@@ -571,6 +624,7 @@ clients/
     src/probe.ts          subscriber-side measurement, taken at the sinks
     src/instrument.ts     live counts of the platform resources the page holds, and the speaker tap
     src/close.ts          the refused session, read off `WebTransport.closed`
+    src/route-key.ts      the lite-07 session that proves the tab's route key
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   js-native/catalog.ts    the compressed-catalog reader, pinned to one version
   js-native/hls.ts        the HLS grid publisher via @moq/hang

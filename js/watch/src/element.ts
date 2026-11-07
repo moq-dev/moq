@@ -62,8 +62,10 @@ const OBSERVED = [
 	"follow",
 	// Renamed to `follow`, observed only to refuse it.
 	"announced",
-	"delay",
+	// Renamed to `lookahead`, observed only to refuse it.
 	"buffer",
+	"delay",
+	"lookahead",
 	"catalog-format",
 	"captions",
 	"echo",
@@ -97,12 +99,12 @@ function parseDelay(value: string | null): Delay {
 	throw invalidAttribute("delay", value, '"auto", "instant", or a duration like "300ms"');
 }
 
-// Parse the `buffer` attribute: a duration, or zero when absent.
-function parseBuffer(value: string | null): Milli {
+// Parse the `lookahead` attribute: a duration, or zero when absent.
+function parseLookahead(value: string | null): Milli {
 	if (value === null) return Milli.zero;
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
-	throw invalidAttribute("buffer", value, 'a duration like "30s"');
+	throw invalidAttribute("lookahead", value, 'a duration like "30s"');
 }
 
 // Parse the `echo` attribute: the viewer's feedback name, one visible path segment, or undefined when absent.
@@ -181,7 +183,7 @@ export default class MoqWatch extends HTMLElement {
 		// How far playback trails the live edge.
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
-		buffer: new Signal<Milli>(Milli.zero),
+		lookahead: new Signal<Milli>(Milli.zero),
 		video: {
 			// The desired video rendition (resolution/bitrate cap).
 			target: new Signal<Video.Target | undefined>(undefined),
@@ -195,6 +197,10 @@ export default class MoqWatch extends HTMLElement {
 			target: new Signal<Audio.Target | undefined>(undefined),
 			volume: new Signal(0.5),
 			muted: new Signal(false),
+		},
+		viewer: {
+			// The viewer ceiling in bits per second instead of the catalog's, or 0 to claim none.
+			max: new Signal<number | undefined>(undefined),
 		},
 		text: {
 			// The selected caption track name, or undefined for off (the default; captions are opt-in).
@@ -244,7 +250,6 @@ export default class MoqWatch extends HTMLElement {
 
 		this.player = new Player({
 			origin: this.connection.origin,
-			probe: this.connection.probe,
 			enabled: this.#enabled,
 			name: this.#name,
 			follow: this.#follow,
@@ -265,6 +270,7 @@ export default class MoqWatch extends HTMLElement {
 					(muted, volume) => muted || volume === 0,
 				),
 			},
+			viewer: { ...this.controls.viewer, viewers: this.connection.viewers },
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
 		this.signals.cleanup(() => this.player.close());
@@ -340,7 +346,9 @@ export default class MoqWatch extends HTMLElement {
 			const delay = effect.get(this.controls.delay);
 			this.#reflect(effect, "delay", typeof delay === "number" ? formatDuration(delay) : delay);
 		});
-		this.signals.run((effect) => this.#reflect(effect, "buffer", formatDuration(effect.get(this.controls.buffer))));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "lookahead", formatDuration(effect.get(this.controls.lookahead))),
+		);
 
 		// Track the element's rendered size and feed it into the rendition picker,
 		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
@@ -415,8 +423,11 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "announced" && newValue !== null)
 				throw new Error("moq-watch: `announced` was renamed to `follow`");
 			else if (name === "announced") this.#accept("announced");
+			else if (name === "buffer" && newValue !== null)
+				throw new Error("moq-watch: `buffer` was renamed to `lookahead`");
+			else if (name === "buffer") this.#accept("buffer");
 			else if (name === "delay") this.delay = parseDelay(newValue);
-			else if (name === "buffer") this.buffer = parseBuffer(newValue);
+			else if (name === "lookahead") this.lookahead = parseLookahead(newValue);
 			else if (name === "catalog-format") this.catalogFormat = parseCatalogFormat(newValue);
 			else if (name === "captions") this.captions = newValue || undefined;
 			else if (name === "echo") this.echo = parseEcho(newValue);
@@ -570,19 +581,19 @@ export default class MoqWatch extends HTMLElement {
 	/**
 	 * Future-dated media held beyond the live edge before playback skips ahead, in milliseconds.
 	 *
-	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up a
-	 * buffer from future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
-	 * once they would sit further than `delay + buffer` past the playhead. Call `reset()` at each
-	 * utterance boundary.
+	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up
+	 * future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
+	 * once they would sit further than `delay + lookahead` past the playhead. Call `reset()` at each
+	 * utterance boundary. Not a jitter buffer: live streams leave it at zero and tune `delay`.
 	 */
-	get buffer(): Milli {
-		return this.controls.buffer.peek();
+	get lookahead(): Milli {
+		return this.controls.lookahead.peek();
 	}
 
-	set buffer(value: Milli) {
-		if (typeof value !== "number") throw invalidAttribute("buffer", value, "non-negative milliseconds");
-		this.controls.buffer.set(parseBuffer(formatDuration(value)));
-		this.#accept("buffer");
+	set lookahead(value: Milli) {
+		if (typeof value !== "number") throw invalidAttribute("lookahead", value, "non-negative milliseconds");
+		this.controls.lookahead.set(parseLookahead(formatDuration(value)));
+		this.#accept("lookahead");
 	}
 
 	/**

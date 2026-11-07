@@ -50,9 +50,14 @@ export class Duplicate extends Error {
 	}
 }
 
-// How long a token refused for a reason that may pass waits before its session presents it
-// again, doubling on each refusal up to RETRY_MAX.
-const RETRY_INITIAL = Milli(1000);
+/**
+ * How long a token refused for a reason that may pass waits before its session presents it
+ * again, doubling on each refusal up to RETRY_MAX. A moq-transport refusal that may pass asks
+ * its peer to wait as long.
+ *
+ * @internal
+ */
+export const RETRY_INITIAL = Milli(1000);
 const RETRY_MAX = Milli(30_000);
 
 // Whether a refusal is the acceptor failing to decide rather than its verdict on the token,

@@ -275,6 +275,31 @@ test("hands the producer to the rendition without a subscriber and clears it whe
 	broadcast.close();
 });
 
+// The audio encoder ends its epoch whenever its track changes, so another rendition's rename must
+// not take the track away even for a microtask.
+test("renaming one rendition leaves the others' producers in place", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	const audio = broadcast.audio("audio");
+	audio.config.set(audioConfig);
+	await settle();
+
+	const track = audio.track.peek();
+	expect(track).toBeDefined();
+	const seen: unknown[] = [];
+	const dispose = audio.track.subscribe((value) => seen.push(value));
+
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	await settle();
+	expect(video.track.peek()?.name).toBe("video/1");
+	expect(seen).toEqual([]);
+	expect(audio.track.peek()).toBe(track);
+
+	dispose();
+	broadcast.close();
+});
+
 test("on demand hands the producer to the rendition only while a subscriber is attached", async () => {
 	const broadcast = new Broadcast({
 		enabled: true,
@@ -365,7 +390,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 
 // Regression: a re-announce re-created the catalog track, restarting its group sequence under the
 // same instance, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
-// unannounces at once and keeps the broadcast for the next announce.
+// withdraws the route at once and keeps it, broadcast and instance, for the next announce.
 test("a re-announce continues the catalog's group sequence", async () => {
 	const announce = new Signal(true);
 	const broadcast = new Broadcast({
@@ -382,6 +407,8 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
 	expect((await first.nextGroup())?.sequence).toBe(0n);
+	const instance = announced?.active.peek()?.instance;
+	expect(instance).toBeDefined();
 
 	announce.set(false);
 	await settle();
@@ -391,7 +418,9 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	announce.set(true);
 	await settle();
 
-	// The same track keeps serving, and its newest group is past the first.
+	// The follower continues the same instance, the same track keeps serving, and its newest group
+	// is past the first.
+	expect(announced?.active.peek()?.instance).toBe(instance);
 	expect(broadcast.net.peek()).toBe(net);
 	const group = await first.nextGroup();
 	expect(group?.sequence).toBeGreaterThan(0);
@@ -992,9 +1021,9 @@ test("echo solicits feedback in the catalog unless it walks above the root", asy
 test("the catalog declares the longest group as the join interval once it lists media", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("join.hang") });
 	const video = broadcast.video("video/hd");
-	video.joinInterval.set(Milli(2000));
+	video.join.set(Milli(2000));
 	const audio = broadcast.audio("audio/data");
-	audio.joinInterval.set(Milli(20));
+	audio.join.set(Milli(20));
 	broadcast.text("captions/en").config.set({ format: "vtt", container: { kind: "legacy" } } as Catalog.TextConfig);
 	await settle();
 
@@ -1020,15 +1049,15 @@ test("the join interval stays fixed for the network broadcast", async () => {
 	const name = new Signal(Path.from("fixed.hang"));
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name });
 	const video = broadcast.video("video");
-	video.joinInterval.set(Milli(2000));
+	video.join.set(Milli(2000));
 	video.config.set(videoConfig);
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
 
 	// A longer GOP, from a config change or a later rendition, leaves the declared grid alone.
-	video.joinInterval.set(Milli(4000));
+	video.join.set(Milli(4000));
 	const later = broadcast.video("video/later");
-	later.joinInterval.set(Milli(6000.5));
+	later.join.set(Milli(6000.5));
 	later.config.set(videoConfig);
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
@@ -1040,17 +1069,17 @@ test("the join interval stays fixed for the network broadcast", async () => {
 	broadcast.close();
 });
 
-test("an audio-only broadcast declares its group duration, and no duration declares nothing", async () => {
+test("an audio-only broadcast declares its join, and no join declares nothing", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("audio.hang") });
 	const audio = broadcast.audio("audio");
-	audio.joinInterval.set(Milli(0));
+	audio.join.set(Milli(0));
 	audio.config.set(audioConfig);
 	await settle();
-	// Every frame its own group: the spacing is a frame, unknown up front, so nothing is promised.
+	// A zero join is no positive spacing, so nothing is promised.
 	expect((await readCatalog(broadcast))?.media?.join).toBeUndefined();
 
 	// A later listing tries again once a duration is known.
-	audio.joinInterval.set(Milli(20));
+	audio.join.set(Milli(20));
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(20));
 	broadcast.close();
@@ -1066,7 +1095,7 @@ test("an on-demand rendition declares the interval before encoding, and a media 
 		onDemand: true,
 	});
 	const video = broadcast.video("video");
-	video.joinInterval.set(Milli(2000));
+	video.join.set(Milli(2000));
 	video.config.set(videoConfig);
 	await settle();
 	const net = broadcast.net.peek();

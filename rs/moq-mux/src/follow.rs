@@ -45,13 +45,14 @@ impl Instances {
 		Self(Feed::Fixed(Some(broadcast)))
 	}
 
-	/// Poll for the next change, registering `waiter` when there is none yet.
+	/// The next change.
 	///
 	/// Returns each instance as it comes online or takes over, and `None` once the path goes
 	/// offline or, with an instance named, another one takes it over; see
 	/// [`Following::available`](moq_net::origin::Following::available). Fails once the origin
 	/// closes, and with any resolution failure, such as a handler refusing the path; the call
 	/// after a refusal waits for the serving route to change.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<moq_net::broadcast::Consumer>>> {
 		let (following, instance, live) = match &mut self.0 {
 			Feed::Following {
@@ -84,11 +85,6 @@ impl Instances {
 			}
 		}
 	}
-
-	/// The next change; see [`Self::poll_next`].
-	pub async fn next(&mut self) -> crate::Result<Option<moq_net::broadcast::Consumer>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
 }
 
 #[cfg(test)]
@@ -104,8 +100,8 @@ mod tests {
 		}
 	}
 
-	fn route(instance: &moq_net::Instance) -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_instance(instance.clone(), 0)
+	fn route(instance: &moq_net::Instance) -> moq_net::origin::RouteOptions {
+		moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0)
 	}
 
 	/// The next change a follower reports, which must arrive within the origin's update hold.
@@ -131,13 +127,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_follow_starts_late_and_survives_an_end() {
 		let origin = produce_origin();
-		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		let _catalog = origin.route("a/pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let mut follow = source.follow(Some(&Relative::new("./source").unwrap()), None).unwrap();
 		quiet(&mut follow).await;
 
-		let first = origin.publish("a/source", Default::default()).unwrap();
+		let first = origin.route("a/source", Default::default()).unwrap();
 		let started = followed(&mut follow).await.expect("a start");
 		assert_eq!(started.info().path.as_str(), "a/source");
 
@@ -145,7 +141,7 @@ mod tests {
 		assert!(followed(&mut follow).await.is_none(), "an end");
 		quiet(&mut follow).await;
 
-		let _second = origin.publish("a/source", Default::default()).unwrap();
+		let _second = origin.route("a/source", Default::default()).unwrap();
 		let restarted = followed(&mut follow).await.expect("a start");
 		assert!(!restarted.is_clone(&started));
 	}
@@ -156,8 +152,8 @@ mod tests {
 	async fn a_follow_restarts_only_without_an_instance() {
 		let origin = produce_origin();
 		let (old_instance, new_instance) = (moq_net::Instance::random(), moq_net::Instance::random());
-		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
-		let _old = origin.publish("a/source", route(&old_instance)).unwrap();
+		let _catalog = origin.route("a/pub", Default::default()).unwrap();
+		let _old = origin.route("a/source", route(&old_instance)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let rel = Relative::new("./source").unwrap();
@@ -166,7 +162,7 @@ mod tests {
 		let old = followed(&mut any).await.unwrap();
 		assert!(followed(&mut named).await.unwrap().is_clone(&old));
 
-		let new = origin.publish("a/source", route(&new_instance)).unwrap();
+		let new = origin.route("a/source", route(&new_instance)).unwrap();
 		let replaced = followed(&mut any).await.unwrap();
 		assert_eq!(replaced.info().instance.as_ref(), Some(&new_instance));
 		assert!(followed(&mut named).await.is_none(), "another instance ends it");
@@ -187,10 +183,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_named_instance_follows_a_minted_one() {
 		let origin = produce_origin();
-		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		let _catalog = origin.route("a/pub", Default::default()).unwrap();
 		let minted: moq_net::Instance = "~minted".parse().unwrap();
 		assert!(minted.is_minted());
-		let _sibling = origin.publish("a/source", route(&minted)).unwrap();
+		let _sibling = origin.route("a/source", route(&minted)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let named = moq_net::Instance::random();
@@ -205,13 +201,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_follow_of_the_catalog_keeps_its_instance() {
 		let origin = produce_origin();
-		let old = origin.publish("a/pub", Default::default()).unwrap();
+		let old = origin.route("a/pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let mut follow = source.follow(Some(&Relative::new("./pub").unwrap()), None).unwrap();
 		assert!(followed(&mut follow).await.unwrap().is_clone(&source.broadcast()));
 
-		let _new = origin.publish("a/pub", Default::default()).unwrap();
+		let _new = origin.route("a/pub", Default::default()).unwrap();
 		quiet(&mut follow).await;
 		// Its end is the catalog's, which the catalog's reader sees.
 		drop(old);

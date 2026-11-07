@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared unsupported CPU error
+
+`e2ee::Error::Unsupported(String)` is now `UnsupportedCpu(cpu::UnsupportedCpu)`. The shared `UnsupportedCpu` type and `check()` move from `provider` to `cpu`, enabled by the new `cpu` feature and by `e2ee` and `provider`. `cpu` needs only rind; `provider` adds rustls.
+
+### Async wrappers are opt-in
+
+Enable the `async` Cargo feature to keep awaiting `read_frame`, `recv_group`, `recv`,
+`requested_track`, `requested`, and `closed`:
+`moq-crypto = { version = "...", features = ["async"] }`. This also applies with
+`default-features = false`. The feature is off by default; the matching `poll_*` methods stay
+available without it. Signatures, ciphertext, and track names are unchanged.
+
 ### Datagrams are their own track kind ([#7752](https://github.com/moq-dev/moq/pull/7752))
 
 `e2ee::track::Producer::{append_datagram, insert_datagram}` and `e2ee::track::Consumer::{poll_recv_datagram, recv_datagram}` are removed. Create a datagram track with `e2ee::broadcast::Producer::create_datagrams(name, info)` and read it with `e2ee::broadcast::Consumer::datagrams(name)`, which return `datagram::Producer` (`append`, `insert`) and `datagram::Consumer` (`recv`, yielding the same `datagram::Event`). Its sequence is its own, not the stream track's group counter, and its key domain stays separate.
@@ -52,7 +64,7 @@ A track served on demand is reserved up front with `broadcast::Producer::reserve
 
 The protected path is the opaque broadcast path; the publisher epoch is read from the route's instance instead of a path suffix.
 On wires that do not carry an instance, the session mints one, so the application supplies the epoch.
-Drop `join_epoch` and `split_epoch`: announce the generation's `moq_crypto::e2ee::Epoch` as the route's instance with `Route::default().with_instance(generation.epoch().instance(), 0)`, and read it back from the resolved broadcast with `moq_crypto::e2ee::Epoch::of(&broadcast)`.
+Drop `join_epoch` and `split_epoch`: create the broadcast's route under the generation's `moq_crypto::e2ee::Epoch` as its instance, with `RouteOptions::hidden().with_instance(generation.epoch().instance(), 0)`, and read it back from the resolved broadcast with `moq_crypto::e2ee::Epoch::of(&broadcast)`.
 
 ### Timestamps are optional
 

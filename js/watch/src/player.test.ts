@@ -1,19 +1,23 @@
 import { expect, mock, test } from "bun:test";
-import { Origin, Path } from "@moq/net";
+import * as Catalog from "@moq/hang/catalog";
+import { Bandwidth, Origin, Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 
 // Bun does not run Vite's worklet loader; these tests never create an AudioContext.
 mock.module("./audio/render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
 
 const { Player } = await import("./player");
+const Audio = await import("./audio");
+const Video = await import("./video");
 
 async function flush() {
 	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-test("Player refuses the renamed reload and announced inputs", () => {
+test("Player refuses the renamed reload, announced, and buffer inputs", () => {
 	expect(() => new Player({ reload: true } as never)).toThrow("`reload` was renamed to `follow`");
 	expect(() => new Player({ announced: true } as never)).toThrow("`announced` was renamed to `follow`");
+	expect(() => new Player({ buffer: 1000 } as never)).toThrow("`buffer` was renamed to `lookahead`");
 });
 
 test.each(["table", "consumer", "structural"] as const)("Player borrows a %s origin", async (role) => {
@@ -35,8 +39,7 @@ test.each(["table", "consumer", "structural"] as const)("Player borrows a %s ori
 	const player = new Player({ origin: origins[role], name, catalogFormat: "manual", catalog: {} });
 	try {
 		const active = player.broadcast.out.active.changed();
-		const publication = producer.createBroadcast(name);
-		publication.announce();
+		const publication = producer.route(name);
 		expect((await active)?.path).toBe(name);
 		expect(player.in.origin.peek()).toBe(origins[role]);
 		expect(player.broadcast.in.origin.peek()).toBe(origins[role]);
@@ -88,5 +91,135 @@ test("Player owns the shared pipeline and feeds output policy into decoders", as
 		expect(player.textRenderer.in.enabled.peek()).toBe(false);
 	} finally {
 		player.close();
+	}
+});
+
+test("Player claims its viewer only while it downloads, and an override replaces the catalog's ceiling", async () => {
+	const viewers = new Bandwidth.Viewers();
+	const enabled = new Signal(true);
+	const muted = new Signal(false);
+	const max = new Signal<number | undefined>(1_500_000);
+	const player = new Player({ enabled, audio: { muted }, video: { visible: "never" }, viewer: { viewers, max } });
+	try {
+		await flush();
+		expect(viewers.target.peek()).toBe(1_500_000);
+
+		// The override, too, claims only while something downloads.
+		muted.set(true);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+		muted.set(false);
+		await flush();
+		expect(viewers.target.peek()).toBe(1_500_000);
+
+		enabled.set(false);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+
+		enabled.set(true);
+		max.set(0);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+
+		// Without an override, a player with no catalog yet claims nothing.
+		max.set(undefined);
+		await flush();
+		expect(viewers.target.peek()).toBe(0);
+
+		max.set(2_000_000);
+		await flush();
+		expect(viewers.target.peek()).toBe(2_000_000);
+	} finally {
+		player.close();
+	}
+	await flush();
+	expect(viewers.target.peek()).toBe(0);
+	viewers.close();
+});
+
+test("Player selects video from its viewer grant less audio, moving up as the grant rises", async () => {
+	// Bun has no WebCodecs or Web Audio: accept every rendition so selection runs, and park the
+	// audio graph, which builds for any selected rendition, before it needs a worklet.
+	const supported = { video: Video.Decoder.supported, audio: Audio.Decoder.supported };
+	Video.Decoder.supported = async () => true;
+	Audio.Decoder.supported = async () => true;
+	const context = Object.getOwnPropertyDescriptor(globalThis, "AudioContext");
+	globalThis.AudioContext = class extends EventTarget {
+		state = "running";
+		audioWorklet = { addModule: () => new Promise<void>(() => {}) };
+		suspend = async () => {};
+		resume = async () => {};
+		close = async () => {};
+	} as unknown as typeof AudioContext;
+
+	const estimate = new Signal<number | undefined>(undefined);
+	const viewers = new Bandwidth.Viewers(estimate);
+	const visible = new Signal<"always" | "never">("always");
+	const video = (width: number, height: number, bitrate: number) =>
+		Catalog.VideoConfigSchema.parse({
+			codec: "avc1.640028",
+			container: { kind: "legacy" },
+			codedWidth: width,
+			codedHeight: height,
+			bitrate,
+		});
+	const catalog = {
+		video: {
+			renditions: {
+				"360p": video(640, 360, 800_000),
+				"1080p": video(1920, 1080, 4_000_000),
+			},
+		},
+		audio: {
+			renditions: {
+				audio: Catalog.AudioConfigSchema.parse({
+					codec: "opus",
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					container: { kind: "legacy" },
+					bitrate: 100_000,
+				}),
+			},
+		},
+	};
+	const player = new Player({
+		name: Path.from("live"),
+		catalogFormat: "manual",
+		catalog,
+		video: { visible },
+		viewer: { viewers },
+	});
+	try {
+		await flush();
+		// The 1080p rendition over the selection margin, plus audio.
+		expect(viewers.target.peek()).toBe(5_100_000);
+
+		// An app-limited estimate funds only the small rendition.
+		estimate.set(1_200_000);
+		await flush();
+		expect(player.video.source.out.track.peek()).toBe("360p");
+
+		// Short of the target by one bit, the audio's share leaves too little for 1080p.
+		estimate.set(5_099_999);
+		await flush();
+		expect(player.video.source.out.track.peek()).toBe("360p");
+
+		// A probe that reaches the target moves the viewer up.
+		estimate.set(5_100_000);
+		await flush();
+		expect(player.video.source.out.track.peek()).toBe("1080p");
+
+		// Hidden video claims only audio, which says nothing about video: the selection holds.
+		visible.set("never");
+		await flush();
+		expect(viewers.target.peek()).toBe(100_000);
+		expect(player.video.source.out.track.peek()).toBe("1080p");
+	} finally {
+		player.close();
+		viewers.close();
+		Video.Decoder.supported = supported.video;
+		Audio.Decoder.supported = supported.audio;
+		if (context) Object.defineProperty(globalThis, "AudioContext", context);
+		else delete (globalThis as { AudioContext?: unknown }).AudioContext;
 	}
 });

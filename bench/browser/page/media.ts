@@ -70,7 +70,7 @@ async function publish(config: Media): Promise<void> {
 			codec: config.codec,
 			frameRate: config.fps,
 			maxPixels: config.width * config.height,
-			keyframeInterval: Milli(config.keyframe_ms),
+			join: Milli(config.keyframe_ms),
 			maxBitrate: config.bitrate,
 		},
 	});
@@ -182,10 +182,10 @@ async function watch(config: Media): Promise<{ first_frame_ms: number }> {
 	const connection = new Moq.Connection({ url: new URL(config.url), websocket: { enabled: false } });
 	player = new Watch.Player({
 		origin: connection.origin,
-		probe: connection.probe,
 		name: Moq.Path.from(config.path),
 		video: { canvas, visible: "always", backend: "2d" },
 		audio: { muted: true },
+		viewer: { viewers: connection.viewers },
 	});
 	const sampler = setInterval(() => {
 		const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;

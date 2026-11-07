@@ -4,15 +4,38 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### HTTP HLS lists contributions without starting their media
+### Shared unsupported CPU error
 
-`Server` follows the root catalog's contributions and lists their renditions from their
-catalogs, on the root catalog's join interval and clock. Contribution media starts
+`Error::UnsupportedCpu` now carries `moq_crypto::cpu::UnsupportedCpu` instead of a `String`. Use its `Display` implementation for the missing feature message.
+
+### Media indexing counts toward no stats session
+
+A `Broadcaster` subscribes to each rendition's media to index it, and those subscriptions
+are now unmetered: an origin metered with `with_stats` no longer counts the index's
+`bytes`, `frames`, `groups`, subscriptions, or viewer refcount. The catalog subscription
+and the segments and inits clients fetch still count. No code change is needed.
+
+### The gateways need the `async` feature
+
+The `import` and `export` modules compile only with the new `async` Cargo feature, which the default
+`server` feature enables. With `default-features = false`, enable it to keep them:
+`moq-hls = { version = "...", default-features = false, features = ["async"] }`.
+Nothing else changes for a build with `server`.
+
+The export waits have polls for a caller that drives them itself: `Broadcaster::poll_closed`
+and `poll_ready`, `Rendition::poll_playable`, and `poll_next` on the `renditions::Consumer` and
+`segments::Consumer` cursors. A `segments::Consumer::next` dropped mid-fetch leaves that fetch to the
+next call, which resumes it rather than starting over.
+
+### HTTP HLS lists includes without starting their media
+
+`Server` follows the root catalog's includes and lists their renditions from their
+catalogs, on the root catalog's join interval and clock. Include media starts
 only when requested and stops once responses finish and it idles for the longer of three
 target durations and the playlist window plus one target duration.
 Their URLs include both instances:
-`@{instance}/contribution/{id}/{kind}/{rendition}/@{contribution-instance}/...`.
-`Route::contribution` identifies that contribution; `Resource::instance` still names the
+`@{instance}/include/{id}/{kind}/{rendition}/@{include-instance}/...`.
+`Route::include` identifies that include; `Resource::instance` still names the
 parent broadcast's instance. Embedders using `Server::respond` need no routing change.
 DASH, `Broadcaster::new`, and the recorder cursor continue serving the broadcast's own
 renditions only.

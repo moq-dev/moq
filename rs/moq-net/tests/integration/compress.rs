@@ -9,7 +9,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,7 +30,8 @@ fn compressed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -43,7 +44,7 @@ fn payload(frame: u64) -> Vec<u8> {
 struct Fixture {
 	track: moq_net::track::Producer,
 	subscriber: moq_net::track::Subscriber,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	_hops: Vec<MockPair>,
 	_origins: Vec<moq_net::origin::Producer>,
 }
@@ -51,16 +52,18 @@ struct Fixture {
 /// A track announced by the original publisher, before any relay carries it.
 struct Published {
 	publisher: moq_net::origin::Producer,
-	broadcast: moq_net::origin::Publication,
+	broadcast: moq_net::origin::Route,
 	track: moq_net::track::Producer,
 }
 
 /// Announce one track described by `info`.
 fn publish(info: moq_net::track::Info) -> Published {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("data", info).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("data", info).unwrap();
+	broadcast.announce().unwrap();
 	Published {
 		publisher,
 		broadcast,
@@ -270,8 +273,10 @@ async fn ietf_fetch_keeps_the_stored_form() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
-			let broadcast = publisher.create_broadcast("bcast").unwrap();
-			let track = broadcast.create_track("data", compressed()).unwrap();
+			let broadcast = publisher
+				.route("bcast", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let track = broadcast.broadcast().create_track("data", compressed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			for index in 0..3 {
 				group
@@ -280,7 +285,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 			}
 			group.finish().unwrap();
 			track.finish().unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			broadcast.announce().unwrap();
 			let origin = produce_origin(2);
 			let mut options = MockConnectOptions::new(version.parse().unwrap());
 			options.server_publish = Some(publisher.consume());

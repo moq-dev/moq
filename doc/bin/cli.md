@@ -231,8 +231,10 @@ to `--delay` ahead of its decode time and no further than its decoder buffer
 holds. That send-ahead comes out of the delay, so the output trails a TS source
 by `--delay`. A frame that cannot arrive in time at the rate fails the export,
 as does video whose HRD declares a longer buffer delay than `--delay`; the
-error names the `--delay` it needs. Skipped media within the same broadcast
-flags the next PCR as discontinuous without changing the PMT version. Raw
+error names the `--delay` it needs. A clock jump flags its first PCR without
+changing the PMT version. Padding keeps PCR values on a continuous grid; after
+an outage exhausts the buffered media, overdue padding can arrive in a catch-up
+burst when media resumes. Raw
 `--passthrough` keeps surviving packets unchanged, including across loss.
 
 ## Play
@@ -260,7 +262,10 @@ the one playing. With `--video off`, `--metrics <PATH>` writes a JSON line every
 250 ms with the playhead, the delay, and every gap and stall the speaker hit, in
 the schema the
 [audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
-reduces to underruns, skips, and silence.
+reduces to underruns, skips, and silence. A silence the publisher declares, such
+as a push-to-talk mute, plays as comfort noise at the level of the quietest audio
+heard before it, and counts as no gap or stall. The metrics total that comfort
+noise and name the media timestamp each utterance after it resumes from.
 
 The broadcast's announcement is its online signal, followed until the window
 closes. Playback starts when the name is announced. A
@@ -277,11 +282,7 @@ audio-device dependencies:
 cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
-`moq play` skips disabled renditions when it picks one. If no enabled rendition
-matches its name and codec filters, it waits for a later catalog. Disabling the
-current rendition switches to an enabled one of its kind that matches the
-filters; with none, it stays subscribed, so re-enabling it (an unmute) plays at
-once.
+`moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
 
 ## Capture
 
@@ -504,7 +505,11 @@ moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/
 `--publish` and `--subscribe` take patterns: `alice` is one broadcast,
 `alice/**` is a subtree, `**` is everything under `--root`. `moq auth serve`
 answers a relay's auth requests with the same keys (see [Auth
-server](/bin/relay/auth#auth-server)). `moq auth sessions` and
+server](/bin/relay/auth#auth-server)). It also reads every setting from an
+optional TOML file (`moq auth serve auth.toml`), where flags win and
+`[mtls.certificates.<sha256>]` scopes a client certificate by its
+[chain](/bin/relay/auth#mtls); it reloads the file when it changes.
+`moq auth sessions` and
 `moq auth revalidate` list and re-check sessions on a relay's internal
 listener; a re-check asks the auth server again, and its reply is what kicks.
 See [Authentication](/bin/relay/auth).

@@ -159,6 +159,32 @@ async fn reading_returns_flow_control_credit() {
 	}
 }
 
+/// A stream's bytes count as acknowledged once they go to the transport, which a stalled link
+/// holds back; a reset stream never is.
+#[tokio::test(start_paused = true)]
+async fn a_stream_is_acknowledged_once_its_bytes_go_out() {
+	for &version in Version::ALL {
+		let (client, server, up, _down) = link();
+		let (client, server) = establish(client, server, config(version), config(version)).await;
+
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		assert_eq!(send.acknowledged(), Some(true), "{version:?}: nothing written");
+		up.send(Flow::Stall).unwrap();
+		// More than the pipe holds, within the peer's stream window.
+		let data = payload(2 * PIPE, 5);
+		write_all(&mut send, data.clone()).await;
+		assert_eq!(send.acknowledged(), Some(false), "{version:?}: the link holds the rest");
+
+		up.send(Flow::Open).unwrap();
+		let mut recv = server.accept_uni().await.unwrap();
+		assert_eq!(read_exact(&mut recv, data.len()).await.unwrap(), data, "{version:?}");
+		assert_eq!(send.acknowledged(), Some(true), "{version:?}: all of it went out");
+
+		send.reset(1);
+		assert_eq!(send.acknowledged(), Some(false), "{version:?}");
+	}
+}
+
 /// Lease `want` bytes, returning how many were leased and handing them back unread, so they
 /// keep their credit.
 async fn lease(recv: &mut RecvStream, want: usize) -> Result<usize, Error> {
@@ -262,6 +288,31 @@ async fn set_limits_widens_and_refuses_a_rate_cap() {
 		server.set_limits(limits),
 		Err(Error::ReceiveWindowTooSmall(_))
 	));
+}
+
+/// moq-net opens a session's receive window through the transport trait, unless the session's
+/// window is fixed, which it reports as a limit it cannot change.
+#[tokio::test(start_paused = true)]
+async fn the_transport_widens_unless_its_window_is_fixed() {
+	let mut limits = net::Limits::default();
+	limits.receive_window = std::num::NonZeroU64::new(16 << 20);
+
+	let (_client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	poll::Session::set_limits(&server, limits).expect("widened");
+	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, 16 << 20);
+
+	let mut fixed = config(Version::QMux02);
+	fixed.fixed_receive_window = true;
+	let (_client, server) = pair(config(Version::QMux02), fixed).await;
+	let window = poll::Session::receive_window(&server).unwrap().connection;
+	assert_eq!(
+		poll::Session::set_limits(&server, limits),
+		Err(net::LimitsError::Unsupported)
+	);
+	let mut direct = moq_quic::Limits::default();
+	direct.receive_window = limits.receive_window;
+	assert!(matches!(server.set_limits(direct), Err(Error::InvalidConfig(_))));
+	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, window);
 }
 
 /// A reset seen through a lease frees the stream while the reader still holds it, returning

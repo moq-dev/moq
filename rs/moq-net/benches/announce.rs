@@ -9,8 +9,10 @@
 //!
 //! - health: `<pid>/private/channel_N/stream-health-<ts>` from a few origins behind
 //!   a shared pair of relays, the shape that motivated compression.
-//! - unique: random single-segment paths and random two-hop chains, where nothing
-//!   is shared and every START pays the four zero base/keep bytes.
+//! - unique: random single-segment paths and random two-hop chains, where no path
+//!   is shared and every START pays the two zero base/keep bytes.
+//!
+//! The hop chains travel only on lite-06; lite-07 names each claim's route instead.
 //!
 //! The byte counts print once before the timings.
 //!
@@ -18,7 +20,7 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{
-	Hop, Hops, Path, announce,
+	Path, announce,
 	fuzz::{AnnounceWriter, Announced, decode_announces, encode_announces},
 	origin,
 };
@@ -56,7 +58,7 @@ fn initial(c: &mut Criterion) {
 						origin::RouteEvent::Update(announce::Announce {
 							prefix: moq_net::Path::new(&format!("route/{route}")).unwrap(),
 							captures: None,
-							route: moq_net::origin::Route::default().with_cost(cost),
+							route: moq_net::fuzz::route_info([], cost, None),
 						})
 					})
 				})
@@ -103,12 +105,8 @@ fn id(seed: u64) -> u64 {
 	((z ^ (z >> 31)) & ((1 << 62) - 1)).max(1)
 }
 
-fn hops(ids: &[u64]) -> Hops {
-	Hops::try_from(ids.iter().map(|id| Hop::new(*id).unwrap()).collect::<Vec<_>>()).unwrap()
-}
-
 /// Announce `routes` routes, then replace `churn` of them, oldest first.
-fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (Path, Hops)) -> Vec<Announced> {
+fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (Path, Vec<u64>)) -> Vec<Announced> {
 	let mut announced: Vec<_> = (0..routes)
 		.map(|n| {
 			let (path, hops) = route(n);
@@ -123,7 +121,7 @@ fn stream(routes: u64, churn: u64, route: impl Fn(u64) -> (Path, Hops)) -> Vec<A
 	announced
 }
 
-fn health(n: u64) -> (Path, Hops) {
+fn health(n: u64) -> (Path, Vec<u64>) {
 	let origin = n % ORIGINS;
 	let path = format!(
 		"{:x}/private/channel_{}/stream-health-{}",
@@ -131,17 +129,17 @@ fn health(n: u64) -> (Path, Hops) {
 		n % 16,
 		1_700_000_000 + n
 	);
-	(Path::new(&path).unwrap(), hops(&[id(origin), id(100), id(101)]))
+	(Path::new(&path).unwrap(), vec![id(origin), id(100), id(101)])
 }
 
-fn unique(n: u64) -> (Path, Hops) {
+fn unique(n: u64) -> (Path, Vec<u64>) {
 	(
 		moq_net::Path::new(&format!("{:x}", id(n))).unwrap(),
-		hops(&[id(n + 1_000_000), id(n + 2_000_000)]),
+		vec![id(n + 1_000_000), id(n + 2_000_000)],
 	)
 }
 
-type Workload = (&'static str, fn(u64) -> (Path, Hops));
+type Workload = (&'static str, fn(u64) -> (Path, Vec<u64>));
 const WORKLOADS: [Workload; 2] = [("health", health), ("unique", unique)];
 
 fn report() {

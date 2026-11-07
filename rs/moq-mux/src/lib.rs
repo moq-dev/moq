@@ -1,4 +1,11 @@
 #![warn(missing_docs)]
+#![cfg_attr(
+	not(feature = "async"),
+	allow(
+		rustdoc::broken_intra_doc_links,
+		reason = "the docs link the async-only functions, which a poll-only build leaves out"
+	)
+)]
 
 //! Media muxers and demuxers for MoQ.
 //!
@@ -28,6 +35,9 @@
 //!   serve it, for a reader that restarts on each one.
 //! - [`Linger`] keeps a cleanly ended broadcast up for a fixed time, so a
 //!   subscriber that arrives after the end still gets its tail.
+//!
+//! The `poll_*` methods are always available. Enable the `async` feature for their generated
+//! async wrappers and the async constructors with no poll of their own; it is off by default.
 
 #[cfg(any(test, feature = "fuzz"))]
 mod allocation;

@@ -281,17 +281,7 @@ impl crate::failover::Aggregate for Error {
 crate::error::from_message! {
 	driver::endpoint::ConnectError => Connect,
 	driver::connection::Error => Connection,
-	web::ServerError => Server,
 	hex::FromHexError => InvalidFingerprint,
-}
-
-impl From<web::ClientError> for Error {
-	fn from(err: web::ClientError) -> Self {
-		Self::Client {
-			status: client_status(&err),
-			message: crate::error::message(err),
-		}
-	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -579,40 +569,30 @@ impl Error {
 	}
 }
 
-fn map_client_error(err: web::ClientError) -> Error {
-	match client_status(&err).and_then(crate::ConnectError::from_status_u16) {
+fn map_client_error(err: web::Error) -> Error {
+	let status = client_status(&err);
+	match status.and_then(crate::ConnectError::from_status_u16) {
 		Some(rejected) => rejected.into(),
-		None => err.into(),
+		None => Error::Client {
+			status,
+			message: crate::error::message(err),
+		},
 	}
 }
 
 /// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
 /// all (as opposed to the connection failing underneath the request).
 ///
-/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// Both classifications read this: [`map_client_error`] turns an auth status into a
 /// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
 /// the status. A `404` or `405` is the server's settled answer, so retrying
 /// it just burns the reconnect budget on a URL that will never work.
-fn client_status(err: &web::ClientError) -> Option<u16> {
+fn client_status(err: &web::Error) -> Option<u16> {
 	match err {
-		web::ClientError::HttpError(err) => connect_status(err),
-		_ => None,
-	}
-}
-
-fn connect_status(err: &web::ConnectError) -> Option<u16> {
-	match err {
-		web::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
-		web::ConnectError::ProtoError(err) => proto_status(err),
-		_ => None,
-	}
-}
-
-fn proto_status(err: &web::proto::ConnectError) -> Option<u16> {
-	match err {
-		web::proto::ConnectError::ErrorStatus(status) | web::proto::ConnectError::WrongStatus(Some(status)) => {
-			Some(status.as_u16())
-		}
+		web::Error::Handshake(web::HandshakeError::Status(status)) => Some(status.as_u16()),
+		web::Error::Handshake(web::HandshakeError::Connect(
+			web::proto::ConnectError::ErrorStatus(status) | web::proto::ConnectError::WrongStatus(Some(status)),
+		)) => Some(status.as_u16()),
 		_ => None,
 	}
 }
@@ -621,10 +601,8 @@ fn proto_status(err: &web::proto::ConnectError) -> Option<u16> {
 
 pub(crate) struct Server {
 	pub quic: driver::endpoint::Endpoint,
-	/// The configured receive window, opened once a session is admitted: until then a
-	/// connection holds [`moq_net::transport::SETUP_RECEIVE_WINDOW`].
-	pub window: Option<std::num::NonZeroU64>,
-	tls: crate::tls::Serve,
+	/// Builds each accepted client's identity against the listener's current roots.
+	pub(crate) tls: crate::tls::Serve,
 	/// Reloads the QUIC-LB peers for as long as the server runs.
 	_peers: Option<notify::RecommendedWatcher>,
 }
@@ -648,7 +626,8 @@ impl Server {
 		} = options;
 		let quic = quic.resolve();
 		let mut transport = transport(&quic, "server")?;
-		let window = transport.limits.receive_window;
+		// Held back until admission, when moq-net opens the configured window
+		// (`moq_net::Server::with_receive_window`).
 		transport.limits.receive_window = std::num::NonZeroU64::new(moq_net::transport::SETUP_RECEIVE_WINDOW);
 		let keylog = quic
 			.keylog
@@ -764,7 +743,6 @@ impl Server {
 
 		Ok(Self {
 			quic,
-			window,
 			tls: served,
 			_peers: peers,
 		})
@@ -822,6 +800,7 @@ impl Closer {
 pub(crate) async fn accept(
 	conn: driver::endpoint::Incoming,
 	alpns: Vec<&'static str>,
+	tls: crate::tls::Serve,
 ) -> Result<crate::server::Accepted<web::Session>> {
 	let mut conn = conn.accept()?;
 
@@ -855,10 +834,7 @@ pub(crate) async fn accept(
 				.await
 				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
-			let identity = request
-				.connection()
-				.peer_identity()
-				.map(crate::tls::PeerIdentity::from_chain);
+			let identity = request.connection().peer_identity().map(|chain| tls.peer(chain));
 			// The authority the client put in its CONNECT URL.
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
@@ -885,7 +861,7 @@ pub(crate) async fn accept(
 		// this also covers versions omitted from `moq_net::ALPNS` but enabled
 		// in this server's configuration.
 		alpn if alpns.contains(&alpn) => {
-			let identity = conn.peer_identity().map(crate::tls::PeerIdentity::from_chain);
+			let identity = conn.peer_identity().map(|chain| tls.peer(chain));
 			// Raw QUIC carries no request URL; the path rides the SETUP. The TLS SNI is the
 			// only authority the client can offer here, and it is optional.
 			let authority = (!host.is_empty()).then_some(host);
@@ -1085,7 +1061,7 @@ mod tests {
 		let dial = client.connect(&tls, url.into(), &versions);
 		let accept = async {
 			let incoming = server.accept().await.expect("incoming connection");
-			super::accept(incoming, versions.alpns()).await
+			super::accept(incoming, versions.alpns(), server.tls.clone()).await
 		};
 		let webrtc = async {
 			let mut received = Vec::new();
@@ -1162,7 +1138,7 @@ mod tests {
 		let dial = client.connect(&tls, url.into(), &versions);
 		let accept = async {
 			let incoming = server.accept().await.expect("incoming connection");
-			super::accept(incoming, versions.alpns()).await
+			super::accept(incoming, versions.alpns(), server.tls.clone()).await
 		};
 		let result = kio::clock::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
 			.await

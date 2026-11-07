@@ -861,10 +861,12 @@ int main()
 		CHECK(catalog.has_value());
 		if (catalog) {
 			const auto &[name, rendition] = *catalog->video.begin();
-			auto media = TestOk(
-				moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::kVideo{name, rendition}})
-					.get(),
-				"container consumer");
+			// No max delay: the default of zero lets the publisher reset the first
+			// group's unsent end (its duration marker and FIN) the moment the large
+			// keyframe supersedes it, which reads as a gap. This reader wants every group.
+			moq::MediaTrackConfig config{moq::Rendition::kVideo{name, rendition}, moq::Subscription{}};
+			auto media = TestOk(moq::MediaTrackConsumer::subscribe(broadcast, config).get(),
+					    "container consumer");
 			// Read a frame first, so the relay is subscribed before the last one is written.
 			auto next = media->next();
 			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
@@ -1140,6 +1142,10 @@ int main()
 		CHECK(signalAt(0).code == OBS_OUTPUT_ENCODE_ERROR);
 	}
 	printf("encode error: ok\n");
+
+	// Join moq-ffi's runtime threads as obs_module_unload does, or one that exited idle is
+	// still unjoined at exit, which ThreadSanitizer reports as a leak.
+	moq::shutdown();
 
 	if (g_failures) {
 		fprintf(stderr, "%d failure(s)\n", g_failures);

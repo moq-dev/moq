@@ -12,8 +12,8 @@ sizes.
 
 The measured rows are the `relay-mic-rtt40` replay row, whose
 `player_underruns_per_min` must reach 0, and a live re-run of the 2026-11-03
-rows below on Chrome and Safari with a real microphone and 40 ms or more of
-added RTT, read from the stats panel's audio Underruns.
+rows below with a real microphone, Chrome's with 40 ms or more of added RTT
+and Safari's on the direct path, read from the stats panel's audio Underruns.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is still
 missing audio; only received audio is stretched. The estimator stays as
@@ -27,6 +27,12 @@ Decided 2026-11-03 (maintainer, on
 stretch into m1 as this quest's fix, keeping `QUANTILE` at 0.95. The options
 were restating the Goal to the measured rate, or raising the quantile. The m2
 Time stretch quest was folded in here.
+
+Decided 2026-11-06 (maintainer, /quest-unblock): drop the Safari row with
+40 ms or more of added RTT. Safari can't be redirected through the RTT relay,
+and shaping it needs Network Link Conditioner or `dnctl`/`pfctl` on the
+laptop, so its rows run on the direct path. Not chosen: a hands-on Safari run
+with shaped RTT.
 
 ### Baseline, 2026-11-03
 
@@ -121,11 +127,16 @@ are expanding sooner or more often as the ring nears empty, or accepting the
 remaining re-stalls. Each departure from NetEq's constants is recorded with
 the replay numbers that justify it.
 
+- Port the shared specification rather than NetEq independently:
+  [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856) landed the
+  native stretch with `doc/concept/audio-jitter.md` specifying the shared
+  floating-point adaptation and `doc/concept/audio-jitter/stretch/corpus.json`
+  holding literal PCM vectors for both languages. Implement that spec and
+  pass those vectors, so both players stretch alike; record any departure
+  from it in the spec, not only here.
 - Put the stretch where `js/watch/src/audio/replay.ts` exercises it, such as
   `AudioRingBuffer`'s read path or a module the render worklet and the replay
-  share, so the replay rows measure the stretch and not a model of it. Port
-  the search with unit tests against NetEq's behaviour on synthetic periodic
-  and noise signals.
+  share, so the replay rows measure the stretch and not a model of it.
 - Accelerate replaces the skip-ahead when the ring sits above the high
   limit. A re-stall remains for a ring that empties despite the stretch, and a
   skip-ahead remains only above what fast accelerate can close.
@@ -133,8 +144,8 @@ the replay numbers that justify it.
   budget is tightened to the new measurement. No other replay row regresses,
   and the nightly browser rows are re-measured by the budgets note's rule. A
   listening check confirms that a 2 ms/s drift and the measured expansions are
-  inaudible or close to it. The 2026-11-03 Chrome and Safari +40 ms rows are
-  re-run on real hardware.
+  inaudible or close to it. The 2026-11-03 rows are re-run on real hardware:
+  Chrome's at +40 ms and Safari's on the direct path.
 
 ### Publisher, measured in the same run
 
@@ -150,21 +161,18 @@ path, so the 20 ms default stays.
 Decided 2026-10-15: keep this proof in m1 with the existing playback and
 A/V clock work.
 
-## Waiting
-
-- Maintainer: Safari with 40 ms or more of added RTT, the baseline row the
-  2026-11-03 run could not shape. On the MacBook Air (`kixtop`), install
-  Network Link Conditioner (Additional Tools for Xcode) or allow
-  `sudo dnctl`/`pfctl`, then play `cdn.moq.dev/anon` in Safari with the stats
-  panel open for two minutes, and record its audio Underruns after 30 s and the
-  latency tab's auto delay.
-
-## Required
-
-- [A/V clock](/quest/m1/av-clock.md) - the clock the stretch converges toward
+Decided 2026-11-05 (maintainer, /quest-plan): steady-state lip sync comes
+from this stretch converging the ring's playhead on `Sync.now()`, the shared
+clock on local time anchored at the earliest arrival. The clock never follows
+audio: one slow track must not hold the others, so audio and video stay in sync
+in the steady state and drift apart only while a track is congested.
+[moq-dev/moq#7941](https://github.com/moq-dev/moq/pull/7941) dropped an
+audio-driven clock for this. Recommendation: measure the gap against the sample
+reaching the output, through `AudioContext.getOutputTimestamp()`, so output
+latency, Bluetooth included, is part of the lip sync.
 
 ## Related
 
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - re-measures the AAC browser budgets after the publisher change, no gate on this proof
 - [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - the native time-stretch sharing one NetEq algorithm and its test vectors with this one
-- [Watch worker](/quest/m2/watch-worker.md) - moves the worklet this stretch changes
+- [Watch worker](/quest/m3/watch-worker.md) - moves the worklet this stretch changes

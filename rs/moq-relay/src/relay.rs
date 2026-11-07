@@ -154,7 +154,7 @@ impl Relay {
 			.implementation
 			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
 			.clone();
-		config.connect.implementation = Some(implementation.clone());
+		config.connect.implementation = Some(implementation);
 		let resolved_config = Box::new(config.clone());
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -185,9 +185,7 @@ impl Relay {
 
 		// Every listener shares admission ownership before its workers can accept.
 		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
-		let server_versions = config.listen.versions();
 		let handshake_timeout = config.listen.resolved_timeout();
-		let server_extensions = config.listen.extensions;
 
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
@@ -334,10 +332,7 @@ impl Relay {
 		let (ready, _) = tokio::sync::watch::channel(Startup::Starting);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
-			.with_versions(server_versions)
-			.with_extensions(server_extensions)
-			.with_implementation(implementation)
-			.with_timeout(handshake_timeout)
+			.with_listen(&config.listen)
 			.with_quic(&config.quic)
 			.with_sessions(sessions.clone())
 			.with_tls_acceptor(server.tls_acceptor());
@@ -1034,21 +1029,18 @@ mod tests {
 		);
 	}
 
-	/// A long-lived task's panic ends `run` with that panic, instead of leaving a
-	/// relay that accepts sessions it can no longer serve.
+	/// A long-lived task's failure ends `run` with it, instead of leaving a relay
+	/// that accepts sessions it can no longer serve.
 	#[tokio::test]
-	async fn a_critical_panic_stops_the_relay() {
+	async fn a_critical_failure_stops_the_relay() {
 		let mut config = crate::Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
 		let _admissions = relay.admissions().unwrap();
-		relay
-			.cluster()
-			.critical
-			.spawn("injected task", async { panic!("injected") });
+		relay.cluster().critical.fail(anyhow::anyhow!("injected"));
 
 		let err = relay.run().await.expect_err("the relay kept running");
-		assert_eq!(err.root_cause().to_string(), "injected task panicked: injected");
+		assert_eq!(err.root_cause().to_string(), "injected");
 	}
 
 	/// A panic in the cluster's driver, which `run` polls rather than spawns, ends

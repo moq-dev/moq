@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures::StreamExt;
 
 use moq_net::transport::poll::{RecvStream as _, SendStream as _, Session as _};
-use moq_net::{Hop, Timestamp, Version};
+use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -33,7 +33,8 @@ const SUBSCRIBE_TRACKS: &[u8] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -44,14 +45,16 @@ struct Setup {
 	pair: MockPair,
 	track: moq_net::track::Producer,
 	frames: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 }
 
 async fn setup(version: Version) -> Setup {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("room").unwrap();
-	let track = broadcast.create_track("video", timed()).unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+	broadcast.announce().unwrap();
 
 	let subscriber = produce_origin(2);
 	let mut options = MockConnectOptions::new(version);

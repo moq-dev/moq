@@ -1769,8 +1769,8 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// Copy the measured multiplex rate into the `mpegts` section, publishing the
-	/// catalog. Called only when the measurement changed, so a steady source never
-	/// republishes.
+	/// catalog. Called only when the measurement changed, so a steady source republishes
+	/// only when a window sets a new high, ever more rarely.
 	fn record_mux_rate(&mut self) -> anyhow::Result<()> {
 		let rate = self.mux_rate.published();
 		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
@@ -5837,10 +5837,11 @@ pub(super) mod test {
 		let exporter = crate::container::ts::export_test::open_ts(
 			crate::source::announced(&consumer).await,
 			crate::catalog::CatalogFormat::Hang,
+			RECORDING_MAX_AGE,
 		)
 		.await
 		.unwrap();
-		let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
+		let mut exporter = exporter.with_replay();
 		let mut ts = Vec::new();
 		while let Ok(Some(frame)) = kio::clock::timeout(RECORDING_MAX_AGE * 3, exporter.next())
 			.await
@@ -9604,12 +9605,13 @@ pub(super) mod test {
 					None => baseline = Some(observed.clone()),
 					Some(expected) => assert_eq!(&observed, expected, "{kind:?} {layout}"),
 				}
-				let mut export =
-					crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-						.await
-						.unwrap()
-						.with_delay(Duration::from_secs(30))
-						.with_replay();
+				let mut export = crate::container::ts::export_test::open_export(
+					crate::source::announced(&consumer).await,
+					Duration::from_secs(30),
+				)
+				.await
+				.unwrap()
+				.with_replay();
 				let mut ts = Vec::new();
 				while let Ok(frame) = kio::clock::timeout(Duration::from_secs(100), export.next()).await {
 					let Some(frame) = frame.unwrap() else {
@@ -10239,11 +10241,13 @@ pub(super) mod test {
 			"the first group ends at the break, one frame after its last picture"
 		);
 
-		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-			.await
-			.unwrap()
-			.with_delay(Duration::from_secs(30))
-			.with_replay();
+		let mut exporter = crate::container::ts::export_test::open_export(
+			crate::source::announced(&consumer).await,
+			Duration::from_secs(30),
+		)
+		.await
+		.unwrap()
+		.with_replay();
 		let mut ts = Vec::new();
 		while let Ok(res) = kio::clock::timeout(Duration::from_secs(100), exporter.next()).await {
 			let Some(frame) = res.expect("the exporter must take the open GOP after the break") else {
@@ -11037,11 +11041,11 @@ pub(super) mod test {
 		// groups and their boundary. Queued media is drained on its deadlines, without
 		// generating output through an arbitrary silence before feeding the next phase.
 		let delay = std::time::Duration::from_millis((RESET_LEAP_TICKS + RESET_PES * RESET_PES_TICKS) / 90);
-		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-			.await
-			.unwrap()
-			.with_delay(delay)
-			.with_replay();
+		let mut exporter =
+			crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await, delay)
+				.await
+				.unwrap()
+				.with_replay();
 		// A discontinuity before anything went out moves no clock, so the media before the
 		// boundary goes out first, as it would live.
 		let (frames, before_flags) = exported_discontinuities(&mut exporter).await;

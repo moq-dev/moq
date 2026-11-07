@@ -2,31 +2,43 @@
 
 ## Goal
 
-Confirm the cache earns its keep for the hosted jobs that still use R2
-(Nightly on `main`, release pull requests, and the macOS and Windows jobs),
-and record the numbers in the PR that closes this:
+Confirm the cache earns its keep for the hosted Nightly jobs on `main` that
+still use R2 (Linux, macOS and Windows), and record the numbers in the PR
+that closes this:
 
-- A release pull request's `Check the cache` step reports `effective
-  read-only`. Condition: `release` carries the Rust cache, which its
-  `platform.yml` still lacks on 2026-10-28; check with
-  `git show origin/release:.github/workflows/platform.yml | grep rust-cache`.
 - Nightly's Linux, macOS and Windows jobs hit what the previous Nightly
   wrote.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
   store it replaced, from the same commit before and after.
-- Each object expires 30 days after upload, so a crate no Nightly builds in
+- Each object expires 14 days after upload, so a crate no hosted job builds in
   that window stays cold for the next hosted job. Count how often a Nightly
   job pays that rebuild, including when `Cargo.lock` changed more than 8 times
   since the previous Nightly (see Plan).
 - Bucket size and request counts after a month with capped manifests
-  (mbx 1.28.0 and later, from about 2026-11-26), against the 30-day expiry
+  (mbx 1.28.0 and later, from about 2026-11-26), against the 14-day expiry
   in `infra/mbx/lifecycle.json`.
-  Shorten or lengthen it from that.
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
 nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
+
+Decided 2026-11-07 (maintainer, /quest-unblock): agents collect the R2
+numbers with this desktop's wrangler login, and the maintainer only picks the
+lifecycle. Baseline that day: 720,249 objects / 1.2 TB, with 18,006,968
+`GetObject` and 4,892,769 `PutObject` requests from 2026-10-16 to 2026-11-07.
+
+Decided 2026-11-07 (maintainer, /quest-unblock): ✅ shrink the expiry to 14
+days, applied that day with `just infra mbx lifecycle`. At R2 list prices the
+30-day window was headed for about 1.65 TB (about $25 a month in storage alone), and 14 days halves
+that. Not chosen: keeping 30 days until the 2026-11-26 numbers;
+lengthening it.
+
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ the release pull request
+check moved to [m3](/quest/m3/mbx-r2-release-cache.md) (m2 before the milestone re-cut) behind the cut, since
+`release` gets the platform Rust cache only when the cut merges `main` into
+it; the Nightly checks stay here. Not chosen: moving this whole quest; merging
+`main` into `release` now, which reverses the 2026-11-04 decision.
 
 Decided 2026-10-22 (maintainer): narrowed to hosted jobs. Since
 [#6040](https://github.com/moq-dev/moq/pull/6040) the merge queue runs on the
@@ -34,15 +46,15 @@ self-hosted `moq-queue` runner with mbx's local store, so it neither reads nor
 writes R2.
 
 Decided 2026-10-27 (maintainer): the cross-job miss report moved to
-[unifying dependency features](/quest/m0/ci/hakari.md), which measures its own
-before and after baseline and no longer waits on this quest.
+the cargo-hakari quest, which recorded its own before and after baseline and
+finished 2026-11-06.
 
 The first scheduled Nightly on mbx 1.28.0,
 [40506938673](https://github.com/moq-dev/moq/actions/runs/40506938673)
 (2026-10-27), settled the bump: every hosted job reports `configured
 read-write, effective read-write`, and macOS refused only a manifest already
-oversized before it. Six such manifests stay unreadable until the 30-day
-lifecycle deletes them, the last about 2026-11-26: `a90076a4...`,
+oversized before it. Six such manifests stay unreadable until the
+lifecycle deletes them, typically within a day of the 14-day rule applied 2026-11-07: `a90076a4...`,
 `5cb8fb79...`, `b0310ce4...`, `18d136a6...` (17235558 bytes, first refused in
 [40090959108](https://github.com/moq-dev/moq/actions/runs/40090959108)),
 `2ed9df47...` and `0d4f4e3f...`. A refusal for any other digest means the
@@ -70,19 +82,28 @@ compilation is "not looked up".
   where `main` has it. mbx v1.29.1 (2026-11-01) includes
   [#870](https://github.com/jdx/mr-boxington/pull/870), and
   `.github/actions/rust-cache/action.yml` pins 1.29.2 (2026-11-03) since
-  [#7653](https://github.com/moq-dev/moq/pull/7653). Verify it against the
-  Windows criterion in Waiting below. The fix also offers legacy CRLF
-  identities, so an in-window manifest from 1.28.0 remains usable.
+  [#7653](https://github.com/moq-dev/moq/pull/7653). The fix also offers
+  legacy CRLF identities, so an in-window manifest from 1.28.0 remains usable.
+  Verified 2026-11-05: the scheduled
+  [Windows job](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127326015447)
+  of run 42050683248 set up mbx 1.29.2, and its workspace build, against a
+  manifest of 2,604 predictions, reported 846 hits, 224 misses, 168 not looked
+  up and 1,019 prefetched. Its `Cargo.lock` differed from the previous
+  scheduled run's, so those hits point to an inherited manifest, but the
+  summary does not name the manifest identity it looked up; record that
+  identity from a later Windows job before relying on inheritance.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,
   yet hit only 13, with 1565 compilations not looked up. The install order is
   not the cause. Find out why the inherited predictions mostly miss, for
-  example the lockfile changes or the 30-day expiry.
+  example the lockfile changes or the expiry (30 days until 2026-11-07, 14
+  since).
 - Linux: Nightly's Linux jobs check out at depth 1, so mbx finds no earlier
   lockfile and reuses only a manifest written for the identical `Cargo.lock`.
   The doctest job hit 0 on 2026-10-24 and 2026-10-27, 115 on 2026-10-25, and
   46 on 2026-10-26. Decided 2026-10-29 (maintainer): give those jobs full
   history (`fetch-depth: 0` with `filter: blob:none`) only once Windows hits
-  after the mbx bump, which shows inheritance pays.
+  after the mbx bump, which shows inheritance pays. Windows hit on
+  2026-11-05 (above), so that condition is met.
 - `Cargo.lock` changed 7, 2, 6, 10, 8 and 8 times between consecutive
   scheduled Nightlies from 2026-10-21 to 2026-10-27. Nightly is the only
   hosted writer for Windows and macOS, so after more than 8 changes the
@@ -118,28 +139,18 @@ feature unification, so changed compiler inputs remain a separate cause.
 
 ## Waiting
 
-- GitHub Actions: a scheduled Windows job on mbx 1.29.1 or later must load
-  a workspace manifest of more than 124 predictions and hit, as its
-  workspace build's mbx summary reports. Check the first run with an
-  available manifest from an earlier scheduled Windows workspace build at the
-  same lockfile state or within 8 earlier states. A setup failure or no
-  in-window predecessor is inconclusive; inspect the next eligible scheduled
-  run. Until this proves inheritance pays, keep Linux's shallow checkout as
-  decided above. Do not dispatch Nightly.
-- moq-dev/moq: `release` still lacks the platform Rust cache as checked on
-  2026-11-04 with the command in the Goal. Once it carries the cache, inspect
-  a release pull request's `Check the cache` step for effective read-only.
 - GitHub Actions: scheduled runs must supply the remaining cross-platform
   reuse, restore-plus-build comparison and rebuild-frequency evidence in the
   Goal. Current timings are not a matched-commit comparison, and macOS's
   inherited-prediction misses remain unexplained.
-- Maintainer: from about 2026-11-26, collect R2 bucket size and request counts
-  for the first month and check that the six old oversized manifests expired.
-  R2's account metrics need the maintainer's Cloudflare login, which agents
-  lack. Then decide the lifecycle in `infra/mbx/lifecycle.json`: shorten,
-  keep or lengthen the 30 days. Recommended: keep 30 days unless storage cost
-  or the rebuild count argues otherwise.
-
-## Related
-
-- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - the same R2 and Environment bootstrap for Nix
+- moq-dev/moq: no earlier than 2026-11-26, an agent on the maintainer's
+  desktop collects `mbx-moq-dev`'s size and request counts for the first
+  month and checks that the six old oversized manifests expired. Size comes
+  from `npx wrangler r2 bucket info mbx-moq-dev`. Request counts come from
+  Cloudflare's GraphQL API (`r2OperationsAdaptiveGroups`, filtered on
+  `bucketName` and grouped by `actionType`), authenticated with the
+  `oauth_token` in `~/.config/.wrangler/config/default.toml`. Record them
+  here beside the 2026-11-07 baseline, split at that date's lifecycle
+  change, and count the Nightly jobs that rebuilt a crate the 14-day expiry
+  deleted, listing as unknown any it cannot attribute. Bring the lifecycle back to the
+  maintainer only if that count argues for lengthening it.

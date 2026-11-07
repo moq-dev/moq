@@ -147,6 +147,11 @@ impl Stream {
 		self.0.priority()
 	}
 
+	/// Whether the peer acknowledged every byte written so far.
+	pub(crate) fn acknowledged(&self) -> bool {
+		self.0.acknowledged()
+	}
+
 	/// Move the stream into a send group, or with `None` back to the ungrouped streams, which
 	/// go before every group.
 	///
@@ -156,12 +161,8 @@ impl Stream {
 		self.0.set_group(group);
 	}
 
-	/// Completes when the peer stops the stream. See [`Finished::closed()`].
-	pub async fn closed(&self) -> Result<Option<VarInt>, Error> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Wait for the stream to end, retaining the peer's stop code; see [`Self::closed`].
+	/// Resolves once the peer stops the stream, with its stop code. See [`Finished::poll_closed`].
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		poll_closed(&self.0.shared, self.0.id, waiter)
 	}
@@ -196,6 +197,11 @@ impl Finished {
 		self.0.priority()
 	}
 
+	/// Whether the peer acknowledged every byte written. See [`Stream::acknowledged()`].
+	pub(crate) fn acknowledged(&self) -> bool {
+		self.0.acknowledged()
+	}
+
 	/// Move the stream into a send group. See [`Stream::set_group()`].
 	///
 	/// # Panics
@@ -204,17 +210,13 @@ impl Finished {
 		self.0.set_group(group);
 	}
 
-	/// Completes when the peer stops the stream or acknowledges all of its data.
+	/// Resolves once the peer stops the stream or acknowledges all of its data.
 	///
 	/// Yields `Some` with the stop error code if the peer stops the stream, and `None` once the
 	/// peer acknowledges receipt of all stream data (although not necessarily the processing of
 	/// it). Fails only when the connection ends first, since then the caller cannot read success
 	/// as "every byte arrived".
-	pub async fn closed(&self) -> Result<Option<VarInt>, Error> {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Wait for the stream to end, retaining the peer's stop code; see [`Self::closed`].
+	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
 		poll_closed(&self.0.shared, self.0.id, waiter)
 	}
@@ -268,6 +270,14 @@ impl Half {
 			.send_stream(self.id)
 			.priority()
 			.unwrap_or_default()
+	}
+
+	/// Whether the peer acknowledged every byte written so far; never once reset or stopped.
+	fn acknowledged(&self) -> bool {
+		let mut conn = self.shared.conn.borrow_mut();
+		let mut stream = conn.send_stream(self.id);
+		let offset = stream.offset();
+		stream.acked(offset).unwrap_or(false)
 	}
 
 	fn set_group(&mut self, group: Option<&Group>) {

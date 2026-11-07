@@ -657,11 +657,12 @@ mod tests {
 
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let source = origin.publish("test", Default::default()).unwrap();
+		let source = origin.route("test", Default::default()).unwrap();
 		let mut source_catalog =
 			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
 		let track = source
+			.broadcast()
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
@@ -1123,6 +1124,29 @@ mod tests {
 		)
 		.expect("videotoolbox H.265 decoder");
 		round_trip(encoder, decoder, "videotoolbox");
+	}
+
+	/// The same over VA-API: HEVC encode emitting hev1 and HEVC decode, both on
+	/// the render node the two share. Skips without a VA-API H.265 encoder, which
+	/// includes radeonsi at this size (its H.265 minimum width is 384).
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[test]
+	fn vaapi_hevc_round_trip() {
+		let encoder = match Encoder::new(&EncodeConfig {
+			kind: EncodeKind::Named("vaapi".into()),
+			codec: crate::encode::Codec::H265,
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		}) {
+			Ok(encoder) => encoder,
+			// No H.265 encoder, or none this small: AMD's VCN 5 starts at 384 wide.
+			Err(err) => {
+				eprintln!("skipping: no VA-API H.265 encoder at 320x240: {err}");
+				return;
+			}
+		};
+		let decoder = backend::open(&Codec::H265.into(), &decode_config(super::Kind::Named("vaapi".into())))
+			.expect("a VA-API H.265 decoder beside the encoder");
+		round_trip(encoder, decoder, "vaapi");
 	}
 
 	#[cfg(all(target_os = "windows", feature = "openh264"))]

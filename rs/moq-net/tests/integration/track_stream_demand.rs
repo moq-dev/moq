@@ -12,7 +12,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Hop, Timestamp, Version, origin};
+use moq_net::{Timestamp, Version, origin};
 use support::{
 	harness::{MockConnectOptions, MockPair, connect_mock},
 	mock::MockSession,
@@ -30,7 +30,7 @@ const VERSIONS: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 const STARTUP: Duration = Duration::from_millis(5);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -81,9 +81,9 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	}
 	let reader: &MockSession = &links.last().unwrap().client_transport;
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	// Serve every request for the track, keeping what it started.
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let track_edges = Rc::new(RefCell::new(None));
@@ -181,9 +181,9 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		links.push(link(version, &pair[0], &pair[1]).await);
 	}
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let served = requests.clone();
 	let publisher = kio::clock::sim::spawn(async move {

@@ -55,7 +55,7 @@ pub(crate) enum Item {
 /// `Consumer` wraps a [`moq_net::track::Subscriber`] and a [`Container`]
 /// format implementation, typically
 /// [`catalog::hang::Container`](crate::catalog::hang::Container). Yields
-/// decoded frames via [`read`](Self::read).
+/// decoded frames via [`poll_read`](Self::poll_read).
 ///
 /// ## Ordering & age skipping
 ///
@@ -72,9 +72,14 @@ pub(crate) enum Item {
 /// a marker behind a hole is delivered even when the track is paused, and the holes a stalled
 /// source left behind expire together rather than one budget each.
 ///
-/// Delivery starts at the lowest absolute start among the
-/// [`Subscription::ranges`](moq_net::track::Subscription::ranges) when every range names one, waiting for that group under the budget; without one it
-/// starts at the lowest group that arrived, waiting for one covering the live edge less
+/// Delivery starts at the floor the
+/// [`Subscription::ranges`](moq_net::track::Subscription::ranges) name, raised to where the
+/// publisher reports its feed starts ([`poll_start`](moq_net::track::Subscriber::poll_start)) once
+/// that resolves, and waits for that group under the budget. The publisher resolves a relative
+/// start against a newest group that may hold no frame yet, which a floor resolved here misses.
+/// A group that arrives below the start is never delivered: groups arrive newest first, so a
+/// cursor taken from the first arrival would drop the older groups the publisher serves. Without
+/// either it starts at the lowest group that arrived, waiting for one covering the live edge less
 /// [`Delay::min`] plus any [`Playout::warmup`]. Both default to zero, so it waits
 /// for nothing. Until the first item, the start also moves past each group whose first frame
 /// trails the newest content by more than the max delay plus the warmup, as `@moq/hang`'s
@@ -98,7 +103,7 @@ pub(crate) enum Item {
 ///
 /// ## Gaps and ends
 ///
-/// [`read`](Self::read) yields [`Read::Gap`] wherever media after an item already read
+/// [`poll_read`](Self::poll_read) yields [`Read::Gap`] wherever media after an item already read
 /// will never arrive: a latency skip, an evicted current group, or a sequence hole whose
 /// boundary is not contiguous within 1 ms. Whatever is lost before the first item is no
 /// gap, since nothing was read before it. A marker group (no decodable frames: one empty
@@ -147,8 +152,9 @@ pub struct Consumer<F: Container> {
 	// once a skip refunds room: it pulls again itself.
 	gated: bool,
 
-	// Latches the cursor onto the publisher's first served group when the
-	// subscription names no start. Cleared once a first group is chosen.
+	// The subscription named no floor when the consumer was built, so the cursor has yet to
+	// choose its first group: the floor once resolved, raised to the publisher's resolved
+	// start, or else the first arrivals. Cleared once one is chosen.
 	startup: bool,
 
 	// Latch onto the newest group instead, discarding what arrived below it.
@@ -295,8 +301,8 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Item {
 /// reader is the warmup past both its first frame and that point, the skip also tolerates the
 /// warmup, so the media leading up to the start is not dropped as stale.
 ///
-/// A subscription that names a start already waits for it, and a live start takes the newest
-/// group.
+/// A subscription that names a start, or a publisher that reports where its feed starts, already
+/// waits for it, and a live start takes the newest group.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Playout {
 	/// The delay the consumer plays at, and skips past.
@@ -344,9 +350,10 @@ impl<F: Container> Consumer<F> {
 	/// publisher preserves the same replay window.
 	pub fn new(track: moq_net::track::Subscriber, format: F) -> Self {
 		let subscription = track.subscription();
-		// Delivery starts at the subscription floor; without one it starts wherever
-		// the publisher does, adopted from the first arrivals (see poll_read). Either
-		// way the age budget is the one rule that catches the cursor up to the live
+		// Delivery starts at the subscription floor raised to the publisher's resolved start,
+		// once that resolves, since a floor resolved here may count below a frameless newest
+		// group the publisher counted; without either it starts at the first arrivals (see
+		// poll_read). Either way the age budget is the one rule that catches the cursor up to the live
 		// edge from there. The budget is clamped to the track's max age, since a group
 		// the publisher already marks stale can't be waited for and would otherwise
 		// stall the catch-up by the excess.
@@ -366,7 +373,7 @@ impl<F: Container> Consumer<F> {
 			collect_at: 1,
 			memory: Memory::new(DEFAULT_MAX_BUFFER),
 			gated: false,
-			startup: start.is_none(),
+			startup: true,
 			newest: false,
 			min_delay: subscription.delay.min.unwrap_or_default(),
 			warmup: std::time::Duration::ZERO,
@@ -420,8 +427,18 @@ impl<F: Container> Consumer<F> {
 	///
 	/// Returns `None` when the track has ended, and after an error. See [`Read`] for the items between frames;
 	/// an undeclared forward timestamp jump is not a gap, since nothing says media is missing.
-	pub async fn read(&mut self) -> Result<Option<Read>, F::Error> {
-		kio::wait(|waiter| self.poll_read(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Read>, F::Error>> {
+		loop {
+			let read = match ready!(self.poll_item(waiter))? {
+				Some(Item::Frame { group, frame, .. }) => Read::Frame { group, frame },
+				Some(Item::Gap { timestamp, duration }) => Read::Gap { timestamp, duration },
+				Some(Item::End { group, end }) => Read::End { group, end },
+				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut { .. }) => continue,
+				None => return Poll::Ready(Ok(None)),
+			};
+			return Poll::Ready(Ok(Some(read)));
+		}
 	}
 
 	/// The next frame, passing over gaps and ends.
@@ -433,23 +450,6 @@ impl<F: Container> Consumer<F> {
 				Some(Read::Gap { .. } | Read::End { .. }) => continue,
 				None => return Ok(None),
 			}
-		}
-	}
-
-	/// Poll-based implementation of the read loop.
-	///
-	/// Uses a single waiter that gets registered on all relevant kio channels,
-	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Read>, F::Error>> {
-		loop {
-			let read = match ready!(self.poll_item(waiter))? {
-				Some(Item::Frame { group, frame, .. }) => Read::Frame { group, frame },
-				Some(Item::Gap { timestamp, duration }) => Read::Gap { timestamp, duration },
-				Some(Item::End { group, end }) => Read::End { group, end },
-				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut { .. }) => continue,
-				None => return Poll::Ready(Ok(None)),
-			};
-			return Poll::Ready(Ok(Some(read)));
 		}
 	}
 
@@ -512,19 +512,30 @@ impl<F: Container> Consumer<F> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter).is_ready();
 
-		// A subscription with no explicit start begins wherever the publisher does:
-		// the lowest sequence it actually serves. Timestamps can't reveal that point
-		// (a gap below the served window looks like in-flight groups until the budget
-		// expires, or forever on a quiet track), so the cursor adopts it from the
-		// first arrivals instead of assuming group 0. Skipping stays the budget's job.
-		// A relative start names its floor once the first group to arrive resolves it.
-		if self.startup
-			&& !self.newest
-			&& let Some(start) = self.subscriber().floor()
-		{
-			self.pending.retain(|group| group.sequence >= start);
-			self.current = start;
-			self.startup = false;
+		// The floor is raised to where the publisher says its feed starts: it serves nothing
+		// below, and resolved a relative start against its own latest group, which may hold no
+		// frame yet and so count neither in the largest it reports nor in a floor resolved here. Waiting below would be waiting for a
+		// group that won't come. Without a reported start the first arrivals stand in for it
+		// below, since timestamps can't reveal it: a gap below the served window looks like
+		// in-flight groups until the budget expires, or forever on a quiet track. Skipping
+		// stays the budget's job.
+		if self.startup && !self.newest {
+			let floor = self.subscriber().floor();
+			let served = match self.subscriber().poll_start(waiter) {
+				Poll::Ready(served) => served,
+				// A finished track resolves no start any more.
+				Poll::Pending if finished => None,
+				Poll::Pending => return Poll::Pending,
+			};
+			let start = match (floor, served) {
+				(Some(floor), Some(served)) => Some(floor.max(served)),
+				(floor, served) => floor.or(served),
+			};
+			if let Some(start) = start {
+				self.pending.retain(|group| group.sequence >= start);
+				self.current = start;
+				self.startup = false;
+			}
 		}
 		if self.startup {
 			// NOTE: poll_min_timestamp buffers at least one frame per group and
@@ -2706,6 +2717,51 @@ mod tests {
 		assert_eq!(items(&mut consumer).await, ["0", "end 0", "1000000"]);
 	}
 
+	/// A pause's timestamp jump is not lateness: the group that resumes it can arrive behind the
+	/// one after it, and is waited for like any hole rather than skipped as too old.
+	#[tokio::test(start_paused = true)]
+	async fn the_head_after_a_declared_end_is_waited_for() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut consumer = Consumer::new(
+			track.subscribe(
+				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(30))),
+			),
+			Container::Legacy(crate::container::Kind::Audio),
+		);
+		consumer.max_delay = Duration::from_millis(300);
+		write_group(&mut track, 0, &[ts(0)]);
+		// The end, then the stopped encoder's final packet, as `moq_audio`'s producer writes them.
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		let frame = |timestamp, payload| Frame {
+			timestamp,
+			payload,
+			keyframe: true,
+			duration: None,
+		};
+		Container::Legacy(crate::container::Kind::Audio)
+			.write(
+				&mut group,
+				&[
+					frame(ts(60_000), Bytes::new()),
+					frame(ts(40_000), Bytes::from_static(b"x")),
+				],
+			)
+			.unwrap();
+		group.finish().unwrap();
+		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
+		assert!(matches!(
+			consumer.read().await.unwrap(),
+			Some(Read::End { group: 1, .. })
+		));
+		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(40_000));
+		write_group(&mut track, 3, &[ts(60_060_000)]);
+		tokio::time::advance(Duration::from_millis(299)).await;
+		assert!(consumer.poll_read(&kio::Waiter::noop()).is_pending());
+		write_group(&mut track, 2, &[ts(60_000_000)]);
+		track.finish().unwrap();
+		assert_eq!(items(&mut consumer).await, ["60000000", "60060000"]);
+	}
+
 	#[tokio::test]
 	async fn a_zero_budget_idle_resume_reports_the_shed_marker_as_a_gap() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
@@ -3077,17 +3133,15 @@ mod tests {
 		// One publisher instance behind every route, so each may resume the others.
 		let instance = moq_net::Instance::random();
 		let origin = crate::source::produce_origin();
-		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let route = |cost: u64| {
-			moq_net::origin::Route::default()
+			moq_net::origin::RouteOptions::hidden()
 				.with_instance(instance.clone(), 0)
-				.with_hops(hops.clone())
 				.with_cost(cost)
 		};
-		let first = origin.create_broadcast("live").unwrap();
+		let first = origin.route("live", route(5)).unwrap();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
-		let first_track = first.create_track("video", info.clone()).unwrap();
-		first.announce(route(5)).unwrap();
+		let first_track = first.broadcast().create_track("video", info.clone()).unwrap();
+		first.announce().unwrap();
 		let broadcast = origin.consume().request("live", None).await.unwrap();
 		let track = broadcast
 			.track("video")
@@ -3119,9 +3173,9 @@ mod tests {
 		// full budget past it.
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
-			let source = origin.create_broadcast("live").unwrap();
-			let mut track = source.create_track("video", info.clone()).unwrap();
-			source.announce(route(5 - sequence)).unwrap();
+			let source = origin.route("live", route(5 - sequence)).unwrap();
+			let mut track = source.broadcast().create_track("video", info.clone()).unwrap();
+			source.announce().unwrap();
 			let mut demand = track.demand();
 			while demand.wanted_changed().await.unwrap().is_none() {}
 			if sequence == 1 {
@@ -4584,6 +4638,98 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 		assert_eq!(micros, vec![700_000, 800_000, 900_000]);
+	}
+
+	/// Groups arrive newest first, so the head of what the publisher serves lands after the
+	/// live edge: the cursor starts where the publisher says its feed starts, rather than at
+	/// the first arrival, and a group that arrives below it is never delivered, with no gap.
+	#[tokio::test]
+	async fn startup_at_the_publishers_start_over_a_newer_first_arrival() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		track.start_at(8).unwrap();
+		let mut consumer = Consumer::new(
+			track.subscribe(
+				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(10))),
+			),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+
+		write_group(&mut track, 10, &[ts(1_000_000)]);
+		assert!(
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err(),
+			"the publisher's start is still on its way"
+		);
+		for sequence in [7, 8, 9] {
+			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+		}
+		track.finish().unwrap();
+
+		assert_eq!(items(&mut consumer).await, ["800000", "900000", "1000000"]);
+	}
+
+	/// A relative start still waiting on the feed takes the start the publisher resolved for it
+	/// when that is later: the publisher counts back from a newest group that may hold no frame
+	/// yet, which neither the largest it reports nor this copy counts, so a floor counted here
+	/// would wait on a group that never comes.
+	#[tokio::test]
+	async fn a_waiting_relative_start_takes_the_publishers_resolved_start() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		track.start_at(5).unwrap();
+		let consumer_track = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+				.with_ranges([moq_net::track::Range::live()]),
+		);
+		assert_eq!(
+			consumer_track.floor(),
+			None,
+			"the relative start waits on a first group"
+		);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
+
+		write_group(&mut track, 4, &[ts(400_000)]);
+		write_group(&mut track, 5, &[ts(500_000)]);
+		track.finish().unwrap();
+
+		assert_eq!(items(&mut consumer).await, ["500000"]);
+	}
+
+	/// A relative floor already resolved here still rises to the start the publisher resolved,
+	/// which counts a newest group that held no frame yet, rather than wait on a group below it
+	/// that never comes.
+	#[tokio::test]
+	async fn a_resolved_relative_floor_rises_to_the_publishers_start() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		for sequence in 0..5 {
+			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+		}
+		track.start_at(5).unwrap();
+		let consumer_track = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(Delay::default().with_max(Duration::from_secs(10)))
+				.with_ranges([moq_net::track::Range::live()]),
+		);
+		assert_eq!(
+			consumer_track.floor(),
+			Some(4),
+			"resolved here from the newest group with a frame"
+		);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
+
+		write_group(&mut track, 5, &[ts(500_000)]);
+		let read = kio::clock::timeout(Duration::from_millis(50), consumer.read())
+			.await
+			.expect("group 5 reads without waiting on group 4")
+			.unwrap();
+		assert!(
+			matches!(read, Some(crate::container::Read::Frame { group: 5, .. })),
+			"{read:?}"
+		);
 	}
 
 	#[tokio::test]

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,13 +15,10 @@ type Reply = { status?: number; output?: string; error?: string };
 // credentials, builds, or publishing escape the fixture.
 function run(options: {
 	manifest: Manifest;
-	imports?: Record<string, string>;
 	nested?: boolean;
 	replies?: Record<string, Reply>;
 	dryRun?: boolean;
-	jsr?: boolean;
 	published?: boolean;
-	jsrToken?: string;
 	sibling?: { name: string; version: string; private?: boolean; scripts?: { release: string } };
 }) {
 	const cwd = mkdtempSync(join(tmpdir(), "moq-release-"));
@@ -40,7 +37,6 @@ function run(options: {
 			JSON.stringify({
 				name: "@moq/fixture",
 				version: "1.0.0",
-				jsr: options.jsr ?? false,
 				scripts: { release: "unused" },
 				workspaces: options.sibling ? ["sibling"] : undefined,
 				dependencies: { "@moq/source-only": "workspace:^" },
@@ -55,7 +51,7 @@ function run(options: {
 			writeFileSync(join(packageDir, "package.json"), JSON.stringify(manifest));
 		}
 		writeFileSync(join(cwd, "fixture.json"), JSON.stringify(options));
-		for (const tool of ["bun", "npm", "deno"]) {
+		for (const tool of ["bun", "npm"]) {
 			writeFileSync(
 				join(bin, tool),
 				`#!${process.execPath}
@@ -63,12 +59,9 @@ import { appendFileSync, readFileSync, mkdirSync, writeFileSync } from "node:fs"
 const options = JSON.parse(readFileSync("${cwd}/fixture.json", "utf8"));
 const args = process.argv.slice(2);
 appendFileSync("${cwd}/calls.jsonl", JSON.stringify(["${tool}", ...args]) + "\\n");
-if (process.env.JSR_TOKEN) appendFileSync("${cwd}/leaks.txt", "${tool}\\n");
 if ("${tool}" === "bun") {
  mkdirSync("dist", { recursive: true });
  writeFileSync("dist/package.json", JSON.stringify(options.manifest));
- const deps = { ...options.manifest.dependencies, ...options.manifest.peerDependencies };
- writeFileSync("jsr.json", JSON.stringify({ imports: options.imports ?? Object.fromEntries(Object.entries(deps).map(([k,v]) => [k, "npm:" + k + "@" + v])) }));
 } else if ("${tool}" === "npm" && args[0] === "view") {
  if (args[1] === "@moq/fixture") { console.log(options.published ? "1.0.0" : "0.9.0"); }
  else {
@@ -91,7 +84,6 @@ if ("${tool}" === "bun") {
 				PATH: bin,
 				HOME: cwd,
 				DRY_RUN: String(options.dryRun ?? false),
-				...(options.jsrToken ? { JSR_TOKEN: options.jsrToken } : {}),
 			},
 			stdout: "pipe",
 			stderr: "pipe",
@@ -100,29 +92,22 @@ if ("${tool}" === "bun") {
 			.trim()
 			.split("\n")
 			.map((s) => JSON.parse(s) as string[]);
-		const leaks = existsSync(join(cwd, "leaks.txt"))
-			? readFileSync(join(cwd, "leaks.txt"), "utf8").trim().split("\n")
-			: [];
-		return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString(), calls, leaks };
+		return { code: result.exitCode, output: result.stdout.toString() + result.stderr.toString(), calls };
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
 }
 
-for (const jsr of [false, true]) {
-	test(`dry-run packs an unpublished workspace dependency without publishing (jsr=${jsr})`, () => {
-		const result = run({
-			dryRun: true,
-			jsr,
-			sibling: { name: "@moq/net", version: "999.0.0" },
-			manifest: { dependencies: { "@moq/net": "^999.0.0" } },
-		});
-		expect(result.code).toBe(0);
-		expect(result.calls).toContainEqual(["npm", "pack", "--dry-run"]);
-		expect(result.calls.some((c) => c[1] === "publish")).toBe(false);
-		if (jsr) expect(result.output).toContain("Skipping JSR dry-run");
+test("dry-run packs an unpublished workspace dependency without publishing", () => {
+	const result = run({
+		dryRun: true,
+		sibling: { name: "@moq/net", version: "999.0.0" },
+		manifest: { dependencies: { "@moq/net": "^999.0.0" } },
 	});
-}
+	expect(result.code).toBe(0);
+	expect(result.calls).toContainEqual(["npm", "pack", "--dry-run"]);
+	expect(result.calls.some((c) => c[1] === "publish")).toBe(false);
+});
 
 test("refuses all missing dependencies and peers before publishing", () => {
 	const result = run({
@@ -186,38 +171,6 @@ test("matching dependencies publish, deduplicating identical dependency and peer
 	expect(result.calls.at(-1)).toEqual(["npm", "publish", "--access", "public"]);
 });
 
-test("JSR dry-run checks its import map once and runs when dependencies are published", () => {
-	const result = run({
-		dryRun: true,
-		jsr: true,
-		manifest: { dependencies: { "@moq/net": "^1" } },
-		replies: {
-			"@moq/net@^1": { output: "1.1.0" },
-		},
-	});
-	expect(result.code).toBe(0);
-	expect(result.calls.filter((c) => c[1] === "view")).toEqual([["npm", "view", "@moq/net@^1", "version", "--json"]]);
-	expect(result.calls.some((c) => c[0] === "deno" && c.includes("--dry-run"))).toBe(true);
-	expect(result.calls.some((c) => c[0] === "npm" && c[1] === "publish")).toBe(false);
-});
-
-test("the JSR token reaches only deno publish", () => {
-	const result = run({ jsr: true, jsrToken: "jsr-secret", manifest: {} });
-	expect(result.code).toBe(0);
-	expect(result.calls.at(-1)).toEqual([
-		"deno",
-		"publish",
-		"--unstable-bare-node-builtins",
-		"--unstable-sloppy-imports",
-		"--no-check",
-		"--allow-dirty",
-		"--token",
-		"jsr-secret",
-	]);
-	expect(result.calls.filter((c) => c.includes("jsr-secret"))).toHaveLength(1);
-	expect(result.leaks).toEqual([]);
-});
-
 test("a local sibling cannot satisfy the registry check for a real publish", () => {
 	const result = run({
 		sibling: { name: "@moq/net", version: "999.0.0" },
@@ -234,26 +187,23 @@ test("packages without internal dependencies still pack", () => {
 	expect(result.calls.at(-1)).toEqual(["npm", "pack", "--dry-run"]);
 });
 
-test("an already-published npm-only version keeps the existing skip", () => {
+test("an already-published version skips publishing", () => {
 	const result = run({ published: true, manifest: { dependencies: { "@moq/net": "^999" } } });
 	expect(result.code).toBe(0);
 	expect(result.calls).toEqual([["npm", "view", "@moq/fixture", "version"]]);
 });
 
-for (const jsr of [false, true]) {
-	for (const sibling of [undefined, { name: "@moq/net", version: "999.0.0" }]) {
-		test(`dry-run rejects an unresolved non-sibling (jsr=${jsr}, sibling=${Boolean(sibling)})`, () => {
-			const result = run({
-				dryRun: true,
-				jsr,
-				sibling,
-				manifest: { dependencies: { "@moq/ghost": "^999", ...(sibling ? { "@moq/net": "^999" } : {}) } },
-			});
-			expect(result.code).not.toBe(0);
-			expect(result.output).toContain("@moq/ghost@^999");
-			expect(result.calls.some((c) => c[1] === "pack" || c[1] === "publish")).toBe(false);
+for (const sibling of [undefined, { name: "@moq/net", version: "999.0.0" }]) {
+	test(`dry-run rejects an unresolved non-sibling (sibling=${Boolean(sibling)})`, () => {
+		const result = run({
+			dryRun: true,
+			sibling,
+			manifest: { dependencies: { "@moq/ghost": "^999", ...(sibling ? { "@moq/net": "^999" } : {}) } },
 		});
-	}
+		expect(result.code).not.toBe(0);
+		expect(result.output).toContain("@moq/ghost@^999");
+		expect(result.calls.some((c) => c[1] === "pack" || c[1] === "publish")).toBe(false);
+	});
 }
 for (const sibling of [
 	{ name: "@moq/net", version: "1.0.0" },
@@ -300,11 +250,4 @@ test("a registry version can satisfy a range even when the local sibling cannot"
 	});
 	expect(result.code).toBe(0);
 	expect(result.calls).toContainEqual(["npm", "pack", "--dry-run"]);
-});
-
-test("an unresolved JSR-only non-sibling fails before packing", () => {
-	const result = run({ dryRun: true, jsr: true, manifest: {}, imports: { "@moq/ghost": "npm:@moq/ghost@^999" } });
-	expect(result.code).not.toBe(0);
-	expect(result.output).toContain("@moq/ghost@^999");
-	expect(result.calls.some((c) => c[1] === "pack" || c[1] === "publish")).toBe(false);
 });

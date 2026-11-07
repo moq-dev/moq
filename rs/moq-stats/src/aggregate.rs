@@ -170,8 +170,9 @@ pub struct TotalsConsumer {
 impl TotalsConsumer {
 	/// The next merged frame, or `None` once the announce stream ends (the
 	/// source origin went away).
-	pub async fn next(&mut self) -> Result<Option<TotalsFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<TotalsFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -184,8 +185,9 @@ pub struct GroupConsumer {
 impl GroupConsumer {
 	/// The next merged frame, each tier's [`Group`] keyed by tier label as in
 	/// [`GroupFrame::tiers`], or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<BTreeMap<String, Group>>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<BTreeMap<String, Group>>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -197,8 +199,9 @@ pub struct PresenceConsumer {
 
 impl PresenceConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<PresenceFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<PresenceFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -210,8 +213,9 @@ pub struct PrefixConsumer {
 
 impl PrefixConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
-	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
-		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<PrefixFrame>>> {
+		self.inner.poll_next(waiter)
 	}
 }
 
@@ -811,9 +815,13 @@ impl<S: Shape> Merged<S> {
 					moq_net::origin::RouteEvent::Start(update)
 					| moq_net::origin::RouteEvent::Update(update)
 					| moq_net::origin::RouteEvent::Takeover { announce: update, .. },
-				)) => changed |= self.apply_announce(update, true),
+				)) => {
+					let instance = update.route.instance().clone();
+					changed |= self.apply_announce(&update, instance, true)
+				}
 				Poll::Ready(Some(moq_net::origin::RouteEvent::End(update))) => {
-					changed |= self.apply_announce(update, false)
+					let instance = update.route.instance().clone();
+					changed |= self.apply_announce(&update, instance, false)
 				}
 				// Another instance: the one tracked at the path ends, then the new one
 				// starts, so its reader resolves afresh.
@@ -821,11 +829,10 @@ impl<S: Shape> Merged<S> {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
 					if let Some(previous) = absolute.and_then(|absolute| self.last_announced.get(&absolute).cloned()) {
-						let mut ended = update.clone();
-						ended.route.instance = Some(previous);
-						changed |= self.apply_announce(ended, false);
+						changed |= self.apply_announce(&update, previous, false);
 					}
-					changed |= self.apply_announce(update, true);
+					let instance = update.route.instance().clone();
+					changed |= self.apply_announce(&update, instance, true);
 				}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
@@ -870,10 +877,16 @@ impl<S: Shape> Merged<S> {
 	/// Apply one announce update to the node set. Returns whether the merged view
 	/// changed (only a departure closing open pairs, or a gauge's contribution
 	/// leaving, does).
-	fn apply_announce(&mut self, update: moq_net::announce::Announce, active: bool) -> bool {
-		let path = update.prefix;
+	/// Fold `update` in under `instance`: the route's own, or the one a restart replaced.
+	fn apply_announce(
+		&mut self,
+		update: &moq_net::announce::Announce,
+		instance: moq_net::Instance,
+		active: bool,
+	) -> bool {
+		let path = &update.prefix;
 		// An announced prefix is a path beneath the root, so rooting it fits.
-		let Ok(absolute) = self.announce.absolute(&path) else {
+		let Ok(absolute) = self.announce.absolute(path) else {
 			return false;
 		};
 
@@ -885,10 +898,7 @@ impl<S: Shape> Merged<S> {
 		}
 		// Publisher replacement can race reader polling on another worker, so every
 		// reader pins the identity it contributes to, independent of announce order.
-		let key = (
-			absolute,
-			update.route.instance.expect("a delivered route has an instance"),
-		);
+		let key = (absolute, instance);
 
 		if !active {
 			// Unannounce: keep the cumulative counters, close the open pairs,
@@ -925,11 +935,11 @@ impl<S: Shape> Merged<S> {
 			Entry::Vacant(entry) => {
 				let instance = entry.key().1.clone();
 				entry.insert(Node {
-					reader: resolve(&self.origin, &path, instance.clone()),
+					reader: resolve(&self.origin, path, instance.clone()),
 					listing: None,
 					offered: false,
 					instance,
-					path,
+					path: path.clone(),
 					shape: S::default(),
 					departed: None,
 				});
@@ -1245,7 +1255,7 @@ mod tests {
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: origin::Routes,
-		source: origin::Publication,
+		source: origin::Route,
 		consumer: broadcast::Consumer,
 		sub: track::Subscriber,
 		ctx: moq_net::stats::Session,
@@ -1263,9 +1273,10 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.routes();
-		let source = feed_origin.create_broadcast(path).expect("create_broadcast");
-		source.announce(origin::Route::default()).expect("announce");
-		let track = source.create_track("video", timed()).expect("create_track");
+		let source = feed_origin
+			.route(path, moq_net::origin::RouteOptions::default())
+			.expect("route");
+		let track = source.broadcast().create_track("video", timed()).expect("create_track");
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
@@ -1329,7 +1340,7 @@ mod tests {
 	/// Dropping it unannounces the node.
 	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct NodeBroadcast {
-		source: origin::Publication,
+		source: origin::Route,
 		group: moq_json::snapshot::Producer<GroupFrame>,
 		track: track::Producer,
 		frame: TrafficFrame,
@@ -1337,13 +1348,15 @@ mod tests {
 
 	impl NodeBroadcast {
 		fn new(origin: &origin::Producer, group: &str, node: &str) -> Self {
+			Self::with_instance(origin, group, node, format!("node-{node}").parse().unwrap())
+		}
+
+		fn with_instance(origin: &origin::Producer, group: &str, node: &str, instance: moq_net::Instance) -> Self {
 			let path = format!(".stats/node/{node}");
-			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
-			let instance = format!("node-{node}").parse().unwrap();
-			source
-				.announce(origin::Route::default().with_instance(instance, 0))
-				.expect("announce");
+			let options = origin::RouteOptions::default().with_instance(instance, 0);
+			let source = origin.route(path.as_str(), options).expect("announce");
 			let track = source
+				.broadcast()
 				.create_track(group_track(moq_net::Path::new(group).unwrap()), timed())
 				.expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
@@ -1946,17 +1959,22 @@ mod tests {
 	/// totals track and no instance, so a new one at the same path is that node
 	/// restarting without telling the reader.
 	struct TotalsNode {
-		_source: origin::Publication,
+		_source: origin::Route,
 		totals: moq_json::snapshot::Producer<TotalsFrame>,
 	}
 
 	impl TotalsNode {
 		fn new(origin: &origin::Producer, node: &str) -> Self {
 			let source = origin
-				.create_broadcast(format!(".stats/node/{node}").as_str())
+				.route(
+					format!(".stats/node/{node}").as_str(),
+					moq_net::origin::RouteOptions::default(),
+				)
 				.expect("create broadcast");
-			source.announce(origin::Route::default()).expect("announce");
-			let track = source.create_track(totals_track(), timed()).expect("create track");
+			let track = source
+				.broadcast()
+				.create_track(totals_track(), timed())
+				.expect("create track");
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,
@@ -2008,11 +2026,12 @@ mod tests {
 		let instance: Instance = "a".parse().unwrap();
 		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into());
 		merged.apply_announce(
-			moq_net::announce::Announce {
+			&moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: origin::Route::default().with_instance(instance.clone(), 0),
+				route: Default::default(),
 			},
+			instance.clone(),
 			true,
 		);
 		(merged, (path, instance))
@@ -2029,11 +2048,12 @@ mod tests {
 		};
 		let path = Path::from_static(".stats/node/b");
 		merged.apply_announce(
-			moq_net::announce::Announce {
+			&moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: origin::Route::default().with_instance("b".parse().unwrap(), 0),
+				route: Default::default(),
 			},
+			"b".parse().unwrap(),
 			true,
 		);
 		let second = (path, "b".parse().unwrap());
@@ -2193,9 +2213,8 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn traffic_resume_reopens_closed_pairs_without_going_down() {
 		let origin = produce_origin();
-		let mut node = NodeBroadcast::new(&origin, "acme", "a");
-		let route = origin::Route::default().with_instance("01900000-0000-7000-8000-000000000001".parse().unwrap(), 0);
-		node.source.announce(route.clone()).expect("announce instance");
+		let instance = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+		let mut node = NodeBroadcast::with_instance(&origin, "acme", "a", instance);
 		let mut raw = Traffic::default();
 		raw.announces_started = 5;
 		raw.announces_ended = 3;
@@ -2211,7 +2230,7 @@ mod tests {
 		let mut traffic = traffic(&agg);
 		let grew = |before: &Traffic, after: &Traffic| !after.regressed(before);
 		read_until(&mut traffic, grew, |frame| frame.get("acme/room") == Some(&raw)).await;
-		node.source.unannounce();
+		node.source.withdraw();
 		let departed = raw.retire();
 		read_until(&mut traffic, grew, |frame| {
 			assert!(!frame["acme/room"].regressed(&raw));
@@ -2220,7 +2239,7 @@ mod tests {
 		.await;
 
 		// The same publisher instance returns with all three pairs still open.
-		node.source.announce(route).expect("reannounce instance");
+		node.source.announce().expect("reannounce instance");
 		let mut expected = raw;
 		expected.announces_started = 7;
 		expected.announces_ended = 5;

@@ -10,7 +10,7 @@ use moq_net::track::Delay;
 use std::time::Duration;
 
 use moq_net::track::{Info, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version};
+use moq_net::{Timescale, Timestamp, Version};
 use support::harness::{peer, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,7 +21,8 @@ const BUDGET: Duration = Duration::from_millis(500);
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -34,11 +35,14 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	let downstream = produce_origin(2);
 	let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &downstream).await;
 
-	let broadcast = publisher.create_broadcast("room").unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track("data", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let consumer = downstream.consume();
 	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
