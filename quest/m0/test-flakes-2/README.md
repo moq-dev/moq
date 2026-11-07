@@ -159,6 +159,11 @@ closed, left no finished record, so the final catalog snapshot started the
 rendition again and replayed a group on its held pad. A failure now counts as
 the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160).
 
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s lite-07
+relative-start integration test, which failed once on main in
+[moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run.
+It is quarantined with `test.skip` until its child fixes it.
+
 Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
 `js/net`'s lite-07 empty-window reply test, which fails on main 12/200 under
 `--rerun-each 200`, found in [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670).
@@ -170,4 +175,5 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
+- [A lite-07 relative start resolves to the publisher's start every time](/quest/m0/test-flakes-2/lite07-relative-start.md) - `js/net`'s frameless-newest-group integration test stops reading a start of 0, and its `test.skip` is removed
 - [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
