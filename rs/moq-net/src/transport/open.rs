@@ -242,30 +242,29 @@ impl Lines {
 			.iter()
 			.filter_map(|(key, stream)| Some((*key, stream.upgrade()?)))
 			.collect();
-		let mut open: Vec<_> = listed
+		let mut open: BTreeMap<(Rank, u64), _> = listed
 			.into_iter()
-			.map(|(key, stream)| (stream.read().rank, key, stream))
+			.map(|(key, stream)| ((stream.read().rank, key), stream))
 			.collect();
-		open.sort_by_key(|(rank, key, _)| (*rank, *key));
 		for rank in owed {
 			// An open that cannot preempt the lowest stream finds no lower-priority group open,
 			// which would rank lower, so only its own group's oldest stream is left to check.
-			let index = match (open.first(), rank) {
-				(Some((lowest, _, _)), _) if rank.preempts(*lowest) => 0,
+			let candidate = match (open.first_key_value(), rank) {
+				(Some((&(lowest, key), _)), _) if rank.preempts(lowest) => (lowest, key),
 				(Some(_), Rank::Grouped { group, turn, .. }) => {
 					let first = Rank::Grouped {
 						group,
 						turn,
 						stream: i64::MIN,
 					};
-					open.partition_point(|(open, _, _)| *open < first)
+					match open.range((first, 0)..).next() {
+						Some((&(oldest, key), _)) if rank.preempts(oldest) => (oldest, key),
+						_ => continue,
+					}
 				}
 				_ => continue,
 			};
-			if !open.get(index).is_some_and(|(lowest, _, _)| rank.preempts(*lowest)) {
-				continue;
-			}
-			let (lowest, key, stream) = open.remove(index);
+			let ((lowest, key), stream) = open.remove_entry(&candidate).expect("just found");
 			tracing::debug!(?lowest, waiting = ?rank, "reset a lower-ranked stream to make room");
 			stream.preempt();
 			self.unlist(key);
