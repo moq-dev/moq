@@ -3,8 +3,8 @@
  * session by keying material both ends export from its handshake.
  *
  * A tab proves one key per page load, so a peer recognizes it across its sessions. Only a
- * transport that exposes `exportKeyingMaterial` can bind a proof; elsewhere the tab sends
- * none and stays unproven.
+ * transport that exposes `exportKeyingMaterial` with the draft's derivation can bind a proof;
+ * elsewhere the tab sends none and stays unproven.
  *
  * @module
  */
@@ -19,12 +19,24 @@ type Exporter = (label: BufferSource, context: BufferSource, outputLength: numbe
 let pageKey: Promise<CryptoKeyPair | undefined> | undefined;
 
 /**
- * The proof to send in SETUP for `transport`, or `undefined` when it cannot export keying
- * material. `client` is whether this endpoint dialed the session.
+ * Whether this runtime's exporter derives what draft-ietf-webtrans-http3 section 4.8 specifies.
+ *
+ * Firefox (neqo) writes the session ID into the exporter context as a varint, not the draft's 64
+ * bits, so its proof never verifies and the peer would end the session. Checked against Firefox
+ * 157; neqo has no fix yet. Only the user agent tells it apart: the argument count of its
+ * `exportKeyingMaterial`, which changes in 160, says nothing about the derivation.
+ */
+function draftExporter(): boolean {
+	return !/\bFirefox\//.test(globalThis.navigator?.userAgent ?? "");
+}
+
+/**
+ * The proof to send in SETUP for `transport`, or `undefined` when it cannot export the draft's
+ * keying material. `client` is whether this endpoint dialed the session.
  */
 export async function proveRouteKey(transport: WebTransport, client: boolean): Promise<Uint8Array | undefined> {
 	const exporter = (transport as { exportKeyingMaterial?: Exporter }).exportKeyingMaterial;
-	if (typeof exporter !== "function") return undefined;
+	if (typeof exporter !== "function" || !draftExporter()) return undefined;
 	const secret = new Uint8Array(await exporter.call(transport, EXPORTER_LABEL, new Uint8Array(), SECRET_SIZE));
 	// Select page capability once: unavailable Ed25519 leaves sessions unproven.
 	pageKey ??= (
