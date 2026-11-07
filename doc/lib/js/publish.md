@@ -58,8 +58,10 @@ Each audio frame is its own group by default, so a relay pays a stream and a
 group's bookkeeping per 20ms frame. `el.audio.groupDuration` sets a minimum
 per group instead, such as `Time.Milli(100)`: the first frame at least 100ms
 after the group's first timestamp opens the next group and closes the previous
-one. If encoding pauses, the current group stays open until the next frame, a
-timeline marker, or the encoder stopping. Frames still forward as they are
+one. A group also ends early at the per-group cap of 8192 frames or 32 MiB, so
+a long duration with short frames splits into several groups. If encoding
+pauses, the current group stays open until the next frame, a timeline marker,
+or the encoder stopping. Frames still forward as they are
 encoded, so grouping does not buffer them, but loss gets coarser: a viewer that
 falls behind skips a whole group, and a lost frame holds back the rest of its
 group until it is retransmitted. A 60ms Opus `frameDuration` also cuts the
