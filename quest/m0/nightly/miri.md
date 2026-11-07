@@ -56,6 +56,18 @@ on 2026-11-05, passed `Tests (rs miri)` with both passes:
 `debt_sheds_the_front_but_not_the_newest_frame` from four 1 MiB pseudo-random
 frames to four 1 KiB frames; shedding counts frames, not bytes.
 
+The scheduled run on 2026-11-06,
+[run 42236107954](https://github.com/moq-dev/moq/actions/runs/42236107954/job/127954016784)
+at fbef872bdc, before #7997 merged, failed `Tests (rs miri)` before any test
+ran: the Miri selection (`-p kio -p moq-net --lib`) builds `moq-net` without
+its `async` feature, and a resume-model test helper in `model/track.rs` called
+the `async`-only `group::Consumer::read_frame`. The merge gate never saw it,
+since workspace feature unification turns `async` on there.
+[moq-dev/moq#7995](https://github.com/moq-dev/moq/pull/7995) since gated those
+helpers on `async`: `cargo test --locked -p kio -p moq-net --lib --no-run`
+reproduces the error at fbef872bdc and builds on 1ae5c5f808. That native build
+is the cheap local check for this class of break.
+
 Remaining: confirm on the next scheduled Nightly that neither pass has a SLOW
 test (strict pass included, since its slowest sits near 200 s), then delete
 this quest. If the job nears 60 minutes, split the strict and epoch passes
