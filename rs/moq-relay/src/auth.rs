@@ -1856,14 +1856,12 @@ mod tests {
 
 	#[tokio::test]
 	async fn dropping_the_last_auth_ends_admissions() {
+		use futures::FutureExt;
+
 		let (auth, mut admissions) = Auth::embedded("relay-1");
 		let clone = auth.clone();
 		drop(auth);
-		assert!(
-			kio::clock::timeout(std::time::Duration::ZERO, admissions.next())
-				.await
-				.is_err()
-		);
+		assert!(admissions.next().now_or_never().is_none(), "a clone still admits");
 		drop(clone);
 		assert!(admissions.next().await.is_none());
 	}

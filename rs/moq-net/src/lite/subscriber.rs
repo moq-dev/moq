@@ -2880,19 +2880,10 @@ impl DatagramServe {
 						};
 						continue;
 					}
-					match producer.poll_priority(waiter, Some(*priority)) {
-						Poll::Ready(Some(next)) => {
-							*priority = next;
-							stream.writer.buffer(&lite::DatagramsUpdate { priority: next })?;
-							continue;
-						}
-						// Nobody reads it: cancel, unless a reader arrived meanwhile, whose
-						// priority the next pass reads.
-						Poll::Ready(None) => match producer.close_unused() {
-							true => return Poll::Ready(Err(Error::Cancel)),
-							false => continue,
-						},
-						Poll::Pending => {}
+					if let Poll::Ready(next) = Self::poll_demand(producer, waiter, *priority) {
+						*priority = next?;
+						stream.writer.buffer(&lite::DatagramsUpdate { priority: *priority })?;
+						continue;
 					}
 					ready!(stream.writer.poll_flush(waiter))?;
 					return Poll::Pending;
@@ -2919,19 +2910,9 @@ impl DatagramServe {
 						};
 						continue;
 					}
-					match producer.poll_priority(waiter, Some(*priority)) {
-						Poll::Ready(Some(next)) => {
-							*priority = next;
-							let subscription = subscriber.subscription().with_priority(next);
-							subscriber.update(subscription)?;
-							continue;
-						}
-						Poll::Ready(None) => match producer.close_unused() {
-							true => return Poll::Ready(Err(Error::Cancel)),
-							false => continue,
-						},
-						Poll::Pending => return Poll::Pending,
-					}
+					*priority = ready!(Self::poll_demand(producer, waiter, *priority))?;
+					let subscription = subscriber.subscription().with_priority(*priority);
+					subscriber.update(subscription)?;
 				}
 				DatagramState::Ending { applied, writer } => {
 					ready!(applied.poll_closed(waiter));
@@ -2948,6 +2929,24 @@ impl DatagramServe {
 					return Poll::Ready(Ok(()));
 				}
 				DatagramState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+
+	/// The subscriber priority once it differs from `sent`, or [`Error::Cancel`] once nobody
+	/// reads the track. While only passive readers remain, the priority reads `None` but the
+	/// track stays: park until demand returns or they leave.
+	fn poll_demand(producer: &datagram::Producer, waiter: &kio::Waiter, sent: i8) -> Poll<Result<i8, Error>> {
+		loop {
+			match ready!(producer.poll_priority(waiter, Some(sent))) {
+				Some(next) => return Poll::Ready(Ok(next)),
+				// Atomic with a reader joining, whose priority the next pass reads.
+				None if producer.close_unused() => return Poll::Ready(Err(Error::Cancel)),
+				None => {
+					if producer.poll_priority(waiter, None).is_pending() && producer.poll_unused(waiter).is_pending() {
+						return Poll::Pending;
+					}
+				}
 			}
 		}
 	}
