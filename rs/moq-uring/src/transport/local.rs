@@ -114,6 +114,10 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.receive_window()
 	}
 
+	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
+		self.0.set_limits(limits)
+	}
+
 	fn stream_credit(&self, dir: moq::Dir) -> Option<moq::StreamCredit> {
 		self.0.stream_credit(dir)
 	}
@@ -153,6 +157,10 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_closed(waiter)
+	}
+
+	fn acknowledged(&self) -> Option<bool> {
+		self.0.acknowledged()
 	}
 }
 

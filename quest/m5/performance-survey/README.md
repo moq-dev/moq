@@ -172,10 +172,10 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 
 ### Existing ownership and deliberately deferred work
 
-- [Release performance](/quest/m1/release-perf/README.md) owns the main
-  against release comparison for this cut, including the sparse read slope;
-  it already fixed or accepted resume duplicates, idle GC, stats drain, FETCH
-  fan-out, JS frame regressions, and paired comparison correctness. The
+- [Release performance](/.github/release-perf.md) records the completed main
+  against release comparison for this cut, including the sparse read slope,
+  resume duplicates, idle GC, stats drain, FETCH fan-out, JS frame regressions,
+  and paired comparison correctness. The
   [performance audit](/quest/m3/audit-perf.md) repeats it before later cuts.
 - [Perf](/quest/m4/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
@@ -219,4 +219,3 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 
 - [Performance audit](/quest/m3/audit-perf.md) - nightly regression attribution and remaining coverage
 - [Benchmark sources](/quest/m4/bench-sources.md) - publishing existing measurements to the trend table
-- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly regression report

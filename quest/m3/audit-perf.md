@@ -101,8 +101,8 @@ did not move.
 - History: compare at least five nights by commit, now that it exists. Nightly
   stores every series on `gh-pages` (`bench/costs`, `bench/rates`); re-runs add
   duplicate points for one commit. Read the paired comparison on the table
-  page instead of raw history, once
-  [its calibration](/quest/m1/bench-ci.md) lands. The first JS series (841) appeared on
+  page instead of raw history, calibrated in
+  [Paired comparison](/bench/README.md#paired-comparison). The first JS series (841) appeared on
   Oct 22, and Dart still needs a recheck against the bindings history.
 - The per-group write cost above, then the resume reader: at 16 single-frame
   groups `track::Subscriber::poll_group` is 44% of the Annex B export
@@ -138,7 +138,7 @@ wall-clock bisect blames the wrong commit. Count instructions instead:
   step; workspace sources show as `${workspace}`, so read them by name.
 - A wall-time hold at equal instructions may be page faults: compare
   `/usr/bin/time -f %R`, then pin glibc with `GLIBC_TUNABLES` (see
-  [the m1 release run](/quest/m1/release-perf/README.md)) before blaming code.
+  [the m1 release run](/.github/release-perf.md)) before blaming code.
 - A bench that is not CPU-bound is not attributable this way:
   `relay_auth_refresh` runs real loopback sockets and moved +27-60% on CI with
   +0.4% instructions.
