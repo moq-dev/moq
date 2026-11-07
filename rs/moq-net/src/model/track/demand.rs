@@ -314,7 +314,7 @@ mod tests {
 			let index = rng.random_range(0..slots.len());
 			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
 				0 => Anchor::Relative(rng.random_range(0..3)),
-				1 => Anchor::Relative(u64::MAX),
+				1 => Anchor::Oldest,
 				_ => Anchor::Absolute(rng.random_range(0..8)),
 			};
 			let ranges: Vec<Range> = (0..rng.random_range(0..3))

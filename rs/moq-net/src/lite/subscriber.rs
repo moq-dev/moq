@@ -7710,6 +7710,18 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(wire_ranges(&timed, None), Err(Error::TimestampMismatch)));
+
+		// Only the oldest start goes out without an anchor; a count back past the varint
+		// stays one, clamped to the largest it can spell.
+		let start = |start| {
+			let subscription = Subscription::default().with_ranges([track::Range { start, end: None }]);
+			wire_ranges(&subscription, None).unwrap().unwrap()[0].start
+		};
+		assert_eq!(start(Anchor::Oldest), None);
+		assert_eq!(
+			start(Anchor::Relative(u64::MAX)),
+			Some(lite::Anchor::Relative(MAX_QUIC))
+		);
 	}
 
 	/// A wire without ranges asks from group 0 when no single start covers both a count
@@ -9319,10 +9331,10 @@ fn wire_ranges(subscription: &Subscription, timescale: Option<Timescale>) -> Res
 			continue;
 		}
 		let start = match range.start {
-			// Past the varint's reach, a count back clamps to group 0 just as the oldest
-			// start does, which only that start can spell.
-			Anchor::Relative(back) if back > MAX_QUIC => None,
-			Anchor::Relative(back) => Some(lite::Anchor::Relative(back)),
+			Anchor::Oldest => None,
+			// No group sequence reaches past the varint, so a count back that does clamps to
+			// group 0 just as the largest one it can spell.
+			Anchor::Relative(back) => Some(lite::Anchor::Relative(back.min(MAX_QUIC))),
 			Anchor::Absolute(group) => Some(lite::Anchor::Absolute(Position::group(group))),
 			Anchor::Time(pts) => Some(time(pts)?),
 		};
@@ -9331,7 +9343,7 @@ fn wire_ranges(subscription: &Subscription, timescale: Option<Timescale>) -> Res
 		// nothing names a resolved end, so one resolved upstream would leave the copy short.
 		let end = match range.end {
 			Some(Anchor::Absolute(group)) => Some(lite::Anchor::Absolute(Position::group(group))),
-			None | Some(Anchor::Relative(_) | Anchor::Time(_)) => None,
+			None | Some(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_)) => None,
 		};
 		ranges.push(lite::Range { start, end });
 	}
@@ -10144,7 +10156,7 @@ impl TrackServe {
 				|| subscription
 					.ranges
 					.iter()
-					.all(|range| range.end.is_none() && matches!(range.start, Anchor::Relative(0 | u64::MAX))));
+					.all(|range| range.end.is_none() && matches!(range.start, Anchor::Oldest | Anchor::Relative(0))));
 		if opening && idle {
 			subscription = subscription.with_start(newest);
 		}

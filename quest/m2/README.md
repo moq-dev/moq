@@ -186,7 +186,6 @@ quests that require them.
 - [Publish reports rendition stats as hang's type](/quest/m2/rendition-stats-type.md) - `Rendition.stats` and `Report.Writer` take the rendition stats schema's input type, so encoders write plain numbers
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [A recreated or restarted track cannot reuse group sequences](/quest/m2/sequence-reuse.md) - recreating a track or restarting an instance cannot give new content an old group identity unless the app seeds past it, and datagrams are documented as exempt
-- [Subscriptions name the oldest group without a u64::MAX sentinel](/quest/m2/anchor-oldest.md) - `Anchor` gets an explicit oldest variant, decoded the same way on every wire
 - [moq auth serve bounds what a leaked token or public caller can do](/quest/m2/auth-serve-policy.md) - tokens need an `exp` unless the operator opts out, and a public listener authenticates relays
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)

@@ -1108,9 +1108,7 @@ impl Reader {
 				let end = previous.and_then(|previous| previous.end).or(resolved.end);
 				track::Range {
 					start: match range.start {
-						// The farthest offset reaches back to the oldest group, which names no floor.
-						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(start),
-						Anchor::Time(_) => Anchor::Absolute(start),
+						Anchor::Relative(_) | Anchor::Time(_) => Anchor::Absolute(start),
 						start => start,
 					},
 					// A time end the copy has not settled stays one: its cap is not the end.

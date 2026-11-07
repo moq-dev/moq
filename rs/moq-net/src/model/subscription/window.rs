@@ -568,8 +568,9 @@ impl Walk {
 impl Window {
 	/// Resolve `ranges`, counting relative anchors back from `latest`.
 	///
-	/// Refuses a time anchor on an untimed track with [`Error::TimestampMismatch`], and an
-	/// anchor a received copy's wire drops with [`Error::Unsupported`].
+	/// Refuses an [`Anchor::Oldest`] end with [`Error::InvalidRange`], a time anchor on an
+	/// untimed track with [`Error::TimestampMismatch`], and an anchor a received copy's wire
+	/// drops with [`Error::Unsupported`].
 	pub fn new(ranges: &[Range], latest: Option<u64>, holdings: &impl Holdings) -> Result<Self> {
 		let mut window = Self {
 			ranges: ranges.to_vec(),
@@ -1062,6 +1063,9 @@ impl Window {
 	}
 
 	fn place(&mut self, latest: Option<u64>, holdings: &impl Holdings) -> Result<()> {
+		if self.ranges.iter().any(|range| range.end == Some(Anchor::Oldest)) {
+			return Err(Error::InvalidRange);
+		}
 		let time = |anchor: Option<Anchor>| matches!(anchor, Some(Anchor::Time(_)));
 		if !holdings.timed()
 			&& self
@@ -1239,8 +1243,8 @@ enum Start {
 fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start {
 	match anchor {
 		Anchor::Absolute(start) => Start::At(start, true),
-		// Nothing sits below group 0, so the farthest offset needs no latest group.
-		Anchor::Relative(u64::MAX) => Start::At(0, false),
+		// Nothing sits below group 0, so the oldest start needs no latest group.
+		Anchor::Oldest => Start::At(0, false),
 		Anchor::Relative(back) => latest.map_or(Start::Pending, |latest| Start::At(latest.saturating_sub(back), true)),
 		Anchor::Time(pts) => match holdings.containing(pts) {
 			Containing::Group(group) => Start::At(group, true),
@@ -1286,6 +1290,8 @@ fn end(anchor: Option<Anchor>, latest: Option<u64>) -> Option<End> {
 			.checked_add(1)
 			.map_or(End::Open, End::Before),
 		Some(Anchor::Time(pts)) => End::Time(pts),
+		// Refused before any range resolves; ending before group 0 would deliver nothing.
+		Some(Anchor::Oldest) => End::Before(0),
 	})
 }
 
@@ -1500,9 +1506,31 @@ mod tests {
 		assert_eq!(covered(&window, 8), vec![5, 6, 7]);
 		assert!(window.is_settled());
 
-		// The farthest offset needs no latest group, and names no floor.
+		// The oldest start needs no latest group, and names no floor.
 		let window = Window::new(&[Range::oldest()], None, &Untimed).unwrap();
 		assert_eq!((window.floor(), window.start()), (Some(0), None));
+
+		// Any count back, however far, waits on a latest group and names the group it clamps
+		// to, as a peer's largest counts must agree.
+		for back in [u64::MAX, u64::MAX - 1] {
+			let open = Range {
+				start: Anchor::Relative(back),
+				end: None,
+			};
+			assert!(!open.is_wire());
+			assert!(Window::new(&[open], None, &Untimed).unwrap().is_pending());
+			assert_eq!(Window::new(&[open], Some(7), &Untimed).unwrap().start(), Some(0));
+		}
+	}
+
+	/// No hop can place the oldest group as an end, so it is refused.
+	#[test]
+	fn an_oldest_end_is_refused() {
+		let ranges = [range(Anchor::Absolute(0), Anchor::Oldest)];
+		assert!(matches!(
+			Window::new(&ranges, Some(3), &Untimed),
+			Err(Error::InvalidRange)
+		));
 	}
 
 	/// The named floor is the lowest start, unless a range reaches back to the oldest

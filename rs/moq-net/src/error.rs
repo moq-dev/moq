@@ -420,7 +420,7 @@ pub enum Error {
 	#[error("invalid joining request ID")]
 	InvalidJoiningRequestId,
 
-	/// A FETCH range is empty or lies beyond the published objects.
+	/// A range is empty, lies beyond the published objects, or ends at the oldest group.
 	#[error("invalid fetch range")]
 	InvalidRange,
 

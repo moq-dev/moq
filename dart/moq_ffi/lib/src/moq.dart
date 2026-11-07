@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -5506,6 +5508,12 @@ class FfiConverterMoqAnchor {
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
+      case 4:
+        final lifted = OldestMoqAnchor.read(subview);
+        return LiftRetVal<MoqAnchor>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
@@ -5637,6 +5645,34 @@ class TimeMoqAnchor extends MoqAnchor {
       timestamp,
       Uint8List.view(buf.buffer, new_offset),
     );
+    return new_offset;
+  }
+}
+
+class OldestMoqAnchor extends MoqAnchor {
+  OldestMoqAnchor();
+  OldestMoqAnchor._();
+  static LiftRetVal<OldestMoqAnchor> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    return LiftRetVal(OldestMoqAnchor._(), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 4);
+    int new_offset = buf.offsetInBytes + 4;
     return new_offset;
   }
 }

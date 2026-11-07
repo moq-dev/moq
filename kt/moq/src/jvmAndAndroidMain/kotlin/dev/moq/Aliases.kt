@@ -186,8 +186,14 @@ fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
 /** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
 typealias Range = uniffi.moq.MoqRange
 
-/** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */
+/**
+ * Where one end of a [Range] falls: [AnchorOldest], [AnchorAbsolute], [AnchorRelative], or
+ * [AnchorTime].
+ */
 typealias Anchor = uniffi.moq.MoqAnchor
+
+/** The oldest group still around, as far back as the max delay allows. A start only. */
+typealias AnchorOldest = uniffi.moq.MoqAnchor.Oldest
 
 /** A group, delivered from its first frame. */
 typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
