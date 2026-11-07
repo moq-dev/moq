@@ -90,8 +90,9 @@ Then, only where the profile shows a cost:
   one server shard behind a QUIC reverse proxy. Clients connect to the proxy,
   and the proxy connects to the server over loopback with an 8,192-byte UDP
   payload. Clients are moq-bench fan-out viewers: audio-rate, then 3 Mbit/s
-  video, 5 min each. The four runs ran in ABBA order (off, on, on, off). Server
-  CPU is in cores, as mean / max.
+  video, 5 min each. The four runs ran in ABBA order (off, on, on, off), one
+  run per cell, so no load's comparison is counterbalanced and there's no
+  variance estimate. Server CPU is in cores, as mean / max.
 
   | Load (audio / video viewers) | Batching | Audio p50 / p99, lost groups | Audio CPU | Video p99 |
   |---|---|---|---|---|
@@ -102,16 +103,19 @@ Then, only where the profile shows a cost:
 
   - **Below the server's ceiling, batching saved no CPU and raised p99.** The
     loopback harness's 8–22% saving did not carry over, and why hasn't been
-    measured.
-  - **Only past the ceiling (400 audio) did it cut CPU, by 13%,** and the losses
-    with it. But the shard was overloaded either way, and video's p99 rose from
-    31 to 79 ms.
+    measured. Both arms lost groups at this point, batching more (9,781 against
+    6,090), so the p99 rise is measured under unequal loss, not drop-free.
+  - **Only at 400 audio did it cut CPU, by 13%,** and the lost groups with it.
+    The shard was overloaded either way, though no control at 400 separates the
+    server's ceiling from proxy-side loss. Audio p99 fell from 212 to 110 ms,
+    while video p99 rose from 31 to 79 ms.
   - **The losses at 300 came from the proxy's client-facing socket buffer**, not
     the server. With a 1 MiB receive buffer on the proxy, that point loses
     nothing.
 
-  So on this path the latency cost shows up and the CPU saving doesn't. That
-  argues for keeping batching opt-in and off by default, if it ships.
+  So on this path, below the ceiling p99 rose with no CPU saving; past it, CPU
+  and audio losses fell but video p99 rose. That leans toward keeping batching
+  opt-in and off by default, if it ships, on single runs.
 
   Its shape:
   - `UdpSocketState::try_send_many` on Linux sends up to 64 transmits, one
