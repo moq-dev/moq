@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { type Installed, Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
@@ -589,6 +590,7 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("a RESET_STREAM received first keeps the stream terminal", async () => {
+		hostTime();
 		const { session, peer } = connect();
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await session.ready;

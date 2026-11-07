@@ -1011,15 +1011,11 @@ export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.
 				// Status carries the measured takeover state. Never guess while it is unavailable.
 				controlButton.disabled = !active && !status;
 				const respawnButton = q(".respawn-btn") as HTMLButtonElement;
-				const driverId = effect.get(this.truck.driverId);
+				const handle = effect.get(this.truck.handle);
 				const estopped = effect.get(this.truck.estopped) || Boolean(status?.estopped);
 				respawnButton.hidden = !isFocused;
 				respawnButton.disabled =
-					effect.get(this.truck.respawning) ||
-					!active ||
-					!driverId ||
-					status?.driver !== driverId ||
-					estopped;
+					effect.get(this.truck.respawning) || !active || !handle || status?.driver !== handle || estopped;
 				// Latched if either side thinks so: the local signal reacts
 				// instantly, the status echo is authoritative (see resetEstop).
 				const stopButton = q(".estop-btn") as HTMLButtonElement;
@@ -1049,7 +1045,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.
 								estopped,
 								estopBy: status?.estop_by,
 								status: statusState,
-								driverId,
+								handle,
 								statusDriver: status?.driver,
 								wheel: effect.get(source) === "wheel",
 							});

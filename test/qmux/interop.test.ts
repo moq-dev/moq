@@ -40,11 +40,13 @@ function expectPayload(actual: Uint8Array, seed: number): void {
 }
 
 async function withTimeout<T>(label: string, promise: Promise<T>): Promise<T> {
+	// biome-ignore lint/style/noRestrictedGlobals: a watchdog on a real peer process, outside the clock preload.
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		return await Promise.race([
 			promise,
 			new Promise<never>((_, reject) => {
+				// biome-ignore lint/style/noRestrictedGlobals: a watchdog on a real peer process, outside the clock preload.
 				timer = setTimeout(() => reject(new Error(`timed out: ${label}`)), OPERATION_TIMEOUT_MS);
 			}),
 		]);

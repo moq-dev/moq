@@ -44,7 +44,7 @@ use ndk::media::media_codec::{
 use ndk::media::media_format::MediaFormat;
 use ndk::media_error::MediaError;
 
-use super::super::encoder::{Applied, Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config};
 use super::{Backend, Encoded};
 use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::{Error, Frame, I420};
@@ -447,8 +447,7 @@ fn encoder_format(config: &Config, mime: &str) -> Result<MediaFormat, Error> {
 	// MediaCodec takes the keyframe interval in seconds rather than frames, and
 	// reads it as a float, so a sub-second GOP survives instead of rounding to
 	// zero (which would mean an IDR on every frame).
-	let Gop::Keyframe { interval } = config.gop;
-	format.set_f32(KEY_I_FRAME_INTERVAL, interval as f32 / config.framerate.as_f64() as f32);
+	format.set_f32(KEY_I_FRAME_INTERVAL, config.effective_join().as_secs_f32());
 	// Ask for the shortest pipeline the device offers: output a frame after
 	// input, and no B-frames, whose reorder delay a live track has no use for.
 	// Both are hints an older device drops, which is why `flush` still drains the
