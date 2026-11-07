@@ -116,8 +116,10 @@ struct Outbox {
 	pending: HashMap<Id, (u64, Pending)>,
 	/// Outputs to read in order: the other kinds, and a pending entry once taken.
 	ready: VecDeque<Output>,
-	/// Each claim's last Serve or Unserve, read after the rest. Keyed by when it last
-	/// changed, so a takeover's successor still reads before its predecessor goes.
+	/// Each claim's last Serve or Unserve, read after the rest, in queue order. A
+	/// takeover queues its successor's Serve before its predecessor's Unserve, and the
+	/// session needs the predecessor still served to carry it on: so a Serve replacing
+	/// a queued Serve keeps its place, while an Unserve, or a Serve after one, goes last.
 	serves: BTreeMap<u64, Output>,
 	/// Where each claim's last change sits in `serves`.
 	serving: HashMap<(Id, Path), u64>,
@@ -213,9 +215,17 @@ impl Outbox {
 			// Each serving change replaces the last: the session acts on where the claim
 			// ends up, in place when it keeps its instance.
 			Output::Serve { id, ref claim, .. } | Output::Unserve { id, ref claim } => {
+				let key = (id, claim.clone());
+				if let Some(&seq) = self.serving.get(&key)
+					&& matches!(output, Output::Serve { .. })
+					&& matches!(self.serves.get(&seq), Some(Output::Serve { .. }))
+				{
+					self.serves.insert(seq, output);
+					return None;
+				}
 				let seq = self.next;
 				self.next += 1;
-				if let Some(old) = self.serving.insert((id, claim.clone()), seq) {
+				if let Some(old) = self.serving.insert(key, seq) {
 					self.serves.remove(&old);
 				}
 				self.serves.insert(seq, output);
@@ -831,6 +841,39 @@ mod tests {
 		};
 		assert_eq!(claims(outputs(&a)), [p("live/a/x")]);
 		assert_eq!(claims(outputs(&b)), [p("live/b/y")]);
+	}
+
+	/// A stalled stream reads a takeover's successor before its predecessor goes, even
+	/// once the successor changed again meanwhile, so the session still finds the
+	/// predecessor to carry on.
+	#[test]
+	fn a_stalled_takeover_reads_its_successor_first() {
+		let (old, new) = (Instance::random(), Instance::random());
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let fast = relay.receive(Link::default(), Path::empty()).unwrap();
+		let stalled = relay.receive(Link::default(), Path::empty()).unwrap();
+		let fast_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		let stalled_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live"), Some(claim(&old, 0)), None);
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		outputs(&fast);
+		outputs(&stalled);
+
+		origin.own(p("live/x"), Some(claim(&new, 0)), Some(&p("live")));
+		origin.own(p("live"), None, None);
+		pump(&fast_answer, &fast);
+		origin.own(p("live/x"), Some(claim(&new, 5)), None);
+		pump(&fast_answer, &fast);
+		let read: Vec<(Path, Option<u64>)> = (served(outputs(&stalled)).into_iter())
+			.map(|output| match output {
+				Output::Serve { claim, served, .. } => (claim, Some(served.claim.cost)),
+				Output::Unserve { claim, .. } => (claim, None),
+				other => panic!("not a serving change: {other:?}"),
+			})
+			.collect();
+		assert_eq!(read, [(p("live/x"), Some(5)), (p("live"), None)]);
 	}
 
 	/// A claim of a scoped peer left with no usable route stays where it is served,
