@@ -18,7 +18,9 @@ Decided 2026-11-07 (maintainer, on moq-dev/studio's /quest-complete of
   keeps its loudness as it moves. Rejected: linear (-6 dB) and 0 dB center.
 - ✅ **A stereo source is balanced**: the far side is attenuated by the same
   law and each channel stays where it is. Rejected: moving both channels
-  together.
+  together. The even loudness holds for a mono source; balance only turns a
+  side down, so a stereo source with sound on one side only goes silent when
+  balanced hard to the other, as a mixer's balance control does.
 - ✅ **Stereo buses only.** A non-center pan on a mono or surround bus is
   refused with an error. Rejected: ignoring it, and a surround pan nobody
   needs yet.
@@ -40,7 +42,8 @@ the error while any is open. A strip outlives its channels, so a flag would
 keep refusing after the last one closes. The driver never sees a refused pan.
 
 Also recommended, not settled: store the pan atomically beside the gain and
-apply both in the same per-frame loop, so a pan change is click-free in the
-same way a gain change is. Test a mono impulse panned hard left, center,
-and hard right, and a stereo source balanced, against the expected channel
-levels.
+ramp each channel's pan gain across the block as `Driver::advance` already
+ramps the strip's gain (`rs/moq-audio/src/bus.rs`), so a pan move is
+click-free. Test a mono impulse panned hard left, center, and hard right, a
+stereo source balanced, and a hard-left to hard-right move during a
+sustained tone, against the expected channel levels.
