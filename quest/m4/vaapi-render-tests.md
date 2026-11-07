@@ -41,6 +41,16 @@ which covers only NVIDIA.
   recipe's filter selects them.
 - No hosted runner has these GPUs, so this stays a local recipe until a
   GPU runner exists ([GPU CI](/quest/m3/gpu-ci.md) owns that decision).
+- Added 2026-11-06 (maintainer, /quest-unblock) from
+  [moq-dev/moq#8013](https://github.com/moq-dev/moq/pull/8013)'s follow-ups:
+  - The VA-API tests open the first suitable render node, so a second GPU
+    is covered only when `MOQ_VAAPI_DEVICE` names it. `just rs gpu` runs the
+    VA-API tests once for each render node, with `MOQ_VAAPI_DEVICE` set.
+  - The H.265 decode tests gain an open-GOP stream with RASL pictures, and
+    a Main 10 stream holding 8-bit samples that decodes. They also gain a
+    10-bit stream, which is refused, since moq-vaapi has no P010 output
+    ([moq-dev/vaapi#11](https://github.com/moq-dev/vaapi/pull/11)).
+  - Not chosen: dropping either gap.
 
 ## Related
 
