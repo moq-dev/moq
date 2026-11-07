@@ -64,21 +64,22 @@ its mbx summaries. The first post-merge run,
 [42050683248](https://github.com/moq-dev/moq/actions/runs/42050683248/job/127325640293),
 cancelled that job at the 60-minute timeout, so it is incomplete evidence.
 
+Checked 2026-11-06 (/quest-unblock): the baseline's 10 summaries total 333 hits and 359 misses
+(48.12%), 401 not looked up, 12 bypassed, 2 remote failures, about 12m28s of
+compiler time avoided. The first complete post-merge run,
+[42236107954](https://github.com/moq-dev/moq/actions/runs/42236107954/job/127954016736)
+(2026-11-06), totals 427 hits and 615 misses (40.98%), 20 not looked up, 4
+bypassed, 5 remote failures, about 12m0s avoided; several builds hit the 5 GiB
+download budget. It failed only on the `moq-uring` socket-queue benchmark's 60 s
+test timeout, as the baseline did.
+
 Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: collect the baseline run 41852517544's and the first two
-  complete post-merge Nightlies' mbx hit rates and available compiler-time
-  fields for `Nightly (Rust benchmark tests)`. No complete post-merge evidence
-  exists yet: the 2026-11-05 run cancelled the job at 60 minutes. If the cache
+- moq-dev/moq: collect a second complete post-merge Nightly's mbx hit rate and
+  compiler-time fields for `Nightly (Rust benchmark tests)`, beside the
+  baseline and 2026-11-06 numbers in the Plan. If the cache
   cost is material, present the measured tradeoff to the maintainer; recommend
   keeping the narrow final exclusions unless the measurements justify another
   design.
-
-## Related
-
-- [Unify dependency features with cargo-hakari](/quest/m0/ci/hakari.md) - owns
-  the separate macOS/Windows evidence and FFI invocation alignment in
-  [moq-dev/moq#7666](https://github.com/moq-dev/moq/pull/7666); do not duplicate
-  those measurements

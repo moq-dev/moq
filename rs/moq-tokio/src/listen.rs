@@ -75,7 +75,7 @@ impl<'de> serde::Deserialize<'de> for Bind {
 }
 
 /// How long an accepted connection has to finish its handshake, unless overridden by `--listen-timeout`.
-pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = moq_net::server::DEFAULT_TIMEOUT;
 
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///

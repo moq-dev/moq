@@ -10,7 +10,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version, goaway::Goaway};
+use moq_net::{Version, goaway::Goaway};
 use support::Draining;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 use support::mock::create_mock_session_pair;
@@ -21,8 +21,8 @@ fn timed() -> moq_net::track::Info {
 }
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
-fn produce_origin(hop: Hop) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(hop));
+fn produce_origin() -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 	support::harness::spawn(driver);
 	producer
 }
@@ -368,7 +368,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 async fn goaway_keeps_new_subscribes(version: Version) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		// Server publishes a broadcast with one live track.
-		let pub_origin = produce_origin(Hop::random());
+		let pub_origin = produce_origin();
 		let broadcast = pub_origin
 			.route("test", moq_net::origin::RouteOptions::hidden())
 			.expect("create broadcast");
@@ -389,7 +389,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		audio_group.finish().expect("finish group");
 
 		// Client consumes into its own origin.
-		let sub_origin = produce_origin(Hop::random());
+		let sub_origin = produce_origin();
 
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(pub_origin.consume());
@@ -491,13 +491,13 @@ async fn goaway_keeps_new_subscribes_moq_transport_22() {
 /// draining peer has no reason to send.
 async fn goaway_drains_routes(version: Version) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
-		let pub_origin = produce_origin(Hop::random());
+		let pub_origin = produce_origin();
 		let broadcast = pub_origin
 			.route("test", moq_net::origin::RouteOptions::hidden())
 			.expect("create broadcast");
 		broadcast.announce().expect("announce");
 
-		let sub_origin = produce_origin(Hop::random());
+		let sub_origin = produce_origin();
 
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(pub_origin.consume());

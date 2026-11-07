@@ -121,8 +121,6 @@ pub struct Options {
 	pub identity: Option<crate::tls::PeerIdentity>,
 	/// The socket measurements captured before the HTTP server erased its descriptor.
 	pub socket_stats: Option<qmux::SharedSocketStats>,
-	/// The SETUP deadline, including its reply; unset uses ten seconds, zero disables it.
-	pub timeout: Option<time::Duration>,
 	/// The `[quic]` windows and stream count the session starts with, until
 	/// [`crate::server::Request::with_quic_limits`] widens it. Defaults to the `[quic]`
 	/// defaults, so a server passes its own resolved section.
@@ -139,7 +137,6 @@ impl Options {
 			link: Default::default(),
 			identity: None,
 			socket_stats: None,
-			timeout: None,
 			quic: Default::default(),
 		}
 	}
@@ -162,7 +159,8 @@ fn socket_config() -> tungstenite::protocol::WebSocketConfig {
 
 /// Read SETUP on an upgraded WebSocket, leaving admission to the returned request.
 ///
-/// Cap the socket at [`max_message_size`] before the upgrade.
+/// The accept deadline runs from here, set by `options`' server
+/// ([`moq_net::Server::with_timeout`]). Cap the socket at [`max_message_size`] before the upgrade.
 pub async fn accept<T>(socket: T, options: Options) -> crate::Result<crate::server::Request>
 where
 	T: futures::Stream<Item = std::result::Result<tungstenite::Message, tungstenite::Error>>
@@ -172,10 +170,7 @@ where
 		+ 'static,
 {
 	crate::runtime::scope(async move {
-		let timeout = options.timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT);
-		let deadline = (!timeout.is_zero())
-			.then(|| kio::clock::now().checked_add(timeout))
-			.flatten();
+		let deadline = options.server.deadline(kio::clock::now());
 		// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
 		// lifetime that QUIC's idle timeout bounds on the native path.
 		// The subprotocol names the QMux version; an upgrade without one has no wire format.
@@ -1150,17 +1145,17 @@ mod timeout_tests {
 	use moq_net::transport::poll::Session as _;
 
 	#[tokio::test(start_paused = true)]
-	async fn unset_timeout_uses_the_default_and_zero_disables_it() {
+	async fn the_servers_timeout_bounds_setup() {
 		const ALPN: &str = "qmux-01.moq-lite-06";
-		for (timeout, expires) in [(None, true), (Some(time::Duration::ZERO), false)] {
+		let short = time::Duration::from_secs(1);
+		for (timeout, expires) in [(Some(short), true), (None, false)] {
 			let activity = moq_net::server::Activity::default();
 			let mut options = Options::new(
 				"ws://localhost/".parse().unwrap(),
-				Default::default(),
+				moq_net::Server::new().with_timeout(timeout),
 				activity.enter().unwrap(),
 			);
 			options.link.alpn = Some(ALPN.into());
-			options.timeout = timeout;
 			// Complete QMux over an in-memory WebSocket, then withhold MoQ SETUP.
 			// A silent transport would expire QMux's own parameter deadline first.
 			let (server, peer) = tokio::io::duplex(4096);
@@ -1176,7 +1171,7 @@ mod timeout_tests {
 			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
-			tokio::time::advance(crate::listen::DEFAULT_TIMEOUT).await;
+			tokio::time::advance(timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT)).await;
 			let result = accept.as_mut().now_or_never();
 			if expires {
 				assert!(
@@ -1185,7 +1180,7 @@ mod timeout_tests {
 					result.map(|outcome| outcome.map(|_| ()))
 				);
 			} else {
-				assert!(result.is_none(), "zero must keep waiting for SETUP");
+				assert!(result.is_none(), "no timeout must keep waiting for SETUP");
 			}
 		}
 	}

@@ -111,7 +111,7 @@ mints at its own time, so mint order outranks cost, preference, and the
 local-broadcast tie and relays disagree on a pool path's winner, while
 ranking a minted epoch last keeps the renewal it was meant to delete.
 
-Moved 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)):
+Moved 2026-10-30 (maintainer, the [route epic](https://github.com/moq-dev/moq/blob/1a6ac473d75fcbfd5d23bdbdfd64eb4750b077ad/quest/m1/api-audit/route/README.md)):
 [Instance and epoch](https://github.com/moq-dev/moq/pull/7489) now deletes that
 epochless machinery, so the route layer no longer does. A session mints
 an `instance` (`~` plus random bits) for any route that
