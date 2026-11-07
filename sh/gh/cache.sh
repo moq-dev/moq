@@ -22,3 +22,5 @@ just infra nix push nix-ci-moq-dev "$roots/devshell"
 # upstream mirrors.
 nix build .#moq-libav .#moq-libav.wasm .#moq-libav.sources --out-link "$roots/libav"
 just infra nix push nix-ci-moq-dev "$roots"/libav*
+
+just infra nix roots nix-ci-moq-dev "${GITHUB_SHA:?not set}" "dev-$(nix eval --impure --raw --expr builtins.currentSystem)" "$roots"/*

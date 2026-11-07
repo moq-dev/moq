@@ -280,9 +280,14 @@ platforms have no Smoke nix lane. Runtime warms serialize: the active run
 finishes and new pushes replace only the pending run, avoiding duplicate
 builds without starving publication or delaying the dev-shell matrix.
 Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30 days
-after upload; the next warm re-uploads what it still needs. `flake.nix`
-sets `fallback = true` because that expiry can remove a path before one that
-depends on it.
+after upload. `nix copy` never re-uploads a path the bucket already has, so a
+path many commits reuse keeps its first upload's age. Each job therefore
+records the store paths it pushed under `roots/<commit>/`, and the daily
+`cache-refresh.yml` copies every object in the newest cached commit's closures onto
+itself once it is a week old, restarting its age; it fails if any is already
+gone. That commit is the one Smoke pins, so it always substitutes in full;
+older commits' paths still expire. `flake.nix` sets `fallback = true` because
+that expiry can remove a path before one that depends on it.
 
 The Worker logs R2 internal errors (10001) and service-unavailable errors
 (10043) and treats the failed read as a miss: the other bucket can still
@@ -371,7 +376,9 @@ secrets.
 
 To rotate the key, run `keygen` again and add the new public key next to the
 old one in `flake.nix`. Drop the old key once nothing signed with it matters:
-30 days for CI paths, but never for released ones unless they are re-signed.
+never for released ones unless they are re-signed, and for CI paths only after
+emptying `nix-ci-moq-dev`, since the refresh keeps the newest cached commit's
+paths, with their old signatures, indefinitely. The next Cache push refills it.
 
 ## Bootstrapping the video corpus
 

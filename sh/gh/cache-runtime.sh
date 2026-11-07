@@ -16,3 +16,5 @@ just infra nix push nix-ci-moq-dev "$roots"/deps*
 
 nix build .#moq-relay .#moq --out-link "$roots/runtime" --print-build-logs
 just infra nix push nix-ci-moq-dev "$roots"/runtime*
+
+just infra nix roots nix-ci-moq-dev "${GITHUB_SHA:?not set}" runtime-x86_64-linux "$roots"/*
