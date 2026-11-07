@@ -296,7 +296,7 @@ impl Subscriber {
 		};
 		let source = moq_mux::Source::new(origin.clone(), broadcast);
 		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
-		let export = ts::Export::new(source, catalog).with_delay(options.latency.max(MIN_DELAY));
+		let export = ts::Export::new(source, catalog, options.latency.max(MIN_DELAY));
 		let follower = ts::Follower::new(export)?
 			.with_follow(options.follow)
 			.with_stitch(options.stitch);
