@@ -4385,7 +4385,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.4.23"
+version = "0.4.24"
 dependencies = [
  "anyhow",
  "bytes",

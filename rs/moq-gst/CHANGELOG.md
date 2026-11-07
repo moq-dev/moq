@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.24](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.23...moq-gst-v0.4.24) - 2026-11-07
+
+### Other
+
+- Republish so the GitHub release and Homebrew tarballs publish again. 0.4.21 to 0.4.23 published to crates.io, but their macOS Homebrew formula test hung, so their GitHub releases never published ([#8109](https://github.com/moq-dev/moq/pull/8109)). No code changes.
+
 ## [0.4.23](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.22...moq-gst-v0.4.23) - 2026-11-05
 
 ### Other
