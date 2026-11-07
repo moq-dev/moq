@@ -23,8 +23,9 @@ request ends while its follower waits for the publisher to arrive.
 Until [`js/net` speaks lite-07's route layer](../../quest/m2/cluster-routing/routes/js.md),
 native JS dials its defaults in the matrix, leaving its grant unchecked, and every
 lane that would run it on lite-07 records a skip naming that quest: claims, track
-replacement, sockets, and the lite-07 compress and drop legs. The compressed catalog
-runs without its lite-07 reader, and `--versions moq-lite-07-wip` refuses JS clients.
+replacement, sockets, the browser route key proof, and the lite-07 compress and
+drop legs. The compressed catalog runs without its lite-07 reader, and
+`--versions moq-lite-07-wip` refuses JS clients.
 
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
@@ -243,7 +244,9 @@ a varint rather than the draft's 64 bits, so `@moq/net` sends no proof from
 Firefox, and the tab must connect unproven. A build that cannot prove yet skips,
 or fails under `CI_STRICT`, which release PRs set, so the lite-07 cut waits for
 both browsers to prove. A build the table says cannot prove but that does fails,
-so the table follows the browsers.
+so the table follows the browsers. Until
+[routes/js.md](../../quest/m2/cluster-routing/routes/js.md) ports `js/net` to the
+route layer, the lane records a skip naming it.
 
 ## moq-transport
 

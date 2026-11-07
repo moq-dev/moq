@@ -2368,6 +2368,11 @@ run_matrix() {
         local engine status
         for engine in "${ROUTE_KEY_ENGINES[@]}"; do
             log="$HARNESS_RUN/route-key-$engine.log"
+            if [[ -n "$JS_LITE07_SKIP" ]]; then
+                echo "  SKIP  route key $engine"
+                record skip case="route key $engine" subscriber=js version=moq-lite-07-wip detail="$JS_LITE07_SKIP"
+                continue
+            fi
             if is_broken js; then
                 echo "  FAIL  route key $engine (browser client unavailable)"
                 record fail case="route key $engine" subscriber=js version=moq-lite-07-wip detail="browser client unavailable"
