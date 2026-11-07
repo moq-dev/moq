@@ -55,6 +55,7 @@ const tickers = new Map<Nano, Ticker>();
 
 /** Subscribes `fn` to the page-wide ticker for `period`; returns its dispose. */
 export function tick(period: Nano, fn: () => void): () => void {
+	if (period <= 0) throw new RangeError("ticker period must be positive");
 	let ticker = tickers.get(period);
 	if (!ticker) {
 		ticker = new Ticker(period);

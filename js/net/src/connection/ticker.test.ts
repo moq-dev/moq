@@ -23,6 +23,11 @@ test("subscribers share one tick and the loop stops with the last", async () => 
 		b();
 		await clock.advance(Nano.fromMilli(Milli(500)));
 		expect(ticks).toEqual(["a", "b", "b"]);
+
+		// A stopped loop restarts for a later subscriber, rather than leaving the page unsampled.
+		tick(period, () => ticks.push("c"));
+		await clock.advance(period);
+		expect(ticks).toEqual(["a", "b", "b", "c"]);
 	} finally {
 		installed.close();
 	}
