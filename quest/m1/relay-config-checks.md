@@ -2,7 +2,7 @@
 
 ## Goal
 
-moq-relay turns its CLI, environment and TOML settings into one validated configuration at load, and the rest of the relay takes that type, so a setting cannot be accepted and then ignored. Cross-field rules live in that one step instead of across `Config::build`, `Cluster::new`, `Cluster::start` and `Relay::load`. The cases this audit found are refused there:
+moq-relay turns its CLI, environment and TOML settings into one validated configuration at load, and the rest of the relay takes that type, so a setting cannot be accepted and then ignored. Cross-field rules live in that one step instead of across `Config::resolve`, `Cluster::new`, `Cluster::start` and `Relay::load`. The cases this audit found are refused there:
 
 - Stats enabled on a clustered relay without `stats.node`; or `stats.node` defaults to `cluster.node`. Without either, nodes overwrite each other's `<prefix>/node` broadcast.
 - `--cluster-lan` without a QUIC listener; today it advertises SRV port 0.
