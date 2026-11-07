@@ -181,3 +181,23 @@ export function requestReason(code: number, reasonPhrase: string, kind: RequestK
 	const condition = fromRequestCode(code, kind, version) ?? "unregistered";
 	return `${condition} (code=${code}) ${reasonPhrase}`;
 }
+
+/**
+ * A peer's REQUEST_ERROR refusing a SUBSCRIBE: what it reads as, and the Retry Interval it asked
+ * for, which a relay forwards to its own readers unchanged.
+ *
+ * @internal
+ */
+export class SubscribeRefused extends Error {
+	/** The condition the code reads as, `internal` for one the draft does not register. */
+	readonly condition: RequestCondition;
+	/** The Retry Interval, in milliseconds. */
+	readonly retryInterval: bigint;
+
+	constructor(code: number, reasonPhrase: string, retryInterval: bigint, version: IetfVersion) {
+		super(`SUBSCRIBE error: ${requestReason(code, reasonPhrase, "subscribe", version)}`);
+		this.name = "SubscribeRefused";
+		this.condition = fromRequestCode(code, "subscribe", version) ?? "internal";
+		this.retryInterval = retryInterval;
+	}
+}

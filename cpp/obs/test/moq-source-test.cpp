@@ -1912,6 +1912,10 @@ int main()
 	}
 	report("broadcast ends");
 
+	// Join moq-ffi's runtime threads as obs_module_unload does, or one that exited idle is
+	// still unjoined at exit, which ThreadSanitizer reports as a leak.
+	moq::shutdown();
+
 	if (g_failures) {
 		fprintf(stderr, "%d failure(s)\n", g_failures);
 		return 1;

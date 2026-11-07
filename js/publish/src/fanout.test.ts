@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Milli, Nano, sleep } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Effect } from "@moq/signals";
 import { Fanout } from "./fanout";
 
@@ -152,6 +153,7 @@ describe("Fanout", () => {
 	// A reader closes what it receives, so handing the same VideoFrame to two renditions would
 	// close it out from under the other. Content equality can't catch that; identity can.
 	test("gives each reader its own copy", async () => {
+		hostTime();
 		const source = pushable<{ id: number }>();
 		const fanout = new Fanout(source.stream, {
 			clone: (value) => ({ ...value }),
@@ -178,6 +180,7 @@ describe("Fanout", () => {
 
 	// Everything the fanout discards has to be released, or a VideoFrame's buffers leak.
 	test("releases what it discards", async () => {
+		hostTime();
 		const source = pushable<{ id: number }>();
 		const released: number[] = [];
 
@@ -207,6 +210,7 @@ describe("Fanout", () => {
 	});
 
 	test("releases values that arrive with nobody attached", async () => {
+		hostTime();
 		const source = pushable<{ id: number }>();
 		const released: number[] = [];
 
@@ -222,6 +226,7 @@ describe("Fanout", () => {
 	// Without this the pump just logged and stopped, leaving every reader parked on read() forever:
 	// the encoders stalled with no terminal signal while still reporting themselves active.
 	test("surfaces a source failure to every reader", async () => {
+		hostTime();
 		let control!: ReadableStreamDefaultController<number>;
 		const source = new ReadableStream<number>({
 			start: (controller) => {
@@ -255,6 +260,7 @@ describe("Fanout", () => {
 	// FrameSource and SampleSource both document that their stream is cancelled when dropped, and a
 	// one-shot decode keeps running (and holding the stream locked) if we don't.
 	test("cancels its source on close", async () => {
+		hostTime();
 		let cancelled = 0;
 		const source = new ReadableStream<number>({
 			cancel: () => {

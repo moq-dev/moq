@@ -57,9 +57,6 @@ from moq_ffi import (
     MoqVideoEncoderOutput as VideoEncoderOutput,
 )
 from moq_ffi import (
-    MoqVideoGop as VideoGop,
-)
-from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
 
@@ -112,7 +109,6 @@ __all__ = [
     "VideoCodec",
     "VideoEncoderInput",
     "VideoEncoderKind",
-    "VideoGop",
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",

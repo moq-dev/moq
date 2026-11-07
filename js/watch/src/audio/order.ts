@@ -1,10 +1,12 @@
 /**
  * Puts one subscription's frames in timestamp order for the audio decoder.
  *
- * Groups go out newest-first, so a subscription's head (the groups the publisher still holds) arrives
- * after the live edge it was served alongside. Chrome's AudioDecoder stamps every output from its
- * first input, so decoding the head after the live edge shifts the rest of the track, and the ring,
- * anchored at the first decoded frame, cannot place the head anyway.
+ * Groups go out newest-first, so a subscription's head (the groups the publisher still holds) can
+ * arrive after the live edge it was served alongside. The container's ordered read waits for it from
+ * where the publisher's feed starts and hands groups over in sequence, so the head comes first here;
+ * this keeps the order should it not. Chrome's AudioDecoder stamps every output from its first input,
+ * so decoding the head after the live edge shifts the rest of the track, and the ring, anchored at the
+ * first decoded frame, cannot place the head anyway.
  *
  * A buffered subscription holds its head and releases it sorted. The head is complete once a newer
  * group than the first arrives, or once the first group alone runs past the floor: the ring could not

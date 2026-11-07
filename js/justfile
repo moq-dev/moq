@@ -10,10 +10,14 @@ set working-directory := '.'
 default:
     just check
 
+# Install root workspace dependencies: frozen for validation, update for lockfile changes.
+install mode:
+    uv run --no-project python ../sh/js/install.py {{ mode }}
+
 # `build` runs here rather than as its own gate: the per-package `check` script
 # is `tsc --noEmit`, which never runs declaration emit, so the errors that only
 # surface when emitting a `.d.ts` (TS4023 and friends) pass `check` and then
-# break a JSR/npm publish. It costs about 20s for every package.
+# break an npm publish. It costs about 20s for every package.
 #
 # `common/deps.ts` runs first and cheaply: bundlers resolve an undeclared
 # workspace import through hoisting, so nothing else in `check` notices one.
@@ -46,7 +50,7 @@ fix:
 
 # Rebuild changed workspace packages (or `--all`) to update their API reports.
 fix-changed list:
-    bun install
+    uv run --no-project python ../sh/js/install.py update
     MOQ_API_REPORT=update python3 ../sh/js/workspace.py build '{{ list }}'
 
 # Run all unit tests.
@@ -63,44 +67,44 @@ coverage package="":
 
 # Run one net benchmark: broadcasts, forward, requests, fills, fetch, reader, frames, track, resume, observed, drift, ledger, bandwidth, replay, varint, lite-varint, priority, subscribe-drop, refresh, compression, or datagrams.
 bench name:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun net/bench/{{ name }}.ts
 
 # Sweep browser publisher fairness over backlog x viewers using the devShell's Chromium.
 serve-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project net/bench/tsconfig.json
     bun net/bench/serve-browser.ts
 
 # Sweep catalog estimate publishes and subscribe updates over tracks x viewers.
 catalog-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun publish/bench/catalog.ts
 
 # Sweep QMux record decoding over record size x frames per record.
 qmux-record-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun qmux/bench/record.ts
 
 # Sweep QMux datagram receive-queue draining over backlog size (median of 7 runs).
 qmux-datagrams-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun qmux/bench/datagrams.ts
 
 # Sweep CMAF fragment decode over mdat bytes x declared sample count, including a hostile count.
 cmaf-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun hang/bench/cmaf.ts
 
 # Time Effect create and close, which pays for the creation stack its diagnostics print.
 signals-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun signals/bench/effect.ts
 
 # Bundle the worklets with Vite, webpack, esbuild, and Bun, and load them in Chromium, with and
 # without a strict CSP. Nightly, against the bundlers pinned in test/worklet.
 worklet-matrix:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun ../test/worklet/matrix.ts
 
 # Build all packages.
@@ -113,87 +117,87 @@ dist-imports:
 
 # Compare eager and cold lazy WebSocket fallback setup in Chromium.
 qmux-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project net/bench/tsconfig.json
     bun net/bench/qmux.ts
 
 # Sweep open arrival handles against their unread backlog.
 arrivals-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun watch/bench/arrivals.ts
 
 # Reduce and compare the worst known peer grant shapes, swept over AUTH_OK size.
 pattern-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project pattern/bench/tsconfig.json
     bun pattern/bench/algebra.ts
 
 # Sweep manual-clock armed timers x due timers, with independent and shared abort scopes.
 clock-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun clock/bench/timers.ts
 
 # Sweep buffered JSON stream reads over record count, payload size, and compression.
 json-stream-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project json/bench/tsconfig.json
     bun json/bench/stream.ts
 
 # Sweep snapshot codec cost over document size and changed keys.
 json-codec-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project json/bench/tsconfig.json
     bun json/bench/codec.ts
 
 # Compare the duplicate-refusing JSON frame parse against bare JSON.parse.
 json-parse-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project json/bench/tsconfig.json
     bun json/bench/parse.ts
 
 # Sweep a slow hang consumer's skipped groups against its warning traffic and catch-up time.
 slow-group-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun hang/bench/slow-group.ts
 
 # Sweep a hang consumer's buffered groups, frames per group, publishers and players across arrival orders.
 buffered-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project hang/bench/tsconfig.json
     bun hang/bench/buffered.ts
 
 # Sweep the audio jitter estimator's held history against in-order and reordered frames.
 jitter-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun hang/bench/jitter.ts
 
 # Sweep players against the main-thread CPU and allocation of feeding the audio ring, in Chromium.
 ring-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun watch/bench/ring.ts
 
 # Sweep audio rendition count against repeated mute/unmute catalog updates.
 audio-support-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun watch/bench/support.ts
 
 # Sweep decoder count against PCM callback size during audio warmup.
 audio-warmup-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun watch/bench/warmup.ts
 
 # Sweep data-channel qmux stream count and payload size.
 p2p-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun p2p/bench/transport.ts
 
 # Sweep E2EE frame size against writes in flight through the WebCrypto pump.
 e2ee-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bun crypto/bench/pump.ts
 
 # Sweep audio renditions x raw retention through native WebCodecs in Chromium.
 raw-audio-bench:
-    bun install --frozen-lockfile
+    uv run --no-project python ../sh/js/install.py frozen
     bunx tsc --noEmit --project publish/bench/tsconfig.json
     bun publish/bench/audio.ts
