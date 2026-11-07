@@ -153,3 +153,5 @@ Public API: none. Wire: none.
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
 - [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
+- [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
+- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load

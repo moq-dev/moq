@@ -13,6 +13,8 @@ return early without a device today (`vaapi_h264_round_trip` and
 `native_frames_still_answer_into_i420` in
 `rs/moq-video/src/decode/backend/vaapi.rs`) and moq-transcode's
 `vaapi_decoder_available` tests, which hosted CI reports as passed.
+The ignored `vaapi_1080p_ladder_stays_on_the_gpu` encode test in
+`rs/moq-video/src/encode/backend/vaapi.rs` runs there too.
 
 ## Plan
 

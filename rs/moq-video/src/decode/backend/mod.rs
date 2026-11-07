@@ -209,7 +209,7 @@ const HARDWARE: &[Candidate] = &[
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	Candidate {
 		name: vaapi::NAME,
-		supports: |c| matches!(c, Codec::H264),
+		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: vaapi::Vaapi::open,
 	},
 	// Last of the Linux hardware decoders, for the same reason as its encode
