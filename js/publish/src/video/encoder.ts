@@ -374,7 +374,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.order, broadcast.join, effect);
+			this.#encode(rendition.track, broadcast.order, broadcast.join, effect);
 		});
 
 		// Reserve against the connection while a subscriber is attached. Wait for a ceiling so we
@@ -410,7 +410,14 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, order: Order, join: Getter<Milli | undefined>, effect: Effect): void {
+	#encode(
+		tracks: Getter<Moq.Track.Producer | undefined>,
+		order: Order,
+		join: Getter<Milli | undefined>,
+		effect: Effect,
+	): void {
+		const track = effect.get(tracks);
+		if (!track) return;
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
@@ -607,8 +614,15 @@ export class Encoder {
 						() => true,
 					);
 					do {
-						const done = await race([flushed, Signal.race(this.in.enabled), effect.closed]);
-						if (done !== false) break;
+						if (track.closed.peek() !== undefined || tracks.peek() !== track) break;
+						const done = await race([
+							flushed,
+							Signal.race(this.in.enabled),
+							Signal.race(tracks),
+							track.closed,
+							effect.closed,
+						]);
+						if (done === true || done === undefined) break;
 					} while (!this.in.enabled.peek());
 				}
 			} finally {

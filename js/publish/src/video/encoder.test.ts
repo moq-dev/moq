@@ -1186,7 +1186,7 @@ async function installRecording() {
 	};
 }
 
-for (const stop of ["resume", "close", "detach"] as const) {
+for (const stop of ["resume", "close", "detach", "track closed", "track replaced"] as const) {
 	test(`a stalled final black frame cannot block ${stop}`, async () => {
 		using recording = await installRecording();
 		const enabled = new Signal(true);
@@ -1199,9 +1199,10 @@ for (const stop of ["resume", "close", "detach"] as const) {
 			join: new Signal(undefined),
 			close: () => {},
 		};
+		const order = new Order();
 		const broadcast = new Signal<Broadcast | undefined>({
 			video: () => rendition,
-			order: new Order(),
+			order,
 			join: new Signal(undefined),
 		} as never);
 		const encoder = new Encoder("video", {
@@ -1211,6 +1212,7 @@ for (const stop of ["resume", "close", "detach"] as const) {
 		});
 		const pending = Promise.withResolvers<void>();
 		const closed = spyOn(RecordingVideoEncoder.prototype, "close");
+		const leave = spyOn(order, "leave");
 		let flush: ReturnType<typeof spyOn<RecordingVideoEncoder, "flush">> | undefined;
 		try {
 			await settle();
@@ -1225,9 +1227,15 @@ for (const stop of ["resume", "close", "detach"] as const) {
 			expect(closed.mock.calls.length).toBe(before);
 			if (stop === "close") encoder.close();
 			else if (stop === "detach") broadcast.set(undefined);
+			else if (stop === "track closed") track.close();
+			else if (stop === "track replaced")
+				rendition.track.set(
+					new Moq.Track.Producer("replacement").accept({ timescale: Moq.Time.Timescale.MICRO }),
+				);
 			else enabled.set(true);
 			await settle();
 			expect(closed.mock.calls.length).toBeGreaterThan(before);
+			expect(leave).toHaveBeenCalled();
 			if (stop === "resume") {
 				await recording.send(300);
 				expect(recording.keys).toContain(300);
@@ -1238,6 +1246,7 @@ for (const stop of ["resume", "close", "detach"] as const) {
 			track.close();
 			flush?.mockRestore();
 			closed.mockRestore();
+			leave.mockRestore();
 			pending.resolve();
 			await settle();
 		}
