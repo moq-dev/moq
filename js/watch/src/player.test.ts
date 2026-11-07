@@ -11,9 +11,10 @@ async function flush() {
 	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-test("Player refuses the renamed reload and announced inputs", () => {
+test("Player refuses the renamed reload, announced, and buffer inputs", () => {
 	expect(() => new Player({ reload: true } as never)).toThrow("`reload` was renamed to `follow`");
 	expect(() => new Player({ announced: true } as never)).toThrow("`announced` was renamed to `follow`");
+	expect(() => new Player({ buffer: 1000 } as never)).toThrow("`buffer` was renamed to `lookahead`");
 });
 
 test.each(["table", "consumer", "structural"] as const)("Player borrows a %s origin", async (role) => {
