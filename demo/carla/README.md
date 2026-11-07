@@ -53,12 +53,12 @@ carla/{truck}/{camera}.hang       <- one media broadcast per camera (hang catalo
   hd                                 720p H.264, for the focused view
   status                             JSON Snapshot telemetry
 
-carla/.socket/{truck}             <- the truck's socket endpoint, which drivers dial
-carla/.socket/driver-{id}         <- one endpoint per driver lease
+carla/.server/{truck}             <- the truck's server socket endpoint, which drivers dial
+carla/.client/{id}                <- one client endpoint per driver lease
 ```
 
-Each truck accepts `track` sessions on its endpoint. A driver dials from an
-endpoint of its own, one session per lease, and sends one control per message;
+Each truck accepts `track` sessions on its server endpoint. A driver dials from
+a client endpoint of its own, one session per lease, and sends one control per message;
 the truck answers each control it accepted from the lease holder on the same
 session. Cameras are sibling broadcasts, so switching views never creates a
 second claim on the same wheel.
@@ -98,7 +98,7 @@ A bystander's e-stop, a command the gate refused, or an accepted `respawn`
 ```json
 { "accepted": { "steering": .., "throttle": .., "brake": .., "gear": ".." },
   "autonomy": "autonomous|manual", "estopped": true,
-  "driver": "driver-ab12cd", "estop_by": "driver-ef34gh",
+  "driver": "driver-3eb1bd43", "estop_by": "driver-9c0a7f12",
   "map": "Town10HD_Opt",
   "pose": { "x": 12.35, "y": -78.9, "yaw": 180.1, "speed": 9.88 },
   "measured": { "steering": .., "throttle": .., "brake": .., "gear": ".." },
@@ -149,13 +149,15 @@ The worker's gate (`sim/moq_carla_sim/drive.py`) owns every truck's controls:
   e-stop latched, that has not moved 2 m in 5 minutes of a running world
   returns to a free spawn point under autonomy, its e-stop cleared.
 
-The lease is cooperative. Anonymous drivers share one grant, publish
-`carla/.socket/driver-*`, so anyone can announce an endpoint under the id that
-`status` names as the holder. That never continues the holder's lease, since a
-lease is one session, but it can disrupt it: the relay may route the truck's
-accept of the holder's next session to the impostor. Truck names must not look
-like driver ids, or the same grant would let anyone impersonate a truck; the
-worker refuses one. So the lease stops two honest drivers fighting over a
+The lease is cooperative. Anonymous drivers share one grant to publish
+`carla/.client/*`, so an endpoint id is all it takes to announce in a driver's
+place and win the relay's route to its next session. Each driver's id is
+therefore 128 random bits, and `status` names the holder and the e-stop's
+sender by a handle instead: `driver-` and 8 hex digits of the SHA-256 of the
+session's secret id, which the driver derives the same way to recognize its
+own lease. The grant covers only client endpoints, so no driver can announce a
+truck's server endpoint, whatever its name. Anyone may still claim a free truck
+or press its e-stop, so the lease stops two honest drivers fighting over a
 truck, not a deliberate disruption. Anything beyond a simulator needs
 per-driver tokens scoped to the driver's own endpoint.
 
@@ -220,7 +222,7 @@ just carla venv
 just carla service-install
 
 # The units read this. MOQ_URL carries a token allowed to publish `carla/**`,
-# which covers the trucks' endpoints, and subscribe `carla/.socket/driver-*`,
+# which covers the trucks' server endpoints, and subscribe `carla/.client/**`,
 # the endpoints drivers dial from; keeping it here keeps it off the command
 # line. CARLA_IMAGE is the tag the moq-dev/carla build printed, since the worker
 # refuses a stock simulator.

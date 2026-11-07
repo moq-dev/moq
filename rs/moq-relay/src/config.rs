@@ -851,7 +851,7 @@ root = ["ca.pem"]
 				if path.extension().is_none_or(|ext| ext != "toml")
 					|| matches!(
 						path.file_name().and_then(|name| name.to_str()),
-						Some("Cargo.toml" | "rust-toolchain.toml")
+						Some("Cargo.toml" | "rust-toolchain.toml" | "bunfig.toml")
 					) {
 					continue;
 				}
@@ -1136,12 +1136,13 @@ ws = false
 	/// An embedder can merge its relay fragment without parsing the binary CLI again.
 	#[test]
 	fn merge_into_relay_fragment() {
-		if !test_env::Env::without(&["MOQ_CLUSTER_ID"]).isolate() {
+		if !test_env::Env::without(&["MOQ_CLUSTER_MAX_HOPS"]).isolate() {
 			return;
 		}
 		let (parsed, cli) =
-			Cli::parse_from_with_settings(&[std::ffi::OsStr::new("--cluster-id"), std::ffi::OsStr::new("9")]).unwrap();
-		let file = toml::from_str::<toml::Value>("[cluster]\nid = 7\n").unwrap();
+			Cli::parse_from_with_settings(&[std::ffi::OsStr::new("--cluster-max-hops"), std::ffi::OsStr::new("9")])
+				.unwrap();
+		let file = toml::from_str::<toml::Value>("[cluster]\nmax_hops = 7\n").unwrap();
 		let source = moq_tokio::cli::FileSource {
 			path: std::path::Path::new("relay.toml"),
 			value: &file,
@@ -1150,8 +1151,8 @@ ws = false
 		config
 			.merge_into(&cli, &usage_rs::config::EnvLayer::from_process(), Some(source))
 			.unwrap();
-		assert_eq!(config.cluster.id, Some(9));
-		assert_eq!(config.source("cluster.id"), Some("--cluster-id"));
+		assert_eq!(config.cluster.max_hops, Some(9));
+		assert_eq!(config.source("cluster.max_hops"), Some("--cluster-max-hops"));
 	}
 
 	/// One source a merged setting is read from, and what it must end up as.
@@ -1174,7 +1175,6 @@ ws = false
 		"MOQ_CACHE_DURATION",
 		"MOQ_CONNECT_TIMEOUT",
 		"MOQ_CLUSTER_TIER",
-		"MOQ_CLUSTER_ID",
 		"MOQ_CLUSTER_MAX_HOPS",
 		"MOQ_QUIC_RECEIVE_WINDOW",
 		"MOQ_CONNECT_TLS_SYSTEM_ROOTS",
@@ -1287,14 +1287,6 @@ ws = false
 				key: "cluster.tier",
 				check: |config| assert_eq!(config.cluster.tier.as_deref(), Some("region")),
 				source: "tier",
-			},
-			Case {
-				name: "optional-int-from-file",
-				toml: "[cluster]\nid = 12345\n",
-				cli: &[],
-				key: "cluster.id",
-				check: |config| assert_eq!(config.cluster.id, Some(12345)),
-				source: "id",
 			},
 			Case {
 				name: "hop-limit-from-file",

@@ -25,6 +25,12 @@ Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
   abort()` (`rs/moq-net/src/model/track.rs`) during the CLI FETCH round.
   Find which producer the CLI or the relay drops without finishing it, and
   finish or abort it.
+  [moq-dev/studio#95](https://github.com/moq-dev/studio/pull/95) logged the
+  same warning at teardown in 2 of about 12 runs of a test where a relay
+  takes in a publisher's broadcast (`catalog.json` once, `1.avc3` once), with
+  a backtrace into moq-net: when a session ends, the subscriber side drops
+  the tracks it took in without aborting them. That may be this cause; if
+  so, abort a session's subscribed tracks when it ends.
 - Reproduce both from a passing local run with the producer warning set to
   log a backtrace. Then add an assertion that a passing run logs neither
   warning, so they can't return unnoticed.

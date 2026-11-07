@@ -24,6 +24,6 @@ The `/js` Bun workspace, published as `@moq/<package>`. Run recipes via `just js
 # Conventions
 
 - Only browser performance counts; accept a small regression that shows only on node or bun.
-- Document every export and give each entrypoint a `@module` block (JSR builds docs from them). Hide deprecated exports with `@internal` or drop them; never annotate "use X".
+- Document every export and give each entrypoint a `@module` block. Hide deprecated exports with `@internal` or drop them; never annotate "use X".
 - `just js check` includes the build, since declaration emit catches errors `--noEmit` misses, and rejects importing a `@moq/*` package the manifest doesn't declare.
 - Test UI or playback changes with `just dev` in a real browser. `<moq-watch>` renders black in a background tab unless `visible="always"`.

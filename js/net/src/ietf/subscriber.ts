@@ -44,7 +44,7 @@ import { wireOf } from "../wire.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
-import { requestReason } from "./error.ts";
+import { requestReason, SubscribeRefused } from "./error.ts";
 import { Fetch, FetchHeader, FetchOk } from "./fetch.ts";
 import { isDraft20 } from "./filter.ts";
 import { Join } from "./join.ts";
@@ -1603,18 +1603,18 @@ export class Subscriber {
 		const response = await state.stream.next();
 		if (response === undefined) throw new Error("subscription ended before its response");
 		if (response.type !== SubscribeOk.id) {
-			let reasonPhrase = "unknown error";
+			let refused: RequestError | undefined;
 			try {
 				if (response.type === RequestError.id) {
-					const err = await RequestError.decode(response.reader, version);
-					reasonPhrase = requestReason(err.errorCode, err.reasonPhrase, "subscribe", version);
+					refused = await RequestError.decode(response.reader, version);
 					// Only a well-formed refusal ended the request; cleanup resets anything else.
 					state.rejected = true;
 				}
 			} catch {
 				// Decoding error response failed, use default message
 			}
-			throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
+			if (!refused) throw new Error("SUBSCRIBE error: unknown error");
+			throw new SubscribeRefused(refused.errorCode, refused.reasonPhrase, refused.retryInterval, version);
 		}
 
 		const ok = await SubscribeOk.decode(response.reader, version);
@@ -1907,12 +1907,9 @@ export class Subscriber {
 		};
 		// A group that will never arrive whole is dropped, so readers stop owing it.
 		const dropHeadless = () =>
-			hooks.dropTrackGroups(
-				track,
-				group.groupId,
-				group.groupId + 1n,
-				new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }),
-			);
+			hooks.dropTrackGroups(track, group.groupId, group.groupId + 1n, {
+				error: new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }),
+			});
 		// After an END_OF_GROUP or END_OF_TRACK status only the stream's end may follow: an
 		// object past the group's final one makes the track malformed.
 		const last = async () => {

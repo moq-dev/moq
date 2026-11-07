@@ -1,5 +1,5 @@
-import { expect, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { expect, test } from "bun:test";
+import { Manual, Micro, Milli, Nano, yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
 import { Group, Error as NetError, Origin, Path, Time } from "@moq/net";
@@ -17,8 +17,9 @@ const config = Catalog.AudioConfigSchema.parse({
 });
 
 test("arrival capture stamps a later group before a stalled earlier group", async () => {
-	let now = 10;
-	const clock = spyOn(performance, "now").mockImplementation(() => now);
+	const clock = new Manual();
+	const installed = clock.install();
+	clock.jump(Nano.fromMilli(Milli(10)));
 	const early = new Group.Producer(0n);
 	const late = new Group.Producer(1n);
 	const captured: Arrival[] = [];
@@ -35,7 +36,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 		late.finish();
 		await read(late.consume());
 		expect(captured).toEqual([[10, 20, 1, 20]]);
-		now = 50;
+		clock.jump(Nano.fromMilli(Milli(40)));
 		early.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
@@ -49,7 +50,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 	} finally {
 		early.finish();
 		late.finish();
-		clock.mockRestore();
+		installed.close();
 	}
 });
 
@@ -171,7 +172,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
 		});
-		while (capture.drain().length === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+		while (capture.drain().length === 0) await yieldNow();
 		end(group);
 		await capture.close();
 		return capture.error();

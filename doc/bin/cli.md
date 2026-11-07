@@ -231,8 +231,10 @@ to `--delay` ahead of its decode time and no further than its decoder buffer
 holds. That send-ahead comes out of the delay, so the output trails a TS source
 by `--delay`. A frame that cannot arrive in time at the rate fails the export,
 as does video whose HRD declares a longer buffer delay than `--delay`; the
-error names the `--delay` it needs. Skipped media within the same broadcast
-flags the next PCR as discontinuous without changing the PMT version. Raw
+error names the `--delay` it needs. A clock jump flags its first PCR without
+changing the PMT version. Padding keeps PCR values on a continuous grid; after
+an outage exhausts the buffered media, overdue padding can arrive in a catch-up
+burst when media resumes. Raw
 `--passthrough` keeps surviving packets unchanged, including across loss.
 
 ## Play

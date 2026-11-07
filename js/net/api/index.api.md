@@ -345,6 +345,10 @@ export namespace Error {
 		});
 		readonly code: SessionCode;
 	}
+	export class Skipped extends Error {
+		constructor(sequence: bigint);
+		readonly sequence: bigint;
+	}
 	export class Stream extends Error {
 		constructor(code: StreamCode, options?: Error.StreamOptions);
 		readonly code: StreamCode;
@@ -751,6 +755,7 @@ export namespace Track {
 		readonly name: string;
 		get priority(): number;
 		requests(): Track.Requests;
+		skipGroups(start: bigint, end: bigint): void;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
@@ -777,11 +782,14 @@ export namespace Track {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		finished(): Promise<Track.Position>;
+		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
+		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
+		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryRecvGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;

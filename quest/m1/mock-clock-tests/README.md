@@ -18,8 +18,8 @@ test's clock):
   assertions.** Not chosen: only the first two; also the ~530 tests that
   only wait for progress under a timeout, which flake little and would cost
   a much larger migration.
-- ✅ m1, while the [guards](/quest/m0/clock-guard/README.md) that stop new
-  ones are m0.
+- ✅ m1, while the guards that stop new ones (the runtime guards and the
+  `REVIEW.md` rule) landed in m0.
 
 Rules every child keeps:
 
@@ -29,9 +29,13 @@ Rules every child keeps:
 - Never replace one real wait with a shorter or longer one, or with a
   quiet window.
 - Fix a test and its siblings in other languages together.
-- Each JS child removes the opt-outs the
-  [JS guard](/quest/m0/clock-guard/js.md) added, so the guard covers the
-  converted tests.
+- Each JS child removes the bare `hostTime();` opt-outs in its area, so the
+  `bun test` guard (`js/clock/src/preload.ts`) covers the converted tests. An
+  opt-out with a trailing reason comment is real I/O and stays.
+- Each Rust child removes the `kio::clock::host_time()` calls in the
+  tests it converts, so `just rs test`'s host-timer guard covers them. A test
+  over a real QUIC endpoint or ICE agent is exempt without one, since those
+  transports allow host timers themselves.
 
 The counts come from a heuristic scan on 2026-11-06; re-scan each area
 before starting, since tests land and move.
@@ -39,8 +43,5 @@ before starting, since tests land and move.
 ## Required
 
 - [js/net tests run on a mocked clock](/quest/m1/mock-clock-tests/js-net.md) - about 120 js/net tests stop waiting on real time, through their shared helpers
-- [Other JS tests run on a mocked clock](/quest/m1/mock-clock-tests/js-rest.md) - hang's `settle(20)`, publish's fanout helpers, and the rest of JS
-- [moq-relay tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-relay.md) - the relay's `timeout(..).is_err()` session proofs and settle sleeps
-- [Transport crate tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-transport.md) - moq-tokio, moq-quic, moq-sock, and moq-uring
-- [Media crate tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-media.md) - moq-audio, moq-video, moq-hls, moq-mux, and the bridges
-- [Binding and CLI tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-bindings.md) - moq-ffi, moq-c, moq-cli, and kio
+- [moq-relay's mesh tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-relay.md) - the relay's multi-relay quiet windows and settle sleeps
+- [Manual.drive waits for mocked I/O the work is blocked on](/quest/m1/mock-clock-tests/manual-drive-host-io.md) - `drive` stops at the deadline the work meets, and `js/net`'s `driveUntil` workaround is deleted

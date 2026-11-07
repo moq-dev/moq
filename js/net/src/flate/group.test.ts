@@ -77,14 +77,17 @@ for (const readPlain of [false, true]) {
 		const encoder = new Encoder();
 		const decoder = new Decoder();
 		const bytes = new Uint8Array(1024 * 1024).fill(42);
-		for (let index = 0; index < 100; index++) {
+		// The group's tail budget, charged each frame's plain size. Codec work dominates the run, so
+		// write just enough frames to shed a few past it.
+		const budget = 32 * 1024 * 1024;
+		for (let index = 0; index < budget / bytes.length + 4; index++) {
 			const slice = encoder.frame(bytes);
 			hooks.writeGroupFrame(group, { payload: slice }, bytes.length);
 			const frame = await hooks.readGroupFrame(raw, true);
 			expect(frame?.frame.payload).toBe(slice);
 			expect(decoder.frame(slice, bytes.length)).toEqual(bytes);
 			if (plain) expect((await plain.readFrame())?.payload).toEqual(bytes);
-			expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(32 * 1024 * 1024);
+			expect(hooks.groupCacheBytes(group)).toBeLessThanOrEqual(budget);
 		}
 		await expect(slow.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
 		group.finish();

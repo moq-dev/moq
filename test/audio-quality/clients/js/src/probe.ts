@@ -63,7 +63,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 
 	const signals = new Effect();
 	// Peeking does not request PROBE reports on an audio-only page.
-	signals.subscribe(watch.player.in.probe, () => {});
+	signals.subscribe(watch.connection.probe, () => {});
 
 	// Stall changes are taken as they happen: a re-stall shorter than the sample grid is exactly the
 	// one a 250 ms read would miss, and it is what tells a stall from an underrun.
@@ -129,7 +129,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			delay: sync.out.delay.peek(),
 			playerUnderruns: audio.out.stats.peek()?.underruns,
 			playerSkips: audio.out.stats.peek()?.skips,
-			rtt: watch.player.in.probe.peek()?.rtt,
+			rtt: watch.connection.probe.peek()?.rtt,
 			jitter: audio.source.out.config.peek()?.jitter,
 			renditionDelay: audio.source.out.config.peek()?.delay,
 			outputLatency: context ? context.outputLatency * 1000 : undefined,

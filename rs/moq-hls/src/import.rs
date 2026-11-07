@@ -2493,15 +2493,14 @@ mod tests {
 		}
 	}
 
-	/// Every frame timestamp `name` carries so far, in microseconds.
+	/// Every frame timestamp `name` carries so far, in microseconds, without waiting for more.
 	async fn stamps(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u128> {
 		let replay = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
 		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
-		let wait = std::time::Duration::from_millis(100);
 		let mut out = Vec::new();
-		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(wait, track.recv_group()).await {
-			while let Ok(Ok(Some(frame))) = kio::clock::timeout(wait, group.read_frame()).await {
+		while let Poll::Ready(Ok(Some(mut group))) = track.poll_recv_group(&kio::Waiter::noop()) {
+			while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&kio::Waiter::noop()) {
 				out.push(frame.timestamp.unwrap().as_micros());
 			}
 		}
@@ -2532,8 +2531,9 @@ mod tests {
 	/// The import's timebase never withholds the catalog, and an importer replacing a rendition on a
 	/// new `EXT-X-MAP` after that catalog is out shifts by the same offset as the first one: none,
 	/// since the first placed the clock. A fresh offset would shift it by its own arrival.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_replacement_importer_keeps_the_offset() {
+		kio::clock::host_time();
 		let (init, fragments) = fmp4_parts(2);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();

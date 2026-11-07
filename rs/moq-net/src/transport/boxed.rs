@@ -57,11 +57,15 @@ impl Session {
 
 	/// Poll opening a unidirectional stream for a group, like [`Self::poll_open_uni`], which the
 	/// session lists among its open group streams until it is finished, reset, or dropped.
+	///
+	/// A higher-ranked open waiting for credit may reset it with `preempt`, the stream code
+	/// the negotiated version gives the reason; its writer then reads that code back.
 	pub(crate) fn poll_open_group(
 		&self,
 		open: &mut Open,
 		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
+		preempt: u32,
 	) -> Poll<Result<SendStream, Error>> {
 		let SendStream(Sender::Own(stream)) = ready!(self.poll_open_uni(open, waiter, options))? else {
 			unreachable!("a stream is listed only here");
@@ -69,8 +73,11 @@ impl Session {
 		let listed = Arc::new(Listed {
 			state: Mutex::new(ListedState {
 				stream,
-				group: options.group.map(|group| group.priority.clone()),
+				group: options.group.map(|group| group.rank.clone()),
 				priority: options.priority,
+				preempt,
+				preempted: false,
+				waiters: Default::default(),
 			}),
 		});
 		let key = self.opens.list(&listed);
@@ -198,14 +205,34 @@ impl super::Error for Error {
 /// A boxed send group. It only ever goes back to the session that opened it.
 pub(crate) struct Group {
 	inner: Box<dyn ErasedGroup>,
-	/// Shared by every clone, like the group itself, so an open ranks by its current priority.
-	priority: Arc<std::sync::atomic::AtomicI64>,
+	/// Shared by every clone, like the group itself, so an open ranks by the group's current
+	/// priority and turn.
+	rank: Arc<GroupRank>,
+}
+
+/// Where a send group ranks against the session's others: its priority, then its turn.
+pub(super) struct GroupRank {
+	priority: std::sync::atomic::AtomicI64,
+	/// When the group last took stream credit, counted by its session's [`open::Lines`].
+	turn: AtomicU64,
+}
+
+impl GroupRank {
+	/// The group's priority and turn.
+	pub(super) fn read(&self) -> (i64, u64) {
+		(self.priority.load(Ordering::Relaxed), self.turn.load(Ordering::Relaxed))
+	}
 }
 
 impl Group {
-	/// The group's current priority.
-	pub(crate) fn priority(&self) -> i64 {
-		self.priority.load(Ordering::Relaxed)
+	/// The group's priority and turn, as its opens rank.
+	pub(super) fn rank(&self) -> (i64, u64) {
+		self.rank.read()
+	}
+
+	/// Mark the group as having just taken stream credit, at `turn`.
+	pub(super) fn take_turn(&self, turn: u64) {
+		self.rank.turn.store(turn, Ordering::Relaxed);
 	}
 }
 
@@ -213,14 +240,14 @@ impl Clone for Group {
 	fn clone(&self) -> Self {
 		Self {
 			inner: self.inner.clone_box(),
-			priority: self.priority.clone(),
+			rank: self.rank.clone(),
 		}
 	}
 }
 
 impl poll::SendGroup for Group {
 	fn set_priority(&mut self, priority: i64) {
-		self.priority.store(priority, Ordering::Relaxed);
+		self.rank.priority.store(priority, Ordering::Relaxed);
 		self.inner.set_priority(priority)
 	}
 }
@@ -259,6 +286,29 @@ impl SendStream {
 		}
 	}
 
+	/// Poll a write, failing once the session preempted the stream, and waking a parked
+	/// write when it does.
+	fn poll_writing(
+		&mut self,
+		waiter: &kio::Waiter,
+		f: impl FnOnce(&mut dyn ErasedSend) -> Poll<Result<usize, Error>>,
+	) -> Poll<Result<usize, Error>> {
+		match &mut self.0 {
+			Sender::Own(stream) => f(stream.as_mut()),
+			Sender::Listed(listing) => {
+				let mut state = listing.listed.lock();
+				if let Some(err) = state.preempted() {
+					return Poll::Ready(Err(err));
+				}
+				let res = f(state.stream.as_mut());
+				if res.is_pending() {
+					state.waiters.register(waiter);
+				}
+				res
+			}
+		}
+	}
+
 	fn get(&self) -> Read<'_> {
 		match &self.0 {
 			Sender::Own(stream) => Read::Own(stream.as_ref()),
@@ -291,9 +341,37 @@ pub(super) struct Listed {
 
 struct ListedState {
 	stream: Box<dyn ErasedSend>,
-	/// The priority of the send group the stream is in, shared with the group's handles.
-	group: Option<Arc<std::sync::atomic::AtomicI64>>,
+	/// The rank of the send group the stream is in, shared with the group's handles.
+	group: Option<Arc<GroupRank>>,
 	priority: i64,
+	/// The stream code a reset to make room uses.
+	preempt: u32,
+	/// Whether the session reset the stream to make room, so its writer fails.
+	preempted: bool,
+	/// The writer's waits, woken once the stream is preempted.
+	waiters: kio::WaiterList,
+}
+
+impl ListedState {
+	/// The writer's error once the session reset the stream to make room.
+	fn preempted(&self) -> Option<Error> {
+		self.preempted.then(|| Error::new(Preempted(self.preempt)))
+	}
+}
+
+/// A group stream the session reset to make room for a higher-ranked open.
+#[derive(Debug, thiserror::Error)]
+#[error("reset to make room for a higher-priority stream")]
+struct Preempted(u32);
+
+impl super::Error for Preempted {
+	fn session_error(&self) -> Option<(u32, String)> {
+		None
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		Some(self.0)
+	}
 }
 
 impl Listed {
@@ -305,12 +383,21 @@ impl Listed {
 	pub(super) fn read(&self) -> open::OpenStream {
 		let state = self.lock();
 		open::OpenStream {
-			rank: open::Rank::new(
-				state.group.as_ref().map(|group| group.load(Ordering::Relaxed)),
-				state.priority,
-			),
+			rank: open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority),
 			acknowledged: state.stream.acknowledged(),
 		}
+	}
+
+	/// Reset the stream to make room, failing its writer with the reset's code.
+	pub(super) fn preempt(&self) {
+		let mut state = self.lock();
+		if state.preempted {
+			return;
+		}
+		state.preempted = true;
+		let code = state.preempt;
+		state.stream.reset(code);
+		state.waiters.wake();
 	}
 }
 
@@ -569,7 +656,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 	fn send_group(&self, priority: i64) -> Option<Group> {
 		poll::Session::send_group(self, priority).map(|group| Group {
 			inner: Box::new(group),
-			priority: Arc::new(std::sync::atomic::AtomicI64::new(priority)),
+			rank: Arc::new(GroupRank {
+				priority: priority.into(),
+				turn: AtomicU64::new(0),
+			}),
 		})
 	}
 
@@ -775,7 +865,10 @@ impl poll::Session for Session {
 	}
 
 	fn send_group(&self, priority: i64) -> Option<Group> {
-		self.inner.session.send_group(priority)
+		let group = self.inner.session.send_group(priority)?;
+		// A new group waits its turn behind the groups already waiting, not ahead of them.
+		group.take_turn(self.opens.next_turn());
+		Some(group)
 	}
 
 	fn send_datagram(&self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
@@ -841,11 +934,11 @@ impl poll::SendStream for SendStream {
 	type Group = Group;
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
-		self.with(false, |stream| stream.poll_write(waiter, buf))
+		self.poll_writing(waiter, |stream| stream.poll_write(waiter, buf))
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
-		self.with(false, |stream| stream.poll_write_buf(waiter, buf))
+		self.poll_writing(waiter, |stream| stream.poll_write_buf(waiter, buf))
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -857,21 +950,42 @@ impl poll::SendStream for SendStream {
 
 	fn set_group(&mut self, group: &Group) {
 		if let Sender::Listed(listing) = &self.0 {
-			listing.listed.lock().group = Some(group.priority.clone());
+			listing.listed.lock().group = Some(group.rank.clone());
 		}
 		self.with(false, |stream| stream.set_group(group))
 	}
 
 	fn finish(&mut self) -> Result<(), Error> {
+		if let Sender::Listed(listing) = &self.0
+			&& let Some(err) = listing.listed.lock().preempted()
+		{
+			return Err(err);
+		}
 		self.with(true, |stream| stream.finish())
 	}
 
 	fn reset(&mut self, code: u32) {
+		// A preempted stream keeps the code it was reset with.
+		if let Sender::Listed(listing) = &self.0
+			&& listing.listed.lock().preempted
+		{
+			return;
+		}
 		self.with(true, |stream| stream.reset(code))
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		self.get().poll_closed(waiter)
+		match &self.0 {
+			Sender::Own(stream) => stream.poll_closed(waiter),
+			Sender::Listed(listing) => {
+				let mut state = listing.listed.lock();
+				if let Some(err) = state.preempted() {
+					return Poll::Ready(Err(err));
+				}
+				state.waiters.register(waiter);
+				state.stream.poll_closed(waiter)
+			}
+		}
 	}
 
 	fn acknowledged(&self) -> Option<bool> {
@@ -989,7 +1103,7 @@ mod test {
 	}
 
 	fn open_group(session: &Session, options: SendOptions<'_, Group>) -> SendStream {
-		let Poll::Ready(Ok(stream)) = session.poll_open_group(&mut Open::default(), &kio::Waiter::noop(), options)
+		let Poll::Ready(Ok(stream)) = session.poll_open_group(&mut Open::default(), &kio::Waiter::noop(), options, 1)
 		else {
 			panic!("the transport opens at once");
 		};
@@ -1079,13 +1193,17 @@ mod test {
 			},
 		);
 		let read = |session: &Session| session.open_streams()[0];
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 1, stream: 2 });
+		let grouped = |session: &Session| match read(session).rank {
+			open::Rank::Grouped { group, stream, .. } => (group, stream),
+			open::Rank::Ungrouped { .. } => panic!("the stream is in a group"),
+		};
+		assert_eq!(grouped(&session), (1, 2));
 		assert_eq!(read(&session).acknowledged, None);
 
 		poll::SendGroup::set_priority(&mut low, 3);
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 3, stream: 2 });
+		assert_eq!(grouped(&session), (3, 2));
 		poll::SendStream::set_group(&mut stream, &high);
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 5, stream: 2 });
+		assert_eq!(grouped(&session), (5, 2));
 	}
 
 	/// A stream accepted while the connection window was held back, such as one buffered

@@ -7,8 +7,8 @@ received audio, as WebRTC NetEq does, instead of running its ring dry and
 padding with silence or trimming buffered audio. `moq play`'s native rows in
 `test/audio-quality` play with no audible glitch once the target settles,
 with underrun ceilings measured by `budgets.json`'s rule rather than fixed at
-zero, as decided 2026-11-06 in
-[Watch](/quest/m1/audio-jitter-target/watch.md). The
+zero, as decided 2026-11-06 on
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058). The
 stretch shares one algorithm and one set of test vectors with the browser's.
 
 Boundaries: no packet loss concealment, so a frame that never arrives is
@@ -26,9 +26,8 @@ received-audio accelerate and preemptive expand into the native playback
 callback. The estimator is unchanged. `doc/concept/audio-jitter.md` specifies
 the shared floating-point algorithm;
 `doc/concept/audio-jitter/stretch/corpus.json` supplies literal PCM vectors
-for both languages. The browser half remains
-[Watch](/quest/m1/audio-jitter-target/watch.md); neither implementation waits
-for the other.
+for both languages. The browser half landed in
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058).
 
 The port retains WebRTC's BSD notice and patent grant, 4 kHz analysis,
 50-sample correlation at lags 10 through 59, 14746/16384 normal and
@@ -117,4 +116,4 @@ bench waits below remain.
 
 ## Related
 
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser stretch sharing this algorithm and its vectors
+- [Browser ceilings](/quest/m1/audio-jitter-target/browser-ceilings.md) - re-measures the browser rows with the stretch sharing this algorithm and its vectors

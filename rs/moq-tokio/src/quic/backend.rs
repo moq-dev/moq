@@ -281,17 +281,7 @@ impl crate::failover::Aggregate for Error {
 crate::error::from_message! {
 	driver::endpoint::ConnectError => Connect,
 	driver::connection::Error => Connection,
-	web::ServerError => Server,
 	hex::FromHexError => InvalidFingerprint,
-}
-
-impl From<web::ClientError> for Error {
-	fn from(err: web::ClientError) -> Self {
-		Self::Client {
-			status: client_status(&err),
-			message: crate::error::message(err),
-		}
-	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -579,40 +569,30 @@ impl Error {
 	}
 }
 
-fn map_client_error(err: web::ClientError) -> Error {
-	match client_status(&err).and_then(crate::ConnectError::from_status_u16) {
+fn map_client_error(err: web::Error) -> Error {
+	let status = client_status(&err);
+	match status.and_then(crate::ConnectError::from_status_u16) {
 		Some(rejected) => rejected.into(),
-		None => err.into(),
+		None => Error::Client {
+			status,
+			message: crate::error::message(err),
+		},
 	}
 }
 
 /// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
 /// all (as opposed to the connection failing underneath the request).
 ///
-/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// Both classifications read this: [`map_client_error`] turns an auth status into a
 /// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
 /// the status. A `404` or `405` is the server's settled answer, so retrying
 /// it just burns the reconnect budget on a URL that will never work.
-fn client_status(err: &web::ClientError) -> Option<u16> {
+fn client_status(err: &web::Error) -> Option<u16> {
 	match err {
-		web::ClientError::HttpError(err) => connect_status(err),
-		_ => None,
-	}
-}
-
-fn connect_status(err: &web::ConnectError) -> Option<u16> {
-	match err {
-		web::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
-		web::ConnectError::ProtoError(err) => proto_status(err),
-		_ => None,
-	}
-}
-
-fn proto_status(err: &web::proto::ConnectError) -> Option<u16> {
-	match err {
-		web::proto::ConnectError::ErrorStatus(status) | web::proto::ConnectError::WrongStatus(Some(status)) => {
-			Some(status.as_u16())
-		}
+		web::Error::Handshake(web::HandshakeError::Status(status)) => Some(status.as_u16()),
+		web::Error::Handshake(web::HandshakeError::Connect(
+			web::proto::ConnectError::ErrorStatus(status) | web::proto::ConnectError::WrongStatus(Some(status)),
+		)) => Some(status.as_u16()),
 		_ => None,
 	}
 }

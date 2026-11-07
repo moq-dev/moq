@@ -99,12 +99,12 @@ several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
 `el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
 who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
-so `keyframeInterval` is only the longest a group runs. Through a moq-lite
+so `join` is only the longest a group runs. Through a moq-lite
 relay, only the join that opens the relay's upstream subscription counts.
 The broadcast declares the longest group among its renditions as the catalog's
 `media.join.interval` when it first lists one, which an HLS or DASH export cuts
 its segments on. It stays fixed for the network broadcast, so raising
-`keyframeInterval` later overruns that grid. Size,
+`join` later overruns that grid. Size,
 bitrate, and framerate change in place, while a codec or audio format change
 keeps the rendition's catalog ID under a fresh `track` name that viewers
 follow through the catalog. For
@@ -112,10 +112,10 @@ simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
 Audio groups carry at least 20 ms by default, packing shorter codec frames
-together. `el.audio.groupDuration` changes that minimum; `Milli(0)` puts
-every frame in its own group. A longer minimum lets a relay keep fewer
-streams, at the cost of coarser loss: a viewer that falls behind skips a whole
-group. Frames still forward as they are encoded.
+together. `el.audio.join` changes that minimum; a join shorter than a frame
+puts every frame in its own group, and zero is refused. A longer join lets a
+relay keep fewer streams, at the cost of coarser loss: a viewer that falls
+behind skips a whole group. Frames still forward as they are encoded.
 
 Timestamps are `@moq/clock`'s `now()` in microseconds, so every source shares one
 timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks

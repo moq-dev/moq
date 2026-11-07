@@ -130,8 +130,8 @@ setup after the capabilities land.
 
 ## Required
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m2/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 
 ## Related
 

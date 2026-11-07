@@ -1,6 +1,9 @@
 package dev.moq.socket
 
-/** Announces one hidden endpoint and dials or accepts sessions. */
+/**
+ * A server, a client, or both: its first dial announces it as a client, and its first accept as a
+ * server.
+ */
 typealias Endpoint = uniffi.moq.MoqSocketEndpoint
 
 /** An incoming TCP dial, consumed by accepting or rejecting it. */

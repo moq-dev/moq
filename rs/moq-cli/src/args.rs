@@ -555,7 +555,7 @@ impl MoqSide {
 
 	/// The cluster this process publishes and subscribes on, with the driver that
 	/// must run for as long as it serves. Built once; the origin is its origin, whose
-	/// Hop ID is random per run unless `--cluster-id` names the node.
+	/// Hop ID is random per run.
 	pub fn cluster(&self) -> anyhow::Result<(moq_relay::cluster::Cluster, moq_relay::cluster::Driver)> {
 		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
@@ -2682,7 +2682,7 @@ mod tests {
 			("--cluster-api-url", "https://api.example/peers", "--cluster-api-url"),
 			("--cluster-node", "https://self.example", "--cluster-node"),
 			("--cluster-token", "cluster.jwt", "--cluster-token"),
-			("--cluster-id", "1", "--cluster-id"),
+			("--cluster-max-hops", "8", "--cluster-max-hops"),
 			("--cluster-tier", "internal", "--cluster-tier"),
 		] {
 			let cli = Invocation::try_parse_from(["moq", flag, value, "auth", "generate"]).unwrap();

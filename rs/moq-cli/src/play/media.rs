@@ -2226,7 +2226,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
 		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
-		config.gop = moq_video::encode::Gop::Keyframe { interval: 120 };
+		config.join = Duration::from_secs(4);
 		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();
 		for index in 0..=60 {
 			let surface = moq_video::Surface::rgba(&vec![128; 64 * 64 * 4], moq_video::Size::new(64, 64)).unwrap();

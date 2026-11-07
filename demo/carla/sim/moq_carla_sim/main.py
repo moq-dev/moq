@@ -42,10 +42,6 @@ DEFAULT_URL = "http://localhost:4443"
 # peer. The web player offers the same list.
 VERSIONS = ("moq-lite-07-wip", "moq-transport-22")
 
-# The id form anonymous drivers may publish endpoints under. A truck named like
-# one could be impersonated by any of them.
-DRIVER_ID_PREFIX = "driver-"
-
 
 def default_trucks() -> list[str]:
     trucks = json.loads(TRUCKS_FILE.read_text())
@@ -89,9 +85,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not args.trucks:
         args.trucks = default_trucks()
-    for truck in args.trucks:
-        if truck.startswith(DRIVER_ID_PREFIX):
-            parser.error(f"truck {truck!r} is named like a driver, whose endpoints anyone may publish")
     return args
 
 
