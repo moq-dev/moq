@@ -73,6 +73,22 @@ export class Local {
 	readonly cameraCapture: Publish.Video.Capture;
 	/** Shared capture feeding the screen renditions. */
 	readonly screenCapture: Publish.Video.Capture;
+	/** Microphone gain and captured audio graphs for analysis. */
+	readonly audio: {
+		/** Microphone gain and capture graph. */
+		readonly microphone: {
+			/** Linear gain applied before encoding, where 1 is unity. */
+			readonly volume: Signal<number>;
+			/** Raw microphone graph while capture is running; its context may render silently. */
+			readonly root: Getter<AudioNode | undefined>;
+		};
+		/** Screenshare capture graph. */
+		readonly screen: {
+			/** Raw screen audio graph while capture is running; its context may render silently. */
+			readonly root: Getter<AudioNode | undefined>;
+		};
+	};
+
 	#preview = new Signal<Preview>({});
 	#cameraVideo = new Signal<Publish.Video.Source | undefined>(undefined);
 	#cameraAudio = new Signal<Publish.Audio.Source | undefined>(undefined);
@@ -248,6 +264,11 @@ export class Local {
 			bandwidth,
 		});
 		this.#signals.cleanup(() => screenAudio.close());
+
+		this.audio = {
+			microphone: { volume: cameraAudio.volume, root: cameraAudioCapture.out.root },
+			screen: { root: screenAudioCapture.out.root },
+		};
 
 		this.#signals.run((effect) => {
 			const source = effect.get(this.share.out.source);

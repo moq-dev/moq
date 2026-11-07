@@ -71,6 +71,15 @@ export type Kind = typeof KIND[keyof typeof KIND];
 
 export class Local {
 	constructor(props: LocalProps);
+	readonly audio: {
+		readonly microphone: {
+			readonly root: Getter<AudioNode | undefined>;
+			readonly volume: Signal<number>;
+		};
+		readonly screen: {
+			readonly root: Getter<AudioNode | undefined>;
+		};
+	};
 	readonly camera: import("@moq/publish").Broadcast;
 	readonly cameraCapture: import("@moq/publish").Video.Capture;
 	readonly cameraEnabled: Signal<boolean>;
