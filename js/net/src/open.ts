@@ -102,7 +102,11 @@ class Line<T> {
 			waiting = { rank: current, resolve, reject, left: new AbortController(), impatient: false };
 		});
 		this.#waiting.push(waiting);
-		if (this.#room) void this.#impatient(this.#room, waiting);
+		if (this.#room) {
+			// An open ranked above an impatient one takes its place among those a reset is owed to.
+			this.#makeRoom(this.#room);
+			void this.#impatient(this.#room, waiting);
+		}
 
 		// An open that gave up leaves its create running for the next one, so cancellation
 		// churn never queues more creates than opens wait.
@@ -208,6 +212,8 @@ class Line<T> {
 		// Whichever open the credit reaches, a reset's credit may be the one it took.
 		this.#resets = Math.max(this.#resets - 1, 0);
 		const next = this.#remove(best);
+		// A rank read again may have moved an impatient open out of those still owed a reset.
+		if (this.#room) this.#makeRoom(this.#room);
 		next.resolve(this.#handed(admitted, order));
 	}
 

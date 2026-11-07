@@ -158,3 +158,37 @@ test("an open makes room only once it has waited a round trip itself", async () 
 		installed.close();
 	}
 });
+
+test("an open ranked above an impatient one makes room for it at once", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { client, server } = qmuxPair(2n);
+	try {
+		const low = await openGroup(client, 1);
+		const mid = await openGroup(client, 2);
+		await low.write(new Uint8Array(16));
+		await mid.write(new Uint8Array(16));
+
+		const waiting = openGroup(client, 5);
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		expect(orders(client)).toEqual([2]);
+
+		// The reset's credit will reach this open instead, so the one still waiting is owed another.
+		const higher = openGroup(client, 10);
+		// Well short of its own round trip.
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		expect(orders(client)).toEqual([]);
+
+		const incoming = server.incomingUnidirectionalStreams.getReader();
+		for (let i = 0; i < 2; i++) {
+			const { value } = await incoming.read();
+			await value?.cancel();
+		}
+		expect((await higher).sendOrder).toBe(10);
+		expect((await waiting).sendOrder).toBe(5);
+	} finally {
+		client.close();
+		server.close();
+		installed.close();
+	}
+});
