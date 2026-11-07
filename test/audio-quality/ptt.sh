@@ -26,7 +26,7 @@ for tool in python3 pulseaudio; do
     }
 done
 
-bun install --frozen-lockfile
+uv run --no-project python sh/js/install.py frozen
 # The native listener is the shipped player, built with its speaker.
 cargo build --locked --features moq-cli/play -p moq-relay -p moq-cli
 TARGET_BASE="${CARGO_TARGET_DIR:-$ROOT/target}"

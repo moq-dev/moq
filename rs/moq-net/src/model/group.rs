@@ -5491,6 +5491,7 @@ mod test {
 	}
 
 	/// `count` frames of 1 MiB, each naming its index and incompressible.
+	#[cfg(feature = "async")]
 	fn mebibytes(count: usize) -> Vec<Bytes> {
 		let mut seed = 0x9e37_79b9_7f4a_7c15u64;
 		(0..count)

@@ -49,7 +49,7 @@ The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
 catalog group dropped mid-read ending the player's catalog, fixed by
 [moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
 
-moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
+moq-webrtc's session-end test was never load-bound: on the paused clock, dimpl's
 randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
 fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
 
@@ -140,6 +140,4 @@ Public API: none. Wire: none.
 - [Flate's tail-shed test passes under load](/quest/m0/test-flakes-2/flate-tail-shed.md) - `js/net`'s compressed tail-shed cases finish within bun's timeout under load, re-enabled once fixed
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
-- [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load
