@@ -3,8 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Sample } from "./src/schema";
 
 const FRAME = 60;
+/** How far the native clock runs ahead of the page's, delivery included. */
+const NATIVE = 5000;
 
 // 22 complete presses on an ideal path: the media clock is the page clock, every 60 ms frame is
 // encoded, written, received and decoded a millisecond apart, and each separated press renders
@@ -54,10 +57,38 @@ function trace() {
 	return result;
 }
 
-async function analyze(result: ReturnType<typeof trace>) {
+// The native listener on the same run: it resumes on each head 2 ms after the page writes it,
+// plays each previous utterance out 300 ms after its release, and fills the rest of the mute with
+// comfort noise. Samples every 250 ms, with the render clock half a second behind.
+function nativeTrace(result: ReturnType<typeof trace>) {
+	const presses = result.presses.filter((press) => press.on);
+	const mutes = presses.slice(1).map((press, i) => [result.presses[i * 2 + 1].at + 300, press.at + 300]);
+	const heads = presses.map((press) => {
+		const head = result.submitted.find((frame) => frame.at >= press.at);
+		const written = result.sent.find((frame) => frame.timestamp === head?.timestamp);
+		if (!head || !written) throw new Error("no head");
+		return { at: written.at + 2 + NATIVE, timestamp: head.timestamp / 1000 };
+	});
+	const samples: Sample[] = [];
+	const end = result.presses[result.presses.length - 1].at + 5000;
+	for (let page = 5000; page <= end; page += 250) {
+		const at = page + NATIVE;
+		samples.push({
+			at,
+			render: at - 500,
+			stalled: false,
+			comfort: mutes.reduce((sum, [from, to]) => sum + Math.min(Math.max(page - from, 0), to - from), 0),
+			utterances: heads.filter((head) => head.at <= at && head.at > at - 250),
+		});
+	}
+	return samples;
+}
+
+async function analyze(result: ReturnType<typeof trace>, native = nativeTrace(result)) {
 	const directory = mkdtempSync(join(tmpdir(), "ptt-analyze-"));
 	try {
 		await Bun.write(join(directory, "presses.json"), JSON.stringify(result));
+		await Bun.write(join(directory, "native.ndjson"), native.map((sample) => JSON.stringify(sample)).join("\n"));
 		const run = Bun.spawnSync(["bun", fileURLToPath(new URL("./ptt-analyze.ts", import.meta.url)), directory]);
 		const summary = await Bun.file(join(directory, "summary.json")).json();
 		return { exitCode: run.exitCode, stdout: run.stdout.toString(), stderr: run.stderr.toString(), summary };
@@ -174,4 +205,76 @@ test("an underrun or stall across the presses fails the run", async () => {
 		expect(exitCode).toBe(1);
 		expect(stderr).toContain("playback underran or stalled");
 	}
+});
+
+test("the native listener's results sit beside each press", async () => {
+	const { exitCode, summary } = await analyze(trace());
+	expect(exitCode).toBe(0);
+	expect(summary.native.offset).toBe(NATIVE + 2);
+	expect(summary.native.playback).toEqual({ underruns: 0, stalls: 0 });
+	expect(summary.presses[0].native).toEqual({ head: true, comfort: null });
+	// A separated press's mute, less the 300 ms its previous utterance still played, give or take a
+	// sample on each side.
+	const comfort = summary.presses[8].native.comfort;
+	expect(Math.abs(comfort - (8000 - 300))).toBeLessThanOrEqual(250);
+});
+
+test("a native utterance resumed past its head fails the run", async () => {
+	// The head was lost, so the next frame started the utterance.
+	const result = trace();
+	const native = nativeTrace(result);
+	const resumed = native.flatMap((sample) => sample.utterances ?? [])[4];
+	resumed.timestamp += FRAME;
+	const { exitCode, stderr } = await analyze(result, native);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("native: an utterance did not resume on its head");
+});
+
+test("a native mute without comfort noise fails the run", async () => {
+	const result = trace();
+	const native = nativeTrace(result);
+	const from = result.presses[19].at + NATIVE;
+	let comfort: number | undefined;
+	for (const sample of native) {
+		if (sample.at < from) continue;
+		comfort ??= sample.comfort;
+		if (sample.at < result.presses[20].at + NATIVE + 300) sample.comfort = comfort;
+	}
+	const { exitCode, stderr } = await analyze(result, native);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("native: a mute played no comfort noise");
+});
+
+test("a native underrun or stall after the first press fails the run, and one before it does not", async () => {
+	for (const [page, fails] of [
+		[trace().presses[0].at - 1000, false],
+		[trace().presses[6].at, true],
+	] as const) {
+		for (const event of ["gap", "stall"] as const) {
+			const run = trace();
+			const native = nativeTrace(run);
+			const sample = native.find((sample) => sample.at >= page + NATIVE + 250);
+			if (!sample?.render) throw new Error("no sample");
+			// Reported a sample late, stamped where it played.
+			const at = sample.render - 250;
+			if (event === "gap") sample.gaps = [{ at, ms: 20, quanta: 8, short: 1 }];
+			else sample.stalls = [{ at, stalled: true }];
+			const { exitCode, stderr } = await analyze(run, native);
+			expect(exitCode).toBe(fails ? 1 : 0);
+			if (fails) expect(stderr).toContain("native: playback underran or stalled");
+		}
+	}
+});
+
+test("a native underrun open as the first press lands fails the run", async () => {
+	const result = trace();
+	const native = nativeTrace(result);
+	const sample = native.find((sample) => sample.at >= result.presses[0].at + NATIVE + 250);
+	if (!sample?.render) throw new Error("no sample");
+	// It starts 100 ms before the window, which opens at the first press's head, and runs 200 ms into it.
+	const start = result.presses[0].at + NATIVE + 2;
+	sample.gaps = [{ at: sample.render - (sample.at - (start - 100)), ms: 300, quanta: 113, short: 0 }];
+	const { exitCode, stderr } = await analyze(result, native);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("native: playback underran or stalled");
 });

@@ -83,6 +83,11 @@ pub(crate) async fn run(
 				Some(Event::Wake) => {}
 				Some(Event::Ended | Event::Finished) => break Ok(()),
 				Some(Event::Failed(error)) => break Err(anyhow::anyhow!(error)),
+				Some(Event::Utterance(timestamp)) => {
+					if let Some(metrics) = &mut metrics {
+						metrics.utterance(timestamp);
+					}
+				}
 				None => break Err(anyhow::anyhow!("audio playback event channel closed")),
 			},
 			result = &mut media, if !completed => {

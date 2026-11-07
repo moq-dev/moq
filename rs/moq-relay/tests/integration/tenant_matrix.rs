@@ -8,9 +8,10 @@
 
 #![cfg(feature = "quic")]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 
 use axum::extract::State;
@@ -26,10 +27,6 @@ use moq_tokio::quic::driver;
 use crate::refusals::{client, config};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long a broadcast that should never arrive gets to show up anyway, once
-/// everything published before it has.
-const SETTLE: Duration = Duration::from_millis(300);
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -69,6 +66,10 @@ impl Tenants {
 		let tenants = Self::default();
 		tenants.grant("a", tenant_a());
 		tenants.grant("b", tenant_b());
+		// Rooted where it dials, so it can publish at another tenant's root.
+		let mut open = rooted("");
+		open.root = None;
+		tenants.grant("open", open);
 		tenants
 	}
 
@@ -212,6 +213,11 @@ impl Publisher {
 	}
 
 	fn publish(&mut self, name: &str) {
+		self.publish_frame(name, b"hello");
+	}
+
+	/// Publish `name` holding one group with `payload` in `video`.
+	fn publish_frame(&mut self, name: &str, payload: &'static [u8]) {
 		let broadcast = self
 			.origin
 			.route(name, moq_net::origin::RouteOptions::default())
@@ -222,7 +228,7 @@ impl Publisher {
 			.expect("create track");
 		let mut group = track.append_group().expect("append group");
 		group
-			.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+			.write_frame(moq_net::Timestamp::ZERO, payload)
 			.expect("write frame");
 		self.held.push(Box::new((broadcast, track, group)));
 	}
@@ -319,6 +325,49 @@ impl Watcher {
 	}
 }
 
+/// Every broadcast `url`'s scope announces, as a fresh subscriber reads it once synced
+/// with the relay: a name missing here was not announced when the relay answered.
+async fn synced_listing(url: url::Url) -> BTreeSet<String> {
+	let origin = moq_tokio::origin::spawn();
+	let mut routes = origin.consume().routes();
+	let _session = kio::clock::timeout(
+		TIMEOUT,
+		client()
+			.with_subscriber(origin)
+			.with_reconnect(false)
+			.connect(url.clone())
+			.established(),
+	)
+	.await
+	.expect("listing connect timeout")
+	.expect("listing connect failed");
+	let mut listed = BTreeSet::new();
+	kio::clock::timeout(TIMEOUT, async {
+		loop {
+			// Synced counts only once every event queued before it was read.
+			let next = moq_net::kio::wait(|waiter| match routes.poll_next(waiter) {
+				Poll::Ready(event) => Poll::Ready(event),
+				Poll::Pending => routes.poll_synced(waiter).map(|()| None),
+			})
+			.await;
+			use moq_net::origin::RouteEvent;
+			match next {
+				Some(RouteEvent::End(route)) => listed.remove(route.prefix.as_str()),
+				Some(
+					RouteEvent::Start(route)
+					| RouteEvent::Update(route)
+					| RouteEvent::Restart(route)
+					| RouteEvent::Takeover { announce: route, .. },
+				) => listed.insert(route.prefix.to_string()),
+				None => return,
+			};
+		}
+	})
+	.await
+	.unwrap_or_else(|_| panic!("{url} never synced"));
+	listed
+}
+
 /// Dial raw QUIC as moq-lite-06 and send a SETUP whose Path is exactly `target`,
 /// bytes no URL type touched. The relay may close it once admission decides;
 /// the caller watches the auth server for what it was admitted as.
@@ -413,9 +462,10 @@ async fn matrix(io_uring: bool) {
 	conn.close(driver::VarInt::from_u32(0), "done");
 	endpoint.close(driver::VarInt::from_u32(0), "done").await;
 
-	// Give anything that should not arrive time to.
-	kio::clock::sleep(SETTLE).await;
-	let a_seen = a_view.seen();
+	// B's announces were all decided at step 4, so a viewer synced since lists any
+	// that landed in A's scope.
+	let a_seen = synced_listing(relay.url("/", "a")).await;
+	assert!(a_seen.contains("secret/cam"), "A's own listing: {a_seen:?}");
 	assert!(
 		!a_seen
 			.iter()
@@ -427,7 +477,8 @@ async fn matrix(io_uring: bool) {
 		"B wrote into A through its read-only mount: {a_seen:?}"
 	);
 	// 2. B never sees A's secret.
-	let b_seen = b_view.seen();
+	let b_seen = synced_listing(relay.url("/tenant-a", "b")).await;
+	assert!(b_seen.contains("marker"), "B's own listing: {b_seen:?}");
 	assert!(
 		!b_seen.iter().any(|name| name.contains("secret")),
 		"B saw A's secret: {b_seen:?}"
@@ -494,14 +545,22 @@ async fn http_routes_keep_tenants_apart() {
 		assert!(body.contains("probe"), "B's listing is not its own root: {body}");
 	}
 
-	// A fetch waits up to 30 seconds for its broadcast to appear. A's secret is
-	// already here, so a fetch that would serve it answers at once; one still
-	// waiting has served nothing.
-	if let Ok(fetch) = kio::clock::timeout(Duration::from_secs(2), get("/fetch/tenant-a/secret/cam/video?jwt=b")).await
-	{
-		assert_ne!(fetch.expect("fetch request").status(), 200, "B fetched A's secret");
-	}
+	// A fetch serves the broadcast at its token's root, so B's lands on B's root,
+	// where a decoy waits, rather than on the dialed path, where A's secret is.
+	let mut decoy = Publisher::connect(relay.url("/", "open")).await;
+	decoy.publish_frame("tenant-b", b"decoy");
+	let mut fetch = get("/fetch/tenant-a/secret/cam/video?jwt=b")
+		.await
+		.expect("fetch request");
+	assert_eq!(fetch.status(), 200);
+	let body = kio::clock::timeout(TIMEOUT, fetch.chunk())
+		.await
+		.expect("fetch timeout")
+		.expect("fetch body")
+		.expect("fetch body ended early");
+	assert_eq!(&body[..], b"decoy", "B's fetch escaped its root");
 
+	drop(decoy);
 	drop(a);
 	drop(b);
 	relay.stop().await;
