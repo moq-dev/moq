@@ -34,8 +34,14 @@ use super::{Dir, StreamCredit};
 /// starves another of the same priority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rank {
-	Grouped { group: i64, turn: Reverse<u64>, stream: i64 },
-	Ungrouped { stream: i64 },
+	Grouped {
+		group: i64,
+		turn: Reverse<u64>,
+		stream: i64,
+	},
+	Ungrouped {
+		stream: i64,
+	},
 }
 
 impl Rank {
@@ -529,7 +535,7 @@ mod tests {
 					(*name, options, Open::default())
 				})
 				.collect();
-			let mut poll = |open: &mut Open, options: &SendOptions<'_, boxed::Group>| {
+			let poll = |open: &mut Open, options: &SendOptions<'_, boxed::Group>| {
 				open.poll(lines, Dir::Uni, &waiter, options, |waiter| {
 					let mut credit = credit.lock().unwrap();
 					if credit.available == 0 {

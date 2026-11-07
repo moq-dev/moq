@@ -1102,13 +1102,17 @@ mod test {
 			},
 		);
 		let read = |session: &Session| session.open_streams()[0];
-		assert!(matches!(read(&session).rank, open::Rank::Grouped { group: 1, stream: 2, .. }));
+		let grouped = |session: &Session| match read(session).rank {
+			open::Rank::Grouped { group, stream, .. } => (group, stream),
+			open::Rank::Ungrouped { .. } => panic!("the stream is in a group"),
+		};
+		assert_eq!(grouped(&session), (1, 2));
 		assert_eq!(read(&session).acknowledged, None);
 
 		poll::SendGroup::set_priority(&mut low, 3);
-		assert!(matches!(read(&session).rank, open::Rank::Grouped { group: 3, stream: 2, .. }));
+		assert_eq!(grouped(&session), (3, 2));
 		poll::SendStream::set_group(&mut stream, &high);
-		assert!(matches!(read(&session).rank, open::Rank::Grouped { group: 5, stream: 2, .. }));
+		assert_eq!(grouped(&session), (5, 2));
 	}
 
 	/// A stream accepted while the connection window was held back, such as one buffered
