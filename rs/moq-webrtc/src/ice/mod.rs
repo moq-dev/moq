@@ -5,7 +5,7 @@
 //! and timeouts and draining what it produces (transmits, events, the next
 //! timeout), and runs a STUN Binding client on the same socket so the agent can
 //! offer server-reflexive candidates. Shared by the WHIP/WHEP gateway and the
-//! [`crate::p2p`] data channel transport, which only differ in what they do with
+//! `p2p` data channel transport, which only differ in what they do with
 //! the events.
 //!
 //! str0m requires every mutation of an `Rtc` to be followed by draining its output

@@ -1,5 +1,5 @@
 //! WebRTC for MoQ: a WHIP/WHEP gateway, and with the `p2p` feature, MoQ sessions over a
-//! data channel with a browser peer (see [`p2p`]).
+//! data channel with a browser peer (the `p2p` module).
 //!
 //! The gateway bridges WHIP (RFC 9725) and WHEP between WebRTC peers and
 //! [`moq_net`] broadcasts. The crate is split along two orthogonal axes
