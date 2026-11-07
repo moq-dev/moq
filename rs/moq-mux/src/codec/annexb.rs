@@ -217,6 +217,14 @@ pub fn build_prefix<'a, I: IntoIterator<Item = &'a Bytes>>(nals: I) -> Bytes {
 /// layer's never replaces the base layer's.
 pub(crate) type ParameterSets = BTreeMap<(u8, u32), Bytes>;
 
+/// Adopt the parameter sets of one type that an access unit or init defined: each layer it
+/// defined any for replaces that layer's retained sets, dropping ids the new configuration no
+/// longer uses, while every other layer keeps its own. An empty `sets` changes nothing.
+pub(crate) fn adopt_parameter_sets(retained: &mut ParameterSets, sets: ParameterSets) {
+	retained.retain(|(layer, _), _| !sets.keys().any(|(defined, _)| defined == layer));
+	retained.extend(sets);
+}
+
 /// The NAL syntax an [`InBand`] transform reads.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum InBandCodec {
@@ -293,9 +301,7 @@ impl InBandCodec {
 			}
 		}
 		for (retained, set) in retained.iter_mut().zip(sets) {
-			if !set.is_empty() {
-				**retained = set;
-			}
+			adopt_parameter_sets(retained, set);
 		}
 		Ok(())
 	}
@@ -328,9 +334,9 @@ impl InBandCodec {
 ///
 /// A keyframe is the only place a receiver can join, so it always carries every
 /// parameter-set type, in dependency order (VPS, SPS, PPS) right after any access
-/// unit delimiter. A type the access unit omitted is the last one seen. A type it
-/// carried replaces every cached set of that type, so a source that spreads several
-/// PPS ids across access units keeps only the last.
+/// unit delimiter. A type or layer the access unit omitted is the last one seen. A type
+/// it carried replaces every cached set of that type in each layer it carried, so a
+/// source that spreads several PPS ids across access units keeps only the last.
 pub(crate) struct InBand {
 	codec: InBandCodec,
 	/// The active sets of each type, in [`InBandCodec::parameter_sets`] order.
@@ -370,9 +376,7 @@ impl InBand {
 			}
 		}
 		for (active, set) in self.active.iter_mut().zip(sets) {
-			if !set.is_empty() {
-				*active = set;
-			}
+			adopt_parameter_sets(active, set);
 		}
 		if !nals.iter().any(|nal| codec.is_vcl(nal)) {
 			return Ok(None);
@@ -416,25 +420,57 @@ fn length_prefix(out: &mut BytesMut, nal: &[u8]) -> Result<()> {
 }
 
 /// Reconcile the retained parameter sets with what a keyframe access unit carried
-/// inline, called when the keyframe slice is reached:
+/// inline, called when the keyframe slice is reached. `retained` and `seen` hold
+/// each parameter-set type in dependency order (VPS, SPS, PPS).
 ///
-/// - If the AU presented its own set (`seen` non-empty), adopt it as the retained
-///   set, dropping any the new GOP no longer uses (a mid-stream reinit).
-/// - If the AU carried none, re-inject the retained set into `chunks` as Annex-B
-///   so a receiver tuning in at this keyframe still gets them.
+/// - Each type and layer the AU presented sets for adopts them as its retained
+///   sets, dropping any the new GOP no longer uses (a mid-stream reinit).
+/// - When any retained type or layer is missing from the AU, its parameter sets are
+///   rewritten as every retained set in dependency order, at the first inline one or
+///   before the slice, so a receiver tuning in at this keyframe still gets them all
+///   and each after those it references.
 ///
 /// `seen` is this AU's inline NALs (already appended to `chunks`); `retained` is
 /// the cross-GOP set re-injected on bare keyframes.
-pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut ParameterSets, seen: &mut ParameterSets) {
-	if seen.is_empty() {
-		for nal in retained.values() {
-			chunks.extend_from_slice(&START_CODE);
-			chunks.extend_from_slice(nal);
-		}
+pub(crate) fn reconcile_keyframe_params(
+	codec: InBandCodec,
+	chunks: &mut BytesMut,
+	retained: &mut [&mut ParameterSets],
+	seen: &mut [&mut ParameterSets],
+) -> Result<()> {
+	let mut missing = false;
+	for (retained, seen) in retained.iter_mut().zip(seen.iter_mut()) {
+		missing |= retained
+			.keys()
+			.any(|(layer, _)| !seen.keys().any(|(defined, _)| defined == layer));
+		adopt_parameter_sets(retained, std::mem::take(*seen));
 		seen.clone_from(retained);
-	} else if seen != retained {
-		retained.clone_from(seen);
 	}
+	if !missing {
+		return Ok(());
+	}
+
+	let block = build_prefix(retained.iter().flat_map(|sets| sets.values()));
+	let types = codec.parameter_sets();
+	let au = std::mem::take(chunks);
+	let mut injected = false;
+	for nal in complete_nals(&au)? {
+		if nal.is_empty() {
+			continue;
+		}
+		if types.iter().any(|&(ty, _)| ty == codec.nal_type(&nal)) {
+			if !std::mem::replace(&mut injected, true) {
+				chunks.extend_from_slice(&block);
+			}
+			continue;
+		}
+		chunks.extend_from_slice(&START_CODE);
+		chunks.extend_from_slice(&nal);
+	}
+	if !injected {
+		chunks.extend_from_slice(&block);
+	}
+	Ok(())
 }
 
 /// Every NAL in a complete Annex-B buffer, including the final one that no start code terminates.
@@ -1120,6 +1156,25 @@ mod tests {
 
 		let sei_first = tx.transform(annexb(&[sei, idr]), true).unwrap().unwrap();
 		assert_eq!(sei_first.as_ref(), length_prefixed(&[vps, sps2, pps, sei, idr]));
+	}
+
+	/// An access unit redefining only an enhancement layer's sets keeps the base layer's.
+	#[test]
+	fn in_band_h265_keeps_the_base_layer_beside_an_enhancement_update() {
+		use crate::codec::h265::fixtures::{MV_PPS_LAYER1, MV_SPS_LAYER1, PPS, SPS, VPS};
+		let idr = &[0x26, 0x01, 0xaa][..];
+
+		let mut tx = InBand::new(InBandCodec::H265);
+		let first = tx.transform(annexb(&[VPS, SPS, PPS, idr]), true).unwrap().unwrap();
+		assert_eq!(first.as_ref(), length_prefixed(&[VPS, SPS, PPS, idr]));
+		let update = tx
+			.transform(annexb(&[MV_SPS_LAYER1, MV_PPS_LAYER1, idr]), true)
+			.unwrap()
+			.unwrap();
+		assert_eq!(
+			update.as_ref(),
+			length_prefixed(&[VPS, SPS, MV_SPS_LAYER1, PPS, MV_PPS_LAYER1, idr])
+		);
 	}
 
 	/// A parameter set keys by the id it defines, so a stream redefining ids holds one entry

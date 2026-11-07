@@ -344,16 +344,17 @@ pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
 /// [`crate::codec::h264::Avc1`].
 ///
 /// The active VPS/SPS/PPS set is scoped to the latest keyframe: a frame that
-/// carries parameter sets redefines them, so a mid-stream reconfiguration drops
-/// the superseded ones instead of accumulating them forever.
+/// carries parameter sets redefines those of each layer it carries them for, so
+/// a mid-stream reconfiguration drops the superseded ones instead of
+/// accumulating them forever.
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
 	/// The active VPS NALs (from the most recent keyframe that carried them).
-	vps: Vec<Bytes>,
+	vps: ParameterSets,
 	/// The active SPS NALs.
-	sps: Vec<Bytes>,
+	sps: ParameterSets,
 	/// The active PPS NALs.
-	pps: Vec<Bytes>,
+	pps: ParameterSets,
 }
 
 impl Default for Hvc1 {
@@ -367,9 +368,9 @@ impl Hvc1 {
 	pub fn new() -> Self {
 		Self {
 			hvcc: None,
-			vps: Vec::new(),
-			sps: Vec::new(),
-			pps: Vec::new(),
+			vps: ParameterSets::new(),
+			sps: ParameterSets::new(),
+			pps: ParameterSets::new(),
 		}
 	}
 
@@ -414,23 +415,17 @@ impl Hvc1 {
 
 		// A frame that carries parameter sets (a keyframe) redefines the active
 		// set; adopt it so a superseded configuration's VPS/SPS/PPS are dropped
-		// rather than lingering in the hvcC. Per type, so a frame that updates only
-		// one kind keeps the others.
+		// rather than lingering in the hvcC. Per type and layer, so a frame that
+		// updates only one kind or layer keeps the others.
 		let mut changed = false;
-		let frame_vps: Vec<Bytes> = frame_vps.into_values().collect();
-		if !frame_vps.is_empty() && frame_vps != self.vps {
-			self.vps = frame_vps;
-			changed = true;
-		}
-		let frame_sps: Vec<Bytes> = frame_sps.into_values().collect();
-		if !frame_sps.is_empty() && frame_sps != self.sps {
-			self.sps = frame_sps;
-			changed = true;
-		}
-		let frame_pps: Vec<Bytes> = frame_pps.into_values().collect();
-		if !frame_pps.is_empty() && frame_pps != self.pps {
-			self.pps = frame_pps;
-			changed = true;
+		for (active, frame) in [
+			(&mut self.vps, frame_vps),
+			(&mut self.sps, frame_sps),
+			(&mut self.pps, frame_pps),
+		] {
+			let before = active.clone();
+			crate::codec::annexb::adopt_parameter_sets(active, frame);
+			changed |= *active != before;
 		}
 		if changed {
 			self.rebuild_hvcc()?;
@@ -447,7 +442,8 @@ impl Hvc1 {
 		if self.vps.is_empty() || self.sps.is_empty() || self.pps.is_empty() {
 			return Ok(());
 		}
-		self.hvcc = Some(build_hvcc(&self.vps, &self.sps, &self.pps)?);
+		let [vps, sps, pps] = [&self.vps, &self.sps, &self.pps].map(|sets| sets.values().cloned().collect::<Vec<_>>());
+		self.hvcc = Some(build_hvcc(&vps, &sps, &pps)?);
 		Ok(())
 	}
 }
@@ -723,6 +719,28 @@ mod tests {
 	/// hvc1: a length-prefixed access unit with an IDR slice wraps as one keyframe;
 	/// the payload is passed through verbatim. The leading prefix-SEI NAL exercises
 	/// the walk past non-slice NALs.
+	/// A keyframe redefining only an enhancement layer's sets keeps the base layer's in the hvcC.
+	#[test]
+	fn hvc1_keeps_the_base_layer_beside_an_enhancement_update() {
+		let annexb = |nals: &[&[u8]]| {
+			let mut buf = BytesMut::new();
+			for nal in nals {
+				buf.extend_from_slice(&[0, 0, 0, 1]);
+				buf.extend_from_slice(nal);
+			}
+			buf.freeze()
+		};
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa];
+		let mut hvc1 = Hvc1::new();
+		hvc1.transform(annexb(&[fixtures::VPS, fixtures::MV_SPS, fixtures::PPS, idr]))
+			.unwrap();
+		hvc1.transform(annexb(&[fixtures::MV_SPS_LAYER1, fixtures::MV_PPS_LAYER1, idr]))
+			.unwrap();
+		let params = Hvcc::parse(hvc1.hvcc().unwrap()).unwrap();
+		assert_eq!(params.sps, [fixtures::MV_SPS, fixtures::MV_SPS_LAYER1]);
+		assert_eq!(params.pps, [fixtures::PPS, fixtures::MV_PPS_LAYER1]);
+	}
+
 	#[test]
 	fn hvc1_frame_keyframe() {
 		let sei: &[u8] = &[0x4e, 0x01, 0x05, 0xff]; // PrefixSeiNut (39)

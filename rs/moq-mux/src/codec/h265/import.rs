@@ -615,6 +615,13 @@ mod tests {
 		import.decode(frames).unwrap();
 		assert_eq!(size(&catalog), (Some(128), Some(64)));
 
+		// A later keyframe redefining only the enhancement layer keeps the base layer's config.
+		let update = annexb(&[fixtures::MV_SPS_LAYER1, fixtures::MV_PPS_LAYER1, idr]);
+		let mut frames = split.decode(&update, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		assert_eq!(size(&catalog), (Some(128), Some(64)));
+
 		let enhancement = annexb(&[fixtures::VPS, fixtures::MV_SPS_LAYER1, fixtures::MV_PPS_LAYER1, idr]);
 		let (track, catalog) = setup("video");
 		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();

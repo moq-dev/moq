@@ -199,20 +199,15 @@ impl Split {
 				// Adopt this keyframe's inline set (dropping any the new GOP no longer
 				// uses), or re-inject the retained set if the keyframe carried none.
 				crate::codec::annexb::reconcile_keyframe_params(
+					InBandCodec::H265,
 					&mut self.current.chunks,
-					&mut self.vps,
-					&mut self.current.vps_seen,
-				);
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.sps,
-					&mut self.current.sps_seen,
-				);
-				crate::codec::annexb::reconcile_keyframe_params(
-					&mut self.current.chunks,
-					&mut self.pps,
-					&mut self.current.pps_seen,
-				);
+					&mut [&mut self.vps, &mut self.sps, &mut self.pps],
+					&mut [
+						&mut self.current.vps_seen,
+						&mut self.current.sps_seen,
+						&mut self.current.pps_seen,
+					],
+				)?;
 
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
@@ -625,7 +620,9 @@ mod tests {
 	}
 
 	/// An enhancement layer's parameter sets are retained beside the base layer's and re-injected
-	/// on a bare keyframe, even one reusing the base SPS's id or using the multi-layer layout.
+	/// on a bare keyframe, even one reusing the base SPS's id or using the multi-layer layout. A
+	/// keyframe redefining only the enhancement layer's keeps the base layer's, re-injected ahead
+	/// in dependency order.
 	#[tokio::test(start_paused = true)]
 	async fn retains_enhancement_layer_parameter_sets() {
 		use crate::codec::h265::fixtures::{MV_PPS_LAYER1, MV_SPS_LAYER1};
@@ -641,6 +638,16 @@ mod tests {
 
 			let bare = decode_one(&mut split, &mut annexb(&[IDR]), ts());
 			assert!(bare[0].keyframe);
+			assert_eq!(bare[0].payload.as_ref(), annexb(&au).freeze().as_ref());
+
+			let partial = decode_one(
+				&mut split,
+				&mut annexb(&[AUD, layer1, MV_PPS_LAYER1, PREFIX_SEI, IDR]),
+				ts(),
+			);
+			let full = [AUD, VPS, SPS, layer1, PPS, MV_PPS_LAYER1, PREFIX_SEI, IDR];
+			assert_eq!(partial[0].payload.as_ref(), annexb(&full).freeze().as_ref());
+			let bare = decode_one(&mut split, &mut annexb(&[IDR]), ts());
 			assert_eq!(bare[0].payload.as_ref(), annexb(&au).freeze().as_ref());
 		}
 	}
