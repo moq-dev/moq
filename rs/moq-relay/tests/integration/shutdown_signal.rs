@@ -103,11 +103,31 @@ fn a_failed_startup_leaves_the_signals_alone() {
 	);
 }
 
+/// A relay serving with its signal handling off installs no handler, so SIGINT keeps
+/// its default action and kills the process: a handler the relay installed would
+/// catch it instead, and drain on a signal the embedder owns. Only a fresh process
+/// shows it, as for [`a_failed_startup_leaves_the_signals_alone`]. Then the embedder
+/// drains on its own trigger.
 #[test]
 fn an_embedder_owns_the_signals() {
 	kio::clock::host_time();
-	let _sigint = SIGINT.lock().unwrap_or_else(|e| e.into_inner());
-	run_test(an_embedder_owns_the_signals_inner);
+	const CHILD: &str = "MOQ_RELAY_EMBEDDER_SIGNALS_CHILD";
+	if std::env::var_os(CHILD).is_some() {
+		run_test(a_relay_without_signals_leaves_sigint_alone_inner);
+		return;
+	}
+	let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", "shutdown_signal::an_embedder_owns_the_signals"])
+		.env(CHILD, "1")
+		.status()
+		.expect("spawn the child test process");
+	use std::os::unix::process::ExitStatusExt;
+	assert_eq!(
+		status.signal(),
+		Some(libc::SIGINT),
+		"SIGINT did not kill a relay serving with its signals off: {status}"
+	);
+	run_test(an_embedder_drains_on_its_trigger_inner);
 }
 
 #[test]
@@ -237,13 +257,34 @@ async fn a_failed_startup_leaves_the_signals_alone_inner() {
 	unsafe { libc::raise(libc::SIGTERM) };
 }
 
-async fn an_embedder_owns_the_signals_inner() {
+async fn a_relay_without_signals_leaves_sigint_alone_inner() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
+	// A process started with SIGINT ignored, such as a background job of a script,
+	// passes that on: restore the default action, which the relay must then leave alone.
+	// SAFETY: nothing else in this fresh process watches SIGINT yet.
+	assert_ne!(
+		unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL) },
+		libc::SIG_ERR,
+		"failed to restore SIGINT's default action"
+	);
 
-	// The embedder's own handler, which is also what keeps SIGINT from killing
-	// the test process.
-	let mut interrupt =
-		tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect("register SIGINT");
+	let relay = Relay::load(relay_config())
+		.await
+		.expect("load relay")
+		.with_signals(false);
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
+	let _run = tokio::spawn(relay.run());
+	let _connection = connect(&client(Vec::new()), port).await;
+	let _straggler = straggler(port).await;
+
+	// SAFETY: raise has no memory-safety preconditions. With the default action
+	// this never returns.
+	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
+	panic!("a handler caught SIGINT for a relay serving with its signals off");
+}
+
+async fn an_embedder_drains_on_its_trigger_inner() {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let relay = Relay::load(relay_config())
 		.await
@@ -258,23 +299,7 @@ async fn an_embedder_owns_the_signals_inner() {
 	let draining = connection.draining().expect("connected");
 	let _straggler = straggler(port).await;
 
-	// SAFETY: `raise` is async-signal-safe, and SIGINT's disposition is tokio's
-	// handler, registered above.
-	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
-	kio::clock::timeout(Duration::from_secs(5), interrupt.recv())
-		.await
-		.expect("the embedder never saw SIGINT");
-
-	// The signal is the embedder's: the relay keeps serving without a GOAWAY.
-	assert!(
-		kio::clock::timeout(DRAIN_TIMEOUT / 2, moq_net::kio::wait(|waiter| draining.poll(waiter)))
-			.await
-			.is_err(),
-		"the relay drained on a signal the embedder owns"
-	);
-	assert!(!run.is_finished(), "the relay exited on a signal the embedder owns");
-
-	// Until the embedder decides.
+	// The embedder decides when.
 	let started = kio::clock::now();
 	trigger.start();
 	let goaway = kio::clock::timeout(
