@@ -2,8 +2,7 @@
 
 ## Goal
 
-The work in flight now: passing Nightly, Interop, and Video runs, a
-draft-18 session to Cloudflare's relay that outlives its first request, backports
+The work in flight now: passing Nightly, Interop, and Video runs, backports
 and patch releases for the `release` line, CI cost and latency, test flakes,
 and a few small fixes for hostile input, WebSocket throughput, agent disk use,
 and CRLF checkouts. The quest merge driver
