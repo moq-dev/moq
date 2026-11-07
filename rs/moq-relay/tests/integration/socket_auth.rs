@@ -264,23 +264,56 @@ async fn a_forged_dial_never_connects() {
 
 /// A client's grant keeps it a client: an accept announces a server endpoint the relay
 /// never carries, so no dial reaches it, and another client's endpoint is out of reach.
+///
+/// Each absence is read by a session that connects once the relay holds everything it
+/// could have carried, so its first sync with the relay would have listed it.
 #[tokio::test]
 async fn a_client_grant_neither_serves_nor_reads_clients() {
 	let fixture = Fixture::new().await;
 	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;
+	let (_bob, bob_origin, _bob_session) = fixture.endpoint(Role::Server, "bob", LITE).await;
+	// Bob, a server, reads a client endpoint once the relay carries it.
+	let carried = |id: &'static str| {
+		let origin = bob_origin.consume();
+		async move {
+			kio::clock::timeout(TIMEOUT, origin.request(id, None))
+				.await
+				.expect("request timeout")
+				.unwrap_or_else(|err| panic!("{id}: {err}"));
+		}
+	};
+
+	// Alice dials, which announces her client endpoint.
+	let _alice_dial = alice.dial_tcp("carol").expect("dial");
+	carried(".client/alice").await;
+
+	// Mallory, a client, can't read it.
 	let (mallory, mallory_origin, _mallory_session) = fixture.endpoint(Role::Client, "mallory", LITE).await;
+	let read = kio::clock::timeout(TIMEOUT, mallory_origin.consume().request(".client/alice", None))
+		.await
+		.expect("request timeout");
+	assert!(
+		matches!(read, Err(moq_net::Error::Unroutable)),
+		"mallory read alice's endpoint: {:?}",
+		read.err()
+	);
 
-	// Mallory accepts as a server would, but alice's dial never reaches her.
-	let accept = async { kio::clock::timeout(SETTLE, mallory.accept_tcp()).await };
-	let dial = async { kio::clock::timeout(SETTLE, alice.dial_tcp("mallory").expect("dial")).await };
-	let (accepted, dialed) = futures::join!(accept, dial);
-	assert!(accepted.is_err(), "mallory heard a dial as a server");
-	assert!(dialed.is_err(), "alice's dial reached a client");
+	// Mallory accepts as a server would, then dials, announcing her client endpoint after
+	// her server one on the same session: once it is carried, the relay decided both.
+	assert!(mallory.poll_accept_tcp(&kio::Waiter::noop()).is_pending());
+	let _mallory_dial = mallory.dial_tcp("bob").expect("dial");
+	carried(".client/mallory").await;
 
-	// Alice's client endpoint is announced, since she dialed, but mallory can't read it.
-	let _elsewhere = alice.dial_tcp("carol").expect("dial");
-	let read = kio::clock::timeout(SETTLE, mallory_origin.consume().request(".client/alice", None)).await;
-	assert!(!matches!(read, Ok(Ok(_))), "mallory read alice's endpoint");
+	// So no dial can reach her.
+	let (_dave, dave_origin, _dave_session) = fixture.endpoint(Role::Client, "dave", LITE).await;
+	let served = kio::clock::timeout(TIMEOUT, dave_origin.consume().request(".server/mallory", None))
+		.await
+		.expect("request timeout");
+	assert!(
+		matches!(served, Err(moq_net::Error::Unroutable)),
+		"the relay carried mallory's server endpoint: {:?}",
+		served.err()
+	);
 }
 
 /// A reader allowed every endpoint lists both ends of a running session and finds no
