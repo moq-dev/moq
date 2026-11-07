@@ -676,6 +676,8 @@ async fn play_audio<O: Output>(
 		let mut silent = false;
 		// The frame being written resumes a timeline whose end is already declared.
 		let mut declare = false;
+		// The frame being written starts the utterance after a declared silence.
+		let mut utterance = false;
 		loop {
 			let (event, (delay, lateness), crossing, _) = loop {
 				if let Some(event) = received.lock().unwrap().pop_front() {
@@ -701,6 +703,7 @@ async fn play_audio<O: Output>(
 							if std::mem::take(&mut silent) {
 								timeline = AudioTimeline::default();
 								sink.next();
+								utterance = true;
 							}
 						}
 						Some(Crossing::Resume(transition)) => {
@@ -729,6 +732,7 @@ async fn play_audio<O: Output>(
 							// Comfort noise fills the wait, so this frame plays one target out.
 							silent = false;
 							sink.next();
+							utterance = true;
 						}
 						None => {}
 					}
@@ -834,7 +838,13 @@ async fn play_audio<O: Output>(
 				quiet -= frames as u64;
 			}
 			let skip = fit.skip as usize * stride;
-			let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
+			let written = sink.write(&frame.data[skip.min(frame.data.len())..])?;
+			// A dropped write leaves the utterance to start on the next frame the sink accepts.
+			if utterance && written.accepted_sample_frames > 0 {
+				utterance = false;
+				let skipped = Duration::from_secs_f64(fit.skip as f64 / sample_rate as f64);
+				output.send(Event::Utterance(Duration::from(frame.timestamp) + skipped));
+			}
 			if std::mem::take(&mut declare) {
 				sink.end();
 				silent = true;
@@ -1047,6 +1057,19 @@ mod tests {
 		task.await.unwrap();
 
 		assert_eq!(recorder.latencies(), vec![delay], "the mute replaced the sink");
+		let utterances: Vec<_> = recorder
+			.events()
+			.into_iter()
+			.filter_map(|event| match event {
+				Event::Utterance(timestamp) => Some(timestamp),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			utterances,
+			vec![110 * PACKET_DURATION],
+			"the press starts from its first frame"
+		);
 		let played = recorder.played();
 		let first = played.iter().find(|part| part.sample == 0.5).unwrap();
 		assert_eq!(first.utterance, 1);
@@ -1856,7 +1879,7 @@ mod tests {
 			match event {
 				Event::Failed(err) => panic!("playback failed: {err}"),
 				Event::Ended | Event::Finished => panic!("the player stopped following the path"),
-				Event::Wake => {}
+				Event::Wake | Event::Utterance(_) => {}
 			}
 		}
 		assert!(!player.is_finished(), "the player stopped following the path");

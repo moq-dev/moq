@@ -672,6 +672,11 @@ impl Consumer {
 		done
 	}
 
+	/// Frames of comfort noise read so far, ever.
+	pub(crate) fn comfort(&self) -> u64 {
+		self.comfort.filled()
+	}
+
 	/// Accept pushes without reading first, as a read would.
 	pub(crate) fn start(&self) {
 		self.shared.read.store(true, Ordering::Relaxed);

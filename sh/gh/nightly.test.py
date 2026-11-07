@@ -377,7 +377,8 @@ class NightlyTest(unittest.TestCase):
             named |= set(re.findall(r"test\((\w+)\)", call))
         self.assertTrue(named)
         sources = "".join(path.read_text() for path in (ROOT / "rs").glob("*/**/*.rs") if "/target/" not in str(path))
-        missing = {name for name in named if not re.search(rf"\bfn {name}\b", sources)}
+        # A filter can name one test or a module containing several benchmark cases.
+        missing = {name for name in named if not re.search(rf"\b(?:fn|mod) {name}\b", sources)}
         self.assertEqual(missing, set(), "Nightly benchmark tests that no longer exist")
 
     def test_failed_release_build_does_not_hide_later_work(self):
