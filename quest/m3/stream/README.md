@@ -43,8 +43,9 @@ Amended 2026-11-01 with the maintainer (socket planning interview),
 2026-11-03 when sockets became endpoints, and 2026-11-04 when the socket's
 `tcp` protocol became one group each way: connection setup is the
 [socket](/doc/concept/socket.md) `Endpoint`, `dial_tcp`, and
-`accept_tcp`, which settle the layout (`<prefix>/.socket/<id>`, a
-`tcp/<dialer>/<acceptor>/<session>` track each way). Each TCP connection is one `tcp`
+`accept_tcp`, which settle the layout (`<prefix>/.server/<id>` and
+`<prefix>/.client/<id>`, a `tcp/<dialer>/<acceptor>/<session>` track each
+way). Each TCP connection is one `tcp`
 session, whose halves are a single group each way for the connection's life:
 frames are writes, finishing is FIN, resetting is RST, and the writer awaits
 `group::Producer::ready` for backpressure. Each session gets its own priority,

@@ -198,8 +198,8 @@ fn webtransport_echo_end_to_end() {
 			// out of the H3 mapping as itself.
 			let err = kio::wait(|waiter| session.poll_closed(waiter)).await;
 			match err {
-				quic::Error::App { code, reason } => {
-					assert_eq!(code, u64::from(CLOSE_CODE), "close code");
+				quic::web::Error::Closed(code, reason) => {
+					assert_eq!(code, CLOSE_CODE, "close code");
 					assert_eq!(reason, CLOSE_REASON, "close reason");
 				}
 				other => panic!("expected an application close, got {other:?}"),
@@ -535,7 +535,7 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 }
 
 /// A client whose CONNECT is expected to fail, reporting how it failed.
-fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web::ClientError> {
+fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web::Error> {
 	std::thread::spawn(move || {
 		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let rt = tokio::runtime::Builder::new_current_thread()
@@ -585,7 +585,10 @@ fn an_abandoned_handshake_closes_the_connection() {
 				.respond(quic::web::proto::ConnectResponse::OK.with_protocol("never-offered"))
 				.await
 				.expect_err("a subprotocol the peer did not offer");
-			assert!(matches!(err, quic::Error::Web(_)), "got {err:?}");
+			assert!(
+				matches!(err, quic::web::Error::Handshake(quic::web::HandshakeError::Protocol(_))),
+				"got {err:?}"
+			);
 
 			// Nothing here closed it by hand; the guard on the dropped request
 			// is what does.
@@ -653,7 +656,7 @@ fn a_rejection_reaches_the_peer() {
 	assert!(
 		matches!(
 			&err,
-			moq_tokio::quic::web::ClientError::HttpError(moq_tokio::quic::web::ConnectError::ProtoError(
+			moq_tokio::quic::web::Error::Handshake(moq_tokio::quic::web::HandshakeError::Connect(
 				moq_tokio::quic::web::proto::ConnectError::WrongStatus(Some(status))
 			)) if *status == http::StatusCode::NOT_FOUND
 		),
@@ -684,7 +687,7 @@ fn a_rejection_refuses_non_error_statuses() {
 				let request = quic::web::Request::accept(conn).await.unwrap();
 				assert!(matches!(
 					request.reject(status).now_or_never(),
-					Some(Err(quic::Error::Web(_)))
+					Some(Err(quic::web::Error::Handshake(quic::web::HandshakeError::Status(_))))
 				));
 				watch.closed().await;
 			})

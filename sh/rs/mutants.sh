@@ -5,6 +5,8 @@ set -euo pipefail
 
 out=target/mutants
 rm -rf "$out"
+# cargo-mutants requires the output parent to exist, including on a clean checkout.
+mkdir -p "$out"
 # Not `cargo mutants`: cargo would point `$CARGO` back at itself.
 export CARGO="$PWD/sh/rs/mutants-cargo.sh"
 status=0

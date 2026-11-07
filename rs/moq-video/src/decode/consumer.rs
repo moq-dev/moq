@@ -985,6 +985,7 @@ mod tests {
 	#[cfg(not(apple))]
 	#[tokio::test]
 	async fn a_cancelled_read_resumes_the_flush_in_flight() {
+		kio::clock::host_time();
 		probe::prepare_blocking_flush();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1226,6 +1227,7 @@ mod tests {
 	/// then the max-delay decoder's once it has decoded the sweep before them.
 	#[tokio::test]
 	async fn a_cold_join_hands_over_to_the_max_delay_decoder() {
+		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let published = track.clone();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
@@ -1258,6 +1260,7 @@ mod tests {
 	/// max-delay decoder still starts at the group before it, and takes over.
 	#[tokio::test]
 	async fn a_cold_join_whose_live_edge_arrives_first_starts_a_group_earlier() {
+		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut live = group(&mut track, 1, &[4, 5]);
 
@@ -1303,6 +1306,7 @@ mod tests {
 	/// never alternating in between.
 	#[tokio::test]
 	async fn a_short_stall_skips_only_the_min_delay_decoder() {
+		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut consumer = dual(
 			&broadcast,
@@ -1368,6 +1372,7 @@ mod tests {
 	/// late frames are never shown, and the max-delay decoder still takes over.
 	#[tokio::test]
 	async fn a_long_stall_skips_both_decoders() {
+		kio::clock::host_time();
 		let (broadcast, mut track) = live_track();
 		let mut consumer = dual(
 			&broadcast,
