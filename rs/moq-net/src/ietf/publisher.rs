@@ -7087,6 +7087,10 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		inner.follow(waiter);
 		inner.stream.poll_closed(waiter)
 	}
+
+	fn acknowledged(&self) -> Option<bool> {
+		self.inner.lock().unwrap().stream.acknowledged()
+	}
 }
 
 /// Write one group's frames in the negotiated draft's FETCH object layout.
@@ -7667,7 +7671,10 @@ impl GroupServe {
 		}
 		// The current rank, so a move while parked applies to the stream as it opens.
 		let _ = self.rank.poll_moved(waiter);
-		let stream = match ready!(self.session.poll_open_uni(&mut self.open, waiter, self.rank.options())) {
+		let stream = match ready!(
+			self.session
+				.poll_open_group(&mut self.open, waiter, self.rank.options())
+		) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;

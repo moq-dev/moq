@@ -2,7 +2,9 @@
 
 ## Goal
 
-A browser publisher on shipping Chrome, Firefox, and Safari gets a send-rate estimate, so its bandwidth reservations (`Reservation.rate`) follow the path and `@moq/publish` encoders adapt, instead of holding their ceiling because the estimate is always `undefined`.
+A browser publisher on shipping Chrome and Firefox gets a send-rate estimate, so its bandwidth reservations (`Reservation.rate`) follow the path and `@moq/publish` encoders adapt, instead of holding their ceiling because the estimate is always `undefined`.
+
+The WebSocket fallback is out of scope: it has no browser estimate to read, so its publishers keep holding their rate (decided 2026-11-07, below). That includes every WebKit browser, which `js/net` routes to the fallback (`isWebTransportUserAgentSupported` in `js/net/src/connection/browser.ts`) until [Safari WebTransport](/quest/m5/safari-webtransport.md) lifts the gate; that quest owns Safari's estimate.
 
 ## Plan
 
@@ -24,18 +26,24 @@ Reason: one rule decided at setup fixes the RTT, the polling, and the counters. 
 What remains once the waits clear:
 
 - In stable Chrome (no flag) and Firefox, verify through a shaped link that a publisher's bitrate follows a capacity drop. Reuse the [probe epic](/quest/m2/probe/README.md)'s shaped-uplink harness if it has landed.
-- The WebSocket fallback has no estimate whatever the browsers ship, so its publishers still hold their rate; the maintainer decision below covers it.
+- The WebSocket fallback has no estimate whatever the browsers ship, so its publishers still hold their rate, as decided below.
 
-Public API: none expected. Wire: none, unless the decision below picks a receiver report.
+Decided 2026-11-07 (maintainer, /quest-unblock): Safari publishers and the WebSocket fallback get no estimate before WebKit reports one.
+
+- ✅ (a) Wait for WebKit, as today.
+- (b) A lite-07 receiver report, where the relay sends back the rate it receives from us, which can only lower the estimate while app-limited.
+- (c) Estimate locally from how fast the transport drains our writes, which depends on each browser's buffering.
+
+Reason: Chrome and Firefox need nothing. For Safari, (b) and (c) each build an app-layer controller above the browser's own that a later WebKit release makes redundant. For the WebSocket fallback, (b) or (c) would be the only source, since it never reads WebTransport stats; building one waits until fallback adaptation is worth it on its own.
+
+Public API: none expected. Wire: none.
 
 ## Waiting
 
 - Chrome: ships `WebTransport.getStats()` with `estimatedSendRate` enabled for all users in 159, per the 2026-11-05 Intent to Ship. Check that stable Chrome's `getStats()` reports a non-null `estimatedSendRate` on a connection that has been sending media for a few seconds.
-- WebKit: Safari's `getStats()` reports a non-null `estimatedSendRate`. Check the `return_object_property_estimatedSendRate` entry under `api.WebTransport.getStats` in browser-compat-data, or a Safari publisher's `Reservation.rate`.
-- Maintainer: whether Safari publishers (and the WebSocket fallback) get an estimate before WebKit reports one. An agent can't pick this because each option changes the wire or adds a congestion estimator above the browser's own. Options: (a) wait for WebKit, as today; (b) a lite-07 receiver report, where the relay sends back the rate it receives from us, which can only lower the estimate while app-limited; (c) estimate locally from how fast the transport drains our writes, which depends on each browser's buffering. Recommendation: (a), since Chrome and Firefox need nothing, and (b) and (c) each build an app-layer controller that a later WebKit release makes redundant.
 
 ## Related
 
 - [One page-wide getStats sampling ticker](/quest/m2/probe/stats-ticker.md) - shares the `getStats()` sampling this reads
-- [Padding probes](/quest/m2/probe/padding.md) - raises the estimate once one exists
+- [Padding probes](/quest/m3/probe-padding.md) - raises the estimate once one exists
 - [Media stats](/quest/m3/stats/README.md) - its JS stats read PROBE for the downlink

@@ -76,6 +76,6 @@ Rejected in planning:
 - A follow policy enum folding `linger` and `stitch`: one name per meaning
   (the export wait is `--follow`) fixes the confusion more cheaply.
 
-## Related
+## Required
 
-- [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check
+- [Encoders take a join](/quest/m1/api-audit/join.md) - video's `keyframeInterval`/`Gop`, audio's `groupDuration`, and the C hints become one `join` time in JS, Rust, FFI, and C

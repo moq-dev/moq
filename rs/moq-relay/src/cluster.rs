@@ -794,6 +794,12 @@ pub struct Config {
 	#[usage(skip)]
 	#[serde(rename = "connect_api_tls_root", skip_serializing)]
 	pub(crate) removed_api_root: Option<serde::de::IgnoredAny>,
+	#[usage(long = "cluster-id", env = "MOQ_CLUSTER_ID", hide = true)]
+	#[serde(skip)]
+	pub(crate) removed_id: Option<String>,
+	#[usage(skip)]
+	#[serde(rename = "id", skip_serializing)]
+	pub(crate) removed_id_toml: Option<serde::de::IgnoredAny>,
 
 	/// This relay's own externally-reachable URL (identity). Sent to
 	/// `--cluster-api-url` as a `?node=` query param so the endpoint can return
@@ -861,6 +867,13 @@ impl Config {
 		}
 		if self.removed_api_root.is_some() {
 			found.toml("[cluster] connect_api_tls_root", "[cluster.api.tls] root", None);
+		}
+		const ID: &str = "the Hop ID is random on every start and nothing pins it";
+		if self.removed_id.is_some() {
+			found.removed("--cluster-id", Some("MOQ_CLUSTER_ID"), ID);
+		}
+		if self.removed_id_toml.is_some() {
+			found.toml("[cluster] id", "removed", Some(ID));
 		}
 
 		if self.connect.iter().any(|peer| is_legacy_peer(peer.url())) {
@@ -3762,6 +3775,31 @@ mod tests {
 
 		// Releasing an unknown peer is a no-op, not a panic.
 		dialed.release("never-dialed", DialSource::Mdns, &mut no_dial);
+	}
+
+	/// A removed cluster ID still parses, from the flag, the variable, or the file, so
+	/// the process can say why it stops instead of refusing an unknown setting.
+	#[test]
+	fn a_removed_cluster_id_is_reported() {
+		let flagged = Config {
+			removed_id: Some("7".into()),
+			..Default::default()
+		};
+		let reported = flagged.deprecated().to_string();
+		assert!(
+			reported.contains("--cluster-id / MOQ_CLUSTER_ID -> removed"),
+			"{reported}"
+		);
+		assert!(new_cluster(flagged).is_err());
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-id.toml");
+		std::fs::write(&path, "[cluster]\nid = 7\n").unwrap();
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let Err(err) = RelayConfig::parse_and_merge(args) else {
+			panic!("a removed cluster ID loaded");
+		};
+		assert!(format!("{err:#}").contains("[cluster] id -> removed"), "{err:#}");
 	}
 
 	#[test]

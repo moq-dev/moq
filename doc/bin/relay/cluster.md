@@ -179,6 +179,12 @@ the same one for a given path. A publisher connected straight to the relay is
 not hashed at its own path: its newest session wins, so a publisher that
 restarts takes over from its lingering old session at once.
 
+moq-lite-07-wip carries no hop list, so both hop-list steps drop out: the first
+relay ranks the origin nodes announcing a path the same way otherwise, and
+remaining ties hash the path with each node's routing identity. Later hops
+follow their own route to the node it picked. Routes learned over an older
+version rank as above.
+
 ```toml
 [cluster]
 connect = ["https://sibling.same-dc/?cost=1", "https://us-east.example.com/?cost=10"]

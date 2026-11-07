@@ -57,13 +57,26 @@ Update `doc/bin/relay/cluster.md` (`proxy`, `upstream`, and the
 one-copy-per-broadcast priority recipe) and affected auth/config examples in
 the same PR; the combined concept/setup guide follows separately.
 
+Decided 2026-11-06 (maintainer; the agent picked the children): require
+only the route children federation builds on,
+[session integration](/quest/m2/cluster-routing/routes/session.md) and
+[acceptance](/quest/m2/cluster-routing/routes/acceptance.md), not the whole
+[route epic](/quest/m2/cluster-routing/routes/README.md). Federation is
+relay-to-relay, so browser route-key proofs, the Playwright pin they wait on,
+and the mixed-version follow-ups (lite-06 failover, mount takeover) gate the
+lite-07 cut, not this. Its consumer, the [mesh node](/quest/m3/mesh/node.md),
+is a Rust relay too. Acceptance still brings the js/net route layer for its
+Rust/JS interop checks. Rejected: session integration alone, which drops the
+proven contract the wire rule below relies on.
+
 Public API: report any peer configuration or admission change. Wire: use the
 proven lite-07 routing contract; any additional change requires draft and
 Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts check`.
 
 ## Required
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - identity, scoped claims, reachability, and export policy
+- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - lite-07 sessions driven by the router, scoped identities keyed by the proven route key, bounded per-peer state
+- [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - the forwarding and partition fixtures this reuses, proven on the implementation
 
 ## Related
 

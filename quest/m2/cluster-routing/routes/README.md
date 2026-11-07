@@ -540,6 +540,10 @@ benchmarks.
 - [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
+- [Browser tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - current Firefox and Chromium tabs open lite-07 sessions with a route-key proof the relay verifies, checked nightly
+- [Playwright bundles the spec exporters](/quest/m2/cluster-routing/routes/playwright-pin.md) - the toolchain's Playwright bundles Chromium 158+ and Firefox 160+, so the browser proof lane asserts both tabs proven
+- [A declined lite-06 route is reconsidered when the lite-07 path fails](/quest/m2/cluster-routing/routes/lite06-failover.md) - a mixed-version relay fails over to the lite-06 route it declined
+- [A covering predecessor's takeover shows under a mount](/quest/m2/cluster-routing/routes/mount-takeover.md) - lite-07 presents a takeover beneath a mount as lite-06 does
 
 ## Related
 

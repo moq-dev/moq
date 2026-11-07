@@ -3500,6 +3500,12 @@ impl Drop for AnnounceProducer {
 /// for as long as the origin lives.
 struct OwnClaims {
 	routes: Routes,
+	/// The same routes, less those learned on an upstream link.
+	downstream: Routes,
+	/// The claim fed at each prefix.
+	best: HashMap<Path, crate::route::node::Claim>,
+	/// The instance at each prefix that a route not learned upstream serves.
+	local: HashMap<Path, Instance>,
 	node: crate::route::Node,
 }
 
@@ -3507,36 +3513,94 @@ impl kio::Task for OwnClaims {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		while let Some(event) = ready!(self.routes.poll_next(waiter)) {
-			self.apply(event);
+		loop {
+			if let Poll::Ready(event) = self.downstream.poll_next(waiter) {
+				match event {
+					Some(event) => self.local(event),
+					None => return Poll::Ready(()),
+				}
+				continue;
+			}
+			match ready!(self.routes.poll_next(waiter)) {
+				Some(event) => self.apply(event),
+				None => return Poll::Ready(()),
+			}
 		}
-		Poll::Ready(())
 	}
 }
 
 impl OwnClaims {
 	/// Feed the node the routes the table already holds, so a stream answered before
 	/// the driver next runs sees them.
-	fn new(routes: Routes, node: crate::route::Node) -> Self {
-		let mut own = Self { routes, node };
+	fn new(routes: Routes, downstream: Routes, node: crate::route::Node) -> Self {
+		let mut own = Self {
+			routes,
+			downstream,
+			best: HashMap::new(),
+			local: HashMap::new(),
+			node,
+		};
+		while let Some(event) = own.downstream.try_next() {
+			own.local(event);
+		}
 		while let Some(event) = own.routes.try_next() {
 			own.apply(event);
 		}
 		own
 	}
 
-	fn apply(&self, event: RouteEvent) {
+	fn apply(&mut self, event: RouteEvent) {
 		let announce = match event {
 			RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => announce,
-			RouteEvent::End(announce) => return self.node.own(announce.prefix, None),
+			RouteEvent::End(announce) => {
+				self.best.remove(&announce.prefix);
+				return self.node.own(announce.prefix, None);
+			}
 		};
 		let route = announce.route;
-		let claim = route.instance.map(|instance| crate::route::node::Claim {
+		let Some(instance) = route.instance else {
+			return;
+		};
+		let claim = crate::route::node::Claim {
 			instance,
 			epoch: route.epoch,
 			cost: route.cost.value(),
-		});
-		self.node.own(announce.prefix, claim);
+			upstream: false,
+			// Only a route published here has crossed no node.
+			learned: !route.hops.is_empty(),
+		};
+		self.best.insert(announce.prefix.clone(), claim);
+		self.feed(announce.prefix);
+	}
+
+	/// The route not learned upstream changed at a prefix: whether the claim there may
+	/// go to an upstream peer follows it.
+	fn local(&mut self, event: RouteEvent) {
+		match event {
+			RouteEvent::End(announce) => {
+				self.local.remove(&announce.prefix);
+				self.feed(announce.prefix);
+			}
+			RouteEvent::Start(announce) | RouteEvent::Update(announce) | RouteEvent::Restart(announce) => {
+				if let Some(instance) = announce.route.instance {
+					self.local.insert(announce.prefix.clone(), instance);
+				}
+				self.feed(announce.prefix);
+			}
+		}
+	}
+
+	/// Feed the node the claim at `prefix`, marked as learned upstream unless a route
+	/// not learned upstream serves the same instance there.
+	fn feed(&self, prefix: Path) {
+		let Some(claim) = self.best.get(&prefix) else {
+			return;
+		};
+		let claim = crate::route::node::Claim {
+			upstream: self.local.get(&prefix) != Some(&claim.instance),
+			..claim.clone()
+		};
+		self.node.own(prefix, Some(claim));
 	}
 }
 
@@ -6898,20 +6962,24 @@ impl Consumer {
 		shared.route_node = Some(node.clone());
 		drop(shared);
 		// The whole table, whatever this handle's scope.
-		let own = Self {
-			scope: OriginScope::default(),
-			root: Path::default(),
-			horizon: Horizon {
-				node: NodeFilter::Own,
-				..Horizon::default()
-			},
-			covering: false,
-			..self.clone()
-		}
-		.with_hidden(true)
-		// Feeding the node is no reason to ask any peer about anything.
-		.serving();
-		self.tasks.push(OwnClaims::new(own.routes(), node.clone()));
+		let own = |upstream| {
+			Self {
+				scope: OriginScope::default(),
+				root: Path::default(),
+				horizon: Horizon {
+					node: NodeFilter::Own,
+					upstream,
+					..Horizon::default()
+				},
+				covering: false,
+				..self.clone()
+			}
+			.with_hidden(true)
+			// Feeding the node is no reason to ask any peer about anything.
+			.serving()
+		};
+		let claims = OwnClaims::new(own(false).routes(), own(true).routes(), node.clone());
+		self.tasks.push(claims);
 		node
 	}
 
