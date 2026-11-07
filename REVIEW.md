@@ -27,6 +27,17 @@ Assume a better approach exists until you have tried to find one:
 An approach finding names the alternative and why it holds up better long-term.
 "Rework or abandon this PR" is a valid finding when the case is strong.
 
+# State
+
+Lifecycles (a session, a subscription, a producer, a codec drain) are where bugs hide as combinations no phase allows.
+Flag new or changed code that breaks one of these, and point at the shape to copy:
+
+- **One enum per lifecycle**: phases are one enum or union whose variants carry their data, like `PresentState` in `rs/moq-net/src/lite/session.rs` and `State` in `js/net/src/ietf/join.ts`. Flag a flag, `Option`, or error kept beside an enum; a terminal state stored in two places; per-phase data reached through `.expect()` or call order; and a one-shot handle in an `Option` taken before validation, so "answered" and "failed to answer" look alike.
+- **Terminal after the work**: a transition to finished, closed, or answered happens after the work that can fail, or records the failure as its terminal state. A consuming method like `finish(self)` in `rs/moq-rtmp/src/server.rs` leaves nothing to use after. Flag "done" set before a fallible flush or write.
+- **One lock per value**: a value is never guarded by two locks or split across atomics. Use one lock, or one atomic holding the whole state, like `CompletionState` in `rs/moq-gst/src/sink/session.rs`.
+
+The fix makes the bad combination unrepresentable; a check that rejects it is not one.
+
 # Tests
 
 Unit tests mock time instead of depending on the real clock: a test that sleeps to let work settle, waits out a timeout to prove nothing happened, or asserts that an operation finished within a real-time budget passes on a quiet machine and flakes under load.
