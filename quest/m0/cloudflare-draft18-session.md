@@ -6,7 +6,9 @@ A moq-transport-18 session from moq-net to Cloudflare's public draft-18 relay
 stays up past its first request instead of closing with `protocol violation`.
 Done when `moq --connect
 https://draft-18.cloudflare.mediaoverquic.com/<random> fetch publisher.json`,
-built from `main`, waits until its timeout instead of failing. If the
+built from `main`, stays connected until its own timeout: a trace shows
+Cloudflare answered the first SUBSCRIBE_NAMESPACE and no CONNECTION_CLOSE
+arrives before the timeout, so a stalled setup does not count. If the
 violation is ours, the fix lands here with a test; if it is Cloudflare's, a
 reproducer is reported upstream and this quest waits on that fix.
 
@@ -20,14 +22,18 @@ raised it.
 
 The [interop audit](/quest/m3/audit-interop.md) records that `main`
 passed against Cloudflare draft-18 after
-[moq-dev/moq#5483](https://github.com/moq-dev/moq/pull/5483), so this is
-either a regression since then or a change on Cloudflare's deployed relay.
+[moq-dev/moq#5483](https://github.com/moq-dev/moq/pull/5483), but that was
+the JavaScript lifecycle test, not this Rust CLI fetch. So this is a
+regression since then, a change on Cloudflare's deployed relay, or a Rust
+CLI path that never worked.
 Find which first: read who sends the CONNECTION_CLOSE and its reason with
 `RUST_LOG=trace` (or a qlog). Then build cloudflare/moq-rs's `draft-18-dev`
 relay locally (as `test/smoke/cloudflare.sh` does), and run the same
 `main`-built `moq --connect ... fetch publisher.json` against it, trusting its
 self-signed certificate. A local reproduction can bisect our side; a
-remote-only failure points at the deployed relay's version. `just cloudflare`
+remote-only failure points at the deployed relay's version only once the
+peer's SETUP and our resulting SUBSCRIBE_NAMESPACE bytes match between the
+two runs; differing SETUP parameters can leave a client-side bug untested. `just cloudflare`
 stays a separate control: its only client is `clients/cloudflare`, built
 against cloudflare/moq-rs, so it never exercises moq-net.
 
