@@ -166,6 +166,9 @@ struct Lane {
 	delay: VecDeque<f32>,
 	/// A channel was read into `block` this advance.
 	fed: bool,
+	/// Samples advanced since a channel last fed this lane: once they cover
+	/// the delay line, it holds only silence.
+	idle: usize,
 }
 
 impl Lane {
@@ -547,13 +550,16 @@ impl Source {
 		let pan = self.strip.pan();
 		let mut first = true;
 		for (mono, lane) in [false, true].into_iter().zip(&mut self.lanes) {
-			if !lane.fed {
+			if lane.fed {
+				lane.idle = 0;
+			} else {
 				// Nothing new, but audio held back from a closed channel plays out.
 				if lane.delay.is_empty() {
 					continue;
 				}
 				lane.block.clear();
 				lane.block.resize(samples, 0.0);
+				lane.idle += samples;
 			}
 			lane.delay(held, samples);
 			if stereo {
@@ -566,6 +572,10 @@ impl Source {
 				for (out, sample) in self.block.iter_mut().zip(&lane.block) {
 					*out += *sample;
 				}
+			}
+			// The last held audio just played, so free the delay line.
+			if !lane.fed && lane.idle >= lane.delay.len() {
+				*lane = Lane::default();
 			}
 		}
 		if first {
@@ -1040,7 +1050,7 @@ impl Strip {
 	}
 
 	/// The loudest this source contributed since the previous call, after its
-	/// gain and mute.
+	/// gain, mute, pan, and sync delay.
 	pub fn level(&self) -> Level {
 		self.shared.level.take()
 	}
@@ -1703,6 +1713,65 @@ mod tests {
 			let power = frame[0] * frame[0] + frame[1] * frame[1];
 			assert!((power - 0.25).abs() < 1e-4, "constant power: {frame:?}");
 		}
+	}
+
+	/// Mono and stereo channels sharing a strip each follow their own pan law,
+	/// and closing one plays out what the sync delay holds of it before its
+	/// delay line is freed.
+	#[test]
+	fn mixed_layouts_on_one_strip_pan_apart() {
+		use std::f32::consts::{FRAC_PI_8, SQRT_2};
+
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let strip = Strip::default();
+		let mut mono = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let mut stereo = bus.channel(input(48_000, Layout::Stereo), strip.clone()).unwrap();
+		strip.set_pan(0.5).unwrap();
+		strip.set_delay(Duration::from_millis(20));
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		let pcm: Vec<u8> = [0.5f32, 0.25].iter().flat_map(|sample| sample.to_le_bytes()).collect();
+		let pcm = pcm.repeat(BLOCK);
+
+		// Halfway right: mono 0.5 by the constant-power law, and stereo
+		// (0.5, 0.25) with only its far, left side turned down.
+		let angle = 3.0 * FRAC_PI_8;
+		let balanced = [0.5 * SQRT_2 * angle.cos(), 0.25];
+		let mixed = [0.5 * angle.cos() + balanced[0], 0.5 * angle.sin() + balanced[1]];
+		let assert_frames = |block: &Block, [left, right]: [f32; 2]| {
+			for frame in block.data.as_chunks::<2>().0 {
+				assert!(
+					(frame[0] - left).abs() < 1e-4 && (frame[1] - right).abs() < 1e-4,
+					"{frame:?}"
+				);
+			}
+		};
+
+		driver.advance(BLOCK);
+		ready(&mut reader);
+		let mut last = None;
+		for _ in 0..20 {
+			mono.write(&constant(0.5, BLOCK, 1)).unwrap();
+			stereo.write(&pcm).unwrap();
+			last = Some(step(&mut driver, &mut reader));
+		}
+		assert_frames(&last.unwrap(), mixed);
+
+		// The 20 ms delay still holds two blocks of the mono channel.
+		drop(mono);
+		let held_mono = |bus: &Bus| {
+			bus.inner.mixer.lock().unwrap().sources[&key(&strip)].lanes[1]
+				.delay
+				.capacity()
+		};
+		for _ in 0..2 {
+			stereo.write(&pcm).unwrap();
+			assert_frames(&step(&mut driver, &mut reader), mixed);
+		}
+		assert_eq!(held_mono(&bus), 0, "the drained delay line is freed");
+		stereo.write(&pcm).unwrap();
+		assert_frames(&step(&mut driver, &mut reader), balanced);
 	}
 
 	/// A pan change reaches audio the sync delay already holds back, as gain
