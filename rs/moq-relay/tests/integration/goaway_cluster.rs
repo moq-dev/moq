@@ -93,11 +93,13 @@ async fn listen_tcp() -> (u16, moq_tokio::Listener) {
 
 #[test]
 fn cluster_migrates_on_upstream_goaway() {
+	kio::clock::host_time();
 	run_cluster_test(cluster_migrates_on_upstream_goaway_inner());
 }
 
 #[test]
 fn cluster_diamond_goaway_seamless_failover() {
+	kio::clock::host_time();
 	run_cluster_test(cluster_diamond_goaway_seamless_failover_inner());
 }
 
