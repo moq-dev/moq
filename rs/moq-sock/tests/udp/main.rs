@@ -791,24 +791,11 @@ fn recv_transport_error() {
 		)
 		.unwrap();
 
-	let mut received = None;
-	for _ in 0..100 {
-		match state.recv_transport_error((&sock).into()) {
-			Ok(Some(err)) => {
-				received = Some(err);
-				break;
-			}
-			_ => {
-				#[expect(
-					clippy::disallowed_methods,
-					reason = "a sync test with no runtime polls a real kernel socket"
-				)]
-				std::thread::sleep(Duration::from_millis(10));
-			}
-		}
-	}
-
-	let err = received.expect("ICMP Port Unreachable was not received");
+	wait_for_error(&sock);
+	let err = state
+		.recv_transport_error((&sock).into())
+		.expect("failed to read the error queue")
+		.expect("ICMP Port Unreachable was not received");
 
 	assert!(
 		matches!(err.payload, moq_sock::udp::TransportErrorPayload::Unreachable),
@@ -855,21 +842,11 @@ fn recv_transport_error_ipv6() {
 		)
 		.unwrap();
 
-	let mut received = None;
-
-	for _ in 0..100 {
-		if let Ok(Some(err)) = state.recv_transport_error((&sock).into()) {
-			received = Some(err);
-			break;
-		}
-		#[expect(
-			clippy::disallowed_methods,
-			reason = "a sync test with no runtime polls a real kernel socket"
-		)]
-		std::thread::sleep(Duration::from_millis(10));
-	}
-
-	let err = received.expect("ICMPv6 Port Unreachable not received");
+	wait_for_error(&sock);
+	let err = state
+		.recv_transport_error((&sock).into())
+		.expect("failed to read the error queue")
+		.expect("ICMPv6 Port Unreachable not received");
 
 	assert!(matches!(err.payload, moq_sock::udp::TransportErrorPayload::Unreachable));
 
@@ -916,31 +893,15 @@ fn draining_error_queue_before_send_prevents_absorption() {
 		)
 		.unwrap();
 
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "a sync test with no runtime polls a real kernel socket"
-	)]
-	std::thread::sleep(Duration::from_millis(20));
-
 	// Drain the error queue before sending - this is the intended usage pattern
-	let mut got_error = false;
-	for _ in 0..10 {
-		match state.recv_transport_error((&sock).into()) {
-			Ok(Some(_)) => {
-				got_error = true;
-				break;
-			}
-			#[expect(
-				clippy::disallowed_methods,
-				reason = "a sync test with no runtime polls a real kernel socket"
-			)]
-			_ => std::thread::sleep(Duration::from_millis(10)),
-		}
-	}
-	assert!(got_error, "expected one queued error");
+	wait_for_error(&sock);
+	state
+		.recv_transport_error((&sock).into())
+		.expect("failed to read the error queue")
+		.expect("expected one queued error");
 
 	let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-	receiver.set_nonblocking(true).unwrap();
+	receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
 	state
 		.try_send(
@@ -955,15 +916,24 @@ fn draining_error_queue_before_send_prevents_absorption() {
 		)
 		.expect("send failed after draining the error queue");
 
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "a sync test with no runtime polls a real kernel socket"
-	)]
-	std::thread::sleep(Duration::from_millis(20));
-
 	let mut buf = [0u8; 64];
 	let n = receiver
 		.recv(&mut buf)
 		.expect("packet was not delivered after draining the error queue");
 	assert_eq!(&buf[..n], b"connection close");
+}
+
+/// Block until `sock` has an error queued, which the kernel reports as `POLLERR`.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn wait_for_error(sock: &Socket) {
+	use std::os::fd::AsRawFd;
+
+	let mut pfd = libc::pollfd {
+		fd: sock.as_raw_fd(),
+		events: 0,
+		revents: 0,
+	};
+	let n = unsafe { libc::poll(&mut pfd, 1, 5_000) };
+	assert_eq!(n, 1, "no error was queued");
+	assert_ne!(pfd.revents & libc::POLLERR, 0, "revents {:#x}", pfd.revents);
 }

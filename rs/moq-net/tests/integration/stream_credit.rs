@@ -84,6 +84,66 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 	}
 }
 
+/// Out of credit, a newer group resets an older one still being written rather than waiting
+/// for it to finish, on each protocol.
+#[kio::test]
+async fn a_newer_group_resets_an_unfinished_older_one() {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+		let version: Version = version.parse().unwrap();
+		let publisher = origin(1);
+		let viewer = origin(2);
+		let broadcast = publisher
+			.route("live", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let info = track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None);
+		let track = broadcast.broadcast().create_track("0", info).unwrap();
+		broadcast.announce().unwrap();
+
+		let mut options = MockConnectOptions::new(version);
+		// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
+		options.transport.max_concurrent_uni_streams = Some(1 + usize::from(!version.is_lite()));
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(viewer.clone());
+		let _pair = connect_mock(options).await;
+
+		let remote = viewer
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let prefs = track::Subscription::default()
+			.with_order(track::Order::Descending)
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
+		let mut subscriber = remote.track("0").unwrap().subscribe(prefs).await.unwrap();
+
+		// Never finished, so its stream holds the only credit.
+		let mut older = track.append_group().unwrap();
+		older.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		let first = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the older group arrives"))
+			.unwrap()
+			.unwrap();
+		assert_eq!(first.sequence, 0, "{version}");
+
+		let mut newer = track.append_group().unwrap();
+		newer.write_frame(Timestamp::ZERO, b"new".as_slice()).unwrap();
+		newer.finish().unwrap();
+		let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the newer group waits behind the older one"))
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.sequence, 1, "{version}");
+		drop(older);
+	}
+}
+
 /// A relay's upstream session out of request credit waits for it rather than refusing: a
 /// subscription past the publisher's credit is served once an earlier one leaves.
 #[kio::test]

@@ -95,7 +95,7 @@ fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
 	let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
 	config.kind = crate::encode::Kind::Named("nvenc".into());
 	config.color = Some(color);
-	config.gop = crate::encode::Gop::Keyframe { interval: 30 };
+	config.join = std::time::Duration::from_secs(1);
 	crate::encode::Encoder::new(&config).expect("open NVENC")
 }
 

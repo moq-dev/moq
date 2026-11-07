@@ -51,7 +51,7 @@ mod vaapi;
 /// whether forced by `cut` or placed by the backend's own GOP cadence.
 pub(crate) trait Backend {
 	/// Encode one frame, opening a group at it (an IDR) when `cut` is set.
-	/// Backends place group boundaries on their own per [`Config::gop`], so this
+	/// Backends place group boundaries on their own per [`Config::join`], so this
 	/// is only the caller's extra request, arriving via
 	/// [`Encoder::cut`](super::Encoder::cut), and only on a backend whose
 	/// [`can_cut`](Self::can_cut) said yes.

@@ -117,7 +117,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: new Signal(track),
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();

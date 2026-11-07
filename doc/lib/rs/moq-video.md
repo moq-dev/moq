@@ -31,7 +31,7 @@ open and encoding whether or not anyone subscribes, so a late viewer can fetch
 the recent past. Set `encode::Capture::on_demand` to open the camera only while
 someone subscribes, at the cost of that past. A viewer who joins
 once the current group's deltas outweigh twice its keyframe gets a fresh
-keyframe, so the GOP is only the longest a group runs. Through a moq-lite
+keyframe, so `encode::Config::join` is only the longest a group runs. Through a moq-lite
 relay, only the join that opens the relay's upstream subscription counts. A
 build with the `v4l2` feature keeps every `Auto` or `Hardware` selection to its
 GOP, whichever encoder it lands on, since a V4L2 driver may refuse the request.

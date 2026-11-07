@@ -168,7 +168,7 @@ function newest(dirs: string[]): number {
 		found = Math.max(found, stat.mtimeMs);
 		if (!stat.isDirectory()) return;
 		for (const entry of readdirSync(path)) {
-			if (!["node_modules", "dist", "result", ".vite", "jsr.json"].includes(entry)) walk(join(path, entry));
+			if (!["node_modules", "dist", "result", ".vite"].includes(entry)) walk(join(path, entry));
 		}
 	};
 	for (const dir of dirs) walk(dir);

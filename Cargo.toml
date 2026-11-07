@@ -19,7 +19,6 @@ default-members = [
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
     "rs/moq-hls",
-    "rs/moq-ice",
     "rs/moq-json",
     "rs/moq-loc",
     "rs/moq-msf",
@@ -32,7 +31,6 @@ default-members = [
     "rs/moq-quic",
     "rs/moq-relay",
     "rs/moq-room",
-    "rs/moq-rtc",
     "rs/moq-rtmp",
     "rs/moq-rtsp",
     "rs/moq-shaper",
@@ -44,6 +42,7 @@ default-members = [
     "rs/moq-uring",
     "rs/moq-v4l",
     "rs/moq-video",
+    "rs/moq-webrtc",
     "rs/qmux",
     "rs/test-env",
     # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
@@ -111,7 +110,7 @@ humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper = "1.11"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-# Interface addresses for WebRTC host candidates (moq-tokio's `webrtc` feature).
+# Interface addresses for WebRTC host candidates (moq-webrtc's `p2p` feature).
 if-addrs = "0.15"
 indexmap = "2.14.2"
 io-uring = "0.7.15"
@@ -121,7 +120,8 @@ kio-macros = { version = "0.1.0", path = "rs/kio/macros" }
 libc = "0.2"
 libloading = "0.9"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
-# DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
+# DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature),
+# and `.local` candidate resolution (moq-webrtc's `p2p` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.21", features = ["async"] }
 moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
@@ -131,7 +131,6 @@ moq-congestion = { version = "0.1.0", path = "rs/moq-congestion" }
 # default-features off: moq-auth takes only the endpoint key and its text codec.
 moq-crypto = { version = "0.0.11", path = "rs/moq-crypto", default-features = false }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
-moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
 moq-json = { version = "0.5.8", path = "rs/moq-json" }
 moq-loc = { version = "0.2.19", path = "rs/moq-loc" }
 moq-msf = { version = "0.5.1", path = "rs/moq-msf" }
@@ -145,7 +144,6 @@ moq-pattern = { version = "0.1.2", path = "rs/moq-pattern" }
 # default-features off so each consumer picks its crypto provider.
 moq-quic = { version = "0.1.0", path = "rs/moq-quic", default-features = false }
 moq-relay = { version = "0.17.2", path = "rs/moq-relay", default-features = false }
-moq-rtc = { version = "0.3.12", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.3.11", path = "rs/moq-rtmp" }
 moq-rtsp = { version = "0.1.0", path = "rs/moq-rtsp" }
 moq-sock = { version = "0.2.0", path = "rs/moq-sock" }
@@ -176,6 +174,7 @@ moq-vaapi = "0.2.0"
 # that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
+moq-webrtc = { version = "0.3.12", path = "rs/moq-webrtc" }
 mp4-atom = "0.17.1"
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 num_enum = "0.7"

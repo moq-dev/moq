@@ -10,9 +10,9 @@ on:
     paths:
       - 'js/**'
       - '.github/workflows/release-js.yml'
-  # Dry-run: builds, packs, and runs `deno publish --dry-run`, which catches
-  # JSR-only failures before they break a release on `release`. Only a push
-  # publishes, so nightly.yml calls this on main in place of main PRs.
+  # Dry-run: builds and packs, which catches packaging failures before they
+  # break a release on `release`. Only a push publishes, so nightly.yml calls
+  # this on main in place of main PRs.
   workflow_call:
 
 # Only publishing runs share the serialized group. GitHub keeps a single pending
@@ -28,9 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository_owner == 'moq-dev'
     # npm trusted publishing can require this Environment, which only `release`
-    # can deploy to, so a branch's OIDC identity cannot publish. It also holds
-    # the JSR token, since JSR's OIDC trust cannot require an Environment.
-    # Dry-runs skip it.
+    # can deploy to, so a branch's OIDC identity cannot publish. Dry-runs skip it.
     environment: ${{ github.event_name == 'push' && 'npm' || '' }}
 
     steps:
@@ -48,12 +46,9 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: nix develop --command bun install --frozen-lockfile
+        run: nix develop --command just js install frozen
 
       - name: Release packages
         env:
           DRY_RUN: ${{ github.event_name != 'push' }}
-          # Only the `npm` Environment holds it, so dry-runs get none.
-          # release.ts hands it to `deno publish` alone.
-          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
         run: nix develop --command bun --filter '*' release
