@@ -40,7 +40,12 @@ Open, for whoever starts it:
 - How it builds its TLS configs (identity, roots, fingerprint pinning) without
   moq-tokio's `tls` module.
 
-Mirror the two drivers' names and signatures where they overlap. Test it against
+Decided 2026-11-07 (maintainer, /quest-plan from the API shape audit):
+this driver is the one shared core, not a third copy. moq-tokio's
+`quic::driver` and moq-uring's `quic` become I/O loops around it, so the
+endpoint, connection table, and timer logic exist once. Not chosen: a third
+driver that mirrors the other two. Mirror the two drivers' names and
+signatures where they still differ. Test it against
 moq-tokio's server over loopback on simulated time. Bound a hostile peer's cost as the
 other drivers do.
 

@@ -18,6 +18,18 @@ and does not support slicing within a group." Route recovery
 (`resume::Recover`), which fills from frame N, keeps its FETCH
 (`group::Fetch::frame_start`).
 
+Decided 2026-11-07 (maintainer, /quest-unblock): ✅ lite-07 keeps
+single-group FETCH (rejected: FETCH of several ranges delivered in order;
+dropping FETCH from lite-07). Head-of-line blocking between groups is not a
+feature: under backpressure the head is evicted and cancels every group
+queued behind it, and out-of-order arrival helps even a 30 s jitter buffer,
+while a relay should serve newer cached groups rather than wait on old ones
+from cold storage. Dropping FETCH would move frame and byte offsets into every
+SUBSCRIBE range operation instead. Since lite-07 names a group by its start
+time, a reader that knows only a time reads it through a SUBSCRIBE range
+bounded by times; FETCH stays for readers that know the group's start, such
+as route recovery, flights, and byte holes.
+
 Decided 2026-10-25 (maintainer, on
 [moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)) and still
 standing: Rust and JS change together, since both request and serve wire FETCH

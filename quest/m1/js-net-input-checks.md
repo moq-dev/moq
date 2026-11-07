@@ -1,16 +1,15 @@
-# [S] js/net enforces the input checks Rust does
+# [M] js/net and moq-net decode the same inputs the same way
 
 ## Goal
 
-`@moq/net` rejects the inputs `rs/moq-net` rejects, so JS is not the weaker side of a session:
+Rust and JS cannot drift apart on what they accept, because both run one shared corpus, and URLs are parsed once into a typed endpoint:
 
-- A GOAWAY redirect is classified on the host actually dialed. `isLocal` in `js/net/src/connection/goaway.ts` parses the opaque `moql:`/`moqt:` host, so `127.1`, `0x7f000001` and `2130706433` pass as non-local while `dialable()` rewrites them to `https:`, which resolves to 127.0.0.1. With `redirect: "follow"` a relay can steer the client and its tokens to loopback.
-- `redact` in `js/net/src/util/log.ts` logs scheme, host and port only. For `moql:` URLs `url.origin` is `"null"` and the path, which can carry a token, is kept.
-- The lite-01/02 ANNOUNCE_INIT is capped like Rust's (`frame::SEGMENT - 16`) and its count is checked against the announce budget before decoding (`js/net/src/lite/announce.ts`).
-- `checkSequence` (`js/net/src/util/sequence.ts`) refuses a group sequence at or above 2^64, as datagrams already do, so `appendGroup` after group 2^64-1 fails instead of minting a group past `UNBOUNDED`.
-- `accept.ts` requires a pinned `AcceptProps.version` to be one the client offered, as `rs/moq-net/src/server.rs` does.
-- `open.ts` `patience` treats an RTT of 0 as unknown, so a transport that reports 0 before its first sample does not make every stalled open reset a lower-priority stream.
+- A shared corpus of moq-lite inputs, each with its expected outcome (decoded value, or refused), is replayed by `rs/moq-net` and `js/net` tests. It starts from the fuzz regressions in `rs/moq-net/fuzz/regressions` plus hand cases for every difference this audit found: the lite-01/02 ANNOUNCE_INIT size and count budget (JS allows 64 MiB and checks the announce budget only after building the array), group sequences at 2^64 (`checkSequence` accepts them), and a pinned server version the client did not offer (`accept.ts`).
+- JS parses a dial target once into a typed endpoint (scheme, host as an IP or a name, port), the way `rs/moq-net/src/reconnect/redirect.rs` does, and GOAWAY classification, redirect checks, dialing and log redaction all use it. Today `isLocal` (`js/net/src/connection/goaway.ts`) reads the opaque `moql:` host, so `127.1`, `0x7f000001` and `2130706433` pass as non-local while `dialable()` turns them into 127.0.0.1, which lets a relay steer a `redirect: "follow"` client and its tokens to loopback. `redact` logs `null/<path>` for `moql:` URLs, path tokens included.
+- `open.ts` `patience` treats an RTT of 0 as unknown.
 
 ## Plan
 
-Found by the 2026-11-07 invariant audit (js-2, js-5 to js-9). Tests for each, including the three loopback spellings. js-1 (announce queue growth) is already [JS announced coalescing](/quest/m3/js-announced-coalesce.md).
+Found by the 2026-11-07 invariant audit (js-2, js-5 to js-9).
+
+Decided 2026-11-07 (maintainer, invariant-audit root causes): the cause is two hand-written decoders with no shared inputs; the corpus makes any divergence a failing test on both sides. Pick the corpus location and format to suit both test runners (a directory of JSON or hex cases is the obvious start). The single-implementation route stays [Evaluate WASM-to-JS for @moq/net](/quest/m5/rs2ts-wasm2js.md). js-1 (announce queue growth) is [JS announced coalescing](/quest/m3/js-announced-coalesce.md).

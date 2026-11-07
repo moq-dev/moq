@@ -39,3 +39,7 @@ Also sweep `js/qmux/src/recv.ts` and `js/qmux/src/credit.ts`:
 [moq-dev/moq#8136](https://github.com/moq-dev/moq/pull/8136) and
 [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088) also edit
 `session.ts`. Expect merge conflicts.
+
+## Related
+
+- [JS qmux streams follow QUIC's per-stream state machine](/quest/m0/qmux-js-credit.md) - its stream states subsume the `recv.ts` end flags; sweep `recv.ts` on top of it

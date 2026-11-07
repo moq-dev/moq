@@ -153,12 +153,23 @@ skipped the timing report. A TERM landing after a lane forked but before
 hung. The exit trap now waits again, and cancellation reads the job table,
 fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
 
+moq-gst's sink-restart pad test caught a real source bug: a track that failed on
+an instance still up, such as a relay's copy cut off as its publisher's session
+closed, left no finished record, so the final catalog snapshot started the
+rendition again and replayed a group on its held pad. A failure now counts as
+the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160).
+
 `js/net`'s lite-07 relative-start integration test, which failed once on main in
 [moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run,
 read a start of 0 when the newest group landed before the reader asked: its
 window had yet to settle the relative anchor, so it asked a fill from group 0.
 `start()` now settles the window first, as the Rust `poll_start` does, fixed by
 [moq-dev/moq#8197](https://github.com/moq-dev/moq/pull/8197).
+
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s
+http:// fingerprint tests, whose slow real fetch lets the WebTransport hedge
+timer fire on the host clock, seen in
+[moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163)'s CI.
 
 Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
 `js/net`'s lite-07 empty-window reply test, which fails on main 12/200 under
@@ -171,5 +182,5 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
+- [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
 - [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
