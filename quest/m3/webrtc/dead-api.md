@@ -10,9 +10,10 @@ tests; dead upstream API is deleted.
 Planned 2026-11-07 (maintainer, /quest-complete), a follow-up of
 [moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163). It waits on
 the rind and clock quests, since both reshape the seams moq-webrtc calls
-through. Start from the compiler's dead-code report with the vendored
-modules private, then remove what remains unreached, keeping upstream's
-tests for what stays.
+through. The vendored tree opens with `#![allow(warnings, reason = "vendored
+upstream code")]` (`rs/moq-webrtc/src/vendor/mod.rs`), so first narrow that
+allow to let `dead_code` fire, then delete what the report shows unreached,
+keeping upstream's tests for what stays.
 
 Public API: none. Wire: none.
 

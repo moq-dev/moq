@@ -3,8 +3,8 @@
 ## Goal
 
 The vendored `sctp_proto` and str0m's SCTP glue compile only with
-moq-webrtc's data-channel feature, so a WHIP/WHEP-only build has no SCTP
-code in its tree.
+moq-webrtc's `p2p` feature (its data-channel transport), so a WHIP/WHEP-only
+build has no SCTP code in its tree.
 
 ## Plan
 
@@ -14,8 +14,8 @@ the stack but still compiles SCTP into every build. The epic's settled
 decision ("SCTP stays ... but compiles only with the data-channel feature")
 gets this owner. Gate the modules and the str0m paths that reach them,
 and add a check, in the feature matrix `just rs features` runs, that a
-build without the data-channel feature neither compiles nor links
-`sctp_proto`.
+build without `p2p` neither compiles nor links `sctp_proto`. The feature
+keeps its name.
 
 Public API: none. Wire: none.
 

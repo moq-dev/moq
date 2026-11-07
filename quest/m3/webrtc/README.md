@@ -25,7 +25,7 @@ Decided 2026-10-30 with the maintainer (planning interview), after the str0m wor
 - [Several bandwidth lines per media section](/quest/m3/webrtc/sdp-bandwidth.md) - answers carry both `b=TIAS` and `b=AS` without splicing
 - [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md) - DTLS flights start once ICE nominates a pair, so a late ICE path can't exhaust them
 - [The stack takes kio clock time](/quest/m3/webrtc/clock.md) - the vendored code takes `kio::clock::Instant`, so sim tests drive it directly
-- [WHIP/WHEP builds carry no SCTP](/quest/m3/webrtc/sctp-feature.md) - SCTP compiles only with the data-channel feature
+- [WHIP/WHEP builds carry no SCTP](/quest/m3/webrtc/sctp-feature.md) - SCTP compiles only with the `p2p` feature
 - [The vendored stack keeps only what browsers negotiate](/quest/m3/webrtc/browser-only.md) - PSK suites, `ccm`, and anything else no browser uses are gone
 - [The vendored stack exposes only what moq-webrtc calls](/quest/m3/webrtc/dead-api.md) - dead upstream API is deleted once rind and clock settle the seams
 
