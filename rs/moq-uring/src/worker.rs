@@ -1201,7 +1201,7 @@ mod tests {
 
 	#[test]
 	fn spawned_tasks_run() {
-		let Some(mut worker) = worker() else { return };
+		let Some((mut worker, clock)) = manual() else { return };
 		let handle = worker.handle();
 		let flag = Rc::new(std::cell::Cell::new(0));
 
@@ -1211,13 +1211,22 @@ mod tests {
 				flag.set(flag.get() + index + 1);
 			});
 		}
-		// Spawned tasks run even while the main future pends on a timer.
+		// Spawned tasks run even while the main future pends on a timer, which only
+		// fires once the worker has parked on it and the clock is advanced.
+		let parks = handle.metrics();
+		let advancer = std::thread::spawn(move || {
+			while parks.snapshot().parks == 0 {
+				std::hint::spin_loop();
+			}
+			clock.advance(Duration::from_millis(10));
+		});
 		let handle2 = handle.clone();
 		worker
 			.block_on(async move {
 				Deadline::after(&handle2, Duration::from_millis(10)).wait().await;
 			})
 			.unwrap();
+		advancer.join().unwrap();
 		assert_eq!(flag.get(), 6);
 	}
 
