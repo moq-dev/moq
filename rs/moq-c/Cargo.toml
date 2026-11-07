@@ -33,8 +33,8 @@ moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, features = ["quic", "websocket", "tcp", "uds"] }
 # Select the NVIDIA and VAAPI hardware codecs explicitly because workspace
-# defaults are off. The hardware backends dlopen their driver; `vaapi` also runs
-# bindgen, so Linux builds need libclang. The software fallback is `openh264`.
+# defaults are off. The hardware backends dlopen their driver, so neither needs
+# anything on the build host. The software fallback is `openh264`.
 moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 # Blocking on `encode::Sink` from the synchronous C entry points; see
 # `video::block_on` for why not a tokio helper.
