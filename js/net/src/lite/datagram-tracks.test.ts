@@ -455,10 +455,8 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
-// Quarantined: the end needs host tasks under load, so the close aborts the track.
-// Investigation: quest/m0/test-flakes-2/datagram-end-close.md.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	test.skip(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
