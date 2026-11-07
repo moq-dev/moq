@@ -130,7 +130,7 @@ impl Line {
 	fn leave(&mut self, key: Key) {
 		let was_head = self.head() == Some(key);
 		self.waiting.remove(&key);
-		// Whichever open the credit reaches, one fewer open is owed a reset's credit.
+		// Never more resets owed than opens left to owe them to.
 		self.resets = self.resets.min(self.waiting.len());
 		if was_head {
 			self.wake_head();
@@ -182,9 +182,10 @@ impl Lines {
 	}
 
 	/// Reset the lowest-ranked open group stream below each waiting open not yet owed a reset,
-	/// unless the transport reports credit left, so the open waits on something else.
+	/// unless the transport reports it refused no open, so the open waits on something else,
+	/// such as a WebTransport header.
 	fn make_room(&self, line: &mut Line) {
-		if boxed::stream_credit(&self.transport, Dir::Uni).is_some_and(|credit| credit.available > 0) {
+		if boxed::stream_credit(&self.transport, Dir::Uni).is_some_and(|credit| !credit.blocked) {
 			return;
 		}
 		let owed: Vec<Rank> = line.waiting.keys().skip(line.resets).map(|key| key.rank.0).collect();
@@ -313,6 +314,10 @@ impl Open {
 			return Poll::Pending;
 		};
 		self.place = None;
+		// Whichever open the credit reaches, a reset's credit may be the one it took.
+		if res.is_ok() {
+			line.resets = line.resets.saturating_sub(1);
+		}
 		// Whoever is next may find credit left over, or the same failure.
 		line.leave(key);
 		Poll::Ready(res)
@@ -578,6 +583,49 @@ mod tests {
 		drop((lowest, streams));
 		assert!(matches!(open(&mut high, 5), Poll::Ready(Ok(_))));
 		assert!(matches!(open(&mut next, 4), Poll::Ready(Ok(_))));
+	}
+
+	/// A reset's credit taken by a later, higher open leaves the open that reset still owed
+	/// one, so the next open to arrive can make room again.
+	#[test]
+	fn credit_taken_by_another_open_is_owed_again() {
+		use super::super::{memory, poll::RecvStream as _, poll::Session as _};
+
+		let (a, b) = memory::pair(memory::Config {
+			max_concurrent_uni_streams: Some(1),
+			..Default::default()
+		});
+		let session = boxed::Session::new(a);
+		let waiter = kio::Waiter::noop();
+		let open = |open: &mut Open, priority| {
+			session.poll_open_group(open, &waiter, SendOptions { group: None, priority }, 7)
+		};
+		let drain = || {
+			let Poll::Ready(Ok(mut recv)) = b.poll_accept_uni(&waiter) else {
+				panic!("the peer accepts the stream");
+			};
+			while let Poll::Ready(Ok(Some(_))) = recv.poll_read_chunk(&waiter, 16) {}
+		};
+
+		let Poll::Ready(Ok(low)) = open(&mut Open::default(), 1) else {
+			panic!("credit is free");
+		};
+		let mut first = Open::default();
+		assert!(open(&mut first, 5).is_pending());
+		assert!(session.open_streams().is_empty());
+		drop(low);
+		drain();
+
+		let Poll::Ready(Ok(_taken)) = open(&mut Open::default(), 6) else {
+			panic!("the higher open takes the returned credit");
+		};
+		let mut last = Open::default();
+		assert!(open(&mut last, 7).is_pending());
+		assert!(
+			session.open_streams().is_empty(),
+			"the open that reset is owed credit again"
+		);
+		drop(first);
 	}
 
 	/// Ranked as the transport sends: outside every group before any group, then by priority.

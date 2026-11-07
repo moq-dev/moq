@@ -38,6 +38,8 @@ interface Waiting<T> {
 	reject: (err: unknown) => void;
 	/** Aborted once the open leaves the line, ending its wait to make room. */
 	left: AbortController;
+	/** Whether it has waited long enough to make room. */
+	impatient: boolean;
 }
 
 /** What a line resets to make room with, once an open has waited long enough. */
@@ -97,7 +99,7 @@ class Line<T> {
 
 		let waiting!: Waiting<T>;
 		const ticket = new Promise<T>((resolve, reject) => {
-			waiting = { rank: current, resolve, reject, left: new AbortController() };
+			waiting = { rank: current, resolve, reject, left: new AbortController(), impatient: false };
 		});
 		this.#waiting.push(waiting);
 		if (this.#room) void this.#impatient(this.#room, waiting);
@@ -146,7 +148,7 @@ class Line<T> {
 	#remove(index: number): Waiting<T> {
 		const [left] = this.#waiting.splice(index, 1);
 		left.left.abort();
-		// Whichever open the credit reaches, one fewer open is owed a reset's credit.
+		// Never more resets owed than opens left to owe them to.
 		this.#resets = Math.min(this.#resets, this.#waiting.length);
 		return left;
 	}
@@ -161,16 +163,22 @@ class Line<T> {
 			// Left the line first.
 			return;
 		}
+		waiting.impatient = true;
 		this.#makeRoom(room);
 	}
 
-	/** Reset the lowest open group stream below each waiting open not yet owed a reset. */
+	/**
+	 * Reset the lowest open group stream below each waiting open not yet owed a reset that has
+	 * waited long enough.
+	 */
 	#makeRoom(room: Room) {
 		// The highest rank first, and the earliest arrival among equals.
 		const owed = this.#waiting
-			.map((waiting) => waiting.rank())
-			.sort((a, b) => b - a)
-			.slice(this.#resets);
+			.map((waiting) => ({ rank: waiting.rank(), impatient: waiting.impatient }))
+			.sort((a, b) => b.rank - a.rank)
+			.slice(this.#resets)
+			.filter((waiting) => waiting.impatient)
+			.map((waiting) => waiting.rank);
 		const open = room.streams.list();
 		for (const rank of owed) {
 			const lowest = open.shift();
@@ -197,6 +205,8 @@ class Line<T> {
 			this.#spare.push(admitted);
 			return;
 		}
+		// Whichever open the credit reaches, a reset's credit may be the one it took.
+		this.#resets = Math.max(this.#resets - 1, 0);
 		const next = this.#remove(best);
 		next.resolve(this.#handed(admitted, order));
 	}

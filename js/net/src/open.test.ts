@@ -127,3 +127,34 @@ test("an open waiting a round trip resets the lowest stream below it, one per wa
 		installed.close();
 	}
 });
+
+test("an open makes room only once it has waited a round trip itself", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { client, server } = qmuxPair(1n);
+	try {
+		const low = await openGroup(client, 1);
+		await low.write(new Uint8Array(16));
+		const wait = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+
+		const below = Promise.withResolvers<void>();
+		const pending = Writer.tryOpen(client, { version, sendOrder: 0, cancel: below.promise, group: true });
+		await wait(50);
+		const high = openGroup(client, 5);
+		await wait(50);
+		expect(orders(client)).toEqual([1]);
+		await wait(50);
+		expect(orders(client)).toEqual([]);
+
+		below.resolve();
+		expect(await pending).toBeUndefined();
+		const incoming = server.incomingUnidirectionalStreams.getReader();
+		const { value } = await incoming.read();
+		await value?.cancel();
+		expect((await high).sendOrder).toBe(5);
+	} finally {
+		client.close();
+		server.close();
+		installed.close();
+	}
+});
