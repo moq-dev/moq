@@ -825,6 +825,12 @@ impl Serve {
 			);
 		}
 		if let Some(path) = self.listen.strip_prefix("unix:") {
+			// A unix URL carries no userinfo for a client to send the secret from.
+			if self.listen_secret.is_some() {
+				anyhow::bail!(
+					"--listen-secret guards a TCP listener; a unix socket is guarded by its file permissions"
+				);
+			}
 			return Ok(Listen::Unix(path.into()));
 		}
 		let addr: SocketAddr = self
@@ -1430,6 +1436,18 @@ mod tests {
 			serve(&["moq", "auth", "serve", "--listen", "unix:/run/moq-auth.sock"]).listener(),
 			Ok(Listen::Unix(path)) if path == std::path::Path::new("/run/moq-auth.sock")
 		));
+		let err = serve(&[
+			"moq",
+			"auth",
+			"serve",
+			"--listen",
+			"unix:/run/moq-auth.sock",
+			"--listen-secret",
+			"secret.txt",
+		])
+		.listener()
+		.unwrap_err();
+		assert!(err.to_string().contains("unix socket"), "{err}");
 		assert!(
 			serve(&["moq", "auth", "serve", "--listen", "nowhere"])
 				.listener()

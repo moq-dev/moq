@@ -84,9 +84,10 @@ Or you can sign as a CLI
 moq-auth sign --key "root.jwk" \
   --root "rooms/meeting-123" \
   --subscribe "**" \
-  --publish "alice/**" \
-  --expires 1703980800 > "alice.jwt"
+  --publish "alice/**" > "alice.jwt"
 ```
+
+The token expires in an hour unless `--ttl`, `--expires`, or `--unbounded` says otherwise; `moq auth serve` refuses one without an expiry unless run with `--allow-unbounded-tokens`.
 
 ### Verifying
 
