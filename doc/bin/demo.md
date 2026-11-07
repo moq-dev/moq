@@ -41,8 +41,8 @@ What it demonstrates:
 
 - **On-demand encoding.** Emulation and encoding pause when the last viewer leaves and resume with a keyframe when one arrives. No timers, just subscription state.
 - **Discovery by prefix.** Game sessions appear under `boy/game/`. No control plane.
-- **Sockets.** Each emulator runs a [socket](/concept/socket) endpoint named for its game, and each viewer dials it from an endpoint with a random id. Button presses go up as messages on the viewer's own session, and the emulator answers each with that viewer's latency. A `status` track comes down to everyone with the held buttons and player count. Same relay, same protocol as the media. Sockets need `moq-lite-07-wip`, which is opt-in, on every hop, so the local relay enables it.
-- **Split trust.** In production only the server publishes games and their endpoints, while anonymous viewers may publish only `viewer-*` endpoints.
+- **Sockets.** Each emulator runs a [socket](/concept/socket) server endpoint named for its game, and each viewer dials it from a client endpoint with a random id. Button presses go up as messages on the viewer's own session, and the emulator answers each with that viewer's latency. A `status` track comes down to everyone with the held buttons and player count. Same relay, same protocol as the media. Sockets need `moq-lite-07-wip` or moq-transport on every hop. The emulator and viewer offer `moq-lite-07-wip`, which is opt-in, so the local relay enables it.
+- **Split trust.** In production only the server publishes games and their server endpoints, while anonymous viewers may publish only client endpoints.
 
 Code: [`rs/moq-boy`](https://github.com/moq-dev/moq/tree/main/rs/moq-boy) (emulator
 and publisher), [`js/moq-boy`](https://github.com/moq-dev/moq/tree/main/js/moq-boy)

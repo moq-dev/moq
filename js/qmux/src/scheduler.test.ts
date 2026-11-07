@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
-import { SendScheduler, type SendSink } from "./scheduler.ts";
+import { BacklogSink, SendScheduler, type SendSink } from "./scheduler.ts";
 
 /** A sink that starts backpressured; `release()` admits exactly one write. */
 class GatedSink implements SendSink {
@@ -54,6 +54,10 @@ class GatedSink implements SendSink {
 	wantsMore(): boolean {
 		return this.#admits > 0;
 	}
+
+	async flush(): Promise<void> {}
+
+	readonly closed = new Promise<void>(() => {});
 }
 
 /** Yield to the event loop `n` times to let queued work run. */
@@ -310,5 +314,81 @@ describe("SendScheduler", () => {
 		await until(() => sink.written.length === 2);
 
 		expect(activity).toBe(2);
+	});
+});
+
+/** A writable that counts writes like the native `WebSocketStream`, completing each only on `complete()`. */
+function heldWritable() {
+	const written: number[] = [];
+	const held: { resolve: () => void; reject: (err: Error) => void }[] = [];
+	const writable = new WritableStream<Uint8Array>({
+		write: (chunk) =>
+			new Promise<void>((resolve, reject) => {
+				written.push(chunk.byteLength);
+				held.push({ resolve, reject });
+			}),
+	});
+	return { writable, written, held };
+}
+
+describe("BacklogSink", () => {
+	test("only bytes past the mark are backpressure, not a write in flight", async () => {
+		const { writable, held } = heldWritable();
+		const sink = new BacklogSink(writable, 100);
+
+		await sink.write(new Uint8Array(60));
+		expect(sink.wantsMore()).toBe(true);
+		// Handed over at once, queued in the writable behind the first.
+		const second = sink.write(new Uint8Array(60));
+		expect(sink.wantsMore()).toBe(false);
+
+		let accepted = false;
+		void second.then(() => {
+			accepted = true;
+		});
+		await tick(3);
+		expect(accepted).toBe(false);
+		held.shift()?.resolve();
+		await until(() => accepted);
+		expect(sink.wantsMore()).toBe(true);
+	});
+
+	test("raising the mark admits a parked write", async () => {
+		const { writable } = heldWritable();
+		const sink = new BacklogSink(writable, 10);
+		let accepted = false;
+		void sink.write(new Uint8Array(20)).then(() => {
+			accepted = true;
+		});
+		await tick(3);
+		expect(accepted).toBe(false);
+		sink.setHighWaterMark(20);
+		await until(() => accepted);
+	});
+
+	test("a failed write fails the next write, ready, and flush", async () => {
+		const { writable, held } = heldWritable();
+		const sink = new BacklogSink(writable, 100);
+		await sink.write(new Uint8Array(1));
+		const flushed = sink.flush();
+		held.shift()?.reject(new Error("socket gone"));
+		await expect(flushed).rejects.toThrow("socket gone");
+		expect(sink.wantsMore()).toBe(false);
+		await expect(sink.ready()).rejects.toThrow("socket gone");
+		await expect(sink.write(new Uint8Array(1))).rejects.toThrow("socket gone");
+	});
+
+	test("close resolves only once the close frame's write completes", async () => {
+		const { writable, written, held } = heldWritable();
+		const sched = new SendScheduler(new BacklogSink(writable, 100));
+		let done = false;
+		void sched.close(new Error("closed"), frame(9)).then(() => {
+			done = true;
+		});
+		await until(() => written.length === 1);
+		await tick(3);
+		expect(done).toBe(false);
+		held.shift()?.resolve();
+		await until(() => done);
 	});
 });
