@@ -1688,16 +1688,7 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						if (!(await drained())) {
-							// A lite-07 subscriber FINs once it read the finished track's tail, or once
-							// it wants nothing more. Either way the reply FIN goes out now and the groups
-							// still waiting for a slot are cancelled, but an opened stream may be a final
-							// group whose FIN is still being acknowledged, so a draining close still
-							// waits for it; a reader that wants none of it resets it.
-							if (keepsSubscribeOpen(this.version))
-								void this.owe(Promise.allSettled(groups).then(() => undefined));
-							return false;
-						}
+						if (!(await drained())) return false;
 						if (pendingDrops.length > 0) continue;
 						// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: an update may still ask
 						// for the ended track's history, and the subscriber FINs once it wants nothing
@@ -1781,6 +1772,13 @@ export class Publisher {
 			}
 		} finally {
 			if (!finished) unsubscribe();
+			// A lite-07 subscriber FINs once it read the finished track's tail, or once it wants
+			// nothing more, even while a reply is still being written. Either way the groups still
+			// waiting for a slot are cancelled, but an opened stream may be a final group whose FIN
+			// is still being acknowledged, so a draining close still waits for it; a reader that
+			// wants none of it resets it.
+			if (keepsSubscribeOpen(this.version) && groups.size > 0)
+				void this.owe(Promise.allSettled(groups).then(() => undefined));
 			priority.close();
 		}
 	}
@@ -2229,6 +2227,7 @@ export class Publisher {
 					version: this.version,
 					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned]),
+					group: true,
 				});
 			} finally {
 				opened.resolve();
