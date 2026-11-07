@@ -2790,9 +2790,12 @@ export class Subscriber {
 	close(err: Error = new SessionError(SessionCode.Cancel)) {
 		this.#closed.abort(err);
 
-		for (const { track, finished } of this.#subscribes.values()) {
+		for (const { track, finished, end, datagrams } of this.#subscribes.values()) {
 			if (finished) track.finish();
 			track.abort(err);
+			// Lite-05/06: the stream track's end is its datagrams' end. An abort after the declared
+			// end settled ends it cleanly, even while the FIN that would finalize it is in flight.
+			if (datagrams && end !== undefined && hooks.trackReleased(track).peek() === null) datagrams.ended = true;
 		}
 
 		this.#subscribes.clear();

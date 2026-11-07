@@ -1065,7 +1065,10 @@ mod tests {
 	/// Its subscribers must see that cause, rather than an unfinished producer drop.
 	#[tokio::test(start_paused = true)]
 	async fn cancelling_an_idle_rung_reports_cancel() {
-		let (rung, _source, _retire) = idle_rung();
+		let (rung, source, _retire) = idle_rung();
+		// The subscriber below starts the live path. Without a source track its feed fails
+		// on its own and ends the serve before the abort lands.
+		let video = source.create_track("video", None).unwrap();
 		let output = moq_net::broadcast::Info::default().produce();
 		let mut dynamic = output.requests();
 		let view = output.consume();
@@ -1073,6 +1076,10 @@ mod tests {
 		let request = dynamic.requested_track().await.unwrap();
 		let running = tokio::spawn(serve(rung, request));
 		let mut track = subscribing.await.unwrap();
+		// The track is admitted before `serve` is polled; the feed's subscription proves the
+		// live path is parked waiting for media rather than never started.
+		let mut demand = video.demand();
+		while demand.wanted_changed().await.unwrap().is_none() {}
 		running.abort();
 		assert!(running.await.unwrap_err().is_cancelled());
 		assert!(matches!(track.recv_group().await, Err(moq_net::Error::Cancel)));

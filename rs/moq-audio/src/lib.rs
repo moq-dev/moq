@@ -33,9 +33,10 @@
 //!   output device and mixes the `playback::Sink`s registered with it, so one
 //!   device serves every track in a call. Requires the `playback` feature, so
 //!   these names are unlinked here too.
-//! - `bus` mixes any number of PCM sources, each with its own gain, mute, and
-//!   meter, into one program feed that the caller reads on its own clock: a
-//!   studio's program audio. Behind the default-on `bus` feature.
+//! - `bus` mixes any number of PCM sources, each with its own gain, mute, pan,
+//!   sync delay, and meter, into several mixes advanced on the caller's own
+//!   clock: a studio's program audio and its return feeds. Behind the
+//!   default-on `bus` feature.
 //! - `aec` keeps the speaker out of the microphone, which is what a conference
 //!   on a laptop needs to not send itself back. [`aec::Processor`] processes PCM
 //!   supplied by any audio stack without enabling device features. The `aec`
