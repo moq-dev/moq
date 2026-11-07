@@ -45,7 +45,7 @@
 //! Enabled by the default-on `bus` feature; `Bus::capture` also needs `capture`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::f32::consts::{FRAC_PI_4, SQRT_2};
+use std::f32::consts::FRAC_PI_4;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, ready};
@@ -553,6 +553,10 @@ impl Source {
 fn apply_pan(block: &mut [f32], start: f32, target: f32, mono: bool) {
 	if start == target {
 		let [left, right] = pan_gains(target, mono);
+		// A centered stereo source passes through bit-exact.
+		if left == 1.0 && right == 1.0 {
+			return;
+		}
 		for frame in block.as_chunks_mut::<2>().0 {
 			frame[0] *= left;
 			frame[1] *= right;
@@ -575,12 +579,16 @@ fn apply_pan(block: &mut [f32], start: f32, target: f32, mono: bool) {
 /// curve, scaled to unity at center, turns the far side down and leaves the
 /// near side alone.
 fn pan_gains(pan: f32, mono: bool) -> [f32; 2] {
-	let (right, left) = ((pan + 1.0) * FRAC_PI_4).sin_cos();
 	if mono {
-		[left, right]
-	} else {
-		[(left * SQRT_2).min(1.0), (right * SQRT_2).min(1.0)]
+		let (right, left) = ((pan + 1.0) * FRAC_PI_4).sin_cos();
+		// `cos` of a rounded π/2 is a hair below zero.
+		return [left.max(0.0), right.max(0.0)];
 	}
+	// The mono law's far side over its center gain, `√2·cos(π/4 + x)`,
+	// written as `cos x - sin x` so center is exactly unity.
+	let (sin, cos) = (pan.abs() * FRAC_PI_4).sin_cos();
+	let far = (cos - sin).max(0.0);
+	if pan < 0.0 { [1.0, far] } else { [far, 1.0] }
 }
 
 /// One mix: the sum of the sources routed into it.
