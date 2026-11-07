@@ -48,6 +48,3 @@ Also sweep:
   invalid attributes.
 - `js/moq-boy/src/game.ts`: a command sent while disconnected replays on
   reconnect.
-
-[moq-dev/moq#8142](https://github.com/moq-dev/moq/pull/8142) (room audio
-controls) also edits `local.ts`. Expect a merge conflict, not an overlap.

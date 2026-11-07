@@ -56,10 +56,5 @@ Also sweep:
   `held`, where a half-start leaves buffers queued.
 - `vaapi.rs` and `vpx.rs`: the small flag pairs.
 
-[moq-dev/moq#8013](https://github.com/moq-dev/moq/pull/8013) (VAAPI) and
-[moq-dev/moq#7916](https://github.com/moq-dev/moq/pull/7916) also edit
-`decode/decoder.rs`, so expect merge conflicts.
-
-## Related
-
-- [VAAPI encode and decode](/quest/m1/video-vaapi.md) - edits the same decoder front end
+[moq-dev/moq#7916](https://github.com/moq-dev/moq/pull/7916) also edits
+`decode/decoder.rs`, so expect a merge conflict.

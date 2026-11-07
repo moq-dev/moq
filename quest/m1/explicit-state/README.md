@@ -5,7 +5,8 @@
 Every lifecycle that an audit on 2026-11-07 found encoded implicitly is one
 explicit enum or union, in Rust, JS, and the bindings. Each variant carries
 its own data, so the combinations that caused bugs can't be represented. The
-11 reachable bugs the audit found are fixed by these redesigns, and review
+bugs the audit found in the 11 lifecycles that can reach an invalid
+combination, listed in each child, are fixed by these redesigns, and review
 and agent rules keep new instances out.
 
 An implicit state machine here is a lifecycle encoded as several flags,
@@ -38,8 +39,9 @@ Decided 2026-11-07 (maintainer):
   quests beside a separate redesign epic, or widening each bug quest to its
   own module only. The user-visible fixes therefore land with their
   redesigns.
-- ✅ Milestone m1. A child whose fix breaks a published surface marks its PR
-  `!`, says how to migrate, and moves to m2 under the questline's rule. Not
+- ✅ Milestone m1. A child whose design breaks a published surface leaves
+  this epic and becomes its own m2 quest, since an epic joins the milestone
+  its outcome needs; its PR marks its title `!` and says how to migrate. Not
   chosen: m3 after the cut, or small fixes in m1 with the redesigns in m3.
   This replaces the earlier split from the same session (user-visible fixes
   in m1, internal ones in m3).
