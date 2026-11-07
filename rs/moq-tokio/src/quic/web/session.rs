@@ -138,7 +138,7 @@ impl Session {
 		match close_info {
 			Some((code, reason)) => {
 				let err = Error::Closed(code, reason.clone());
-				if !close.set(err.into()) {
+				if !close.set(err) {
 					return;
 				}
 				conn.close(http3_code, &reason);
