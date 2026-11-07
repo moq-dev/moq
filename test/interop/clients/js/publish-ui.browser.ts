@@ -1072,7 +1072,7 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 				["moq-watch", "backend", "gpu", "backend", "auto"],
 				["moq-watch", "visible", "sometimes", "visible", "never"],
 				["moq-watch", "delay", "30", "delay", "instant"],
-				["moq-watch", "buffer", "30", "buffer", 0],
+				["moq-watch", "lookahead", "30", "lookahead", 0],
 				["moq-watch", "catalog-format", "guess", "catalogFormat", "manual"],
 				["moq-publish", "source", "monitor", "source", undefined],
 				["moq-publish", "preview", "mse", "preview", "none"],
@@ -1104,6 +1104,26 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 		});
 		for (const result of results)
 			expect(result).toEqual({ ...result, refused: true, threw: true, recovered: true });
+		// `buffer` was renamed to `lookahead`: the old attribute reports the rename until removed.
+		const renamedBuffer = await page.evaluate(() => {
+			const errors: string[] = [];
+			const listener = (event: ErrorEvent) => {
+				errors.push(event.message);
+				event.preventDefault();
+			};
+			window.addEventListener("error", listener);
+			const watch = document.createElement("moq-watch");
+			watch.setAttribute("buffer", "30s");
+			document.body.append(watch);
+			const refused = !watch.connection.enabled.peek() && errors.some((error) => error.includes("lookahead"));
+			watch.removeAttribute("buffer");
+			const recovered = watch.connection.enabled.peek();
+			watch.remove();
+			watch.signals.close();
+			window.removeEventListener("error", listener);
+			return { refused, recovered };
+		});
+		expect(renamedBuffer).toEqual({ refused: true, recovered: true });
 		const blocked = await page.evaluate(() => {
 			const watch = document.createElement("moq-watch");
 			watch.setAttribute("backend", "bad");
