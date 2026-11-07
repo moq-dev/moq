@@ -146,6 +146,16 @@ by a proven key, every remaining attack stays inside the forger's grant, with
 no grant field, no issuer-coordinated labels, and support for token-less
 admission.
 
+Added 2026-11-07 (maintainer, /quest-plan from the API shape audit), for
+the PR that lands this ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)):
+
+- An origin has one identity on both wires, seeded from `Config.hop`, not a
+  hop ID beside a separate random route identity.
+- `Cost::{MAX, DRAIN}` become `pub(crate)`. A drained route is the lowest
+  preference, never a saturated metric ("drain is a preference state", in
+  the [epic](/quest/m2/cluster-routing/README.md)), so sessions stop
+  stamping `Cost::DRAIN` on GOAWAY, including on moq-transport.
+
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - the contract

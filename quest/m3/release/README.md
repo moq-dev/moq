@@ -41,6 +41,7 @@ production stability proven merely because upstream artifacts published.
 - [Retire libmoq](/quest/m3/release/libmoq-retire.md) - cleanup only after that publication
 - [Retire hand-written C](/quest/m3/release/c-retire.md) - delete the hand-written crate once generated C publishes
 - [Retire the web-transport JS qmux](/quest/m3/release/qmux-js-retire.md) - once `@moq/qmux` publishes from `js/qmux`, deprecate `@moq/web-socket-stream` and stop the second publisher
+- [Retire the web-transport Rust qmux](/quest/m3/release/qmux-rs-retire.md) - once `qmux` publishes from `rs/qmux`, moq-dev/web-transport stops publishing the crate
 - [moq.sh deployment](/quest/m3/release/moq-sh-deploy.md) - verify its release-triggered publication
 - [Runner client bump](/quest/m3/release/runner-client-bump.md) - the upstream interop runner's Rust client moves to the published moq-tokio, so it stops stamping every object
 - [Smoke clients use request and follow](/quest/m3/release/smoke-bindings-rename.md) - condition: a binding release ships the renames; then the native smoke clients move to them
