@@ -134,6 +134,22 @@ recorded only sequencing.
   stamps from its own clock. `Timed<P>` moves from moq-net's root to
   moq-json, whose producers and readers are its only users, and its `at`
   becomes required under the rule above.
+- **One anchor rule.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ collapse `Anchor` to `{Oldest,
+  Relative(n), Time(ts)}` with every end inclusive (rejected: keep
+  `Absolute` and make it inclusive; only add `Oldest`). Today an `Absolute`
+  end is exclusive while `Relative` and `Time` ends include their group
+  (`rs/moq-net/src/model/subscription.rs`), and "oldest" is the sentinel
+  `Relative(u64::MAX)`. Once keys are starts, `Absolute(key)` and `Time(ts)`
+  name the same group, so `Absolute` goes; a legacy exclusive end `E` maps
+  to `Time(E - 1)`, since legacy keys pass through. `Oldest` is explicit and
+  encoded the same on every wire (lite-07, lite-06 and earlier, IETF), where
+  today the lite encoder treats any `back > MAX_QUIC` as oldest and the
+  model does not. `Range::groups(RangeBounds<u64>)` and
+  `Subscription::with_range` go. JS's omitted start keeps meaning `Oldest`.
+  This absorbs the deleted anchor-oldest quest (from the 2026-11-07
+  invariant audit, model-4).
+- **Fence what grows after the cut.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `Position` becomes
+  `#[non_exhaustive]`, so byte-holes can add a byte offset without a break.
 - **Open, for whoever starts this, with the maintainer:** how lite-05/06,
   which carry both a sequence and frame timestamps, map on the way out.
 
@@ -181,7 +197,8 @@ Public API: breaking. `group::Info`, `create_group`, `append_group`,
 `Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, and group consumers
 address by start timestamp, every producer write takes a required
 timestamp, untimed tracks become scale-less, `Timestamp::now` is gone, and
-`Timed` is moq-json's.
+`Timed` is moq-json's, and `Anchor` is `{Oldest, Relative, Time}` with inclusive
+ends.
 Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required

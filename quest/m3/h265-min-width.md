@@ -41,6 +41,8 @@ prerequisite inside this quest.
 Public API: maybe a minimum size on the encoder probe in moq-video. Wire:
 none.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the probe stays private, and the typed error names the minimum width. It becomes public only when a consumer asks.
+
 ## Related
 
 - [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - the same AMD hardware run

@@ -1,12 +1,22 @@
-# [L] Robot teleoperation primitive
+# [M] Robot teleoperation conventions
 
 ## Goal
 
-A `moq-robot` crate carries the track shapes and discovery every teleoperated
-machine needs, so an integrator writes an adapter rather than a stack. It is
-the gate for the rest of the questline.
+The track shapes and discovery every teleoperated machine needs are
+documented conventions in `doc/`, built on moq-net and moq-json, that
+[the MAVLink gateway](/quest/m5/teleop-mavlink.md) implements, so an
+integrator writes an adapter rather than a stack. There is no `moq-robot`
+crate. It is the gate for the rest of the questline.
 
 ## Plan
+
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ no `moq-robot` crate (rejected: a generic robot
+crate, too niche for a published library with no second consumer). The
+shapes below become documented conventions, and `moq-mavlink` ships as a
+moq-cli gateway like moq-srt. If a second consumer appears, generalize
+moq-boy's announce-prefix fan-in into moq-net instead of adding a robot
+crate. Where the text below says "the crate", read the conventions and
+their implementation in moq-mavlink.
 
 Decided 2026-10-08: parked in m5. No teleoperation consumer needs the crate
 yet; telemetry beside video needs [data sync](/quest/m3/watch-data-sync.md),

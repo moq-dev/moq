@@ -20,6 +20,8 @@ the binding layer, and keep the encrypting publisher's refusal of a shared or
 explicit epoch. Add a binding test that decrypts a JS-published broadcast and
 the reverse to the interop suite.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the bindings wrap moq-crypto's concrete `broadcast::{Producer, Consumer}` directly, without waiting on [net-wrap](/quest/m5/net-wrap/README.md).
+
 ## Required
 
 - [Rust protected publisher seams](/quest/m5/e2ee/rust-publish.md) - the producer these bindings wrap

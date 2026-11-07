@@ -111,6 +111,10 @@ Timestamp provenance landed in
 [#6150](https://github.com/moq-dev/moq/pull/6150), and the 2^61 - 1
 timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): Required names every quest that may still change lite-07 bytes.
+The explicit `Oldest` anchor rides [time addressing's model](/quest/m2/time-addressing/model.md),
+whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries.
+
 ## Required
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
@@ -119,6 +123,8 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - the job's route inherits the claim's instance, with no new wire message
 - [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
+- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
+- [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
 
 ## Related
 

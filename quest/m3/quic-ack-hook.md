@@ -97,3 +97,5 @@ close.
 Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
 [viewer lag histogram](/quest/m3/qos/lag-histogram.md) and the
 [delivery-delay histogram](/quest/m5/delivery-delay.md).
+
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): no `Option<()>` outcome. Return a named `enum Acked { Delivered, Unsupported }` (or add `fn acks(&self) -> bool` and make the poll a plain `Result`), and use one offset type on both layers.

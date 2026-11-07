@@ -17,6 +17,16 @@ Decided 2026-11-07 (maintainer, invariant-audit planning): reuse is misuse that 
 
 m2 because `append_group`/`create_group` and the origin splice start refusing calls that succeed today, which callers recreating tracks must adapt to (the questline's breaking-change test). The API shape for the explicit seed is the implementer's call; prefer reusing `create_group` with an explicit sequence over a new method. [moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) changes how a job's route continues its claim's instance; build on whichever lands first.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ the high-water mark is in group keys (starts, once time addressing
+lands), and there is no seed method: an application that reuses a name
+passes the start it wants to `create_group` (rejected: a seed API; landing
+before the model and rekeying). Lands with or after
+[time addressing's model](/quest/m2/time-addressing/model.md).
+
+## Required
+
+- [Address groups by timestamp](/quest/m2/time-addressing/model.md) - the high-water mark is a start
+
 ## Related
 
 - [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - instance continuity across a claim's jobs

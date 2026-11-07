@@ -47,5 +47,6 @@ Instances to sweep:
   encoder.
 
 The importer and producer `finish` signatures are public API. A move to
-`finish(self)` is breaking, so if this child takes it, it leaves the epic and
-becomes its own m2 quest under the epic's rule.
+`finish(self)` is breaking, so it is its own m2 quest,
+[finish-self](/quest/m2/finish-self.md) (decided 2026-11-07, maintainer,
+/quest-plan from the API sweep). This child keeps the internal state.

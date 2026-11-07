@@ -64,6 +64,8 @@ is `moq_net::bandwidth::Limit`, which replaces moq-webrtc's
 `rate::{Cap, Limit}` in [gateway-ingest](/quest/m2/gateway-ingest.md)
 (2026-11-07, maintainer, /quest-plan from the API shape audit). Wire: none.
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `whep::Request` itself lands before the cut in [gateway-ingest](/quest/m2/gateway-ingest.md); this quest adds its rate field.
+
 ## Related
 
 - [SRT rate handle](/quest/m3/srt-rate-handle.md) - the same pacing and retransmit charging on SRT

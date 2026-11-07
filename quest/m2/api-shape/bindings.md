@@ -13,8 +13,18 @@
   a free constructor that the caller must then register.
 - Python: `moq.testing` leaves the published wheel; tests import it from the
   source tree.
+- moq-ffi's `MoqVideoSurface` gets `#[non_exhaustive]`: it has one variant,
+  and Android HardwareBuffer, D3D11, and DMA-BUF surfaces are planned in m3.
+  Check any other output-only UniFFI enum an m3 quest plans to grow.
+- Go's `*DecoderOutput` aliases go (from
+  [the OBS adapter](/quest/m3/obs-moq-video/adapter.md)).
+- Dart's wrapper names the route instance accessor `instance()`, as the
+  other bindings do, so [the exporter](/quest/m3/ffi-exporter.md) changes no
+  Dart call site.
 
 ## Plan
+
+Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests): the video surface fence, the Go aliases, and Dart's `instance()`.
 
 Found by the 2026-11-07 API shape audit (bindings); see the
 [epic](/quest/m2/api-shape/README.md). The generated check that each

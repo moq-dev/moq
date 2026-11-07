@@ -40,7 +40,22 @@ its JS and binding mirrors:
   `RouteEvent::Takeover`, un-hide `origin::Consumer::routes`, `Routes`, and
   `RouteEvent`, documented as the relay-level stream that moq-relay and
   downstream relays already consume, and fix `request`'s doc to say what #8063 made it
-  do.
+  do. `RouteEvent` becomes `struct RouteEvent { kind: RouteKind, announce:
+  Announce }` with `enum RouteKind { Start, Update, Restart, End }`,
+  mirroring JS's `{ kind } & Routed`, so callers need no or-pattern and no
+  accessors.
+- `stats::Registry::report` takes an explicit `now`, and
+  `stats::Handle::{refuse, session}` take `#[non_exhaustive]` argument
+  structs with a `new(label, ..)` constructor (named by role, not clashing
+  with `server::Admission`), so [lag-histogram](/quest/m3/qos/lag-histogram.md)
+  and [session-outcome-records](/quest/m3/session-outcome-records.md) add
+  fields instead of breaking moq-net again.
+- `group::MAX_CACHE_BYTES` becomes `pub(crate)`: byte-holes turns it from a
+  size cap into a tail budget, and moq-json's `max_group_bytes` keeps its own
+  32 MiB default.
+- `auth::Grant` gets `#[non_exhaustive]`, since
+  [rate-grant](/quest/m5/rate-grant.md) adds rates to it; callers outside
+  moq-net build it from `Grant::default()`.
 
 ## Plan
 
@@ -49,3 +64,9 @@ the [epic](/quest/m2/api-shape/README.md). Each item is XS except
 `Attempt::client` and `Compression` (S each). `RefusalKind` is a stats-wire
 field, so say in the PR which deployed dashboards read it. If #8063 has not
 merged when this starts, leave the un-hide for a follow-up and say so.
+
+Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests): the `RouteEvent`
+struct, the stats arguments, the cache cap, and `Grant`. The `RouteEvent`
+reshape replaces [moq-dev/moq#7862](https://github.com/moq-dev/moq/pull/7862)'s
+accessors; if its author takes the reshape in that PR, it lands there for
+credit and this item only un-hides.

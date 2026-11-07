@@ -34,6 +34,8 @@ proves recovery end to end.
 
 Public API: whatever knob `@moq/publish` exposes for the rule. Wire: none.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): no new knob. Mirror `moq_mux::rate::Policy`'s rule and constants, and let `enabled` combine with them.
+
 ## Required
 
 - [Padding probes](/quest/m3/probe-padding.md) - the browser's sender, which raises the estimate so a disabled rung can resume

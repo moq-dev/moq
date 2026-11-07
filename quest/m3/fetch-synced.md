@@ -14,3 +14,5 @@ Decided 2026-10-30 (maintainer, follow-up of [moq-dev/moq#7366](https://github.c
 - Tests: a fetch for an unannounced broadcast on a synced origin returns 404 without advancing the clock to the deadline. A fetch whose broadcast is announced after the request but before sync still serves the group. A fetch for an unannounced broadcast while an upstream session hasn't synced yet waits for that sync; an announced broadcast is served without waiting on it.
 
 Public API: none. Wire: none.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): this adds a public method, so its Public API line says so instead of "none".

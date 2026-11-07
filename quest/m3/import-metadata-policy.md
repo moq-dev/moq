@@ -19,3 +19,5 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 - Document the policy once, in moq-mux's import docs, and make both importers' bounds `pub const`s as #7232's are.
 
 Public API: possibly new `pub const` bounds and a shared refusal error in moq-mux. Wire: none.
+
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the policy's bounds are private, with no `pub const` (as [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088) did for `fmp4::MAX_*`).

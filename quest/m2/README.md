@@ -170,6 +170,13 @@ and instants become objects; native playout sync decouples its tracks like
 the browser's; sentinels, moq-video's environment reads, and per-gateway
 ingest setters go; and an epic batches the small fixes per area.
 
+Added 2026-11-07 (maintainer, /quest-plan from an API sweep of the open PRs
+and the remaining quests): the shapes later quests would otherwise break
+after the cut. Public spawning constructors, moq-audio's codec seam,
+consuming `finish`, the new `bus` signatures, the moq-auth iroh variant, and
+the `warmup` contract settle here; growing structs are fenced with
+`#[non_exhaustive]` through the api-shape epic.
+
 Decided 2026-11-05 (maintainer, /quest-audit): blockers rank above the
 quests that require them.
 
@@ -198,9 +205,15 @@ quests that require them.
 - [Native playout sync keeps tracks decoupled](/quest/m2/mux-sync.md) - `moq_mux::timeline` becomes `moq_mux::sync`, and one slow track no longer stalls or moves another
 - [JS time values are types, not numbers](/quest/m2/js-time-types.md) - every public JS duration and instant is a `Clock.Duration` or `Clock.Instant` object, so a unit mistake fails to compile
 - [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
+- [Public constructors spawn nothing, or say why](/quest/m2/spawn-constructors.md) - each public library entry point that spawns returns a driver its caller polls, or is listed as kept
+- [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - `encode` and `decode` return any number of outputs and gain `flush`, as moq-video's do
+- [Finishing consumes the producer](/quest/m2/finish-self.md) - importers and producers take `finish(self)`, so a finished producer cannot be written
+- [Bus writes land at a bus position](/quest/m2/bus-positioned-write.md) - callers sync audio to video without copying the bus's private latency, before the cut first publishes `bus`
+- [A mix-minus removes several sources](/quest/m2/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
+- [Drop moq-auth's iroh transport](/quest/m2/auth-drop-iroh.md) - this breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
+- [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - the catalog's new `warmup` contract is settled before the cut publishes it
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [A recreated or restarted track cannot reuse group sequences](/quest/m2/sequence-reuse.md) - recreating a track or restarting an instance cannot give new content an old group identity unless the app seeds past it, and datagrams are documented as exempt
-- [Subscriptions name the oldest group without a u64::MAX sentinel](/quest/m2/anchor-oldest.md) - `Anchor` gets an explicit oldest variant, decoded the same way on every wire
 - [moq auth serve bounds what a leaked token or public caller can do](/quest/m2/auth-serve-policy.md) - tokens need an `exp` unless the operator opts out, and a public listener authenticates relays
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)

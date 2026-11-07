@@ -63,6 +63,8 @@ Decided in the 2026-10-06 audit: this does not wait on the library
 `capture` defaults. moq-cli's `capture` feature enables `moq-video/capture`
 and `moq-audio/capture` explicitly, and `release` enables `capture`.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the moq-cli feature that enables everything is named `full`, not `release`.
+
 ## Required
 
 - [Audio capture without runtime system libraries](/quest/m3/capture-alsa-link.md) - the microphone path must start without system audio libraries before every distribution can ship it

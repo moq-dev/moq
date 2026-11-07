@@ -23,6 +23,8 @@ behind the `mediacodec` feature and the encode seam.
 - Round-trip regression through the MediaCodec decoder; runtime proof on a
   device or emulator through `just rs android-test`, as in the decode quest.
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [audio-codec-seam](/quest/m2/audio-codec-seam.md) makes moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break.
+
 ## Required
 
 - [MediaCodec decode](/quest/m5/audio-decode-mediacodec.md) - the round-trip regression decodes through it

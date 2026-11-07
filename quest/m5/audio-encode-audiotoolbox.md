@@ -33,6 +33,8 @@ the encode seam as the platform candidate on macOS and iOS.
   duplicates as holes and resets AAC between them. Shift the whole timeline by
   the deficit instead, including the terminal end (found in #4081 review).
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [audio-codec-seam](/quest/m2/audio-codec-seam.md) makes moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break.
+
 ## Required
 
 - [AudioToolbox decode](/quest/m3/audio-decode-audiotoolbox.md) - the round-trip regression decodes through it

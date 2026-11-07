@@ -25,10 +25,20 @@ the previous API audit's final pass, was open, and none of its children
 repeats an item #8088 changes. A child that starts after #8088 merges
 rechecks each item against `main` and drops what is already done.
 
+Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests): fences for
+what later quests grow (`#[non_exhaustive]` on structs and enums m3 to m5
+add to), shapes those quests would otherwise break, and this epic's own
+work: before the cut, run a "public item used only by its definition"
+search over the published crates and remove each hit, starting with
+`moq_tokio::Server::serve_both`, `hang::Catalog::to_json_pretty`, and
+`moq_audio::Format::{is_planar, is_float}`, the shortlist of
+[the dead code audit](/quest/m3/audit-dead-code.md). The audit itself stays
+in m3 for private code.
+
 Rules every child follows:
 
-- Removal beats addition. A public item with no caller in this repository,
-  a known downstream application goes private, unless an m1 or m2 quest plans a
+- Removal beats addition. A public item with no caller in this repository
+  or a known downstream application goes private, unless an m1 or m2 quest plans a
   caller.
 - No serde aliases, refusals, or shims for a spelling `release` never
   shipped.

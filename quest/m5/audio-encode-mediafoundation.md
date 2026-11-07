@@ -18,6 +18,8 @@ behind the encode seam on Windows.
 - Round-trip regression through the Media Foundation decoder; verification on
   a Windows host, since the per-PR CI compiles only.
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [audio-codec-seam](/quest/m2/audio-codec-seam.md) makes moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break.
+
 ## Required
 
 - [AudioToolbox encode](/quest/m5/audio-encode-audiotoolbox.md) - changes `Encoder::encode` to a zero-or-more packet return with a flush, which this backend implements

@@ -35,6 +35,8 @@ state. The maintainer approved planning the fix from #7693's iterate.
 
 Public API: a new decode error in `@moq/json` and `moq-json`. Wire: none.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the consumer resyncs itself. It drops the bad group, resets its frame count and delta base, and counts the skip (optionally a `skipped()` counter), with no new error variant; a terminal error stays terminal, so room and moq-boy need no change.
+
 ## Related
 
 - [Benchmark a Value merge-patch diff for moq-json](/quest/m5/json-value-diff.md) - may replace the Rust diff this consumer applies

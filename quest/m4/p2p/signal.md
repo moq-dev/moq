@@ -85,3 +85,5 @@ never crosses a peer session: a `moq_auth` JWT is a bearer credential, so a
 peer that received one could replay it against the relay. Rejected: relay-issued,
 key-bound peer grants with a possession proof (the earlier plan), until a use
 case needs per-peer scopes.
+
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): each selected or admitted peer takes its own `iceServers` (default: `Peers`' list); `max` and its CLI flag go, and `enabled` stays only as the element attribute, not on `Peers`.

@@ -30,3 +30,5 @@ frame per TCP read, no fill handler.
   before the frame ends, round-trip bytes, half-close each way,
   reset each way, a reader ending `Evicted` surfaced as a reset, and a relay
   restart ending the stream with a typed error.
+
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the `AsyncRead`/`AsyncWrite` adapter lives in moq-tokio, the tokio edge, not beside moq-net's socket module.

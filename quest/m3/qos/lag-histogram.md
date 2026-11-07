@@ -98,6 +98,8 @@ re-exported by `moq-stats`. Wire: the stats JSON gains the egress fields.
 Update `doc/concept/stats.md` and the stats section of
 `doc/bin/relay/config.md`.
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/net](/quest/m2/api-shape/net.md) makes `stats::Registry::report` take `now` and the handle's arguments `#[non_exhaustive]` before the cut, so this adds fields and is not breaking.
+
 ## Required
 
 - [poll_acked on moq-net's send stream](/quest/m3/quic-ack-hook.md) - the

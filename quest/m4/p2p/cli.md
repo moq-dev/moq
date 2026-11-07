@@ -39,6 +39,8 @@ Discovery alone does not initiate a connection.
 
 Docs: a "P2P" section in `doc/bin/cli.md` beside the LAN cluster one.
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): no `max` flag ([signal](/quest/m4/p2p/signal.md)).
+
 ## Required
 
 - [Native pairs over ICE and QUIC](/quest/m4/p2p/native-quic.md) - the native-to-native path

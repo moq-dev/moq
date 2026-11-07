@@ -2,8 +2,12 @@
 
 ## Goal
 
-- moq-audio's `encode::{Control, State, Status}` become private, and
-  `publish_capture` stays the public path.
+- `publish_capture` returns a handle plus a driver in both moq-audio and
+  moq-video, mirroring each other, and moq-audio's `encode::{Control, State,
+  Status}` stop being separate public names. The handle may start with only
+  the state accessors audio has today, so
+  [video-publish-grant](/quest/m3/video-publish-grant.md) adds `grant()`
+  without a break (added 2026-11-07, maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests).
 - `on_demand` means one thing across crates. moq-video's closes the camera
   between viewers and defaults to `false`; moq-audio's keeps the device open,
   defers encoding, and replays retained PCM, and defaults to `true`. Audio's

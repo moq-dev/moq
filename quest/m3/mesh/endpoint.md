@@ -37,6 +37,8 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
   local [mesh relay node](/quest/m3/mesh/node.md).
 - Write a short porting note into the [guide](/quest/m3/mesh/guide.md).
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): one socket endpoint per service at prefix `mesh/<service>`, with the grant adding publish `mesh/*/.server/<id>` and `mesh/*/.client/<id>`, so `moq_net::socket` ships unchanged and needs no service field.
+
 ## Required
 
 - [Rust byte streams](/quest/m3/stream/rust.md) - the stream this API returns

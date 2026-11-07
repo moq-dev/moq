@@ -14,3 +14,5 @@ Decided 2026-11-05 (maintainer, on moq-dev/studio's /quest-plan): m3, since the 
 where `stats::Config.enabled` is false, and takes no arguments. The studio's
 health test builds its own relay to get stats. Prefer a config the helper
 takes over a second helper, since `foo_with_x` variants are banned.
+
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): additive. Expose `moq_relay::test_config() -> Config` and `TestRelay::start(Config)`, and keep `test_relay()` as is, rather than a `test_relay_with_*` twin.
