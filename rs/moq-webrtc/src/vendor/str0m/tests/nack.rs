@@ -400,6 +400,94 @@ pub fn nack_delay() -> Result<(), RtcError> {
 }
 
 #[test]
+pub fn nack_retries_follow_measured_rtt_in_both_receive_modes() -> Result<(), RtcError> {
+	init_crypto_default();
+
+	for rtp_mode in [true, false] {
+		let now = Instant::now();
+		let rtc = |rtp_mode| {
+			Rtc::builder()
+				.set_rtp_mode(rtp_mode)
+				.enable_raw_packets(true)
+				.set_rtcp_report_interval_video(Duration::from_millis(100))
+				.build(now)
+		};
+		let (mut l, mut r) = connect_l_r_with_rtc(rtc(true), rtc(rtp_mode));
+		l.set_netem(NetemConfig::new().latency(Duration::from_millis(100)));
+		r.set_netem(NetemConfig::new().latency(Duration::from_millis(100)));
+
+		let mid = "vid".into();
+		let ssrc = 42.into();
+		let rtx = 44.into();
+		l.direct_api().declare_media(mid, MediaKind::Video);
+		l.direct_api().declare_stream_tx(ssrc, Some(rtx), mid, None);
+		r.direct_api().declare_media(mid, MediaKind::Video);
+		r.direct_api().expect_stream_rx(ssrc, Some(rtx), mid, None);
+		let pt = l.params_vp8().pt();
+		let max = l.last.max(r.last);
+		l.last = max;
+		r.last = max;
+
+		let write = |l: &mut common::TestRtc, seq: u64| {
+			let now = l.last;
+			l.direct_api().stream_tx(&ssrc).unwrap().write_rtp(
+				RtpWrite::new(pt, seq.into(), seq as u32 * 3000, now, [0x10, 0, 0])
+					.marker(true)
+					.nackable(false),
+			);
+		};
+
+		// Let RRTR/DLRR measure the 200 ms round trip before introducing loss.
+		for seq in 47_000..47_020 {
+			write(&mut l, seq);
+			progress(&mut l, &mut r)?;
+		}
+		let until = l.duration() + Duration::from_secs(2);
+		while l.duration() < until {
+			progress(&mut l, &mut r)?;
+		}
+
+		// Never send 47020, so retries continue even though the sender has no repair.
+		write(&mut l, 47_021);
+		let until = l.duration() + Duration::from_secs(2);
+		while l.duration() < until {
+			progress(&mut l, &mut r)?;
+		}
+		let gap_detected = r
+			.events
+			.iter()
+			.find_map(|(at, event)| match event.as_raw_packet() {
+				Some(RawPacket::RtpRx(header, _)) if header.ssrc == ssrc && header.sequence_number == 47_021 => {
+					Some(*at)
+				}
+				_ => None,
+			})
+			.expect("the packet exposing the gap should arrive");
+		let nacks = r
+			.events
+			.iter()
+			.filter_map(|(at, event)| match event.as_raw_packet() {
+				Some(RawPacket::RtcpTx(Rtcp::Nack(nack))) if nack.reports.iter().any(|entry| entry.pid == 47_020) => {
+					Some(*at)
+				}
+				_ => None,
+			})
+			.collect::<Vec<_>>();
+		assert_eq!(nacks.len(), 5);
+		assert!(nacks[0] - gap_detected <= Duration::from_millis(33));
+		assert!(
+			nacks.windows(2).all(|pair| {
+				let spacing = pair[1] - pair[0];
+				(Duration::from_millis(200)..=Duration::from_millis(250)).contains(&spacing)
+			}),
+			"retries must follow the measured RTT, not the default or the poll interval: {nacks:?}"
+		);
+	}
+
+	Ok(())
+}
+
+#[test]
 pub fn nack_timer_stops_while_receive_paused() -> Result<(), RtcError> {
 	init_log();
 	init_crypto_default();

@@ -725,10 +725,10 @@ use rtp_::{Bitrate, DataSize};
 pub mod rtp {
 	/// Feedback for RTP.
 	pub mod rtcp {
-		pub use crate::vendor::str0m::rtp_::{Descriptions, Fir, Goodbye, Nack, Pli};
+		pub use crate::vendor::str0m::rtp_::{Descriptions, ExtendedReport, Fir, Goodbye, Nack, Pli};
+		pub use crate::vendor::str0m::rtp_::{Dlrr, NackEntry, ReceptionReport, ReportBlock};
 		pub use crate::vendor::str0m::rtp_::{FirEntry, ReceiverReport, SenderInfo, SenderReport, Twcc};
-		pub use crate::vendor::str0m::rtp_::{NackEntry, ReceptionReport};
-		pub use crate::vendor::str0m::rtp_::{ReportList, Rtcp, Sdes, SdesType};
+		pub use crate::vendor::str0m::rtp_::{ReportList, Rrtr, Rtcp, Sdes, SdesType};
 	}
 	use self::rtcp::Rtcp;
 

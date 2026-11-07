@@ -2,6 +2,8 @@
 
 #[path = "abs-capture-time.rs"]
 mod abs_capture_time;
+#[path = "amr-wb.rs"]
+mod amr_wb;
 #[path = "api-errors.rs"]
 mod api_errors;
 mod bidirectional;
@@ -17,6 +19,7 @@ mod crypto_compliance;
 mod data_channel;
 #[path = "data-channel-direct.rs"]
 mod data_channel_direct;
+mod dlrr;
 #[path = "dtls-close.rs"]
 mod dtls_close;
 #[path = "dtls-error-readiness.rs"]
