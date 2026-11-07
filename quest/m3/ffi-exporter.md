@@ -74,6 +74,10 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   [moq-dev/moq#6052](https://github.com/moq-dev/moq/pull/6052) worked around
   the old clash with `moq_audio_encoder_finish`; every wrapper's
   `EncoderFinish` alias follows, so wrapper APIs do not change.
+- **Dart `MoqRoute.instanceId()`** (maintainer, 2026-11-07, from
+  [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088)'s API audit):
+  the switch renames it to the exporter's name for moq-net's
+  `Route::instance()`, a Dart API change listed in its `MIGRATE.md`.
 - rust2's C backend still refuses `Duration`, which moq-ffi's audio configs
   use (moq's current generator accepts it), so the fork must accept it before
   the switch can generate C.
