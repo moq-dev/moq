@@ -588,6 +588,12 @@ impl Permit {
 		Some(crate::model::interest_prefixes(limit))
 	}
 
+	/// Whether both set the same limit on the peer, whatever either was granted.
+	#[cfg(feature = "async")]
+	pub(crate) fn same_limit(&self, other: &Self) -> bool {
+		self.limit == other.limit
+	}
+
 	/// Whether this allows everything `other` does, judged part by part, so a `false`
 	/// may be spurious but a `true` never is.
 	pub(crate) fn covers(&self, other: &Self) -> bool {

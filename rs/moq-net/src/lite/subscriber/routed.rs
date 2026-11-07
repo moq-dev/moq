@@ -82,6 +82,9 @@ pub(super) struct Routed {
 	/// The session's announce cap: one slot per live route and claim.
 	slots: crate::session::Slots,
 	held: Vec<crate::session::Slot>,
+	/// The slots of routes the peer ended, kept until their ROUTE_END echo is flushed,
+	/// so a peer leaving its replies unread holds its routes' slots.
+	echoing: Vec<crate::session::Slot>,
 	served: HashMap<(route::Id, Path), ServedClaim>,
 	/// What the stream served before it filed again, while the new one takes it up.
 	previous: HashMap<(route::Id, Path), ServedClaim>,
@@ -138,6 +141,7 @@ impl Routed {
 			claims: HashMap::new(),
 			slots: subscriber.announces.clone(),
 			held: Vec::new(),
+			echoing: Vec::new(),
 			served: HashMap::new(),
 			previous: HashMap::new(),
 			ready: Default::default(),
@@ -184,7 +188,7 @@ impl Routed {
 					self.claims.remove(&claim);
 					self.held.pop();
 				}
-				self.held.pop();
+				self.echoing.extend(self.held.pop());
 				self.stream.route(route.node, None);
 				self.replies.push(AnnounceReply::RouteEnd { id });
 			}
@@ -332,24 +336,21 @@ impl Routed {
 		self.outputs(subscriber);
 	}
 
-	/// The session's permit changed: a scope the stream no longer matches, or a
-	/// limit admitting a different set of the peer's claims, files it again, the
-	/// peer's routes and the claims the limit admits replayed before the old stream
-	/// lets go. The peer still holds each claim either way.
+	/// The session's permit changed. A new limit files the stream again, the peer's
+	/// routes and the claims the limit admits replayed before the old stream lets go:
+	/// it may change the scope, the claims admitted, the claims the node may serve
+	/// here, and what the floors certify. The peer still holds each claim either way.
 	pub(super) fn limit(&mut self, subscriber: &Subscriber, permit: &crate::auth::Permit) -> Result<(), Error> {
-		let regions = regions(&self.root, permit);
-		let admitted = (self.routes.values())
-			.filter_map(|route| route.committed.as_ref())
-			.flat_map(|(claims, _)| claims.keys())
-			.any(|path| admits(&self.root, &self.permit, path) != admits(&self.root, permit, path));
+		let same = permit.same_limit(&self.permit);
 		self.permit = permit.clone();
-		if regions == self.regions && !admitted {
+		if same {
 			return Ok(());
 		}
+		self.regions = regions(&self.root, permit);
 		let key = self.peer_setup.route_key().unwrap_or(self.session_key);
 		let stream = self
 			.node
-			.receive(scoped(&self.link, &regions, key), self.prefix.clone())
+			.receive(scoped(&self.link, &self.regions, key), self.prefix.clone())
 			.map_err(refused)?;
 		// What the old stream served stays in the origin until the new one serves it
 		// again, or lets go after.
@@ -373,7 +374,6 @@ impl Routed {
 		if self.drained {
 			stream.goaway();
 		}
-		self.regions = regions;
 		drop(std::mem::replace(&mut self.stream, stream));
 		self.previous = previous;
 		self.outputs(subscriber);
@@ -437,6 +437,13 @@ impl Routed {
 			// Outside the session's root, so nothing a request could name here.
 			return;
 		};
+		// A route reaches the peer's origin node, but the scope's regions can be wider
+		// than its limit: a claim another session of the same peer carries is served
+		// here only if this session may carry it too. Left unconfirmed, the node keeps
+		// it where the limit admits it.
+		if !self.permit.within_limit(path.as_str()) {
+			return;
+		}
 		let cost = match self.drained || !served.available {
 			true => crate::origin::Cost::DRAIN,
 			false => crate::origin::Cost::new(served.claim.cost.saturating_add(served.metric)),
@@ -507,8 +514,10 @@ impl Routed {
 		for reply in self.replies.drain(..) {
 			writer.buffer(&reply)?;
 		}
-		if let Poll::Ready(Err(err)) = writer.poll_flush(waiter) {
-			return Err(err);
+		match writer.poll_flush(waiter) {
+			Poll::Ready(Ok(())) => self.echoing.clear(),
+			Poll::Ready(Err(err)) => return Err(err),
+			Poll::Pending => {}
 		}
 		while let Poll::Ready(Ok(key)) = self.ready.poll_pop(waiter) {
 			let Some(entry) = self.served.get_mut(&key) else {
@@ -629,6 +638,102 @@ mod tests {
 
 		routed.limit(&subscriber, &public).unwrap();
 		assert_eq!(served(&routed), ["live/a/public/x"]);
+	}
+
+	/// An unscoped stream narrowed to a limit that leaves a claim out certifies nothing,
+	/// so widening it again brings that claim back at the same revision.
+	#[kio::test]
+	async fn a_new_scope_certifies_against_its_own_regions() {
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: ADVERT,
+		};
+		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		routed.outputs(&subscriber);
+		assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
+
+		routed.limit(&subscriber, &limited("live/*/public/**")).unwrap();
+		assert_eq!(served(&routed), ["live/a/public/x"]);
+
+		routed.limit(&subscriber, &limited("live/**")).unwrap();
+		assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
+	}
+
+	/// Two sessions proving one route key share the peer's routes, but a session serves
+	/// only the claims its own limit admits, even where its regions reach the rest.
+	#[kio::test]
+	async fn a_claim_is_served_only_where_the_limit_admits_it() {
+		let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		let prefix = Path::empty();
+		let everything = limited("live/**");
+		let public = limited("live/*/public/**");
+		let mut wide = super::Routed::new(&subscriber, &prefix, 1, &everything).unwrap();
+		let mut narrow = super::Routed::new(&subscriber, &prefix, 1, &everything).unwrap();
+		narrow.session_key = wide.session_key;
+		narrow.limit(&subscriber, &public).unwrap();
+
+		for routed in [&mut wide, &mut narrow] {
+			let mut decoder = AnnounceDecoder::default();
+			let floor = Msg::Floor {
+				id: 0,
+				revision: Some(0),
+			};
+			let route = Msg::RouteStart {
+				node: 7,
+				advert: ADVERT,
+			};
+			for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
+				routed.receive(&prefix, msg, &mut decoder).unwrap();
+			}
+		}
+		wide.outputs(&subscriber);
+		narrow.outputs(&subscriber);
+		assert_eq!(served(&wide), ["live/a/private/y", "live/a/public/x"]);
+		assert_eq!(served(&narrow), ["live/a/public/x"]);
+	}
+
+	/// A route the peer ended keeps its announce slot until its ROUTE_END echo is
+	/// flushed, so a peer leaving its replies unread cannot churn routes past the cap.
+	#[kio::test]
+	async fn an_ended_route_holds_its_slot_until_its_echo_is_flushed() {
+		let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		subscriber.announces = crate::session::Slots::new(2);
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let budget = kio::Producer::new(0);
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(
+			crate::lite::test_transport::SinkSend::stepped(log, budget.consume()),
+			crate::lite::Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+
+		for (id, node) in [(0, 7), (1, 8)] {
+			let route = Msg::RouteStart { node, advert: ADVERT };
+			routed.receive(&prefix, route, &mut decoder).unwrap();
+			routed.receive(&prefix, Msg::RouteEnd { id }, &mut decoder).unwrap();
+			routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		}
+		let route = Msg::RouteStart {
+			node: 9,
+			advert: ADVERT,
+		};
+		assert!(routed.receive(&prefix, route, &mut decoder).is_err(), "the unflushed echoes hold the cap");
+
+		*budget.write().ok().expect("the budget is open") = usize::MAX;
+		routed.poll(&subscriber, &mut writer, &waiter).unwrap();
+		assert_eq!(subscriber.announces.available(), 2);
 	}
 
 	/// What the stream keeps between floors is the net change to its committed claims,
