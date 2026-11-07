@@ -6,6 +6,7 @@
 //! On `MediaAdded`, it inspects the negotiated codec and instantiates the
 //! matching bridge; on each `MediaData`, it forwards into the bridge.
 
+use crate::vendor::str0m;
 use crate::{Error, Result, codec, session};
 
 pub struct IngestSink {

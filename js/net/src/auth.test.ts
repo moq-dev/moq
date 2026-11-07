@@ -1,6 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
@@ -11,7 +10,7 @@ import * as IetfMessage from "./ietf/message.ts";
 import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
 import * as LiteMessage from "./lite/message.ts";
-import { createMockTransportPair, type MockTransport } from "./mock.ts";
+import { createMockTransportPair, type MockTransport, manual, settlesWithin } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
@@ -354,7 +353,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 	});
 
 	test("a revoked grant withdraws its broadcasts without closing the session", async () => {
-		hostTime();
+		using clock = manual();
 		const origin = new OriginProducer();
 		const { client, server, transport } = await connect({ publish: origin, protocol });
 		const requests = server.auth.requests();
@@ -388,12 +387,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		const third = await nextRoute(announced);
 		expect(third?.kind).toBe("start");
 
-		let closed = false;
-		void transport.closed.then(() => {
-			closed = true;
-		});
-		await sleep(Nano.fromMilli(Milli(10)));
-		expect(closed).toBe(false);
+		expect(await settlesWithin(transport.closed, clock, Milli(10))).toBe(false);
 
 		announced.close();
 		client.abort();

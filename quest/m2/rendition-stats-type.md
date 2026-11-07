@@ -6,7 +6,9 @@
 type (`z.input` of the schema behind `Stats.Rendition`), so publish no longer
 keeps its own `RenditionStats` shape (`js/publish/src/rendition-internal.ts`)
 beside the schema it writes. The encoders keep writing plain numbers into it
-(`effect.proxy` in `js/publish/src/{video,audio}/encoder.ts`).
+(`effect.proxy` in `js/publish/src/{video,audio}/encoder.ts`). The same
+applies to `@moq/publish`'s `Video.Stats` and `Audio.Stats`, which also
+restate the schema's fields by hand.
 
 ## Plan
 
@@ -18,5 +20,8 @@ brands on validation, so publishers pass plain numbers while readers keep the
 same input type, since the encoders write it directly, not through
 `Report.Writer`. Not chosen: dropping the `u53` brand from the stats
 schemas, which would lose the 53-bit integer check on read.
+
+Added 2026-11-07 (maintainer, /quest-plan from the API shape audit):
+`Video.Stats` and `Audio.Stats`, a third and fourth copy of the shape.
 
 It changes a published TypeScript type, so it lands before the cut.

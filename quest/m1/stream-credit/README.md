@@ -36,6 +36,12 @@ which JS cannot raise; Chrome stalled at 103, Firefox at 100):
   browser test stays this README's own work. Not chosen: holding the whole
   quest until #7670 merges.
 
+- Decided 2026-11-07 (maintainer, /quest-plan from the API shape audit):
+  ✅ delete Rust's `StreamCredit` hook too, with no replacement hook
+  ([no-credit-hook](/quest/m1/stream-credit/no-credit-hook.md)). #7894's
+  reversal removed the JS half; the Rust trait kept it because the open line
+  reads it. Not chosen: keeping the hook and recording why.
+
 This epic owns the end-to-end test: a browser reader and a Rust relay over
 WebTransport, 300 live tracks of mixed priority, the highest-priority ones
 receiving every group, and nothing hanging.
@@ -43,3 +49,4 @@ receiving every group, and nothing hanging.
 ## Required
 
 - [Takeover](/quest/m1/stream-credit/takeover.md) - on lite-07 a higher-priority group takes over an acknowledged stream, and a group that lost its stream resumes
+- [Transports report no stream credit](/quest/m1/stream-credit/no-credit-hook.md) - `StreamCredit` and the `poll::Session::stream_credit` hook are gone, and the open line infers a credit wait from its own state
