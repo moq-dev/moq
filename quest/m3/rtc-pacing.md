@@ -64,10 +64,6 @@ is `moq_net::bandwidth::Limit`, which replaces moq-webrtc's
 `rate::{Cap, Limit}` in [gateway-ingest](/quest/m2/gateway-ingest.md)
 (2026-11-07, maintainer, /quest-plan from the API shape audit). Wire: none.
 
-## Required
-
-- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - the vendored str0m this adds the NACK hook to
-
 ## Related
 
 - [SRT rate handle](/quest/m3/srt-rate-handle.md) - the same pacing and retransmit charging on SRT

@@ -27,6 +27,9 @@ enum Case {
 	/// As [`Self::Unanswered`], with the old run finished just before the new instance
 	/// announces.
 	FinishedFirst,
+	/// As [`Self::FinishedFirst`], with the old run's end delivered before the new instance
+	/// announces, so nobody reads its finished track when the restart ends its front.
+	FinishedSettled,
 }
 
 async fn takeover(version: &str, case: Case) {
@@ -62,6 +65,10 @@ async fn takeover(version: &str, case: Case) {
 		// Paused, the clock only moves once every task is idle, so the feed has its answer.
 		Case::Answered => kio::clock::sleep(Duration::from_millis(500)).await,
 		Case::FinishedFirst => old.finish(),
+		Case::FinishedSettled => {
+			old.finish();
+			kio::clock::sleep(Duration::from_millis(500)).await;
+		}
 		Case::Unanswered | Case::UnansweredUnfinished => {}
 	}
 
@@ -101,7 +108,7 @@ async fn takeover(version: &str, case: Case) {
 
 	// The old run ends, while the new one carries on past the old run's last group unless it
 	// leaves that group open.
-	if !matches!(case, Case::FinishedFirst) {
+	if !matches!(case, Case::FinishedFirst | Case::FinishedSettled) {
 		old.finish();
 	}
 	if !matches!(case, Case::UnansweredUnfinished) {
@@ -145,6 +152,11 @@ async fn answered() {
 #[tokio::test(start_paused = true)]
 async fn finished_first() {
 	takeover("moq-lite-07-wip", Case::FinishedFirst).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn finished_settled() {
+	takeover("moq-lite-07-wip", Case::FinishedSettled).await;
 }
 
 /// Read `cursor` until it ends, asserting each segment carries only the old run's media.

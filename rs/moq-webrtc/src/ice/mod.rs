@@ -1,5 +1,5 @@
 //! The ICE side of a str0m peer connection: one UDP socket, its candidates, and
-//! the loop that drives an [`str0m::Rtc`] over it.
+//! the loop that drives an [`str0m::Rtc`](crate::vendor::str0m::Rtc) over it.
 //!
 //! str0m is sans-IO, so [`Agent::next`] alternates between feeding it datagrams
 //! and timeouts and draining what it produces (transmits, events, the next
@@ -22,6 +22,4 @@ mod agent;
 mod wire;
 
 pub(crate) use agent::{Agent, Error, Event, canonical};
-#[cfg(test)]
-pub(crate) use wire::Stats;
-pub(crate) use wire::{INBOX, Inbound, Packet, Socket, Wire, reader};
+pub(crate) use wire::{INBOX, Inbound, Packet, Socket, reader};
