@@ -235,10 +235,7 @@ pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<P
 	}
 
 	// 0 is legal here: the peer speaks the extension but withholds its identity.
-	let hop = params
-		.get_varint(super::ParameterVarInt::HopId)
-		.map(Hop::from_wire)
-		.transpose()?;
+	let hop = params.get_varint(super::ParameterVarInt::HopId).map(Hop::from_wire);
 
 	Ok(Peer {
 		hop,
@@ -510,6 +507,43 @@ mod tests {
 			assert_eq!(peer.hop, Some(self_hop));
 			assert_eq!(peer.cost, cost);
 		}
+	}
+
+	/// The 9-byte varint form, which carries 64 bits; our encoder stops at 2^62 - 1.
+	fn wide_varint(id: u64) -> Vec<u8> {
+		let mut wire = vec![0xFF];
+		wire.extend_from_slice(&id.to_be_bytes());
+		wire
+	}
+
+	#[test]
+	fn wide_hop_id_negotiates_without_an_identity() {
+		// The draft gives a Hop ID the full vi64 range and lets a peer pick one at random,
+		// so most random IDs are past what a Hop holds. The peer still negotiates; its ID
+		// just reads as 0, which identifies nothing.
+		for id in [1u64 << 62, u64::MAX] {
+			let mut wire = vec![0xC4, 0x0B, 0x54];
+			wire.extend(wide_varint(id));
+			let mut bytes = bytes::Bytes::from(wire);
+			let decoded = super::super::Parameters::decode(&mut bytes, VERSION).unwrap();
+
+			let peer = peer_from_setup(&decoded, VERSION).unwrap();
+			assert!(peer.negotiated());
+			assert_eq!(peer.identity(), None);
+		}
+	}
+
+	#[test]
+	fn hop_path_reads_a_wide_hop_as_unknown() {
+		let mut entries = wide_varint(u64::MAX);
+		entries.push(5);
+		entries.extend(wide_varint(1 << 62));
+		let mut buf = BytesMut::new();
+		entries.encode(&mut buf, VERSION).unwrap();
+		let mut bytes = buf.freeze();
+
+		let path = HopPath::param_decode(&mut bytes, VERSION).unwrap();
+		assert_eq!(path, hop_path(&[0, 5, 0]));
 	}
 
 	#[test]

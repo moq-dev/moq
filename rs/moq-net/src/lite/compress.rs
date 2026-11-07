@@ -346,7 +346,7 @@ mod tests {
 	const VERSION: Version = Version::Lite07;
 
 	fn hops(ids: &[u64]) -> Hops {
-		Hops::try_from(ids.iter().map(|id| Hop::from_wire(*id).unwrap()).collect::<Vec<_>>()).unwrap()
+		Hops::try_from(ids.iter().map(|id| Hop::from_wire(*id)).collect::<Vec<_>>()).unwrap()
 	}
 
 	fn path(base: u64, keep: u64, rest: &str) -> PathRef<'static> {
