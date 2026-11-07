@@ -111,9 +111,14 @@ tests' shared locked-memory budget, one child each. The pool-debt test
 overshot because shed frames whose payload canonical content owned stayed
 billed until crossbeam-epoch reclamation, which other tests' reads in the same
 process held back; eviction now lets go of that content itself, fixed by
-[moq-dev/moq#8052](https://github.com/moq-dev/moq/pull/8052). On 2026-11-06, moq-ffi's
-concurrent-ready test, quarantined here instead of in the unrelated
-[moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
+[moq-dev/moq#8052](https://github.com/moq-dev/moq/pull/8052).
+
+moq-ffi's concurrent-ready test drained its reader until the group ended, which
+an unfinished group never does. Its `ffi_caught_up` returned without yielding
+whenever the FFI runtime answered first, so under load the woken `ready` calls
+missed their turn until every frame was read. Fixed by reading at most what was
+written and yielding after each read, in
+[moq-dev/moq#8053](https://github.com/moq-dev/moq/pull/8053).
 
 Added 2026-11-06: `js/net`'s flate tail-shed test, which timed out in a
 merge-queue batch, one child.
@@ -134,5 +139,4 @@ Public API: none. Wire: none.
 - [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
 - [datagram-tracks' end-before-close case passes under load](/quest/m0/test-flakes-2/datagram-end-close.md) - every draft's end survives the session close that follows it in loaded multi-file runs, and the quarantine comes off
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
-- [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
 - [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load
