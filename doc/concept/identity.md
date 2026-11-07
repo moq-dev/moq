@@ -75,7 +75,8 @@ A route resolving a path is chosen in this order:
    over an anonymous one, then the lowest cost, then a broadcast published on
    this origin, then the shortest hop chain, then a hash of the full requested
    path with the route's origin node, which moq-lite 07 carries, or else with
-   the instance. Every relay agrees on the hash, and it spreads a pool's paths
+   the instance. Relays agree on the hash only where routes carry a consistent
+   origin node, which takes moq-lite 07 on every hop, and it spreads a pool's paths
    over its hosts. A route that entered a node for exactly the
    requested path is not hashed: the newest one wins, so a restarted publisher
    takes over from its lingering session at once.
