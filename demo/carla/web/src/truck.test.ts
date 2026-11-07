@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { applyKeys, REST } from "./input.ts";
@@ -24,7 +25,7 @@ describe("Truck video demand", () => {
 					hovered,
 				}),
 		);
-		const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+		const settle = yieldNow;
 		const demand = () => trucks.map((truck) => truck.videoDecoder.in.enabled.peek());
 		try {
 			await settle();

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -318,6 +319,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 	// lite-05 specified an inclusive end, so there the group costs only its own stream.
 	test(`a group at or past SUBSCRIBE_FINISH ${version === Version.DRAFT_05 ? "is dropped" : "aborts the track"}`, async () => {
+		hostTime();
 		const { subscriber, reader, respond } = await subscribed(version);
 		await respond({ start: new SubscribeStart([0n]) });
 		await respond({ finish: new SubscribeFinish(2n) });
@@ -356,6 +358,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	});
 
 	test("a lowered floor owes the groups it newly asked for", async () => {
+		hostTime();
 		const maxDelay = Milli(60_000);
 		const { subscriber, respond, update, fin } = await subscribed(version, maxDelay, {
 			start: { absolute: 3n },
@@ -404,6 +407,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 	// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so there an end
 	// below a received group only costs the early boundary.
 	test(`a SUBSCRIBE_FINISH below a group already received ${version === Version.DRAFT_05 ? "finishes clean" : "aborts the track"}`, async () => {
+		hostTime();
 		const { subscriber, reader, respond, fin } = await subscribed(version);
 		await respond({ start: new SubscribeStart([0n]) });
 		const group = groupStream(subscriber, 3n);

@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -17,6 +18,7 @@ const path = Path.from("live");
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	for (const streams of [false, true]) {
 		test(`${alpn}: ${streams ? "same-name kinds" : "datagram-only track"} delivery`, async () => {
+			hostTime();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio", {
@@ -336,6 +338,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		[100, true],
 	] as const) {
 		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
+			hostTime();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
@@ -375,6 +378,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // of its track's end. The subscriber routes the datagram before it ends the track.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a datagram sent right before its end arrives`, async () => {
+		hostTime();
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
@@ -409,6 +413,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // with some of it still queued. The end waits for the loop to read the queue empty.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a burst sent right before its end arrives past a budget yield`, async () => {
+		hostTime();
 		// As many as a datagram track buffers unread, past two receive budgets.
 		const BURST = 64;
 		const source = new Origin();
@@ -450,12 +455,8 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
-// Quarantined pending quest/m0/test-flakes-2/datagram-end-close.md: the end can still be the
-// publisher's host task when the microtask chain starts, which starves that task, so the close
-// lands first and legitimately cuts the track off. Lite-06 hits it most often, but lite-05 has
-// too, so every draft waits on the fix.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	test.skip(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");

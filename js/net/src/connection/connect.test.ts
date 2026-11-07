@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -227,6 +228,7 @@ test("an http:// fingerprint of the wrong length or status is refused", async ()
 });
 
 test("aborting connect aborts a pending http:// fingerprint fetch", async () => {
+	hostTime(); // a real HTTP server
 	// Answer nothing, so only the abort ends the request.
 	const server = fingerprintServer(() => new Promise<Response>(() => {}));
 	const original = globalThis.WebTransport;
@@ -553,6 +555,7 @@ for (const protocol of ["", undefined]) {
 }
 
 test("SETUP refuses a version the client did not name", async () => {
+	hostTime();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
@@ -582,6 +585,7 @@ test("a peer without an ALPN is refused when no named version negotiates in SETU
 const IETF_VERSIONS = Object.values(Ietf.Version).map((v) => [Ietf.versionName(v), v] as const);
 
 test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async (_, version) => {
+	hostTime();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {

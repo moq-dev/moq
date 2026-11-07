@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
@@ -58,7 +59,7 @@ test("a padding stream is discarded", async () => {
 		await writer.closed;
 
 		// A session close would come from the same handler that read the stream.
-		await Bun.sleep(0);
+		await yieldNow();
 		expect(closed).toBe(false);
 	} finally {
 		connection.abort();
@@ -251,7 +252,7 @@ test("uni streams before SETUP are held until it lands", async () => {
 		// A STOP_SENDING would reject this; a clean close means the padding was read to its end.
 		await padding.closed;
 
-		await Bun.sleep(0);
+		await yieldNow();
 		expect(closed).toBe(false);
 	} finally {
 		connection.abort();

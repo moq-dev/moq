@@ -10,6 +10,10 @@ is removed with its assertions unchanged.
 
 ## Plan
 
+The original end/close case was re-enabled by PR #8110 after PR #8000
+stubbed the publisher write budget. The additional duplicate-SETUP
+investigation below remains open.
+
 Added 2026-11-06 (maintainer's standing rule that flakes join this epic).
 [moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986) and
 [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670) both hit it in
