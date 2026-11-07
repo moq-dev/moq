@@ -23,10 +23,13 @@ passed against Cloudflare draft-18 after
 [moq-dev/moq#5483](https://github.com/moq-dev/moq/pull/5483), so this is
 either a regression since then or a change on Cloudflare's deployed relay.
 Find which first: read who sends the CONNECTION_CLOSE and its reason with
-`RUST_LOG=trace` (or a qlog), then check whether `just cloudflare` in
-`test/smoke`, which runs the head of cloudflare/moq-rs's `draft-18-dev`
-branch locally, reproduces it. A local reproduction can bisect our side; a
-remote-only failure points at the deployed relay's version.
+`RUST_LOG=trace` (or a qlog). Then build cloudflare/moq-rs's `draft-18-dev`
+relay locally (as `test/smoke/cloudflare.sh` does), and run the same
+`main`-built `moq --connect ... fetch publisher.json` against it, trusting its
+self-signed certificate. A local reproduction can bisect our side; a
+remote-only failure points at the deployed relay's version. `just cloudflare`
+stays a separate control: its only client is `clients/cloudflare`, built
+against cloudflare/moq-rs, so it never exercises moq-net.
 
 Fix only what this session needs: draft-18 is a compatibility layer, so
 ignore requirements that add cost without a behavioral benefit. Filing on
