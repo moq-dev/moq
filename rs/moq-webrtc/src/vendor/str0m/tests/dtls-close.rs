@@ -1,5 +1,4 @@
 //! Tests for the Rtc shutdown states.
-#![cfg(any(all(), any(), any(), any(), any(), any(),))]
 
 use std::net::Ipv4Addr;
 use std::time::Instant;

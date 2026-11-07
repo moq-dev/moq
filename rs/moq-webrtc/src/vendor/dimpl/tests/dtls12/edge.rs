@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(all())]
 use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 use crate::vendor::dimpl::crypto::Dtls12CipherSuite;
 use crate::vendor::dimpl::{Config, Dtls, Output};
@@ -33,7 +32,6 @@ fn dtls12_epoch1_record(seq: u64, len: usize) -> Vec<u8> {
 }
 
 #[test]
-#[cfg(all())]
 fn oversized_application_data_reports_buffer_too_small() {
 	let now = Instant::now();
 	let (mut client, mut server, _now) = setup_connected_12_pair(now);
@@ -95,7 +93,6 @@ fn dtls12_min_protected_fragment_len(suite: Dtls12CipherSuite) -> usize {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_malformed_datagram_is_discarded_without_processing_alerts() {
 	let server_cert = generate_self_signed_certificate().expect("gen server cert");
 	let config = dtls12_config();
@@ -116,7 +113,6 @@ fn dtls12_malformed_datagram_is_discarded_without_processing_alerts() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_too_many_control_records_are_discarded() {
 	let server_cert = generate_self_signed_certificate().expect("gen server cert");
 	let config = dtls12_config();
@@ -136,7 +132,6 @@ fn dtls12_too_many_control_records_are_discarded() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_recovers_from_corrupted_packet() {
 	//! During handshake, corrupt 2 bytes in one packet before delivery so the
 	//! DTLS record header is invalid. The receiver drops the corrupted packet.
@@ -246,7 +241,6 @@ fn dtls12_recovers_from_corrupted_packet() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_discards_wrong_epoch_record() {
 	//! After a completed handshake (epoch 1), inject a crafted packet with
 	//! epoch 0 and content_type handshake (22). Verify it is silently dropped
@@ -288,7 +282,6 @@ fn dtls12_discards_wrong_epoch_record() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_short_encrypted_records_do_not_panic() {
 	for suite in [
 		Dtls12CipherSuite::ECDHE_ECDSA_AES128_GCM_SHA256,
@@ -332,7 +325,6 @@ fn dtls12_short_encrypted_records_do_not_panic() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_discards_truncated_record() {
 	//! Deliver a 3-byte packet (too short to be a valid DTLS 1.2 record header,
 	//! which requires 13 bytes). Verify it is silently dropped and the
@@ -391,7 +383,6 @@ fn dtls12_discards_truncated_record() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_discards_unauthenticated_close_notify() {
 	//! After a completed handshake (epoch 1), inject a plaintext close_notify
 	//! alert at epoch 0. Since the connection is authenticated, the
@@ -438,7 +429,6 @@ fn dtls12_discards_unauthenticated_close_notify() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_rejects_renegotiation() {
 	//! After a completed handshake, inject a ClientHello record to simulate
 	//! a renegotiation attempt. Verify it is rejected (either silently dropped
@@ -495,7 +485,6 @@ fn dtls12_rejects_renegotiation() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_mixed_datagram_plaintext_first_then_valid() {
 	//! Test that a UDP datagram with bogus plaintext ApplicationData FIRST
 	//! followed by a valid encrypted record is handled correctly: the bogus
@@ -552,7 +541,6 @@ fn dtls12_mixed_datagram_plaintext_first_then_valid() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_mixed_datagram_valid_first_then_bogus() {
 	//! Test that a UDP datagram with a valid encrypted record FIRST followed
 	//! by bogus plaintext ApplicationData is handled correctly: the valid
@@ -605,7 +593,6 @@ fn dtls12_mixed_datagram_valid_first_then_bogus() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_bad_encrypted_prefix_does_not_drop_valid_tail() {
 	let now = Instant::now();
 	let (mut client, mut server, now) = setup_connected_12_pair(now);
@@ -656,7 +643,6 @@ fn dtls12_bad_encrypted_prefix_does_not_drop_valid_tail() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_relabelled_encrypted_handshake_failure_is_not_silently_discarded() {
 	let client_cert = generate_self_signed_certificate().expect("gen client cert");
 	let server_cert = generate_self_signed_certificate().expect("gen server cert");
@@ -734,7 +720,6 @@ fn dtls12_relabelled_encrypted_handshake_failure_is_not_silently_discarded() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_app_data_after_close_notify_is_ignored() {
 	//! Simulate UDP reordering: the client sends app data, then close_notify,
 	//! but the close_notify datagram arrives at the server first. The app data
@@ -780,7 +765,6 @@ fn dtls12_app_data_after_close_notify_is_ignored() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_close_during_handshake_emits_no_packets() {
 	//! Call close() on the client while the handshake is in progress.
 	//! Per `Dtls::close` API contract, close() during handshake silently
@@ -831,7 +815,6 @@ fn dtls12_close_during_handshake_emits_no_packets() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_reciprocal_close_notify_and_no_further_sends() {
 	//! When the server receives a close_notify from the client, it must send
 	//! a reciprocal close_notify back (RFC 5246 §7.2.1) and transition to
@@ -904,7 +887,6 @@ fn dtls12_reciprocal_close_notify_and_no_further_sends() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_close_state_matrix() {
 	let mut now = Instant::now();
 	let (mut client, mut server, now_hs) = setup_connected_12_pair(now);
@@ -939,7 +921,6 @@ fn dtls12_close_state_matrix() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_discard_pending_writes_on_close_notify() {
 	//! Send application data from the server, then deliver a close_notify from
 	//! the client before the server polls. The pending data must be discarded
@@ -989,7 +970,6 @@ fn dtls12_discard_pending_writes_on_close_notify() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_fatal_alert_during_handshake() {
 	//! During the handshake (peer_encryption_enabled == false), an epoch 0
 	//! fatal alert (level=2) should be accepted and return a SecurityError.
@@ -1031,7 +1011,6 @@ fn dtls12_fatal_alert_during_handshake() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_app_data_delivered_before_close_notify() {
 	//! When app data and close_notify arrive together, the app data must be
 	//! delivered before CloseNotify.
@@ -1080,7 +1059,6 @@ fn dtls12_app_data_delivered_before_close_notify() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_close_notify_not_retransmitted() {
 	//! After sending close_notify, the alert must not be retransmitted.
 	//! RFC 6347 §4.2.7: "Alert messages are not retransmitted at all,

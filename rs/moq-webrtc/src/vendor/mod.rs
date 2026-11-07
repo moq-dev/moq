@@ -6,8 +6,10 @@
 //! # Upstream
 //!
 //! Vendored on 2026-11-07, each module keeping its upstream layout and its
-//! license (MIT OR Apache-2.0; see the `LICENSE-*` files beside each module, and
-//! `str0m/packet/LICENSE-APACHE.txt` for webrtc-rs's notice on `str0m::packet`):
+//! license (MIT OR Apache-2.0). The `LICENSE-*` files sit beside `str0m` (whose
+//! file covers the other crates from its repository, which ship none of their
+//! own), `dimpl`, and `sctp_proto`, and `str0m/packet/LICENSE-APACHE.txt` keeps
+//! webrtc-rs's notice on `str0m::packet`:
 //! - `str0m` (0.24.1+), `str0m_proto` (0.7.0), `is` (0.11.1), `str0m_aws_lc_rs`
 //!   (0.6.0), and the test-only `netem` (0.4.0): <https://github.com/algesten/str0m>
 //!   at [`dc317173`](https://github.com/algesten/str0m/commit/dc317173b16fc6ed86633e6b08b229c9195deb87)

@@ -4,16 +4,6 @@
 //! [aws-lc-rs](https://github.com/aws/aws-lc-rs), Amazon's cryptographic library
 //! based on AWS-LC (a fork of BoringSSL).
 //!
-//! # Feature Flag
-//!
-//! This module is only available when the `aws-lc-rs` feature is enabled. The `aws-lc-rs`
-//! feature is included in the default features, so it's enabled by default. To use
-//! dimpl without this module, disable default features:
-//!
-//! ```toml
-//! dimpl = { version = "...", default-features = false }
-//! ```
-//!
 //! # Usage
 //!
 //! The default provider is used automatically when no custom provider is specified:

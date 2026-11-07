@@ -8,7 +8,6 @@ use crate::vendor::dimpl::Dtls;
 use crate::vendor::dimpl::tests::dtls12::common::*;
 
 #[test]
-#[cfg(all())]
 fn dtls12_application_data_exchange() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -84,7 +83,6 @@ fn dtls12_application_data_exchange() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_multiple_application_data_messages() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -170,7 +168,6 @@ fn dtls12_multiple_application_data_messages() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_bidirectional_data_exchange() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -260,7 +257,6 @@ fn dtls12_bidirectional_data_exchange() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_many_small_messages() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -331,7 +327,6 @@ fn dtls12_many_small_messages() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_large_application_data() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 

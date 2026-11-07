@@ -8,7 +8,6 @@ use crate::vendor::dimpl::{Config, Dtls, SrtpProfile};
 use crate::vendor::dimpl::tests::dtls12::common::*;
 
 #[test]
-#[cfg(all())]
 fn dtls12_client_certificate_not_required() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -28,7 +27,6 @@ fn dtls12_client_certificate_not_required() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_empty_client_certificate_is_rejected_when_required() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 	use crate::vendor::dimpl::{CertificateError, Error};
@@ -81,7 +79,6 @@ fn dtls12_empty_client_certificate_is_rejected_when_required() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_cookie_retry_proceeds_to_server_hello() {
 	//! Verify that after HelloVerifyRequest, the ClientHello with cookie
 	//! is properly processed and the server sends ServerHello (not another HVR).
@@ -195,7 +192,6 @@ fn dtls12_cookie_retry_proceeds_to_server_hello() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_parallel_handshakes_with_cookies() {
 	//! Test multiple parallel DTLS handshakes to ensure cookie handling
 	//! works correctly under concurrent load (the original bug scenario).
@@ -269,7 +265,6 @@ fn dtls12_parallel_handshakes_with_cookies() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_retransmit_no_cookie_after_cookie_sent() {
 	//! Simulates the real Firefox bug scenario:
 	//! 1. Client sends ClientHello (no cookie)
@@ -353,7 +348,6 @@ fn dtls12_retransmit_no_cookie_after_cookie_sent() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_retransmit_no_cookie_before_cookie_received() {
 	//! Tests the specific bug scenario from webrtc deployments:
 	//!
@@ -459,7 +453,6 @@ fn dtls12_retransmit_no_cookie_before_cookie_received() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_basic_handshake() {
 	//! Complete a full dimpl-to-dimpl DTLS 1.2 handshake and verify both
 	//! client and server reach the connected state.
@@ -511,7 +504,6 @@ fn dtls12_basic_handshake() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handshake_with_keying_material() {
 	//! Complete a DTLS 1.2 handshake with SRTP profile configured and verify
 	//! both sides derive identical SRTP keying material.
@@ -570,7 +562,6 @@ fn dtls12_handshake_with_keying_material() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_peer_certificate_exchange() {
 	//! Complete a DTLS 1.2 handshake and verify the client can access the
 	//! server's certificate and the server can access the client's certificate.
@@ -636,7 +627,6 @@ fn dtls12_peer_certificate_exchange() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handshake_client_certificate_auth() {
 	//! Configure the server to require a client certificate, complete the
 	//! handshake, and verify the server received and validated the client
@@ -704,7 +694,6 @@ fn dtls12_handshake_client_certificate_auth() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handshake_secp384r1_key_exchange() {
 	//! Configure to use only P-384 for key exchange, complete the handshake,
 	//! and verify both sides reach connected.
@@ -775,7 +764,6 @@ fn dtls12_handshake_secp384r1_key_exchange() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handshake_timeout_expires() {
 	//! Create client and server but never deliver packets. Trigger timeouts
 	//! repeatedly and verify the handshake eventually times out/fails.

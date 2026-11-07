@@ -337,9 +337,6 @@ impl PartialEq for MediaTime {
 }
 impl Eq for MediaTime {}
 
-#[cfg(any())]
-crate::vendor::str0m::drv_identity_copy!(Frequency, MediaTime);
-
 impl PartialOrd for MediaTime {
 	#[inline(always)]
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {

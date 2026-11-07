@@ -124,16 +124,9 @@ mod tests {
 		}};
 	}
 
-	/// We need a concrete HmacProvider for tests. Use the default feature-gated one.
+	/// We need a concrete HmacProvider for tests.
 	fn hmac_provider() -> &'static dyn HmacProvider {
-		#[cfg(all())]
-		{
-			&crate::vendor::dimpl::crypto::aws_lc_rs::hmac::HMAC_PROVIDER
-		}
-		#[cfg(all(not(all()), any()))]
-		{
-			&crate::vendor::dimpl::crypto::rust_crypto::hmac::HMAC_PROVIDER
-		}
+		&crate::vendor::dimpl::crypto::aws_lc_rs::hmac::HMAC_PROVIDER
 	}
 
 	// ========================================================================

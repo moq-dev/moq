@@ -88,7 +88,6 @@ fn dtls12_discards_scrambled_datagram_and_accepts_clean_retransmission() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handles_duplicate_packets() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -146,7 +145,6 @@ fn dtls12_handles_duplicate_packets() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handles_out_of_order_packets() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -201,7 +199,6 @@ fn dtls12_handles_out_of_order_packets() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_replay_window_rejects_old_app_data() {
 	//! After handshake, send 100 app data messages from client to server.
 	//! Then replay the very first encrypted packet. The replayed packet
@@ -282,7 +279,6 @@ fn dtls12_replay_window_rejects_old_app_data() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_replay_window_rejects_duplicate_app_data() {
 	//! After handshake, send one app data message. Deliver it, then deliver
 	//! the exact same encrypted packet again. Only one copy should be received.
@@ -357,7 +353,6 @@ fn dtls12_replay_window_rejects_duplicate_app_data() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handles_delayed_burst_delivery() {
 	//! During handshake, hold all packets for 3 rounds of timeouts, then
 	//! deliver them all at once in a burst. Verify handshake still completes.

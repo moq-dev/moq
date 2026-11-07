@@ -197,7 +197,6 @@ pub fn complete_dtls12_handshake(client: &mut Dtls, server: &mut Dtls, mut now: 
 /// Create a connected DTLS 1.2 client/server pair with self-signed certificates.
 ///
 /// Returns `(client, server, now)` with the handshake already completed.
-#[cfg(all())]
 pub fn setup_connected_12_pair(now: Instant) -> (Dtls, Dtls, Instant) {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 

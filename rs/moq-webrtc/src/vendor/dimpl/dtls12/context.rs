@@ -586,7 +586,6 @@ mod tests {
 	use super::*;
 	use crate::vendor::dimpl::Config;
 
-	#[cfg(all())]
 	fn cert_auth_mode(config: &Config) -> AuthMode {
 		let cert = crate::vendor::dimpl::certificate::generate_self_signed_certificate().expect("generate cert");
 		let private_key = config
@@ -601,7 +600,6 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg(all())]
 	fn certificate_mode_rejects_psk_suites() {
 		let config = Arc::new(Config::default());
 		let auth = cert_auth_mode(&config);
@@ -619,7 +617,6 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg(all())]
 	fn certificate_mode_accepts_ecdhe_suites() {
 		let config = Arc::new(Config::default());
 		let auth = cert_auth_mode(&config);

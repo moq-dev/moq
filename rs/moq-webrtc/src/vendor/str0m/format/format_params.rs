@@ -112,9 +112,6 @@ pub struct FormatParams {
 	pub mode_set: Option<u16>,
 }
 
-#[cfg(any())]
-crate::vendor::str0m::drv_identity_copy!(FormatParams);
-
 impl FormatParams {
 	pub(crate) fn from_sdp_fmtp<'a>(codec: Codec, mut lines: impl Iterator<Item = &'a [FormatParam]>) -> Option<Self> {
 		let mut params = Self::default();

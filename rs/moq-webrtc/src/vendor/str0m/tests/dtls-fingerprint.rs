@@ -1,6 +1,5 @@
 //! The remote certificate fingerprint is verified with the hash function the
 //! remote names (RFC 8122 §5): sha-256 or sha-1.
-#![cfg(any(all(), any(), any(), any(), any(), any(),))]
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;

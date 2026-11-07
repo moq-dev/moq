@@ -18,7 +18,7 @@ pub mod dtls {
 	pub use crate::vendor::dimpl::{Error as DtlsImplError, Output as DtlsOutput};
 }
 
-#[cfg(any(test, test))]
+#[cfg(test)]
 #[allow(unused)]
 pub(crate) fn test_default_provider() -> &'static CryptoProvider {
 	use std::sync::OnceLock;
@@ -26,34 +26,9 @@ pub(crate) fn test_default_provider() -> &'static CryptoProvider {
 	TEST_PROVIDER.get_or_init(from_feature_flags)
 }
 
-/// Create a crypto provider based on enabled feature flags.
-///
-/// Priority order: aws-lc-rs, rust-crypto, openssl, wincrypto (Windows only)
-///
-/// Note: For Apple platforms, use the separate `str0m-apple-crypto` crate
-/// and call `str0m_apple_crypto::default_provider()` directly.
-#[allow(unreachable_code, clippy::needless_return)]
+/// The default crypto provider: aws-lc-rs, the only backend kept in the vendored copy.
 pub fn from_feature_flags() -> CryptoProvider {
-	#[cfg(all())]
-	return crate::vendor::str0m_aws_lc_rs::default_provider();
-
-	#[cfg(any())]
-	return str0m_rust_crypto::default_provider();
-
-	#[cfg(any(any(), any()))]
-	return str0m_openssl::default_provider();
-
-	#[cfg(all(any(), target_vendor = "apple"))]
-	return str0m_apple_crypto::default_provider();
-
-	#[cfg(all(any(), target_os = "windows"))]
-	return str0m_wincrypto::default_provider();
-
-	panic!(
-		"No crypto provider available. Enable one of: aws-lc-rs, 
-             rust-crypto, openssl, openssl-dimpl, wincrypto (Windows only)
-             or use str0m-apple-crypto crate"
-	);
+	crate::vendor::str0m_aws_lc_rs::default_provider()
 }
 
 mod finger;

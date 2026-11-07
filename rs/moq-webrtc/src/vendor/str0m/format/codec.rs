@@ -50,9 +50,6 @@ pub enum Codec {
 	Unknown,
 }
 
-#[cfg(any())]
-crate::vendor::str0m::drv_identity_copy!(Codec, CodecSpec);
-
 impl Codec {
 	/// Tells if codec is audio.
 	pub fn is_audio(&self) -> bool {

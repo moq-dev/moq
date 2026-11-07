@@ -10,7 +10,6 @@ use crate::vendor::dimpl::{Config, Dtls, Output};
 
 use crate::vendor::dimpl::tests::dtls12::common::*;
 
-#[cfg(all())]
 struct FinalFlightResend {
 	client: Dtls,
 	server: Dtls,
@@ -19,7 +18,6 @@ struct FinalFlightResend {
 	stale_epoch0_handshake: Vec<u8>,
 }
 
-#[cfg(all())]
 fn prepare_server_final_flight_resend(max_queue_rx: usize) -> FinalFlightResend {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -129,7 +127,6 @@ fn prepare_server_final_flight_resend(max_queue_rx: usize) -> FinalFlightResend 
 	}
 }
 
-#[cfg(all())]
 fn first_record_matching(datagrams: &[Vec<u8>], content_type: u8, epoch: u16) -> Option<Vec<u8>> {
 	for datagram in datagrams {
 		let mut offset = 0usize;
@@ -153,7 +150,6 @@ fn first_record_matching(datagrams: &[Vec<u8>], content_type: u8, epoch: u16) ->
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_client_hello_retransmits_using_advertised_deadlines() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -187,7 +183,6 @@ fn dtls12_client_hello_retransmits_using_advertised_deadlines() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_resends_each_flight_epoch_and_sequence_increase() {
 	let now0 = Instant::now();
 	let mut now = now0;
@@ -303,7 +298,6 @@ fn dtls12_resends_each_flight_epoch_and_sequence_increase() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_duplicate_triggers_server_resend_of_final_flight() {
 	let result = prepare_server_final_flight_resend(Config::default().max_queue_rx());
 	assert!(!result.f6_init.is_empty(), "server should emit initial flight 6");
@@ -314,7 +308,6 @@ fn dtls12_duplicate_triggers_server_resend_of_final_flight() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_resend_replaces_pending_handshake_flight_tail() {
 	let now0 = Instant::now();
 	let mut now = now0;
@@ -415,7 +408,6 @@ fn dtls12_resend_replaces_pending_handshake_flight_tail() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_final_flight_resend_can_share_post_release_appdata_tail() {
 	let FinalFlightResend {
 		mut server,
@@ -461,7 +453,6 @@ fn dtls12_final_flight_resend_can_share_post_release_appdata_tail() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_late_retransmitted_ccs_does_not_pin_receive_queue() {
 	//! After the handshake, a peer can still retransmit its final flight. The
 	//! epoch-0 ChangeCipherSpec in that flight must be ignored; otherwise it
@@ -510,7 +501,6 @@ fn dtls12_late_retransmitted_ccs_does_not_pin_receive_queue() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_late_epoch0_handshake_does_not_pin_receive_queue() {
 	//! After peer encryption is enabled, plaintext epoch-0 handshake records are
 	//! unauthenticated and no longer actionable. They must be ignored for the
@@ -572,7 +562,6 @@ fn append_record(mut packet: Vec<u8>, record: &[u8]) -> Vec<u8> {
 	packet
 }
 
-#[cfg(all())]
 fn poll_one_packet(endpoint: &mut Dtls) -> Vec<u8> {
 	let mut buf = vec![0u8; 2048];
 	loop {
@@ -585,7 +574,6 @@ fn poll_one_packet(endpoint: &mut Dtls) -> Vec<u8> {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_late_epoch0_handshake_trailing_app_data_does_not_pin_receive_queue() {
 	//! A stale epoch-0 handshake can arrive behind a valid encrypted record in
 	//! the same datagram. The encrypted app data should still be delivered, and
@@ -632,7 +620,6 @@ fn dtls12_late_epoch0_handshake_trailing_app_data_does_not_pin_receive_queue() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handshake_completes_after_packet_loss() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -694,7 +681,6 @@ fn dtls12_handshake_completes_after_packet_loss() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handshake_completes_with_early_packet_loss() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -773,7 +759,6 @@ fn dtls12_handshake_completes_with_early_packet_loss() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_survives_random_packet_loss_pattern() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -855,7 +840,6 @@ fn dtls12_survives_random_packet_loss_pattern() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_retransmit_exponential_backoff() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -937,7 +921,6 @@ fn dtls12_retransmit_exponential_backoff() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_handshake_timeout_aborts() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -992,7 +975,6 @@ fn dtls12_handshake_timeout_aborts() {
 /// recovers. This is the contrast case to the post-confirmation suppression
 /// below: the gate must not break legitimate retransmission.
 #[test]
-#[cfg(all())]
 fn dtls12_stale_client_hello_before_peer_confirmed_triggers_resend() {
 	const RX_QUEUE_LIMIT: usize = 8;
 	let FinalFlightResend {
@@ -1027,7 +1009,6 @@ fn dtls12_stale_client_hello_before_peer_confirmed_triggers_resend() {
 /// retransmission. This closes the resend-amplification window that an attacker
 /// could otherwise drive with spoofed epoch-0 handshakes.
 #[test]
-#[cfg(all())]
 fn dtls12_stale_client_hello_after_peer_confirmed_triggers_no_resend() {
 	const RX_QUEUE_LIMIT: usize = 8;
 	let FinalFlightResend {
@@ -1072,7 +1053,6 @@ fn dtls12_stale_client_hello_after_peer_confirmed_triggers_no_resend() {
 	);
 }
 
-#[cfg(all())]
 fn forged_epoch1_app_data() -> Vec<u8> {
 	// A DTLS 1.2 record header advertising epoch-1 ApplicationData with a
 	// garbage (undecryptable) body. The content type lives in the cleartext
@@ -1093,7 +1073,6 @@ fn forged_epoch1_app_data() -> Vec<u8> {
 /// the authentication guard it would falsely mark the peer confirmed and suppress
 /// the flight-6 resend that a genuinely lost flight needs.
 #[test]
-#[cfg(all())]
 fn dtls12_forged_epoch1_appdata_before_encryption_does_not_confirm_peer() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 
@@ -1180,7 +1159,6 @@ fn dtls12_forged_epoch1_appdata_before_encryption_does_not_confirm_peer() {
 /// flight-5 datagram is lost, which holds the server short of the CCS while the
 /// Finished datagram is parked; a network-duplicated copy of it then arrives.
 #[test]
-#[cfg(all())]
 fn dtls12_duplicate_epoch1_before_ccs_is_dropped() {
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
 

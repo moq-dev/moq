@@ -52,11 +52,7 @@ pub enum Psk {
 	},
 }
 
-#[cfg(all())]
 use crate::vendor::dimpl::crypto::aws_lc_rs;
-
-#[cfg(any())]
-use crate::vendor::dimpl::crypto::rust_crypto;
 
 /// DTLS configuration shared by all connections.
 ///
@@ -442,9 +438,7 @@ impl ConfigBuilder {
 	/// The crypto provider is selected in the following priority order:
 	/// 1. Explicit provider set via `with_crypto_provider()`
 	/// 2. Default provider installed via `CryptoProvider::install_default()`
-	/// 3. AWS-LC provider (if `aws-lc-rs` feature is enabled)
-	/// 4. RustCrypto provider (if `rust-crypto` feature is enabled)
-	/// 5. Panic if no provider is available
+	/// 3. The aws-lc-rs provider
 	pub fn build(self) -> Result<Config, Error> {
 		if self.handshake_timeout.is_zero() || self.handshake_timeout > MAX_TIMING_DURATION {
 			return Err(ConfigError::InvalidHandshakeTimeout.into());
@@ -453,19 +447,10 @@ impl ConfigBuilder {
 			return Err(ConfigError::InvalidFlightStartRto.into());
 		}
 
-		let crypto_provider = self.crypto_provider.or_else(|| CryptoProvider::get_default().cloned());
-
-		#[cfg(all())]
-		let crypto_provider = crypto_provider.or_else(|| Some(aws_lc_rs::default_provider()));
-
-		#[cfg(any())]
-		let crypto_provider = crypto_provider.or_else(|| Some(rust_crypto::default_provider()));
-
-		let crypto_provider = crypto_provider.expect(
-			"No crypto provider available. Either set one explicitly via \
-             with_crypto_provider(), install a default via CryptoProvider::install_default(), \
-             or enable the 'aws-lc-rs' or 'rust-crypto' feature.",
-		);
+		let crypto_provider = self
+			.crypto_provider
+			.or_else(|| CryptoProvider::get_default().cloned())
+			.unwrap_or_else(aws_lc_rs::default_provider);
 
 		// Always validate the crypto provider
 		crypto_provider.validate()?;

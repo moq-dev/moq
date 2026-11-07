@@ -1,7 +1,7 @@
 //! AES-128-CCM-8 cipher implementation using the RustCrypto `ccm` crate.
 //!
-//! Shared by both aws-lc-rs and rust-crypto backends since aws-lc-rs
-//! does not expose CCM in its high-level API.
+//! Used by the aws-lc-rs backend since aws-lc-rs does not expose CCM in its
+//! high-level API.
 
 use ccm::aead::AeadInOut;
 use ccm::aead::KeyInit;

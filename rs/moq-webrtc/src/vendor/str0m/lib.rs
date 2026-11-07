@@ -339,37 +339,9 @@
 //!
 //! # Crypto backends
 //!
-//! str0m supports multiple crypto backends via feature flags. The default is `aws-lc-rs`.
-//!
-//! | Feature           | Crate                 | DTLS                             | Platforms |
-//! |-------------------|-----------------------|----------------------------------|-----------|
-//! | `aws-lc-rs`       | `str0m-aws-lc-rs`     | dimpl + AWS-LC-RS                | All       |
-//! | `rust-crypto`     | `str0m-rust-crypto`   | dimpl + RustCrypto               | All       |
-//! | `openssl`         | `str0m-openssl`       | OpenSSL (DTLS 1.2 only)          | All       |
-//! | `openssl-dimpl`   | `str0m-openssl`       | dimpl + OpenSSL crypto           | All       |
-//! | `apple-crypto`    | `str0m-apple-crypto`  | dimpl + Apple CryptoKit          | macOS/iOS |
-//! | `wincrypto`       | `str0m-wincrypto`     | dimpl + Windows CNG             | Windows   |
-//! | `wincrypto-dimpl` | `str0m-wincrypto`     | Alias for `wincrypto`           | Windows   |
-//!
-//! If multiple backend features are enabled, str0m automatically selects the backend in this
-//! priority order: `aws-lc-rs`, `rust-crypto`, `openssl-dimpl`, `openssl`, `apple-crypto`
-//! (Apple platforms only), `wincrypto` (Windows only).
-//!
-//! If you disable the default features, you MUST explicitly configure an alternative
-//! crypto backend either process-wide or per-instance.
-//!
-//! ## Process-wide default
-//!
-//! For applications, the easiest is to set a process-wide default at startup.
-//! Note that you can use any backend crate directly without enabling its feature flag:
-//!
-//! ```ignore
-//! // Set process default (will panic if called twice)
-//! // No need to enable the "rust-crypto" feature flag
-//! str0m_rust_crypto::default_provider().install_process_default();
-//! ```
-//!
-//! ## Crypto provider per Rtc instance
+//! The vendored copy keeps only the aws-lc-rs backend (`str0m_aws_lc_rs`, DTLS
+//! from dimpl), which is the default. The `CryptoProvider` trait stays so another
+//! backend can be installed process-wide or per instance:
 //!
 //! ```ignore
 //! use std::sync::Arc;
@@ -377,7 +349,7 @@
 //! use crate::vendor::str0m::Rtc;
 //!
 //! let rtc = Rtc::builder()
-//!     .set_crypto_provider(Arc::new(str0m_rust_crypto::default_provider()))
+//!     .set_crypto_provider(Arc::new(my_provider()))
 //!     .build(Instant::now());
 //! ```
 //!
@@ -691,27 +663,6 @@ use streams::RtpPacket;
 use streams::StreamPaused;
 use tracing::{debug, trace, warn};
 use util::InstantExt;
-
-// Identity `drv::ToStatic` (`Static = Self`) for the `Copy` identity types.
-// Used instead of `#[derive(drv::Input)]` because the derive's generated
-// shadow type isn't `Eq`/`Hash`/`Borrow<Self>`, so it can't be a `HashMap`
-// key inside a `#[drv::memo]` projection; `Static = Self` can. `eq_static`
-// defers to each type's own `PartialEq`. Each module invokes this for its
-// own types.
-#[cfg(any())]
-macro_rules! drv_identity_copy {
-    ($($t:ty),* $(,)?) => {
-        $(
-            impl drv::ToStatic for $t {
-                type Static = $t;
-                fn to_static(&self) -> $t { *self }
-                fn eq_static(&self, other: &$t) -> bool { self == other }
-            }
-        )*
-    };
-}
-#[cfg(any())]
-pub(crate) use drv_identity_copy;
 
 /// Cryptographic provider traits and implementations.
 ///
@@ -1192,11 +1143,8 @@ impl Rtc {
 			.clone()
 			// If crypto_provider is not set in config, check process default
 			.or_else(|| CryptoProvider::get_default().cloned().map(Arc::new))
-			// Or fall back on feature flags
-			.or_else(|| Some(Arc::new(from_feature_flags())))
-			// from_feature_flags panics already, so we should never see
-			// this expect message.
-			.expect("a crash earlier if no crypto provider was set");
+			// Or fall back on the vendored aws-lc-rs backend
+			.unwrap_or_else(|| Arc::new(from_feature_flags()));
 
 		let session = Session::new(&config);
 
@@ -2167,43 +2115,6 @@ impl fmt::Debug for Rtc {
 	}
 }
 
-/// Log a CSV like stat to stdout.
-///
-/// ```ignore
-/// log_stat!("MY_STAT", 1, "hello", 3);
-/// ```
-///
-/// will result in the following being printed
-///
-/// ```text
-/// MY_STAT 1, hello, 3, {unix_timestamp_ms}
-/// ````
-///
-/// These logs can be easily grepped for, parsed and graphed, or otherwise analyzed.
-///
-/// This macro turns into a NO-OP if the `_internal_dont_use_log_stats` feature is not enabled
-macro_rules! log_stat {
-    ($name:expr, $($arg:expr),+) => {
-        #[cfg(any())]
-        {
-            use std::time::SystemTime;
-            use std::io::{self, Write};
-
-            let now = SystemTime::now();
-            let since_epoch = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-            let unix_time_ms = since_epoch.as_millis();
-            let mut lock = io::stdout().lock();
-            write!(lock, "{} ", $name).expect("Failed to write to stdout");
-
-            $(
-                write!(lock, "{},", $arg).expect("Failed to write to stdout");
-            )+
-            writeln!(lock, "{}", unix_time_ms).expect("Failed to write to stdout");
-        }
-    };
-}
-pub(crate) use log_stat;
-
 #[cfg(test)]
 #[doc(hidden)]
 pub fn init_crypto_default() {
@@ -2277,20 +2188,6 @@ mod test {
 			}
 		}
 	}
-}
-
-#[cfg(any())]
-pub mod unversioned {
-	//! This module provides functionality that is not versioned according to semver.
-	//! It may change in breaking ways between minor/patch releases, there are no guarantees.
-	//! USE AT YOUR OWN RISK.
-	//!
-	//! To use this module, enable the `unversioned` feature flag in your Cargo.toml.
-
-	pub use super::packet::{
-		Depacketizer, H264Depacketizer, H264Packetizer, OpusPacketizer, Packetizer, TelephoneEvent, Vp8Depacketizer,
-		Vp8Packetizer,
-	};
 }
 
 #[cfg(test)]

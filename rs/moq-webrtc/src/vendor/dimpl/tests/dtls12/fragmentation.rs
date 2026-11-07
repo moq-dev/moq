@@ -9,7 +9,6 @@ use crate::vendor::dimpl::{Config, Dtls, Output};
 use crate::vendor::dimpl::tests::dtls12::common::*;
 
 #[test]
-#[cfg(all())]
 fn dtls12_fragmentation_dimpl_to_dimpl() {
 	//! Verify that a dimpl-to-dimpl handshake completes successfully with a
 	//! small MTU that forces handshake message fragmentation.
@@ -85,7 +84,6 @@ fn dtls12_fragmentation_dimpl_to_dimpl() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_fragmented_handshake_with_packet_loss() {
 	//! Use a small MTU so flights are fragmented into multiple packets.
 	//! Drop the first packet of the first flight, then trigger a retransmit.
@@ -164,7 +162,6 @@ fn dtls12_fragmented_handshake_with_packet_loss() {
 }
 
 #[test]
-#[cfg(all())]
 fn dtls12_out_of_order_fragments() {
 	//! Use a small MTU to force fragmentation. Before delivering each flight,
 	//! reverse the packet order. Verify the handshake still completes, proving

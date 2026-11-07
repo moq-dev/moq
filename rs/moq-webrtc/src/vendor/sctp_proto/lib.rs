@@ -90,37 +90,6 @@ pub use crate::vendor::sctp_proto::queue::reassembly_queue::{Chunk, Chunks};
 
 pub(crate) mod util;
 
-/// Fuzz helpers. Not part of the public API.
-#[cfg(any())]
-pub mod _fuzz {
-	use bytes::BytesMut;
-
-	use crate::vendor::sctp_proto::packet::Packet;
-	use crate::vendor::sctp_proto::util::generate_packet_checksum;
-
-	/// Feed arbitrary bytes into packet unmarshal.
-	///
-	/// Patches a valid CRC32C checksum so the fuzzer can
-	/// reach the parsing logic beyond the checksum check.
-	pub fn fuzz_packet_unmarshal(data: &[u8]) {
-		if data.len() < 12 {
-			return;
-		}
-		let mut buf = BytesMut::from(data);
-		// Zero checksum field before computing
-		buf[8] = 0;
-		buf[9] = 0;
-		buf[10] = 0;
-		buf[11] = 0;
-		let raw = buf.freeze();
-		let checksum = generate_packet_checksum(&raw);
-		let mut buf = BytesMut::from(raw.as_ref());
-		buf[8..12].copy_from_slice(&checksum.to_le_bytes());
-		let raw = buf.freeze();
-		let _ = Packet::unmarshal(&raw);
-	}
-}
-
 /// Whether an endpoint was the initiator of an association
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 pub enum Side {

@@ -244,7 +244,7 @@ pub(super) static KEY_PROVIDER: AwsLcKeyProvider = AwsLcKeyProvider;
 /// Static instance of the signature verifier.
 pub(super) static SIGNATURE_VERIFIER: AwsLcSignatureVerifier = AwsLcSignatureVerifier;
 
-#[cfg(all(test, all()))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;

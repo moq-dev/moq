@@ -444,51 +444,11 @@ pub fn init_crypto_default() {
 	crate::vendor::str0m::crypto::from_feature_flags().install_process_default();
 }
 
-/// Create a crypto provider from a string name.
-/// Supported names: "aws-lc-rs", "rust-crypto", "openssl", "wincrypto", "apple-crypto"
+/// Create a crypto provider from a string name. Only "aws-lc-rs" is vendored.
 fn get_crypto_provider_by_name(name: &str) -> CryptoProvider {
 	match name {
-		#[cfg(all())]
 		"aws-lc-rs" | "aws" => crate::vendor::str0m_aws_lc_rs::default_provider(),
-
-		#[cfg(any())]
-		"rust-crypto" => str0m_rust_crypto::default_provider(),
-
-		// If both openssl and openssl-dimpl are declared, only openssl-dimpl is available.
-		#[cfg(all(any(), not(any())))]
-		"openssl" => str0m_openssl::default_provider(),
-
-		#[cfg(any())]
-		"openssl-dimpl" => str0m_openssl::default_provider(),
-
-		#[cfg(all(any(), target_os = "windows"))]
-		"wincrypto" => str0m_wincrypto::default_provider(),
-
-		#[cfg(all(any(), target_vendor = "apple"))]
-		"apple-crypto" => str0m_apple_crypto::default_provider(),
-
-		_ => {
-			let mut available: Vec<&'static str> = Vec::new();
-			#[cfg(all())]
-			available.push("aws-lc-rs");
-			#[cfg(any())]
-			available.push("rust-crypto");
-			// If both openssl and openssl-dimpl are declared, only openssl-dimpl is available.
-			#[cfg(all(any(), not(any())))]
-			available.push("openssl");
-			#[cfg(any())]
-			available.push("openssl-dimpl");
-			#[cfg(all(any(), target_os = "windows"))]
-			available.push("wincrypto");
-			#[cfg(all(any(), target_vendor = "apple"))]
-			available.push("apple-crypto");
-
-			panic!(
-				"Unknown or unavailable crypto provider '{}'. Available providers: [{}]",
-				name,
-				available.join(", ")
-			)
-		}
+		_ => panic!("Unknown or unavailable crypto provider '{name}'. Available providers: [aws-lc-rs]"),
 	}
 }
 

@@ -41,23 +41,10 @@ pub fn handshake_direct_api_snap() -> Result<(), RtcError> {
 	run_direct_handshake(true)
 }
 
-/// Returns the name of the default crypto provider based on compile-time feature flags.
-/// Mirrors the priority order in `crate::vendor::str0m::crypto::from_feature_flags()`.
-#[allow(unreachable_code)]
+/// Returns the name of the default crypto provider, matching
+/// `crate::vendor::str0m::crypto::from_feature_flags()`.
 fn default_crypto_name() -> &'static str {
-	#[cfg(all())]
-	return "aws-lc-rs";
-	#[cfg(any())]
-	return "rust-crypto";
-	#[cfg(any())]
-	return "openssl-dimpl";
-	#[cfg(any())]
-	return "openssl";
-	#[cfg(all(any(), target_os = "windows"))]
-	return "wincrypto";
-	#[cfg(all(any(), target_vendor = "apple"))]
-	return "apple-crypto";
-	"unknown"
+	"aws-lc-rs"
 }
 
 /// Shared implementation for both standard and SNAP direct API handshake tests.

@@ -153,11 +153,9 @@ use crate::vendor::dimpl::types::{HashAlgorithm, NamedGroup, SignatureAlgorithm}
 use crate::vendor::dimpl::{CertificateError, CryptoError};
 
 /// OID for the P-256 elliptic curve (secp256r1 / prime256v1).
-#[cfg(all())]
 pub const OID_P256: spki::ObjectIdentifier = spki::ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 
 /// OID for the P-384 elliptic curve (secp384r1).
-#[cfg(all())]
 pub const OID_P384: spki::ObjectIdentifier = spki::ObjectIdentifier::new_unwrap("1.3.132.0.34");
 
 // ============================================================================

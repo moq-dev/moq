@@ -33,5 +33,4 @@ pub use net::{DatagramSend, ParseTcpTypeError, Protocol, TcpType, Transmit};
 mod sha1;
 pub use sha1::{CryptoSafe, Sha1HmacProvider};
 
-#[cfg(all())]
 pub mod crypto;
