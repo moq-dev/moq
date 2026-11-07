@@ -2950,7 +2950,9 @@ struct RouteControl {
 impl RouteControl {
 	fn new(options: RouteOptions, announcement: &AnnounceProducer, request: Option<Request>) -> Self {
 		let held = options.instance.is_none();
-		let instance = announcement.instance().expect("a route just inserted has its entries");
+		let instance = announcement
+			.instance(None)
+			.expect("a route just inserted has its entries");
 		Self {
 			options,
 			instance,
@@ -3008,11 +3010,13 @@ impl Route {
 	///
 	/// Unnamed, it can change: a prefix route ([`Producer::route_prefix`]) moves to a fresh
 	/// instance each time an answer holding its current one ends, and a job's route
-	/// ([`Request::route`]) takes its prefix route's when it first announces.
+	/// ([`Request::route`]) reports its prefix route's current one until it first announces,
+	/// binding whichever that is then.
 	pub fn instance(&self) -> Instance {
 		let mut control = self.state.control.lock();
+		let lender = control.request.as_ref().map(|request| &request.home);
 		if control.held
-			&& let Some(current) = self.state.announcement.instance()
+			&& let Some(current) = self.state.announcement.instance(lender)
 		{
 			control.instance = current;
 		}
@@ -3354,11 +3358,15 @@ impl AnnounceProducer {
 		Ok(true)
 	}
 
-	/// The instance and epoch the entries carry, or `None` once they are gone.
-	fn instance(&self) -> Option<(Instance, u64)> {
+	/// The instance and epoch the entries carry, or `None` once they are gone. A job's
+	/// route not yet announced reads its `lender`'s current one, which it would bind now.
+	fn instance(&self, lender: Option<&kio::Shared<ServeState>>) -> Option<(Instance, u64)> {
 		let shared = self.shared.lock();
 		let (prefix, id) = self.entries.first()?;
 		let entry = shared.routes.entry(prefix, *id)?;
+		if let Some(lent) = lender.and_then(|server| shared.lender(prefix, server)) {
+			return Some((lent.instance, lent.epoch));
+		}
 		Some((entry.instance.clone(), entry.epoch))
 	}
 
@@ -12243,10 +12251,13 @@ mod tests {
 		bob.await.unwrap();
 		let first = claim.instance();
 		assert_eq!(sibling.instance(), first);
+		assert_eq!(prepared.instance(), first);
 
 		drop(sibling);
 		let second = claim.instance();
 		assert_ne!(second, first);
+		// Unannounced, it reports the instance it would bind now.
+		assert_eq!(prepared.instance(), second);
 
 		prepared.announce().unwrap();
 		assert_eq!(prepared.instance(), second);
