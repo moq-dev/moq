@@ -2,14 +2,18 @@ import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
+import { SessionCode } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair, driveUntil, type MockTransport, manual } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
+import { Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
-import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP } from "./version.ts";
+import { DataType } from "./stream.ts";
+import { ALPN_04, ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 const url = new URL("https://localhost/datagrams");
 const path = Path.from("live");
@@ -499,6 +503,71 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			expect(await reader.recv()).toBeUndefined();
 		} finally {
 			budget.mockRestore();
+			reader.close();
+			remote.close();
+			client.abort();
+			server.abort();
+			source.close();
+		}
+	});
+}
+
+// A peer's protocol violation fails the session at once, without the drain a close gets. A lite-05/06
+// datagram track whose SUBSCRIBE_FINISH was accepted keeps that end, even while its FIN lags.
+for (const [alpn, version] of [
+	[ALPN_05, Version.DRAFT_05],
+	[ALPN_06, Version.DRAFT_06],
+] as const) {
+	test(`${alpn}: a duplicate SETUP after a datagram track's end keeps the end`, async () => {
+		const source = new Origin();
+		const publication = source.route(path, { hidden: true });
+		const datagrams = publication.broadcast.createDatagrams("audio");
+		publication.announce();
+		const pair = createMockTransportPair(alpn);
+		// Once armed, the publisher's FINs on the request streams it accepts never leave.
+		let holding = false;
+		const holdFin = (writable: WritableStream<Uint8Array>) => {
+			const writer = writable.getWriter();
+			return new WritableStream<Uint8Array>({
+				write: (bytes) => writer.write(bytes),
+				abort: (reason) => writer.abort(reason),
+				close: () => (holding ? new Promise<void>(() => {}) : writer.close()),
+			});
+		};
+		Object.defineProperty(pair.server, "incomingBidirectionalStreams", {
+			value: pair.server.incomingBidirectionalStreams.pipeThrough(
+				new TransformStream<WebTransportBidirectionalStream, WebTransportBidirectionalStream>({
+					transform: (bidi, controller) =>
+						controller.enqueue({ readable: bidi.readable, writable: holdFin(bidi.writable) }),
+				}),
+			),
+		});
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ url, transport: pair.server, publish: source.consume() }),
+		]);
+		const remote = wireOf(client).consume(path);
+		const reader = remote.datagrams("audio");
+		reader.setPriority(5);
+		const accepted = Promise.withResolvers<void>();
+		const endTrack = hooks.endTrack;
+		const spy = spyOn(hooks, "endTrack").mockImplementation((...args) => {
+			endTrack(...args);
+			accepted.resolve();
+		});
+		try {
+			await reader.info();
+			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
+			holding = true;
+			datagrams.finish();
+			await accepted.promise;
+			const writer = await Writer.open(pair.server, { version });
+			// The client claims the Setup Stream on its type, so the type alone is the duplicate.
+			await writer.u53(DataType.Setup);
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+			expect(await reader.recv()).toBeUndefined();
+		} finally {
+			spy.mockRestore();
 			reader.close();
 			remote.close();
 			client.abort();
