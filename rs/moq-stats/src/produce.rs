@@ -1437,7 +1437,8 @@ mod tests {
 		let pool = config.pool.clone();
 		let (origin, driver) = origin::Producer::new(config);
 		tokio::spawn(moq_net::time::run(driver));
-		(origin, pool)
+		// A relay carries what it learned on to its other peers (moq-lite-07).
+		(origin.with_proxy(true), pool)
 	}
 
 	/// Drive `drain` until `future` resolves.

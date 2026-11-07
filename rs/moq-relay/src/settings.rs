@@ -71,9 +71,6 @@ struct Runtime {
 #[derive(usage_rs::Config)]
 #[usage(prefix = "cluster")]
 struct Cluster {
-	#[usage(env = "MOQ_CLUSTER_ID", cli("--cluster-id"))]
-	id: Option<u64>,
-
 	#[usage(env = "MOQ_CLUSTER_ROUTE_KEY", cli("--cluster-route-key"))]
 	route_key: Option<String>,
 

@@ -13,6 +13,7 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 - Keep `HashMap<token, count>` and `HashMap<remote, count>` beside the slots, updated on connect, end, a new token attaching to a known session, and expiry. `Sessions::revalidate` updates them too, since it re-inserts an aged-out or restart-lost slot and appends a token the slot hadn't seen, and it keeps today's rule of enforcing no cap.
 - Age slots from a queue ordered by `seen`, refreshed on each sighting (a re-push with a generation, or an ordered map keyed by `(seen, id)`), so a sweep pops only expired entries. Keep today's rule: a session that missed two cadences is dropped.
 - Keep the semantics the doc comment on the limits describes, including a known id attaching another credential counting only against the new JWT's cap.
+- Key the per-token count on the token's signing input (header and payload) or its decoded claims, not the whole compact JWS: an ECDSA signature can be malleated to a second valid string, which today doubles `limits.token` for an ES256 or ES384 holder (found by the 2026-11-07 invariant audit, auth-6).
 - Measure with #7512's `verify/sessions` bench before and after; the slope should be flat.
 
 Public API: none. Wire: none.
