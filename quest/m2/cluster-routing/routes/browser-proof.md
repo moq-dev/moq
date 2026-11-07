@@ -2,9 +2,11 @@
 
 ## Goal
 
-Before the lite-07 cut, a lite-07 session from a current Firefox tab connects
-to `moq-relay` with its route-key proof verified, as a current Chromium tab's
-does, and the nightly route key lane keeps both that way.
+The lite-07 cut does not wait on Firefox: the release gate passes a Firefox
+tab that connects unproven, as it does Safari. Once a Firefox release follows
+the draft's exporter, a lite-07 session from it connects to `moq-relay` with
+its route-key proof verified, as a current Chromium tab's does, and the
+nightly route key lane keeps both that way.
 
 The lane (`test/interop/clients/js/route-key.ts`, in `test/interop` nightly
 and the release gate) dials the relay from each browser on lite-07 and reads
@@ -32,8 +34,25 @@ connects unproven rather than being refused.
 
 Decided 2026-11-06 (maintainer, /quest-complete while queueing
 [moq-dev/moq#8022](https://github.com/moq-dev/moq/pull/8022)): cover Firefox
-and Chromium, treat a mismatch as a bug that blocks the cut, and never send a
-proof the relay will reject.
+and Chromium, and never send a proof the relay will reject.
+
+Decided 2026-11-07 (maintainer, /quest-unblock): ✅ cut lite-07 with Firefox
+unproven (rejected: the cut waits for a Firefox that proves; the relay also
+accepting neqo's varint derivation, refused because it departs from the draft
+and tries a second path at runtime; the relay picking the derivation from the
+CONNECT's User-Agent, which is server-side UA sniffing). This replaces
+2026-11-06's "a mismatch blocks the cut". An unproven tab is a supported
+state, the neqo fix is one line, and the lane still fails loud if the relay
+refuses a Firefox tab.
+
+Now: make the lane pass a Firefox tab that sends no proof under `CI_STRICT`,
+as it treats a build that is not yet covered elsewhere, rather than failing
+the release gate (`uncovered` in `test/interop/clients/js/route-key.ts`).
+A Firefox tab that the relay refuses, or that sends a proof, still fails.
+
+Reported upstream on 2026-11-07 as
+[mozilla/neqo#4319](https://github.com/mozilla/neqo/issues/4319), with the
+one-line fix (approved by the maintainer in /quest-unblock).
 
 Once a Firefox release carries neqo's fix, gate `route_key.ts` on Firefox
 majors before it, set the lane's table (`uncovered` in `route-key.ts`) to
@@ -44,20 +63,8 @@ does for Chromium. Verify the fixed build against the relay the way the
 
 ## Waiting
 
-- Maintainer: approve reporting the derivation to mozilla/neqo (outside the
-  moq-dev and kixelated orgs, so an agent may not post unasked), as an issue
-  with a one-line patch writing the session ID as 64 bits; the draft is in
-  [moq-dev/moq#8116](https://github.com/moq-dev/moq/pull/8116). Done when the
-  issue or PR exists.
-- Maintainer: decide whether the lite-07 cut waits for a Firefox that proves.
-  (1) Wait, as decided: the release gate fails on Firefox until a fixed
-  Firefox ships and Playwright bundles it, on a timeline outside our control.
-  (2) Cut with Firefox unproven, as Safari tabs already are: the lane passes a
-  Firefox that sends no proof under `CI_STRICT`, and flips to proven later.
-  (3) Have the relay also accept neqo's derivation: refused, since it departs
-  from the draft and tries a second path at runtime. Recommend (2): the fix
-  is upstream, an unproven tab is a supported state, and the lane still
-  fails loud if a Firefox tab is refused. Done when this Plan records the pick.
-- mozilla/neqo: the exporter context writes the session ID as 64 bits; check
-  `webtransport_export_keying_material` in `neqo-http3/src/webtransport.rs`,
-  then the first Firefox release vendoring it.
+- mozilla/neqo: the exporter context writes the session ID as 64 bits, as
+  asked in [mozilla/neqo#4319](https://github.com/mozilla/neqo/issues/4319);
+  check `webtransport_export_keying_material` in
+  `neqo-http3/src/webtransport.rs`, then the first Firefox release vendoring
+  it.

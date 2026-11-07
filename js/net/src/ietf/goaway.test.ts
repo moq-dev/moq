@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
-import { Milli, Nano, sleep } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Milli } from "@moq/clock";
 import { SessionCode, StreamCode, StreamError } from "../error.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
@@ -22,7 +21,7 @@ for (const [version, alpn, requestId] of [
 	[Version.DRAFT_22, ALPN.DRAFT_22, undefined],
 ] as const) {
 	test(`a ${alpn} GOAWAY surfaces its URI and deadline without closing the session`, async () => {
-		hostTime();
+		using clock = manual();
 		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.client, { version });
 		const peer = await Stream.accept(pair.server, version);
@@ -36,11 +35,6 @@ for (const [version, alpn, requestId] of [
 			client: true,
 		});
 
-		let closed = false;
-		void connection.closed.then(() => {
-			closed = true;
-		});
-
 		try {
 			await peer.writer.u53(GoAway.id);
 			await new GoAway({ newSessionUri: "", timeout: 5000n, requestId }).encode(peer.writer, version);
@@ -49,8 +43,7 @@ for (const [version, alpn, requestId] of [
 			expect(drain.uri).toBe("");
 			expect(drain.timeout).toBe(Milli(5000));
 
-			await sleep(Nano.fromMilli(Milli(20)));
-			expect(closed).toBe(false);
+			expect(await settlesWithin(connection.closed, clock, Milli(20))).toBe(false);
 		} finally {
 			connection.abort();
 		}
@@ -58,7 +51,7 @@ for (const [version, alpn, requestId] of [
 }
 
 test("a server rejects a client GOAWAY that names a redirect", async () => {
-	hostTime();
+	using clock = manual();
 	const version = Version.DRAFT_18;
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const control = await Stream.open(pair.client, { version });
@@ -73,16 +66,10 @@ test("a server rejects a client GOAWAY that names a redirect", async () => {
 		client: false,
 	});
 
-	let closed = false;
-	void connection.closed.then(() => {
-		closed = true;
-	});
-
 	try {
 		await peer.writer.u53(GoAway.id);
 		await new GoAway({ newSessionUri: "https://other.example/", timeout: 0n }).encode(peer.writer, version);
-		await sleep(Nano.fromMilli(Milli(50)));
-		expect(closed).toBe(true);
+		expect(await settlesWithin(connection.closed, clock, Milli(50))).toBe(true);
 	} finally {
 		connection.abort();
 	}
@@ -264,7 +251,7 @@ for (const [version, alpn] of [
 
 	for (const end of ["FIN", "reset"] as const) {
 		test(`${alpn} an idle advertisement whose answer ends by ${end} is offered again`, async () => {
-			hostTime();
+			using clock = manual();
 			const pair = createMockTransportPair(alpn);
 			const control = await Stream.open(pair.server, { version });
 			await Stream.accept(pair.client, version);
@@ -292,7 +279,8 @@ for (const [version, alpn] of [
 				await new RequestOk().encode(first.writer, version);
 				if (end === "reset") first.writer.reset(new StreamError(StreamCode.Cancel));
 				else first.writer.close();
-				await offered();
+				// The offer comes back after the retry backoff.
+				await clock.drive(offered());
 			} finally {
 				connection.abort();
 				origin.close();

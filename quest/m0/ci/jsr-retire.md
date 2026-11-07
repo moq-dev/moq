@@ -22,13 +22,15 @@ Checked 2026-11-07: no `JSR_TOKEN` exists as a repository secret or in the
 
 Archiving needs the maintainer's JSR login. Archiving also ends the
 repository's OIDC link, so no separate unlinking is needed. Archive only after
-the backport lands, or a `release` push can still try to publish.
+the backport lands, or a `release` push can still try to publish. It landed
+in [moq-dev/moq#8119](https://github.com/moq-dev/moq/pull/8119); checked
+2026-11-07, `git grep -n deno origin/release -- js/common
+.github/workflows/release-js.yml` prints nothing.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: the `release` backport that drops JSR publishing merges; check `git grep -n deno origin/release -- js/common .github/workflows/release-js.yml` prints nothing
 - Maintainer: archive each `@moq` package on jsr.io (agents have no JSR login, and JSR offers no archive API for tokenless callers). For each of `auth`, `binary`, `boy`, `flate`, `hang`, `json`, `loc`, `msf`, `net`, `pattern`, `publish`, `room`, `signals`, `token`, `watch`: open `https://jsr.io/@moq/<name>/settings`, set the description to `Moved to npm: https://www.npmjs.com/package/@moq/<name>`, then click "Archive package". `boy`, `publish`, and `watch` never published a version, so deleting them from the same page also works (recommended: archive all 15 for one uniform state). Check with `curl -s https://api.jsr.io/scopes/moq/packages | jq '[.items[] | select(.isArchived | not) | .name]'` printing `[]`
 
 ## Related
