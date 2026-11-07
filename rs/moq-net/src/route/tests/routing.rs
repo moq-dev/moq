@@ -844,7 +844,6 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 			down_only: false,
 		}))
 	};
-	let floors = |region: &str| BTreeMap::from([(p(region), 1)]);
 	let item = Item {
 		seed: 0,
 		epoch: None,
@@ -859,10 +858,11 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 	let mut router: Router<Node, Item> = Router::new(1);
 	router.connect(near, Link::default()).unwrap();
 	router.connect(far, far_link.clone()).unwrap();
+	router.asks(near, p("live/a")).unwrap();
 	router.route(near, 7, finite(1));
-	router.batch(near, 7, vec![(p("live/a/x"), Some(item))], floors("live/a"), 0);
+	router.batch(near, 7, vec![(p("live/a/x"), Some(item))], Some(1), 0);
 	router.route(far, 7, finite(1));
-	router.batch(far, 7, vec![(p("live/b/y"), Some(item))], floors(""), 0);
+	router.batch(far, 7, vec![(p("live/b/y"), Some(item))], Some(1), 0);
 	assert_eq!(router.selected(7).and_then(|route| route.next), Some(near));
 	assert_eq!(router.shows(7, &p("live/a/x")), Some(true));
 	assert_eq!(
@@ -874,9 +874,47 @@ fn an_overflowing_route_neither_certifies_nor_holds() {
 	let mut router: Router<Node, Item> = Router::new(1);
 	router.connect(far, far_link).unwrap();
 	router.route(far, 7, finite(1));
-	router.batch(far, 7, vec![(p("live/x"), Some(item))], floors(""), 0);
+	router.batch(far, 7, vec![(p("live/x"), Some(item))], Some(1), 0);
 	router.route(far, 7, Some(Reach::Held));
 	assert!(router.selected(7).is_none());
 	assert!(!router.grounded(7), "an unreachable held route recovers nothing");
 	assert_eq!(router.shows(7, &p("live/x")), None);
+}
+
+/// A fresh claim arrives only on a stream that certifies nothing, while an
+/// older floor on another stream proves it absent. The merge rule trusts the
+/// floor, so the claim stays hidden until the certifying neighbor refreshes
+/// past it or lets go: that is the bound on how late an uncertified claim
+/// shows.
+#[test]
+fn a_fresh_uncertified_claim_waits_on_an_older_floor() {
+	let finite = |metric| {
+		Some(Reach::Finite(Advert {
+			seqno: 0,
+			metric,
+			down_only: false,
+		}))
+	};
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 2,
+	};
+	let (certifier, carrier) = (1, 2);
+	for refresh in [true, false] {
+		let mut router: Router<Node, Item> = Router::new(1);
+		router.connect(certifier, Link::default()).unwrap();
+		router.connect(carrier, Link::default()).unwrap();
+		router.route(certifier, 7, finite(1));
+		router.batch(certifier, 7, Vec::new(), Some(1), 0);
+		router.route(carrier, 7, finite(1));
+		router.batch(carrier, 7, vec![(p("live/x"), Some(item))], None, 0);
+		assert_eq!(router.shows(7, &p("live/x")), None, "the older floor hides it");
+
+		match refresh {
+			true => router.batch(certifier, 7, vec![(p("live/x"), Some(item))], Some(2), 0),
+			false => router.disconnect(certifier),
+		}
+		assert_eq!(router.shows(7, &p("live/x")), Some(true), "refresh {refresh}");
+	}
 }

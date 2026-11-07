@@ -257,7 +257,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 }
 
 /// A fake sibling upstream: a stream-only moq server publishing `origin`'s
-/// broadcasts to whoever connects. Returns its port, a receiver yielding each
+/// broadcasts to whoever connects, including those it learned from its own upstream,
+/// since a test may relay through it. Returns its port, a receiver yielding each
 /// accepted [`moq_net::Session`] (so the test can drain it), and the task.
 async fn spawn_upstream(
 	origin: moq_net::origin::Producer,
@@ -267,6 +268,7 @@ async fn spawn_upstream(
 	tokio::task::JoinHandle<()>,
 ) {
 	let (port, mut server) = listen_tcp().await;
+	let origin = origin.with_proxy(true);
 
 	let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 

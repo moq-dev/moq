@@ -109,6 +109,9 @@ pub struct MockConnectOptions {
 	pub client_implementation: Option<String>,
 	/// What the server advertises as its implementation, when not the default.
 	pub server_implementation: Option<String>,
+	/// Whether both sides forward the routes they learned from other sessions
+	/// (moq-lite-07): on, since these tests build their relays from plain origins.
+	pub proxy: bool,
 }
 
 impl MockConnectOptions {
@@ -133,6 +136,7 @@ impl MockConnectOptions {
 			client_discovers_all: true,
 			server_gate: None,
 			client_implementation: None,
+			proxy: true,
 			server_implementation: None,
 		}
 	}
@@ -182,7 +186,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		client = client.with_implementation(implementation);
 	}
 	if let Some(publish) = &opts.client_publish {
-		client = client.with_publisher(publish);
+		client = client.with_publisher(publish.clone().with_proxy(opts.proxy));
 	}
 	let client_discovery = opts
 		.client_subscribe
@@ -198,7 +202,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		.with_versions(opts.version.into())
 		.with_extensions(opts.server_extensions);
 	if let Some(publish) = &opts.server_publish {
-		server = server.with_publisher(publish);
+		server = server.with_publisher(publish.clone().with_proxy(opts.proxy));
 	}
 	if let Some(subscribe) = opts.server_subscribe {
 		server = server.with_subscriber(subscribe);
