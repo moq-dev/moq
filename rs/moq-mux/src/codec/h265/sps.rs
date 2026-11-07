@@ -403,8 +403,10 @@ fn read_tail(r: &mut impl BitRead, head: &SpsHead) -> ReadResult<SpsTail> {
 			};
 			sps_scc_extension(r, bits)?;
 		}
-		// sps_extension_data_flag bits follow, which decoders ignore (7.4.3.2.1).
+		// sps_extension_data_flag bits follow, which decoders ignore (7.4.3.2.1). They run to the
+		// last set bit, the stop bit, so a set bit must remain.
 		if extension_4bits != 0 {
+			while !r.read_bit("sps_extension_data_flag")? {}
 			return Ok(tail);
 		}
 	}
@@ -1032,6 +1034,33 @@ mod tests {
 		let mut fields = vec![HEAD, BLOCKS, &[U(1, 0)], &END[..END.len() - 1]];
 		fields.push(&[U(1, 1), U(4, 0), U(4, 1), U(7, 0x55)]);
 		Sps::parse(&synthetic(&fields)).unwrap();
+	}
+
+	/// With nonzero sps_extension_4bits, an SPS whose remaining bits are all zeros has no stop bit.
+	#[test]
+	fn extension_data_without_stop_bit_is_truncated() {
+		// Zero sps_extension_data_flag bits pad the stop bit to the start of the last byte.
+		let nal = (0..8)
+			.map(|padding| {
+				synthetic(&[
+					HEAD,
+					BLOCKS,
+					&[U(1, 0)],
+					&END[..END.len() - 1],
+					&[U(1, 1), U(4, 0), U(4, 1), U(padding, 0)],
+				])
+			})
+			.find(|nal| nal.last() == Some(&0x80))
+			.unwrap();
+		Sps::parse(&nal).unwrap();
+
+		// Zero the stop bit, or drop its byte.
+		let mut zeroed = nal.clone();
+		*zeroed.last_mut().unwrap() = 0;
+		for nal in [&zeroed[..], &nal[..nal.len() - 1]] {
+			assert!(matches!(Sps::parse(nal), Err(Error::SpsParse)));
+			assert!(matches!(Sps::parse_or_head(nal), Err(Error::SpsParse)));
+		}
 	}
 
 	/// An SPS refused after its head: [`Sps::parse`] errors, and [`Sps::parse_or_head`] keeps the
