@@ -43,6 +43,7 @@ mod late_lower_group;
 mod lazy_discovery;
 mod mesh_withdraw;
 mod model;
+mod mount;
 mod multi_cdn;
 mod partial_group;
 mod quiet_catalog;

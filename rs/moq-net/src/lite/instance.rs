@@ -29,6 +29,23 @@ pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option
 	}
 }
 
+/// Encode the origin node a request names, 0 letting the publisher select one. Only
+/// lite-07 carries it, so an older peer always selects, and a node set here is dropped.
+pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: u64) -> Result<(), EncodeError> {
+	match version.has_routes() {
+		true => w.varint(node),
+		false => Ok(()),
+	}
+}
+
+/// Decode the origin node a request names; see [`encode_node`].
+pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version) -> Result<u64, DecodeError> {
+	match version.has_routes() {
+		true => r.varint(),
+		false => Ok(0),
+	}
+}
+
 /// Encode the instance and epoch an announcement serves. Every route carries an instance,
 /// so lite-07 refuses to announce one without. Older versions carry neither, so the
 /// receiving session mints an instance of its own.
