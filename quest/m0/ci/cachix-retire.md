@@ -57,22 +57,28 @@ repository secret. No workflow on `main` or `release` read it, no Environment
 held a copy, and `gh secret list --repo moq-dev/moq` no longer lists it. The
 `kixelated` cache stays readable for old tags.
 
-What remains is the maintainer's: record both bucket sizes against the CI
-bucket's 30-day expiry.
+Decided 2026-11-07 (maintainer, /quest-unblock): agents collect the bucket
+sizes with this desktop's wrangler login.
+
+Baseline 2026-11-07 (`npx wrangler r2 bucket info <bucket>`):
+`nix-ci-moq-dev` held 11,019 objects and 29.3 GB, and `nix-moq-dev` held 45
+objects and 151 MB.
+
+What remains: record both bucket sizes against the CI bucket's 30-day expiry.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
-- Maintainer: record both bucket sizes no earlier than 2026-11-24, a month
-  after the first `cache.yml` push to `nix-ci-moq-dev` on 2026-10-24, against
-  the 30-day expiry in `infra/nix/lifecycle.json`. Sizes need a
-  `wrangler login` to the Cloudflare account, which agents lack. A path
-  expires 30 days after upload even while CI still reads it, and `nix copy`
-  re-uploads it on the next merge. Look for Nightly jobs that fell back to
-  source builds once paths expired (`building '/nix/store/...uniffi-bindgen`
-  in a job log), and refresh on a schedule or switch to a closure-aware
-  collector (niks3) if they recur.
+- moq-dev/moq: no earlier than 2026-11-24, a month after the first
+  `cache.yml` push to `nix-ci-moq-dev` on 2026-10-24, an agent on the
+  maintainer's desktop records both buckets' sizes with
+  `npx wrangler r2 bucket info nix-moq-dev` and `nix-ci-moq-dev`, against the
+  30-day expiry in `infra/nix/lifecycle.json`. A path expires 30 days after
+  upload even while CI still reads it, and `nix copy` re-uploads it on the
+  next merge. Look for Nightly jobs that fell back to source builds once paths
+  expired (`building '/nix/store/...uniffi-bindgen` in a job log), and refresh
+  on a schedule or switch to a closure-aware collector (niks3) if they recur.
 
 ## Related
 
