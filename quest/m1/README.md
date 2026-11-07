@@ -52,7 +52,6 @@ moves what remains of them once their claims merge.
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - AMD's VA-API H.264 encode decodes, or the node is refused for OpenH264
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
-- [moq-mux reads H.265 SPS without scuffle](/quest/m1/h265-sps-reader.md) - moq-mux's own SPS reader replaces scuffle-h265 and scuffle-expgolomb, and the fuzz regressions still pass
 - [QMux reads the app-limited flag on big-endian Linux](/quest/m1/qmux-app-limited-endian.md) - the send-rate filter's app-limited mask follows the target's byte order
 - [A cancelled dispatch lane stops its phase promptly](/quest/m1/dispatch-cancel-race.md) - a TERM landing just before a lane forks its phase's command still stops that command, instead of waiting out the phase
 
