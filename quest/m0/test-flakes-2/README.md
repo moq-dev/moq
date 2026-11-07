@@ -134,4 +134,6 @@ Public API: none. Wire: none.
 - [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [The FFI concurrent-ready test wakes both calls under load](/quest/m0/test-flakes-2/ffi-concurrent-ready.md) - `concurrent_ready_calls_all_wake` stops stalling its reader drain under load and is re-enabled
 - [The datagram-end close test survives load](/quest/m0/test-flakes-2/datagram-end-close.md) - `a session close right after a datagram track's end keeps the end` stops aborting the track under load and is re-enabled
+- [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
+- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
 - [OBS TSan runs report no leaked FFI worker thread](/quest/m0/test-flakes-2/obs-tsan-thread-leak.md) - the OBS TSan tests stop flagging a finished `moq-ffi-worker` thread at exit under load
