@@ -100,7 +100,6 @@ This README's own work, once the children land:
 ## Required
 
 - [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - browser publishers adapt to `getStats()`'s send estimate once Chrome and Safari report one
-- [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
 
 ## Related
 
