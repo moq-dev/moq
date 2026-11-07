@@ -990,11 +990,12 @@ export class Producer {
 	// must not see them. The wire's aggregate, `#state.update`, keeps them.
 	#live = new Signal<Subscription | undefined>(undefined);
 
-	// Recently written source groups, retained for replay to late subscribers until the cache
-	// pool evicts them, for its budget or once idle. Each entry tracks the mirror
-	// it handed to every sink so eviction can drop them too: otherwise a slow consumer
-	// that never reads would pin old groups (and their frame bytes) forever.
-	#cache: CachedGroup[] = [];
+	// Recently written source groups, in arrival order, retained for replay to late subscribers
+	// until the cache pool evicts them, for its budget or once idle. A set, so evicting a run of
+	// them is linear. Each entry tracks the mirror it handed to every sink so eviction can drop
+	// them too: otherwise a slow consumer that never reads would pin old groups (and their frame
+	// bytes) forever.
+	#cache = new Set<CachedGroup>();
 	// The same entries by sequence, so a write finds a duplicate without a scan.
 	#cached = new Map<bigint, CachedGroup>();
 	// The cached groups' checked starts, sorted by sequence, so a first frame finds its
@@ -1566,7 +1567,7 @@ export class Producer {
 
 	// Take a cached group out of the cache lookups, releasing what it billed the pool.
 	#uncache(entry: CachedGroup, evicted = false): void {
-		this.#cache.splice(this.#cache.indexOf(entry), 1);
+		this.#cache.delete(entry);
 		this.#cached.delete(entry.group.sequence);
 		this.#unbound(entry, evicted);
 		this.#account.remove(entry);
@@ -1717,7 +1718,7 @@ export class Producer {
 				return () => this.#record(entry, start, late);
 			});
 		}
-		this.#cache.push(entry);
+		this.#cache.add(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#fills.arrived(group.sequence);
 		this.#advance(group.sequence, true);
@@ -2155,7 +2156,7 @@ export class Producer {
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
-		const open = this.#cache.filter((entry) => entry.group.closed.peek() === undefined);
+		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
 		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? this.#state.endError ?? null);
 		// Closing a copy never supplies the missing tail of a group. Already finished groups
@@ -2192,7 +2193,8 @@ export class Producer {
 		if (end === undefined) return false;
 		const final = finalSequence(end);
 		if (!reaches(this.#received, this.#state.drops.peek(), final) || this.#owes(final)) return false;
-		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
+		for (const { group } of this.#cache) if (group.sequence < final && group.closed.peek() !== null) return false;
+		return true;
 	}
 
 	/** Append a frame as its own single-frame group. */
