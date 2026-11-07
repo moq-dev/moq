@@ -13,8 +13,8 @@ and a portable software AV1 fallback such as
 OS, extension, hardware, format, and fixture requirements; a browser playing
 a codec is not proof that our native backend can open it.
 
-NVIDIA AV1 encode/10-bit and VAAPI expansion already have quests. Keep those
-owners. Software VP8/VP9 decode is libvpx behind moq-video's `vpx` feature;
+NVIDIA AV1 encode/10-bit already has quests; keep those owners. VA-API gaps,
+such as HEVC Main 10 decode, have no owner and are in scope here. Software VP8/VP9 decode is libvpx behind moq-video's `vpx` feature;
 hardware VP8/VP9 decode is in scope here. Windows NVIDIA support needs a demonstrated advantage over
 the existing native path. If revisiting software AV1 encoding, measure the
 target real-time workload and build cost rather than assuming all presets or
