@@ -397,7 +397,9 @@ impl Session {
 		let result = match &self.web {
 			None => self.conn.send_datagram(payload, options),
 			// The session id goes ahead of the payload as its own chunk, so neither is copied.
-			Some(web) => self.conn.send_datagram(web.header_datagram.clone().chain(payload), options),
+			Some(web) => self
+				.conn
+				.send_datagram(web.header_datagram.clone().chain(payload), options),
 		};
 		result.map_err(|err| self.handles.map(err.into()))
 	}
@@ -983,9 +985,7 @@ impl Handles {
 		self.web
 			.as_ref()
 			.filter(|_| code.into_inner() == 0x170d7b68)
-			.map(|web| {
-				web.closed.borrow().clone().unwrap_or(Error::SessionGone)
-			})
+			.map(|web| web.closed.borrow().clone().unwrap_or(Error::SessionGone))
 	}
 	/// Replace an error caused by the connection closing with the recorded close reason, or
 	/// decode the peer's close code when none was recorded.

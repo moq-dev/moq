@@ -664,9 +664,8 @@ fn poll_accept_bi_shared(
 pub(crate) type UniHeader = (StreamUni, Option<VarInt>, crate::quic::driver::recv::Stream);
 /// A unidirectional stream whose header is being read.
 pub(crate) type PendingUni = dyn Future<Output = Result<UniHeader, Error>> + Send;
-type PendingBi = dyn Future<
-		Output = Result<Option<(crate::quic::driver::send::Stream, crate::quic::driver::recv::Stream)>, Error>,
-	> + Send;
+type PendingBi = dyn Future<Output = Result<Option<(crate::quic::driver::send::Stream, crate::quic::driver::recv::Stream)>, Error>>
+	+ Send;
 
 // Logic just for accepting streams, which is annoying because of the stream header.
 struct SessionAccept {
@@ -917,7 +916,9 @@ async fn read_varint(recv: &mut crate::quic::driver::recv::Stream) -> Result<Var
 // moq does routinely. Anything else is a misbehaving peer.
 pub(crate) fn log_header_error(err: Error, direction: &'static str) {
 	match err {
-		Error::Read(crate::quic::driver::recv::Error::Reset(_) | crate::quic::driver::recv::Error::Connection(_)) => tracing::debug!(?err, direction, "stream closed before its header"),
+		Error::Read(crate::quic::driver::recv::Error::Reset(_) | crate::quic::driver::recv::Error::Connection(_)) => {
+			tracing::debug!(?err, direction, "stream closed before its header")
+		}
 		_ => tracing::warn!(?err, direction, "failed to decode stream header"),
 	}
 }

@@ -127,7 +127,9 @@ impl moq_net::transport::Error for Error {
 		// An open can fail while writing its WebTransport header, before it returns a stream.
 		// Raw QUIC writes no header, so the code is always in HTTP/3 space here.
 		match self {
-			Self::Write(crate::quic::send::Error::Stopped(code)) => web_transport_proto::error_from_http3(code.into_inner()),
+			Self::Write(crate::quic::send::Error::Stopped(code)) => {
+				web_transport_proto::error_from_http3(code.into_inner())
+			}
 			_ => None,
 		}
 	}
@@ -170,7 +172,11 @@ mod tests {
 	/// stopped, and only when it names a WebTransport code.
 	#[test]
 	fn header_stops_keep_their_registry() {
-		let stopped = |code: u64| Error::Write(crate::quic::send::Error::Stopped(crate::quic::VarInt::from_u64(code).unwrap()));
+		let stopped = |code: u64| {
+			Error::Write(crate::quic::send::Error::Stopped(
+				crate::quic::VarInt::from_u64(code).unwrap(),
+			))
+		};
 		assert_eq!(stopped(web_transport_proto::error_to_http3(3)).stream_error(), Some(3));
 		assert_eq!(stopped(0x100).stream_error(), None, "not a MoQ stream code");
 	}

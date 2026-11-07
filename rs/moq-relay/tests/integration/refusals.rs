@@ -527,10 +527,7 @@ async fn uri_setup_paths(io_uring: bool) {
 				})
 				.await
 				.expect("forbidden SETUP Path must close the session");
-				assert!(
-					matches!(error, Error::Closed(3, _)),
-					"{version}, {path:?}: {error:?}"
-				);
+				assert!(matches!(error, Error::Closed(3, _)), "{version}, {path:?}: {error:?}");
 			} else {
 				let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
 				assert_eq!(admission.request.path, "/room", "{version}");

@@ -225,7 +225,10 @@ mod tests {
 			super::super::recv::Error::Session(idle.clone()).close_kind(),
 			CloseKind::IdleTimeout
 		);
-		assert_eq!(super::super::send::Error::Session(idle).close_kind(), CloseKind::IdleTimeout);
+		assert_eq!(
+			super::super::send::Error::Session(idle).close_kind(),
+			CloseKind::IdleTimeout
+		);
 		assert_eq!(super::super::recv::Error::Evicted.close_kind(), CloseKind::Evicted);
 		let local = Error::Connection(crate::quic::driver::connection::Error::LocallyClosed {
 			code: 7u32.into(),
@@ -308,7 +311,10 @@ mod tests {
 		let mapped = web.map(closed(web_transport_proto::error_to_http3(7)));
 		assert_eq!(mapped.session_error(), Some((7, "bye".into())));
 		let h3 = web.map(closed(0x100));
-		assert!(matches!(&h3, Error::Http3 { code: 0x100, reason } if reason == "bye"), "got {h3:?}");
+		assert!(
+			matches!(&h3, Error::Http3 { code: 0x100, reason } if reason == "bye"),
+			"got {h3:?}"
+		);
 		assert_eq!(h3.session_error(), None);
 
 		let raw = CloseReason::new(true);
