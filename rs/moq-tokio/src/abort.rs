@@ -34,3 +34,31 @@ impl<T> Drop for AbortOnDrop<T> {
 		self.0.abort();
 	}
 }
+
+/// Owns a task spawned where [`Spawner::current`](crate::runtime::Spawner::current) picks,
+/// the simulator included, cancelling it when this guard drops.
+#[cfg(feature = "net")]
+#[derive(Debug)]
+pub(crate) struct Detached(futures::future::AbortHandle);
+
+#[cfg(feature = "net")]
+impl Detached {
+	/// Spawn `future` beside the caller.
+	pub(crate) fn spawn(future: impl Future<Output = ()> + Send + 'static) -> Self {
+		let (future, handle) = futures::future::abortable(future);
+		crate::runtime::Spawner::current().spawn(future);
+		Self(handle)
+	}
+
+	/// Cancel the task at its next poll.
+	pub(crate) fn abort(&self) {
+		self.0.abort();
+	}
+}
+
+#[cfg(feature = "net")]
+impl Drop for Detached {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
