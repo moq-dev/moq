@@ -13,9 +13,9 @@
 //!
 //! Pause/resume state machine:
 //! ```text
-//!   Demand { video, audio } under the condvar's mutex
-//!     both false → paused (emulation stops, condvar blocks)
-//!     either true → resumed (condvar notified)
+//!   Wanted { video, audio, closed } under the condvar's mutex
+//!     neither wanted and not closed → paused (emulation stops, condvar blocks)
+//!     anything wanted or closed → resumed (condvar notified)
 //!
 //!   On resume → force video keyframe, reanchor audio
 //! ```
