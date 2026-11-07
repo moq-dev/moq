@@ -43,6 +43,8 @@ pub(super) enum Event {
 	/// still queued, then stop.
 	Ended,
 	Failed(String),
+	/// Audio resumed after a declared silence, starting at this media timestamp.
+	Utterance(Duration),
 }
 
 /// Run native playback on the calling thread until the window closes.
@@ -284,6 +286,7 @@ impl ApplicationHandler<Event> for App {
 				}
 			}
 			Event::Failed(err) => self.fail(event_loop, err),
+			Event::Utterance(_) => {}
 		}
 	}
 

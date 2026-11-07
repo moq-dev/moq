@@ -159,6 +159,32 @@ async fn reading_returns_flow_control_credit() {
 	}
 }
 
+/// A stream's bytes count as acknowledged once they go to the transport, which a stalled link
+/// holds back; a reset stream never is.
+#[tokio::test(start_paused = true)]
+async fn a_stream_is_acknowledged_once_its_bytes_go_out() {
+	for &version in Version::ALL {
+		let (client, server, up, _down) = link();
+		let (client, server) = establish(client, server, config(version), config(version)).await;
+
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		assert_eq!(send.acknowledged(), Some(true), "{version:?}: nothing written");
+		up.send(Flow::Stall).unwrap();
+		// More than the pipe holds, within the peer's stream window.
+		let data = payload(2 * PIPE, 5);
+		write_all(&mut send, data.clone()).await;
+		assert_eq!(send.acknowledged(), Some(false), "{version:?}: the link holds the rest");
+
+		up.send(Flow::Open).unwrap();
+		let mut recv = server.accept_uni().await.unwrap();
+		assert_eq!(read_exact(&mut recv, data.len()).await.unwrap(), data, "{version:?}");
+		assert_eq!(send.acknowledged(), Some(true), "{version:?}: all of it went out");
+
+		send.reset(1);
+		assert_eq!(send.acknowledged(), Some(false), "{version:?}");
+	}
+}
+
 /// Lease `want` bytes, returning how many were leased and handing them back unread, so they
 /// keep their credit.
 async fn lease(recv: &mut RecvStream, want: usize) -> Result<usize, Error> {

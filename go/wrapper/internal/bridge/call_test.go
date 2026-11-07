@@ -63,28 +63,30 @@ func TestRunHandleIgnoresAResultThatIsNoHandle(t *testing.T) {
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	started := make(chan struct{})
 	finish := make(chan struct{})
-	returned := make(chan struct{})
 
 	go func() {
 		<-started
 		cancelCtx()
 	}()
 
-	_, err := CallHandle(ctx, nil, func(context.Context) (*stubHandle, error) {
+	// CallHandle's own release, wrapped to report when it has run. It runs on its
+	// own goroutine, so a nil dereference there takes the process down rather
+	// than failing here.
+	released := make(chan struct{})
+	_, err := CallRelease(ctx, nil, func(context.Context) (*stubHandle, error) {
 		close(started)
 		<-finish
-		close(returned)
 		return nil, nil
+	}, func(val *stubHandle) {
+		releaseHandle(val)
+		close(released)
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 
 	close(finish)
-	<-returned
-	// The release runs on its own goroutine, so a nil dereference there takes the
-	// process down rather than failing here; give it a moment to happen.
-	time.Sleep(50 * time.Millisecond)
+	<-released
 }
 
 // A context that is already done starts no call at all, so a request that would
