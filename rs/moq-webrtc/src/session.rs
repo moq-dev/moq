@@ -8,6 +8,7 @@
 //! to a remote URL (client side), or whether the media flow is RTP-in
 //! ([`MediaSink`]) or RTP-out ([`crate::egress::EgressSource`]).
 
+use crate::vendor::str0m;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -659,7 +660,7 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConf
 		.set_send_buffer_video(EGRESS_SEND_BUFFER_VIDEO);
 	for c in codecs {
 		config = match c {
-			Codec::Opus => config.enable_opus(true, false),
+			Codec::Opus => config.enable_opus(true),
 			Codec::H264 => config.enable_h264(true),
 			Codec::H265 => config.enable_h265(true),
 			Codec::Vp8 => config.enable_vp8(true),

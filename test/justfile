@@ -65,6 +65,7 @@ harness:
 # Finite track tails run too; `--tail` selects just the CLI FETCH close and Rust/Node/Bun tail checks.
 # `--versions ietf` reruns them with every client pinned to each even moq-transport draft.
 # Both runs first check the Rust/JS wire and session interop suites, in both directions.
+# `lite_tracks_interop` rejoins them with quest/m2/cluster-routing/routes/js.md.
 [positional-arguments]
 interop *args:
     uv run --no-project python ../sh/js/install.py frozen
@@ -76,7 +77,6 @@ interop *args:
         ietf_range_updates_interop \
         padding_interop \
         sign_interop \
-        tracks_interop \
         varint_interop \
         --run-ignored all
     ./interop/interop.sh "$@"

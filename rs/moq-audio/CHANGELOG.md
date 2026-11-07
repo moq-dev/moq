@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A bus `Strip` has a pan, `set_pan` and `pan`, that places its source between
+  left and right in every mix: constant power for a mono source, at -3 dB per
+  side when centered (so a mono source now plays 3 dB quieter by default), and
+  balance for any other. Only a stereo bus pans: another refuses a strip panned
+  off center, and the strip refuses a pan while a channel is open on one.
 - **Breaking:** the bus routes sources into several mixes. `Bus::new` returns
   the bus and the one `Driver` that advances it on the caller's clock; each mix
   has its own meter and independent readers whose blocks carry their clock
