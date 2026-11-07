@@ -120,6 +120,11 @@ missed their turn until every frame was read. Fixed by reading at most what was
 written and yielding after each read, in
 [moq-dev/moq#8053](https://github.com/moq-dev/moq/pull/8053).
 
+The Python audio playout-delay test was never a decoder stall: under its default
+zero max delay, a read more than the 80 ms warmup late found the first frame's
+group stale, and the warmup then trimmed all the audio left. The test now asks
+for no max delay, fixed by [moq-dev/moq#8050](https://github.com/moq-dev/moq/pull/8050).
+
 Added 2026-11-06: `js/net`'s flate tail-shed test, which timed out in a
 merge-queue batch, one child.
 
@@ -139,5 +144,4 @@ Public API: none. Wire: none.
 - [Flate's tail-shed test passes under load](/quest/m0/test-flakes-2/flate-tail-shed.md) - `js/net`'s compressed tail-shed cases finish within bun's timeout under load, re-enabled once fixed
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [The Python audio playout-delay test reads its frames](/quest/m0/test-flakes-2/audio-playout-delay.md) - `test_audio_consumer_reports_its_playout_delay` stops timing out on its first read in the merge queue
 - [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
