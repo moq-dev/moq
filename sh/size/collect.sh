@@ -15,7 +15,7 @@ esac
 cargo build --locked --release -p moq-ffi --no-default-features --target-dir "$target/minimal"
 cp "$target/minimal/release/libmoq_ffi.$dylib" "$out/native/libmoq_ffi-minimal.$dylib"
 cp "$target/minimal/release/libmoq_ffi.a" "$out/native/libmoq_ffi-minimal.a"
-bun install --frozen-lockfile
+uv run --no-project python sh/js/install.py frozen
 just js build
 bun sh/size/bundles.ts "$out/js"
 # Symbols are necessary only for attribution; they never replace the measured shipping sizes.
