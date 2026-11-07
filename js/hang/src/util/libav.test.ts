@@ -38,7 +38,6 @@ function power(samples: Float32Array, frequency: number): number {
 test("the fallback decodes AAC without a native AudioDecoder", async () => {
 	// The premise: Bun ships no WebCodecs, so this runs entirely on the libav fallback.
 	expect(globalThis.AudioDecoder).toBeUndefined();
-	expect(await polyfill()).toBe(true);
 
 	const config: AudioDecoderConfig = {
 		codec: "mp4a.40.2",
@@ -46,6 +45,29 @@ test("the fallback decodes AAC without a native AudioDecoder", async () => {
 		numberOfChannels: 2,
 		description: audioSpecificConfig(SAMPLE_RATE, 2),
 	};
+
+	// The polyfill library installs its own AudioDecoder, which refuses AAC, before its load
+	// finishes. A caller arriving in that window must still get the AAC-capable one.
+	let installed: typeof AudioDecoder | undefined;
+	let early: Promise<boolean | undefined> | undefined;
+	Object.defineProperty(globalThis, "AudioDecoder", {
+		configurable: true,
+		get: () => installed,
+		set: (value: typeof AudioDecoder) => {
+			installed = value;
+			// Ask once the library has installed every global, as a concurrent caller would see them.
+			early ??= Promise.resolve()
+				.then(polyfill)
+				.then(async () => (await AudioDecoder.isConfigSupported(config)).supported);
+		},
+	});
+	try {
+		expect(await polyfill()).toBe(true);
+	} finally {
+		Object.defineProperty(globalThis, "AudioDecoder", { configurable: true, writable: true, value: installed });
+	}
+	expect(await early).toBe(true);
+
 	expect((await AudioDecoder.isConfigSupported(config)).supported).toBe(true);
 	for (const codec of ["mp4a.40.02", "mp4a.40.5", "mp4a.40.05", "mp4a.40.29", "mp4a.67"]) {
 		expect((await AudioDecoder.isConfigSupported({ ...config, codec })).supported).toBe(true);

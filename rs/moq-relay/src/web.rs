@@ -2867,6 +2867,7 @@ mod tests {
 			.await;
 			let (transport, driver) = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
 				.connect()
+				.await
 				.unwrap();
 			tokio::spawn(driver);
 			let origin = moq_tokio::origin::spawn();
