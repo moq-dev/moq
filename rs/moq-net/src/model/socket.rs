@@ -1301,7 +1301,7 @@ mod tests {
 
 		let (done, finished) = std::sync::mpsc::channel();
 		let thread = std::thread::spawn(move || {
-			let (origin, _driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(1).unwrap()));
+			let (origin, _driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 			let endpoint = Endpoint::new(&origin, "room", "bob").unwrap();
 			let noop = kio::Waiter::noop();
 			// Listening, so the dial queues for the handler.
@@ -1340,7 +1340,7 @@ mod tests {
 	/// its dialer gives up, so dialing and giving up again never piles up requests.
 	#[test]
 	fn abandoned_dials_leave_the_queue() {
-		let (origin, _driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(1).unwrap()));
+		let (origin, _driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 		let endpoint = Endpoint::new(&origin, "room", "bob").unwrap();
 		let noop = kio::Waiter::noop();
 		// Accepting both protocols, then only `tcp`.

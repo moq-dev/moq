@@ -423,7 +423,7 @@ impl Subscriber {
 		// origin we publish into so it matches the relay identity across
 		// every session sharing that origin, required for cross-session
 		// loop detection.
-		let self_origin = config.origin.hop();
+		let self_origin = crate::Hop::from(config.origin.hop());
 		Self {
 			session: config.session,
 			runtime: config.runtime,
@@ -3951,7 +3951,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4005,7 +4005,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(local.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4038,7 +4038,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(local.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4074,7 +4074,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(local),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4136,7 +4136,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(local),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4288,7 +4288,7 @@ mod tests {
 				let subscriber = Subscriber::new(SubscriberConfig {
 					runtime: crate::time::sim(),
 					session: crate::driver::Transport::new(session.clone()),
-					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 					recv_bandwidth: None,
 					version,
 					peer_setup: peer_setup.clone(),
@@ -4347,7 +4347,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4443,7 +4443,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup,
@@ -4625,7 +4625,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4782,7 +4782,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: clock.clone(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4854,7 +4854,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4917,7 +4917,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5024,7 +5024,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5096,7 +5096,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5166,7 +5166,7 @@ mod tests {
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
 	async fn check_subscription_fin(version: Version, responses: Vec<u8>, clean: bool) {
 		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -5286,7 +5286,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5358,7 +5358,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5446,7 +5446,7 @@ mod tests {
 	#[kio::test]
 	async fn route_datagram_delivers_to_its_subscription() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(SinkSession::default()),
@@ -5523,7 +5523,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::default()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5569,7 +5569,7 @@ mod tests {
 	#[kio::test]
 	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Lite04, Version::Lite07] {
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _interest = origin.consume().routes();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
 			let log = session.log.clone();
@@ -5606,7 +5606,7 @@ mod tests {
 				let subscriber = Subscriber::new(SubscriberConfig {
 					runtime: crate::time::sim(),
 					session: crate::driver::Transport::new(session.clone()),
-					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 					recv_bandwidth: None,
 					version,
 					peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5669,7 +5669,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version: VERSION,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5722,7 +5722,7 @@ mod tests {
 		Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session,
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup,
@@ -6059,7 +6059,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6114,7 +6114,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6260,7 +6260,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::default()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6316,7 +6316,7 @@ mod tests {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_bi(gate.consume());
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -6384,7 +6384,7 @@ mod tests {
 		let session = SinkSession::gated_bi(gate.consume());
 		let auth = crate::auth::Link::new(false);
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -6455,7 +6455,7 @@ mod tests {
 			// what was true at the instant it would.
 			let gate = kio::Producer::new(true);
 			let session = SinkSession::gated_bi(gate.consume());
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
@@ -6540,7 +6540,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6613,7 +6613,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6685,7 +6685,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: Some(producer),
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6750,7 +6750,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: Some(producer),
 			version,
 			peer_setup,
@@ -7092,7 +7092,7 @@ mod tests {
 	#[kio::test]
 	async fn a_double_announce_is_an_error_even_when_reflected() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7185,7 +7185,7 @@ mod tests {
 	/// every announced route there made each group cost the whole announce set.
 	#[kio::test]
 	async fn a_request_readies_only_its_route() {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7239,7 +7239,7 @@ mod tests {
 	/// route afresh. Withdrawing the claim still closes a source in use at once.
 	#[kio::test]
 	async fn an_unheld_source_is_retired() {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7308,7 +7308,7 @@ mod tests {
 	/// machine, rather than the front finding no handler and ending the track `NotFound`.
 	#[kio::test]
 	async fn a_track_read_before_its_source_is_served_queues() {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7364,7 +7364,7 @@ mod tests {
 	#[kio::test]
 	async fn every_declined_announce_is_recorded() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7422,7 +7422,7 @@ mod tests {
 	#[kio::test]
 	async fn a_dropped_announce_still_holds_its_path() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7481,7 +7481,7 @@ mod tests {
 	async fn an_announce_reflected_by_its_sender_is_dropped() {
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7525,7 +7525,7 @@ mod tests {
 	#[kio::test]
 	async fn a_reflected_announce_does_not_displace_the_local_front() {
 		let relay = crate::Hop::new(1).unwrap();
-		let origin = origin::Config::new(relay).produce();
+		let origin = origin::Config::from(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
 		let local = origin
@@ -7613,7 +7613,7 @@ mod tests {
 		let session = SinkSession::new(Default::default());
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7660,7 +7660,7 @@ mod tests {
 	#[kio::test]
 	async fn lite03_placeholders_stay_anonymous() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7742,7 +7742,7 @@ mod tests {
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber, crate::origin::Consumer) {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7898,7 +7898,7 @@ mod tests {
 	/// to the session (outliving the stream) would leak the announcement instead.
 	#[kio::test]
 	async fn a_lost_announce_stream_retracts_the_route() {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7983,7 +7983,7 @@ mod tests {
 			.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
 			.unwrap();
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -8052,7 +8052,7 @@ mod tests {
 		version: Version,
 		session: crate::lite::test_transport::ScriptedSession,
 	) -> (AnnouncePrefix, origin::Consumer) {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -8303,7 +8303,7 @@ mod tests {
 				.unwrap();
 		}
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -8345,7 +8345,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),

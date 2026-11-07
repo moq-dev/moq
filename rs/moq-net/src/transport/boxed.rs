@@ -7,14 +7,14 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
-use std::task::Poll;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::task::{Poll, ready};
 
 use bytes::{Buf, Bytes};
 
 use super::open::{self, Open};
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, Dir, Probe, ReceiveWindow, StreamCredit, Wire};
+use super::{Address, CloseKind, Dir, Limits, LimitsError, Probe, ReceiveWindow, StreamCredit, Wire};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -53,6 +53,38 @@ impl Session {
 		open.poll(&self.opens, Dir::Uni, waiter, &options, |waiter| {
 			self.inner.session.poll_open_uni(waiter, options)
 		})
+	}
+
+	/// Poll opening a unidirectional stream for a group, like [`Self::poll_open_uni`], which the
+	/// session lists among its open group streams until it is finished, reset, or dropped.
+	pub(crate) fn poll_open_group(
+		&self,
+		open: &mut Open,
+		waiter: &kio::Waiter,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<SendStream, Error>> {
+		let SendStream(Sender::Own(stream)) = ready!(self.poll_open_uni(open, waiter, options))? else {
+			unreachable!("a stream is listed only here");
+		};
+		let listed = Arc::new(Listed {
+			state: Mutex::new(ListedState {
+				stream,
+				group: options.group.map(|group| group.priority.clone()),
+				priority: options.priority,
+			}),
+		});
+		let key = self.opens.list(&listed);
+		Poll::Ready(Ok(SendStream(Sender::Listed(Listing {
+			listed,
+			lines: self.opens.clone(),
+			key: Some(key),
+		}))))
+	}
+
+	/// The session's open group streams, the lowest ranked first.
+	#[cfg(test)]
+	pub(crate) fn open_streams(&self) -> Vec<open::OpenStream> {
+		self.opens.open_streams()
 	}
 
 	/// Poll opening a bidirectional stream, its sending half scheduled by `options`, once
@@ -194,13 +226,114 @@ impl poll::SendGroup for Group {
 }
 
 /// A boxed outgoing stream.
-pub(crate) struct SendStream(Box<dyn ErasedSend>);
+pub(crate) struct SendStream(Sender);
+
+enum Sender {
+	Own(Box<dyn ErasedSend>),
+	/// A group stream its session lists, so the list can read it too.
+	Listed(Listing),
+}
 
 impl SendStream {
 	/// Box a stream, keeping its own send-group type behind the boundary.
 	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::SendStream<Group: Send + Sync> + Send + Sync) -> Self {
-		Self(Box::new(stream))
+		Self(Sender::Own(Box::new(stream)))
+	}
+
+	fn own(stream: impl poll::SendStream<Group: Send + Sync> + Send + Sync + 'static) -> Self {
+		Self(Sender::Own(Box::new(stream)))
+	}
+
+	/// Run `f` on the transport's stream, then leave the session's list if `unlist`.
+	fn with<T>(&mut self, unlist: bool, f: impl FnOnce(&mut dyn ErasedSend) -> T) -> T {
+		match &mut self.0 {
+			Sender::Own(stream) => f(stream.as_mut()),
+			Sender::Listed(listing) => {
+				let res = f(listing.listed.lock().stream.as_mut());
+				if unlist {
+					listing.unlist();
+				}
+				res
+			}
+		}
+	}
+
+	fn get(&self) -> Read<'_> {
+		match &self.0 {
+			Sender::Own(stream) => Read::Own(stream.as_ref()),
+			Sender::Listed(listing) => Read::Listed(listing.listed.lock()),
+		}
+	}
+}
+
+/// A boxed stream borrowed for a read through `&self`.
+enum Read<'a> {
+	Own(&'a (dyn ErasedSend + 'static)),
+	Listed(std::sync::MutexGuard<'a, ListedState>),
+}
+
+impl std::ops::Deref for Read<'_> {
+	type Target = dyn ErasedSend;
+
+	fn deref(&self) -> &Self::Target {
+		match self {
+			Read::Own(stream) => *stream,
+			Read::Listed(state) => state.stream.as_ref(),
+		}
+	}
+}
+
+/// An open group stream, shared by the task writing it and its session's list.
+pub(super) struct Listed {
+	state: Mutex<ListedState>,
+}
+
+struct ListedState {
+	stream: Box<dyn ErasedSend>,
+	/// The priority of the send group the stream is in, shared with the group's handles.
+	group: Option<Arc<std::sync::atomic::AtomicI64>>,
+	priority: i64,
+}
+
+impl Listed {
+	fn lock(&self) -> std::sync::MutexGuard<'_, ListedState> {
+		self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+	}
+
+	/// The stream's rank, and whether the peer acknowledged everything written to it.
+	pub(super) fn read(&self) -> open::OpenStream {
+		let state = self.lock();
+		open::OpenStream {
+			rank: open::Rank::new(
+				state.group.as_ref().map(|group| group.load(Ordering::Relaxed)),
+				state.priority,
+			),
+			acknowledged: state.stream.acknowledged(),
+		}
+	}
+}
+
+/// The writing task's hold on a listed stream, which leaves the list once the stream is
+/// finished, reset, or dropped.
+struct Listing {
+	listed: Arc<Listed>,
+	lines: Arc<open::Lines>,
+	/// The key the stream is listed under, until it leaves.
+	key: Option<u64>,
+}
+
+impl Listing {
+	fn unlist(&mut self) {
+		if let Some(key) = self.key.take() {
+			self.lines.unlist(key);
+		}
+	}
+}
+
+impl Drop for Listing {
+	fn drop(&mut self) {
+		self.unlist();
 	}
 }
 
@@ -211,17 +344,16 @@ impl RecvStream {
 	/// Box a stream outside any session, which therefore never pauses.
 	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::RecvStream + Send + Sync) -> Self {
-		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new(), None)
+		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new())
 	}
 
-	/// Box a stream of a session granting `receive`, read when the stream is accepted or
-	/// opened, which sizes its pacing [`window`](Self::window).
-	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget, receive: Option<ReceiveWindow>) -> Self {
+	/// Box a stream of `session`, whose receive windows size its pacing [`window`](Self::window).
+	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget) -> Self {
 		Self(Box::new(Budgeted {
 			stream,
 			session,
 			held: 0,
-			window: crate::model::pace::window(receive),
+			window: OnceLock::new(),
 		}))
 	}
 
@@ -251,8 +383,9 @@ struct Budgeted<T> {
 	session: Budget,
 	/// The credit reserved while paused, zero while read.
 	held: u64,
-	/// The pacing window, from the session's receive windows when the stream arrived.
-	window: u64,
+	/// The pacing window, read from the session's receive windows when ingest first paces
+	/// the stream, so one that arrived before admission widened them paces at the wider ones.
+	window: OnceLock<u64>,
 }
 
 impl<T> Budgeted<T> {
@@ -348,6 +481,7 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn wire(&self) -> Option<Wire>;
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
+	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit>;
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
@@ -366,6 +500,7 @@ trait ErasedSend: Send + Sync {
 	fn finish(&mut self) -> Result<(), Error>;
 	fn reset(&mut self, code: u32);
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
+	fn acknowledged(&self) -> Option<bool>;
 }
 
 trait ErasedRecv: Send + Sync {
@@ -402,27 +537,23 @@ fn unbox<'a, G: 'static>(options: SendOptions<'a, Group>) -> SendOptions<'a, G> 
 	}
 }
 
-fn bi<S: poll::Boxable>(session: &S, (send, recv): poll::BiStreams<S>, budget: Budget) -> (SendStream, RecvStream) {
-	let receive = poll::Session::receive_window(session);
-	(SendStream(Box::new(send)), RecvStream::budgeted(recv, budget, receive))
+fn bi<S: poll::Boxable>((send, recv): poll::BiStreams<S>, budget: Budget) -> (SendStream, RecvStream) {
+	(SendStream::own(send), RecvStream::budgeted(recv, budget))
 }
 
 impl<S: poll::Boxable> ErasedSession for S {
 	fn poll_accept_uni(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<RecvStream, Error>> {
-		poll::Session::poll_accept_uni(self, waiter).map(|res| {
-			res.map(|recv| RecvStream::budgeted(recv, budget, poll::Session::receive_window(self)))
-				.map_err(Error::new)
-		})
+		poll::Session::poll_accept_uni(self, waiter)
+			.map(|res| res.map(|recv| RecvStream::budgeted(recv, budget)).map_err(Error::new))
 	}
 
 	fn poll_accept_bi(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		poll::Session::poll_accept_bi(self, waiter)
-			.map(|res| res.map(|bis| bi::<S>(self, bis, budget)).map_err(Error::new))
+		poll::Session::poll_accept_bi(self, waiter).map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
 	}
 
 	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
 		poll::Session::poll_open_uni(self, waiter, unbox(options))
-			.map(|res| res.map(|send| SendStream(Box::new(send))).map_err(Error::new))
+			.map(|res| res.map(SendStream::own).map_err(Error::new))
 	}
 
 	fn poll_open_bi(
@@ -432,7 +563,7 @@ impl<S: poll::Boxable> ErasedSession for S {
 		budget: Budget,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		poll::Session::poll_open_bi(self, waiter, unbox(options))
-			.map(|res| res.map(|bis| bi::<S>(self, bis, budget)).map_err(Error::new))
+			.map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
 	}
 
 	fn send_group(&self, priority: i64) -> Option<Group> {
@@ -484,6 +615,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		poll::Session::receive_window(self)
+	}
+
+	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
+		poll::Session::set_limits(self, limits)
 	}
 
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
@@ -543,6 +678,10 @@ impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		poll::SendStream::poll_closed(self, waiter).map_err(Error::new)
 	}
+
+	fn acknowledged(&self) -> Option<bool> {
+		poll::SendStream::acknowledged(self)
+	}
 }
 
 impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
@@ -569,7 +708,13 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 	}
 
 	fn window(&self) -> u64 {
-		self.window
+		*self.window.get_or_init(|| {
+			let receive = self
+				.session
+				.upgrade()
+				.and_then(|shared| shared.session.receive_window());
+			crate::model::pace::window(receive)
+		})
 	}
 
 	fn pause(&mut self) -> bool {
@@ -678,6 +823,10 @@ impl poll::Session for Session {
 		self.inner.session.receive_window()
 	}
 
+	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
+		self.inner.session.set_limits(limits)
+	}
+
 	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
 		self.inner.session.stream_credit(dir)
 	}
@@ -692,31 +841,41 @@ impl poll::SendStream for SendStream {
 	type Group = Group;
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
-		self.0.poll_write(waiter, buf)
+		self.with(false, |stream| stream.poll_write(waiter, buf))
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
-		self.0.poll_write_buf(waiter, buf)
+		self.with(false, |stream| stream.poll_write_buf(waiter, buf))
 	}
 
 	fn set_priority(&mut self, priority: i64) {
-		self.0.set_priority(priority)
+		if let Sender::Listed(listing) = &self.0 {
+			listing.listed.lock().priority = priority;
+		}
+		self.with(false, |stream| stream.set_priority(priority))
 	}
 
 	fn set_group(&mut self, group: &Group) {
-		self.0.set_group(group)
+		if let Sender::Listed(listing) = &self.0 {
+			listing.listed.lock().group = Some(group.priority.clone());
+		}
+		self.with(false, |stream| stream.set_group(group))
 	}
 
 	fn finish(&mut self) -> Result<(), Error> {
-		self.0.finish()
+		self.with(true, |stream| stream.finish())
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.0.reset(code)
+		self.with(true, |stream| stream.reset(code))
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		self.0.poll_closed(waiter)
+		self.get().poll_closed(waiter)
+	}
+
+	fn acknowledged(&self) -> Option<bool> {
+		self.get().acknowledged()
 	}
 }
 
@@ -827,6 +986,121 @@ mod test {
 
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
 		assert_eq!(accept(&session).window(), AHEAD);
+	}
+
+	fn open_group(session: &Session, options: SendOptions<'_, Group>) -> SendStream {
+		let Poll::Ready(Ok(stream)) = session.poll_open_group(&mut Open::default(), &kio::Waiter::noop(), options)
+		else {
+			panic!("the transport opens at once");
+		};
+		stream
+	}
+
+	fn ranks(session: &Session) -> Vec<open::Rank> {
+		session.open_streams().into_iter().map(|stream| stream.rank).collect()
+	}
+
+	fn ungrouped(priority: i64) -> SendOptions<'static, Group> {
+		SendOptions { group: None, priority }
+	}
+
+	/// Group streams are listed lowest ranked first, following a moved priority, until they
+	/// finish, reset, or drop; other streams are never listed.
+	#[test]
+	fn group_streams_are_listed_until_they_end() {
+		let (a, _b) = super::super::memory::pair(Default::default());
+		let session = Session::new(a);
+		let mut first = open_group(&session, ungrouped(1));
+		let mut second = open_group(&session, ungrouped(3));
+		let _control = session
+			.poll_open_uni(&mut Open::default(), &kio::Waiter::noop(), ungrouped(0))
+			.map(Result::unwrap);
+		let third = open_group(&session, ungrouped(2));
+		let rank = |stream| open::Rank::Ungrouped { stream };
+		assert_eq!(ranks(&session), [rank(1), rank(2), rank(3)]);
+
+		poll::SendStream::set_priority(&mut second, 0);
+		assert_eq!(ranks(&session), [rank(0), rank(1), rank(2)]);
+
+		poll::SendStream::finish(&mut first).unwrap();
+		poll::SendStream::reset(&mut second, 1);
+		assert_eq!(ranks(&session), [rank(2)]);
+		drop(third);
+		assert!(session.open_streams().is_empty());
+	}
+
+	/// A listed stream reports the peer acknowledging what was written to it, and a reset one
+	/// never is.
+	#[test]
+	fn a_listed_stream_reports_its_acknowledgement() {
+		let (a, b) = super::super::memory::pair(Default::default());
+		let session = Session::new(a);
+		let mut stream = open_group(&session, ungrouped(0));
+		let acknowledged = || session.open_streams()[0].acknowledged;
+		assert_eq!(acknowledged(), Some(true), "nothing written is all acknowledged");
+
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(
+			poll::SendStream::poll_write(&mut stream, &waiter, b"group"),
+			Poll::Ready(Ok(5))
+		));
+		assert_eq!(acknowledged(), Some(false));
+		assert_eq!(
+			poll::SendStream::acknowledged(&stream),
+			Some(false),
+			"the writer reads the same"
+		);
+
+		let Poll::Ready(Ok(mut recv)) = poll::Session::poll_accept_uni(&b, &waiter) else {
+			panic!("the peer accepts the stream");
+		};
+		assert!(matches!(
+			poll::RecvStream::poll_read_chunk(&mut recv, &waiter, 16),
+			Poll::Ready(Ok(Some(_)))
+		));
+		assert_eq!(acknowledged(), Some(true));
+
+		poll::SendStream::reset(&mut stream, 1);
+		assert_eq!(poll::SendStream::acknowledged(&stream), Some(false));
+	}
+
+	/// A grouped stream ranks by its group's current priority, and follows a move to another
+	/// group; a transport that cannot tell reports no acknowledgement.
+	#[test]
+	fn a_listed_stream_ranks_by_its_group() {
+		let session = Session::new(SinkSession::new(Default::default()).with_groups());
+		let mut low = poll::Session::send_group(&session, 1).expect("the sink opens groups");
+		let high = poll::Session::send_group(&session, 5).expect("the sink opens groups");
+		let mut stream = open_group(
+			&session,
+			SendOptions {
+				group: Some(&low),
+				priority: 2,
+			},
+		);
+		let read = |session: &Session| session.open_streams()[0];
+		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 1, stream: 2 });
+		assert_eq!(read(&session).acknowledged, None);
+
+		poll::SendGroup::set_priority(&mut low, 3);
+		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 3, stream: 2 });
+		poll::SendStream::set_group(&mut stream, &high);
+		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 5, stream: 2 });
+	}
+
+	/// A stream accepted while the connection window was held back, such as one buffered
+	/// before admission, paces at the window in force once ingest reads it.
+	#[test]
+	fn a_stream_paces_at_the_window_widened_after_it_arrived() {
+		let gate = kio::Producer::new(true);
+		let session =
+			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(10, 20)));
+		let early = accept(&session);
+		let limits = Limits {
+			receive_window: std::num::NonZeroU64::new(100),
+		};
+		session.set_limits(limits).unwrap();
+		assert_eq!(early.window(), 20);
 	}
 
 	/// A transport that reports no window never pauses a stream, since nothing bounds what

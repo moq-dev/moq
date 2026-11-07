@@ -3,6 +3,7 @@ import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
+import { inspect } from "../connection/stats.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
@@ -78,6 +79,18 @@ test("a throwing getStats advertises None rather than propagating", async () => 
 		throw new Error("no stats for you");
 	});
 	expect(await probeLevel(quic, Version.DRAFT_05)).toBe(ProbeLevel.None);
+});
+
+// Safari's stub reports a 0 RTT and no rate; once inspect() flags it, the wire says None.
+test("a stub getStats found at setup advertises None", async () => {
+	const stub = transport(async () => ({ smoothedRtt: 0, estimatedSendRate: null }));
+	await inspect(stub);
+	expect(await probeLevel(stub, Version.DRAFT_05)).toBe(ProbeLevel.None);
+
+	// A 0 RTT alongside a rate is not a stub.
+	const rate = transport(async () => ({ smoothedRtt: 0, estimatedSendRate: 1_000_000 }));
+	await inspect(rate);
+	expect(await probeLevel(rate, Version.DRAFT_05)).toBe(ProbeLevel.Report);
 });
 
 async function sendGoaway(server: WebTransport, uri: string): Promise<void> {
@@ -212,6 +225,38 @@ function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 			enabled = true;
 		},
 		release: release.resolve,
+	};
+}
+
+// Once enabled, every write on a bidirectional stream the peer opens reaches the peer before
+// the writer resumes a host task later, as when the write budget yields: a reply delivered
+// while its writer still waits.
+function yieldReplies(transport: MockTransport) {
+	let enabled = false;
+	const wrap = (writable: WritableStream<Uint8Array>) => {
+		const writer = writable.getWriter();
+		return new WritableStream<Uint8Array>({
+			async write(bytes) {
+				await writer.write(bytes);
+				if (enabled) await yieldNow();
+			},
+			abort: (reason) => writer.abort(reason),
+			close: () => writer.close(),
+		});
+	};
+	Object.defineProperty(transport, "incomingBidirectionalStreams", {
+		value: transport.incomingBidirectionalStreams.pipeThrough(
+			new TransformStream<WebTransportBidirectionalStream, WebTransportBidirectionalStream>({
+				transform(stream, controller) {
+					controller.enqueue({ readable: stream.readable, writable: wrap(stream.writable) });
+				},
+			}),
+		),
+	});
+	return {
+		enable: () => {
+			enabled = true;
+		},
 	};
 }
 
@@ -359,6 +404,71 @@ for (const [alpn, version] of [
 			origin.close();
 		}
 	});
+
+	// A lite-07 subscriber FINs once it read the tail, which can land while SUBSCRIBE_FINISH's
+	// write still waits; the final group's FIN still holds the close.
+	if (keepsSubscribeOpen(version)) {
+		test(`a subscriber FIN during the end's write still drains the final group over ${versionName(version)}`, async () => {
+			const pair = createMockTransportPair(alpn);
+			const fin = holdFins(pair.server, "uni");
+			const replies = yieldReplies(pair.server);
+			const origin = new Producer();
+			const broadcastRoute = origin.route(Path.from("room"));
+			const broadcast = broadcastRoute.broadcast;
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			let closed = false;
+			void pair.server.closed.then(() => {
+				closed = true;
+			});
+			try {
+				const first = producer.appendGroup();
+				first.writeFrame(textFrame("first"));
+				first.finish();
+				const received = await track.nextGroup();
+				expect(await received?.readString()).toBe("first");
+				expect(await received?.readString()).toBeUndefined();
+				received?.close();
+
+				fin.enable();
+				const last = producer.appendGroup();
+				last.writeFrame(textFrame("last"));
+				last.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("last");
+				await fin.reached;
+				replies.enable();
+				producer.finish();
+				producer.close();
+				const closing = server.close();
+
+				expect(await track.nextGroup()).toBeUndefined();
+				await settle();
+				expect(closed).toBe(false);
+
+				fin.release();
+				await closing;
+				expect(closed).toBe(true);
+			} finally {
+				fin.release();
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
 
 	// The peer's close can overtake the final group or, where it is the track's only end, the
 	// SUBSCRIBE FIN it sent first; the closing session reads them.

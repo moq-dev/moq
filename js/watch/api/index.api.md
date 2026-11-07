@@ -163,12 +163,12 @@ export type PlayerInput = {
 		target: Signals.Getter<Audio.Target | undefined>;
 		volume: Signals.Getter<number>;
 	};
-	buffer: Signals.Getter<Clock.Milli>;
 	catalog: Signals.Getter<Hang.Catalog.Root | undefined>;
 	catalogFormat: Signals.Getter<CatalogFormat | undefined>;
 	delay: Signals.Getter<Delay>;
 	enabled: Signals.Getter<boolean>;
 	follow: Signals.Getter<boolean>;
+	lookahead: Signals.Getter<Clock.Milli>;
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
@@ -203,8 +203,8 @@ export class Sync {
 }
 
 export type SyncInput = {
-	buffer: Signals.Getter<Clock.Milli>;
 	delay: Signals.Getter<Delay>;
+	lookahead: Signals.Getter<Clock.Milli>;
 };
 
 export type SyncOutput = {

@@ -51,15 +51,16 @@ sys.exit(int(os.environ["CONFORMANCE_EXIT"]))
     def test_every_selected_case_uses_subscribe_and_supported_forwarding(self):
         result, calls = self.run_suite()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(len(calls), 29)
+        self.assertEqual(len(calls), 24)
         preferences = set()
         for call in calls:
             self.assertIn("--request=subscribe", call)
             preference = next(arg for arg in call if arg.startswith("--forwarding_preference="))
-            self.assertIn(preference, ["--forwarding_preference=0", "--forwarding_preference=3"])
+            self.assertEqual(preference, "--forwarding_preference=0")
             preferences.add(preference)
-        self.assertEqual(len(preferences), 2)
+        self.assertEqual(len(preferences), 1)
         self.assertIn("EXCLUDED (nonzero subgroup)", result.stdout)
+        self.assertIn("EXCLUDED (datagram delivery)", result.stdout)
         print(f"selected {len(calls)} upstream cases")
 
     def test_a_client_crash_after_success_still_fails_the_suite(self):
