@@ -322,6 +322,8 @@ fn read_tail(r: &mut impl BitRead, head: &SpsHead) -> ReadResult<SpsTail> {
 	let mut max_num_reorder_pics = 0;
 	for _ in first..=head.max_sub_layers_minus1 {
 		let max_dec_pic_buffering_minus1 = r.read_ue("sps_max_dec_pic_buffering_minus1")?;
+		// No profile's MaxDpbSize exceeds 16 (A.4.2), which bounds the reorder depth below it.
+		ensure(max_dec_pic_buffering_minus1 < 16, "sps_max_dec_pic_buffering_minus1")?;
 		max_num_reorder_pics = r.read_ue("sps_max_num_reorder_pics")?;
 		ensure(
 			max_num_reorder_pics <= max_dec_pic_buffering_minus1,
@@ -407,11 +409,28 @@ fn read_tail(r: &mut impl BitRead, head: &SpsHead) -> ReadResult<SpsTail> {
 		// last set bit, the stop bit, so a set bit must remain.
 		if extension_4bits != 0 {
 			while !r.read_bit("sps_extension_data_flag")? {}
+			read_rest(r)?;
 			return Ok(tail);
 		}
 	}
 	ensure(r.read_bit("rbsp_stop_one_bit")?, "rbsp_stop_one_bit")?;
+	ensure(!read_rest(r)?, "rbsp_alignment_zero_bit")?;
 	Ok(tail)
+}
+
+/// Read the RBSP to its end, which checks its emulation prevention, returning whether a bit was set.
+/// Trailing zero bytes are already gone, so nothing set after the stop bit means the RBSP ends there.
+fn read_rest(r: &mut impl BitRead) -> ReadResult<bool> {
+	let mut set = false;
+	loop {
+		match r.read_bit("rbsp_trailing_bits") {
+			Ok(bit) => set |= bit,
+			Err(BitReaderError::ReaderError(_, err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+				return Ok(set);
+			}
+			Err(err) => return Err(err),
+		}
+	}
 }
 
 /// `scaling_list_data` (7.3.4).
@@ -1063,6 +1082,31 @@ mod tests {
 		}
 	}
 
+	/// After the stop bit, only zeros may follow; after extension data, only valid RBSP bytes.
+	#[test]
+	fn data_after_the_stop_bit_is_refused() {
+		let mut nal = synthetic(&[HEAD, BLOCKS, &[U(1, 0)], END]);
+		nal.push(0x80);
+		assert_refused(&nal);
+
+		// Extension data past h264-reader's 128-byte read-ahead, so only reading to the end checks
+		// its emulation prevention.
+		let data = [U(32, 0x5555_5555)].repeat(40);
+		let mut nal = synthetic(&[
+			HEAD,
+			BLOCKS,
+			&[U(1, 0)],
+			&END[..END.len() - 1],
+			&[U(1, 1), U(4, 0), U(4, 1)],
+			&data,
+		]);
+		Sps::parse(&nal).unwrap();
+		// A start code inside the extension data, which emulation prevention forbids.
+		let stop = nal.pop().unwrap();
+		nal.extend([0x00, 0x00, 0x01, stop]);
+		assert_refused(&nal);
+	}
+
 	/// An SPS refused after its head: [`Sps::parse`] errors, and [`Sps::parse_or_head`] keeps the
 	/// head.
 	fn assert_refused(nal: &[u8]) {
@@ -1094,6 +1138,12 @@ mod tests {
 		// 64 leading zeros, past the 32 that 9.2 allows.
 		let mut head = HEAD.to_vec();
 		head[14] = Ue64; // log2_max_pic_order_cnt_lsb_minus4
+		assert_refused(&synthetic(&[&head, BLOCKS, &[U(1, 0)], END]));
+
+		// A decoded picture buffer past MaxDpbSize, with as deep a reorder.
+		let mut head = HEAD.to_vec();
+		head[16] = Ue(16); // sps_max_dec_pic_buffering_minus1
+		head[17] = Ue(16); // sps_max_num_reorder_pics
 		assert_refused(&synthetic(&[&head, BLOCKS, &[U(1, 0)], END]));
 
 		// More pictures reordered than buffered.
