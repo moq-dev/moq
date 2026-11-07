@@ -114,6 +114,8 @@ pub(super) struct Subscriber {
 	/// The instances minted for the paths the peer advertises without one, shared by the
 	/// announce streams.
 	minted: Minted,
+	/// The identities the origin routes to over lite-07, whose hop chains are held back.
+	known: kio::Shared<crate::route::node::Known>,
 }
 
 /// The instance a session minted for each path a peer advertises without one (every
@@ -474,6 +476,7 @@ impl Subscriber {
 		// every session sharing that origin, required for cross-session
 		// loop detection.
 		let self_origin = crate::Hop::from(config.origin.hop());
+		let known = config.origin.known();
 		Self {
 			session: config.session,
 			runtime: config.runtime,
@@ -500,6 +503,7 @@ impl Subscriber {
 			announces: Default::default(),
 			viewers: Default::default(),
 			minted: Default::default(),
+			known,
 		}
 	}
 
@@ -787,8 +791,11 @@ impl Subscriber {
 		let metadata = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
 
 		// A re-price keeps the route's prefix (and its
-		// served paths) and re-prices in place. In-flight tracks keep flowing.
-		if let Some(entry) = announced.attached(&path) {
+		// served paths) and re-prices in place. In-flight tracks keep flowing. A chain
+		// that now names an identity routed over lite-07 is offered, to be held back.
+		if !self.known.read().names(&metadata.hops)
+			&& let Some(entry) = announced.attached(&path)
+		{
 			entry.update(metadata);
 			return Ok(true);
 		}
@@ -2133,6 +2140,8 @@ struct PrefixRun {
 	decoder: lite::AnnounceDecoder,
 	/// The auth epoch last applied, so a new limit holds back or brings back routes.
 	auth_epoch: u64,
+	/// The [`crate::route::node::Known`] epoch last applied.
+	known_epoch: u64,
 	/// Lite05+: the ANNOUNCE_STARTs of the initial set still to read. Anything else
 	/// before them, or the stream ending, cuts the counted set short.
 	initial: u64,
@@ -2231,6 +2240,7 @@ impl AnnouncePrefix {
 			announced: Announced::new(self.subscriber.announces.clone(), self.subscriber.minted.clone()),
 			decoder: lite::AnnounceDecoder::default(),
 			auth_epoch: 0,
+			known_epoch: 0,
 			initial,
 			routed: match version.has_routes() {
 				true => {
@@ -2298,6 +2308,20 @@ impl AnnouncePrefix {
 				if let Some(routed) = &mut run.routed {
 					routed.limit(&self.subscriber, &permit)?;
 				}
+			}
+			// A hop chain naming an identity this node gains or loses a lite-07 route to
+			// is held back or taken up. Lite-07 streams carry no chains.
+			while run.routed.is_none() {
+				let seen = run.known_epoch;
+				let Poll::Ready(known) = self.subscriber.known.poll(waiter, |known| match known.epoch() != seen {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}) else {
+					break;
+				};
+				run.known_epoch = known.epoch();
+				drop(known);
+				run.announced.reconsider(&self.subscriber);
 			}
 			// Each announce routes into the origin, so a peer streaming them must not hold
 			// the session's other tasks. A yield has woken the task, and this arm always
@@ -9621,6 +9645,11 @@ enum Held {
 	/// Outside the session's limit: the route as advertised, attached once a
 	/// limit allows it.
 	Withheld(crate::origin::RouteInfo),
+	/// Its chain names an identity the origin routes to over lite-07: the route as
+	/// advertised, attached once no usable route to it is left. Filed now, it would be
+	/// another copy of that identity's claim under this node's own, outliving its
+	/// withdrawal until this chain retracts too.
+	Shadowed(crate::origin::RouteInfo),
 	/// In the origin, serving requests.
 	Attached(Box<AnnouncedRoute>),
 }
@@ -9671,6 +9700,11 @@ impl Announced {
 	/// session on demand, or hold it back when the session's limit does not cover it.
 	/// Returns whether it attached.
 	fn offer(&mut self, subscriber: &Subscriber, path: Path, route: crate::origin::RouteInfo) -> bool {
+		if subscriber.known.read().names(&route.hops) {
+			tracing::debug!(route = %subscriber.log_path(&path), "holding back announce of an identity routed over lite-07");
+			self.routes.insert(path, Held::Shadowed(route));
+			return false;
+		}
 		if !subscriber
 			.auth
 			.within_limit(crate::auth::Direction::Subscribe, path.as_str())
@@ -9786,7 +9820,7 @@ impl Announced {
 			.filter(|(path, held)| match held {
 				Held::Attached(_) => !permit.within_limit(path.as_str()),
 				Held::Withheld(_) => permit.within_limit(path.as_str()),
-				Held::Declined => false,
+				Held::Declined | Held::Shadowed(_) => false,
 			})
 			.map(|(path, _)| path.clone())
 			.collect();
@@ -9805,6 +9839,34 @@ impl Announced {
 				}
 				_ => unreachable!("only attached and withheld routes change"),
 			}
+		}
+	}
+
+	/// Apply a change in what the origin routes to over lite-07: hold back every attached
+	/// route whose chain now names such an identity, closing its sources, and offer every
+	/// held-back one whose chain no longer does, so the lite-06 path takes over.
+	fn reconsider(&mut self, subscriber: &Subscriber) {
+		let changed: Vec<Path> = {
+			let known = subscriber.known.read();
+			(self.routes.iter())
+				.filter(|(_, held)| match held {
+					Held::Attached(entry) => known.names(&entry.route.hops),
+					Held::Shadowed(route) => !known.names(&route.hops),
+					Held::Declined | Held::Withheld(_) => false,
+				})
+				.map(|(path, _)| path.clone())
+				.collect()
+		};
+		for path in changed {
+			let mut route = match self.routes.remove(&path) {
+				Some(Held::Attached(entry)) => entry.route.clone(),
+				Some(Held::Shadowed(route)) => route,
+				_ => unreachable!("only attached and held-back routes change"),
+			};
+			if subscriber.going_away.is_set() {
+				route.cost = crate::origin::Cost::DRAIN;
+			}
+			self.offer(subscriber, path, route);
 		}
 	}
 

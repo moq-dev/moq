@@ -2404,6 +2404,15 @@ impl Producer {
 		Some(crate::route::node::hop(node.declared()))
 	}
 
+	/// The identities this node routes to over moq-lite-07, as the lite-06 hops they
+	/// travel as. A lite-06 route naming one is held back while that route lasts, so
+	/// the broadcast is not filed again as this node's own claim, and taken up once it
+	/// goes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn known(&self) -> kio::Shared<crate::route::node::Known> {
+		self.shared.lock().known.clone()
+	}
+
 	/// This origin's construction config.
 	pub fn config(&self) -> Config {
 		let shared = self.shared.lock();
@@ -6004,6 +6013,9 @@ struct OriginState {
 	// The route layer node this origin's lite-07 sessions share; see
 	// [`Consumer::route_node`].
 	route_node: Option<crate::route::Node>,
+	// What that node routes to, published before it exists so older-version sessions
+	// can watch it from the start.
+	known: kio::Shared<crate::route::node::Known>,
 }
 
 impl OriginState {
@@ -6023,6 +6035,7 @@ impl OriginState {
 			next_listener: 0,
 			hidden_withheld: HiddenWithheld::default(),
 			route_node: None,
+			known: Default::default(),
 		}
 	}
 
@@ -7222,7 +7235,7 @@ impl Consumer {
 		if let Some(node) = &shared.route_node {
 			return node.clone();
 		}
-		let node = crate::route::Node::random();
+		let node = crate::route::Node::random(shared.known.clone());
 		shared.route_node = Some(node.clone());
 		drop(shared);
 		// The whole table, whatever this handle's scope.

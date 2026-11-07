@@ -751,3 +751,72 @@ async fn a_node_that_does_not_proxy_keeps_what_it_learned_over_lite06() {
 	assert_eq!(seen.get("room/local"), Some(&vec![Kind::Start]), "{seen:?}");
 	assert!(!seen.contains_key("room/learned"), "{seen:?}");
 }
+
+/// `d` reaches `p` both directly over moq-lite-07 and through `b`, which translates
+/// `p`'s claims onto its moq-lite-06 link to `d`.
+async fn mixed_version_triangle() -> (origin::Producer, origin::Producer, origin::Producer, Vec<MockPair>) {
+	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: Version = "moq-lite-06".parse().unwrap();
+	let p = produce_origin(1);
+	let b = produce_origin(2);
+	let d = produce_origin(3);
+	let pairs = vec![
+		peer(lite07, &p, &b).await,
+		peer(lite06, &b, &d).await,
+		peer(lite07, &p, &d).await,
+	];
+	(p, b, d, pairs)
+}
+
+/// A relay hearing a claim over moq-lite-07 holds back the moq-lite-06 copy of it, so
+/// the copy never becomes one of its own claims: once the publisher withdraws, no node
+/// restarts onto that copy before it retracts.
+#[kio::test]
+async fn mixed_version_triangle_withdraw_retracts_once() {
+	let (p, b, d, _pairs) = mixed_version_triangle().await;
+	let mut watched: Vec<_> = [&p, &b, &d].iter().map(|node| watch(node.consume().routes())).collect();
+	let broadcast = p.route("room/x", origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
+	kio::clock::sim::idle().await;
+	for (relay, watched) in ["p", "b", "d"].into_iter().zip(&mut watched) {
+		assert_eq!(drain(watched).get("room/x"), Some(&vec![Kind::Start]), "{relay}");
+	}
+
+	drop(broadcast);
+	kio::clock::sim::idle().await;
+	for (relay, watched) in ["p", "b", "d"].into_iter().zip(&mut watched) {
+		assert_eq!(drain(watched).get("room/x"), Some(&vec![Kind::End]), "{relay}");
+	}
+}
+
+/// The moq-lite-06 copy a relay held back takes over once its moq-lite-07 route to the
+/// publisher is gone, and is held back again once that route returns.
+#[kio::test]
+async fn mixed_version_failover_takes_up_the_lite06_route() {
+	let (p, _b, d, mut pairs) = mixed_version_triangle().await;
+	let mut at_d = watch(d.consume().routes());
+	let broadcast = p.route("room/x", origin::RouteOptions::hidden()).unwrap();
+	broadcast.announce().unwrap();
+	kio::clock::sim::idle().await;
+	assert_eq!(drain(&mut at_d).get("room/x"), Some(&vec![Kind::Start]));
+
+	let direct = pairs.pop().unwrap();
+	direct.server.abort(moq_net::Error::Cancel);
+	direct.client.abort(moq_net::Error::Cancel);
+	kio::clock::sim::idle().await;
+	// The lost session's routes leave with it, before the route layer hears the route
+	// to `p` is gone, so the copy starts afresh: lite-06 carries no instance, so it is
+	// another stream either way.
+	assert_eq!(drain(&mut at_d).get("room/x"), Some(&vec![Kind::End, Kind::Start]));
+	kio::clock::timeout(Duration::from_secs(10), d.consume().request("room/x", None))
+		.await
+		.expect("request hung")
+		.expect("the lite-06 route serves the broadcast");
+
+	let _direct = peer("moq-lite-07-wip".parse().unwrap(), &p, &d).await;
+	kio::clock::sim::idle().await;
+	assert_eq!(drain(&mut at_d).get("room/x"), Some(&vec![Kind::Restart]));
+	drop(broadcast);
+	kio::clock::sim::idle().await;
+	assert_eq!(drain(&mut at_d).get("room/x"), Some(&vec![Kind::End]));
+}

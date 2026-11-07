@@ -15,7 +15,7 @@
 //! only once another serves it, so the origin always holds a route for it.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	sync::{Arc, Mutex, MutexGuard},
 	task::{Poll, ready},
 };
@@ -87,6 +87,26 @@ pub(crate) enum Output {
 	},
 	/// Stop serving `claim` of `id` through this stream.
 	Unserve { id: Id, claim: Path },
+}
+
+/// The lite-06 hops of the identities a node routes to over lite-07, so its
+/// older-version sessions recognize a hop chain that names one.
+#[derive(Debug, Default)]
+pub(crate) struct Known {
+	hops: HashSet<crate::Hop>,
+	/// Bumped on every change, for a reader to tell when to look again.
+	epoch: u64,
+}
+
+impl Known {
+	/// Whether `hops` names an identity with a usable lite-07 route.
+	pub fn names(&self, hops: &crate::Hops) -> bool {
+		hops.iter().any(|hop| self.hops.contains(hop))
+	}
+
+	pub fn epoch(&self) -> u64 {
+		self.epoch
+	}
 }
 
 /// The node every lite-07 session of one origin shares.
@@ -301,6 +321,9 @@ struct State {
 	queues: Queues,
 	/// Each shown claim of another identity, and the streams serving it.
 	homes: BTreeMap<(Id, Path), Home>,
+	/// The other identities with a usable route, and the hop each travels as.
+	routed: BTreeMap<Id, crate::Hop>,
+	known: kio::Shared<Known>,
 }
 
 /// Where one shown claim is served: each stream, what it was last sent, and
@@ -343,7 +366,13 @@ impl Home {
 
 impl Node {
 	/// A node declaring a fresh identity, `seed` keying its rotation.
+	#[cfg(test)]
 	pub fn new(id: Id, seed: u64) -> Self {
+		Self::publishing(id, seed, Default::default())
+	}
+
+	/// A node declaring a fresh identity that keeps `known` current.
+	fn publishing(id: Id, seed: u64, known: kio::Shared<Known>) -> Self {
 		debug_assert!(
 			id != 0 && id & QUALIFIED == 0,
 			"a declared identity is non-zero and unqualified"
@@ -356,15 +385,17 @@ impl Node {
 				next_key: 1,
 				queues: HashMap::new(),
 				homes: BTreeMap::new(),
+				routed: BTreeMap::new(),
+				known,
 			})),
 		}
 	}
 
-	/// A node with a random identity.
-	pub fn random() -> Self {
+	/// A node with a random identity, keeping `known` current.
+	pub fn random(known: kio::Shared<Known>) -> Self {
 		let mut rng = kio::clock::rng();
 		let id = rng.random_range(1..QUALIFIED);
-		Self::new(id, rng.random())
+		Self::publishing(id, rng.random(), known)
 	}
 
 	fn lock(&self) -> MutexGuard<'_, State> {
@@ -608,10 +639,21 @@ impl State {
 		self.router.events();
 		let changed = self.router.changed();
 		let declared = self.router.declared();
+		let mut known = false;
 		for id in changed {
-			if Some(id) != declared {
-				self.home(id);
+			if Some(id) == declared {
+				continue;
 			}
+			known |= match self.router.selected(id).is_some() {
+				true => self.routed.insert(id, hop(id)).is_none(),
+				false => self.routed.remove(&id).is_some(),
+			};
+			self.home(id);
+		}
+		if known {
+			let mut published = self.known.lock();
+			published.hops = self.routed.values().copied().collect();
+			published.epoch += 1;
 		}
 	}
 

@@ -21,7 +21,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -2145,7 +2146,10 @@
+@@ -2145,8 +2146,11 @@
  		let mut run: PrefixRun = PrefixRun {
  			responder_origin,
  			link_cost,
@@ -32,6 +32,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 +			)),
  			decoder: lite::AnnounceDecoder::default(),
  			auth_epoch: 0,
+ 			known_epoch: 0,
  			initial,
 @@ -2301,7 +2305,8 @@
  	path: Path,

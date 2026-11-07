@@ -26,7 +26,9 @@ versions translates: a moq-lite-06 peer's routes enter the route layer as the
 relay's own claims, and lite-07 routes reach a moq-lite-06 peer as a hop list
 that starts at their origin node. A relay drops a moq-lite-06 route whose hop
 list names its own routing identity, since that is one of its claims coming
-back.
+back. It holds back one naming an identity it routes to over moq-lite-07, a
+copy of that node's claims that would otherwise outlive their withdrawal, and
+announces it afresh once that route is lost, so the moq-lite-06 path takes over.
 
 A track from a moq-transport publisher keeps its Object IDs, object properties,
 and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
