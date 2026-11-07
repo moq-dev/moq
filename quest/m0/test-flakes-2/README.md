@@ -145,12 +145,19 @@ Added 2026-11-07 (maintainer, /quest-complete): moq-relay's
 [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138)'s Check with "the
 owner's sockets outlived `run`". It is `#[ignore]`d until its child fixes it.
 
+`sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
+landing just after the dispatcher's `wait -n` returned left Bash marking the
+exit trap's next `wait` as interrupted, so it returned 143 at once and errexit
+skipped the timing report. A TERM landing after a lane forked but before
+`running` recorded it left that lane uncancelled and the exit trap's `wait`
+hung. The exit trap now waits again, and cancellation reads the job table,
+fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
 - [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
 - [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands

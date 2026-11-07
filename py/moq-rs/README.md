@@ -180,6 +180,7 @@ client = moq.Client(
   - `.write_frame(payload, timestamp=None)` writes a payload with optional capture time.
   - `await .ready(size)` (`GroupProducer`) waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each write for backpressure. A writer that doesn't wait sheds the front of the group instead.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
+  - `.skip_groups(start, end)` (`TrackProducer`) declares groups `start` up to the exclusive `end` will never be produced, so readers move past them; creating one there then fails.
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
@@ -253,8 +254,9 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 `from moq import socket` exposes `socket.Endpoint(origin, prefix, id)`. Use the
 same origin as the session's publish and consume sides. Hold the endpoint while
-sessions run, or use it as an async context manager. It announces only
-`<prefix>/.socket/<id>`; keep each session id private.
+sessions run, or use it as an async context manager. Its first dial announces
+`<prefix>/.client/<id>` and its first accept `<prefix>/.server/<id>`, so grants
+decide whether it may be a client, a server, or both; keep each session id private.
 
 - `await endpoint.dial_tcp(peer)` and `await endpoint.accept_tcp()` use the TCP queue.
 - `await endpoint.dial_track(peer, info=None)` and `await endpoint.accept_track()` use the track queue.

@@ -704,6 +704,7 @@ impl LiteSample {
 				max_delay: std::time::Duration::from_secs(10),
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
+				update: 0,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -905,6 +906,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
 				}],
+				update: 0,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
@@ -917,6 +919,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
+				update: 0,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1083,6 +1086,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
+			update: 0,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),
