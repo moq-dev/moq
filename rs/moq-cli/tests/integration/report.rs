@@ -49,6 +49,8 @@ async fn relay() -> Relay {
 
 fn moq(relay: &Relay, broadcast: &str, args: &[&str]) -> tokio::process::Command {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	// The guard on host timers is for tests, not the binaries they run.
+	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
 	for (name, _) in std::env::vars_os() {
 		if name.to_string_lossy().starts_with("MOQ_") {

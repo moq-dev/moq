@@ -136,6 +136,13 @@ class TrackProducer:
         """Create a group with an explicit sequence number."""
         return GroupProducer(self._inner.create_group(sequence))
 
+    def skip_groups(self, start: int, end: int) -> None:
+        """Declare that groups ``start`` up to the exclusive ``end`` will never be produced.
+
+        Readers move past them, and creating a group there then fails.
+        """
+        self._inner.skip_groups(start, end)
+
     def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
         """Write a single-frame group with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
