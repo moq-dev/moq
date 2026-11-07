@@ -32,3 +32,10 @@ CPU-heavy job. Record which inode outlived `run` and who owns it. Then make
 `run` close it before returning, or show that the close is already ordered
 before `run` returns and fix the check instead. No retry, sleep, or settle
 window.
+
+The assertion lives in the shared `embed_and_stop` helper, so
+`shared_tokio_custom_route_and_quic` (default CI) and
+`uring_custom_route_and_quic` (nightly's `just rs uring`) assert the same close.
+Reproduce and verify the fix on all three before removing the `#[ignore]`. If
+the cause is the check racing a close rather than a leak in the worker mode,
+the fix covers the other two as well.

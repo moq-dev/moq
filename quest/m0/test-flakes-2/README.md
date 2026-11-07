@@ -140,6 +140,11 @@ the case's microtask drain. [moq-dev/moq#8000](https://github.com/moq-dev/moq/pu
 stubbed that budget, merging after the quarantine was written. The case was
 re-enabled in [moq-dev/moq#8110](https://github.com/moq-dev/moq/pull/8110).
 
+Added 2026-11-07 (maintainer, /quest-complete): moq-relay's
+`embed::worker_tokio_custom_route_and_quic`, which failed
+[moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138)'s Check with "the
+owner's sockets outlived `run`". It is `#[ignore]`d until its child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
