@@ -1587,8 +1587,14 @@ mod test {
 
 		let track = producer.create_track("a", None).unwrap();
 		assert!(matches!(track.append_group(), Err(Error::Reused)));
-		assert!(matches!(track.create_group(crate::group::Info { sequence: 4 }), Err(Error::Reused)));
-		assert!(matches!(track.create_group(crate::group::Info { sequence: 2 }), Err(Error::Reused)));
+		assert!(matches!(
+			track.create_group(crate::group::Info { sequence: 4 }),
+			Err(Error::Reused)
+		));
+		assert!(matches!(
+			track.create_group(crate::group::Info { sequence: 2 }),
+			Err(Error::Reused)
+		));
 		track.create_group(crate::group::Info { sequence: 5 }).unwrap();
 		assert_eq!(track.append_group().unwrap().sequence, 6);
 		track.abort(Error::Cancel).unwrap();
@@ -1597,7 +1603,15 @@ mod test {
 		let request = producer.reserve_track("a").unwrap();
 		let track = request.accept(track::Info::default());
 		assert!(matches!(track.append_group(), Err(Error::Reused)));
-		assert_eq!(producer.create_track("b", None).unwrap().append_group().unwrap().sequence, 0);
+		assert_eq!(
+			producer
+				.create_track("b", None)
+				.unwrap()
+				.append_group()
+				.unwrap()
+				.sequence,
+			0
+		);
 	}
 
 	/// A track handle reads what an open broadcast serves now, so a track that went away
