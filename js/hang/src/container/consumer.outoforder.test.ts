@@ -121,6 +121,7 @@ test("a head group still downloading is not truncated", async () => {
 // budget, or forever on an open track, for groups it never gets. Mirrors Rust's
 // `an_excluded_gap_between_ranges_does_not_stall`.
 test("an excluded gap between ranges does not stall", async () => {
+	hostTime();
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
 	const consumer = new Consumer(
 		track.subscribe({
@@ -142,6 +143,7 @@ test("an excluded gap between ranges does not stall", async () => {
 // which counts a newest group that held no frame yet, rather than wait under the budget for a group
 // below it that never comes. Mirrors Rust's `a_resolved_relative_floor_rises_to_the_publishers_start`.
 test("a resolved relative floor rises to the publisher's start", async () => {
+	hostTime();
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
 	for (const sequence of [0n, 1n, 2n, 3n, 4n]) publish(track, sequence, Number(sequence) * 100);
 	const subscriber = track.subscribe({ delay: { max: Milli(10_000) }, ranges: [{ start: { relative: 0n } }] });
