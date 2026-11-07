@@ -393,6 +393,7 @@ impl Consumer {
 				groups_read: false,
 				out: Vec::new(),
 				drops: RangeMap::new(),
+				reported_stale: RangeSet::new(),
 				declared: None,
 				declared_error: None,
 				refused: false,
@@ -466,45 +467,10 @@ impl Consumer {
 	}
 }
 
-/// Whether `err` is the route failing to deliver rather than judging what it carried, so a new
-/// copy may fix it. Anything else would repeat on every copy. Mirrors `routeFailed` in
-/// `js/net/src/resume.ts`.
-pub(super) fn route_failed(err: &Error) -> bool {
-	unroutable(err) || retryable(err)
-}
-
-/// Whether `err` is a source losing its route to the content: only another route continues it.
-fn unroutable(err: &Error) -> bool {
-	matches!(err, Error::Unroutable | Error::Stream(StreamError::Unroutable))
-}
-
-/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
-/// route instead: asking it again can replace the withdrawal's cause with a refusal.
-pub(super) fn retryable(err: &Error) -> bool {
-	matches!(
-		err,
-		Error::Transport(_)
-			| Error::IdleTimeout
-			| Error::Session(_)
-			| Error::GoingAway
-			| Error::GoawayTimeout
-			| Error::Dropped
-			| Error::Closed
-			| Error::Cancel
-			| Error::Stream(
-				StreamError::Session(_)
-					| StreamError::Internal
-					| StreamError::Cancel
-					| StreamError::GoingAway
-					| StreamError::ControlTimeout
-			)
-	)
-}
-
 /// Whether `copy` lost its route, so an error read from it is no verdict on what it carried.
 /// A terminal track verdict, unlike a delivery failure, still judges its content.
 fn copy_failed(copy: &track::Consumer) -> bool {
-	matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(err)) if route_failed(&err))
+	matches!(copy.poll_complete(&kio::Waiter::noop()), Poll::Ready(Err(err)) if err.retryable())
 }
 
 /// A route's copy, as one reader reads it.
@@ -916,6 +882,20 @@ impl Subscriber {
 		reader.window.covered_by(from, cap, accounted)
 	}
 
+	/// Fresh reads of the groups in `run` the serving route's copy still caches and judges
+	/// fresh, and the runs still given up; see [`track::Subscriber::reoffer_groups`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn reoffer_groups(&mut self, run: std::ops::Range<u64>) -> (Vec<group::Consumer>, RangeSet<u64>) {
+		self.reader().reoffer_groups(run)
+	}
+
+	/// Take back every stale run this reader queued or the serving route's copy reported;
+	/// see [`track::Subscriber::reoffer_stale`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn reoffer_stale(&mut self) -> Vec<std::ops::Range<u64>> {
+		self.reader().reoffer_stale()
+	}
+
 	/// Poll for sequences the serving copy gave up that no copy may still deliver; see
 	/// [`track::Subscriber::poll_drop`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -924,7 +904,7 @@ impl Subscriber {
 		delivered: &Delivered,
 		probe: bool,
 		waiter: &kio::Waiter,
-	) -> Poll<(std::ops::Range<u64>, StreamError)> {
+	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
 		self.reader().poll_drop(delivered, probe, waiter)
 	}
 
@@ -1076,7 +1056,12 @@ struct Reader {
 	out: Vec<(u64, Weak<()>)>,
 	/// Runs the serving copy gave up that the reader has yet to report; see
 	/// [`Reader::poll_drop`].
-	drops: RangeMap<u64, StreamError>,
+	/// Each with whether it is a received stale run the serving copy held, which new terms
+	/// can supersede.
+	drops: RangeMap<u64, (track::Hole, bool)>,
+	/// The stale runs reported since the last [`Reader::reoffer_stale`], whichever copy gave
+	/// them up: an update reopens each, and the copy that reported it may no longer serve.
+	reported_stale: RangeSet<u64>,
 }
 
 impl Reader {
@@ -1436,6 +1421,11 @@ impl Reader {
 	fn hand_out(&mut self, index: usize, group: group::Consumer) -> group::Consumer {
 		let sequence = group.sequence;
 		self.newest = self.newest.max(Some(sequence));
+		// The group won over any stale report on it, whichever copy made it, so no update
+		// reopens it.
+		if let Some(end) = sequence.checked_add(1) {
+			self.reported_stale.remove(sequence..end);
+		}
 		// Another copy holding the group, now or once it lands there, is where a failure
 		// continues it, so it stays while the group is read; see [`Copy::retains`]. Recorded
 		// even with one copy, since a later route's copy may come to hold it.
@@ -1460,6 +1450,7 @@ impl Reader {
 			out: Some(out),
 			logical: None,
 			fetch: None,
+			recovering: false,
 		})
 	}
 
@@ -1666,7 +1657,7 @@ impl Reader {
 		// failure is the front's to replace. Mirrors the JS reader's `#end`.
 		match serving.and_then(&done) {
 			Some(Ok(())) => return Some(Poll::Ready(Ok(None))),
-			Some(Err(err)) if !route_failed(&err) => return Some(Poll::Ready(Err(err))),
+			Some(Err(err)) if !err.retryable() => return Some(Poll::Ready(Err(err))),
 			_ => {}
 		}
 		let end = self.route.end();
@@ -1727,12 +1718,12 @@ impl Reader {
 					Poll::Ready(Ok(sub)) => match sub.poll_finished(waiter) {
 						Poll::Ready(Ok(fin)) => return Poll::Ready(Ok(fin)),
 						// Only a delivery failure waits for the front to replace its copy.
-						Poll::Ready(Err(err)) if !route_failed(&err) || concluded.is_some() => {
+						Poll::Ready(Err(err)) if !err.retryable() || concluded.is_some() => {
 							return Poll::Ready(Err(err));
 						}
 						_ => {}
 					},
-					Poll::Ready(Err(err)) if !route_failed(&err) || concluded.is_some() => {
+					Poll::Ready(Err(err)) if !err.retryable() || concluded.is_some() => {
 						return Poll::Ready(Err(err));
 					}
 					_ => {}
@@ -1746,6 +1737,48 @@ impl Reader {
 		}
 	}
 
+	/// Fresh reads of the groups in `run` the serving copy still caches and judges fresh,
+	/// handed out as any group of that copy is, and the runs still given up: all of `run`
+	/// while no copy serves.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn reoffer_groups(&mut self, run: std::ops::Range<u64>) -> (Vec<group::Consumer>, RangeSet<u64>) {
+		let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) else {
+			let mut given_up = RangeSet::new();
+			given_up.insert(run);
+			return (Vec::new(), given_up);
+		};
+		let (groups, given_up) = sub.reoffer_groups(run);
+		// The serving copy is the newest one.
+		let index = self.copies.len() - 1;
+		let groups = groups.into_iter().map(|group| self.hand_out(index, group)).collect();
+		(groups, given_up)
+	}
+
+	/// Take back every stale run: those queued here, those this reader reported, and those
+	/// the serving copy reported, which its cursor owes again. What this reader reported
+	/// counts whichever copy gave it up, since a route change since leaves the serving copy
+	/// knowing nothing of it, though the update reopened it. Only the serving copy is
+	/// judged again: a replaced copy may no longer deliver, so what it gave up is the new
+	/// route's to deliver or give up.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn reoffer_stale(&mut self) -> Vec<std::ops::Range<u64>> {
+		let mut runs = std::mem::take(&mut self.reported_stale);
+		let queued: Vec<_> = self
+			.drops
+			.iter()
+			.filter(|(_, (hole, _))| hole.stale_budget().is_some())
+			.map(|(run, _)| run.clone())
+			.collect();
+		for run in queued {
+			self.drops.remove(run.clone());
+			runs.insert(run);
+		}
+		if let Poll::Ready(Some(sub)) = self.poll_serving(&kio::Waiter::noop()) {
+			runs.extend(sub.reoffer_stale());
+		}
+		runs.into_iter().collect()
+	}
+
 	/// The next run the serving copy gave up that `delivered` lacks and no other copy may
 	/// still deliver. Only the serving copy's verdicts count, and a route failure is none:
 	/// another route may still deliver the group, and a failed group it buffered continues
@@ -1757,21 +1790,38 @@ impl Reader {
 		delivered: &Delivered,
 		probe: bool,
 		waiter: &kio::Waiter,
-	) -> Poll<(std::ops::Range<u64>, StreamError)> {
+	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
+		let queued: Vec<_> = self
+			.drops
+			.iter()
+			.filter(|(_, (_, received))| *received)
+			.map(|(run, _)| run.clone())
+			.collect();
 		let mut given_up = Vec::new();
+		let mut superseded = Vec::new();
 		if let Poll::Ready(Some(sub)) = self.poll_serving(waiter) {
+			// A received stale run queued here that new terms superseded since is unknown again:
+			// the copy no longer holds it, and its upstream re-offers or drops it again.
+			for run in queued {
+				superseded.extend(sub.stale_held(run.clone()).gaps(&run));
+			}
 			loop {
 				let polled = match probe {
 					true => sub.poll_drop(waiter),
 					false => sub.poll_queued_drop(waiter),
 				};
-				let Poll::Ready(run) = polled else { break };
-				given_up.push(run);
+				let Poll::Ready((run, hole)) = polled else { break };
+				// A stale run the copy holds came from its upstream, which new terms may supersede.
+				let received = hole.stale_budget().is_some() && !sub.stale_held(run.clone()).is_empty();
+				given_up.push((run, hole, received));
 			}
 		}
-		for (run, err) in given_up {
-			if !route_failed(&Error::Stream(err.clone())) {
-				self.drops.insert(run, err);
+		for run in superseded {
+			self.drops.remove(run);
+		}
+		for (run, hole, received) in given_up {
+			if !Error::Stream(hole.error()).retryable() {
+				self.drops.insert(run, (hole, received));
 			}
 		}
 		let covered: Vec<_> = self
@@ -1805,7 +1855,7 @@ impl Reader {
 				feeding.insert(from..until);
 			}
 		}
-		let next = self.drops.iter().find_map(|(run, err)| {
+		let next = self.drops.iter().find_map(|(run, (err, _))| {
 			let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
 			let open = delivered
 				.gaps(run)
@@ -1819,6 +1869,11 @@ impl Reader {
 		// Reported once. As on a plain cursor, the report is not final: a miss (a fill given
 		// up) may still land, and is handed out if it does.
 		self.drops.remove(open.clone());
+		match &err {
+			err if err.stale_budget().is_some() => self.reported_stale.insert(open.clone()),
+			// A skip or final drop is final, so no update reopens a stale report it replaced.
+			track::Hole::Skip | track::Hole::Drop { .. } => self.reported_stale.remove(open.clone()),
+		}
 		Poll::Ready((open, err))
 	}
 
@@ -2001,6 +2056,8 @@ pub(super) struct Recover {
 	logical: Option<kio::Consumer<track::TrackState>>,
 	/// A fetch of the rest of the group from the serving route, by its generation.
 	fetch: Option<(u64, Fetch)>,
+	/// A recovery started and has not ended, so its events are logged once each.
+	recovering: bool,
 }
 
 enum Fetch {
@@ -2022,8 +2079,9 @@ impl Clone for Recover {
 			lease: self.lease.clone(),
 			out: self.out.clone(),
 			logical: self.logical.clone(),
-			// A clone reads in parallel, so it asks for itself.
+			// A clone reads in parallel, so it asks and logs for itself.
 			fetch: None,
+			recovering: false,
 		}
 	}
 }
@@ -2052,6 +2110,46 @@ impl Recover {
 		false
 	}
 
+	/// Log, once per recovery, that the read at frame `index` looks past its copy: `failed`
+	/// is the copy's error, or `None` for a stall while a newer route serves.
+	pub(super) fn recovering(&mut self, index: usize, failed: Option<&Error>) {
+		if std::mem::replace(&mut self.recovering, true) {
+			return;
+		}
+		tracing::debug!(
+			broadcast = %self.copy.broadcast().path,
+			track = self.copy.name(),
+			group = self.sequence,
+			frame = index,
+			cause = failed.map_or_else(|| "stalled behind a newer route".to_owned(), ToString::to_string),
+			fetch = self.reader.is_none(),
+			read_generation = self.generation,
+			serving_generation = self.route.consumer().read().generation,
+			"group read recovering",
+		);
+	}
+
+	/// The read went on without a replacement: its copy answered after all.
+	pub(super) fn resumed(&mut self) {
+		self.recovering = false;
+	}
+
+	/// Log the error a recovery ended the read with, which may differ from its cause.
+	pub(super) fn failed(&mut self, index: usize, err: &Error) {
+		if std::mem::take(&mut self.recovering) {
+			tracing::debug!(
+				broadcast = %self.copy.broadcast().path,
+				track = self.copy.name(),
+				group = self.sequence,
+				frame = index,
+				%err,
+				read_generation = self.generation,
+				serving_generation = self.route.consumer().read().generation,
+				"group read recovery failed",
+			);
+		}
+	}
+
 	/// Whether the copy being read failed delivering the group rather than judging it, so
 	/// its own route may be asked again. Any other failure would repeat on every copy from
 	/// that route, so only another route is asked, which bounds a hostile route to one bad
@@ -2062,7 +2160,7 @@ impl Recover {
 	/// exists, so neither is a verdict on a fetch: one answered from a group still arriving
 	/// over a subscription asks the route again for the rest when that delivery gives up on it.
 	fn undelivered(&self, err: &Error) -> bool {
-		route_failed(err)
+		err.retryable()
 			|| copy_failed(&self.copy)
 			|| matches!(err, Error::Lagged)
 			|| (self.reader.is_none() && matches!(StreamError::from(err), StreamError::Old | StreamError::Evicted))
@@ -2127,7 +2225,7 @@ impl Recover {
 			}
 			// An unroutable copy waits for another route: asking its own again could only replace
 			// the withdrawal's cause with a refusal. None comes once the front is done.
-			let withdrawn = failed.filter(|err| generation == self.generation && unroutable(err));
+			let withdrawn = failed.filter(|err| generation == self.generation && err.unroutable());
 			if let Some(err) = withdrawn
 				&& terminal
 			{
@@ -2215,7 +2313,7 @@ impl Recover {
 			// route's subscription, not whether the group exists, so it is no verdict on a
 			// fetch; nor is one a copy that failed dropped its open groups with, or a failure
 			// of the route it came through.
-			Poll::Ready(Err(err)) if self.reader.is_some() && !route_failed(&err) && !copy_failed(serving) => {
+			Poll::Ready(Err(err)) if self.reader.is_some() && !err.retryable() && !copy_failed(serving) => {
 				return Poll::Ready(Err(err));
 			}
 			_ => {}
@@ -2228,7 +2326,7 @@ impl Recover {
 		if self.reader.is_some()
 			&& serving.poll_closed(waiter).is_ready()
 			&& let Poll::Ready(Err(err)) = serving.poll_complete(&kio::Waiter::noop())
-			&& !route_failed(&err)
+			&& !err.retryable()
 		{
 			verdict = Some(err);
 		}
@@ -2269,7 +2367,7 @@ impl Recover {
 		};
 		let err = match fetch {
 			// That route failed: the next one is asked.
-			Fetch::Refused(err) if route_failed(err) || copy_failed(serving) => return Poll::Pending,
+			Fetch::Refused(err) if err.retryable() || copy_failed(serving) => return Poll::Pending,
 			Fetch::Refused(err) => err.clone(),
 			Fetch::Pending(pending) => match ready!(kio::Task::poll(&mut **pending, waiter)) {
 				Ok(group) => {
@@ -2286,7 +2384,7 @@ impl Recover {
 					Error::NotFound
 				}
 				// That route is failing too: wait for the next one.
-				Err(err) if route_failed(&err) || copy_failed(serving) => {
+				Err(err) if err.retryable() || copy_failed(serving) => {
 					*fetch = Fetch::Refused(err);
 					return Poll::Pending;
 				}
@@ -2322,6 +2420,17 @@ impl Recover {
 
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
 	pub(super) fn adopt(&mut self, replacement: &Replacement) {
+		if std::mem::take(&mut self.recovering) {
+			tracing::debug!(
+				broadcast = %self.copy.broadcast().path,
+				track = self.copy.name(),
+				group = self.sequence,
+				frame = replacement.group.index(),
+				read_generation = self.generation,
+				adopted_generation = replacement.generation,
+				"group read recovered",
+			);
+		}
 		self.generation = replacement.generation;
 		// The generation moved without `wants` seeing it ready, so it judges the new one.
 		self.route.reset();
@@ -2516,11 +2625,12 @@ impl kio::Task for Fetching {
 						out: None,
 						logical: Some(self.logical.clone()),
 						fetch: None,
+						recovering: false,
 					})))
 				}
 				// The route failed: ask the next one, unless none will come. Kept as the answer,
 				// since the same copy is never asked twice.
-				Err(err) if (route_failed(&err) || copy_failed(&serving)) && self.route.end().is_none() => {
+				Err(err) if (err.retryable() || copy_failed(&serving)) && self.route.end().is_none() => {
 					if let Some(asked) = &mut self.pending {
 						asked.answer = Some(Err(err));
 					}
@@ -2549,6 +2659,13 @@ mod test {
 			"video",
 			crate::track::Info::timed(),
 		)
+	}
+
+	/// A route's copy received from a remote publisher, whose groups may land out of order.
+	fn received_copy() -> track::Producer {
+		let copy = copy();
+		copy.received();
+		copy
 	}
 
 	/// The logical track `routes` serves.
@@ -3413,6 +3530,79 @@ mod test {
 		}
 	}
 
+	/// A recovery logs its cause and route generations once when it starts, however often the
+	/// read parks, then the copy it adopted or the error it ended the read with.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_recovery_logs_its_start_and_outcome() {
+		let events = |message: &str, events: &[String]| {
+			events
+				.iter()
+				.filter(|event| event.contains(&format!("message={message} ")))
+				.cloned()
+				.collect::<Vec<_>>()
+		};
+
+		// A stall while a newer route serves, which the replacement continues.
+		let logs = crate::test_tracing::capture(tracing::Level::DEBUG, || {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			let b = copy();
+			routes.serve(b.consume());
+			for _ in 0..3 {
+				assert!(reading.read_frame().now_or_never().is_none());
+			}
+			let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+			for (ms, frame) in [(0, b"a"), (1, b"b")] {
+				whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+			}
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		});
+		let [start] = events("group read recovering", &logs).try_into().unwrap();
+		assert!(start.contains("group=0 frame=1 "), "{start}");
+		assert!(start.contains("cause=\"stalled behind a newer route\""), "{start}");
+		assert!(start.contains("read_generation=1 serving_generation=2 "), "{start}");
+		let [end] = events("group read recovered", &logs).try_into().unwrap();
+		assert!(end.contains("read_generation=1 adopted_generation=2 "), "{end}");
+		assert!(events("group read recovery failed", &logs).is_empty());
+
+		// A failed copy whose replacement route then gives the group up.
+		let logs = crate::test_tracing::capture(tracing::Level::DEBUG, || {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			a.clone().abort(Error::Dropped).unwrap();
+
+			let b = copy();
+			routes.serve(b.consume());
+			assert!(reading.read_frame().now_or_never().is_none());
+			b.abort(Error::Stream(StreamError::App(5))).unwrap();
+			assert!(reading.read_frame().now_or_never().unwrap().is_err());
+		});
+		let [start] = events("group read recovering", &logs).try_into().unwrap();
+		assert!(start.contains(&format!("cause=\"{}\"", Error::Dropped)), "{start}");
+		let [end] = events("group read recovery failed", &logs).try_into().unwrap();
+		assert!(
+			end.contains(&format!("err={} ", Error::Stream(StreamError::App(5)))),
+			"{end}"
+		);
+		assert!(events("group read recovered", &logs).is_empty());
+	}
+
 	/// A fetch the serving route already answered continues the group, even when that route
 	/// aborts before the reader polls again. Asked of the route whose copy failed, the answer
 	/// arrives only through the fetch, not that copy's subscription.
@@ -3631,8 +3821,8 @@ mod test {
 	/// Every run the reader gives up right now.
 	fn dropped(sub: &mut track::Subscriber) -> Vec<(std::ops::Range<u64>, StreamError)> {
 		let mut runs = Vec::new();
-		while let Poll::Ready(run) = sub.poll_drop(&kio::Waiter::noop()) {
-			runs.push(run);
+		while let Poll::Ready((run, hole)) = sub.poll_drop(&kio::Waiter::noop()) {
+			runs.push((run, hole.error()));
 		}
 		runs
 	}
@@ -3659,6 +3849,34 @@ mod test {
 		write(&a, 4);
 		assert_eq!(drain(&mut sub, false), [3, 4]);
 		assert_eq!(dropped(&mut sub), []);
+	}
+
+	/// A skip of a run the serving copy already dropped replaces the drop, so the resumed
+	/// reader reports it again, as a skip, and only once.
+	#[kio::test]
+	async fn a_resumed_reader_reports_a_skip_over_a_reported_drop() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let holes = |sub: &mut track::Subscriber| {
+			let mut runs = Vec::new();
+			while let Poll::Ready(run) = sub.poll_drop(&kio::Waiter::noop()) {
+				runs.push(run);
+			}
+			runs
+		};
+
+		a.drop_groups(1..3, StreamError::NotFound);
+		assert_eq!(holes(&mut sub), [(1..3, track::Hole::drop(StreamError::NotFound))]);
+		a.skip_groups(1..3);
+		assert_eq!(holes(&mut sub), [(1..3, track::Hole::Skip)]);
+		assert_eq!(holes(&mut sub), []);
+		write(&a, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
 	}
 
 	/// A run the serving copy gave up waits while a copy it replaced may still deliver it
@@ -3690,6 +3908,120 @@ mod test {
 		assert_eq!(dropped(&mut sub), [(2..3, StreamError::NotFound)]);
 		write(&a, 2);
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+	}
+
+	/// A received stale run the reader held back is unknown again once new terms supersede it
+	/// on the serving copy: its upstream re-offers or drops it again, so it is not reported
+	/// meanwhile.
+	#[kio::test]
+	async fn a_held_back_stale_run_new_terms_supersede_is_not_reported() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let budget = Duration::from_secs(1);
+		let mut sub = subscribe(&logical, budget);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		// The new route's upstream judged groups 1 and 2 stale; the old route may still deliver them.
+		b.give_up(1..3, track::Hole::stale(budget));
+		assert_eq!(dropped(&mut sub), []);
+		write(&b, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
+
+		// The route's subscription updates before the old copy is past the budget.
+		b.supersede_stale(None);
+		kio::clock::sleep(budget).await;
+		assert_eq!(dropped(&mut sub), [], "no verdict under the new terms");
+	}
+
+	/// A front's reader re-offers what its serving route's copy still caches and judges fresh,
+	/// and gives up the rest, so a relay's publisher re-serves an expired stream through it.
+	#[test]
+	fn a_resumed_reader_reoffers_a_group_its_serving_copy_still_caches() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let (groups, given_up) = sub.reoffer_groups(0..3);
+		assert_eq!(groups.iter().map(|group| group.sequence).collect::<Vec<_>>(), [0]);
+		assert_eq!(given_up, std::iter::once(1..3).collect::<RangeSet<u64>>());
+	}
+
+	/// A front's reader takes back the stale runs its serving route's copy reported, so a
+	/// relay's publisher re-offers them under a new update rather than keep them reported.
+	#[test]
+	fn a_resumed_reader_takes_back_its_stale_reports() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		a.give_up(1..3, track::Hole::stale(HOUR));
+		assert_eq!(dropped(&mut sub), [(1..3, StreamError::Old)]);
+		assert_eq!(sub.reoffer_stale(), vec![1..3]);
+		assert_eq!(sub.reoffer_stale(), Vec::<std::ops::Range<u64>>::new());
+	}
+
+	/// A stale run one route reported is still taken back once another serves: the update
+	/// reopened it downstream, and the new route's copy knows nothing of it, so the groups it
+	/// delivers there afterwards are owed rather than kept reported.
+	#[test]
+	fn a_resumed_reader_takes_back_a_replaced_routes_stale_reports() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		a.give_up(1..3, track::Hole::stale(HOUR));
+		assert_eq!(dropped(&mut sub), [(1..3, StreamError::Old)]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(dropped(&mut sub), []);
+		assert_eq!(
+			sub.reoffer_stale(),
+			vec![1..3],
+			"reopened, though the new route never reported it"
+		);
+		assert_eq!(sub.reoffer_stale(), Vec::<std::ops::Range<u64>>::new());
+		write(&b, 1);
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [1, 2]);
+	}
+
+	/// A group the new route delivers over a stale run the old route reported retires that
+	/// report, and a final drop that follows it replaces it: only what is still stale is taken
+	/// back, so an update reopens no group already served.
+	#[test]
+	fn a_resumed_reader_retires_a_stale_report_its_group_or_final_drop_replaces() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		a.give_up(1..4, track::Hole::stale(HOUR));
+		assert_eq!(dropped(&mut sub), [(1..4, StreamError::Old)]);
+		a.drop_groups(2..3, StreamError::App(5));
+		assert_eq!(dropped(&mut sub), [(2..3, StreamError::App(5))]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
+		assert_eq!(sub.reoffer_stale(), vec![3..4], "only group 3 is still stale");
 	}
 
 	/// A run a replaced route held back is dropped with that route: the route serving next
@@ -4626,7 +4958,7 @@ mod test {
 	fn a_clean_end_waits_for_a_group_the_replaced_copy_still_carries() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
-		let a = copy();
+		let a = received_copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(1));
 		write(&a, 0);
@@ -4654,7 +4986,7 @@ mod test {
 			for ordered in [false, true] {
 				let routes = Producer::new();
 				let logical = logical(&routes);
-				let a = copy();
+				let a = received_copy();
 				let pool = a.broadcast().pool.clone();
 				let opened = a.consume().now();
 				let noop = kio::Waiter::noop();
@@ -4708,7 +5040,7 @@ mod test {
 	fn a_read_waiting_past_a_drained_copy_wakes_when_the_route_changes() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
-		let a = copy();
+		let a = received_copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(1));
 		write(&a, 0);
@@ -6421,9 +6753,9 @@ mod test {
 		const DELIVERY: [u32; 6] = [0x0, 0x1, 0x3, 0x4, 0x31, 0x36];
 		for code in (0..0x40).chain([64, 64 + 5, 0xffff_ffff]) {
 			let err = Error::Stream(StreamError::from_code(code));
-			assert_eq!(route_failed(&err), DELIVERY.contains(&code), "{code:#x}: {err:?}");
+			assert_eq!(err.retryable(), DELIVERY.contains(&code), "{code:#x}: {err:?}");
 		}
-		assert!(route_failed(&Error::Unroutable));
+		assert!(Error::Unroutable.retryable());
 	}
 
 	/// A failure judging the group repeats on every copy from its route, so it ends a read or

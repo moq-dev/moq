@@ -41,7 +41,7 @@ echo --- FFmpeg ^(CLI, for the `just dev` demo media^) ---
 %WG% --id Gyan.FFmpeg
 echo --- GitHub CLI ---
 %WG% --id GitHub.cli
-echo --- uv ^(Python, for the py/ workspace^) ---
+echo --- uv ^(Python for dependency setup and the py/ workspace^) ---
 %WG% --id astral-sh.uv
 
 REM MSVC linker + C++ headers, required for any Rust MSVC build. winget skips
@@ -56,7 +56,7 @@ where rustup >nul 2>nul && ( rustup default stable & rustup update stable ) || e
 
 echo.
 echo === Installing JS dependencies ^(bun install^) ===
-where bun >nul 2>nul && bun install || echo NOTE: bun not on PATH yet. Reopen your terminal, then run: bun install
+where bun >nul 2>nul && where uv >nul 2>nul && uv run --no-project python sh/js/install.py update || echo NOTE: bun or uv not on PATH yet. Reopen your terminal, then run: just js install update
 
 echo.
 echo === Done ===

@@ -98,7 +98,7 @@ function longestGroup(effect: Effect, renditions: ReadonlyMap<string, Rendition<
 	let longest: number | undefined;
 	for (const rendition of renditions.values()) {
 		if (rendition.kind === "text") continue;
-		const hint = effect.get(rendition.joinInterval);
+		const hint = effect.get(rendition.join);
 		if (hint === undefined || !Number.isFinite(hint) || hint <= 0) continue;
 		longest = Math.max(longest ?? 0, Math.ceil(hint));
 	}
@@ -126,7 +126,7 @@ export class Broadcast {
 	/**
 	 * The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	 * `video`/`audio` sections and `media.join` are folded from the registered renditions (see
-	 * {@link Rendition.joinInterval}); an application adds its own
+	 * {@link Rendition.join}); an application adds its own
 	 * root sections (e.g. `scte35`) by locking it too.
 	 */
 	readonly catalog = new CatalogProducer();

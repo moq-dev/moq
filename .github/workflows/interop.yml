@@ -55,7 +55,7 @@ jobs:
 
       - name: Workspace dependencies
         id: setup
-        run: nix develop --command bun install --frozen-lockfile
+        run: nix develop --command just js install frozen
         shell: bash -leo pipefail {0}
 
       # Each suite reports independently after setup, while a failed step still fails the job.
@@ -63,6 +63,12 @@ jobs:
         id: max-age
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test max-age
+        shell: bash -leo pipefail {0}
+
+      - name: Datagram tracks
+        id: datagram-tracks
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test datagram-tracks
         shell: bash -leo pipefail {0}
 
       - name: Stream limits over WebSocket
@@ -115,6 +121,8 @@ jobs:
           # it, for the report below.
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
           HARNESS_RESULTS: ${{ runner.temp }}/moq-test-runs/results.jsonl
+          # A release PR fails, rather than skips, a browser that cannot prove its route key yet.
+          CI_STRICT: ${{ github.event_name == 'pull_request' && '1' || '' }}
 
       # The same matrix with every client pinned to one moq-transport draft per pass. A release
       # PR runs the oldest and newest even draft between Rust and native JS; nightly and manual
@@ -217,6 +225,7 @@ jobs:
             "Rust cache": "${{ steps.rust-cache.outcome }}",
             "Playwright Chromium": "${{ steps.setup.outcome }}",
             "Optional publisher retention": "${{ steps.max-age.outcome }}",
+            "Datagram tracks": "${{ steps.datagram-tracks.outcome }}",
             "Stream limits over WebSocket": "${{ steps.stream-limits.outcome }}",
             "Relay fills": "${{ steps.relay-fill.outcome }}",
             "Receive credit recovery": "${{ steps.receive-credit.outcome }}",

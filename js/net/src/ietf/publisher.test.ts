@@ -1,8 +1,10 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { accept, connect } from "../connection/index.ts";
 import {
 	error,
 	fromTransport,
@@ -25,7 +27,8 @@ import type { Producer as TrackProducer } from "../track.ts";
 import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
-import { toRequestCode } from "./error.ts";
+import { ObjectDatagram } from "./datagram.ts";
+import { SubscribeRefused, toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
@@ -418,6 +421,92 @@ test("TRACK_STATUS for a missing broadcast or track is refused DOES_NOT_EXIST", 
 	}
 });
 
+// A refused track invites a retry when asking again may pass, as in Rust, and asks the peer never
+// to retry a verdict.
+test("a TRACK_STATUS refusal that may pass invites a retry", async () => {
+	for (const version of IETF_VERSIONS) {
+		for (const [err, errorCode, retryInterval] of [
+			[new StreamError(StreamCode.GoingAway, { message: "draining" }), 0x6, 1000n],
+			[new SessionError(SessionCode.Internal), 0x0, 1000n],
+			[new StreamError(StreamCode.NotFound, { message: "no video" }), 0x10, 0n],
+			[new StreamError(StreamCode.Unauthorized), 0x1, 0n],
+			[new StreamError(StreamCode.DeliveryTimeout), 0x2, 0n],
+			[new StreamError(StreamCode.MalformedTrack), 0x12, 0n],
+			[new SessionError(SessionCode.Unauthorized), 0x1, 0n],
+			[new SessionError(SessionCode.Expired), 0x5, 0n],
+			[new SessionError(SessionCode.Timeout), 0x2, 0n],
+			[new SessionError(SessionCode.Version), 0x3, 0n],
+			[new SessionError(SessionCode.Unsupported), 0x3, 0n],
+		] as const) {
+			const pair = createMockTransportPair(ALPNS[version]);
+			const session = new NativeSession(pair.server, version, true);
+			const { pub, origin } = publisher(pair.server, { session });
+			const requests = origin.routePrefix(Path.from("room")).requested();
+
+			const status = requestStream(version);
+			const answering = pub.runTrackStatusRequest(trackStatus("room"), status.stream);
+			const request = (await requests.next()).value;
+			if (!request) throw new Error("no request for room");
+			const served = new BroadcastProducer();
+			const trackRequest = wireOf(served).requested();
+			request.serve(served);
+			(await trackRequest)?.reject(err);
+			await answering;
+
+			const wire = status.wire();
+			expect(await wire.u53()).toBe(RequestError.id);
+			const refused = await RequestError.decode(wire, version);
+			expect([refused.errorCode, refused.retryInterval]).toEqual([errorCode, retryInterval]);
+			await requests.return?.();
+			served.close();
+			origin.close();
+		}
+	}
+});
+
+// A relay refuses its reader with the code and Retry Interval its upstream's refusal asked for,
+// where deriving an interval from the code would differ: DOES_NOT_EXIST derives "never retry",
+// and GOING_AWAY derives a retry the upstream declined.
+test("a relay forwards an upstream SUBSCRIBE refusal's retry interval", async () => {
+	for (const version of IETF_VERSIONS) {
+		for (const [errorCode, retryInterval] of [
+			[0x10, 5000n],
+			[0x6, 0n],
+		] as const) {
+			const pair = createMockTransportPair(ALPNS[version]);
+			const session = new NativeSession(pair.server, version, true);
+			const { pub, origin } = publisher(pair.server, { session });
+			const requests = origin.routePrefix(Path.from("room")).requested();
+
+			const reader = requestStream(version);
+			const subscribing = pub.runSubscribe(
+				new Subscribe({
+					requestId: 7n,
+					trackNamespace: Path.from("room"),
+					trackName: "video",
+					subscriberPriority: 0,
+				}),
+				reader.stream,
+			);
+			const request = (await requests.next()).value;
+			if (!request) throw new Error("no request for room");
+			const served = new BroadcastProducer();
+			const trackRequest = wireOf(served).requested();
+			request.serve(served);
+			(await trackRequest)?.reject(new SubscribeRefused(errorCode, "upstream", retryInterval, version));
+			await subscribing;
+
+			const wire = reader.wire();
+			expect(await wire.u53()).toBe(RequestError.id);
+			const refused = await RequestError.decode(wire, version);
+			expect([refused.errorCode, refused.retryInterval]).toEqual([errorCode, retryInterval]);
+			await requests.return?.();
+			served.close();
+			origin.close();
+		}
+	}
+});
+
 // The requester leaving is owed nothing, and gives back the origin demand or the track
 // lookup it held, whichever was still resolving.
 test("a cancelled TRACK_STATUS releases its demand on every draft", async () => {
@@ -559,6 +648,56 @@ test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
 			else client.reader.stop(new Error("cancel"));
 			await serving;
 			expect(resumed.demand().wanted.peek()).toBeUndefined();
+		} finally {
+			client.close();
+			fx.close();
+		}
+	}
+});
+
+// A resume refused upstream is refused downstream with the Retry Interval the upstream asked
+// for, where DOES_NOT_EXIST would derive "never retry".
+test("a relay forwards a resume refusal's retry interval", async () => {
+	for (const version of IETF_VERSIONS) {
+		const fx = fixture(version);
+		const client = await Stream.open(fx.pair.client, { version });
+		const server = await Stream.accept(fx.pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		const first = (async () => {
+			const request = await wireOf(fx.broadcast).requested();
+			if (!request) throw new Error("no track was requested");
+			return request.accept({ timescale: Timescale.MILLI });
+		})();
+		const serving = fx.pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				forward: false,
+			}),
+			server,
+		);
+		try {
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			await SubscribeOk.decode(client.reader, version);
+			const track = await first;
+			while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			track.finish();
+			track.close();
+			const second = wireOf(fx.broadcast).requested();
+			const parameters = new Parameters();
+			parameters.forward = true;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, version);
+			const resumed = await second;
+			if (!resumed) throw new Error("the resume asked for nothing");
+			resumed.reject(new SubscribeRefused(0x10, "upstream", 5000n, version));
+
+			expect(await client.reader.u53()).toBe(RequestError.id);
+			const refused = await RequestError.decode(client.reader, version);
+			expect([refused.errorCode, refused.retryInterval]).toEqual([0x10, 5000n]);
+			await serving;
 		} finally {
 			client.close();
 			fx.close();
@@ -1051,6 +1190,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
  * namespace unadvertised until something unrelated changed.
  */
 test("a broadcast published mid-advertisement is still announced", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1083,6 +1223,7 @@ test("a broadcast published mid-advertisement is still announced", async () => {
  * be offered again for the life of the session.
  */
 test("a declined advertisement is retried on the next change", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1317,6 +1458,7 @@ test("a refusal that forbids retrying is not retried", async () => {
  * the replacement for the life of the session.
  */
 test("republishing a path clears a refusal without unannouncing first", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1347,6 +1489,7 @@ test("republishing a path clears a refusal without unannouncing first", async ()
  * delivers.
  */
 test("a new instance at the same path clears a refusal", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -1377,6 +1520,7 @@ test("a new instance at the same path clears a refusal", async () => {
  * by rebuilding the watched entry on re-announce.
  */
 test("re-announcing a path clears a refusal that forbade retrying", async () => {
+	hostTime();
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
@@ -2197,6 +2341,7 @@ const ALPNS: Record<IetfVersion, string> = {
 function fixture(
 	version: IetfVersion = V22,
 	grant?: Signal<Grant | undefined>,
+	pair = createMockTransportPair(ALPNS[version]),
 ): {
 	pair: ReturnType<typeof createMockTransportPair>;
 	pub: Publisher;
@@ -2205,7 +2350,6 @@ function fixture(
 	version: IetfVersion;
 	close: () => void;
 } {
-	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, false);
 	const { pub, origin } = publisher(pair.server, { session, grant });
 	const broadcast = publish(origin, Path.from("test"));
@@ -2663,10 +2807,10 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 	}
 });
 
-// Quarantined: the live group intermittently resets while read.
-// Investigation: quest/m0/test-flakes-2/ietf-wider-fill.md.
-test.skip.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
+test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refused in %s order", async (order) => {
 	const fx = fixture();
+	// No max age: group 9 is served live, and a zero budget would give it up mid-write once the
+	// live group supersedes it, racing this test's read of the refused fill.
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	for (const sequence of [0n, 3n, 9n]) {
 		const group = track.createGroup(sequence);
@@ -2691,7 +2835,7 @@ test.skip.each(["ascending", "descending"] as const)("draft-22: a wider fill is 
 		const fill = await nextUni(fx.uni);
 		if (!fill) throw new Error("missing fill stream");
 		const served = await readFill(fill, order);
-		expect(served.reset).toBeDefined();
+		expect(served.reset).toBeInstanceOf(StreamError);
 		expect(served.objects).toEqual([]);
 		const live = track.appendGroup();
 		live.writeFrame({ payload: new TextEncoder().encode("live"), timestamp: Timestamp.now() });
@@ -3198,6 +3342,7 @@ for (const synchronous of [true, false]) {
 // PUBLISH_DONE MUST wait until every stream the subscription will open is closed, so its
 // Stream Count is final. A group still queued for a stream slot when the track ends is one.
 test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -3620,6 +3765,205 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 			client.close();
 			track.finish();
 			track.close();
+			fx.close();
+		}
+	}
+});
+
+test("a paused relay subscription reacquires its upstream datagrams", async () => {
+	const source = new OriginProducer();
+	const route = source.route(Path.from("test"));
+	const track = route.broadcast.createTrack("audio", {});
+	const datagrams = route.broadcast.createDatagrams("audio", {});
+	const upstream = createMockTransportPair(ALPN.DRAFT_18);
+	const url = new URL("https://localhost/resume");
+	const peers = await Promise.all([
+		connect({ url, transport: upstream.client }),
+		accept({ url, transport: upstream.server, publish: source.consume() }),
+	]);
+	const original = wireOf(peers[0]).consume(Path.from("test"));
+	const relay = new OriginProducer();
+	const requests = relay.routePrefix(Path.from("test"));
+	const cursor = requests.requested();
+	const routing = (async () => {
+		for await (const request of cursor) request.serve(original);
+	})();
+	const fx = fixture(V22);
+	fx.pub.close();
+	fx.pub = new Publisher({
+		quic: fx.pair.server,
+		session: new NativeSession(fx.pair.server, V22, false),
+		publish: relay.consume(),
+		requiresSolicitation: false,
+	});
+	const received = fx.pair.client.datagrams.readable.getReader();
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "audio",
+			subscriberPriority: 128,
+		}),
+	);
+	const forward = async (id: bigint, on: boolean) => {
+		const parameters = new Parameters();
+		parameters.forward = on;
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, V22);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, V22);
+	};
+	try {
+		datagrams.append(undefined, Uint8Array.of(1));
+		expect((await received.read()).done).toBe(false);
+		await forward(2n, false);
+		while (track.subscription.peek() !== undefined) await track.subscription.changed();
+		const before = upstream.client.sendStreams.bidi.length;
+		await forward(4n, true);
+		expect(upstream.client.sendStreams.bidi.length).toBe(before + 1);
+		datagrams.append(undefined, Uint8Array.of(2));
+		const next = await received.read();
+		if (!next.value) throw new Error("no resumed relay datagram");
+		expect((await ObjectDatagram.decode(next.value, V22)).body).toEqual({ payload: Uint8Array.of(2) });
+	} finally {
+		client.close();
+		fx.pub.close();
+		received.releaseLock();
+		fx.close();
+		requests.close();
+		await routing;
+		for (const peer of peers) peer.abort();
+		original.close();
+		relay.close();
+		source.close();
+	}
+});
+
+test.each(["writable", "createWritable"] as const)(
+	"concurrent IETF subscriptions share the %s datagram transport",
+	async (datagramWritable) => {
+		const fx = fixture(V22, undefined, createMockTransportPair(ALPN.DRAFT_22, { datagramWritable }));
+		const producers = ["audio", "video"].map((name) => fx.broadcast.createDatagrams(name, {}));
+		const received = fx.pair.client.datagrams.readable.getReader();
+		const clients: Stream[] = [];
+		try {
+			for (const [i, name] of ["audio", "video"].entries()) {
+				const { client } = await runSubscribe(
+					fx,
+					new Subscribe({
+						requestId: BigInt(i * 2),
+						trackNamespace: Path.from("test"),
+						trackName: name,
+						subscriberPriority: 128,
+					}),
+				);
+				clients.push(client);
+			}
+			for (const [i, producer] of producers.entries()) {
+				producer.append(undefined, Uint8Array.of(i));
+				const next = await received.read();
+				if (!next.value) throw new Error("missing concurrent datagram");
+				const decoded = await ObjectDatagram.decode(next.value, V22);
+				expect(decoded.trackAlias).toBe(BigInt(i * 2));
+				expect(decoded.body).toEqual({ payload: Uint8Array.of(i) });
+			}
+		} finally {
+			for (const client of clients) client.close();
+			for (const producer of producers) producer.finish();
+			received.releaseLock();
+			fx.pub.close();
+			fx.close();
+		}
+	},
+);
+
+test("a paused IETF subscription leaves a blocked datagram write", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_22);
+	const started = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	Object.defineProperty(pair.server.datagrams, "writable", {
+		value: new WritableStream<Uint8Array>({
+			write: async () => {
+				started.resolve();
+				await release.promise;
+			},
+		}),
+	});
+	const fx = fixture(V22, undefined, pair);
+	const datagrams = fx.broadcast.createDatagrams("audio", {});
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "audio",
+			subscriberPriority: 128,
+		}),
+	);
+	try {
+		datagrams.append(undefined, Uint8Array.of(1));
+		await started.promise;
+		const parameters = new Parameters();
+		parameters.forward = false;
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, V22);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, V22);
+		expect(datagrams.priority.peek()).toBeUndefined();
+	} finally {
+		release.resolve();
+		client.close();
+		datagrams.finish();
+		fx.pub.close();
+		fx.close();
+	}
+});
+
+test("a datagram-only SUBSCRIBE releases demand on pause and resumes", async () => {
+	for (const startPaused of [false, true]) {
+		const fx = fixture(V22);
+		const datagrams = fx.broadcast.createDatagrams("audio", {});
+		const received = fx.pair.client.datagrams.readable.getReader();
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "audio",
+				subscriberPriority: 128,
+				forward: !startPaused,
+			}),
+		);
+		const forward = async (id: bigint, on: boolean) => {
+			const parameters = new Parameters();
+			parameters.forward = on;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, V22);
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(client.reader, V22);
+		};
+		try {
+			if (!startPaused) {
+				datagrams.append(undefined, Uint8Array.of(1));
+				expect((await received.read()).done).toBe(false);
+				await forward(2n, false);
+			}
+			while (datagrams.priority.peek() !== undefined) await datagrams.priority.changed();
+			datagrams.append(undefined, Uint8Array.of(2));
+			await forward(4n, true);
+			datagrams.append(undefined, Uint8Array.of(3));
+			const next = await received.read();
+			if (!next.value) throw new Error("no resumed datagram");
+			const decoded = await ObjectDatagram.decode(next.value, V22);
+			expect(decoded.body).toEqual({ payload: Uint8Array.of(3) });
+			datagrams.finish();
+			expect(await client.reader.u53()).toBe(PublishDone.id);
+			expect((await PublishDone.decode(client.reader, V22)).streamCount).toBe(0n);
+		} finally {
+			received.releaseLock();
+			client.close();
+			datagrams.finish();
 			fx.close();
 		}
 	}
@@ -4325,6 +4669,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 });
 
 test("draft-22: widening with a fill keeps the open live group", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
@@ -4369,6 +4714,7 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 });
 
 test("draft-22: a fill-only update short of the edge keeps the live join's floor", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
@@ -4416,6 +4762,7 @@ test("draft-22: a fill-only update short of the edge keeps the live join's floor
 });
 
 test("draft-22: a fill-only update keeps the subscription's floor", async () => {
+	hostTime();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);

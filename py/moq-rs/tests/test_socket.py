@@ -108,7 +108,10 @@ async def test_tcp_rst_and_endpoint_close_are_errors():
     assert reset.value.details.code == 64 + 17
     client, server = await tcp(a, b)
     a.close()
-    with pytest.raises(moq.Error.Cancelled):
+    # The stream's reset and the endpoint's retraction race, so either shutdown error can
+    # reach the reader. The contract promises no clean EOF here, not a cause.
+    shutdown: tuple[type[BaseException], ...] = (moq.Error.Cancelled, moq.Error.Closed)
+    with pytest.raises(shutdown):
         await server.consumer.read_frame()
     b.close()
 
@@ -181,11 +184,11 @@ async def late_peer(clock):
 async def test_cancelling_acceptance_drops_the_original_dial_while_proving_routability():
     origin = moq.OriginProducer()
     endpoint = socket.Endpoint(origin, "room", "server")
-    forged = origin.route("room/.socket/forged", hidden=True)
+    forged = origin.route("room/.client/forged", hidden=True)
     returning = forged.broadcast.requests()
     forged.announce()
     incoming = await start(endpoint.accept_tcp())
-    broadcast = await origin.consume().request("room/.socket/server")
+    broadcast = await origin.consume().request("room/.server/server")
     original = await start(broadcast.subscribe_track("tcp/forged/server/0123456789abcdef0123456789abcdef"))
     offered = await incoming
     accepting = await start(offered.accept())

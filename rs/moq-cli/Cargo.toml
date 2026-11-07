@@ -26,7 +26,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
+default = ["cluster-lan", "quic", "websocket", "nvidia", "vaapi", "s3", "gcs", "azure"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]
@@ -36,8 +36,6 @@ quic = ["moq-tokio/quic"]
 # congestion-control testing.
 qlog = ["moq-tokio/qlog"]
 websocket = ["moq-tokio/websocket"]
-# Native WebRTC data channels, for holding sessions with browser peers.
-webrtc = ["moq-tokio/webrtc"]
 # The cloud object stores `export archive` and `import archive` reach (`s3://`,
 # `gs://`, `az://`), signing through rind and connecting through reqwest. Local
 # `file://` URLs need none of them.
@@ -72,10 +70,10 @@ nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
 # feature it turns on. Only bites when `capture`, `transcode`, or `play` pulls in
 # moq-video.
 openh264 = ["moq-video?/openh264", "moq-transcode?/openh264"]
-# Intel/AMD VAAPI hardware encoding (Linux), opt-in like the moq-video feature
-# it turns on: libva is dlopen'd at runtime, but moq-vaapi's bindgen needs
-# libclang on the build host. Only bites when `capture`, `transcode`, or `play`
-# pulls in moq-video.
+# Intel/AMD VAAPI hardware codecs (Linux), on by default like the moq-video
+# feature it turns on: libva is dlopen'd at runtime and moq-vaapi checks its
+# bindings in, so nothing is needed on the build host. Only bites when
+# `capture`, `transcode`, or `play` pulls in moq-video.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 # The V4L2 M2M codecs of an ARM SoC (a Raspberry Pi's VideoCore and the like),
 # opt-in like the moq-video feature it turns on. Costs the build nothing: moq-v4l
@@ -118,7 +116,6 @@ moq-mux = { workspace = true, features = ["async"] }
 # Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
 # CLI's own feature set (quic, cluster-lan) is what selects them.
 moq-relay = { workspace = true }
-moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
 moq-rtsp = { workspace = true }
 moq-srt = { workspace = true }
@@ -126,6 +123,7 @@ moq-srt = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["tcp", "uds", "watch"] }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
+moq-webrtc = { workspace = true }
 object_store = { workspace = true, features = ["fs"] }
 percent-encoding = { workspace = true }
 pollster = { workspace = true, optional = true }

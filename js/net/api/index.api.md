@@ -1,11 +1,8 @@
 # `@moq/net`
 
 ```ts
-import { $ZodBranded } from "zod/v4/core";
 import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
-import { ZodMiniBigInt } from "zod/mini";
-import { infer } from "zod/mini";
 
 export namespace Announce {
 	export interface Announce {
@@ -348,6 +345,10 @@ export namespace Error {
 		});
 		readonly code: SessionCode;
 	}
+	export class Skipped extends Error {
+		constructor(sequence: bigint);
+		readonly sequence: bigint;
+	}
 	export class Stream extends Error {
 		constructor(code: StreamCode, options?: Error.StreamOptions);
 		readonly code: StreamCode;
@@ -465,8 +466,6 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
 	}
-	export type Hop = infer<typeof Origin.HopSchema>;
-	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
 	export class Producer implements Origin.Table {
 		constructor();
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -515,10 +514,9 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export interface RouteInfo {
-		readonly auth?: Auth.Credential;
+		readonly anonymous: boolean;
 		readonly cost: Origin.Cost;
-		readonly epoch?: bigint;
-		readonly hops: readonly Origin.Hop[];
+		readonly hops: readonly bigint[];
 		readonly instance?: Instance.Valid;
 	}
 	export interface RouteOptions {
@@ -532,7 +530,6 @@ export namespace Origin {
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 	}
-	export function isAnonymous(route: Origin.RouteInfo): boolean;
 }
 
 export namespace Path {
@@ -758,6 +755,7 @@ export namespace Track {
 		readonly name: string;
 		get priority(): number;
 		requests(): Track.Requests;
+		skipGroups(start: bigint, end: bigint): void;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
@@ -784,11 +782,14 @@ export namespace Track {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		finished(): Promise<Track.Position>;
+		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
+		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
+		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryRecvGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;

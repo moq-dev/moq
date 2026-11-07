@@ -195,6 +195,27 @@ impl StreamCredit {
 	}
 }
 
+/// Limits to change on a live session with [`poll::Session::set_limits`]. Each `None` leaves
+/// its limit as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Limits {
+	/// The connection-wide receive window, in bytes.
+	pub receive_window: Option<std::num::NonZeroU64>,
+}
+
+/// Why a transport did not apply [`Limits`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LimitsError {
+	/// The transport cannot change these limits on a live session.
+	#[error("the transport cannot change these limits")]
+	Unsupported,
+	/// The transport refused the values, with its reason.
+	#[error("limits refused: {0}")]
+	Refused(String),
+}
+
 /// The smallest connection receive window a transport that leases may offer: one 1 MiB
 /// storage segment.
 ///
@@ -395,6 +416,17 @@ pub mod poll {
 		/// sheds what its readers fall behind on.
 		fn receive_window(&self) -> Option<super::ReceiveWindow> {
 			None
+		}
+
+		/// Apply `limits` to the live session, such as to open the receive window a server held
+		/// back until it admitted the peer.
+		///
+		/// Errors with [`LimitsError::Unsupported`](super::LimitsError::Unsupported) when the
+		/// transport cannot change them, which is the default: such a transport holds nothing
+		/// back to open.
+		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
+			let _ = limits;
+			Err(super::LimitsError::Unsupported)
 		}
 
 		/// Return the peer's stream credit in `dir`, or `None` when the transport cannot say,
@@ -623,6 +655,10 @@ pub mod poll {
 			(**self).receive_window()
 		}
 
+		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
+			(**self).set_limits(limits)
+		}
+
 		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
 			(**self).stream_credit(dir)
 		}
@@ -779,6 +815,15 @@ pub mod poll {
 		/// Some implementations do not support FIN acknowledgement, in which case this
 		/// resolves once the FIN is sent.
 		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>>;
+
+		/// Whether the peer has acknowledged every byte written so far, or `None` when the
+		/// transport cannot tell, as a browser's WebTransport cannot.
+		///
+		/// A transport answers for all of its streams or for none. A stream that was reset, or
+		/// that the peer stopped, is never acknowledged.
+		fn acknowledged(&self) -> Option<bool> {
+			None
+		}
 
 		/// Write some of the buffer, returning how many bytes were accepted.
 		fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self> {

@@ -384,6 +384,11 @@ pub enum Error {
 	#[error("duplicate")]
 	Duplicate,
 
+	/// A group was created at a sequence its track declared skipped: a skip says the
+	/// sequence will never be produced, so it is final. See `track::Producer::skip_groups`.
+	#[error("sequence was skipped")]
+	Skipped,
+
 	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
 	/// by either side, as `Session::closed` reports it. Not a failure.
 	#[error("cancelled")]
@@ -594,6 +599,41 @@ impl Error {
 			_ => Self::Transport(err.to_string()),
 		}
 	}
+
+	/// Whether asking again may succeed: the route failed to deliver rather than judging what
+	/// it carried, which would repeat on every attempt. Mirrors `routeFailed` in
+	/// `js/net/src/resume.ts`.
+	pub(crate) fn retryable(&self) -> bool {
+		self.unroutable() || self.transient()
+	}
+
+	/// Whether a source lost its route to the content: only another route continues it.
+	pub(crate) fn unroutable(&self) -> bool {
+		matches!(self, Self::Unroutable | Self::Stream(StreamError::Unroutable))
+	}
+
+	/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
+	/// route instead: asking it again can replace the withdrawal's cause with a refusal.
+	pub(crate) fn transient(&self) -> bool {
+		matches!(
+			self,
+			Self::Transport(_)
+				| Self::IdleTimeout
+				| Self::Session(_)
+				| Self::GoingAway
+				| Self::GoawayTimeout
+				| Self::Dropped
+				| Self::Closed
+				| Self::Cancel
+				| Self::Stream(
+					StreamError::Session(_)
+						| StreamError::Internal
+						| StreamError::Cancel
+						| StreamError::GoingAway
+						| StreamError::ControlTimeout
+				)
+		)
+	}
 }
 
 /// Preserve the session registry when carrying a protocol error.
@@ -642,6 +682,7 @@ impl From<&Error> for SessionError {
 			| Error::UnexpectedMessage
 			| Error::UnexpectedStream
 			| Error::Duplicate
+			| Error::Skipped
 			| Error::Decode(_)
 			| Error::Encode(_)
 			| Error::WrongSize
@@ -727,6 +768,7 @@ impl From<&Error> for StreamError {
 			| Error::UnknownAlpn(_)
 			| Error::TooManyRequests
 			| Error::Duplicate
+			| Error::Skipped
 			| Error::GoawayTimeout
 			| Error::ProtocolViolation
 			| Error::UnexpectedMessage => Self::Session(SessionError::from(err)),

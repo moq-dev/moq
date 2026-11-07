@@ -4,8 +4,10 @@
 //! reading only each group's first frame timestamp, which the transport carries. Playlists and
 //! manifests are a pure function of those timestamps and the catalog's `media.join.interval`,
 //! and media bytes move only when an HTTP client requests a segment, which FETCHes exactly the
-//! groups that segment holds from the relay cache and transmuxes them to CMAF. A broadcast whose
-//! catalog declares no interval gets no playlists. A `moq-archive` recording served by its
+//! groups that segment holds from the relay cache and transmuxes them to CMAF. The media
+//! subscriptions that index each group count toward no stats session, so a source whose origin
+//! is metered counts its catalog and the media clients fetch, not media nobody requested. A broadcast whose catalog declares no
+//! interval gets no playlists. A `moq-archive` recording served by its
 //! `Consumer` is served the same way, and a segment GETs only its rendition's objects.
 //!
 //! Every rendition numbers its groups into segments on the grid the interval draws (see the
@@ -142,7 +144,7 @@ impl Broadcaster {
 	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
 	/// cryptography cannot run on.
 	pub fn new(source: moq_mux::Source, config: Config) -> crate::Result<(Self, Driver)> {
-		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
+		moq_crypto::cpu::check()?;
 		Ok(Self::start(source, config, None))
 	}
 
@@ -801,6 +803,8 @@ mod tests {
 	}
 
 	/// The next rendition event, or `None` if the set is quiet.
+	///
+	/// Callers run on paused time, so the timeout fires only once every task has run.
 	async fn next_event(cursor: &mut renditions::Consumer) -> Option<renditions::Event> {
 		kio::clock::timeout(Duration::from_millis(50), cursor.next())
 			.await
@@ -940,8 +944,9 @@ mod tests {
 
 	// No rendition is served until the catalog declares its join interval: without that grid
 	// nothing numbers their segments. Once it does, every rendition is added.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn renditions_wait_for_the_join_interval() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1024,8 +1029,9 @@ mod tests {
 	// moves, writing those two fields and nothing else. That must not churn the rendition:
 	// rebuilding resets the playlist window, the cached init segment and EXT-X-MEDIA-SEQUENCE,
 	// and makes every recording cursor see a Removed followed by an Added.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn estimate_only_catalog_update_keeps_the_rendition() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1094,8 +1100,9 @@ mod tests {
 	// The estimator also measures the framerate and publishes it once it settles, so an
 	// imported source gains one about a second in. Rebuilding for it would re-time the fMP4
 	// (its timescale derives from the framerate) and churn every recording cursor mid-stream.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn estimated_framerate_keeps_the_rendition() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1158,8 +1165,9 @@ mod tests {
 	// The other half: a change that alters how the rendition decodes, or which track it
 	// lists, still rebuilds it, so the cached init segment can never describe media it no
 	// longer matches.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn decoder_config_change_rebuilds_the_rendition() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1225,6 +1233,7 @@ mod tests {
 	// groups' timestamps, and a segment request fetches and transmuxes exactly its groups.
 	#[tokio::test]
 	async fn master_lists_only_playable_renditions() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1865,6 +1874,7 @@ mod tests {
 	// playlist still lists the segments muxed under them.
 	#[tokio::test]
 	async fn a_reconfigure_versions_the_init_url() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -2149,6 +2159,60 @@ mod tests {
 		// The live-edge segment isn't listed yet, and unknown segments miss.
 		assert!(rendition.listed_segment(2).await.unwrap().is_none());
 		assert!(rendition.listed_segment(99).await.unwrap().is_none());
+
+		drop((media, catalog, broadcast));
+	}
+
+	/// Indexing reads every group of the media, but a stats session on the source's origin
+	/// counts only the catalog and what a client fetches.
+	#[tokio::test]
+	async fn a_metered_source_counts_only_what_clients_fetch() {
+		kio::clock::host_time();
+		let origin = produce_origin();
+		let broadcast = origin
+			.route("live", moq_net::origin::RouteOptions::default())
+			.expect("publish allowed");
+		settle().await;
+		// Coded dimensions, so the init builds from the catalog without reading media.
+		let (catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
+
+		let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
+		let consumer = origin.consume().with_stats(
+			registry
+				.tier(moq_net::stats::Tier::default())
+				.session(moq_net::Path::from_static("viewer")),
+		);
+		let bytes = || -> u64 {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.map(|(_, _, traffic)| traffic.bytes)
+				.sum()
+		};
+		let resolved = consumer.request("live", None).await.expect("the broadcast resolves");
+		let broadcaster = Broadcaster::spawned(moq_mux::Source::new(consumer, resolved), Config::default());
+		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster
+			.rendition(Kind::Video, "video0")
+			.expect("rendition discovered from the catalog");
+		until_listed(&rendition, 2).await;
+		let indexed = bytes();
+		assert!(indexed > 0, "the catalog counts");
+
+		// Three more GOPs, indexed and listed without a fetch.
+		for micros in [6_000_000, 8_000_000, 10_000_000] {
+			media.write(vp8_frame(micros, true)).unwrap();
+		}
+		until_listed(&rendition, 5).await;
+		assert_eq!(bytes(), indexed, "indexing every group counts nothing");
+
+		rendition
+			.listed_segment(4)
+			.await
+			.unwrap()
+			.expect("segment fetched on demand");
+		assert!(bytes() > indexed, "the fetched segment counts");
 
 		drop((media, catalog, broadcast));
 	}
@@ -2615,6 +2679,7 @@ mod tests {
 	// A finished broadcast renders a static presentation.
 	#[tokio::test]
 	async fn dash_manifest_turns_static_when_finished() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())

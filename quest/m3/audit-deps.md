@@ -82,9 +82,9 @@ Open after the 2026-11-01 removal run:
 Advisories waiting on upstream:
 
 - ashpd 0.13 pulls zbus 5 and the unmaintained zvariant, zvariant_derive, and
-  zbus_names (RUSTSEC-2026-0370, 0371, 0372). Upstream's
-  [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491) merged on
-  2026-10-25; wait for a stable ashpd release that carries it.
+  zbus_names (RUSTSEC-2026-0370, 0371, 0372). ashpd 0.14.0 (2026-11-05) carries
+  the zbus 6 port; [ashpd uses maintained D-Bus crates](/quest/m4/ashpd-maintained.md)
+  upgrades to it.
 - basic-toml (RUSTSEC-2026-0374) comes through askama_derive's default
   `config` feature in uniffi_bindgen 0.32, which reads its `askama.toml`.
   It only reaches the generator-only uniffi fork and never ships.
@@ -221,7 +221,7 @@ standalone build, not incremental workspace savings.
 - The QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, UniFFI and LibAV forks all have
   current transport, gateway, device, binding or codec consumers. Their
   removal would drop behavior or recreate nontrivial platform code;
-  upstream porting stays with [vendor-sync](/quest/m2/cut-gate/vendor-sync/README.md).
+  upstream porting stays with [vendor-sync](/quest/m3/vendor-sync/README.md).
   OpenH264 and device integrations remain opt-in where already gated.
 - Error/primitive derives remain shared infrastructure: `thiserror` is the
   workspace convention; `derive_more` handles existing enum conversions,

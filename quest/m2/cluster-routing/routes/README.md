@@ -161,8 +161,7 @@ the bullets below are the contract it carries.
   keyed by the route key the peer proves, so relays configured with the same
   key file fail over as one; a scoped peer that proves no key, such as one on
   qmux, gets a per-session key
-  ([session integration](/quest/m2/cluster-routing/routes/session.md),
-  [Scoped peers prove a route key](/quest/m2/cluster-routing/routes/proof.md)).
+  ([session integration](/quest/m2/cluster-routing/routes/session.md)).
   The router takes the key from the caller (`Scope::qualify`).
 - Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
   and a scoped connection forwarding an already qualified identity has that
@@ -532,11 +531,14 @@ benchmarks.
 
 ## Required
 
-- [Scoped peers prove a route key](/quest/m2/cluster-routing/routes/proof.md) - records the session proof decision and implementation
 - [Route session integration](/quest/m2/cluster-routing/routes/session.md) - one router per origin node drives the origin and every lite-07 announce stream
 - [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
+- [Firefox tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - a current Firefox tab opens a lite-07 session with a route-key proof the relay verifies, once neqo's exporter follows the draft
+- [Playwright bundles Chromium's spec exporter](/quest/m2/cluster-routing/routes/playwright-pin.md) - the toolchain's Playwright bundles Chromium 158+, so the route key lane proves the Chromium tab
+- [A declined lite-06 route is reconsidered when the lite-07 path fails](/quest/m2/cluster-routing/routes/lite06-failover.md) - a mixed-version relay fails over to the lite-06 route it declined
+- [A covering predecessor's takeover shows under a mount](/quest/m2/cluster-routing/routes/mount-takeover.md) - lite-07 presents a takeover beneath a mount as lite-06 does
 
 ## Related
 

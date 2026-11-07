@@ -38,17 +38,40 @@ Cachix retirement, and bucket sizes moved to
 [Release tags push to nix.moq.dev](/quest/m0/ci/cachix-retire.md), which
 backports `release-nix.yml` to `release` now instead of waiting for the cut.
 
+Recorded 2026-11-06 (/quest-unblock): #7662 merged 2026-11-05 22:15Z, and the
+first successful Cache run after it,
+[42119995773](https://github.com/moq-dev/moq/actions/runs/42119995773/job/127569533619),
+uploaded both the `moq-cli` and `moq-relay` closures from its
+`Runtime (ubuntu-24.04)` job.
+
 Use the scheduled and push runs; never dispatch Nightly for this evidence.
+
+Checked 2026-11-06 (/quest-unblock): the next scheduled Smoke,
+[42245927828](https://github.com/moq-dev/moq/actions/runs/42245927828)
+(2026-11-06, started 15:45Z), fetched the deps from `nix.moq.dev` but still
+compiled both binaries. Smoke builds `github:moq-dev/moq#...` unpinned, so it
+built main as of 16:28Z (2916531c19), whose Cache run was cancelled, rather
+than its own head. Any Smoke that starts while main is ahead of its last
+completed Runtime upload misses the same way.
+
+Confirmed 2026-11-06 (/quest-start, [moq-dev/moq#8114](https://github.com/moq-dev/moq/pull/8114)):
+the miss was a commit mismatch, not a cache bug. The relay resolved
+2916531c19 (Cache [42251988901](https://github.com/moq-dev/moq/actions/runs/42251988901)
+cancelled) and the CLI, built five minutes later, resolved 809994ba84, whose
+Cache run [42253517707](https://github.com/moq-dev/moq/actions/runs/42253517707)
+finished at 16:46Z, after the build. #8114 pins both Smoke builds to the newest
+`main` commit with a successful push Cache run, so the next scheduled run is a
+direct test: any `building '...moq-relay-...drv'` line in that step is a real miss.
 
 ## Waiting
 
-- moq-dev/moq: Once
-  [moq-dev/moq#7662](https://github.com/moq-dev/moq/pull/7662) merges, record the first successful Cache run's
-  `Runtime (ubuntu-24.04)` job uploading both closures
-  (`gh run list --workflow cache.yml --branch main`), then the next Smoke run
-  on that head or later (the 08:00 UTC schedule) whose
-  `ubuntu-latest / nix` job copies `moq-relay` and `moq` from
-  `https://nix.moq.dev` instead of compiling them.
+- moq-dev/moq: a scheduled Smoke run (08:00 UTC) whose `ubuntu-latest / nix`
+  job, after #8114 merges, copies `moq-relay` and `moq` from
+  `https://nix.moq.dev` instead of compiling them. Check with
+  `gh run list --workflow smoke.yml --event schedule`: its "Build moq from the
+  flake" step names the pinned commit, which already had a successful Cache run,
+  so a `building` line for either binary is a cache miss: rule out the bucket's
+  30-day object expiry before calling it a cache bug.
 
 ## Related
 

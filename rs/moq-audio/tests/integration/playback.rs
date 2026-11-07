@@ -11,7 +11,8 @@
 //! Through the dev shell, not bare `cargo`: reaching the default device needs
 //! the ALSA plugin path the shell sets (see `alsaPlugins` in `flake.nix`).
 //! Nothing here asserts on what you hear, so muting the system volume is fine:
-//! the mix is metered before it reaches the device.
+//! the mix is metered before it reaches the device. The tests run on real time
+//! because the device pulls on its own clock, which no mocked clock can drive.
 
 #![cfg(feature = "playback")]
 

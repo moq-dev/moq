@@ -93,11 +93,13 @@ async fn listen_tcp() -> (u16, moq_tokio::Listener) {
 
 #[test]
 fn cluster_migrates_on_upstream_goaway() {
+	kio::clock::host_time();
 	run_cluster_test(cluster_migrates_on_upstream_goaway_inner());
 }
 
 #[test]
 fn cluster_diamond_goaway_seamless_failover() {
+	kio::clock::host_time();
 	run_cluster_test(cluster_diamond_goaway_seamless_failover_inner());
 }
 
@@ -803,8 +805,22 @@ fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
 /// old one still draining. Redirect that dial at a listener that accepts TCP and
 /// then says nothing, so the handshake hangs, and the predecessor must still be
 /// closed on schedule rather than held for as long as the dial takes.
+///
+/// Time passes only when the test moves the clock, by no more than the handover,
+/// so no dial timeout can end the hang first.
 async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
+	// The manual clock moves only when told, so the watchdog runs on tokio's.
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "real sockets settle on tokio's clock, beside the installed manual clock"
+	)]
+	async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
+		tokio::time::timeout(TEST_TIMEOUT, fut)
+			.await
+			.unwrap_or_else(|_| panic!("timed out: {step}"))
+	}
 
 	let upstream_origin = moq_tokio::origin::spawn();
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin).await;
@@ -812,11 +828,13 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	// Accepts the connection, then never speaks MoQ: the dial hangs in the handshake.
 	let black_hole = std::net::TcpListener::bind("127.0.0.1:0").expect("bind black hole");
 	let black_hole_port = black_hole.local_addr().expect("local addr").port();
+	let (dialed_tx, mut dialed) = tokio::sync::mpsc::unbounded_channel();
 	let _black_hole = std::thread::spawn(move || {
 		// Hold every accepted socket open and idle for the life of the test.
 		let mut held = Vec::new();
 		while let Ok((socket, _)) = black_hole.accept() {
 			held.push(socket);
+			let _ = dialed_tx.send(());
 		}
 	});
 
@@ -827,7 +845,8 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	// The GOAWAY has to land on a *healthy* session, which is the path that goes
 	// straight into the replacement dial. Below this bar it takes the immediate
 	// redirect path instead, whose sleep polls the drain either way.
-	client_config.backoff.initial = Some((Duration::from_millis(50)).into());
+	let healthy = Duration::from_millis(100);
+	client_config.backoff.healthy = Some((healthy).into());
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let url: Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
@@ -842,7 +861,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 
 	// Clear the healthy bar, so the GOAWAY continues straight into the replacement
 	// dial rather than sleeping first.
-	kio::clock::sleep(Duration::from_millis(120)).await;
+	clock.advance(healthy);
 
 	// Send the client somewhere that will never finish handshaking. No wire timeout:
 	// our own `--connect-goaway-handover` is then the only thing bounding the old session.
@@ -853,17 +872,16 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 		)))
 		.expect("send goaway");
 
-	// The predecessor must close on its own deadline, not whenever that dial gives
-	// up. The bound is generous against a loaded runner but far below the seconds a
-	// hanging handshake takes, which is the gap being measured.
-	let sent = kio::clock::now();
-	let closed = kio::clock::timeout(handover * 10, server_session.closed()).await;
-	let elapsed = sent.elapsed();
-	assert!(
-		closed.is_ok() && elapsed < handover * 5,
-		"the old session outlived its {handover:?} handover by {elapsed:?}: \
-		 the replacement dial was never interrupted to enforce it"
-	);
+	// The handover deadline is set before the replacement dial starts, so once the
+	// dial reaches the black hole, passing the handover must close the predecessor
+	// while the dial still hangs.
+	within("the replacement dial reaches the black hole", dialed.recv()).await;
+	clock.advance(handover);
+	within(
+		"the old session outlived its handover: the replacement dial was never interrupted to enforce it",
+		server_session.closed(),
+	)
+	.await;
 
 	drop(connection);
 }

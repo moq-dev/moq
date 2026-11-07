@@ -13,6 +13,8 @@ return early without a device today (`vaapi_h264_round_trip` and
 `native_frames_still_answer_into_i420` in
 `rs/moq-video/src/decode/backend/vaapi.rs`) and moq-transcode's
 `vaapi_decoder_available` tests, which hosted CI reports as passed.
+The ignored `vaapi_1080p_ladder_stays_on_the_gpu` encode test in
+`rs/moq-video/src/encode/backend/vaapi.rs` runs there too.
 
 ## Plan
 
@@ -41,6 +43,21 @@ which covers only NVIDIA.
   recipe's filter selects them.
 - No hosted runner has these GPUs, so this stays a local recipe until a
   GPU runner exists ([GPU CI](/quest/m3/gpu-ci.md) owns that decision).
+- Added 2026-11-06 (maintainer, /quest-unblock) from
+  [moq-dev/moq#8013](https://github.com/moq-dev/moq/pull/8013)'s follow-ups:
+  - The VA-API tests open the first suitable render node, so a second GPU
+    is covered only when `MOQ_VAAPI_DEVICE` names it. `just rs gpu` runs the
+    VA-API tests once for each AMD or Intel render node, with
+    `MOQ_VAAPI_DEVICE` set; a node of either vendor without its VA-API
+    driver fails, and NVIDIA nodes are left to GPU CI. The renderer
+    fixtures allocate their NV12 and I420 buffers on that node and pick the
+    Vulkan adapter whose DRM render node matches it
+    (`VK_EXT_physical_device_drm`), so each run stays on one GPU.
+  - The H.265 decode tests gain an open-GOP stream with RASL pictures, and
+    a Main 10 stream holding 8-bit samples that decodes. They also gain a
+    10-bit stream, which is refused, since moq-vaapi has no P010 output
+    ([moq-dev/vaapi#11](https://github.com/moq-dev/vaapi/pull/11)).
+  - Not chosen: dropping either gap.
 
 ## Related
 

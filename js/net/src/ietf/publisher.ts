@@ -6,6 +6,8 @@ import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
+import type * as datagram from "../datagram.ts";
+import * as DatagramStream from "../datagram_stream.ts";
 import {
 	controlTimeout,
 	error,
@@ -19,15 +21,23 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import type { Hop, RouteInfo } from "../hop.ts";
+import type { Hop, WireRoute } from "../hop.ts";
 import { finalSequence, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
+import { routeFailed } from "../resume.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Groups, Info, Range, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
+import {
+	type Groups,
+	type Info,
+	type Range,
+	type Position as TrackPosition,
+	Producer as TrackProducer,
+	type Subscriber as TrackSubscriber,
+} from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { toNumber } from "../util/bigint.ts";
 import { nextChange } from "../util/change.ts";
@@ -38,7 +48,8 @@ import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
-import { requestReason } from "./error.ts";
+import { encodeDatagram } from "./datagram.ts";
+import { type RequestCondition, requestReason, SubscribeRefused } from "./error.ts";
 import { type Fetch, FetchHeader, FetchOk, type FetchType } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { MAX_AGE_PARAMETER } from "./max_age.ts";
@@ -79,7 +90,7 @@ const RETRY_BASE = 100;
 const RETRY_MAX = 5000;
 
 /** Cluster parameters for one snapshot: the advertised hops, then our own id last. */
-function clusterFor(base: Cluster.Advert | undefined, route: RouteInfo): Cluster.Advert | undefined {
+function clusterFor(base: Cluster.Advert | undefined, route: WireRoute): Cluster.Advert | undefined {
 	if (!base) return undefined;
 	const self = base.hops.at(-1);
 	if (self === undefined) return undefined;
@@ -301,6 +312,40 @@ interface RunFill {
 	streams: StreamCount;
 }
 
+// The condition a request that failed for `err` is refused with, mirroring Rust's `to_code`: a
+// verdict stays one, so the peer is never invited to retry it.
+function refusedAs(err: Error): RequestCondition {
+	if (err instanceof SubscribeRefused) return err.condition;
+	if (err instanceof SessionError) {
+		switch (err.code) {
+			case SessionCode.Unauthorized:
+				return "unauthorized";
+			case SessionCode.Expired:
+				return "expired";
+			case SessionCode.Timeout:
+				return "timeout";
+			case SessionCode.Version:
+			case SessionCode.Unsupported:
+				return "not_supported";
+		}
+	} else if (err instanceof StreamError) {
+		switch (err.code) {
+			case StreamCode.Unauthorized:
+				return "unauthorized";
+			case StreamCode.DeliveryTimeout:
+				return "timeout";
+			case StreamCode.MalformedTrack:
+				return "malformed_track";
+			case StreamCode.GoingAway:
+				return "going_away";
+			case StreamCode.NotFound:
+			case StreamCode.Unroutable:
+				return "does_not_exist";
+		}
+	}
+	return "internal";
+}
+
 /**
  * Handles publishing broadcasts using moq-transport protocol.
  * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
@@ -314,6 +359,7 @@ export class Publisher {
 		return this.#withdrawal.close();
 	}
 	#quic: WebTransport;
+	#datagramWriter?: ReturnType<typeof DatagramStream.datagramWriter>;
 	#session: Session;
 	#requiresSolicitation: boolean;
 	// What a joining FETCH needs from each draft-18 SUBSCRIBE, by its request ID, while it lasts:
@@ -396,6 +442,7 @@ export class Publisher {
 		ready?: Promise<void>;
 	}) {
 		this.#quic = quic;
+		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 		this.#grant = grant;
 		this.#gate = new Gate(grant);
 		this.#auth = auth;
@@ -411,7 +458,10 @@ export class Publisher {
 	}
 
 	/** The origin owns broadcasts; transport teardown ends this publisher's served requests. @internal */
-	close(): void {}
+	close(): void {
+		this.#datagramWriter?.close();
+		this.#datagramWriter = undefined;
+	}
 
 	/**
 	 * Handles an incoming SUBSCRIBE request on a bidi stream.
@@ -498,58 +548,112 @@ export class Publisher {
 				}),
 			);
 		};
+		// Before any await, so a subscriber waiting on this priority is not stuck behind setup.
+		// A transport without datagrams never asks: the lookup would open an upstream
+		// subscription nothing here can carry.
+		const datagramOf = () => {
+			if (DatagramStream.maxDatagramSize(this.#quic) === 0) return;
+			const local = wireOf(broadcast).localDatagrams;
+			const consumer = local
+				? broadcast.datagrams(msg.trackName)
+				: wireOf(broadcast).liveDatagrams(msg.trackName);
+			if (local) consumer?.setPriority(fromWire(msg.subscriberPriority));
+			return consumer;
+		};
+		let datagrams = datagramOf();
 		let track = subscribe(broadcast);
 
-		try {
-			let info: Awaited<ReturnType<TrackSubscriber["info"]>>;
-			try {
-				info = await untilAborted(track.info(), left.signal);
-			} catch (err) {
-				if (left.signal.aborted) {
-					request.abort(cancel);
-					return;
-				}
-				const failed = error(err);
-				if (
-					!(failed instanceof StreamError) ||
-					(failed.code !== StreamCode.NotFound && failed.code !== StreamCode.Unroutable)
-				)
-					throw err;
-				// The broadcast resolved, so only a vanished route still means a missing publisher;
-				// a missing track is the publisher's answer.
-				await request.refuse(
-					"subscribe",
-					this.#failed(err, rendezvous && failed.code === StreamCode.Unroutable),
-				);
-				return;
+		let datagramTrack: TrackProducer | undefined;
+		const resolve = async () => {
+			// A relay learns both halves from the same stream response. Only local
+			// application handlers can answer either kind independently.
+			const streamInfo = track.info().then((info) => ({ kind: "stream" as const, info }));
+			const consumer = datagrams;
+			const selected = await untilAborted(
+				consumer && wireOf(broadcast).localDatagrams
+					? Promise.any([
+							streamInfo,
+							consumer.info().then((info) => ({ kind: "datagram" as const, info })),
+						]).catch(() => streamInfo)
+					: streamInfo,
+				left.signal,
+			);
+			if (selected.kind === "datagram") {
+				track.close();
+				datagramTrack = new TrackProducer(msg.trackName).accept(selected.info);
+				track = hooks.parked(datagramTrack.subscribe({ priority: fromWire(msg.subscriberPriority) }));
 			}
+			return selected.info;
+		};
+		try {
+			const info = await resolve().catch(async (err) => {
+				if (left.signal.aborted) request.abort(cancel);
+				else {
+					const refusal = this.#failed(err, rendezvous, true);
+					// An upstream's refusal goes on with the Retry Interval it asked for.
+					if (err instanceof SubscribeRefused) refusal.retryInterval = err.retryInterval;
+					await request.refuse("subscribe", refusal);
+				}
+				return undefined;
+			});
+			if (!info) return;
+			datagrams ??= datagramOf();
 			// Every subscription a resume makes counts toward the same PUBLISH_DONE.
 			const streams: StreamCount = { opened: 0 };
-			let paused = await this.#forward({ msg, request, track, info, streams });
+			let paused = await this.#forward({
+				msg,
+				request,
+				track,
+				info,
+				streams,
+				datagrams,
+				datagramDemand: wireOf(broadcast).localDatagrams,
+				datagramTrack,
+			});
 			// A pause drops the subscription, and its demand with it; a resume subscribes again as
 			// a new SUBSCRIBE would, so nothing carries across but the request.
 			while (paused) {
 				track.close();
+				datagramTrack?.abort(cancel);
+				datagramTrack = undefined;
+				datagrams?.close();
+				datagrams = undefined;
 				if (paused.answer) await Message.write(request.writer, RequestOk.id, new RequestOk(), version);
 				const answer = await this.#pausedSubscribe(msg, request, streams);
 				if (!answer) return;
 				track = subscribe(broadcast);
+				datagrams = datagramOf();
 				let resumed: Info;
 				try {
-					resumed = await untilAborted(track.info(), left.signal);
+					resumed = await resolve();
+					datagrams ??= datagramOf();
 					// A resume answers with the live edge, which only a granted subscriber learns.
 					if (!this.#gate.allows(name)) throw unauthorized(name);
 				} catch (err) {
 					if (left.signal.aborted) return;
-					await refuseUpdate(request.writer, version, "subscribe", this.#failed(err));
+					const refusal = this.#failed(err);
+					if (err instanceof SubscribeRefused) refusal.retryInterval = err.retryInterval;
+					await refuseUpdate(request.writer, version, "subscribe", refusal);
 					await this.#publishFailed(request, streams);
 					request.close();
 					return;
 				}
-				paused = await this.#forward({ msg, request, track, info: resumed, streams, answer });
+				paused = await this.#forward({
+					msg,
+					request,
+					track,
+					info: resumed,
+					streams,
+					answer,
+					datagrams,
+					datagramDemand: wireOf(broadcast).localDatagrams,
+					datagramTrack,
+				});
 			}
 		} finally {
 			track.close();
+			datagramTrack?.abort(cancel);
+			datagrams?.close();
 		}
 	}
 
@@ -651,6 +755,9 @@ export class Publisher {
 		info,
 		streams = { opened: 0 },
 		answer,
+		datagrams,
+		datagramDemand,
+		datagramTrack,
 	}: {
 		msg: Subscribe;
 		request: RequestStream;
@@ -660,13 +767,22 @@ export class Publisher {
 		streams?: StreamCount;
 		/** The update a resumed SUBSCRIBE answers with REQUEST_OK instead of SUBSCRIBE_OK. */
 		answer?: { requestId: bigint };
+		/** A datagram track of the same name, forwarded as OBJECT_DATAGRAM beside the groups. */
+		datagrams?: datagram.Consumer;
+		datagramDemand: boolean;
+		/** Metadata-only track whose lifetime follows the datagram sender. */
+		datagramTrack?: TrackProducer;
 	}): Promise<Paused | undefined> {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		const priority = fromWire(msg.subscriberPriority);
+		const datagramPriority = new Signal(priority);
 		const order = msg.groupOrder;
 		let cache: TrackSubscriber | undefined;
 		let ranking: Priority | undefined;
+		// Assigned once forwarding starts. An early pause returns before that, and the finally
+		// still waits so a task begun on another path cannot outlive the subscription.
+		let datagramTask: Promise<void> = Promise.resolve();
 		try {
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			const timescale = msg.propertiesWanted ? (info.timescale ?? undefined) : undefined;
@@ -766,6 +882,22 @@ export class Publisher {
 			}
 			console.debug(`publish ok: broadcast=${name} track=${track.name}`);
 
+			// Groups are served below; datagrams ride beside them and must not fail this subscription.
+			// A burst stays behind the group's send order, so it cannot starve the groups.
+			datagramTask = datagrams
+				? this.#sendDatagrams(datagrams, {
+						alias: msg.requestId,
+						timescale,
+						priority: datagramPriority,
+					}).then(
+						() => datagramTrack?.finish(),
+						(err: unknown) => {
+							if (datagramTrack) datagramTrack.abort(error(err));
+							else console.debug(`stopping datagrams on this subscription: ${reason(err)}`);
+						},
+					)
+				: Promise.resolve();
+
 			// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 			// a track that ran out of groups still has to flush the ones already queued, and we
 			// close the stream ourselves below to say so.
@@ -828,8 +960,12 @@ export class Publisher {
 					if (framed === undefined) return request.ended;
 					const { params, requestId: ownRequestId } = await this.#decodeUpdate(request, framed);
 					// update() replaces every option, so carry the rest over as Rust does.
-					if (params.subscriberPriority !== undefined)
-						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
+					if (params.subscriberPriority !== undefined) {
+						const priority = fromWire(params.subscriberPriority);
+						track.update({ ...track.subscription.peek(), priority });
+						datagramPriority.set(priority);
+						if (datagramDemand) datagrams?.setPriority(priority);
+					}
 					const maxAge = params.maxAge;
 					if (maxAge !== undefined) {
 						const current = track.subscription.peek();
@@ -990,7 +1126,7 @@ export class Publisher {
 			// PUBLISH_DONE has no end location: an END_OF_TRACK object is what tells the
 			// subscriber where the track ended.
 			const final = hooks.subscriberEnd(track);
-			if (ended && !publishError && final !== undefined && !streams.terminalSent) {
+			if (!datagramTrack && ended && !publishError && final !== undefined && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
 					final,
@@ -1059,12 +1195,82 @@ export class Publisher {
 		} finally {
 			// Groups still draining keep being ranked until they finish.
 			ranking?.close();
+			datagrams?.close();
+			await datagramTask;
 			track.close();
 			// Idempotent, and the backstop for a throw between the fork and the fill starting:
 			// #runFill closes it itself on every path it reaches.
 			cache?.close();
 		}
 		return undefined;
+	}
+
+	/**
+	 * Forward one datagram track as OBJECT_DATAGRAM beside a stream subscription.
+	 *
+	 * Best-effort: a missing track, an oversized payload, or a datagram the draft cannot
+	 * encode is dropped. The datagram track ending does not end the stream subscription.
+	 */
+	async #sendDatagrams(
+		datagrams: datagram.Consumer,
+		options: { alias: bigint; timescale?: Timescale; priority: Signal<number> },
+	): Promise<void> {
+		let info: datagram.Info;
+		try {
+			info = await datagrams.info();
+		} catch (err) {
+			console.debug(`serving the stream track without datagrams: ${reason(err)}`);
+			return;
+		}
+		const opened = this.#datagramWriter;
+		if (!opened) return;
+		const publisher = info.priority;
+		const timescale = options.timescale;
+		const rank = () => sendOrder({ priority: options.priority.peek(), publisher, position: 2 ** 36 - 1 });
+		const sender = opened.open(rank());
+		const dispose = options.priority.subscribe(() => sender.setPriority(rank()));
+		const version = this.#session.version;
+		const max = DatagramStream.maxDatagramSize(this.#quic);
+		const left = hooks.datagramClosed(datagrams);
+		try {
+			for (;;) {
+				const datagram = await datagrams.recv();
+				if (!datagram) return;
+				if (timescale !== undefined && datagram.timestamp === undefined) {
+					console.debug(`dropping a datagram without a timestamp: sequence=${datagram.sequence}`);
+					continue;
+				}
+				let body: Uint8Array;
+				try {
+					body = await encodeDatagram(
+						datagram,
+						{
+							trackAlias: options.alias,
+							publisherPriority: toWire(publisher),
+							timescale,
+						},
+						version,
+					);
+				} catch (err) {
+					console.debug(`dropping a datagram this draft cannot encode: ${reason(err)}`);
+					continue;
+				}
+				if (body.byteLength > max) {
+					console.debug(
+						`dropping datagram larger than the transport limit: size=${body.byteLength} max=${max}`,
+					);
+					continue;
+				}
+				// A paused subscription must release its consumer even when transport writes stall.
+				await race([sender.writer.ready, left]);
+				if (left.peek() !== undefined) return;
+				await race([sender.writer.write(body), left]);
+				if (left.peek() !== undefined) return;
+			}
+		} finally {
+			dispose();
+			await race([sender.close(), left]);
+		}
 	}
 
 	/**
@@ -1109,6 +1315,7 @@ export class Publisher {
 					version: this.#session.version,
 					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned, excluded.promise]),
+					group: true,
 				});
 			} finally {
 				opened.resolve();
@@ -1819,7 +2026,7 @@ export class Publisher {
 	/**
 	 * The extension parameters an advertisement of `route` carries.
 	 */
-	#params(route: RouteInfo): AdvertParams {
+	#params(route: WireRoute): AdvertParams {
 		return { cluster: clusterFor(this.#advert, route) };
 	}
 
@@ -1828,7 +2035,7 @@ export class Publisher {
 	 * is logged and skipped: a peer that wants none of this rejects each one and stays
 	 * connected.
 	 */
-	async #advertise(path: Path.Valid, requests: Requests, route: RouteInfo): Promise<Answer> {
+	async #advertise(path: Path.Valid, requests: Requests, route: WireRoute): Promise<Answer> {
 		const params = this.#params(route);
 		const auth = this.#carry(route.auth);
 		const requestId = await this.#session.nextRequestId();
@@ -2544,16 +2751,18 @@ export class Publisher {
 		}
 	}
 
-	/** What a request that failed to resolve is refused with. */
-	#failed(err: unknown, wait = false): Refusal {
+	/**
+	 * What a request that failed to resolve is refused with. A missing publisher a rendezvous
+	 * waited for is a timeout, which, like Rust's `rendezvous_error`, invites no retry.
+	 */
+	#failed(err: unknown, wait = false, resolved = false): Refusal {
 		const e = error(err);
-		const condition =
-			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
-				? wait
-					? "timeout"
-					: "does_not_exist"
-				: "internal";
-		return { condition, reasonPhrase: reason(e) };
+		const reasonPhrase = reason(e);
+		const missing =
+			e instanceof StreamError &&
+			(e.code === StreamCode.Unroutable || (e.code === StreamCode.NotFound && !resolved));
+		if (wait && missing) return { condition: "timeout", reasonPhrase };
+		return { condition: refusedAs(e), reasonPhrase, retryable: routeFailed(e) };
 	}
 
 	/**

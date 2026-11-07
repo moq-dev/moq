@@ -957,14 +957,11 @@ impl Publish {
 		}
 	}
 
-	/// Hand `fill` to C a group at a time, each once the one before it is answered or nobody
-	/// reads it any more, until every group is answered or nobody waits on the fill.
+	/// Hand `fill` to C a group at a time, each once the one before it reached a reader or
+	/// nobody reads it any more, until every group is answered or nobody waits on the fill.
 	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
-		let mut last = None;
-		while let Some(sequence) = fill.wanted()
-			&& last != Some(sequence)
-		{
-			last = Some(sequence);
+		let mut changes = (*fill).clone();
+		while let Some(sequence) = changes.wanted_changed().await {
 			let (pending, answered) = oneshot::channel();
 			let request = GroupRequest {
 				fill: fill.clone(),
@@ -1124,6 +1121,13 @@ impl Publish {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
 		let group = raw.inner.create_group(moq_net::group::Info { sequence })?;
 		self.groups.insert(group)
+	}
+
+	/// Declare that a raw track will never produce groups `start..end`.
+	pub fn track_skip(&mut self, track: Id, start: u64, end: u64) -> Result<(), Error> {
+		let raw = self.tracks.get(track).ok_or(Error::TrackNotFound)?;
+		raw.inner.skip_groups(start..end);
+		Ok(())
 	}
 
 	/// Write a single-frame group to a raw track, `None` when untimed.

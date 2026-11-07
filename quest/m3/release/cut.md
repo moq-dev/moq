@@ -46,7 +46,7 @@ and adoption quests move to m0, m3's other quests split by kind into m1
 (additive) and m2 (breaking), m4's move to m3, m5 stays, and every link to a
 moved path is rewritten. A recurring cut-gate child that its last run
 re-created in m3, such as the [vendor
-sync](/quest/m2/cut-gate/vendor-sync/README.md), moves under the re-created
+sync](/quest/m3/vendor-sync/README.md), moves under the re-created
 gate instead. That PR also removes this path from every `Required`, which
 releases the audits waiting on it. It then re-creates the [cut
 gate](/quest/m2/cut-gate/README.md) in m2 as that gate's Plan describes, and
@@ -68,10 +68,9 @@ From the 2026-10-25 pre-cut run:
 From [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702), which
 merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
 
-- Publish `main`'s code-free `rs/moq-e2ee` stub, whose README points at
-  moq-crypto, as moq-e2ee's final release. It must take a version above
-  crates.io's current `max_version` (0.0.20 on 2026-11-02); check with
-  `curl -s https://crates.io/api/v1/crates/moq-e2ee`.
+- Nothing to publish for moq-e2ee: its final code-free release, 0.0.22,
+  already points at moq-crypto, and `rs/moq-e2ee` is gone. Don't merge a
+  `release` branch release-plz proposal that bumps it.
 
 The [2026-10-22 release audit](https://github.com/moq-dev/moq/pull/7176)
 closed with its fixes rechecked together. At source candidate
@@ -85,6 +84,20 @@ token, and catalog/container lane, with lite-07-wip skipped as its accepted
 planned break. Dart's tests and both staged publish dry-runs passed with no
 warnings. Neither main is the cut tree, and the full Linux gate was not run:
 repeat these checks after the documented release-to-main merge.
+
+The [2026-10-24 pre-cut audit](https://github.com/moq-dev/moq/pull/6707)
+closed with its 37 findings' regression tests re-run together in
+[moq-dev/moq#8059](https://github.com/moq-dev/moq/pull/8059). At
+[main 1ae5c5f808](https://github.com/moq-dev/moq/commit/1ae5c5f808f5fb695a42dcb451611edce81802d7),
+each fix's test still exists or was replaced by a later deliberate change.
+These passed: the moq-net, moq-net-tests, moq-mux, moq-rtmp, moq-tokio,
+moq-uring, hang, and moq-audio suites (7,027 tests, with the fuzz regression
+replays), every JS package's unit tests (5,745), the `just test harness`
+browser checks (48), and `just test video` (11). Nightly's harness step fails
+before it reaches its browser checks, which is how two of them stayed broken
+after [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) until the
+re-run fixed them. Run those browser checks by hand on the cut tree, along
+with the suites above.
 
 ## Required
 

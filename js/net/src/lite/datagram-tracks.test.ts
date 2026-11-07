@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -17,6 +18,7 @@ const path = Path.from("live");
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	for (const streams of [false, true]) {
 		test(`${alpn}: ${streams ? "same-name kinds" : "datagram-only track"} delivery`, async () => {
+			hostTime();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio", {
@@ -336,6 +338,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		[100, true],
 	] as const) {
 		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
+			hostTime();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
@@ -375,6 +378,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // of its track's end. The subscriber routes the datagram before it ends the track.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a datagram sent right before its end arrives`, async () => {
+		hostTime();
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
@@ -409,6 +413,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // with some of it still queued. The end waits for the loop to read the queue empty.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a burst sent right before its end arrives past a budget yield`, async () => {
+		hostTime();
 		// As many as a datagram track buffers unread, past two receive budgets.
 		const BURST = 64;
 		const source = new Origin();
@@ -464,15 +469,20 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		const remote = wireOf(client).consume(path);
 		const reader = remote.datagrams("audio");
 		reader.setPriority(5);
+		// The end has to reach the client before the abort, and the mock delivers it in
+		// microtasks. A write-budget yield is a host task that the drain below can't advance,
+		// so under CPU load the publisher's answer could still be stalled when the abort lands.
+		const budget = spyOn(Budget.prototype, "poll").mockImplementation(() => undefined);
 		try {
 			await reader.info();
 			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
 			datagrams.finish();
 			// The mock delivers the end in microtasks, all within this host task.
-			for (let i = 0; i < 1000; i++) await Promise.resolve();
+			for (let i = 0; i < 10000; i++) await Promise.resolve();
 			client.abort();
 			expect(await reader.recv()).toBeUndefined();
 		} finally {
+			budget.mockRestore();
 			reader.close();
 			remote.close();
 			client.abort();

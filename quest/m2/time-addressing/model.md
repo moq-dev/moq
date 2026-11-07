@@ -64,22 +64,36 @@ a producer would need per-track memory of its last number.
   one FETCH per tick in the hole. Accepted: "This was a lingering problem.
   The entire point of (multiple) ranges is to avoid this issue."
 
+- **Skips are declared, never inferred** (decided 2026-11-03, maintainer,
+  /quest-complete, replacing that day's "eager skips";
+  [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670)). A gap tells
+  moq-net nothing, since groups may be created out of order. SKIP comes only
+  from the producer: an explicit `skip_groups`, or `append_group`, which
+  means "the next group" and so skips every key below it that never arrived
+  and was not given up, since the producer's last append. `create_group`
+  implies no skip. A skip is final: creating a group at a skipped key is
+  refused. Today `append_group` leaves no gap of its own, so its skip only
+  names holes earlier `create_group` calls left. `append_group(timestamp)`
+  keeps the rule, and there it names the span between consecutive starts:
+  every key between the previous group's start and the new one.
+
 Every current role of the sequence needs a replacement or a reason to drop
 it:
 
 - The cache key, the duplicate check, the hand-out-once record
   (`delivered.rs`), and slot stamps.
 - Successor, reach, expiry, the arrival ledger, tail accounting, fills and
-  misses, and SUBSCRIBE_DROP accounting. Successor and reach already scan the
+  misses, and SUBSCRIBE_SKIP and SUBSCRIBE_DROP accounting. Successor and reach already scan the
   cache by range, so they tolerate sparse keys; `delivered.rs` runs, fills,
   misses, and `subscription/window.rs` treat `sequence + 1` as the next group
   and must follow previous-start links instead.
 - Resume across route flips (`resume.rs`), mid-group `Position` and
   `frame_start`, priority order within a subscription, `Demand::wanted`, and
   refresh.
-- Not datagrams: they become their own track kind with their own sequence ([Datagram tracks](/quest/m1/datagram-tracks/README.md)).
+- Not datagrams: they are their own track kind with their own sequence.
 - The legacy codecs: lite GROUP, SUBSCRIBE and SUBSCRIBE_UPDATE bounds,
-  SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_DROP, FETCH, and
+  SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_SKIP,
+  SUBSCRIBE_DROP, FETCH, and
   every IETF Location, Filter, FETCH, Largest, and NEW_GROUP_REQUEST.
 
 ### Timestamps are required and legacy IDs pass through

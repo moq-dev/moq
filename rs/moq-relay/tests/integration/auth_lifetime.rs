@@ -54,8 +54,8 @@ struct Script {
 	seen: Arc<Mutex<Vec<Request>>>,
 	/// Answers each `end` only once a permit is added, when [`Self::hold_ends`] set it.
 	end_gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
-	/// Notified as each `end` arrives.
-	end_arrived: Arc<tokio::sync::Notify>,
+	/// Bumped as each request arrives, so a test awaits one instead of sleeping.
+	arrived: Arc<tokio::sync::watch::Sender<()>>,
 }
 
 impl Script {
@@ -66,7 +66,7 @@ impl Script {
 			revalidate_http: Arc::new(Mutex::new(None)),
 			seen: Arc::new(Mutex::new(Vec::new())),
 			end_gate: Arc::default(),
-			end_arrived: Arc::default(),
+			arrived: Arc::new(tokio::sync::watch::Sender::new(())),
 		}
 	}
 
@@ -94,13 +94,37 @@ impl Script {
 			.lock()
 			.unwrap()
 			.iter()
-			.filter(|r| matches!(r.event, Event::End { .. }))
+			.filter(|r| is_end(r))
 			.cloned()
 			.collect()
 	}
 
+	/// Wait until the requests seen so far satisfy `done`, and return them.
+	async fn until(&self, what: &str, done: impl Fn(&[Request]) -> bool) -> Vec<Request> {
+		let mut arrived = self.arrived.subscribe();
+		let waited = kio::clock::timeout(TIMEOUT, async {
+			loop {
+				let seen = self.seen.lock().unwrap().clone();
+				if done(&seen) {
+					return seen;
+				}
+				arrived.changed().await.expect("the script outlives its waiters");
+			}
+		})
+		.await;
+		waited.unwrap_or_else(|_| panic!("{what}: got {:?}", self.seen.lock().unwrap()))
+	}
+
+	/// Wait for at least `n` `end`s, and return every one.
+	async fn ends_at_least(&self, n: usize, what: &str) -> Vec<Request> {
+		self.until(what, |seen| seen.iter().filter(|r| is_end(r)).count() >= n)
+			.await;
+		self.ends()
+	}
+
 	async fn handle(State(script): State<Script>, Json(request): Json<Request>) -> Response {
 		script.seen.lock().unwrap().push(request.clone());
+		script.arrived.send_replace(());
 		let answer = match request.event {
 			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate if request.transport == moq_auth::Transport::Http => script
@@ -111,7 +135,6 @@ impl Script {
 				.unwrap_or_else(|| script.revalidate.lock().unwrap().clone()),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
 			Event::End { .. } => {
-				script.end_arrived.notify_one();
 				let gate = script.end_gate.lock().unwrap().clone();
 				if let Some(gate) = gate {
 					drop(gate.acquire().await);
@@ -408,6 +431,37 @@ async fn assert_closed(session: moq_tokio::Connection, within: Duration, what: &
 		.unwrap_or_else(|_| panic!("relay should close the {what} session"));
 }
 
+fn is_end(request: &Request) -> bool {
+	matches!(request.event, Event::End { .. })
+}
+
+/// The reason an `end` carries for a session its client closed.
+fn client_closed() -> moq_auth::lease::Reason {
+	"closed".into()
+}
+
+/// Close `sessions` from the client and assert each `end` reports that close, so the
+/// relay had ended none of them first. Earlier ends must have arrived already.
+async fn assert_open_until_closed(
+	script: &Script,
+	sessions: impl IntoIterator<Item = moq_tokio::Connection>,
+	what: &str,
+) {
+	let before = script.ends().len();
+	let mut closing = 0;
+	for session in sessions {
+		session.abort(moq_net::Error::Cancel);
+		closing += 1;
+	}
+	let ends = script.ends_at_least(before + closing, what).await;
+	for end in &ends[before..] {
+		let Event::End { reason, .. } = &end.event else {
+			unreachable!()
+		};
+		assert_eq!(*reason, client_closed(), "{what}: the relay ended the session first");
+	}
+}
+
 /// The scripted server admits, and every request carries what the relay knows.
 #[tokio::test]
 async fn admits_and_reports_the_session() {
@@ -562,18 +616,15 @@ async fn a_configured_token_is_the_connection_credential() {
 			})
 			.await
 			.expect("grant timeout");
-		} else {
-			// Lite-06 has no AUTH answer and a client is live before admission, so give a
-			// refusal time to land.
-			assert!(
-				kio::clock::timeout(Duration::from_millis(500), session.closed())
-					.await
-					.is_err(),
-				"{versions:?}: the relay refused the configured token"
-			);
 		}
 
-		let seen = script.seen.lock().unwrap().clone();
+		// Lite-06 has no AUTH answer and a client is live before admission, so wait for
+		// what the server was sent.
+		let seen = script
+			.until(&format!("{versions:?}: a connect"), |seen| {
+				seen.iter().any(|r| r.event == Event::Connect)
+			})
+			.await;
 		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
 		assert_eq!(connect.token, setup, "{versions:?}");
 		assert_eq!(connect.query.as_deref(), query, "{versions:?}");
@@ -603,6 +654,7 @@ async fn refusals_and_outages_refuse_at_connect() {
 /// ones, and media sent afterwards records there in both directions.
 #[tokio::test]
 async fn a_moved_tier_retags_the_live_session() {
+	kio::clock::host_time();
 	let mut labeled = grant(Duration::from_secs(3600));
 	labeled.label = Some("project/key/1".into());
 	let script = Script::new(labeled);
@@ -760,19 +812,7 @@ async fn a_moved_tier_retags_the_live_session() {
 		"later presence and bytes move to the new label"
 	);
 
-	assert!(
-		kio::clock::timeout(Duration::from_millis(200), pub_session.closed())
-			.await
-			.is_err(),
-		"a tier change must not close the publisher"
-	);
-	assert!(
-		kio::clock::timeout(Duration::from_millis(200), sub_session.closed())
-			.await
-			.is_err(),
-		"a tier change must not close the subscriber"
-	);
-
+	assert_open_until_closed(&script, [pub_session, sub_session], "a tier change").await;
 	relay.abort();
 }
 
@@ -920,14 +960,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			}
 		}
 
-		for (session, what) in [(pub_session, "publisher"), (sub_session, "subscriber")] {
-			assert!(
-				kio::clock::timeout(Duration::from_millis(200), session.closed())
-					.await
-					.is_err(),
-				"{scheme}: a resize must not close the {what}"
-			);
-		}
+		assert_open_until_closed(&script, [pub_session, sub_session], &format!("{scheme}: a resize")).await;
 		relay.abort();
 	}))
 	.await;
@@ -937,6 +970,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 /// named the same way under the new one.
 #[tokio::test]
 async fn a_moved_root_closes_live_sessions() {
+	kio::clock::host_time();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
@@ -954,6 +988,7 @@ async fn a_moved_root_closes_live_sessions() {
 /// 403, 401, and an empty grant are all a no.
 #[tokio::test]
 async fn a_refusal_closes_live_sessions() {
+	kio::clock::host_time();
 	// Each answer waits out a re-check cadence, so run them side by side.
 	let answers = [
 		("403", Answer::Status(403)),
@@ -970,9 +1005,7 @@ async fn a_refusal_closes_live_sessions() {
 		assert_closed(pub_session, Duration::from_secs(5), &format!("{label} publisher")).await;
 		assert_closed(sub_session, Duration::from_secs(5), &format!("{label} subscriber")).await;
 
-		kio::clock::sleep(Duration::from_millis(200)).await;
-		let ends = script.ends();
-		assert!(ends.len() >= 2, "{label}: an end per session, got {}", ends.len());
+		let ends = script.ends_at_least(2, &format!("{label}: an end per session")).await;
 		for end in &ends {
 			let Event::End { reason, .. } = &end.event else {
 				unreachable!()
@@ -1073,7 +1106,14 @@ async fn http_routes_hold_a_lease() {
 		Event::End { reason, .. } => reason.clone(),
 		_ => unreachable!(),
 	};
-	kio::clock::sleep(Duration::from_millis(200)).await;
+	let http_ends = |n: usize| {
+		move |seen: &[Request]| {
+			seen.iter()
+				.filter(|r| is_end(r) && r.transport == moq_auth::Transport::Http)
+				.count() >= n
+		}
+	};
+	script.until("the announced session ended", http_ends(1)).await;
 	let done = ends(&script);
 	assert_eq!(done.len(), 1, "the announced session ended");
 	assert_eq!(end_reason(&done[0]), "done".into());
@@ -1091,10 +1131,6 @@ async fn http_routes_hold_a_lease() {
 		.expect("body ended early");
 	assert_eq!(&first[..], b"hello");
 
-	// The body is still streaming, so the fetch's lease is still held.
-	kio::clock::sleep(Duration::from_millis(200)).await;
-	assert_eq!(ends(&script).len(), 1, "the fetch must not end while its body streams");
-
 	// A refusal on the fetch's re-check cuts the transfer; the publisher is untouched.
 	script.on_revalidate_http(Answer::Status(403));
 	let cut = kio::clock::timeout(Duration::from_secs(5), async {
@@ -1109,16 +1145,12 @@ async fn http_routes_hold_a_lease() {
 	.expect("the refused fetch kept streaming");
 	assert!(cut.is_err(), "a refused fetch must not end cleanly: {cut:?}");
 
-	kio::clock::sleep(Duration::from_millis(200)).await;
+	script.until("the fetch session ended", http_ends(2)).await;
 	let ended = ends(&script);
 	assert_eq!(ended.len(), 2, "the fetch session ended");
+	// Refused, not `done`: the lease was still held while the body streamed.
 	assert_eq!(end_reason(&ended[1]), moq_auth::lease::Reason::Refused);
-	assert!(
-		kio::clock::timeout(Duration::from_millis(200), pub_session.closed())
-			.await
-			.is_err(),
-		"refusing the fetch must not close the publisher"
-	);
+	assert_open_until_closed(&script, [pub_session], "refusing the fetch").await;
 
 	drop(group);
 	drop(track);
@@ -1135,26 +1167,22 @@ async fn the_end_carries_duration_and_bytes() {
 	let url: url::Url = format!("moql://127.0.0.1:{}/room?jwt=token", addr.port())
 		.parse()
 		.unwrap();
+	// Each lease starts after `dialing` and is reported ended before `reported`.
+	let dialing = kio::clock::now();
 	let (pub_session, sub_session) = connect_and_round_trip(&url).await;
-
-	kio::clock::sleep(Duration::from_millis(300)).await;
 	drop(pub_session);
 	drop(sub_session);
 
-	let deadline = kio::clock::now() + Duration::from_secs(5);
-	let ends = loop {
-		let ends = script.ends();
-		if ends.len() >= 2 {
-			break ends;
-		}
-		assert!(kio::clock::now() < deadline, "ends never arrived: {}", ends.len());
-		kio::clock::sleep(Duration::from_millis(50)).await;
-	};
+	let ends = script.ends_at_least(2, "an end per session").await;
+	let reported = kio::clock::now();
 	for end in &ends {
 		let Event::End { duration, bytes, .. } = &end.event else {
 			unreachable!()
 		};
-		assert!(*duration >= Duration::from_millis(200), "duration {duration:?}");
+		assert!(
+			!duration.is_zero() && *duration <= reported - dialing,
+			"duration {duration:?}"
+		);
 		assert!(bytes.sent > 0 && bytes.received > 0, "bytes {bytes:?}");
 	}
 
@@ -1207,9 +1235,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 	clock.advance(Duration::from_secs(1));
 	let closed = kio::clock::wall();
 	clients[0].abort(moq_net::Error::Cancel);
-	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
-		.await
-		.expect("first end");
+	script.ends_at_least(1, "first end").await;
 	assert_eq!(
 		observer.changed().await,
 		moq_relay::shutdown::Tally { open: 1, ending: 1 }
@@ -1226,9 +1252,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 		async move { observer.drained().await }
 	});
 	clock.advance(drain_timeout - Duration::from_secs(1));
-	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
-		.await
-		.expect("deadline end");
+	script.ends_at_least(2, "deadline end").await;
 	assert_eq!(
 		observer.changed().await,
 		moq_relay::shutdown::Tally { open: 0, ending: 2 }
@@ -1326,9 +1350,14 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 		Patterns::new(),
 	)))
 	.await;
-	let (addr, relay) = spawn_quic_relay(build_auth(narrow), Some(root.clone())).await;
+	let cluster = crate::spawn_cluster(cluster::Options::default());
+	let relayed = cluster.origin.consume();
+	let (addr, relay) = spawn_quic_relay_with(build_auth(narrow), Some(root.clone()), cluster).await;
 	let url: url::Url = format!("moql://127.0.0.1:{}/mine", addr.port()).parse().unwrap();
 	let origin = moq_tokio::origin::spawn();
+	let _broadcast = origin
+		.route("cam", moq_net::origin::RouteOptions::default())
+		.expect("create broadcast");
 	let session = kio::clock::timeout(
 		TIMEOUT,
 		mtls_client()
@@ -1340,12 +1369,12 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	.await
 	.expect("connect timeout")
 	.expect("a scoped certificate is admitted");
-	assert!(
-		kio::clock::timeout(Duration::from_secs(2), session.closed())
-			.await
-			.is_err(),
-		"the scoped publisher stays admitted"
-	);
+	// The session can establish before the verdict; its announce reaching the relay
+	// is what proves the verdict admitted it.
+	kio::clock::timeout(TIMEOUT, relayed.follow("mine/cam", None).unwrap().available())
+		.await
+		.expect("the scoped publisher's announce never reached the relay")
+		.expect("announced broadcast resolves");
 	// A subscribe-only client has nothing granted, so it is refused at the handshake.
 	assert_refused_with(mtls_client(), &url).await;
 	// The rules are rooted at `/`, so a certificate dialed outside `mine` gets nothing.
@@ -1511,12 +1540,14 @@ async fn an_embedded_decider_admits_and_revokes() {
 	let publisher = decider.producers.lock().unwrap().remove(0);
 	publisher.revoke(moq_auth::lease::Reason::Refused);
 	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
-	assert!(
-		kio::clock::timeout(Duration::from_millis(200), sub_session.closed())
-			.await
-			.is_err(),
-		"revoking one lease must not close the other session"
-	);
+	// The subscriber's lease reports the client's own close, so the revocation had
+	// not ended it.
+	let subscriber = decider.producers.lock().unwrap().remove(0);
+	sub_session.abort(moq_net::Error::Cancel);
+	let (reason, _) = kio::clock::timeout(TIMEOUT, subscriber.closed())
+		.await
+		.expect("the subscriber's lease never ended");
+	assert_eq!(reason, client_closed(), "revoking one lease ended the other session");
 
 	// A refusal reaches the session's transport before it establishes.
 	let (refusing, mut refusals) = moq_relay::auth::Auth::embedded("test-relay");
@@ -1739,6 +1770,7 @@ async fn connect_through_embedded_admission(
 /// comes closes the connection at the deadline, not after a fixed cap of its own.
 #[tokio::test]
 async fn an_unanswered_admission_closes_at_the_handshake_deadline() {
+	kio::clock::host_time();
 	let (relay, mut admissions, connecting) = connect_through_embedded_admission(Duration::from_secs(1)).await;
 	let trigger = relay.shutdown_trigger().clone();
 	let running = tokio::spawn(relay.run());
@@ -1787,20 +1819,23 @@ async fn a_late_decision_within_the_deadline_admits() {
 		tokio::time::pause();
 		tokio::time::advance(wait).await;
 		tokio::time::resume();
-		admission.grant(moq_auth::lease::Consumer::fixed(grant(Duration::from_secs(3600))));
+		let (lease, consumer) = moq_auth::lease::Producer::new(grant(Duration::from_secs(3600)));
+		admission.grant(consumer);
 		let connection = kio::clock::timeout(TIMEOUT, connecting)
 			.await
 			.expect("the late decision never reached the client")
 			.expect("client task")
 			.unwrap_or_else(|err| panic!("{timeout:?}: refused after {wait:?}: {err}"));
-		// Admitted, so the session stays up; a refusal would have closed it by now.
-		assert!(
-			kio::clock::timeout(Duration::from_secs(1), connection.closed())
-				.await
-				.is_err(),
-			"{timeout:?}: closed after the decision {wait:?} in"
+		// Admitted, so the lease lives until the client's own close ends it.
+		connection.abort(moq_net::Error::Cancel);
+		let (reason, _) = kio::clock::timeout(TIMEOUT, lease.closed())
+			.await
+			.expect("the lease never ended");
+		assert_eq!(
+			reason,
+			client_closed(),
+			"{timeout:?}: ended after the decision {wait:?} in"
 		);
-		drop(connection);
 
 		trigger.start();
 		kio::clock::timeout(TIMEOUT, running)
@@ -2034,9 +2069,7 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 	.unwrap();
 	assert!(script.ends().iter().all(|request| request.auth.is_none()));
 	drop(second);
-	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
-		.await
-		.unwrap();
+	script.ends_at_least(1, "the attach's end").await;
 	let ended = script.ends();
 	assert_eq!(ended.len(), 1);
 	assert_eq!(ended[0].id, attached[0].id);

@@ -255,14 +255,9 @@ pub enum Error {
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
 
-	/// The WebRTC data channel transport failed.
-	#[cfg(feature = "webrtc")]
-	#[error(transparent)]
-	WebRtc(Arc<crate::webrtc::Error>),
-
 	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
 	/// such as a rate cap, which qmux cannot pace.
-	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+	#[cfg(feature = "qmux")]
 	#[error("qmux refused the session limits: {0}")]
 	QmuxLimits(String),
 }
@@ -275,13 +270,8 @@ impl Error {
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
 			Self::MoqNet(err) => matches!(
-				moq_net::SessionError::from(err),
-				moq_net::SessionError::Unauthorized
-					| moq_net::SessionError::Expired
-					| moq_net::SessionError::MalformedAuthToken
-					| moq_net::SessionError::ProtocolViolation
-					| moq_net::SessionError::KeyValueFormatting
-					| moq_net::SessionError::InvalidRequestId
+				moq_net::reconnect::Verdict::from(err),
+				moq_net::reconnect::Verdict::Refused | moq_net::reconnect::Verdict::Fatal
 			),
 			Self::Tls(err) => err.is_terminal(),
 			Self::NoBackend(_)
@@ -367,6 +357,20 @@ impl Error {
 	}
 }
 
+/// What a connection reports when moq-net's reconnect policy fails an attempt or gives up.
+#[cfg(feature = "net")]
+impl From<moq_net::reconnect::Failure> for Error {
+	fn from(failure: moq_net::reconnect::Failure) -> Self {
+		use moq_net::reconnect::Failure;
+		match failure {
+			Failure::Timeout(timeout) => Self::ConnectTimeout(timeout),
+			Failure::Refused(reason) => Self::RefusedRedirect(reason.to_string()),
+			Failure::Fixed => Self::PinnedRedirect,
+			failure => Self::Reconnect(failure.to_string()),
+		}
+	}
+}
+
 // The wrapped sources aren't `Clone`, so `#[from]` can't store them behind `Arc`
 // directly. These hand-written conversions keep `?` ergonomic at the call sites.
 impl From<std::io::Error> for Error {
@@ -421,13 +425,6 @@ impl From<crate::tcp::Error> for Error {
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
-	}
-}
-
-#[cfg(feature = "webrtc")]
-impl From<crate::webrtc::Error> for Error {
-	fn from(err: crate::webrtc::Error) -> Self {
-		Self::WebRtc(Arc::new(err))
 	}
 }
 

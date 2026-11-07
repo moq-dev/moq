@@ -35,4 +35,3 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 - [AudioToolbox decode](/quest/m3/audio-decode-audiotoolbox.md) - HE-AAC and multichannel AAC reach the OBS source on macOS through moq-ffi
 - [AudioToolbox encode](/quest/m5/audio-encode-audiotoolbox.md) - native AAC encode reaches the OBS encoder adapter on macOS through moq-ffi
 - [Linux GPU input](/quest/m5/obs-linux-gpu.md) - allocation-export feasibility and its dependent implementation are deferred
-- [VAAPI encode and decode](/quest/m1/video-vaapi.md) - owns Linux backend decode/import capabilities; reconcile its older dependency assumptions against current code

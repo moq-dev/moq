@@ -40,8 +40,8 @@ export namespace Audio {
 		get capture(): Audio.Capture | undefined;
 		close(): void;
 		codec: Signals.Signal<Audio.Codec>;
-		groupDuration: Signals.Signal<Clock.Milli>;
 		readonly in: Signals.Readonlys<Audio.EncoderInput>;
+		join: Signals.Signal<Clock.Milli>;
 		muted: Signals.Signal<boolean>;
 		readonly name: string;
 		readonly out: Signals.Readonlys<Audio.EncoderOutput>;
@@ -62,7 +62,7 @@ export namespace Audio {
 	};
 	export type EncoderProps = Signals.Inputs<Audio.EncoderInput> & {
 		codec?: Audio.Codec | Signals.Signal<Audio.Codec>;
-		groupDuration?: Clock.Milli | Signals.Signal<Clock.Milli>;
+		join?: Clock.Milli | Signals.Signal<Clock.Milli>;
 		muted?: boolean | Signals.Signal<boolean>;
 		volume?: number | Signals.Signal<number>;
 	};
@@ -221,7 +221,7 @@ export namespace Preview {
 export class Rendition<Config> {
 	close(): void;
 	readonly config: Signals.Signal<Config | undefined>;
-	readonly joinInterval: Signals.Signal<Clock.Milli | undefined>;
+	readonly join: Signals.Signal<Clock.Milli | undefined>;
 	readonly kind: Kind;
 	readonly name: string;
 	readonly stats: Signals.Signal<RenditionStats | undefined>;
@@ -367,7 +367,7 @@ export namespace Video {
 		bitrateScale?: number;
 		codec?: string;
 		frameRate?: number;
-		keyframeInterval?: Clock.Milli;
+		join?: Clock.Milli;
 		maxBitrate?: number;
 		maxPixels?: number;
 		maxScale?: number;

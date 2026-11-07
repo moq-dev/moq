@@ -19,6 +19,7 @@ use super::Version;
 use crate::tail::{self, Reading, Settle, Tail};
 
 use kio::Lock;
+use rangemap::RangeSet;
 
 mod fills;
 use fills::{FillAsk, RangeFills};
@@ -219,8 +220,14 @@ struct Parked {
 	/// The headers still waiting on the accept, by ticket, in arrival order.
 	waiting: Vec<(u64, lite::Group)>,
 	/// What the accept opened for each, until its stream takes it.
-	opened: HashMap<u64, Result<Opened, Error>>,
+	opened: HashMap<u64, Result<Open, Error>>,
 	next: u64,
+}
+
+/// What a group stream's header opened in its subscription's copy.
+enum Open {
+	Group(Opened),
+	Duplicate(Duplicate),
 }
 
 /// A group stream's group, opened in its subscription's copy for the stream to fill.
@@ -228,6 +235,16 @@ struct Opened {
 	group: group::Producer,
 	track: track::Producer,
 	framing: lite::Framing,
+	reading: Reading,
+}
+
+/// A group stream duplicating a copy still arriving, such as a lite-07 re-offer that
+/// overtook the reset of the stream it replaces. It waits unread, which its stream credit
+/// bounds, and is discarded if that copy finishes or takes the group if it fails.
+struct Duplicate {
+	arriving: group::Handle,
+	track: track::Producer,
+	/// Counted already, and kept open while held, since the stream may still carry the group.
 	reading: Reading,
 }
 
@@ -243,7 +260,9 @@ impl Drop for TrackEntry {
 			Err(_) => return,
 		};
 		for opened in opened.into_values().flatten() {
-			let _ = opened.group.abort(Error::Cancel);
+			if let Open::Group(opened) = opened {
+				let _ = opened.group.abort(Error::Cancel);
+			}
 		}
 	}
 }
@@ -316,7 +335,7 @@ impl TrackEntry {
 	}
 
 	/// Take what the accept opened for the parked stream `ticket`.
-	fn unpark(&mut self, ticket: u64) -> Result<Opened, Error> {
+	fn unpark(&mut self, ticket: u64) -> Result<Open, Error> {
 		let Some(parked) = &self.parked else {
 			return Err(Error::Cancel);
 		};
@@ -347,7 +366,7 @@ impl TrackEntry {
 			}
 			Err(_) => return,
 		};
-		if let Some(Ok(opened)) = opened {
+		if let Some(Ok(Open::Group(opened))) = opened {
 			let _ = opened.group.abort(err.clone());
 		}
 		if done {
@@ -356,8 +375,8 @@ impl TrackEntry {
 	}
 
 	/// Open the group of a stream whose header is `hdr` in the copy.
-	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Opened, Error> {
-		let Some(Accepted { producer, framing }) = &mut self.copy else {
+	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Open, Error> {
+		let Some(Accepted { producer, .. }) = &mut self.copy else {
 			return Err(Error::Cancel);
 		};
 		let group_info = group::Info { sequence: hdr.sequence };
@@ -390,8 +409,38 @@ impl TrackEntry {
 				}
 			}
 		}
+		self.place(hdr, version, received, reading)
+	}
+
+	/// Open the group of a held stream again, once the copy it waited on failed.
+	fn reopen(&self, hdr: &lite::Group, version: Version, reading: Reading) -> Result<Open, Error> {
+		let Some(Accepted { producer, .. }) = &self.copy else {
+			return Err(Error::Cancel);
+		};
+		let received = producer.create_group_at(group::Info { sequence: hdr.sequence }, hdr.frame_start);
+		self.place(hdr, version, received, reading)
+	}
+
+	/// Give a stream what the cache answered for its header.
+	fn place(
+		&self,
+		hdr: &lite::Group,
+		version: Version,
+		received: Result<track::Received, Error>,
+		reading: Reading,
+	) -> Result<Open, Error> {
+		let Some(Accepted { producer, framing }) = &self.copy else {
+			return Err(Error::Cancel);
+		};
 		let group = match received {
-			Ok(group) => group,
+			Ok(track::Received::Group(group)) => group,
+			Ok(track::Received::Held(arriving)) => {
+				return Ok(Open::Duplicate(Duplicate {
+					arriving,
+					track: producer.clone(),
+					reading,
+				}));
+			}
 			// The group is at or past the end the publisher declared, which no
 			// later stream can repair. Before lite-05 only a local finish sets
 			// an end, and lite-05 specified an inclusive one, so its last
@@ -408,12 +457,12 @@ impl TrackEntry {
 			}
 			Err(err) => return Err(err),
 		};
-		Ok(Opened {
+		Ok(Open::Group(Opened {
 			group,
 			track: producer.clone(),
 			framing: *framing,
 			reading,
-		})
+		}))
 	}
 }
 
@@ -423,7 +472,7 @@ impl Subscriber {
 		// origin we publish into so it matches the relay identity across
 		// every session sharing that origin, required for cross-session
 		// loop detection.
-		let self_origin = config.origin.hop();
+		let self_origin = crate::Hop::from(config.origin.hop());
 		Self {
 			session: config.session,
 			runtime: config.runtime,
@@ -1454,7 +1503,8 @@ impl GroupRecv {
 			None => Poll::Ready(Ok(())),
 		});
 		self.park_wait = None;
-		let (ietf, hdr) = header;
+		let ietf: bool = header.0;
+		let hdr: lite::Group = header.1;
 		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
 			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
 		{
@@ -1462,7 +1512,7 @@ impl GroupRecv {
 		}
 		accepted?;
 
-		let opened = {
+		let open = {
 			let mut subs = self.subscriber.subscribes.lock();
 			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 			match &parked {
@@ -1470,15 +1520,45 @@ impl GroupRecv {
 				None => entry.open(&hdr, self.subscriber.version, self.subscriber.runtime.now()),
 			}
 		};
+		let mut open: Option<Open> = Some(open?);
+		// A duplicate of a copy still arriving waits, unread, for that copy to settle.
+		let opened: Opened = wait!(Hold => loop {
+			let duplicate = match open.take() {
+				Some(Open::Group(opened)) => break Poll::Ready(Ok(opened)),
+				Some(Open::Duplicate(duplicate)) => duplicate,
+				None => break Poll::Ready(Err(Error::Cancel)),
+			};
+			if let Poll::Ready(err) = self.reader.poll_reset(waiter) {
+				break Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(err) = duplicate.track.poll_aborted(waiter) {
+				break Poll::Ready(Err(err));
+			}
+			match duplicate.arriving.poll_closed(waiter) {
+				Poll::Pending => {
+					*open = Some(Open::Duplicate(duplicate));
+					break Poll::Pending;
+				}
+				// The copy holds every frame, so this one only duplicates it.
+				Poll::Ready(Ok(())) => break Poll::Ready(Err(Error::Duplicate)),
+				Poll::Ready(Err(_)) => {
+					let subs = self.subscriber.subscribes.lock();
+					let Some(entry) = subs.get(&hdr.subscribe) else {
+						break Poll::Ready(Err(Error::Cancel));
+					};
+					match entry.reopen(hdr, self.subscriber.version, duplicate.reading) {
+						Ok(reopened) => *open = Some(reopened),
+						Err(err) => break Poll::Ready(Err(err)),
+					}
+				}
+			}
+		})?;
 		let Opened {
 			group,
 			track,
 			framing,
 			reading,
-		} = match opened {
-			Ok(opened) => opened,
-			Err(err) => return Poll::Ready(Err(err)),
-		};
+		} = opened;
 		let (priority, order) = track
 			.subscription()
 			.map_or((0, Default::default()), |sub| (sub.priority, sub.order));
@@ -1507,7 +1587,10 @@ impl GroupRecv {
 
 		let res = match res {
 			Ok(()) => {
-				let _ = group.finish();
+				// Only a lite-07 stale drop asks which groups arrived whole.
+				if group.finish().is_ok() && self.subscriber.version.has_skip() {
+					reading.finish();
+				}
 				Ok(())
 			}
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
@@ -2902,19 +2985,10 @@ impl DatagramServe {
 						};
 						continue;
 					}
-					match producer.poll_priority(waiter, Some(*priority)) {
-						Poll::Ready(Some(next)) => {
-							*priority = next;
-							stream.writer.buffer(&lite::DatagramsUpdate { priority: next })?;
-							continue;
-						}
-						// Nobody reads it: cancel, unless a reader arrived meanwhile, whose
-						// priority the next pass reads.
-						Poll::Ready(None) => match producer.close_unused() {
-							true => return Poll::Ready(Err(Error::Cancel)),
-							false => continue,
-						},
-						Poll::Pending => {}
+					if let Poll::Ready(next) = Self::poll_demand(producer, waiter, *priority) {
+						*priority = next?;
+						stream.writer.buffer(&lite::DatagramsUpdate { priority: *priority })?;
+						continue;
 					}
 					ready!(stream.writer.poll_flush(waiter))?;
 					return Poll::Pending;
@@ -2941,19 +3015,9 @@ impl DatagramServe {
 						};
 						continue;
 					}
-					match producer.poll_priority(waiter, Some(*priority)) {
-						Poll::Ready(Some(next)) => {
-							*priority = next;
-							let subscription = subscriber.subscription().with_priority(next);
-							subscriber.update(subscription)?;
-							continue;
-						}
-						Poll::Ready(None) => match producer.close_unused() {
-							true => return Poll::Ready(Err(Error::Cancel)),
-							false => continue,
-						},
-						Poll::Pending => return Poll::Pending,
-					}
+					*priority = ready!(Self::poll_demand(producer, waiter, *priority))?;
+					let subscription = subscriber.subscription().with_priority(*priority);
+					subscriber.update(subscription)?;
 				}
 				DatagramState::Ending { applied, writer } => {
 					ready!(applied.poll_closed(waiter));
@@ -2970,6 +3034,24 @@ impl DatagramServe {
 					return Poll::Ready(Ok(()));
 				}
 				DatagramState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+
+	/// The subscriber priority once it differs from `sent`, or [`Error::Cancel`] once nobody
+	/// reads the track. While only passive readers remain, the priority reads `None` but the
+	/// track stays: park until demand returns or they leave.
+	fn poll_demand(producer: &datagram::Producer, waiter: &kio::Waiter, sent: i8) -> Poll<Result<i8, Error>> {
+		loop {
+			match ready!(producer.poll_priority(waiter, Some(sent))) {
+				Some(next) => return Poll::Ready(Ok(next)),
+				// Atomic with a reader joining, whose priority the next pass reads.
+				None if producer.close_unused() => return Poll::Ready(Err(Error::Cancel)),
+				None => {
+					if producer.poll_priority(waiter, None).is_pending() && producer.poll_unused(waiter).is_pending() {
+						return Poll::Pending;
+					}
+				}
 			}
 		}
 	}
@@ -3081,6 +3163,8 @@ mod tests {
 	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, track::Fill) {
 		let info = track::Info::default().with_timescale(None).with_max_age(None);
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
+		// The relay's copy of the upstream feed, whose groups may land out of order.
+		track.received();
 		let dynamic = track.requests();
 		let fetching = track.consume().fetch_group(sequence, None);
 		let req = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
@@ -3109,10 +3193,13 @@ mod tests {
 			served: None,
 			started: false,
 			starts: Default::default(),
+			declared: None,
 			end: None,
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
+			update: 0,
+			stale: RangeSet::new(),
 		})
 	}
 
@@ -3263,10 +3350,13 @@ mod tests {
 				served: None,
 				started: false,
 				starts: Default::default(),
+				declared: None,
 				end: None,
 				wanted: None,
 				unanswered: None,
 				_working: crate::session::Work::default().start(),
+				update: 0,
+				stale: RangeSet::new(),
 			});
 			if update {
 				h.serve
@@ -3309,6 +3399,8 @@ mod tests {
 	) -> (track::Producer, Vec<kio::Pending<track::Fetching>>, Vec<track::Fill>) {
 		let info = track::Info::default().with_timescale(None).with_max_age(None);
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		// The relay's copy of the upstream feed, whose groups may land out of order.
+		track.received();
 		let dynamic = track.requests();
 		let mut callers = Vec::new();
 		let mut requests = Vec::new();
@@ -3728,10 +3820,13 @@ mod tests {
 			served: None,
 			started: false,
 			starts: Default::default(),
+			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
+			update: 0,
+			stale: RangeSet::new(),
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -3841,10 +3936,13 @@ mod tests {
 			served: Some(4),
 			started: true,
 			starts: [(0, Some(4))].into(),
+			declared: None,
 			end: None,
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
+			update: 0,
+			stale: RangeSet::new(),
 		};
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
@@ -3906,10 +4004,13 @@ mod tests {
 			served: Some(4),
 			started: true,
 			starts: [(0, Some(4))].into(),
+			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
+			update: 0,
+			stale: RangeSet::new(),
 		};
 		assert_eq!(sub.owed(None), Some(vec![4..10]));
 
@@ -3946,7 +4047,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4000,7 +4101,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(local.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4033,7 +4134,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(local.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4069,7 +4170,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(local),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4131,7 +4232,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(local),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4283,7 +4384,7 @@ mod tests {
 				let subscriber = Subscriber::new(SubscriberConfig {
 					runtime: crate::time::sim(),
 					session: crate::driver::Transport::new(session.clone()),
-					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 					recv_bandwidth: None,
 					version,
 					peer_setup: peer_setup.clone(),
@@ -4342,7 +4443,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4438,7 +4539,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup,
@@ -4620,7 +4721,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4777,7 +4878,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: clock.clone(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4823,6 +4924,108 @@ mod tests {
 		assert!(settle.poll(&kio::Waiter::noop(), |tail| tail.streams() >= 1).is_ready());
 	}
 
+	/// A lite-07 re-offer can overtake the reset of the stream it replaces: its stream waits,
+	/// unread, until that copy settles. It is discarded once the copy finishes, and takes the
+	/// group once the copy fails.
+	#[kio::test]
+	async fn a_duplicate_of_an_arriving_copy_waits_for_it_to_settle() {
+		use crate::transport::poll::Session as _;
+
+		for first_fails in [false, true] {
+			let version = Version::Lite07;
+			let mut script = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+			lite::Group {
+				subscribe: 7,
+				sequence: 3,
+				frame_start: 0,
+			}
+			.encode(&mut encoder, version)
+			.unwrap();
+			encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
+			encoder.bytes(b"again").unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let clock = crate::time::Deadlines::new(crate::time::Instant::now());
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: clock.clone(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"video",
+				crate::track::Info::timed(),
+			);
+			let subscription = crate::track::Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
+				.with_range(0..);
+			let mut reader = track.subscribe(subscription.clone());
+			// The original copy, still arriving: one frame in, no end yet.
+			let Ok(track::Received::Group(mut first)) = track.create_group_at(group::Info { sequence: 3 }, 0) else {
+				panic!("the first copy opens");
+			};
+			first
+				.write_frame(Timestamp::from_millis(300).unwrap(), &b"first"[..])
+				.unwrap();
+			let tail = kio::Producer::new(Tail::default());
+			subscriber.subscribes.lock().insert(
+				7,
+				TrackEntry::accepted(
+					track.clone(),
+					lite::Framing {
+						timescale: Some(Timescale::MILLI),
+						ietf: None,
+						compressed: false,
+					},
+					tail.clone(),
+				),
+			);
+
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut duplicate = GroupRecv::new(
+				subscriber,
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+			);
+			let waiter = kio::Waiter::noop();
+			assert!(duplicate.poll_serve(&waiter).is_pending(), "first fails: {first_fails}");
+			assert_eq!(duplicate.state.name(), "Hold", "first fails: {first_fails}");
+			// Counted and holding the end open while it waits, since it may carry the group.
+			assert_eq!(tail.read().streams(), 1);
+
+			let mut original = reader.assert_group();
+			if !first_fails {
+				first.finish().unwrap();
+				let res = kio::wait(|waiter| duplicate.poll_serve(waiter)).await;
+				assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
+				let frame = original.read_frame().await.unwrap().unwrap();
+				assert_eq!(&frame.payload[..], b"first");
+				assert!(original.read_frame().await.unwrap().is_none());
+				continue;
+			}
+
+			// The reset lands: the held stream takes the group.
+			first.abort(Error::Cancel).unwrap();
+			let res = kio::wait(|waiter| duplicate.poll_serve(waiter)).await;
+			assert!(res.is_ok(), "{res:?}");
+			// A reader already handed the original sees it fail, since no sequence is handed
+			// out twice; one that had not reached it reads the re-offer.
+			assert!(original.read_frame().await.is_err());
+			let mut later = track.subscribe(subscription);
+			let mut group = later.assert_group();
+			assert_eq!(group.sequence, 3);
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"again");
+			assert!(group.read_frame().await.unwrap().is_none());
+		}
+	}
+
 	/// A SUBSCRIBE_FINISH below a group already received contradicts that group. lite-05
 	/// specified an inclusive end, and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it only
 	/// costs the early boundary; later drafts abort the track.
@@ -4849,7 +5052,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -4912,7 +5115,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5019,7 +5222,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5061,6 +5264,426 @@ mod tests {
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
 	}
 
+	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under update 0 and the
+	/// max age `budget`, its broadcast, and the tail it accounts on.
+	async fn lite07_serving(
+		budget: Duration,
+	) -> (TrackServe, ServeLoop, kio::Producer<Tail>, crate::broadcast::Producer) {
+		let version = Version::Lite07;
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
+		let tail = kio::Producer::new(Tail::default());
+		serving.sub = Sub::Active(SubStream {
+			order: crate::track::Order::Descending,
+			stream: Stream::open(&crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap(),
+			id: 0,
+			max_delay: budget,
+			min_delay: None,
+			start: None,
+			priority: 0,
+			requested: None,
+			live: lite::LiveRanges::new(version, &[lite::Range::OLDEST]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			fill_groups: Default::default(),
+			tail: tail.clone(),
+			served: None,
+			started: false,
+			starts: Default::default(),
+			declared: None,
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+			update: 0,
+			stale: RangeSet::new(),
+		});
+		(serve, serving, tail, broadcast)
+	}
+
+	/// A SUBSCRIBE_DROP can only echo an update the subscriber sent: one naming a later update
+	/// is a protocol violation, and accounts for nothing.
+	#[kio::test]
+	async fn a_drop_naming_an_unsent_update_is_a_protocol_violation() {
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let drop = lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+			start: 1,
+			end: 2,
+			error: u64::from(crate::coding::StreamCodes::encode_stream_code(
+				&Version::Lite07,
+				&crate::StreamError::Old,
+			)),
+			update: 1,
+		});
+		assert!(matches!(
+			serving.apply_response(&serve, drop),
+			Err(Error::ProtocolViolation)
+		));
+		assert!(!tail.read().covers(1..3));
+	}
+
+	/// On lite-07 an OLD drop is a stale verdict judged under the budget this subscriber sent
+	/// with the update it names. Any SUBSCRIBE_UPDATE reopens every stale run in the tail,
+	/// whether or not it widens the budget, and an OLD drop naming a superseded update is no
+	/// verdict: still owed, and given up on no reader. Any other drop is final, whatever update
+	/// it names.
+	#[kio::test]
+	async fn an_update_reopens_every_stale_drop_and_supersedes_the_rest() {
+		let version = Version::Lite07;
+		let budget = Duration::from_millis(500);
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
+		let mut reader = serving.serving.subscribe(
+			crate::track::Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(budget))
+				.with_ranges([crate::track::Range::groups(0..)]),
+		);
+		let waiter = kio::Waiter::noop();
+		let code = |err: &crate::StreamError| u64::from(crate::coding::StreamCodes::encode_stream_code(&version, err));
+		let drop = |start, end, err: &crate::StreamError, update| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start,
+				end,
+				error: code(err),
+				update,
+			})
+		};
+		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
+
+		serving
+			.apply_response(&serve, drop(1, 2, &crate::StreamError::Old, 0))
+			.unwrap();
+		assert!(covers(1..3));
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((1..3, track::Hole::stale(budget))),
+			"judged under the budget sent with update 0"
+		);
+
+		// An update that keeps the budget and the ranges still reopens the stale run.
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			let ranges = active.live.unchanged();
+			buffer_update(active, ranges, &serving.serving, serve.subscriber.runtime.now()).unwrap();
+			assert_eq!(active.update, 1);
+			assert!(active.stale.is_empty());
+		}
+		assert!(!covers(1..3), "the publisher re-offers or drops it again");
+
+		// Still in flight from before the update: no verdict.
+		serving
+			.apply_response(&serve, drop(4, 4, &crate::StreamError::Old, 0))
+			.unwrap();
+		assert!(!covers(4..5), "still owed");
+		assert!(reader.poll_drop(&waiter).is_pending(), "no reader settles on it");
+
+		// Any other drop is final, whatever update it names.
+		serving
+			.apply_response(&serve, drop(5, 5, &crate::StreamError::App(5), 0))
+			.unwrap();
+		assert!(covers(5..6));
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((5..6, track::Hole::drop(crate::StreamError::App(5))))
+		);
+
+		// Under the current update, a stale drop is a verdict again.
+		serving
+			.apply_response(&serve, drop(6, 6, &crate::StreamError::Old, 1))
+			.unwrap();
+		assert!(covers(6..7));
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((6..7, track::Hole::stale(budget)))
+		);
+	}
+
+	/// A group that arrives over a lite-07 stale (OLD) drop wins over it, whichever lands first:
+	/// the publisher serves a group after its stale drop, as a front that switched routes does,
+	/// and the group's stream may overtake the drop. The next update owes it no more, and a
+	/// group still arriving is never aborted by the drop.
+	#[kio::test]
+	async fn a_group_wins_over_its_stale_drop() {
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let now = || serve.subscriber.runtime.now();
+		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
+			&version,
+			&crate::StreamError::Old,
+		));
+		let old = |sequence| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start: sequence,
+				end: sequence,
+				error: code,
+				update: 0,
+			})
+		};
+		let frame = |group: &mut crate::group::Producer| {
+			group.write_frame(crate::Timestamp::from_millis(1).unwrap(), &b"x"[..])?;
+			group.finish()
+		};
+		let arrive = |serving: &mut ServeLoop, sequence| {
+			let group = serving.serving.create_group(crate::group::Info { sequence }).unwrap();
+			(group, Reading::open(&tail, Some(sequence), now()))
+		};
+
+		// OLD, then the group, which finishes.
+		serving.apply_response(&serve, old(1)).unwrap();
+		let (mut one, reading) = arrive(&mut serving, 1);
+		frame(&mut one).unwrap();
+		drop(reading);
+		// The group first, still arriving when its OLD lands.
+		let (mut two, _two) = arrive(&mut serving, 2);
+		serving.apply_response(&serve, old(2)).unwrap();
+		// OLD, then the group, still arriving at the update.
+		serving.apply_response(&serve, old(3)).unwrap();
+		let (mut three, _three) = arrive(&mut serving, 3);
+		// OLD, and no group.
+		serving.apply_response(&serve, old(4)).unwrap();
+
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			let ranges = active.live.unchanged();
+			buffer_update(active, ranges, &serving.serving, now()).unwrap();
+		}
+		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
+		assert!(covers(1..4), "every group that arrived stays accounted for");
+		assert!(!covers(4..5), "the group that never arrived is owed again");
+		frame(&mut two).expect("the drop leaves a group still arriving");
+		frame(&mut three).expect("the update leaves a group still arriving");
+	}
+
+	/// A group whose stream finished wins over a lite-07 stale drop that lands after the cache
+	/// evicted it: the publisher served it over that drop, so the next update owes it no more.
+	/// A stream that finished under an earlier update says nothing of a drop under the new one.
+	#[kio::test]
+	async fn a_finished_group_wins_over_a_late_stale_drop_once_evicted() {
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let now = || serve.subscriber.runtime.now();
+		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
+			&version,
+			&crate::StreamError::Old,
+		));
+		let old = |sequence, update| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start: sequence,
+				end: sequence,
+				error: code,
+				update,
+			})
+		};
+		serve.subscriber.subscribes.lock().insert(
+			0,
+			TrackEntry::accepted(
+				serving.serving.clone(),
+				lite::Framing {
+					timescale: Some(Timescale::MILLI),
+					ietf: None,
+					compressed: false,
+				},
+				tail.clone(),
+			),
+		);
+		// A group stream that arrives whole, through the path that records it, then is evicted.
+		let arrive = async |serving: &mut ServeLoop, sequence| {
+			use crate::transport::poll::Session as _;
+
+			let mut script = Vec::new();
+			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+			lite::Group {
+				subscribe: 0,
+				sequence,
+				frame_start: 0,
+			}
+			.encode(&mut encoder, version)
+			.unwrap();
+			encoder.varint(crate::coding::varint::zigzag(1)).unwrap();
+			encoder.bytes(b"x").unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let mut group = GroupRecv::new(
+				serve.subscriber.clone(),
+				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+			);
+			kio::wait(|waiter| group.poll_serve(waiter)).await.unwrap();
+			serving.serving.evict(sequence);
+		};
+		let update = |serving: &mut ServeLoop| {
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			let ranges = active.live.unchanged();
+			buffer_update(active, ranges, &serving.serving, now()).unwrap();
+		};
+		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
+
+		arrive(&mut serving, 1).await;
+		serving.apply_response(&serve, old(1, 0)).unwrap();
+		update(&mut serving);
+		assert!(covers(1..2), "the evicted group that arrived stays accounted for");
+
+		// Finished under the first update, then judged stale under the second.
+		arrive(&mut serving, 2).await;
+		update(&mut serving);
+		serving.apply_response(&serve, old(2, 2)).unwrap();
+		update(&mut serving);
+		assert!(
+			!covers(2..3),
+			"a drop under a later update is the publisher's to re-offer"
+		);
+	}
+
+	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an
+	/// update reopens only stale verdicts, so the groups stay accounted for, and the skip
+	/// stays final rather than being superseded with the OLD drop. An empty range names
+	/// nothing.
+	#[kio::test]
+	async fn a_skip_or_final_drop_replaces_an_earlier_stale_one() {
+		let version = Version::Lite07;
+		let budget = Duration::from_millis(500);
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
+		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
+			&version,
+			&crate::StreamError::Old,
+		));
+		let old = |start, end| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+				start,
+				end,
+				error: code,
+				update: 0,
+			})
+		};
+		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
+
+		serving.apply_response(&serve, old(1, 2)).unwrap();
+		serving.apply_response(&serve, old(4, 4)).unwrap();
+		serving
+			.apply_response(
+				&serve,
+				lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 1, end: 2 }),
+			)
+			.unwrap();
+		serving
+			.apply_response(
+				&serve,
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..=4, &crate::StreamError::App(5), 0, version)),
+			)
+			.unwrap();
+		// Empty ranges.
+		serving.apply_response(&serve, old(6, 5)).unwrap();
+		serving
+			.apply_response(
+				&serve,
+				lite::SubscribeResponse::Skip(lite::SubscribeSkip { start: 6, end: 5 }),
+			)
+			.unwrap();
+
+		{
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			let ranges = active.live.unchanged();
+			buffer_update(active, ranges, &serving.serving, serve.subscriber.runtime.now()).unwrap();
+		}
+		assert!(covers(1..3), "the skip is final");
+		assert!(covers(4..5), "the drop is final");
+		assert!(
+			matches!(
+				serving.serving.create_group(crate::group::Info { sequence: 1 }),
+				Err(Error::Skipped)
+			),
+			"still skipped after the update"
+		);
+	}
+
+	/// A SKIP replaces an earlier final DROP of the same groups too: "never produced" is the
+	/// most authoritative verdict. A later DROP leaves the skip in place, and a SKIP naming a
+	/// group that arrived keeps the group, without ending the session.
+	#[kio::test]
+	async fn a_skip_replaces_a_final_drop_but_not_a_cached_group() {
+		let version = Version::Lite07;
+		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let drop = |start, end, error: &crate::StreamError| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(start..=end, error, 0, version))
+		};
+		let skip = |start, end| lite::SubscribeResponse::Skip(lite::SubscribeSkip { start, end });
+		let mut group = serving
+			.serving
+			.create_group(crate::group::Info { sequence: 5 })
+			.unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(5).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish().unwrap();
+
+		serving
+			.apply_response(&serve, drop(1, 2, &crate::StreamError::App(5)))
+			.unwrap();
+		serving.apply_response(&serve, skip(1, 2)).unwrap();
+		assert!(
+			matches!(
+				serving.serving.create_group(crate::group::Info { sequence: 2 }),
+				Err(Error::Skipped)
+			),
+			"the skip replaced the final drop"
+		);
+		serving
+			.apply_response(&serve, drop(2, 2, &crate::StreamError::NotFound))
+			.unwrap();
+		assert!(
+			matches!(
+				serving.serving.create_group(crate::group::Info { sequence: 2 }),
+				Err(Error::Skipped)
+			),
+			"a later drop leaves the skip"
+		);
+
+		// Group 5 arrived, so the skip names only 4 and 6.
+		serving.apply_response(&serve, skip(4, 6)).unwrap();
+		assert!(tail.read().covers(4..7));
+		let mut reader = serving
+			.serving
+			.subscribe(crate::track::Subscription::default().with_ranges([crate::track::Range::groups(0..)]));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((1..3, track::Hole::Skip)));
+		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((4..5, track::Hole::Skip)));
+		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((6..7, track::Hole::Skip)));
+		assert!(reader.poll_drop(&waiter).is_pending());
+		let group = reader.recv_group().await.unwrap().unwrap();
+		assert_eq!(group.sequence, 5, "the group that arrived is kept");
+	}
+
 	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code on lite-07.
 	/// Earlier versions carry an application code there, so the same bytes read as
 	/// OLD.
@@ -5078,6 +5701,7 @@ mod tests {
 					start: 2,
 					end: 2,
 					error: code.into(),
+					update: 0,
 				}),
 			] {
 				resp.encode(
@@ -5091,7 +5715,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5161,7 +5785,7 @@ mod tests {
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
 	async fn check_subscription_fin(version: Version, responses: Vec<u8>, clean: bool) {
 		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -5281,7 +5905,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5353,7 +5977,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5441,7 +6065,7 @@ mod tests {
 	#[kio::test]
 	async fn route_datagram_delivers_to_its_subscription() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(SinkSession::default()),
@@ -5518,7 +6142,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::default()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5564,7 +6188,7 @@ mod tests {
 	#[kio::test]
 	async fn announce_interest_waits_for_credit() {
 		for version in [Version::Lite04, Version::Lite07] {
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _interest = origin.consume().routes();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
 			let log = session.log.clone();
@@ -5601,7 +6225,7 @@ mod tests {
 				let subscriber = Subscriber::new(SubscriberConfig {
 					runtime: crate::time::sim(),
 					session: crate::driver::Transport::new(session.clone()),
-					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 					recv_bandwidth: None,
 					version,
 					peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5664,7 +6288,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version: VERSION,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -5717,7 +6341,7 @@ mod tests {
 		Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session,
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup,
@@ -6031,7 +6655,9 @@ mod tests {
 			Err(_) => panic!("the entry holds the parked streams"),
 		};
 		assert_eq!(opened, [kept], "the withdrawn group is gone");
-		let Opened { mut group, .. } = entry.unpark(kept).expect("the kept group");
+		let Ok(Open::Group(Opened { mut group, .. })) = entry.unpark(kept) else {
+			panic!("the kept group");
+		};
 		group.finish().unwrap();
 		track.finish().unwrap();
 		// Only the kept group reaches the subscriber: the withdrawn one ended, so nothing
@@ -6054,7 +6680,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6109,7 +6735,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: Version::Lite07,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6255,7 +6881,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::default()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6311,7 +6937,7 @@ mod tests {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_bi(gate.consume());
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -6370,7 +6996,7 @@ mod tests {
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
 	}
 
-	/// A narrower limit landing while the SUBSCRIBE is still opening resets it with
+	/// A narrower limit landing while SUBSCRIBE is still opening resets it with
 	/// UNAUTHORIZED, like a live one, and releases its id.
 	#[kio::test]
 	async fn a_narrower_limit_resets_a_subscribe_still_opening() {
@@ -6379,7 +7005,7 @@ mod tests {
 		let session = SinkSession::gated_bi(gate.consume());
 		let auth = crate::auth::Link::new(false);
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -6406,6 +7032,7 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("audio").unwrap();
 		let mut serving = ServeLoop::new(&serve, request, Default::default());
+		let _reader = serving.serving.subscribe(None);
 		let wire = Wire {
 			subscription: Subscription::default(),
 			demand: Some(Subscription::default()),
@@ -6434,6 +7061,270 @@ mod tests {
 		drop(gate);
 	}
 
+	/// Losing demand releases setup even when credit, writes, or the answer never arrive.
+	#[kio::test]
+	async fn an_abandoned_setup_releases_its_track_and_registration() {
+		for stage in ["credit", "write", "answer"] {
+			let gate = kio::Producer::new(stage != "write");
+			let opening = kio::Producer::new(true);
+			let session = SinkSession::gated_bi(gate.consume()).with_open_bi_gate(opening.consume());
+
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin,
+				recv_bandwidth: None,
+				version: Version::Lite07,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let subscribes = subscriber.subscribes.clone();
+			let serve = TrackServe {
+				validity: Default::default(),
+				route: None,
+				source: None,
+				subscriber,
+				path: Path::from_static("room/host"),
+				instance: None,
+				name: "audio".to_string(),
+			};
+
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("audio").unwrap();
+			let mut serving = ServeLoop::new(&serve, request, Default::default());
+			let reader = serving.serving.subscribe(None);
+			let held = Stream::open(&serve.subscriber.session, Version::Lite07).await.unwrap();
+			serving.held = Some(HeldTrack(held));
+			if stage == "credit" {
+				*opening.write().ok().expect("gate live") = false;
+			}
+			serving.linger.set(Some(serve.subscriber.runtime.now()));
+			let pref = serving.serving.subscription();
+			serving.begin(&serve, pref).unwrap();
+			assert!(serving.linger.deadline().is_none(), "new demand ends the old linger");
+			let gate_run = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate: gate_run,
+				datagrams: None,
+			};
+
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+			assert_eq!(session.log.bi_opens(), if stage == "credit" { 1 } else { 2 });
+			assert!(!subscribes.lock().is_empty());
+			assert!(
+				!session
+					.log
+					.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish))
+			);
+
+			// A canceled fetch must retire even while establishment is blocked.
+			let (_track, fetching, fill) = feed_fetch(50);
+			let TrackRunState::Serve(serving) = &mut running.state else {
+				unreachable!()
+			};
+			serving.fetches.push(FillServeRun::new(
+				running.serve.clone(),
+				fill,
+				FetchInfo::Known(Default::default()),
+			));
+			drop(fetching);
+			drop(reader);
+			let _ = kio::Task::poll(&mut running, &kio::Waiter::noop());
+
+			assert!(
+				session
+					.log
+					.trail()
+					.iter()
+					.any(|(id, sent)| *id == 0 && matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"TRACK hold released"
+			);
+			assert!(session.log.closes().is_empty(), "session stays live");
+			assert!(subscribes.lock().is_empty(), "the id outlived its subscription");
+			let TrackRunState::Serve(serving) = &running.state else {
+				panic!("copy should linger")
+			};
+			assert!(matches!(serving.mode, ServeMode::Select));
+			assert!(serving.linger.deadline().is_some());
+			assert!(serving.fetches.is_empty());
+			drop(gate);
+		}
+	}
+
+	/// Equal demand returning between cancellation and Select must open a new setup.
+	#[kio::test]
+	async fn identical_demand_after_setup_cancellation_is_not_already_served() {
+		let gate = kio::Producer::new(false);
+		let opening = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume()).with_open_bi_gate(opening.consume());
+
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin,
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let subscribes = subscriber.subscribes.clone();
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room/host"),
+			instance: None,
+			name: "audio".to_string(),
+		};
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let request = broadcast.reserve_track("audio").unwrap();
+		let mut serving = ServeLoop::new(&serve, request, Default::default());
+		let held = Stream::open(&serve.subscriber.session, Version::Lite07).await.unwrap();
+		serving.held = Some(HeldTrack(held));
+		let wire = Wire {
+			subscription: Subscription::default(),
+			demand: Some(Subscription::default()),
+			demand_ranges: vec![lite::Range::OLDEST],
+			ranges: vec![lite::Range::OLDEST],
+		};
+		let reader = serving.serving.subscribe(None);
+		serving.serving.seen_subscription(Some(Subscription::default()));
+		let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
+		serving.mode = ServeMode::Establish(establish);
+
+		drop(reader);
+		serving.abandon_setup();
+		let _returning = serving.serving.subscribe(None);
+		assert!(matches!(
+			serving.serving.poll_subscription_changed(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Some(_)))
+		));
+		let pref = serving.serving.subscription();
+		serving.begin(&serve, pref).unwrap();
+		assert!(matches!(serving.mode, ServeMode::Establish(_)));
+		assert_eq!(subscribes.lock().len(), 1);
+	}
+
+	/// A requester owns setup through metadata acceptance until a reader attaches or
+	/// the requester disappears, including when no poll ever observed its demand.
+	#[kio::test]
+	async fn a_requester_owns_setup_until_attachment_or_cancellation() {
+		for attach in [false, true] {
+			let gate = kio::Producer::new(false);
+			let opening = kio::Producer::new(true);
+			let session = SinkSession::gated_bi(gate.consume()).with_open_bi_gate(opening.consume());
+
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin,
+				recv_bandwidth: None,
+				version: Version::Lite07,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let subscribes = subscriber.subscribes.clone();
+			let serve = TrackServe {
+				validity: Default::default(),
+				route: None,
+				source: None,
+				subscriber,
+				path: Path::from_static("room/host"),
+				instance: None,
+				name: "audio".to_string(),
+			};
+
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("audio").unwrap();
+			let requester = request.consume().info();
+			let mut serving = ServeLoop::new(&serve, request, Default::default());
+			assert!(requester.poll_ok(&kio::Waiter::noop()).is_ready());
+			let held = Stream::open(&serve.subscriber.session, Version::Lite07).await.unwrap();
+			serving.held = Some(HeldTrack(held));
+			let wire = Wire {
+				subscription: Subscription::default(),
+				demand: Some(Subscription::default()),
+				demand_ranges: vec![lite::Range::OLDEST],
+				ranges: vec![lite::Range::OLDEST],
+			};
+			let establish = serve.prepare_establish(&mut serving.serving, wire, &Default::default());
+			serving.mode = ServeMode::Establish(establish);
+			let gate_run = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate: gate_run,
+				datagrams: None,
+			};
+
+			// Cancellation can happen before the first serving poll after metadata acceptance.
+			if !attach {
+				drop(requester);
+				let _ = kio::Task::poll(&mut running, &kio::Waiter::noop());
+				assert!(subscribes.lock().is_empty(), "a vanished requester releases setup");
+				assert!(
+					session
+						.log
+						.trail()
+						.iter()
+						.any(|(id, sent)| *id == 0 && matches!(sent, crate::lite::test_transport::Sent::Finish)),
+					"a vanished requester releases TRACK"
+				);
+				continue;
+			}
+			// The requester still owns setup while no group reader has attached.
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+			let TrackRunState::Serve(serving) = &mut running.state else {
+				unreachable!()
+			};
+			assert!(matches!(serving.mode, ServeMode::Establish(_)));
+			assert!(!subscribes.lock().is_empty(), "the fresh setup keeps its registration");
+			assert!(
+				!session
+					.log
+					.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"a fresh setup keeps its TRACK hold"
+			);
+
+			// A reader arriving keeps it, and its leaving is what releases the setup.
+			let reader = serving.serving.subscribe(None);
+			drop(requester);
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+			drop(reader);
+			let _ = kio::Task::poll(&mut running, &kio::Waiter::noop());
+			assert!(
+				session
+					.log
+					.trail()
+					.iter()
+					.any(|(id, sent)| *id == 0 && matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"TRACK hold released once demand left"
+			);
+			assert!(subscribes.lock().is_empty(), "the id outlived its subscription");
+			drop(gate);
+		}
+	}
+
 	/// Everything a `handle_subscription` test needs to stay alive for the call.
 	struct Harness {
 		serve: TrackServe,
@@ -6450,7 +7341,7 @@ mod tests {
 			// what was true at the instant it would.
 			let gate = kio::Producer::new(true);
 			let session = SinkSession::gated_bi(gate.consume());
-			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
@@ -6535,7 +7426,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6608,7 +7499,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6680,7 +7571,7 @@ mod tests {
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
 				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 				recv_bandwidth: Some(producer),
 				version,
 				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -6719,6 +7610,78 @@ mod tests {
 			kio::wait(|waiter| probe.poll(waiter)).await.unwrap();
 			assert_eq!(estimate.peek(), None, "reset: {reset}");
 		}
+	}
+
+	/// A peer that stops reading holds one PROBE target, and once it drains, only the
+	/// latest is sent: the targets set while the writer was stalled never pile up behind it.
+	#[kio::test]
+	async fn a_stalled_probe_writer_sends_only_the_latest_target() {
+		use crate::transport::poll::{RecvStream as _, Session as _};
+		let version = Version::Lite06;
+		// One queued message per stream, so a peer that stops reading stalls the writer.
+		let config = crate::transport::memory::Config {
+			stream_buffer: 0,
+			..Default::default()
+		};
+		let (session, peer) = crate::transport::memory::pair(config);
+		let producer = bandwidth::Producer::new();
+		let _estimate = producer.consume();
+		let peer_setup = lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		peer_setup
+			.set(lite::Setup {
+				probe: lite::ProbeLevel::Increase,
+				..Default::default()
+			})
+			.unwrap();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: Some(producer),
+			version,
+			peer_setup,
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let viewer = subscriber.viewers.watch(bandwidth::Rate::from_mbps(1)).unwrap();
+		let mut probe = RecvBandwidth::new(subscriber);
+
+		// The stream type fills the stream, so the first target waits in the writer.
+		let (_send, mut recv) = kio::wait(|waiter| {
+			let _ = probe.poll(waiter);
+			peer.poll_accept_bi(waiter)
+		})
+		.await
+		.unwrap();
+		assert!(probe.poll(&kio::Waiter::noop()).is_pending());
+		for mbps in 2..=4 {
+			viewer.update(bandwidth::Rate::from_mbps(mbps)).unwrap();
+			assert!(probe.poll(&kio::Waiter::noop()).is_pending());
+		}
+
+		let target = |mbps| lite::Probe {
+			bitrate: Some(bandwidth::Rate::from_mbps(mbps).as_bps()),
+			rtt: None,
+		};
+		let expected = [
+			lite::ControlType::Probe.encode_bytes(version).unwrap(),
+			target(1).encode_bytes(version).unwrap(),
+			target(4).encode_bytes(version).unwrap(),
+		];
+		for expected in expected {
+			let chunk = kio::wait(|waiter| {
+				let _ = probe.poll(waiter);
+				recv.poll_read_chunk(waiter, usize::MAX)
+			})
+			.await
+			.unwrap()
+			.expect("the stream stays open");
+			assert_eq!(chunk, expected);
+		}
+		assert!(probe.poll(&kio::Waiter::noop()).is_pending());
+		assert!(recv.poll_read_chunk(&kio::Waiter::noop(), usize::MAX).is_pending());
 	}
 
 	/// The model's groups map to wire ranges starting and ending at a group's first frame,
@@ -7015,7 +7978,7 @@ mod tests {
 	#[kio::test]
 	async fn a_double_announce_is_an_error_even_when_reflected() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7108,7 +8071,7 @@ mod tests {
 	/// every announced route there made each group cost the whole announce set.
 	#[kio::test]
 	async fn a_request_readies_only_its_route() {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7162,7 +8125,7 @@ mod tests {
 	/// route afresh. Withdrawing the claim still closes a source in use at once.
 	#[kio::test]
 	async fn an_unheld_source_is_retired() {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7231,7 +8194,7 @@ mod tests {
 	/// machine, rather than the front finding no handler and ending the track `NotFound`.
 	#[kio::test]
 	async fn a_track_read_before_its_source_is_served_queues() {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7287,7 +8250,7 @@ mod tests {
 	#[kio::test]
 	async fn every_declined_announce_is_recorded() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(SinkSession::new(Default::default())),
@@ -7345,7 +8308,7 @@ mod tests {
 	#[kio::test]
 	async fn a_dropped_announce_still_holds_its_path() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7404,7 +8367,7 @@ mod tests {
 	async fn an_announce_reflected_by_its_sender_is_dropped() {
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7448,7 +8411,7 @@ mod tests {
 	#[kio::test]
 	async fn a_reflected_announce_does_not_displace_the_local_front() {
 		let relay = crate::Hop::new(1).unwrap();
-		let origin = origin::Config::new(relay).produce();
+		let origin = origin::Config::from(relay).produce();
 		let assigned = crate::Hop::new(777).unwrap();
 
 		let local = origin
@@ -7536,7 +8499,7 @@ mod tests {
 		let session = SinkSession::new(Default::default());
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7583,7 +8546,7 @@ mod tests {
 	#[kio::test]
 	async fn lite03_placeholders_stay_anonymous() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7665,7 +8628,7 @@ mod tests {
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber, crate::origin::Consumer) {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7821,7 +8784,7 @@ mod tests {
 	/// to the session (outliving the stream) would leak the announcement instead.
 	#[kio::test]
 	async fn a_lost_announce_stream_retracts_the_route() {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7906,7 +8869,7 @@ mod tests {
 			.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
 			.unwrap();
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -7975,7 +8938,7 @@ mod tests {
 		version: Version,
 		session: crate::lite::test_transport::ScriptedSession,
 	) -> (AnnouncePrefix, origin::Consumer) {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -8226,7 +9189,7 @@ mod tests {
 				.unwrap();
 		}
 
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -8268,7 +9231,7 @@ mod tests {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
 			session: crate::driver::Transport::new(session),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
 			recv_bandwidth: None,
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
@@ -8445,6 +9408,9 @@ struct SubStream {
 	/// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range's delivery starts, by
 	/// Range ID, `None` for one with nothing to deliver.
 	starts: std::collections::BTreeMap<u64, Option<u64>>,
+	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
+	/// again: each declaration restarts the grace of the gaps above it.
+	declared: Option<(Option<u64>, bool)>,
 	/// The track's exclusive end (SUBSCRIBE_FINISH), once declared.
 	end: Option<lite::SubscribeFinish>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
@@ -8453,6 +9419,12 @@ struct SubStream {
 	/// without an instance resolves whichever one wins the path when it arrives, so one
 	/// still unanswered once another instance takes the path may be answered by it.
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
+	/// The number of the latest SUBSCRIBE (0) or SUBSCRIBE_UPDATE sent: a stale drop given
+	/// up under an earlier one is no verdict on the current terms.
+	update: u64,
+	/// The runs `tail` accounts for by a stale drop under `update`: the next update reopens
+	/// them, since the publisher re-offers or drops them again under it.
+	stale: RangeSet<u64>,
 	/// Holds the session busy for as long as the subscription is open.
 	_working: crate::session::Working,
 }
@@ -8462,6 +9434,42 @@ impl SubStream {
 	/// answers even when no group resolved the start, unless nothing was asked below the end.
 	fn awaits_start(&self) -> bool {
 		!self.started && self.end.as_ref().is_some_and(|end| end.group > self.start.unwrap_or(0))
+	}
+
+	/// Lite-07's declaration of where the live feed starts: the lowest start the demand's live
+	/// ranges report, or the requested floor, pending, while SUBSCRIBE_START or a range's
+	/// SUBSCRIBE_STARTED has yet to say where one starts. `None` before lite-07, whose one start
+	/// describes only the SUBSCRIBE's demand, and while the ranges ask only for fills.
+	fn feed_start(&self) -> Option<(Option<u64>, bool)> {
+		if !self.live.reports_starts() || self.demand.is_none() {
+			return None;
+		}
+		let mut start: Option<u64> = None;
+		for (id, _) in self.live.iter().filter(|(id, _)| !self.fill_ids.contains(id)) {
+			match self.starts.get(&id) {
+				// A range with no group there serves nothing to start from.
+				Some(Some(at)) => start = Some(start.map_or(*at, |start| start.min(*at))),
+				Some(None) => {}
+				None => return Some((self.start, true)),
+			}
+		}
+		Some((start, !self.started))
+	}
+
+	/// Declare on the copy where the live feed starts, by [`Self::feed_start`], so a reader
+	/// waiting on each group in sequence starts there rather than at whatever arrives first.
+	fn declare(&mut self, serving: &mut track::Producer) {
+		let Some(next) = self.feed_start() else {
+			return;
+		};
+		if self.declared.replace(next) == Some(next) {
+			return;
+		}
+		let _ = match next {
+			(start, true) => serving.request_start(start),
+			(Some(start), false) => serving.start_resolved(start),
+			(None, false) => serving.start_at(None),
+		};
 	}
 
 	/// `largest`, when this bounded subscription's ranges, as SUBSCRIBE_START resolved them,
@@ -9021,8 +10029,12 @@ impl TrackServe {
 		match request {
 			Some(wire) => {
 				match sub {
-					// Open an upstream SUBSCRIBE for the first subscriber.
-					Sub::None => Ok(Begin::Establish(self.prepare_establish(producer, wire, &fills.groups))),
+					// Open an upstream SUBSCRIBE for the first subscriber. Its terms are new, so a
+					// stale run an earlier subscription reported is no verdict on them.
+					Sub::None => {
+						producer.supersede_stale(judged(&wire.ranges));
+						Ok(Begin::Establish(self.prepare_establish(producer, wire, &fills.groups)))
+					}
 					Sub::Active(active) => {
 						let Wire {
 							subscription,
@@ -9076,10 +10088,14 @@ impl TrackServe {
 							// the next declaration. A buffered START re-applies only if the
 							// start returns to the demand that produced it (see
 							// `SubStream::requested`).
-							if start_moved {
+							// Lite-07 declares from each live range's reported start instead, pending
+							// while a range the update adds awaits SUBSCRIBE_STARTED.
+							if active.live.reports_starts() {
+								active.declare(producer);
+							} else if start_moved {
 								let _ = producer.start_at(active.start);
 							}
-							buffer_update(active, edit)?;
+							buffer_update(active, edit, producer, self.subscriber.runtime.now())?;
 						}
 						Ok(Begin::None)
 					}
@@ -9268,6 +10284,7 @@ impl TrackServe {
 			demand: Some(subscription.clone()),
 			demand_ranges: ranges.clone(),
 			fill_groups: Default::default(),
+			fills_changed: false,
 			subscription,
 			ranges,
 			tail,
@@ -9359,9 +10376,55 @@ fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration
 	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
 }
 
-/// Buffer the current SUBSCRIBE parameters, with `ranges` the change to the live ranges.
-/// The caller flushes.
-fn buffer_update(active: &mut SubStream, ranges: lite::RangeEdit) -> Result<(), Error> {
+/// Every group `ranges` name, which a stale drop under them was judged against. A bound only
+/// the publisher resolves is taken at its widest: a start from group 0, an end past the live
+/// edge (an exclusive end of `u64::MAX`).
+fn judged<'a>(ranges: impl IntoIterator<Item = &'a lite::Range>) -> Option<RangeSet<u64>> {
+	let mut judged = RangeSet::new();
+	for range in ranges {
+		let start = match range.start {
+			Some(lite::Anchor::Absolute(start)) => start.group,
+			_ => 0,
+		};
+		let end = match range.end {
+			Some(lite::Anchor::Absolute(end)) => end.group.saturating_add(u64::from(end.frame > 0)),
+			_ => u64::MAX,
+		};
+		if start < end {
+			judged.insert(start..end);
+		}
+	}
+	Some(judged)
+}
+
+/// Buffer the current SUBSCRIBE parameters as the next update, with `ranges` the change to
+/// the live ranges. The caller flushes.
+///
+/// A stale drop given up under an earlier update may still be in flight, and this one may
+/// move the range or budget it was judged against, so the runs `serving` holds as stale
+/// become unknown again: a reader fills them by range rather than trust an old verdict.
+///
+/// A lite-07 publisher re-offers every group it reported stale on any update, and drops
+/// again under the new number what is still stale, so the tail owes every stale run again,
+/// from `now`. A group that arrived since its stale drop won over it: the publisher served
+/// it, so it is neither re-offered nor owed again.
+fn buffer_update(
+	active: &mut SubStream,
+	ranges: lite::RangeEdit,
+	serving: &track::Producer,
+	now: crate::time::Instant,
+) -> Result<(), Error> {
+	active.update += 1;
+	let held = serving.supersede_stale(judged(active.live.iter().map(|(_, range)| range)));
+	let recorded = std::mem::take(&mut active.stale);
+	if let Ok(mut tail) = active.tail.write() {
+		tail.updated();
+		for run in recorded.iter() {
+			for reopened in held.overlapping(run) {
+				tail.unaccount(reopened.start.max(run.start)..reopened.end.min(run.end), now);
+			}
+		}
+	}
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,
@@ -9369,6 +10432,7 @@ fn buffer_update(active: &mut SubStream, ranges: lite::RangeEdit) -> Result<(), 
 		min_delay: active.min_delay,
 		ranges,
 		order: active.order,
+		update: active.update,
 	})
 }
 
@@ -9399,6 +10463,8 @@ struct Establish {
 	demand: Option<Subscription>,
 	/// The demand's ranges, which come first on the wire.
 	demand_ranges: Vec<lite::Range>,
+	/// Fill preferences changed while opening and need an update once active.
+	fills_changed: bool,
 	/// The groups it asks for fills.
 	fill_groups: rangemap::RangeSet<u64>,
 	/// The ranges the SUBSCRIBE carries: the demand's, then the fills'.
@@ -9431,6 +10497,7 @@ impl Establish {
 			min_delay: self.subscription.delay.min,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
+			update: 0,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -9486,8 +10553,11 @@ impl Establish {
 			served: None,
 			started: false,
 			starts: Default::default(),
+			declared: None,
 			end: None,
 			wanted: None,
+			update: 0,
+			stale: RangeSet::new(),
 			_working: self.session.work().start(),
 		}
 	}
@@ -9937,6 +11007,10 @@ impl kio::Task for TrackServeRun {
 					// Nobody reads the stream track: a datagram reader left behind asks again.
 					if let Some(datagrams) = &mut self.datagrams {
 						datagrams.end(Err(Error::Cancel));
+					}
+
+					if let ServeMode::Establish(establish) = serve_loop.mode {
+						establish.abort(&Error::Cancel);
 					}
 
 					if let Sub::Active(active) = serve_loop.sub {
@@ -10508,11 +11582,21 @@ impl ServeLoop {
 			tail.set_grace(self.serving.tail_grace(pipelined.pref.budget()));
 		}
 		self.parked = Some(pipelined.id());
-		self.serving.seen_subscription(pipelined.pref);
+		self.serving.seen_subscription(Some(pipelined.pref));
 		match pipelined.state {
 			PipelinedState::Opening(establish) => self.mode = ServeMode::Establish(establish),
 			PipelinedState::Open(active) => self.sub = Sub::Active(active),
 		}
+	}
+
+	/// Release a setup that no longer has demand, including the demand it acted on.
+	fn abandon_setup(&mut self) {
+		let ServeMode::Establish(est) = std::mem::replace(&mut self.mode, ServeMode::Select) else {
+			unreachable!()
+		};
+		est.abort(&Error::Cancel);
+		self.held = None;
+		self.serving.seen_subscription(None);
 	}
 
 	/// Apply a demand change: open, update, or cancel the upstream subscription.
@@ -10525,6 +11609,7 @@ impl ServeLoop {
 			self.supports_update,
 		)? {
 			Begin::Establish(est) => {
+				self.linger.set(None);
 				// A fresh subscription may deliver what the last one would not.
 				self.range_fills.forget_refused();
 				self.mode = ServeMode::Establish(est);
@@ -10657,13 +11742,17 @@ impl ServeLoop {
 				// that moved the start makes it stale, and one that
 				// moved back restores it); elsewhere the
 				// request-tracked floor stands rather than a guess.
-				if active.start == active.requested && active.demand.is_some() {
+				active.started = true;
+				// Lite-07 says where every live range starts, so the declaration follows them
+				// whatever an update changed since.
+				if active.live.reports_starts() {
+					active.declare(&mut self.serving);
+				} else if active.start == active.requested && active.demand.is_some() {
 					let _ = match (serve.subscriber.version.resolves_start(), served) {
 						(true, Some(served)) => self.serving.start_resolved(served),
 						_ => self.serving.start_at(served),
 					};
 				}
-				active.started = true;
 				// The groups the SUBSCRIBE asked for below it are not
 				// waited for, whatever the demand asks later. One that
 				// still arrives is delivered, so they are not dropped.
@@ -10701,30 +11790,94 @@ impl ServeLoop {
 					if let Ok(mut tail) = active.tail.write() {
 						tail.expire(now);
 					}
+					active.declare(&mut self.serving);
 				}
 			}
 			// The publisher will never send these groups, so they
 			// are accounted for without a stream, and a reader of
-			// one still arriving ends with the drop's error now.
+			// one still arriving ends with the drop's error now. A
+			// lite-07 stale drop leaves a group whose stream arrived,
+			// since the stream wins over it.
 			lite::SubscribeResponse::Drop(dropped) => {
+				// It can only echo an update this subscriber sent, even when it names nothing.
+				if dropped.update > active.update {
+					return Err(Error::ProtocolViolation);
+				}
 				let groups = dropped.start..dropped.end.saturating_add(1);
-				let err = dropped.error(serve.subscriber.version);
+				// An empty range (Group Start = Group End + 1) names nothing.
+				if groups.is_empty() {
+					return Ok(());
+				}
+				let error = dropped.error(serve.subscriber.version);
+				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every
+				// other drop is final, whatever update it names.
+				let stale = serve.subscriber.version.has_skip() && error == crate::StreamError::Old;
+				// One given up under an update since replaced says nothing of the current terms:
+				// the publisher re-offers it or drops it again under the new number, so it is
+				// still owed, and a reader that wants it fills it by range meanwhile.
+				if !(stale && dropped.update < active.update) {
+					if let Ok(mut tail) = active.tail.write() {
+						tail.account(groups.clone(), serve.subscriber.runtime.now());
+					}
+					match stale {
+						// Judged under the budget this subscriber sent with that update. A
+						// sequence already skipped stays skipped, and one whose group arrived
+						// keeps it, so no update reopens either. A group a fill asked for is
+						// recovered on its own, so the copy does not record it given up meanwhile.
+						true => {
+							let mut given = rangemap::RangeSet::new();
+							given.insert(groups.clone());
+							for asked in active.fill_groups.overlapping(&groups) {
+								given.remove(asked.clone());
+							}
+							// A group whose stream finished under this update was served over
+							// the drop, so it won, even once the cache evicted it.
+							for finished in active.tail.read().finished(groups.clone()) {
+								given.remove(finished);
+							}
+							for given in given.iter() {
+								let recorded = self
+									.serving
+									.give_up(given.clone(), track::Hole::stale(active.max_delay));
+								active.stale.extend(recorded);
+							}
+						}
+						// Final, so no update reopens it, even where it replaces a stale drop.
+						false => {
+							active.stale.remove(groups.clone());
+							self.serving.give_up(groups.clone(), track::Hole::drop(error.clone()));
+						}
+					}
+					self.range_fills.refuse(groups, error);
+				}
+			}
+			// Never produced, so nothing is waited for and no reader ends. A skip is final and
+			// replaces any drop of the same groups, stale or final, so no update reopens them;
+			// a reader a drop already ended stays ended.
+			lite::SubscribeResponse::Skip(skipped) => {
+				let groups = skipped.start..skipped.end.saturating_add(1);
+				// An empty range (Group Start = Group End + 1) names nothing.
+				if groups.is_empty() {
+					return Ok(());
+				}
 				if let Ok(mut tail) = active.tail.write() {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
-				// A group a fill asked for and the live budget dropped as stale is recovered on
-				// its own, so the copy does not record it given up meanwhile.
-				let mut given = rangemap::RangeSet::new();
-				given.insert(groups.clone());
-				if err == crate::StreamError::Old {
-					for asked in active.fill_groups.overlapping(&groups) {
-						given.remove(asked.clone());
-					}
+				active.stale.remove(groups.clone());
+				// A fill owing them is answered: the source never had them.
+				self.range_fills.refuse(groups.clone(), crate::StreamError::NotFound);
+				// A group that arrived was produced after all, so the skip contradicts it: it
+				// keeps the group, and the session goes on, since the draft requires no more.
+				let cached = self.serving.skip_received(groups);
+				if let Some(first) = cached.iter().next() {
+					tracing::warn!(
+						track = %serve.name,
+						start = skipped.start,
+						end = skipped.end,
+						cached = first.start,
+						"protocol error: SUBSCRIBE_SKIP names a group that arrived; keeping the group"
+					);
 				}
-				for given in given.iter() {
-					self.serving.drop_groups(given.clone(), err.clone());
-				}
-				self.range_fills.refuse(groups, err);
 			}
 			// OK just resolves the range (the producer already orders
 			// groups).
@@ -10785,11 +11938,38 @@ impl ServeLoop {
 		loop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
+					let _ = self.fetches.poll(waiter);
+					let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
+					match self
+						.range_fills
+						.poll(serve, &self.serving, Some(&est.tail), read, waiter)
+					{
+						Ok(changed) => est.fills_changed |= changed,
+						Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
+					}
+					// TRACK requesters own a Resolving handle through metadata acceptance
+					// until they attach a reader or cancel. That ownership is demand too,
+					// so no observed-arrival history is needed to bridge the handoff.
+					// Older wires obtain metadata on SUBSCRIBE itself.
+					if serve.subscriber.version.has_track_stream()
+						&& self.fetches.is_empty()
+						&& self.range_fills.is_empty()
+						&& !read
+					{
+						self.abandon_setup();
+						continue;
+					}
 					let res = ready!(est.poll(waiter));
 					let id = est.id;
+					let fills_changed = est.fills_changed;
 					self.mode = ServeMode::Select;
 					match res {
-						Ok(active) => self.sub = Sub::Active(active),
+						Ok(active) => {
+							self.sub = Sub::Active(active);
+							if fills_changed && let Err(err) = self.begin(serve, self.serving.subscription()) {
+								return Poll::Ready(ServeEnd::GiveBack(err));
+							}
+						}
 						Err(err) => {
 							// Opening the upstream failed (usually the session dying): hand
 							// the track back for another route to resume.
@@ -10964,7 +12144,9 @@ impl ServeLoop {
 						{
 							active.wanted = Some(wanted);
 							let ranges = active.live.unchanged();
-							if let Err(err) = buffer_update(active, ranges) {
+							if let Err(err) =
+								buffer_update(active, ranges, &self.serving, serve.subscriber.runtime.now())
+							{
 								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 							continue;
@@ -11113,6 +12295,8 @@ struct FillServeRun {
 	fill: track::Fill,
 	info: FetchInfo,
 	run: Option<(u64, FetchServeRun)>,
+	/// The group the last run answered.
+	last: Option<u64>,
 }
 
 impl Drop for FillServeRun {
@@ -11132,6 +12316,7 @@ impl FillServeRun {
 			fill,
 			info,
 			run: None,
+			last: None,
 		}
 	}
 }
@@ -11141,25 +12326,24 @@ impl kio::Task for FillServeRun {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let last = match &mut self.run {
-				Some((sequence, run)) => {
-					ready!(run.poll(waiter));
-					let sequence = *sequence;
-					self.run = None;
-					Some(sequence)
-				}
-				None => None,
-			};
+			if let Some((sequence, run)) = &mut self.run {
+				ready!(run.poll(waiter));
+				self.last = Some(*sequence);
+				self.run = None;
+			}
 			// Withdrawn: nobody waits on what is left, so it records nothing.
 			if self.fill.poll_withdrawn(waiter).is_ready() {
 				return Poll::Ready(());
 			}
+			// The next fetch waits for a reader to pick up the group the last one brought, so a
+			// fill wider than the cache never evicts its own groups before they are read.
+			ready!(self.fill.poll_paced(waiter));
 			let Some(sequence) = self.fill.wanted() else {
 				return Poll::Ready(());
 			};
 			// Every run answers its group, so the same one coming back is a bug; ending the
 			// fill names it dropped rather than fetching it forever.
-			if last == Some(sequence) {
+			if self.last == Some(sequence) {
 				debug_assert!(false, "fill group {sequence} left unanswered");
 				return Poll::Ready(());
 			}

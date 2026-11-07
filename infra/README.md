@@ -10,6 +10,7 @@ infrastructure.
 | `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
 | `infra/mbx` |                 | `mbx-moq-dev`   | Private Rust build cache for CI         |
 | `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
+| `infra/corpus` | `corpus.moq.dev` | `corpus-moq-dev`, `corpus-private-moq-dev` | Video-quality corpus |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
 small TypeScript handler. The apt and rpm workers proxy GETs out of the R2
@@ -18,7 +19,8 @@ file kind, and the nix worker does the same across its two buckets. The
 moq.sh worker serves `install.sh` from its bundle at every path, with the
 newest `moq-cli` release filled in as the default version.
 `infra/mbx` has no Worker: CI reaches its bucket directly through mbx's S3
-client.
+client. `infra/corpus` has none either: R2 serves the open bucket on its custom
+domain, and CI reads the private one over S3.
 
 ## Deploying a worker
 
@@ -57,7 +59,8 @@ names the Environment, and a branch that is not on the list fails to start it.
 | `publish` | `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
 | `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
 | `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
-| `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
+| `corpus` | `main` | The private corpus's read key ([below](#bootstrapping-the-video-corpus)) |
+| `npm` | `release` | Nothing; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
 | `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |
 | `github-pages` | `main` | Nothing |
@@ -66,21 +69,19 @@ names the Environment, and a branch that is not on the list fails to start it.
 that names `publish` runs that way: a tag's own run calls its publishers as
 reusable workflows or dispatches them with `--ref` naming the tag or `release`
 (`sh/gh/trigger-repo-publish.sh`). The `workflow_run` publishers that remain
-need only the moq-bot key and name `bot`. `publish` keeps admitting `main`
-until [the maintainer drops it](../quest/m0/ci/publish-release-only.md).
+need only the moq-bot key and name `bot`. `publish` admits only `release` and
+the release tags.
 A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the merge queue's
 build holds no secrets, and the queue watcher runs on the maintainer's host, outside Actions. A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
 'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
-repository level.
+repository level, unless what they read is private.
 
 A tag policy only helps if the tag itself is protected, so the `release tags`
 ruleset ([below](#bootstrapping-the-nix-cache)) also covers `moq-ffi-v*`
 and `moq-dart-v*`. A `workflow_run` job that checks out the triggering commit
 first requires its `head_branch` to be such a tag at that commit, since a
-branch can share a release's name. JSR's GitHub trust checks only the repository, not an
-Environment, so `release-js` publishes to JSR with `JSR_TOKEN` instead and the
-JSR packages do not trust the repository.
+branch can share a release's name.
 
 ## Bootstrapping a new package repository
 
@@ -185,7 +186,7 @@ is done for `main`.
    just infra mbx create
    ```
 
-   `lifecycle.json` deletes every object 30 days after upload and aborts
+   `lifecycle.json` deletes every object 14 days after upload and aborts
    multipart uploads left incomplete for a day. mbx writes each compilation
    once and never refreshes it, so a result still in use expires too; the
    next writer that misses it compiles and uploads it again. After editing
@@ -371,3 +372,51 @@ secrets.
 To rotate the key, run `keygen` again and add the new public key next to the
 old one in `flake.nix`. Drop the old key once nothing signed with it matters:
 30 days for CI paths, but never for released ones unless they are re-signed.
+
+## Bootstrapping the video corpus
+
+The nightly video-quality job, which [the harness
+quest](../quest/m3/video-quality/harness.md) adds, reads its clips from two
+buckets.
+`corpus-moq-dev` holds open clips and is public at `corpus.moq.dev`.
+`corpus-private-moq-dev` holds clips that cannot be redistributed. It has no
+custom domain and its r2.dev URL is off, since R2's public access exposes a
+whole bucket. The harness's manifest records each object's sha256, so a
+replaced clip fails the run. Uploading clips is a maintainer action.
+
+The private bucket's read key lives in the `corpus` Environment, deployable
+from `main` only. A dispatched run uses the workflow file from the branch it
+names, so a job-level `if` cannot keep the key from other branches.
+
+All of this runs once, by a maintainer. All four steps are done.
+
+1. **Create the buckets and the custom domain** under your `wrangler login`:
+
+   ```bash
+   just infra corpus create
+   ```
+
+2. **Create one R2 API token** in the dashboard (R2 -> Manage API tokens ->
+   Create Account API token) with **Object Read only** on
+   `corpus-private-moq-dev` only. Wrangler cannot create R2 tokens. It must
+   not share write credentials with the caches.
+
+3. **Create the `corpus` Environment**, deployable from `main` only:
+
+   ```bash
+   gh api -X PUT repos/moq-dev/moq/environments/corpus --input - <<'EOF'
+   {"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+   EOF
+   gh api -X POST repos/moq-dev/moq/environments/corpus/deployment-branch-policies \
+     -f name=main -f type=branch
+   ```
+
+4. **Store the key** in it:
+
+   ```bash
+   gh secret set CORPUS_R2_ACCESS_KEY_ID --env corpus --repo moq-dev/moq
+   gh secret set CORPUS_R2_SECRET_ACCESS_KEY --env corpus --repo moq-dev/moq
+   ```
+
+   The endpoint is `https://dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com`,
+   as for mbx, so no account id secret is needed.

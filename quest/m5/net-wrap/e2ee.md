@@ -21,8 +21,7 @@ the reverse (decided 2026-10-20, maintainer):
   typed codes (such as an authentication failure) distinguishable rather
   than collapsing into `Error::Dropped`.
 - Datagrams: the wrapper's datagram producer and consumer match the
-  separate datagram types of
-  [Datagram tracks](/quest/m1/datagram-tracks/README.md), so the trait read
+  separate datagram track types, so the trait read
   yields only authenticated datagrams. A datagram that fails authentication, or a duplicate, is
   dropped there and the track continues. The draft's `authentication`
   event stays on moq-crypto's own consumer, outside the trait, for callers
@@ -63,10 +62,9 @@ the reverse (decided 2026-10-20, maintainer):
   Subscribe ID, Sequence, and Timestamp, since datagram tracks dropped the
   relayed `ietf` fields and the Inflated Size from it, so
   `MAX_DATAGRAM_HEADER` (28, `rs/moq-crypto/src/e2ee/limits.rs` and
-  `js/crypto/src/e2ee/limits.ts`) covers every version. Re-check it if
-  moq-transport datagram tracks
-  ([moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md)) add
-  header fields.
+  `js/crypto/src/e2ee/limits.ts`) covers moq-lite. [moq-dev/moq#7959](https://github.com/moq-dev/moq/pull/7959)
+  restores moq-transport datagrams using existing OBJECT_DATAGRAM framing,
+  without adding header fields. Re-check the allowance if that framing changes.
 - Ranges: every moq-net range starts at a group's first frame
   ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)), so the wrapper reads each physical group whole
   and inflates from frame 0.

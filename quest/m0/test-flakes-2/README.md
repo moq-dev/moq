@@ -49,7 +49,7 @@ The `rust-swapped -> js` and `rust -> js` browser audio timeouts were a lite-06
 catalog group dropped mid-read ending the player's catalog, fixed by
 [moq-dev/moq#6820](https://github.com/moq-dev/moq/pull/6820).
 
-moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
+moq-webrtc's session-end test was never load-bound: on the paused clock, dimpl's
 randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
 fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
 
@@ -86,6 +86,13 @@ explains. That batch predates #7658's merge at 15:56Z, and no queue run since
 has failed it, so it needs no child of its own (noted 2026-11-03,
 `/quest-plan`).
 
+The JS reload close-drain test lost a race in the lite-07 publisher: the
+subscriber's FIN after reading the tail could land while a reply write, such as
+SUBSCRIBE_FINISH, still yielded on the write budget. That exit stopped owing the
+opened group streams, so a draining close aborted a final group whose FIN was
+still in flight. Every exit now owes them, fixed by
+[moq-dev/moq#8047](https://github.com/moq-dev/moq/pull/8047).
+
 Added 2026-11-03 (maintainer, `/quest-plan`): five more merge-queue failures
 from 2026-11-03 and early 2026-11-04 UTC, one child each.
 
@@ -95,15 +102,57 @@ test, which failed two merge-queue batches and two loaded local runs.
 Added 2026-11-05 (maintainer, `/quest-audit`): Interop's P2P data-channel
 timeout, one child.
 
+Added 2026-11-06: `js/net`'s lite-06 datagram end/close case, from `Check` on
+[moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981).
+
+Added 2026-11-05 (maintainer, `/quest-complete` follow-ups): moq-net's
+pool-debt flight test, the Python audio playout-delay test, and the io_uring
+tests' shared locked-memory budget, one child each. The pool-debt test
+overshot because shed frames whose payload canonical content owned stayed
+billed until crossbeam-epoch reclamation, which other tests' reads in the same
+process held back; eviction now lets go of that content itself, fixed by
+[moq-dev/moq#8052](https://github.com/moq-dev/moq/pull/8052).
+
+moq-ffi's concurrent-ready test drained its reader until the group ended, which
+an unfinished group never does. Its `ffi_caught_up` returned without yielding
+whenever the FFI runtime answered first, so under load the woken `ready` calls
+missed their turn until every frame was read. Fixed by reading at most what was
+written and yielding after each read, in
+[moq-dev/moq#8053](https://github.com/moq-dev/moq/pull/8053).
+
+The Python audio playout-delay test was never a decoder stall: under its default
+zero max delay, a read more than the 80 ms warmup late found the first frame's
+group stale, and the warmup then trimmed all the audio left. The test now asks
+for no max delay, fixed by [moq-dev/moq#8050](https://github.com/moq-dev/moq/pull/8050).
+
+Added 2026-11-06: `js/net`'s flate tail-shed test, which timed out in a
+merge-queue batch. It was CPU-bound, not racy: 100 one-MiB frames of pako
+deflate and inflate against a 32 MiB tail budget that sheds from the 33rd. It
+now writes four frames past the budget, fixed by
+[moq-dev/moq#8137](https://github.com/moq-dev/moq/pull/8137).
+
+Added 2026-11-06 (maintainer's standing rule that flakes join this epic):
+`js/net`'s datagram-end close case, which failed
+[moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check while
+reproducing on unchanged `main`. Its end waited a host task when the
+publisher's write budget yielded under load while writing SUBSCRIBE_FINISH, past
+the case's microtask drain. [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000)
+stubbed that budget, merging after the quarantine was written. The case was
+re-enabled in [moq-dev/moq#8110](https://github.com/moq-dev/moq/pull/8110).
+
+`sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
+landing just after the dispatcher's `wait -n` returned left Bash marking the
+exit trap's next `wait` as interrupted, so it returned 143 at once and errexit
+skipped the timing report. A TERM landing after a lane forked but before
+`running` recorded it left that lane uncancelled and the exit trap's `wait`
+hung. The exit trap now waits again, and cancellation reads the job table,
+fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [The draft-22 wider-fill refusal test is deterministic](/quest/m0/test-flakes-2/ietf-wider-fill.md) - fix its intermittent live-group reset and re-enable both ordering cases without weakening their assertions
-- [moq-gst's interleaved restart test passes under load](/quest/m0/test-flakes-2/gst-reconnect-interleave.md) - `restarts_under_reconnects_interleave_on_one_pad` passes in loaded runs and the merge queue, its missed delivery and its stray `Eos` each fixed at the cause
-- [reload.test.ts's close-drain tests pass under load](/quest/m0/test-flakes-2/reload-close-drain.md) - the drain cases in `js/net`'s reload tests pass in loaded multi-file runs
-- [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
-- [Diagnose and re-enable the FFI datagram connection test](/quest/m0/test-flakes-2/ffi-datagram-roundtrip.md) - diagnose the default-connection timeout and re-enable the quarantined test
-- [Test PulseAudio servers stay off the desktop's D-Bus](/quest/m0/test-flakes-2/pulse-dbus.md) - concurrent media runs on one desktop never collide on `org.PulseAudio1`
-- [The P2P data-channel test transfers its frame](/quest/m0/test-flakes-2/p2p-data-channel.md) - Interop's two-peer data-channel test stops stalling after a failed send
+- [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
+- [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
+- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load

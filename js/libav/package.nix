@@ -138,7 +138,7 @@ stdenvNoCC.mkDerivation {
     cp ${wasm}/* $out/
     install -Dm444 ${./README.md} $out/README.md
     install -Dm444 ${./index.d.ts} $out/index.d.ts
-    jq 'del(.scripts, .devDependencies, .jsr)
+    jq 'del(.scripts, .devDependencies)
       | .exports |= walk(if type == "string" then sub("^\\./dist/"; "./") else . end)' \
       ${./package.json} > $out/package.json
     runHook postInstall
