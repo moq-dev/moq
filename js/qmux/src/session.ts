@@ -17,7 +17,7 @@ import * as Frame from "./frame.ts";
 import { DEFAULT_TRANSPORT_PARAMS, usesRecords } from "./frame.ts";
 import { RecvStream } from "./recv.ts";
 import { RecvOpen } from "./recv-open.ts";
-import { DEFAULT_SEND_ORDER, SendScheduler, type SendSink, WritableStreamSink } from "./scheduler.ts";
+import { BacklogSink, DEFAULT_SEND_ORDER, SendScheduler, type SendSink, WritableStreamSink } from "./scheduler.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 import {
@@ -433,9 +433,8 @@ export interface SessionOptions extends WebTransportOptions {
 	config?: Config;
 
 	/** Initial send-buffer high-water mark in bytes, used for write
-	 *  backpressure. Only takes effect when falling back to the
-	 *  `WebSocketStream` ponyfill (no native `WebSocketStream`); the
-	 *  native API sizes its own send buffer. Defaults to 64 KiB.
+	 *  backpressure: past it, writes wait and datagrams are dropped.
+	 *  Defaults to 64 KiB.
 	 *
 	 *  For best throughput *and* prioritization, set this to roughly the
 	 *  bandwidth-delay product (RTT × estimated throughput) and adjust it at
@@ -461,7 +460,7 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 	protocol?: string;
 }
 
-/** Default send-buffer high-water mark (bytes) for the WebSocketStream ponyfill. */
+/** Default send-buffer high-water mark (bytes). */
 const DEFAULT_SEND_BUFFER_SIZE = 64 * 1024;
 
 /** How long a closing session waits for a backed-up socket to take its close
@@ -636,11 +635,13 @@ interface StreamFlowState {
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
 export default class Session implements WebTransport {
-	// The transport: a native `WebSocketStream` when the platform has one (real
-	// backpressure), otherwise the `WebSocketStream` ponyfill over a plain
-	// `WebSocket` (bufferedAmount-based backpressure). Either way, one API.
+	// The transport: a native `WebSocketStream` when the platform has one,
+	// otherwise the `WebSocketStream` ponyfill over a plain `WebSocket`. Either
+	// way, one API.
 	#wss?: WebSocketStreamLike;
 	#scheduler?: SendScheduler;
+	// Counts the send backlog of any transport but the ponyfill, which counts its own.
+	#backlog?: BacklogSink;
 	#sendBufferSize: number;
 	// The stream-id role: false dials (client), true accepts (server). Set by
 	// [[Session.accept]]; every id we mint and every id we allow the peer to mint
@@ -811,10 +812,9 @@ export default class Session implements WebTransport {
 
 		this.#attach(
 			dial
-				? // Open the transport via `WebSocketStream` - native when present (real
-					// backpressure), else the ponyfill over a plain `WebSocket`. One code
-					// path for both, so the path exercised in tests is the one Chromium
-					// runs natively.
+				? // Open the transport via `WebSocketStream` - native when present, else
+					// the ponyfill over a plain `WebSocket`. One code path for both, so the
+					// path exercised in tests is the one Chromium runs natively.
 					openWebSocketStream(toWebSocketUrl(source as string | URL), {
 						protocols: subprotocols,
 						highWaterMark: this.#sendBufferSize,
@@ -871,7 +871,12 @@ export default class Session implements WebTransport {
 						this.#transportClose();
 						return;
 					}
-					this.#startSession(protocol, new WritableStreamSink(conn.writable));
+					// Only the ponyfill's `desiredSize` measures bytes; the native API's counts
+					// writes, so it would read as backpressured with any write in flight.
+					let sink: SendSink;
+					if (wss instanceof WebSocketStream) sink = new WritableStreamSink(conn.writable);
+					else sink = this.#backlog = new BacklogSink(conn.writable, this.#sendBufferSize);
+					this.#startSession(protocol, sink);
 					void this.#readLoop(conn.readable.getReader());
 				} catch (error) {
 					this.#closeReason ??= error instanceof Error ? error : new Error("Invalid QMux subprotocol");
@@ -2159,13 +2164,11 @@ export default class Session implements WebTransport {
 	 *  backpressure. A QMux extension beyond the standard `WebTransport` API:
 	 *  set this to roughly the bandwidth-delay product (RTT × estimated
 	 *  throughput) to keep the pipe full while leaving as much queued data as
-	 *  possible reprioritizable by the send scheduler.
-	 *
-	 *  No-op when a native `WebSocketStream` is in use (it sizes its own send
-	 *  buffer); effective with the `WebSocketStream` ponyfill fallback. */
+	 *  possible reprioritizable by the send scheduler. */
 	setSendBufferSize(bytes: number) {
 		this.#sendBufferSize = Math.max(1, Math.floor(bytes));
 		this.#wss?.setHighWaterMark?.(this.#sendBufferSize);
+		this.#backlog?.setHighWaterMark(this.#sendBufferSize);
 	}
 
 	/** Always `"default"`: the underlying TCP connection does its own congestion control. */
