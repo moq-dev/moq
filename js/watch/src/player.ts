@@ -31,7 +31,7 @@ export type PlayerInput = {
 	/** Playback distance from the live edge. */
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
-	buffer: Getter<Milli>;
+	lookahead: Getter<Milli>;
 	/** Video rendition and canvas output. */
 	video: {
 		/** Desired video rendition or quality limits. */
@@ -112,6 +112,7 @@ export class Player {
 		for (const renamed of ["reload", "announced"]) {
 			if (renamed in props) throw new Error(`Watch.Player: \`${renamed}\` was renamed to \`follow\``);
 		}
+		if ("buffer" in props) throw new Error("Watch.Player: `buffer` was renamed to `lookahead`");
 		this.in = {
 			origin: getter(props.origin),
 			name: getter(props.name ?? Path.empty()),
@@ -122,7 +123,7 @@ export class Player {
 			probe: getter(props.probe),
 			paused: getter(props.paused ?? false),
 			delay: getter(props.delay ?? "auto"),
-			buffer: getter(props.buffer ?? Milli.zero),
+			lookahead: getter(props.lookahead ?? Milli.zero),
 			video: {
 				target: getter<Video.Target | undefined>(props.video?.target),
 				canvas: getter(props.video?.canvas),
@@ -166,7 +167,7 @@ export class Player {
 		this.text = new Text.Source({ broadcast: this.broadcast, target: this.in.text.target });
 		this.#signals.cleanup(() => this.text.close());
 
-		this.sync = new Sync({ delay: this.in.delay, buffer: this.in.buffer });
+		this.sync = new Sync({ delay: this.in.delay, lookahead: this.in.lookahead });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.video = new Video.Decoder({ source: videoSource, sync: this.sync, enabled: this.#videoEnabled });

@@ -6,13 +6,15 @@ The server, its socket, and its configuration live under --dir, and only the
 command's process tree sees them: the desktop sound server and its settings are
 untouched, and no physical device is opened. ALSA's default PCM routes to the
 server, so the production ALSA/cpal backend plays into the null sink, which
-clocks it in real time. Exits with the command's status.
+clocks it in real time. SIGINT and SIGTERM go to the command, and this exits
+with its status.
 """
 
 import argparse
 import os
 import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -94,8 +96,13 @@ def run():
         # The rest of its log is drained into the file, so a full pipe never stalls it.
         forward = threading.Thread(target=shutil.copyfileobj, args=(pulse.stderr, log), daemon=True)
         forward.start()
+        child = subprocess.Popen(command, env=env)
+        # Ctrl-C and termination are the command's to handle, such as a player writing its last
+        # metrics sample, so the server outlives it and the command's status stands.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, lambda signum, _frame: child.send_signal(signum))
         try:
-            return subprocess.run(command, env=env).returncode
+            return child.wait()
         finally:
             pulse.terminate()
             try:
