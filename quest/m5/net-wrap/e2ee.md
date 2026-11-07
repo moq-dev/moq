@@ -21,8 +21,7 @@ the reverse (decided 2026-10-20, maintainer):
   typed codes (such as an authentication failure) distinguishable rather
   than collapsing into `Error::Dropped`.
 - Datagrams: the wrapper's datagram producer and consumer match the
-  separate datagram types of
-  [Datagram tracks](/quest/m1/datagram-tracks/README.md), so the trait read
+  separate datagram track types, so the trait read
   yields only authenticated datagrams. A datagram that fails authentication, or a duplicate, is
   dropped there and the track continues. The draft's `authentication`
   event stays on moq-crypto's own consumer, outside the trait, for callers

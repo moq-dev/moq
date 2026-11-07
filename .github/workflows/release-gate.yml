@@ -140,6 +140,8 @@ jobs:
               - "test/max-age/**"
               - "test/portrait/**"
               - "rs/moq-tokio/tests/integration/max_age.rs"
+              - "test/datagram-tracks/**"
+              - "rs/moq-tokio/tests/integration/datagram_tracks.rs"
               - "test/stream-limits/**"
               - "rs/moq-tokio/tests/integration/stream_limits.rs"
               - "test/relay-fill/**"
