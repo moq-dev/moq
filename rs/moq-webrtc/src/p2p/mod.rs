@@ -532,8 +532,7 @@ impl Peer {
 			role,
 			max_message,
 			channel: None,
-			waiter: None,
-			taken: false,
+			handout: Handout::Unasked,
 		};
 		use tracing::Instrument;
 		tokio::spawn(moq_tokio::panic::isolate(driver.run()).instrument(tracing::Span::current()));
@@ -638,10 +637,17 @@ struct Driver {
 	/// The remote peer's SCTP message limit, once its description is applied.
 	max_message: Option<u64>,
 	channel: Option<Result<Open, Error>>,
-	/// The session waiting for the channel to open.
-	waiter: Option<oneshot::Sender<Result<Opened, Error>>>,
-	/// Whether a session already asked for the channel, which only one may carry.
-	taken: bool,
+	handout: Handout,
+}
+
+/// Which session the channel goes to: only one may carry it.
+enum Handout {
+	/// No session asked for the channel yet.
+	Unasked,
+	/// A session waits for the channel to open or fail to.
+	Waiting(oneshot::Sender<Result<Opened, Error>>),
+	/// A session took the channel, or heard why it never opened.
+	Taken,
 }
 
 impl Driver {
@@ -679,7 +685,7 @@ impl Driver {
 			Error::Closed => tracing::debug!("peer connection closed"),
 			err => tracing::debug!(%err, "peer connection failed"),
 		}
-		if let Some(waiter) = self.waiter.take() {
+		if let Handout::Waiting(waiter) = self.handout {
 			let _ = waiter.send(Err(err));
 		}
 	}
@@ -743,12 +749,11 @@ impl Driver {
 			}
 			Command::Candidate(candidate) => self.agent.rtc_mut().add_remote_candidate(candidate),
 			Command::Channel(reply) => {
-				if self.taken {
+				if !matches!(self.handout, Handout::Unasked) {
 					let _ = reply.send(Err(Error::Taken));
 					return;
 				}
-				self.taken = true;
-				self.waiter = Some(reply);
+				self.handout = Handout::Waiting(reply);
 				self.deliver();
 			}
 		}
@@ -868,7 +873,9 @@ impl Driver {
 		let Some(channel) = &mut self.channel else {
 			return;
 		};
-		let Some(waiter) = self.waiter.take() else {
+		let handout = std::mem::replace(&mut self.handout, Handout::Taken);
+		let Handout::Waiting(waiter) = handout else {
+			self.handout = handout;
 			return;
 		};
 		let result = match channel {
