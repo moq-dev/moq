@@ -17,10 +17,13 @@ It is quarantined with `#[ignore]` until this quest fixes it, per AGENTS.md.
 The test starts a session against an unreachable URL, stops it, starts a
 second one, and asserts that failing the first session's completion leaves
 the second's open and the pad relinked to it. Reproduce it under stress
-first and record which assertion fails, then fix the cause: a state
-transition that returns before the old session's task lets go of the pad,
-or a second session that hasn't linked its pad by the time `Paused`
-returns. Fix it in the sink, not by waiting in the test, and prove it with
-a test that forces the losing order.
+first and record which assertion fails; that decides whether the sink or
+the test is wrong. Candidates: a state transition that returns before the
+old session's task lets go of the pad; a second session that hasn't linked
+its pad by the time `Paused` returns; or the old session's status task
+failing its own completion during shutdown before `stale.fail()` runs, which
+breaks the test's assumption rather than the sink. Fix a sink defect in the
+sink, never by waiting in the test, and prove it with a test that forces
+the losing order.
 
 Public API: none. Wire: none.
