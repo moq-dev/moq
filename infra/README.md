@@ -66,8 +66,8 @@ names the Environment, and a branch that is not on the list fails to start it.
 that names `publish` runs that way: a tag's own run calls its publishers as
 reusable workflows or dispatches them with `--ref` naming the tag or `release`
 (`sh/gh/trigger-repo-publish.sh`). The `workflow_run` publishers that remain
-need only the moq-bot key and name `bot`. `publish` keeps admitting `main`
-until [the maintainer drops it](../quest/m0/ci/publish-release-only.md).
+need only the moq-bot key and name `bot`. `publish` admits only `release` and
+the release tags.
 A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the merge queue's
 build holds no secrets, and the queue watcher runs on the maintainer's host, outside Actions. A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&

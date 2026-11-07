@@ -601,11 +601,12 @@ mod tests {
 	}
 
 	/// Another instance taking over while a wait resolves is the one it hands out, so the
-	/// restart the origin holds for it must not hand it out again while the caller holds it.
-	#[kio::test]
-	async fn announced_hands_out_a_held_takeover_once() {
+	/// restart that announced it must not hand it out again while the caller holds it.
+	/// `dynamic_at` is where the route the wait first resolves through covers the path: above
+	/// it, the takeover's restart lands while resolving; at it, the origin holds that restart.
+	async fn hands_out_a_takeover_once(dynamic_at: &str) {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let dynamic = origin.route_prefix(dynamic_at, RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over under another instance.
@@ -614,6 +615,36 @@ mod tests {
 			origin.route("live", RouteOptions::default()).unwrap()
 		});
 		none(&mut announced).await;
+	}
+
+	#[kio::test]
+	async fn announced_hands_out_a_takeover_once_while_resolving() {
+		hands_out_a_takeover_once("").await;
+	}
+
+	#[kio::test]
+	async fn announced_hands_out_a_held_takeover_once() {
+		hands_out_a_takeover_once("live").await;
+	}
+
+	/// Dropping a handed-out takeover changes nothing about the path, so the follower hands
+	/// out nothing until another instance takes over. The takeover's restart reached the
+	/// follower before its resolution handed it out, so no restart is owed.
+	#[kio::test]
+	async fn announced_waits_for_another_instance_after_a_dropped_takeover() {
+		let origin = Hop::new(1).unwrap().produce();
+		let dynamic = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+
+		let (takeover, _publish) = futures::join!(available(&mut announced), async {
+			let _unanswered = requested(&dynamic).await;
+			origin.route("live", RouteOptions::default()).unwrap()
+		});
+		drop(takeover);
+		none(&mut announced).await;
+
+		let next = origin.route("live", RouteOptions::default()).unwrap();
+		assert_eq!(available(&mut announced).await.info().instance, Some(next.instance()));
 	}
 
 	/// The route a wait resolves through leaving, and another instance arriving before it

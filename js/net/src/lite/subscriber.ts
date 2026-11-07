@@ -34,7 +34,7 @@ import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { Deadline } from "../util/deadline.ts";
-import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
+import { isUnrequested, unrequested, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
@@ -1136,11 +1136,11 @@ export class Subscriber {
 			for (;;) {
 				const ready = await this.#auth?.ready(broadcast, "subscribe", {
 					signal: consumed.valid,
-					until: () => abandoned(request.demand()),
+					until: () => unrequested(request),
 				});
 				if (ready !== false) break;
 				// Demand returning before we commit is not abandonment, matching the serving loop.
-				if (!isAbandoned(request.demand())) continue;
+				if (!isUnrequested(request)) continue;
 				request.reject(new Error("subscribe abandoned before it was authorized"));
 				return;
 			}
@@ -1197,21 +1197,20 @@ export class Subscriber {
 		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, msg, ranges, request, id, deadline);
 
-		// The readers leaving gives the setup up, even while its streams wait for credit. An
-		// info-only lookup attaches no reader, so only demand that arrived and left counts.
+		// Subscribers and info lookups explicitly own setup, including the handoff from
+		// metadata acceptance to reader attachment. Release it when the last owner leaves.
 		const left = new AbortController();
 		const demand = request.demand();
-		let arrived = false;
+		const wanted = hooks.requestWanted(request);
 		let unwatch: Dispose | undefined;
 		const watch = () => {
-			if (demand.wanted.peek() !== undefined) arrived = true;
-			if (hooks.demandReleased(demand).peek() !== undefined || (arrived && demand.wanted.peek() === undefined)) {
+			if (isUnrequested(request)) {
 				left.abort(
 					new StreamError(StreamCode.Cancel, { message: "subscribe abandoned before it was accepted" }),
 				);
 				state.cancel.abort(left.signal.reason);
 			} else {
-				unwatch = Signal.race(demand.wanted, hooks.demandReleased(demand)).changed(watch);
+				unwatch = Signal.race(wanted, hooks.demandReleased(demand)).changed(watch);
 			}
 		};
 		watch();

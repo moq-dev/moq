@@ -115,7 +115,6 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
-- [Datagram tracks](/quest/m1/datagram-tracks/README.md) - lite-07 subscribes to datagram tracks through their own request, and datagrams carry their own sequence
 
 ## Related
 
