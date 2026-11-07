@@ -787,8 +787,7 @@ pub mod rtp {
 	pub use crate::vendor::str0m::rtp_::{Extension, ExtensionMap, ExtensionSerializer};
 
 	pub use crate::vendor::str0m::packet::{
-		RedBlock, RedDecoder, RedEncoder, RedundantBlock, Vp8Descriptor, Vp8DescriptorError, Vp8Patch, Vp8PatchBuilder,
-		Vp8PatchError,
+		Vp8Descriptor, Vp8DescriptorError, Vp8Patch, Vp8PatchBuilder, Vp8PatchError,
 	};
 	pub use crate::vendor::str0m::rtp_::{RtpHeader, SeqNo, Ssrc, VideoOrientation};
 	pub use crate::vendor::str0m::streams::{RtpPacket, RtpWrite, StreamPaused, StreamRx, StreamTx, StreamTxQueueInfo};

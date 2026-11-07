@@ -18,7 +18,6 @@ use crate::vendor::str0m::media::Media;
 use crate::vendor::str0m::media::{KeyframeRequestKind, MID_PROBE};
 use crate::vendor::str0m::media::{MediaAdded, MediaChanged};
 use crate::vendor::str0m::pacer::NullPacer;
-use crate::vendor::str0m::packet::{RedBlock, RedDecoder, red_same_pt_blocks};
 use crate::vendor::str0m::poll::Wake;
 use crate::vendor::str0m::rtp::{Extension, RawPacket};
 use crate::vendor::str0m::rtp_::Direction;
@@ -380,11 +379,10 @@ impl Session {
 		};
 
 		// Figure out which payload the PT maps to. Either main or RTX.
-		let maybe_payload = self.codec_config.iter().find(|p| {
-			p.pt() == header.payload_type
-				|| p.resend() == Some(header.payload_type)
-				|| p.red() == Some(header.payload_type)
-		});
+		let maybe_payload = self
+			.codec_config
+			.iter()
+			.find(|p| p.pt() == header.payload_type || p.resend() == Some(header.payload_type));
 
 		// If we don't find it, bail out.
 		let Some(payload) = maybe_payload else {
@@ -400,9 +398,8 @@ impl Session {
 			self.streams
 				.map_dynamic_by_rid(header.ssrc, midrid, media, *payload, is_main);
 		} else {
-			// Case B - the payload type identifies RTX. RED rides the main SSRC, so a RED
-			// PT is also "main".
-			let is_main = payload.pt() == header.payload_type || payload.red() == Some(header.payload_type);
+			// Case B - the payload type identifies RTX.
+			let is_main = payload.pt() == header.payload_type;
 
 			let midrid = MidRid(mid, None);
 
@@ -450,12 +447,11 @@ impl Session {
 				return;
 			}
 		};
-		let clock_rate = params.spec().rtp_clock_rate();
+		let clock_rate = params.spec().clock_rate;
 		let pt = params.pt();
-		let is_red = params.red() == Some(header.payload_type);
 		// RTX padding may use the main payload type, so an associated RTX SSRC takes precedence.
 		let repair_ssrc = stream.as_ref().and_then(|s| s.rtx());
-		let is_repair = repair_ssrc == Some(header.ssrc) || (!is_red && pt != header.payload_type);
+		let is_repair = repair_ssrc == Some(header.ssrc) || pt != header.payload_type;
 		let history = self.max_rx_seq_lookup.get(&header.ssrc);
 		let mut seq_no = if let Some(stream) = &mut stream {
 			let max_seq_lookup = make_max_seq_lookup(&self.max_rx_seq_lookup);
@@ -542,14 +538,6 @@ impl Session {
 		// Register reception in nack registers.
 		let receipt_outer = stream.update_register(now, &header, clock_rate, is_repair, seq_no);
 
-		// RED-recovered packets (frame mode) are collected here and delivered after the
-		// primary, filling single-packet losses from the next packet's redundancy.
-		let mut red_recovered: Vec<(RtpHeader, Arc<[u8]>, SeqNo, MediaTime)> = Vec::new();
-
-		// Capture the full wire payload length before RED unwrapping narrows `data` to the primary
-		// block. The sender counts the whole RED-wrapped payload, so receive stats must too.
-		let wire_payload_len = data.len();
-
 		// RTX packets must be rewritten to be a normal packet. This only changes the
 		// the seq_no, however MediaTime might be different when interpreted against the
 		// the "main" register.
@@ -577,49 +565,6 @@ impl Session {
 			// Now update the "main" register with the repaired packet info.
 			let receipt = stream.update_register(now, &header, clock_rate, false, seq_no);
 			(receipt, data)
-		} else if is_red && !self.rtp_mode {
-			// Frame mode: RED rides the main SSRC/seq. Decode to the primary (Opus) payload
-			// and rewrite the header PT; drop the packet if the RED structure is malformed.
-			let Some(un) = un_red(&mut header, data, pt) else {
-				return;
-			};
-			// Each redundant block carries an earlier frame. Place it at the sequence number it
-			// belongs to (derived from its timestamp and the packets received around it, see
-			// `StreamRx::red_locate_seq`) and, if that is still missing, deliver it as a
-			// recovered packet so a loss is filled without a retransmission. Only same-PT blocks
-			// are considered: RFC 2198 permits a redundant block of another codec, which must
-			// never be fed to this depayloader.
-			for b in red_same_pt_blocks(&un.redundant, *pt) {
-				// Skip recovery (rather than inject a bad timestamp) if the offset somehow
-				// exceeds the primary's extended media time.
-				let Some(numer) = receipt_outer.time.numer().checked_sub(b.timestamp_offset as u64) else {
-					continue;
-				};
-				// `None` when the block can't be tied to a currently-missing seq no (see
-				// `red_locate_seq` for the exact vs. best-effort cases), or when that seq no
-				// was already received or recovered. Recovery only ever fills a hole.
-				let Some(rec_seq) = stream.red_locate_seq(seq_no, numer) else {
-					continue;
-				};
-				// Mark it so the seq is neither NACKed nor recovered again from a later packet.
-				// It is not counted as received (it was lost on the wire), so reception reports
-				// still carry the real loss. `red_locate_seq` now rejects this seq, which also
-				// dedups a malformed packet repeating the same offset.
-				stream.mark_red_recovered(rec_seq, numer);
-
-				let rec_time = MediaTime::new(numer, clock_rate);
-				let mut rec_header = header.clone();
-				rec_header.sequence_number = *rec_seq as u16;
-				// RFC 2198: the marker bit is not carried for redundant blocks. Clearing it also
-				// stops a recovered (historical) audio frame being seen as a start-of-talkspurt.
-				rec_header.marker = false;
-				// Redundant blocks carry no header extensions, so a recovered frame cannot carry
-				// its own (e.g. audio level). Clear the carrier's extensions rather than let the
-				// recovered frame inherit the current packet's metadata.
-				rec_header.ext_vals = ExtensionValues::default();
-				red_recovered.push((rec_header, Arc::from(b.payload), rec_seq, rec_time));
-			}
-			(receipt_outer, un.primary)
 		} else {
 			// This is not RTX, the outer seq and time is what we use. The first
 			// stream.update will have updated the main register.
@@ -631,13 +576,7 @@ impl Session {
 			return;
 		}
 
-		// For RED (frame mode) `data` is now just the unwrapped primary; count the full RED wire
-		// payload instead so receive accounting matches the sender's byte count.
-		let rx_bytes = if is_red && !self.rtp_mode {
-			wire_payload_len
-		} else {
-			data.len()
-		};
+		let rx_bytes = data.len();
 
 		// One-shot conversion to Arc<[u8]>: a single allocation that copies
 		// only the trimmed payload bytes out of the SRTP scratch buffer.
@@ -659,21 +598,6 @@ impl Session {
 			media.depayload(
 				stream.rid(),
 				packet,
-				self.reordering_size_audio,
-				self.reordering_size_video,
-				&self.codec_config,
-			);
-		}
-
-		// Deliver any RED-recovered packets (frame mode only) through the same depayload
-		// path. The jitter buffer orders them and dedups against any later real arrival.
-		for (rec_header, rec_payload, rec_seq, rec_time) in red_recovered {
-			// make_rtp_packet (not handle_rtp): recovered packets must not inflate RX stats.
-			let rec_packet = stream.make_rtp_packet(now, rec_header, rec_payload, rec_seq, rec_time);
-			let media = self.medias.iter_mut().find(|m| m.mid() == mid).unwrap();
-			media.depayload(
-				stream.rid(),
-				rec_packet,
 				self.reordering_size_audio,
 				self.reordering_size_video,
 				&self.codec_config,
@@ -1072,21 +996,10 @@ impl Session {
 				&self.codec_config,
 				self.vp9_packetizer_mode,
 				mtu,
-				self.codec_config.red_distances(),
 			)?;
 		}
 
 		Ok(())
-	}
-
-	/// Toggle RFC 2198 RED wrapping on the send side at runtime. No renegotiation: RED availability
-	/// is fixed at negotiation (or via DirectAPI); this only decides whether we wrap right now.
-	/// Returns whether the setting changed.
-	pub fn set_red_send(&mut self, mid: Mid, enabled: bool) -> bool {
-		let Some(media) = self.media_by_mid_mut(mid) else {
-			return false;
-		};
-		media.set_red_send(enabled)
 	}
 
 	pub fn set_direction(&mut self, mid: Mid, direction: Direction) -> bool {
@@ -1152,41 +1065,7 @@ pub struct PacketReceipt {
 /// Find the PayloadParams for the given Pt, either when the Pt is the main Pt for the Codec or
 /// when it's the RTX Pt.
 fn main_payload_params(c: &CodecConfig, pt: Pt) -> Option<&PayloadParams> {
-	c.iter()
-		.find(|p| p.pt == pt || p.resend == Some(pt) || p.red == Some(pt))
-}
-
-/// A decoded RED (RFC 2198) packet: the primary block plus any redundant (older) blocks.
-struct UnRed<'a> {
-	primary: &'a [u8],
-	redundant: Vec<RedBlock<'a>>,
-}
-
-/// Decode a RED packet, rewrite the header to the primary PT, and return the primary payload
-/// plus the redundant blocks. Returns `None` (drop) when the RED structure is malformed.
-fn un_red<'a>(header: &mut RtpHeader, data: &'a [u8], pt: Pt) -> Option<UnRed<'a>> {
-	let blocks = RedDecoder::decode(data).ok()?;
-	let mut primary = None;
-	let mut redundant = Vec::new();
-	for b in blocks {
-		if b.is_primary {
-			// RFC 2198 lets redundant blocks use a different PT, but the primary block must carry
-			// the codec this RED stream negotiated (`pt`, e.g. Opus). A mismatch means this is not
-			// the primary we expect, so drop the packet rather than mislabel a foreign codec (e.g.
-			// reinterpret a PCMU primary as Opus).
-			if b.pt != *pt {
-				return None;
-			}
-			primary = Some(b.payload);
-		} else {
-			redundant.push(b);
-		}
-	}
-	header.payload_type = pt;
-	Some(UnRed {
-		primary: primary?,
-		redundant,
-	})
+	c.iter().find(|p| p.pt == pt || p.resend == Some(pt))
 }
 
 fn make_max_seq_lookup(map: &HashMap<Ssrc, SeqNoWindow>) -> impl Fn(Ssrc) -> Option<SeqNo> + '_ {
@@ -1204,7 +1083,6 @@ mod tests {
 	use super::*;
 	use crate::vendor::str0m::RtcConfig;
 	use crate::vendor::str0m::io::DATAGRAM_MTU_TARGET;
-	use crate::vendor::str0m::packet::RedEncoder;
 
 	use crate::vendor::str0m::poll::Readiness;
 	use crate::vendor::str0m::rtp_::RtcpPacket;
@@ -1300,17 +1178,5 @@ mod tests {
 		let cfg = RtcConfig::default().set_mtu(900..=1280);
 		let s = Session::new(&cfg);
 		assert_eq!(s.mtu(), 900);
-	}
-
-	#[test]
-	fn un_red_rejects_a_primary_payload_type_mismatch() {
-		let expected_primary_pt = Pt::new_with_value(111);
-		let data = RedEncoder::encode(0, &[1, 2, 3], &[]);
-		let mut header = RtpHeader::default();
-
-		assert!(
-			un_red(&mut header, &data, expected_primary_pt).is_none(),
-			"RED associated with Opus must not reinterpret a PCMU primary block as Opus"
-		);
 	}
 }

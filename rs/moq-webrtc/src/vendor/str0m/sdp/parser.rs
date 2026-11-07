@@ -552,35 +552,6 @@ where
 	let fmtp1 = attribute_line("fmtp", (pt(), token(' '), fmtp_param))
 		.map(|(pt, _, values)| MediaAttribute::Fmtp { pt, values });
 
-	// Parse bare fmtp syntax without assigning codec meaning; rtpmap decides that later.
-	let fmtp_pt_num = || {
-		many1::<String, _, _>(satisfy(|c| c != '/' && c != '\r' && c != '\n'))
-			.and_then(|s| s.parse::<u8>().map_err(StreamErrorFor::<Input>::message_format))
-	};
-	let fmtp_pt_list = attribute_line(
-		"fmtp",
-		(pt(), token(' '), fmtp_pt_num(), skip_many1((token('/'), fmtp_pt_num()))),
-	)
-	.map(|(pt, _, primary, _)| MediaAttribute::Fmtp {
-		pt,
-		values: vec![FormatParam::BarePtList(Pt::from(primary))],
-	});
-
-	let fmtp_range = attribute_line(
-		"fmtp",
-		(
-			pt(),
-			token(' '),
-			string("0-"),
-			many1::<String, _, _>(satisfy(|c: char| c.is_ascii_digit()))
-				.and_then(|s| s.parse::<u8>().map_err(StreamErrorFor::<Input>::message_format)),
-		),
-	)
-	.map(|(pt, _, _, max)| MediaAttribute::Fmtp {
-		pt,
-		values: vec![FormatParam::BareRange(max)],
-	});
-
 	let fmtp_unknown = attribute_line("fmtp", (pt(), optional(token(' ')), optional(any_value()))).map(|(pt, _, _)| {
 		MediaAttribute::Fmtp {
 			pt,
@@ -588,12 +559,7 @@ where
 		}
 	});
 
-	let fmtp = choice((
-		attempt(fmtp1),
-		attempt(fmtp_pt_list),
-		attempt(fmtp_range),
-		attempt(fmtp_unknown),
-	));
+	let fmtp = choice((attempt(fmtp1), attempt(fmtp_unknown)));
 
 	// a=rid:<rid-id> <direction> [pt=<fmt-list>;]<restriction>=<value>
 	let rid = attribute_line(
@@ -1418,41 +1384,6 @@ mod test {
 
 		let parsed = sdp_parser().parse(sdp);
 		assert!(parsed.is_ok());
-	}
-
-	#[test]
-	fn bare_static_audio_pts_are_resolved() {
-		let sdp = "v=0\r\n\
-        o=- 1 1 IN IP4 127.0.0.1\r\n\
-        s=-\r\n\
-        t=0 0\r\n\
-        a=group:BUNDLE 0\r\n\
-        m=audio 9 UDP/TLS/RTP/SAVPF 0 8 9 13\r\n\
-        c=IN IP4 0.0.0.0\r\n\
-        a=setup:actpass\r\n\
-        a=sendrecv\r\n\
-        a=mid:0\r\n\
-        ";
-
-		let (sdp, _) = sdp_parser()
-			.parse(sdp)
-			.expect("static PTs must not require an a=rtpmap line");
-		sdp.assert_consistency().expect("bare static PTs are consistent");
-		let params = sdp.media_lines[0].rtp_params();
-
-		let definitions: Vec<_> = params
-			.iter()
-			.map(|p| (*p.pt(), p.spec().codec, p.spec().clock_rate))
-			.collect();
-		assert_eq!(
-			definitions,
-			vec![
-				(0, Codec::PCMU, Frequency::EIGHT_KHZ),
-				(8, Codec::PCMA, Frequency::EIGHT_KHZ),
-				(9, Codec::G722, Frequency::SIXTEEN_KHZ),
-				(13, Codec::CN, Frequency::EIGHT_KHZ),
-			]
-		);
 	}
 
 	#[test]

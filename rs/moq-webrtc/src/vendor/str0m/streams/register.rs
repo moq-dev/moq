@@ -82,13 +82,6 @@ impl ReceiverRegister {
 		self.nack.accepts(seq)
 	}
 
-	/// Mark `seq` as present without counting it as received: it was rebuilt from redundancy
-	/// (RFC 2198 RED) rather than arriving on the wire. It will no longer be NACKed or accepted
-	/// as new, while `count` (and thus the reception report loss) still reflects wire loss.
-	pub fn mark_recovered(&mut self, seq: SeqNo) {
-		self.nack.update(seq);
-	}
-
 	pub fn update(&mut self, seq: SeqNo, arrival: Instant, rtp_time: u32, clock_rate: u32) -> bool {
 		if self.first.is_none() {
 			self.first = Some(seq);

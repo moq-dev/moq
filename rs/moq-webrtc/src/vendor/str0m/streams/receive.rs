@@ -5,7 +5,6 @@ use tracing::{debug, trace};
 
 use crate::vendor::str0m::config_mod::RtcpReportIntervals;
 use crate::vendor::str0m::media::KeyframeRequestKind;
-use crate::vendor::str0m::packet::MAX_RED_RECOVERY_DEPTH;
 use crate::vendor::str0m::rtp_::MidRid;
 use crate::vendor::str0m::rtp_::SeqNoWindow;
 use crate::vendor::str0m::rtp_::{Bitrate, extend_u32};
@@ -20,10 +19,6 @@ use crate::vendor::str0m::util::{already_happened, calculate_rtt};
 use super::RtpPacket;
 use super::StreamPaused;
 use super::register::ReceiverRegister;
-
-/// How many recent packets to remember for placing RED redundant blocks. Must cover the
-/// recovery depth plus some reordering slack.
-const RED_RECENT_PACKETS: usize = 32;
 
 /// Incoming encoded stream.
 ///
@@ -79,11 +74,6 @@ pub struct StreamRx {
 	///
 	/// Set on the first authenticated RTX packet or restored from remembered sequence history.
 	register_rtx: Option<SeqNoWindow>,
-
-	/// The most recent main-stream packets as `(seq_no, extended rtp time)`, used to place
-	/// RFC 2198 RED redundant blocks (which carry a timestamp, not a seq no) at the right
-	/// sequence number. Bounded by `RED_RECENT_PACKETS`.
-	red_recent: VecDeque<(SeqNo, u64)>,
 
 	/// Last observed media time in an RTP packet.
 	last_time: Option<MediaTime>,
@@ -170,7 +160,6 @@ impl StreamRx {
 			reset_roc: None,
 			register: None,
 			register_rtx: None,
-			red_recent: VecDeque::new(),
 			last_time: None,
 			pending_request_keyframe: None,
 			pending_request_remb: None,
@@ -384,108 +373,6 @@ impl StreamRx {
 		}
 	}
 
-	fn remember_recent(&mut self, seq_no: SeqNo, time: u64) {
-		self.red_recent.push_back((seq_no, time));
-		while self.red_recent.len() > RED_RECENT_PACKETS {
-			self.red_recent.pop_front();
-		}
-	}
-
-	/// Work out which (still missing) sequence number a RED redundant block belongs to.
-	///
-	/// RFC 2198 blocks carry a timestamp offset, not a sequence number, and the frame duration
-	/// is neither signalled nor constant (Opus 10/20/40/60 ms, DTX, CN interleaved on the same
-	/// SSRC). Rather than guess a duration from the offsets, bracket the block's time between the
-	/// nearest received packets `L` (latest with time before) and `U` (earliest with time after)
-	/// and look at the missing sequence numbers between them:
-	///
-	/// * exactly one missing: that is the block, whatever the durations were — this case is
-	///   exact;
-	/// * several missing: only if `L..U` is uniformly spaced and the block time lands exactly on
-	///   one of the missing slots; otherwise give up. This case *assumes* a constant frame
-	///   duration across the gap, which holds for the fixed-ptime senders seen in practice
-	///   (WebRTC uses 20 ms). Under variable Opus ptime the derived slot can be a neighbouring
-	///   lost sequence number rather than the block's true one, so recovered audio may land one
-	///   or two frames off.
-	///
-	/// The bound this always keeps is that a candidate must be a currently *missing* sequence
-	/// number (`register.accepts`): recovery only ever fills a hole, and never overwrites a
-	/// correctly received frame — the worst case above only reorders audio among frames that
-	/// were all lost anyway. `carrier` is the packet the block arrived in; recovery is limited
-	/// to `MAX_RED_RECOVERY_DEPTH` packets behind it.
-	pub(crate) fn red_locate_seq(&self, carrier: SeqNo, block_time: u64) -> Option<SeqNo> {
-		let register = self.register.as_ref()?;
-
-		// A packet (received or already recovered) at exactly this time: nothing to recover.
-		if self.red_recent.iter().any(|(_, t)| *t == block_time) {
-			return None;
-		}
-
-		let below = self
-			.red_recent
-			.iter()
-			.filter(|(_, t)| *t < block_time)
-			.max_by_key(|(s, _)| *s)?;
-		let above = self
-			.red_recent
-			.iter()
-			.filter(|(_, t)| *t > block_time)
-			.min_by_key(|(s, _)| *s)?;
-
-		let (l_seq, l_time) = (*below.0, below.1);
-		let (u_seq, u_time) = (*above.0, above.1);
-
-		// Bound the scan: the block must be within recovery depth of the carrier, which also
-		// keeps `l_seq..u_seq` small. `checked_sub` guards a stream whose timestamps don't
-		// follow its sequence numbers.
-		let depth_ok = (*carrier)
-			.checked_sub(l_seq)
-			.is_some_and(|d| d <= MAX_RED_RECOVERY_DEPTH + 1);
-		if u_seq <= l_seq + 1 || !depth_ok {
-			return None;
-		}
-
-		let mut missing = (l_seq + 1..u_seq).map(SeqNo::from).filter(|s| register.accepts(*s));
-
-		let first = missing.next()?;
-		let candidate = if missing.next().is_none() {
-			// Exactly one hole between two received packets that bracket the block in time.
-			first
-		} else {
-			// Several holes: only a uniformly spaced span lets us tell which one.
-			let span_seq = u_seq - l_seq;
-			let span_time = u_time - l_time;
-			if span_time % span_seq != 0 {
-				return None;
-			}
-			let d = span_time / span_seq;
-			let back = block_time - l_time;
-			if !back.is_multiple_of(d) {
-				return None;
-			}
-			let seq: SeqNo = (l_seq + back / d).into();
-			if !register.accepts(seq) {
-				return None;
-			}
-			seq
-		};
-
-		(*carrier)
-			.checked_sub(*candidate)
-			.is_some_and(|d| d <= MAX_RED_RECOVERY_DEPTH)
-			.then_some(candidate)
-	}
-
-	/// Record that `seq_no` was rebuilt from RED redundancy. It was never on the wire, so it is
-	/// not counted as received (reception reports still show the loss), but it must neither be
-	/// NACKed nor recovered again.
-	pub(crate) fn mark_red_recovered(&mut self, seq_no: SeqNo, time: u64) {
-		if let Some(register) = &mut self.register {
-			register.mark_recovered(seq_no);
-		}
-		self.remember_recent(seq_no, time);
-	}
-
 	pub(crate) fn update_register(
 		&mut self,
 		now: Instant,
@@ -545,9 +432,6 @@ impl StreamRx {
 
 		if !is_repair {
 			self.last_time = Some(time);
-			if is_new_packet {
-				self.remember_recent(seq_no, time.numer());
-			}
 		}
 
 		RegisterUpdateReceipt { time, is_new_packet }
@@ -855,7 +739,6 @@ impl StreamRx {
 
 		// Reset all SSRC-specific state
 		self.register = None;
-		self.red_recent.clear();
 		self.last_time = None;
 		self.last_clock_rate = None;
 		self.sender_info = None;
@@ -909,7 +792,6 @@ impl StreamRx {
 	pub fn reset_roc(&mut self, roc: u64) {
 		self.register = None;
 		self.register_rtx = None;
-		self.red_recent.clear();
 		self.reset_roc = Some(roc);
 	}
 
@@ -1022,79 +904,6 @@ mod tests {
 		assert!(!stream.nack_enabled());
 		assert!(stream.maybe_create_nack(now, 1.into(), &mut feedback).is_none());
 		assert_eq!(feedback.len(), 5);
-	}
-
-	#[test]
-	fn red_locate_seq_single_hole_regardless_of_frame_duration() {
-		// 20 ms frames, then a 40 ms frame at seq 12, then 20 ms again. Seq 13 lost.
-		let stream = stream_with(&[(10, 0), (11, 960), (12, 1920), (14, 4800)]);
-
-		// Block at the time of seq 13 (1920 + 1920): the only hole between 12 and 14.
-		assert_eq!(stream.red_locate_seq(14.into(), 3840), Some(13.into()));
-	}
-
-	#[test]
-	fn red_locate_seq_several_holes_need_uniform_spacing() {
-		// Seq 11, 12, 13 lost; 10 and 14 bracket them 4 frames apart: unambiguous.
-		let stream = stream_with(&[(10, 0), (14, 3840)]);
-		assert_eq!(stream.red_locate_seq(14.into(), 960), Some(11.into()));
-		assert_eq!(stream.red_locate_seq(14.into(), 1920), Some(12.into()));
-		assert_eq!(stream.red_locate_seq(14.into(), 2880), Some(13.into()));
-		// Not on a slot: skip rather than guess.
-		assert_eq!(stream.red_locate_seq(14.into(), 1000), None);
-
-		// Same holes, but one of the lost frames was longer (span not a multiple): every block
-		// is skipped, none is misplaced.
-		let stream = stream_with(&[(10, 0), (14, 4800)]);
-		for t in [960, 1920, 2880, 3840] {
-			assert_eq!(stream.red_locate_seq(14.into(), t), None, "time {t}");
-		}
-	}
-
-	#[test]
-	fn red_locate_seq_rejects_known_and_recovered_frames() {
-		let mut stream = stream_with(&[(10, 0), (14, 3840)]);
-		let now = Instant::now();
-		let mut feedback = VecDeque::new();
-		assert!(stream.maybe_create_nack(now, 1.into(), &mut feedback).is_some());
-
-		// A block for a frame we already have is not a recovery.
-		assert_eq!(stream.red_locate_seq(14.into(), 0), None);
-
-		// Once recovered, the seq is neither a hole nor NACKed, and a later block for the same
-		// frame is rejected instead of being pushed into a neighbouring hole.
-		stream.mark_red_recovered(12.into(), 1920);
-		assert_eq!(stream.red_locate_seq(14.into(), 1920), None);
-		assert!(!stream.is_new_packet(false, 12.into()));
-		let nacked: Vec<SeqNo> = stream
-			.register
-			.as_mut()
-			.unwrap()
-			.nack_report(now + Duration::from_millis(105), None)
-			.into_iter()
-			.flatten()
-			.flat_map(|n| {
-				n.reports
-					.iter()
-					.flat_map(|r| r.into_iter(10.into()))
-					.collect::<Vec<_>>()
-			})
-			.collect();
-		assert_eq!(nacked, vec![11.into(), 13.into()]);
-
-		// The remaining holes are still found (11 and 13 are single-hole brackets now).
-		assert_eq!(stream.red_locate_seq(14.into(), 960), Some(11.into()));
-		assert_eq!(stream.red_locate_seq(14.into(), 2880), Some(13.into()));
-	}
-
-	#[test]
-	fn red_locate_seq_limits_recovery_depth() {
-		let mut packets = vec![(10u16, 0u32)];
-		// Seq 11 lost, then 12..=30 received at 20 ms.
-		packets.extend((12..=30u16).map(|s| (s, (s as u32 - 10) * 960)));
-		let stream = stream_with(&packets);
-		assert_eq!(stream.red_locate_seq(30.into(), 960), None);
-		assert_eq!(stream.red_locate_seq(19.into(), 960), Some(11.into()));
 	}
 
 	#[test]

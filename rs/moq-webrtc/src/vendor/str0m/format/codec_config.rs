@@ -2,8 +2,6 @@ use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 use tracing::debug;
 
-use crate::vendor::str0m::packet::H266ProfileTierLevel;
-use crate::vendor::str0m::packet::MAX_RED_RECOVERY_DEPTH;
 use crate::vendor::str0m::packet::MediaKind;
 use crate::vendor::str0m::rtp_::Pt;
 use crate::vendor::str0m::rtp_::{Direction, Frequency};
@@ -11,18 +9,6 @@ use crate::vendor::str0m::rtp_::{Direction, Frequency};
 use super::codec::{Codec, CodecSpec};
 use super::format_params::FormatParams;
 use super::payload_params::{Claimed, PREFERED_RANGES, PayloadParams};
-
-/// Default payload type for PCMU (G.711 μ-law).
-pub(crate) const PT_PCMU: Pt = Pt::new_with_value(0);
-
-/// Default payload type for PCMA (G.711 A-law).
-pub(crate) const PT_PCMA: Pt = Pt::new_with_value(8);
-
-/// Default payload type for G722.
-pub(crate) const PT_G722: Pt = Pt::new_with_value(9);
-
-/// Static payload type for Comfort Noise at 8000 Hz (RFC 3389).
-pub(crate) const PT_COMFORT_NOISE: Pt = Pt::new_with_value(13);
 
 /// Default payload type for VP8.
 pub(crate) const PT_VP8: Pt = Pt::new_with_value(96);
@@ -48,24 +34,8 @@ pub(crate) const PT_H265: Pt = Pt::new_with_value(102);
 /// Default payload type for H265 RTX.
 pub(crate) const PT_H265_RTX: Pt = Pt::new_with_value(103);
 
-/// Default payload type for H266 (VVC).
-pub(crate) const PT_H266: Pt = Pt::new_with_value(104);
-
-/// Default payload type for H266 RTX.
-pub(crate) const PT_H266_RTX: Pt = Pt::new_with_value(105);
-
 /// Default payload type for Opus.
 pub(crate) const PT_OPUS: Pt = Pt::new_with_value(111);
-
-/// Default RFC 2198 RED payload types, one per audio codec. RED links a single primary codec
-/// via `a=fmtp` and carries that codec's clock rate in `a=rtpmap`, so each audio codec that has
-/// RED needs its own RED payload type. These are the defaults; they are reassigned on conflict
-/// during negotiation, mirroring RTX. They stay below 64 so they are never mistaken for RTCP by
-/// the RTP/RTCP demultiplexer (which reserves payload types 64..=95, see `MultiplexKind`).
-pub(crate) const PT_RED: Pt = Pt::new_with_value(63);
-pub(crate) const PT_G722_RED: Pt = Pt::new_with_value(62);
-pub(crate) const PT_PCMU_RED: Pt = Pt::new_with_value(61);
-pub(crate) const PT_PCMA_RED: Pt = Pt::new_with_value(60);
 
 /// Default payload type for AMR-WB.
 pub(crate) const PT_AMR_WB: Pt = Pt::new_with_value(122);
@@ -74,9 +44,6 @@ pub(crate) const PT_AMR_WB: Pt = Pt::new_with_value(122);
 #[derive(Debug, Clone, Default)]
 pub struct CodecConfig {
 	params: Vec<PayloadParams>,
-	/// RFC 2198 RED send-side redundancy pattern: how many packets back each redundant level
-	/// carries. Empty means the default single level `[1]` (see [`Self::red_distances`]).
-	red_distances: Box<[u32]>,
 }
 
 impl CodecConfig {
@@ -96,13 +63,11 @@ impl CodecConfig {
 	/// Creates a new config with all default configurations enabled.
 	pub fn new_with_defaults() -> Self {
 		let mut c = Self::empty();
-		c.enable_opus(true, false);
+		c.enable_opus(true);
 
 		c.enable_vp8(true);
 		c.enable_h264(true);
 		c.enable_h265(true);
-		// H266/VVC off by default: no browser supports it.
-		c.enable_h266(false);
 		c.enable_vp9(true);
 		c.enable_av1(true);
 
@@ -119,8 +84,7 @@ impl CodecConfig {
 		self.params.clear();
 	}
 
-	/// Manually configure a payload type. For telephone events, configure one
-	/// payload type per supported RTP clock rate; no rates are added automatically.
+	/// Manually configure a payload type.
 	pub fn add_config(
 		&mut self,
 		pt: Pt,
@@ -150,16 +114,10 @@ impl CodecConfig {
 			fb_nack,
 			fb_pli,
 			fb_remb,
-			red: None,
 			locked: false,
 		};
 
 		self.params.push(p);
-	}
-
-	fn add_static_config(&mut self, pt: Pt) {
-		let spec = CodecSpec::from_static_pt(pt).expect("known static payload type");
-		self.add_config(pt, None, spec.codec, spec.clock_rate, spec.channels, spec.format);
 	}
 
 	/// Convenience for adding a h264 payload type.
@@ -198,66 +156,6 @@ impl CodecConfig {
 		)
 	}
 
-	/// Convenience for adding a PCM u-law payload type, optionally with RFC 2198 RED.
-	///
-	/// `use_red` folds a RED payload type onto this codec so the receiver can recover packet loss
-	/// without retransmission, at the cost of extra audio payload size.
-	pub fn enable_pcmu(&mut self, enabled: bool, use_red: bool) {
-		self.params.retain(|c| c.spec.codec != Codec::PCMU);
-		if !enabled {
-			return;
-		}
-		self.add_static_config(PT_PCMU);
-		if use_red {
-			self.set_red_pt(Codec::PCMU, PT_PCMU_RED);
-		}
-	}
-
-	/// Convenience for adding a PCM a-law payload type, optionally with RFC 2198 RED.
-	///
-	/// See [`Self::enable_pcmu`] for `use_red`.
-	pub fn enable_pcma(&mut self, enabled: bool, use_red: bool) {
-		self.params.retain(|c| c.spec.codec != Codec::PCMA);
-		if !enabled {
-			return;
-		}
-		self.add_static_config(PT_PCMA);
-		if use_red {
-			self.set_red_pt(Codec::PCMA, PT_PCMA_RED);
-		}
-	}
-
-	/// Convenience for adding a G722 payload type.
-	///
-	/// G722 samples audio at 16 kHz, but per RFC 3551 §4.5.2 the RTP clock rate is
-	/// 8000 Hz. The codec is configured at 16 kHz here; str0m maps to 8 kHz for the
-	/// SDP `a=rtpmap` line and when converting to/from RTP timestamps. See
-	/// <https://en.wikipedia.org/wiki/RTP_payload_formats#cite_note-55>
-	///
-	/// See [`Self::enable_pcmu`] for `use_red`.
-	pub fn enable_g722(&mut self, enabled: bool, use_red: bool) {
-		self.params.retain(|c| c.spec.codec != Codec::G722);
-		if !enabled {
-			return;
-		}
-		self.add_static_config(PT_G722);
-		if use_red {
-			self.set_red_pt(Codec::G722, PT_G722_RED);
-		}
-	}
-
-	/// Add the static Comfort Noise payload type at 8000 Hz.
-	///
-	/// Higher clock rates require dynamic payload types and can be configured
-	/// with [`CodecConfig::add_config`].
-	pub fn enable_comfort_noise(&mut self, enabled: bool) {
-		self.params.retain(|c| c.spec.codec != Codec::CN);
-		if !enabled {
-			return;
-		}
-		self.add_static_config(PT_COMFORT_NOISE);
-	}
-
 	/// Add a default AMR-WB payload type.
 	pub fn enable_amr_wb(&mut self, enabled: bool) {
 		self.params.retain(|c| c.spec.codec != Codec::AmrWb);
@@ -277,10 +175,8 @@ impl CodecConfig {
 		);
 	}
 
-	/// Add a default OPUS payload type, optionally with RFC 2198 RED.
-	///
-	/// See [`Self::enable_pcmu`] for `use_red`.
-	pub fn enable_opus(&mut self, enabled: bool, use_red: bool) {
+	/// Add a default OPUS payload type.
+	pub fn enable_opus(&mut self, enabled: bool) {
 		self.params.retain(|c| c.spec.codec != Codec::Opus);
 		if !enabled {
 			return;
@@ -297,55 +193,6 @@ impl CodecConfig {
 				..Default::default()
 			},
 		);
-		if use_red {
-			self.set_red_pt(Codec::Opus, PT_RED);
-		}
-	}
-
-	/// Fold the given RFC 2198 RED payload type onto the enabled param for `codec`. Used by the
-	/// audio enable fns when `use_red` is set; each audio codec has its own RED payload type so the
-	/// `a=rtpmap` entries (which carry each codec's clock rate) don't collide in SDP.
-	fn set_red_pt(&mut self, codec: Codec, red_pt: Pt) {
-		if let Some(p) = self.params.iter_mut().find(|p| p.spec.codec == codec) {
-			p.red = Some(red_pt);
-		}
-	}
-
-	/// The RFC 2198 RED send-side redundancy pattern: how many packets back each redundant level
-	/// carries. Defaults to `[1]` (one level, the previous packet, as browsers send).
-	pub fn red_distances(&self) -> &[u32] {
-		if self.red_distances.is_empty() {
-			&[1]
-		} else {
-			&self.red_distances
-		}
-	}
-
-	/// Set the RFC 2198 RED send-side redundancy pattern. Each entry is how many packets back a
-	/// redundant level carries: `[1]` is one level (the previous packet), `[1, 3, 5]` sends three
-	/// levels for higher loss. Deeper redundancy trades bandwidth for resilience.
-	///
-	/// The input is sanitised: zeros and values deeper than the receiver recovery depth are
-	/// dropped, then the rest is sorted and de-duplicated. Distance 1 is always included: recovery
-	/// derives each block's sequence distance from the closest redundant block, treating it as one
-	/// packet back, so a pattern must anchor on distance 1 or the receiver maps the blocks to the
-	/// wrong sequence numbers (a `[2, 4]` pattern becomes `[1, 2, 4]`). An empty or fully invalid
-	/// input falls back to `[1]`. This only sets the pattern; RED still has to be enabled via the
-	/// `use_red` argument of an audio enable fn (e.g. [`Self::enable_opus`]) or negotiated.
-	pub fn set_red_distances(&mut self, distances: &[u32]) {
-		let mut sane: Vec<u32> = distances
-			.iter()
-			.copied()
-			.filter(|&d| (1..=MAX_RED_RECOVERY_DEPTH as u32).contains(&d))
-			.collect();
-		sane.sort_unstable();
-		sane.dedup();
-		// Always anchor on distance 1 so the receiver can establish the packet duration from the
-		// closest block; without it a pattern like `[2, 4]` is silently mis-recovered.
-		if sane.first() != Some(&1) {
-			sane.insert(0, 1);
-		}
-		self.red_distances = sane.into_boxed_slice();
 	}
 
 	/// Add a default VP8 payload type.
@@ -406,41 +253,6 @@ impl CodecConfig {
 		//   https://source.chromium.org/chromium/chromium/src/+/main:
 		//   third_party/webrtc/api/video_codecs/h265_profile_tier_level.h
 		self.add_h265(PT_H265, Some(PT_H265_RTX), 1, 0, 180); // Main, Main tier, Level 6.0
-	}
-
-	/// Convenience for adding a h266 payload type.
-	pub fn add_h266(&mut self, pt: Pt, resend: Option<Pt>, profile_id: u8, tier_flag: u8, level_id: u8) {
-		let ptl = H266ProfileTierLevel::new(profile_id, tier_flag, level_id).unwrap_or(H266ProfileTierLevel::FALLBACK);
-
-		self.add_config(
-			pt,
-			resend,
-			Codec::H266,
-			Frequency::NINETY_KHZ,
-			None,
-			FormatParams {
-				h266_profile_tier_level: Some(ptl),
-				..Default::default()
-			},
-		)
-	}
-
-	/// Add a default H266 (VVC) payload type.
-	///
-	/// Enables H266 as a video codec (clock rate 90kHz) with a default RTX
-	/// payload type. Profile/tier/level negotiation happens via the SDP fmtp
-	/// parameters profile-id / tier-flag / level-id (RFC 9328 §7.2).
-	pub fn enable_h266(&mut self, enabled: bool) {
-		self.params.retain(|c| c.spec.codec != Codec::H266);
-		if !enabled {
-			return;
-		}
-
-		// Single default configuration with a high capability level.
-		//
-		// Level 6.0 (level_id=96) — per ITU-T H.266 Annex A the level_id is
-		// 16*major + 3*minor, e.g. Level 6.0 → 16*6 = 96.
-		self.add_h266(PT_H266, Some(PT_H266_RTX), 1, 0, 96); // Main 10, Main tier, Level 6.0
 	}
 
 	/// Add a default VP9 payload type.
@@ -523,45 +335,15 @@ impl CodecConfig {
 		self.params.iter().find(move |p| f(p))
 	}
 
-	/// Return configured payloads for a media kind, optionally preferring event
-	/// clock rates that match audio codecs in a new local offer.
-	pub(crate) fn all_for_kind(&self, kind: MediaKind, for_new_offer: bool) -> impl Iterator<Item = &PayloadParams> {
-		let matches_audio_clock = move |event: &PayloadParams| {
-			self.params
-				.iter()
-				.any(|audio| audio.spec.codec.is_audio() && audio.spec.rtp_clock_rate() == event.spec.rtp_clock_rate())
-		};
-		let has_matching_events = self
-			.params
-			.iter()
-			.any(|p| p.spec.codec.is_tele() && matches_audio_clock(p));
-
+	/// Return configured payloads for a media kind.
+	pub(crate) fn all_for_kind(&self, kind: MediaKind) -> impl Iterator<Item = &PayloadParams> {
 		self.params.iter().filter(move |p| {
 			if kind == MediaKind::Video {
 				p.spec.codec.is_video()
 			} else {
 				p.spec.codec.is_audio()
-					|| (p.spec.codec.is_tele() && (!for_new_offer || !has_matching_events || matches_audio_clock(p)))
 			}
 		})
-	}
-
-	/// Highest telephone-event code for this payload type.
-	///
-	/// Before SDP negotiation this is the configured range (default `0-16`).
-	/// After negotiation it is the smaller range advertised by both peers,
-	/// shared across all m-lines using the payload type. Returns `None` if
-	/// the payload type is not configured as telephone-event.
-	pub(crate) fn tele_event_max(&self, pt: Pt) -> Option<u8> {
-		self.params
-			.iter()
-			.find(|p| p.pt() == pt && p.spec.codec.is_tele())
-			.map(|p| {
-				p.spec
-					.format
-					.telephone_event_max
-					.unwrap_or(FormatParams::DEFAULT_TELEPHONE_EVENT_MAX)
-			})
 	}
 
 	pub(crate) fn update_params(&mut self, remote_params: &[PayloadParams], remote_dir: Direction) {
@@ -579,10 +361,6 @@ impl CodecConfig {
 			if let Some(rtx) = p.resend {
 				claimed.assert_claim_once(rtx);
 			}
-
-			if let Some(red) = p.red {
-				claimed.assert_claim_once(red);
-			}
 		}
 
 		// Collect all currently unlocked PTs since we will need to avoid them when reassigning.
@@ -590,7 +368,7 @@ impl CodecConfig {
 			.params
 			.iter()
 			.filter(|p| !p.locked)
-			.flat_map(|p| [Some(p.pt()), p.resend(), p.red()])
+			.flat_map(|p| [Some(p.pt()), p.resend()])
 			.flatten()
 			.collect::<HashSet<_>>();
 
@@ -623,25 +401,6 @@ impl CodecConfig {
 
 				claimed.assert_claim_once(pt);
 				unlocked.remove(&pt);
-			}
-
-			// RED rides its own PT (like RTX); reassign it if it now collides.
-			if let Some(red) = p.red {
-				if claimed.is_claimed(red) {
-					match claimed.find_unclaimed(PREFERED_RANGES, &unlocked) {
-						Some(new_red) => {
-							debug!("Reassigned RED PT {:?} => {:?}", p.red, new_red);
-							p.red = Some(new_red);
-							claimed.assert_claim_once(new_red);
-							unlocked.remove(&new_red);
-						}
-						// RED is opt-in; drop it rather than panic if no PT is free.
-						None => {
-							debug!("No free PT for RED; dropping it");
-							p.red = None;
-						}
-					}
-				}
 			}
 
 			let Some(rtx) = p.resend else {
@@ -682,32 +441,6 @@ impl DerefMut for CodecConfig {
 	}
 }
 
-impl CodecSpec {
-	/// Get the standardized codec definition for a static RTP payload type.
-	pub(crate) fn from_static_pt(pt: Pt) -> Option<Self> {
-		let (codec, clock_rate) = if pt == PT_PCMU {
-			(Codec::PCMU, Frequency::EIGHT_KHZ)
-		} else if pt == PT_PCMA {
-			(Codec::PCMA, Frequency::EIGHT_KHZ)
-		} else if pt == PT_G722 {
-			// G722 is represented as 16 kHz internally. CodecSpec::rtp_clock_rate()
-			// maps it to the standardized 8 kHz RTP clock rate on the wire.
-			(Codec::G722, Frequency::SIXTEEN_KHZ)
-		} else if pt == PT_COMFORT_NOISE {
-			(Codec::CN, Frequency::EIGHT_KHZ)
-		} else {
-			return None;
-		};
-
-		Some(CodecSpec {
-			codec,
-			clock_rate,
-			channels: None,
-			format: FormatParams::default(),
-		})
-	}
-}
-
 #[cfg(test)]
 mod test {
 	use crate::vendor::str0m::io::MultiplexKind;
@@ -736,83 +469,6 @@ mod test {
 				}
 			}
 		}
-	}
-
-	#[test]
-	fn static_payload_types_have_canonical_codec_definitions() {
-		let definitions = [
-			(PT_PCMU, Codec::PCMU, Frequency::EIGHT_KHZ),
-			(PT_PCMA, Codec::PCMA, Frequency::EIGHT_KHZ),
-			(PT_G722, Codec::G722, Frequency::SIXTEEN_KHZ),
-			(PT_COMFORT_NOISE, Codec::CN, Frequency::EIGHT_KHZ),
-		];
-
-		for (pt, codec, clock_rate) in definitions {
-			let spec = CodecSpec::from_static_pt(pt).expect("static payload definition");
-			assert_eq!(spec.codec, codec);
-			assert_eq!(spec.clock_rate, clock_rate);
-			assert_eq!(spec.channels, None);
-			assert_eq!(spec.format, FormatParams::default());
-		}
-
-		assert!(CodecSpec::from_static_pt(PT_OPUS).is_none());
-	}
-
-	#[test]
-	fn default_red_payload_types_are_demultiplexed_as_rtp() {
-		for pt in [PT_G722_RED, PT_PCMU_RED, PT_PCMA_RED] {
-			let packet = [0x80, *pt, 0];
-			assert_eq!(
-				MultiplexKind::try_from(packet.as_slice()).unwrap(),
-				MultiplexKind::Rtp,
-				"RED payload type {pt} must not be demultiplexed as RTCP"
-			);
-		}
-	}
-
-	#[test]
-	fn dynamic_comfort_noise_collision_preserves_configured_pt() {
-		let mut claimed = PayloadParams::new(
-			96.into(),
-			None,
-			CodecSpec {
-				codec: Codec::Opus,
-				clock_rate: Frequency::FORTY_EIGHT_KHZ,
-				channels: Some(2),
-				format: FormatParams::default(),
-			},
-		);
-		claimed.locked = true;
-
-		let local_cn = PayloadParams::new(
-			97.into(),
-			None,
-			CodecSpec {
-				codec: Codec::CN,
-				clock_rate: Frequency::SIXTEEN_KHZ,
-				channels: None,
-				format: FormatParams::default(),
-			},
-		);
-		let remote_cn = PayloadParams::new(
-			96.into(),
-			None,
-			CodecSpec {
-				codec: Codec::CN,
-				clock_rate: Frequency::SIXTEEN_KHZ,
-				channels: None,
-				format: FormatParams::default(),
-			},
-		);
-
-		let mut config = CodecConfig::new_from_payload_params(vec![claimed, local_cn]);
-		config.update_params(&[remote_cn], Direction::SendOnly);
-
-		let cn = config
-			.iter()
-			.find(|p| p.spec().codec == Codec::CN)
-			.expect("configured CN payload");
-		assert_eq!(*cn.pt(), 97, "dynamic CN must retain its configured payload type");
 	}
 
 	#[test]
@@ -849,82 +505,6 @@ mod test {
 	}
 
 	#[test]
-	fn enable_comfort_noise_uses_static_8khz_payload_type() {
-		let mut config = CodecConfig::empty();
-
-		config.enable_comfort_noise(true);
-
-		let params = config
-			.params()
-			.iter()
-			.find(|p| p.spec().codec == Codec::CN)
-			.expect("Comfort Noise should be enabled");
-		assert_eq!(params.pt(), Pt::new_with_value(13));
-		assert_eq!(params.spec().clock_rate, Frequency::EIGHT_KHZ);
-		assert_eq!(params.spec().channels, None);
-
-		config.enable_comfort_noise(false);
-		assert!(config.params().iter().all(|p| p.spec().codec != Codec::CN));
-	}
-
-	#[test]
-	fn comfort_noise_supports_dynamic_payload_types_at_higher_clock_rates() {
-		let mut config = CodecConfig::empty();
-
-		for (pt, clock_rate) in [(96, 16_000), (97, 24_000), (98, 32_000), (99, 48_000)] {
-			config.add_config(
-				pt.into(),
-				None,
-				Codec::CN,
-				Frequency::new(clock_rate).unwrap(),
-				None,
-				FormatParams::default(),
-			);
-		}
-
-		let configured: Vec<_> = config
-			.params()
-			.iter()
-			.map(|p| (*p.pt(), p.spec().clock_rate.get()))
-			.collect();
-		assert_eq!(configured, vec![(96, 16_000), (97, 24_000), (98, 32_000), (99, 48_000)]);
-	}
-
-	#[test]
-	fn enable_red_links_opus() {
-		let mut c = CodecConfig::empty();
-		c.enable_opus(true, true);
-		let opus = c.params().iter().find(|p| p.spec().codec == Codec::Opus).unwrap();
-		assert_eq!(opus.red(), Some(PT_RED));
-	}
-
-	#[test]
-	fn enable_red_links_all_audio_codecs_with_distinct_pts() {
-		let mut c = CodecConfig::empty();
-		c.enable_opus(true, true);
-		c.enable_g722(true, true);
-		c.enable_pcmu(true, true);
-		c.enable_pcma(true, true);
-
-		let params = c.params();
-		let red_of = |codec| params.iter().find(|p| p.spec().codec == codec).unwrap().red();
-
-		// Every enabled audio codec gets RED, each with its own distinct payload type so the
-		// `a=rtpmap` entries (which each carry that codec's clock rate) don't collide in SDP.
-		assert_eq!(red_of(Codec::Opus), Some(PT_RED));
-		assert_eq!(red_of(Codec::G722), Some(PT_G722_RED));
-		assert_eq!(red_of(Codec::PCMU), Some(PT_PCMU_RED));
-		assert_eq!(red_of(Codec::PCMA), Some(PT_PCMA_RED));
-		// All four RED payload types are distinct.
-		let pts = [PT_RED, PT_G722_RED, PT_PCMU_RED, PT_PCMA_RED];
-		for (i, a) in pts.iter().enumerate() {
-			for b in &pts[i + 1..] {
-				assert_ne!(a, b, "RED payload types must be distinct");
-			}
-		}
-	}
-
-	#[test]
 	fn enable_amr_wb_uses_a_free_default_pt() {
 		let mut config = CodecConfig::new_with_defaults();
 
@@ -941,86 +521,11 @@ mod test {
 		for pt in config
 			.params()
 			.iter()
-			.flat_map(|p| [Some(p.pt()), p.resend(), p.red()])
+			.flat_map(|p| [Some(p.pt()), p.resend()])
 			.flatten()
 		{
 			assert!(seen.insert(pt), "duplicate PT {pt}");
 		}
-	}
-
-	#[test]
-	fn set_red_distances_sanitises_input() {
-		let mut c = CodecConfig::empty();
-		// Default is a single level, the previous packet.
-		assert_eq!(c.red_distances(), &[1]);
-
-		// Unsorted, duplicated, zero, and over-cap values are cleaned to a sorted distinct set.
-		c.set_red_distances(&[5, 1, 0, 3, 3, 1, 999]);
-		assert_eq!(c.red_distances(), &[1, 3, 5]);
-
-		// Empty or fully invalid input falls back to the default single level.
-		c.set_red_distances(&[0, 999]);
-		assert_eq!(c.red_distances(), &[1]);
-
-		// Distance 1 is always included as the recovery anchor: a pattern without it (which the
-		// receiver would mis-map) gets 1 prepended rather than mis-recovered.
-		c.set_red_distances(&[2, 4]);
-		assert_eq!(c.red_distances(), &[1, 2, 4]);
-		c.set_red_distances(&[3, 5]);
-		assert_eq!(c.red_distances(), &[1, 3, 5]);
-	}
-
-	#[test]
-	fn red_kept_when_both_sides_enable() {
-		let mut local = CodecConfig::empty();
-		local.enable_opus(true, true);
-
-		let mut remote = CodecConfig::empty();
-		remote.enable_opus(true, true);
-
-		local.update_params(remote.params(), Direction::SendRecv);
-
-		let opus = local.params().iter().find(|p| p.spec().codec == Codec::Opus).unwrap();
-		assert_eq!(opus.red(), Some(PT_RED));
-	}
-
-	#[test]
-	fn red_dropped_when_remote_lacks_red() {
-		let mut local = CodecConfig::empty();
-		local.enable_opus(true, true);
-
-		let mut remote = CodecConfig::empty();
-		remote.enable_opus(true, false); // remote does not offer RED
-
-		local.update_params(remote.params(), Direction::SendRecv);
-
-		let opus = local.params().iter().find(|p| p.spec().codec == Codec::Opus).unwrap();
-		assert_eq!(opus.red(), None, "RED must be dropped when remote doesn't offer it");
-	}
-
-	#[test]
-	fn conflicting_remote_red_mappings_do_not_panic() {
-		let shared_red_pt = Pt::new_with_value(63);
-
-		let mut local = CodecConfig::empty();
-		local.enable_g722(true, true);
-		local.enable_pcmu(true, true);
-
-		let mut remote = CodecConfig::empty();
-		remote.enable_g722(true, true);
-		remote.enable_pcmu(true, true);
-		for p in remote.params.iter_mut() {
-			p.red = Some(shared_red_pt);
-		}
-
-		let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-			local.update_params(remote.params(), Direction::SendRecv);
-		}));
-
-		assert!(
-			result.is_ok(),
-			"a conflicting remote RED mapping must be rejected or negotiated without panicking"
-		);
 	}
 
 	#[test]
@@ -1279,7 +784,7 @@ mod test {
 
 		// Now simulate creating a new video m-line (for Firefox's camera)
 		// This is where the bug manifests: we collect ALL video codecs from config
-		let all_video_params: Vec<_> = config.all_for_kind(MediaKind::Video, false).collect();
+		let all_video_params: Vec<_> = config.all_for_kind(MediaKind::Video).collect();
 
 		// Extract just the PTs (including RTX PTs)
 		let mut all_pts = Vec::new();
@@ -1560,251 +1065,15 @@ mod test {
 
 	// H.266 direction-based negotiation tests.
 
-	/// Helper: build a CodecConfig containing only H.266 at the given PTL.
-	fn h266_config(profile_id: u8, tier_flag: u8, level_id: u8) -> CodecConfig {
-		let mut config = CodecConfig::empty();
-		config.add_h266(PT_H266, Some(PT_H266_RTX), profile_id, tier_flag, level_id);
-		config
-	}
-
-	/// Helper: build a single-element remote PayloadParams for H.266 with full PTL.
-	fn h266_remote_ptl(profile_id: u8, tier_flag: u8, level_id: u8) -> Vec<PayloadParams> {
-		vec![PayloadParams::new(
-			PT_H266,
-			Some(PT_H266_RTX),
-			CodecSpec {
-				codec: Codec::H266,
-				clock_rate: Frequency::NINETY_KHZ,
-				channels: None,
-				format: FormatParams {
-					h266_profile_tier_level: Some(H266ProfileTierLevel::new(profile_id, tier_flag, level_id).unwrap()),
-					..Default::default()
-				},
-			},
-		)]
-	}
-
-	/// Helper: build a single-element remote PayloadParams for H.266 with profile-id only.
-	fn h266_remote_profile_only(profile_id: u32) -> Vec<PayloadParams> {
-		vec![PayloadParams::new(
-			PT_H266,
-			Some(PT_H266_RTX),
-			CodecSpec {
-				codec: Codec::H266,
-				clock_rate: Frequency::NINETY_KHZ,
-				channels: None,
-				format: FormatParams {
-					profile_id: Some(profile_id),
-					..Default::default()
-				},
-			},
-		)]
-	}
-
-	/// Helper: build a single-element remote PayloadParams for H.266 with no fmtp.
-	fn h266_remote_no_fmtp() -> Vec<PayloadParams> {
-		vec![PayloadParams::new(
-			PT_H266,
-			Some(PT_H266_RTX),
-			CodecSpec {
-				codec: Codec::H266,
-				clock_rate: Frequency::NINETY_KHZ,
-				channels: None,
-				format: FormatParams::default(),
-			},
-		)]
-	}
-
-	/// Helper: extract the H.266 param from a config (panics if missing).
-	fn get_h266(config: &CodecConfig) -> &PayloadParams {
-		config
-			.params()
-			.iter()
-			.find(|p| p.spec().codec == Codec::H266)
-			.expect("H.266 param missing")
-	}
-
 	// recvonly: remote sends to us.
-
-	/// Remote sends at Level 4.0, we can receive at Level 6.0.
-	/// Negotiated level should narrow to min(6.0, 4.0) = 4.0.
-	#[test]
-	fn test_h266_recvonly_remote_level_lower() {
-		let mut config = h266_config(1, 0, 96); // Main 10, Main tier, Level 6.0
-		let remote = h266_remote_ptl(1, 0, 64); // Level 4.0
-
-		// Direction::SendOnly = remote is sending (we receive)
-		config.update_params(&remote, Direction::SendOnly);
-
-		let ptl = get_h266(&config).spec().format.h266_profile_tier_level.unwrap();
-		assert_eq!(ptl.level_id(), 64, "Should narrow to min(96,64) = Level 4.0");
-		assert_eq!(ptl.profile_id(), 1, "Profile should be preserved");
-		assert_eq!(ptl.tier_flag(), 0, "Tier should be preserved");
-	}
-
-	/// Remote sends at Level 6.0, we can receive at Level 4.0.
-	/// Negotiated level should narrow to min(4.0, 6.0) = 4.0.
-	#[test]
-	fn test_h266_recvonly_local_level_lower() {
-		let mut config = h266_config(1, 0, 64); // Level 4.0
-		let remote = h266_remote_ptl(1, 0, 96); // Level 6.0
-
-		config.update_params(&remote, Direction::SendOnly);
-
-		let ptl = get_h266(&config).spec().format.h266_profile_tier_level.unwrap();
-		assert_eq!(ptl.level_id(), 64, "Should narrow to min(64,96) = Level 4.0");
-	}
 
 	// sendrecv: both sides send and receive.
 
-	/// Both sides sendrecv. Local Level 6.0, remote Level 4.0.
-	/// Effective level should narrow to min(6.0, 4.0) = 4.0.
-	#[test]
-	fn test_h266_sendrecv_remote_level_lower() {
-		let mut config = h266_config(1, 0, 96); // Level 6.0
-		let remote = h266_remote_ptl(1, 0, 64); // Level 4.0
-
-		config.update_params(&remote, Direction::SendRecv);
-
-		let ptl = get_h266(&config).spec().format.h266_profile_tier_level.unwrap();
-		assert_eq!(ptl.level_id(), 64, "sendrecv: should narrow to Level 4.0");
-	}
-
-	/// Both sides sendrecv. Local Level 4.0, remote Level 6.0.
-	/// Effective level should narrow to min(4.0, 6.0) = 4.0.
-	#[test]
-	fn test_h266_sendrecv_local_level_lower() {
-		let mut config = h266_config(1, 0, 64); // Level 4.0
-		let remote = h266_remote_ptl(1, 0, 96); // Level 6.0
-
-		config.update_params(&remote, Direction::SendRecv);
-
-		let ptl = get_h266(&config).spec().format.h266_profile_tier_level.unwrap();
-		assert_eq!(ptl.level_id(), 64, "sendrecv: should narrow to Level 4.0");
-	}
-
-	/// Same level on both sides. Should remain unchanged.
-	#[test]
-	fn test_h266_sendrecv_same_level() {
-		let mut config = h266_config(1, 0, 64); // Level 4.0
-		let remote = h266_remote_ptl(1, 0, 64); // Level 4.0
-
-		config.update_params(&remote, Direction::SendRecv);
-
-		let ptl = get_h266(&config).spec().format.h266_profile_tier_level.unwrap();
-		assert_eq!(ptl.level_id(), 64, "Same levels should stay at Level 4.0");
-	}
-
 	// sendonly: we send, remote receives.
-
-	/// Remote declares recvonly at Level 4.0, we offer sendonly at Level 6.0.
-	/// Negotiated level should narrow to 4.0 (receiver wins).
-	#[test]
-	fn test_h266_sendonly_receiver_level_lower() {
-		let mut config = h266_config(1, 0, 96); // Level 6.0
-		let remote = h266_remote_ptl(1, 0, 64); // Level 4.0
-
-		// Direction::RecvOnly = remote is receiving (we send)
-		config.update_params(&remote, Direction::RecvOnly);
-
-		let ptl = get_h266(&config).spec().format.h266_profile_tier_level.unwrap();
-		assert_eq!(ptl.level_id(), 64, "sendonly: should narrow to receiver's Level 4.0");
-	}
-
-	/// Remote offers only profile-id=1, no tier/level.
-	/// Local should drop its full PTL and echo back profile-id only.
-	#[test]
-	fn test_h266_profile_only_remote_mirrors() {
-		let mut config = h266_config(1, 0, 96); // Full PTL
-		let remote = h266_remote_profile_only(1); // profile-id only
-
-		config.update_params(&remote, Direction::SendRecv);
-
-		let h266 = get_h266(&config);
-		assert!(
-			h266.spec().format.h266_profile_tier_level.is_none(),
-			"Full PTL should be cleared when remote only offers profile-id"
-		);
-		assert_eq!(
-			h266.spec().format.profile_id,
-			Some(1),
-			"profile_id should mirror the remote's value"
-		);
-	}
 
 	// no-fmtp remote.
 
-	/// Remote has no H.266 fmtp at all. Local should clear both fields.
-	#[test]
-	fn test_h266_no_fmtp_remote_clears() {
-		let mut config = h266_config(1, 0, 96); // Full PTL
-		let remote = h266_remote_no_fmtp();
-
-		config.update_params(&remote, Direction::SendRecv);
-
-		let h266 = get_h266(&config);
-		assert!(
-			h266.spec().format.h266_profile_tier_level.is_none(),
-			"PTL should be cleared when remote has no fmtp"
-		);
-		assert!(
-			h266.spec().format.profile_id.is_none(),
-			"profile_id should be cleared when remote has no fmtp"
-		);
-	}
-
 	// profile_id field cleanup.
 
-	/// When remote has full PTL, the `profile_id` field must be None
-	/// to avoid duplicate serialization (profile-id appears in both
-	/// h266_profile_tier_level AND the VP9-style profile_id field).
-	#[test]
-	fn test_h266_profile_id_cleared_on_ptl_match() {
-		let mut config = CodecConfig::empty();
-		// Artificially set both fields to simulate a misconfigured state
-		config.add_config(
-			PT_H266,
-			Some(PT_H266_RTX),
-			Codec::H266,
-			Frequency::NINETY_KHZ,
-			None,
-			FormatParams {
-				h266_profile_tier_level: Some(H266ProfileTierLevel::new(1, 0, 96).unwrap()),
-				profile_id: Some(1), // should be cleared after negotiation
-				..Default::default()
-			},
-		);
-		let remote = h266_remote_ptl(1, 0, 64);
-
-		config.update_params(&remote, Direction::SendRecv);
-
-		let h266 = get_h266(&config);
-		assert!(
-			h266.spec().format.profile_id.is_none(),
-			"profile_id field must be None when full PTL is present"
-		);
-		assert!(
-			h266.spec().format.h266_profile_tier_level.is_some(),
-			"PTL should still be present"
-		);
-	}
-
 	// H.266 default level.
-
-	/// `enable_h266(true)` should add H.266 at Main 10 / Main tier / Level 6.0.
-	#[test]
-	fn test_h266_enable_default_level() {
-		let mut config = CodecConfig::empty();
-		config.enable_h266(true);
-
-		let h266 = config
-			.params()
-			.iter()
-			.find(|p| p.spec().codec == Codec::H266)
-			.expect("H.266 param missing");
-		let ptl = h266.spec().format.h266_profile_tier_level.unwrap();
-		assert_eq!(ptl.profile_id(), 1, "Default H.266 profile should be Main 10 (1)");
-		assert_eq!(ptl.tier_flag(), 0, "Default H.266 tier should be Main (0)");
-		assert_eq!(ptl.level_id(), 96, "Default H.266 level should be 6.0 (96)");
-	}
 }

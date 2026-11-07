@@ -11,7 +11,6 @@ pub enum PacketError {
 	ErrTooManySpatialLayers,
 	ErrTooManyPDiff,
 	ErrH265CorruptedPacket,
-	ErrH266CorruptedPacket,
 	ErrInvalidH265PacketType,
 	ErrH265PACIPHESTooLong,
 	StapASizeLargerThanBuffer(usize, usize),
@@ -19,8 +18,6 @@ pub enum PacketError {
 	ErrVP8CorruptedPacket,
 	ErrVP9CorruptedPacket,
 	ErrAv1CorruptedPacket,
-	ErrRedCorruptedPacket,
-	InvalidTelephoneEvent(&'static str),
 	ErrAmrWbCorruptedPacket,
 }
 
@@ -32,7 +29,6 @@ impl fmt::Display for PacketError {
 			PacketError::ErrTooManySpatialLayers => write!(f, "Too many spatial layers"),
 			PacketError::ErrTooManyPDiff => write!(f, "Too many P-Diff"),
 			PacketError::ErrH265CorruptedPacket => write!(f, "H265 corrupted packet"),
-			PacketError::ErrH266CorruptedPacket => write!(f, "H266 corrupted packet"),
 			PacketError::ErrInvalidH265PacketType => write!(f, "H265 invalid packet type"),
 			PacketError::ErrH265PACIPHESTooLong => {
 				write!(f, "H265 PACI PHES field exceeds maximum size of 31 bytes")
@@ -46,10 +42,6 @@ impl fmt::Display for PacketError {
 			PacketError::ErrVP8CorruptedPacket => write!(f, "VP8 corrupted packet"),
 			PacketError::ErrVP9CorruptedPacket => write!(f, "VP9 corrupted packet"),
 			PacketError::ErrAv1CorruptedPacket => write!(f, "AV1 corrupted packet"),
-			PacketError::ErrRedCorruptedPacket => write!(f, "RED corrupted packet"),
-			PacketError::InvalidTelephoneEvent(reason) => {
-				write!(f, "Invalid telephone event: {reason}")
-			}
 			PacketError::ErrAmrWbCorruptedPacket => write!(f, "AMR-WB corrupted packet"),
 		}
 	}

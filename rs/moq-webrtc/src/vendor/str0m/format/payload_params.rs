@@ -5,7 +5,6 @@ use tracing::{debug, warn};
 
 use crate::vendor::str0m::packet::H264ProfileLevel;
 use crate::vendor::str0m::packet::H265ProfileTierLevel;
-use crate::vendor::str0m::packet::H266ProfileTierLevel;
 use crate::vendor::str0m::rtp_::Pt;
 
 use super::codec::{Codec, CodecSpec};
@@ -97,10 +96,6 @@ pub struct PayloadParams {
 	/// Whether the payload uses the REMB (Receiver Estimated Maximum Bitrate) mechanic.
 	pub(crate) fb_remb: bool,
 
-	/// The RFC 2198 RED payload type that wraps this primary codec, if negotiated.
-	/// Like `resend`, this links a secondary PT to this primary via SDP.
-	pub(crate) red: Option<Pt>,
-
 	/// Whether the payload is locked by negotiation or can still be debated.
 	///
 	/// If we make an OFFER or ANSWER and the direction is sendrecv/recvonly, the parameters are locked
@@ -120,7 +115,6 @@ impl PartialEq for PayloadParams {
 			&& self.fb_pli == other.fb_pli
 			&& self.fb_fir == other.fb_fir
 			&& self.fb_remb == other.fb_remb
-			&& self.red == other.red
 	}
 }
 
@@ -166,7 +160,6 @@ impl PayloadParams {
 			fb_pli: is_video,
 			fb_remb: is_video,
 
-			red: None,
 			locked: false,
 		}
 	}
@@ -194,7 +187,6 @@ impl PayloadParams {
 			fb_pli: false,
 			fb_fir: false,
 			fb_remb: false,
-			red: None,
 			locked: false,
 		}
 	}
@@ -265,11 +257,6 @@ impl PayloadParams {
 		self.fb_remb
 	}
 
-	/// The RFC 2198 RED payload type wrapping this primary codec, if negotiated.
-	pub fn red(&self) -> Option<Pt> {
-		self.red
-	}
-
 	pub(crate) fn match_score(&self, o: &PayloadParams) -> Option<usize> {
 		// we don't want to compare PT
 		let c0 = self.spec;
@@ -289,11 +276,6 @@ impl PayloadParams {
 		if c0.clock_rate != c1.clock_rate {
 			// Clock rates must match
 			return None;
-		}
-
-		// Telephone events match by clock rate, regardless of channel count.
-		if c0.codec.is_tele() {
-			return Some(Self::EXACT_MATCH_SCORE);
 		}
 
 		// AMR-WB defaults an omitted channel count to mono, so it must match
@@ -317,10 +299,6 @@ impl PayloadParams {
 
 		if c0.codec == Codec::H265 {
 			return Self::match_h265_score(c0, c1);
-		}
-
-		if c0.codec == Codec::H266 {
-			return Self::match_h266_score(c0, c1);
 		}
 
 		if c0.codec == Codec::Vp9 {
@@ -564,58 +542,6 @@ impl PayloadParams {
 		}
 	}
 
-	pub(crate) fn match_h266_score(c0: CodecSpec, c1: CodecSpec) -> Option<usize> {
-		match (c0.format.h266_profile_tier_level, c1.format.h266_profile_tier_level) {
-			(Some(c0_ptl), Some(c1_ptl)) => {
-				// Both have full PTL - strict matching
-
-				// Profiles must match exactly.
-				// RFC 9328 §7.2: profile-id is a configuration parameter
-				// that MUST be used symmetrically in offer/answer.
-				if c0_ptl.profile() != c1_ptl.profile() {
-					return None;
-				}
-
-				// Tiers must match exactly.
-				// RFC 9328 §7.2: tier-flag is a configuration parameter
-				// that MUST be used symmetrically in offer/answer.
-				if c0_ptl.tier() != c1_ptl.tier() {
-					return None;
-				}
-
-				// Level difference penalizes score but never causes rejection.
-				let level_difference: usize = c0_ptl.level().ordinal().abs_diff(c1_ptl.level().ordinal());
-
-				Some(Self::EXACT_MATCH_SCORE.saturating_sub(level_difference))
-			}
-			_ => {
-				// At least one side has no full PTL (e.g. a GStreamer offer
-				// with a bare rtpmap and no fmtp). Match on profile only,
-				// using FALLBACK for missing values.
-				let c0_profile = c0
-					.format
-					.h266_profile_tier_level
-					.map(|ptl| ptl.profile().to_id())
-					.or_else(|| c0.format.profile_id.map(|p| p as u8))
-					.unwrap_or(H266ProfileTierLevel::FALLBACK.profile().to_id());
-
-				let c1_profile = c1
-					.format
-					.h266_profile_tier_level
-					.map(|ptl| ptl.profile().to_id())
-					.or_else(|| c1.format.profile_id.map(|p| p as u8))
-					.unwrap_or(H266ProfileTierLevel::FALLBACK.profile().to_id());
-
-				// Profiles must match
-				if c0_profile != c1_profile {
-					return None;
-				}
-
-				Some(Self::PROFILE_ONLY_MATCH_SCORE)
-			}
-		}
-	}
-
 	pub(crate) fn update_param(
 		&mut self,
 		remote_pts: &[PayloadParams],
@@ -639,20 +565,6 @@ impl PayloadParams {
 		// The first negotiated m-line determines TWCC support for this PT.
 		if !self.locked {
 			self.fb_transport_cc &= first.fb_transport_cc();
-		}
-
-		if self.spec.codec.is_tele() {
-			let local = self
-				.spec
-				.format
-				.telephone_event_max
-				.unwrap_or(FormatParams::DEFAULT_TELEPHONE_EVENT_MAX);
-			let remote = first
-				.spec
-				.format
-				.telephone_event_max
-				.unwrap_or(FormatParams::DEFAULT_TELEPHONE_EVENT_MAX);
-			self.spec.format.telephone_event_max = Some(local.min(remote));
 		}
 
 		// Mirror the remote's H.265 fmtp shape: echo back only the params they offered.
@@ -681,36 +593,6 @@ impl PayloadParams {
 			// Adopt remote's sprop-max-don-diff so the depacketizer knows whether
 			// incoming packets contain DONL fields (RFC 7798 §7.1).
 			// The packetizer also uses this to decide whether to emit DONL.
-			if first.spec.format.sprop_max_don_diff.is_some() {
-				self.spec.format.sprop_max_don_diff = first.spec.format.sprop_max_don_diff;
-			}
-		}
-
-		// Same negotiation for H.266 (RFC 9328 §7.2, offer/answer model §7.3.2).
-		if self.spec.codec == Codec::H266 && first.spec.codec == Codec::H266 {
-			if let Some(remote_ptl) = first.spec.format.h266_profile_tier_level {
-				// Narrow level to min(local, remote) so the negotiated level
-				// never exceeds either side's capability.
-				let negotiated_ptl = if let Some(local_ptl) = self.spec.format.h266_profile_tier_level {
-					remote_ptl.with_level(std::cmp::min(local_ptl.level(), remote_ptl.level()))
-				} else {
-					remote_ptl
-				};
-				self.spec.format.h266_profile_tier_level = Some(negotiated_ptl);
-				// Avoid also serializing `profile-id` via the VP9 `profile_id` field.
-				self.spec.format.profile_id = None;
-			} else if let Some(profile_id) = first.spec.format.profile_id {
-				// Remote only offered `profile-id`.
-				self.spec.format.h266_profile_tier_level = None;
-				self.spec.format.profile_id = Some(profile_id);
-			} else {
-				// No remote H.266 fmtp, omit ours as well.
-				self.spec.format.h266_profile_tier_level = None;
-				self.spec.format.profile_id = None;
-			}
-
-			// Adopt remote's sprop-max-don-diff (RFC 9328 §7.2) — enables
-			// DONL on both packetizer and depacketizer.
 			if first.spec.format.sprop_max_don_diff.is_some() {
 				self.spec.format.sprop_max_don_diff = first.spec.format.sprop_max_don_diff;
 			}
@@ -749,10 +631,6 @@ impl PayloadParams {
 
 			if self.resend != remote_rtx {
 				warn!("Ignore remote PT RTX change {:?} => {:?}", self.resend, remote_rtx);
-			}
-
-			if self.red != first.red {
-				warn!("Ignore remote PT RED change {:?} => {:?}", self.red, first.red);
 			}
 		} else {
 			// Before locking, check if the remote PT conflicts with an already locked PT.
@@ -806,39 +684,6 @@ impl PayloadParams {
 				claimed.assert_claim_once(rtx);
 			}
 
-			// RED is opt-in on our side and audio-only: keep it only if the matched remote also
-			// offers RED (`and`) and our codec is an audio codec. A RED PT can still collide (two
-			// codecs mapped to the same PT), so resolve any collision before claiming it. The
-			// collision check runs regardless of who controls PT allocation: only the resolution
-			// differs, and claiming the same PT twice would panic.
-			let mut remote_red = self.red.and(first.red).filter(|_| self.spec.codec.is_audio());
-			if let Some(red) = remote_red {
-				if claimed.is_claimed(red) {
-					if local_is_controlling {
-						// We control PT allocation: remap the conflicting RED to a free PT.
-						if let Some(new_red) = claimed.find_unclaimed(PREFERED_RANGES, unlocked) {
-							debug!("Remapped conflicting RED PT {:?} => {}", red, new_red);
-							remote_red = Some(new_red);
-							unlocked.remove(&new_red);
-						} else {
-							// RED is opt-in; drop it rather than panic if no PT is free.
-							debug!("No free PT for RED; dropping it");
-							remote_red = None;
-						}
-					} else {
-						// The remote dictated the PTs and mapped a RED PT that is already taken.
-						// We can't reassign PTs the remote controls, and RED is opt-in, so drop it
-						// rather than claim the same PT twice (which would panic).
-						debug!("Conflicting remote RED PT {:?}; dropping it", red);
-						remote_red = None;
-					}
-				}
-			}
-			self.red = remote_red;
-			if let Some(red) = remote_red {
-				claimed.assert_claim_once(red);
-			}
-
 			// This is now locked.
 			self.locked = true;
 		}
@@ -851,53 +696,6 @@ mod test {
 
 	use super::*;
 	use crate::vendor::str0m::format::{CodecSpec, FormatParams};
-
-	#[test]
-	fn payload_params_red_defaults_none() {
-		let spec = CodecSpec {
-			codec: Codec::Opus,
-			clock_rate: Frequency::NINETY_KHZ,
-			channels: Some(2),
-			format: FormatParams::default(),
-		};
-		let p = PayloadParams::new(Pt::new_with_value(111), None, spec);
-		assert_eq!(p.red(), None);
-	}
-
-	#[test]
-	fn red_pt_remapped_on_conflict() {
-		use std::collections::HashSet;
-
-		// When we control PT allocation (the remote is send-only) and the RED PT we would adopt
-		// from the remote is already taken, RED is remapped to a free PT rather than colliding
-		// or being dropped.
-		let spec = CodecSpec {
-			codec: Codec::Opus,
-			clock_rate: Frequency::FORTY_EIGHT_KHZ,
-			channels: Some(2),
-			format: FormatParams::default(),
-		};
-
-		let red_pt = Pt::new_with_value(63);
-
-		let mut local = PayloadParams::new(Pt::new_with_value(111), None, spec);
-		local.red = Some(red_pt);
-
-		let mut remote = PayloadParams::new(Pt::new_with_value(111), None, spec);
-		remote.red = Some(red_pt);
-
-		// Pre-claim the RED PT as if another payload already holds it.
-		let mut claimed = [false; 128];
-		claimed[*red_pt as usize] = true;
-		let mut unlocked = HashSet::new();
-
-		// local_is_controlling = true: we allocate PTs and may remap the conflict.
-		local.update_param(&[remote], &mut claimed, true, &mut unlocked);
-
-		let got = local.red.expect("RED is kept, remapped to a free PT");
-		assert_ne!(got, red_pt, "RED PT must be remapped away from the conflict");
-		assert!(claimed.is_claimed(got), "the remapped RED PT must be claimed");
-	}
 
 	mod h264 {
 		use super::*;
@@ -1490,427 +1288,6 @@ mod test {
 				Some(16),
 				"Local sprop-max-don-diff should be preserved when remote doesn't specify it"
 			);
-		}
-	}
-
-	mod h266 {
-		use super::*;
-		use crate::vendor::str0m::packet::H266ProfileTierLevel;
-		use crate::vendor::str0m::packet::Packetizer;
-
-		fn h266_codec_spec(profile_id: u8, tier_flag: u8, level_id: u8) -> CodecSpec {
-			CodecSpec {
-				codec: Codec::H266,
-				clock_rate: Frequency::NINETY_KHZ,
-				channels: None,
-				format: FormatParams {
-					h266_profile_tier_level: Some(H266ProfileTierLevel::new(profile_id, tier_flag, level_id).unwrap()),
-					..Default::default()
-				},
-			}
-		}
-
-		fn h266_codec_spec_profile_only(profile_id: u32) -> CodecSpec {
-			CodecSpec {
-				codec: Codec::H266,
-				clock_rate: Frequency::NINETY_KHZ,
-				channels: None,
-				format: FormatParams {
-					profile_id: Some(profile_id),
-					..Default::default()
-				},
-			}
-		}
-
-		/// Test basic H.266 profile/tier/level matching scenarios.
-		/// Verifies that full ProfileTierLevel parameters are matched correctly.
-		#[test]
-		fn test_profile_tier_level_matching() {
-			struct Case {
-				c0: CodecSpec,
-				c1: CodecSpec,
-				must_match: bool,
-				msg: &'static str,
-			}
-
-			let cases = [
-				// Same profile, tier, level -> should match
-				Case {
-					c0: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(1, 0, 51),
-					must_match: true,
-					msg: "Same profile (Main), tier (Main), level (3.1) should match",
-				},
-				// Same profile and tier, offered level lower -> should match
-				Case {
-					c0: h266_codec_spec(1, 0, 64), // Main, Main tier, Level 4.0
-					c1: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					must_match: true,
-					msg: "Same profile/tier, offered level 3.1 < configured 4.0 should match",
-				},
-				// Same profile and tier, offered level higher -> should still match (with penalty)
-				Case {
-					c0: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(1, 0, 64), // Main, Main tier, Level 4.0
-					must_match: true,
-					msg: "Same profile/tier, offered level 4.0 > configured 3.1 should match (penalized)",
-				},
-				// Different profiles -> should NOT match
-				Case {
-					c0: h266_codec_spec(1, 0, 51),  // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(33, 0, 51), // Main10, Main tier, Level 3.1
-					must_match: false,
-					msg: "Different profiles (Main vs Main10) should NOT match",
-				},
-				// Different tiers -> should NOT match
-				Case {
-					c0: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(1, 1, 51), // Main, High tier, Level 3.1
-					must_match: false,
-					msg: "Different tiers (Main vs High) should NOT match",
-				},
-				// Main10 profile, same tier, lower level -> should match
-				Case {
-					c0: h266_codec_spec(33, 0, 83), // Main10, Main tier, Level 5.1
-					c1: h266_codec_spec(33, 0, 64), // Main10, Main tier, Level 4.0
-					must_match: true,
-					msg: "Main10 profile, offered level 4.0 < configured 5.1 should match",
-				},
-				// High tier, multiple levels down -> should match
-				Case {
-					c0: h266_codec_spec(1, 1, 83), // Main, High tier, Level 5.1
-					c1: h266_codec_spec(1, 1, 51), // Main, High tier, Level 3.1
-					must_match: true,
-					msg: "High tier, offered level 3.1 < configured 5.1 should match",
-				},
-			];
-
-			for Case {
-				c0,
-				c1,
-				must_match,
-				msg,
-			} in cases.into_iter()
-			{
-				let matched = PayloadParams::match_h266_score(c0, c1).is_some();
-				assert_eq!(matched, must_match, "{msg}\nc0: {c0:#?}\nc1: {c1:#?}");
-			}
-		}
-
-		/// Test H.266 level matching with exact scores.
-		/// Verifies that the score decrements based on level difference.
-		#[test]
-		fn test_level_matching_scores() {
-			struct Case {
-				c0: CodecSpec,
-				c1: CodecSpec,
-				expected: Option<usize>,
-				msg: &'static str,
-			}
-
-			let cases = [
-				// Exact match -> score 100
-				Case {
-					c0: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(1, 0, 51),
-					expected: Some(PayloadParams::EXACT_MATCH_SCORE),
-					msg: "Exact match should return score 100",
-				},
-				// One level down -> score 100 - 1
-				Case {
-					c0: h266_codec_spec(1, 0, 64), // Main, Main tier, Level 4.0
-					c1: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					expected: Some(PayloadParams::EXACT_MATCH_SCORE - 1),
-					msg: "One level difference should return score 99",
-				},
-				// Two levels down -> score 100 - 2
-				Case {
-					c0: h266_codec_spec(1, 0, 67), // Main, Main tier, Level 4.1
-					c1: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					expected: Some(PayloadParams::EXACT_MATCH_SCORE - 2),
-					msg: "Two level difference should return score 98",
-				},
-				// Multiple levels down
-				Case {
-					c0: h266_codec_spec(1, 0, 83), // Main, Main tier, Level 5.1
-					c1: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					expected: Some(PayloadParams::EXACT_MATCH_SCORE - 4),
-					msg: "Four level difference (5.1 to 3.1) should return score 96",
-				},
-				// Offered level higher -> still matches, penalized by 1 ordinal
-				Case {
-					c0: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(1, 0, 64), // Main, Main tier, Level 4.0
-					expected: Some(PayloadParams::EXACT_MATCH_SCORE - 1),
-					msg: "Offered level one higher than configured should return score 99",
-				},
-				// Different profiles -> None
-				Case {
-					c0: h266_codec_spec(1, 0, 51),  // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(33, 0, 51), // Main10, Main tier, Level 3.1
-					expected: None,
-					msg: "Different profiles should return None",
-				},
-				// Different tiers -> None
-				Case {
-					c0: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(1, 1, 51), // Main, High tier, Level 3.1
-					expected: None,
-					msg: "Different tiers should return None",
-				},
-			];
-
-			for Case { c0, c1, expected, msg } in cases.into_iter() {
-				assert_eq!(
-					PayloadParams::match_h266_score(c0, c1),
-					expected,
-					"{msg}\nc0: {c0:#?}\nc1: {c1:#?}"
-				);
-			}
-		}
-
-		/// Test H.266 profile-only matching (for Chrome compatibility).
-		/// When only profile-id is provided without tier/level, match on profile only.
-		#[test]
-		fn test_profile_only_matching() {
-			struct Case {
-				c0: CodecSpec,
-				c1: CodecSpec,
-				expected: Option<usize>,
-				msg: &'static str,
-			}
-
-			let cases = [
-				// Both have profile-only, same profile -> score 90
-				Case {
-					c0: h266_codec_spec_profile_only(1), // Main
-					c1: h266_codec_spec_profile_only(1), // Main
-					expected: Some(PayloadParams::PROFILE_ONLY_MATCH_SCORE),
-					msg: "Profile-only match (Main) should return score 90",
-				},
-				// Both have profile-only, different profiles -> None
-				Case {
-					c0: h266_codec_spec_profile_only(1),  // Main
-					c1: h266_codec_spec_profile_only(33), // Main10
-					expected: None,
-					msg: "Profile-only with different profiles should return None",
-				},
-				// One has full PTL, other has profile-only, same profile -> score 90
-				Case {
-					c0: h266_codec_spec(1, 0, 51),       // Main, Main tier, Level 3.1
-					c1: h266_codec_spec_profile_only(1), // Main
-					expected: Some(PayloadParams::PROFILE_ONLY_MATCH_SCORE),
-					msg: "Mixed PTL and profile-only with matching profile should return score 90",
-				},
-				// One has full PTL, other has profile-only, different profiles -> None
-				Case {
-					c0: h266_codec_spec(1, 0, 51),        // Main, Main tier, Level 3.1
-					c1: h266_codec_spec_profile_only(33), // Main10
-					expected: None,
-					msg: "Mixed PTL and profile-only with different profiles should return None",
-				},
-				// Reverse: profile-only vs full PTL, same profile -> score 90
-				Case {
-					c0: h266_codec_spec_profile_only(1), // Main
-					c1: h266_codec_spec(1, 0, 51),       // Main, Main tier, Level 3.1
-					expected: Some(PayloadParams::PROFILE_ONLY_MATCH_SCORE),
-					msg: "Profile-only vs full PTL with matching profile should return score 90",
-				},
-			];
-
-			for Case { c0, c1, expected, msg } in cases.into_iter() {
-				assert_eq!(
-					PayloadParams::match_h266_score(c0, c1),
-					expected,
-					"{msg}\nc0: {c0:#?}\nc1: {c1:#?}"
-				);
-			}
-		}
-
-		/// Test negative cases for H.266 matching to ensure proper rejection.
-		#[test]
-		fn test_negative_cases() {
-			struct Case {
-				c0: CodecSpec,
-				c1: CodecSpec,
-				msg: &'static str,
-			}
-
-			let cases = [
-				// Profile mismatch with full PTL
-				Case {
-					c0: h266_codec_spec(1, 0, 51),  // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(33, 0, 51), // Main10, Main tier, Level 3.1
-					msg: "Profile mismatch (Main vs Main10) must not match",
-				},
-				// Tier mismatch
-				Case {
-					c0: h266_codec_spec(1, 0, 51), // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(1, 1, 51), // Main, High tier, Level 3.1
-					msg: "Tier mismatch (Main vs High) must not match",
-				},
-				// All three different (profile+tier mismatch rejects)
-				Case {
-					c0: h266_codec_spec(1, 0, 51),  // Main, Main tier, Level 3.1
-					c1: h266_codec_spec(33, 1, 83), // Main10, High tier, Level 5.1
-					msg: "Profile and tier different must not match",
-				},
-				// Profile-only mismatch
-				Case {
-					c0: h266_codec_spec_profile_only(1),  // Main
-					c1: h266_codec_spec_profile_only(33), // Main10
-					msg: "Profile-only mismatch must not match",
-				},
-				// Mixed full PTL vs profile-only with different profiles
-				Case {
-					c0: h266_codec_spec(33, 0, 51),      // Main10, Main tier, Level 3.1
-					c1: h266_codec_spec_profile_only(1), // Main
-					msg: "Full PTL (Main10) vs profile-only (Main) must not match",
-				},
-			];
-
-			for Case { c0, c1, msg } in cases.into_iter() {
-				assert_eq!(
-					PayloadParams::match_h266_score(c0, c1),
-					None,
-					"{msg}\nc0: {c0:#?}\nc1: {c1:#?}"
-				);
-			}
-		}
-
-		/// Test that sprop-max-don-diff is adopted from remote SDP during negotiation,
-		/// and that packetizer/depacketizer are correctly initialized with DONL enabled.
-		#[test]
-		fn test_sprop_max_don_diff_negotiation_enables_donl() {
-			use crate::vendor::str0m::packet::{CodecDepacketizer, CodecPacketizer};
-
-			// Local config: no sprop-max-don-diff (default)
-			let local_spec = h266_codec_spec(1, 0, 51);
-			let mut local_params =
-				PayloadParams::new(Pt::new_with_value(102), Some(Pt::new_with_value(103)), local_spec);
-			assert_eq!(
-				local_params.spec.format.sprop_max_don_diff, None,
-				"Local should have no sprop-max-don-diff initially"
-			);
-
-			// Remote offers H.266 with sprop-max-don-diff=32
-			let mut remote_spec = h266_codec_spec(1, 0, 51);
-			remote_spec.format.sprop_max_don_diff = Some(32);
-			let remote_params = PayloadParams::new(Pt::new_with_value(102), Some(Pt::new_with_value(103)), remote_spec);
-
-			// Simulate SDP negotiation (update_param merges remote into local)
-			let mut claimed = [false; 128];
-			let mut unlocked = std::collections::HashSet::new();
-			local_params.update_param(
-				&[remote_params],
-				&mut claimed,
-				false, // remote is controlling (we're answering)
-				&mut unlocked,
-			);
-
-			// Verify sprop-max-don-diff was adopted from remote
-			assert_eq!(
-				local_params.spec.format.sprop_max_don_diff,
-				Some(32),
-				"sprop-max-don-diff should be adopted from remote after negotiation"
-			);
-
-			// Verify packetizer is initialized with DONL enabled
-			let donl_enabled = local_params.spec.format.sprop_max_don_diff.unwrap_or(0) > 0;
-			assert!(donl_enabled, "DONL should be enabled when sprop-max-don-diff > 0");
-
-			let mut pack = CodecPacketizer::new(
-				local_params.spec.codec,
-				crate::vendor::str0m::format::Vp9PacketizerMode::default(),
-			);
-			if let CodecPacketizer::H266(ref mut h266) = pack {
-				h266.with_donl(donl_enabled);
-			}
-
-			// Packetize a NAL — should include DONL field (2 extra bytes)
-			let nalu = vec![0x00, 0x09, 0xAA, 0xBB];
-			let packets = pack.packetize(1200, &nalu).unwrap();
-			assert_eq!(packets.len(), 1);
-			assert_eq!(
-				packets[0].len(),
-				nalu.len() + 2, // +2 for DONL
-				"Packetized output should include 2-byte DONL field"
-			);
-
-			// Verify depacketizer is initialized with DONL enabled
-			let mut depack: CodecDepacketizer = local_params.spec.codec.into();
-			if let CodecDepacketizer::H266(ref mut h266) = depack {
-				h266.with_donl(donl_enabled);
-			}
-
-			// Depacketize the packet — should correctly strip DONL
-			use crate::vendor::str0m::packet::{CodecExtra, Depacketizer};
-			let mut out = Vec::new();
-			let mut extra = CodecExtra::None;
-			if let CodecDepacketizer::H266(ref mut h266) = depack {
-				h266.depacketize(&packets[0], &mut out, &mut extra).unwrap();
-			}
-
-			// Output should be Annex-B: start code + original NAL
-			assert_eq!(&out[0..4], &[0x00, 0x00, 0x00, 0x01]);
-			assert_eq!(&out[4..], &nalu[..], "Depacketized NAL should match original");
-		}
-
-		/// Test that missing sprop-max-don-diff from remote preserves local value.
-		#[test]
-		fn test_sprop_max_don_diff_absent_preserves_local() {
-			// Local has sprop-max-don-diff=16
-			let mut local_spec = h266_codec_spec(1, 0, 51);
-			local_spec.format.sprop_max_don_diff = Some(16);
-			let mut local_params =
-				PayloadParams::new(Pt::new_with_value(102), Some(Pt::new_with_value(103)), local_spec);
-
-			// Remote offers without sprop-max-don-diff
-			let remote_spec = h266_codec_spec(1, 0, 51);
-			assert!(remote_spec.format.sprop_max_don_diff.is_none());
-			let remote_params = PayloadParams::new(Pt::new_with_value(102), Some(Pt::new_with_value(103)), remote_spec);
-
-			let mut claimed = [false; 128];
-			let mut unlocked = std::collections::HashSet::new();
-			local_params.update_param(&[remote_params], &mut claimed, false, &mut unlocked);
-
-			// Local value should be preserved (remote didn't override)
-			assert_eq!(
-				local_params.spec.format.sprop_max_don_diff,
-				Some(16),
-				"Local sprop-max-don-diff should be preserved when remote doesn't specify it"
-			);
-		}
-
-		/// Test that sprop-max-don-diff=0 from remote does NOT enable DONL.
-		#[test]
-		fn test_sprop_max_don_diff_zero_disables_donl() {
-			let local_spec = h266_codec_spec(1, 0, 51);
-			let mut local_params =
-				PayloadParams::new(Pt::new_with_value(102), Some(Pt::new_with_value(103)), local_spec);
-
-			// Remote offers with sprop-max-don-diff=0 (no reordering)
-			let mut remote_spec = h266_codec_spec(1, 0, 51);
-			remote_spec.format.sprop_max_don_diff = Some(0);
-			let remote_params = PayloadParams::new(Pt::new_with_value(102), Some(Pt::new_with_value(103)), remote_spec);
-
-			let mut claimed = [false; 128];
-			let mut unlocked = std::collections::HashSet::new();
-			local_params.update_param(&[remote_params], &mut claimed, false, &mut unlocked);
-
-			assert_eq!(local_params.spec.format.sprop_max_don_diff, Some(0));
-			let donl_enabled = local_params.spec.format.sprop_max_don_diff.unwrap_or(0) > 0;
-			assert!(!donl_enabled, "DONL should NOT be enabled when sprop-max-don-diff=0");
-
-			// Packetize without DONL — packet should be same size as NAL
-			let nalu = vec![0x00, 0x09, 0xAA, 0xBB];
-			let mut pack = crate::vendor::str0m::packet::CodecPacketizer::new(
-				local_params.spec.codec,
-				crate::vendor::str0m::format::Vp9PacketizerMode::default(),
-			);
-			// Don't enable DONL since donl_enabled is false
-			let packets = pack.packetize(1200, &nalu).unwrap();
-			assert_eq!(packets[0].len(), nalu.len(), "No DONL field when sprop-max-don-diff=0");
 		}
 	}
 

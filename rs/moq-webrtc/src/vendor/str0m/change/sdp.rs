@@ -811,7 +811,7 @@ fn as_sdp(session: &Session, params: AsSdpParams) -> Sdp {
 					ssrcs.extend(pending.ssrcs_for_mid(m.mid()))
 				}
 
-				let params: Vec<_> = session.codec_config.all_for_kind(m.kind(), false).cloned().collect();
+				let params: Vec<_> = session.codec_config.all_for_kind(m.kind()).cloned().collect();
 
 				m.as_media_line(attrs, &ssrcs, &session.exts, &params)
 			})
@@ -1425,12 +1425,7 @@ impl AsSdpMediaLine for Media {
 			let p = *p;
 			p.as_media_attrs(&mut attrs);
 
-			// The pts that will be advertised in the SDP. A negotiated RED goes before its
-			// primary: libwebrtc enables RED only when it precedes the selected audio codec.
-			// RED is kept only when both sides offer it (`PayloadParams::update_param`).
-			if let Some(red) = p.red() {
-				pts.push(red);
-			}
+			// The pts that will be advertised in the SDP.
 			pts.push(p.pt());
 			if let Some(rtx) = p.resend() {
 				pts.push(rtx);
@@ -1737,7 +1732,7 @@ impl Change {
 			AddMedia(v) => {
 				// TODO can we avoid all this cloning?
 				let mut add = v.clone();
-				add.pts = config.all_for_kind(v.kind, true).map(|p| p.pt()).collect();
+				add.pts = config.all_for_kind(v.kind).map(|p| p.pt()).collect();
 				add.exts = exts.cloned_with_type(v.kind.is_audio());
 				add.index = index;
 

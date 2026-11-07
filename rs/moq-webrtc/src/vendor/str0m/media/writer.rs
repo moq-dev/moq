@@ -12,8 +12,6 @@ use crate::vendor::str0m::rtp_::VideoOrientation;
 use crate::vendor::str0m::session::Session;
 use crate::vendor::str0m::streams::Streams;
 
-use super::TelephoneEvent;
-use super::tele::{MAX_DURATION, MIN_DURATION, TelephonePackets};
 use super::{ExtensionValues, KeyframeRequestKind, Media, MediaTime, Mid, Pt, Rid, ToPayload};
 
 /// Writer of frame level data.
@@ -28,7 +26,6 @@ pub struct Writer<'a> {
 	mid: Mid,
 	rid: Option<Rid>,
 	start_of_talkspurt: Option<bool>,
-	tele_event: Option<TelephoneEvent>,
 	ext_vals: ExtensionValues,
 }
 
@@ -46,7 +43,6 @@ impl<'a> Writer<'a> {
 			mid,
 			rid: None,
 			start_of_talkspurt: None,
-			tele_event: None,
 			ext_vals: ExtensionValues::default(),
 		}
 	}
@@ -115,28 +111,6 @@ impl<'a> Writer<'a> {
 		self
 	}
 
-	/// Start a telephone event alongside the next audio write.
-	///
-	/// `event` describes the complete tone: set `end` to true and `duration` to its total length.
-	/// The `write` call supplies its start time and audio payload type. The negotiated
-	/// telephone-event payload type with the same RTP clock rate is selected automatically.
-	/// The complete series of telephone packets is queued by this write. Each packet waits until
-	/// its send time, while later audio writes can pass packets still waiting in the queue.
-	/// Passing an empty audio slice to `write` sends the telephone packets without an audio packet.
-	///
-	/// Only one event can be active on this media. Start the next one on a later write, at least
-	/// 50 ms after the previous event ends.
-	///
-	/// Panics if called twice before `write`. Use a separate `write` for each event.
-	pub fn telephone_event(mut self, event: TelephoneEvent) -> Self {
-		assert!(
-			self.tele_event.is_none(),
-			"telephone_event was already set; call write before setting another event"
-		);
-		self.tele_event = Some(event);
-		self
-	}
-
 	/// Set the minimum and maximum playout delay values. This can be used by a player
 	/// on the receiver end to determine the size of the jitter buffer.
 	pub fn playout_delay(mut self, min: MediaTime, max: MediaTime) -> Self {
@@ -185,11 +159,7 @@ impl<'a> Writer<'a> {
 			.iter()
 			.find(|p| p.pt() == pt)
 			.expect("configured payload type exists");
-		let is_audio = params.spec().codec.is_audio();
-		if self.tele_event.is_some() && !is_audio {
-			return Err(RtcError::UnknownPt(pt));
-		}
-		let clock_rate = params.spec().rtp_clock_rate();
+		let clock_rate = params.spec().clock_rate;
 
 		// This (indirect) unwrap is OK due to the invariant of self.mid being resolvable
 		let media = media_by_mid_mut(&mut self.session.medias, self.mid);
@@ -211,50 +181,15 @@ impl<'a> Writer<'a> {
 			data.len()
 		);
 
-		let has_data = !data.is_empty();
-		let has_tele = self.tele_event.is_some();
-
-		// If the user sends an empty slice, we honor it in case there is not
-		// tele event. In case of tele event we assume the user just wants to send
-		// the telephone events and nothing else.
-		if has_data || !has_tele {
-			media.set_to_payload(ToPayload {
-				pt,
-				rid: self.rid,
-				wallclock,
-				rtp_time,
-				not_before: None,
-				data,
-				start_of_talk_spurt: self.start_of_talkspurt.unwrap_or(false),
-				ext_vals: self.ext_vals.clone(),
-			})?;
-		}
-
-		let Some(event) = self.tele_event else {
-			return Ok(());
-		};
-
-		let event_pt = validate_tele_event(
-			media,
-			&self.session.codec_config,
-			&mut self.session.streams,
-			self.rid,
-			params,
+		media.set_to_payload(ToPayload {
+			pt,
+			rid: self.rid,
 			wallclock,
-			event,
-		)?;
-
-		// Iterator over the packets created by the event.
-		let packets = TelephonePackets::new(
-			event_pt,
-			self.rid,
-			event,
-			wallclock,
-			rtp_time.rebase(clock_rate),
-			self.ext_vals,
-		);
-
-		media.queue_telephone_packets(packets, wallclock + event.duration)?;
+			rtp_time,
+			data,
+			start_of_talk_spurt: self.start_of_talkspurt.unwrap_or(false),
+			ext_vals: self.ext_vals.clone(),
+		})?;
 
 		Ok(())
 	}
@@ -316,67 +251,6 @@ impl<'a> Writer<'a> {
 
 		Ok(())
 	}
-}
-
-fn validate_tele_event(
-	media: &Media,
-	codec_config: &CodecConfig,
-	streams: &mut Streams,
-	rid: Option<Rid>,
-	audio_params: &PayloadParams,
-	wallclock: Instant,
-	event: TelephoneEvent,
-) -> Result<Pt, RtcError> {
-	let mid = media.mid();
-	let audio_pt = audio_params.pt();
-	let clock_rate = audio_params.spec().rtp_clock_rate();
-	let event_params = codec_config.params().iter().find(|p| {
-		p.spec().codec.is_tele()
-			&& p.spec().rtp_clock_rate() == clock_rate
-			&& (media.remote_pts().is_empty() || media.remote_pts().contains(&p.pt()))
-	});
-	let Some(event_params) = event_params else {
-		let reason = "no negotiated telephone event for audio clock rate";
-		return Err(tele_invalid(mid, audio_pt, reason));
-	};
-	let event_pt = event_params.pt();
-	let max = codec_config.tele_event_max(event_pt).unwrap();
-	if event.event > max {
-		return Err(tele_invalid(mid, event_pt, "event exceeds negotiated range"));
-	}
-	if !event.end {
-		return Err(tele_invalid(mid, event_pt, "event must have end set"));
-	}
-	if event.volume > 63 {
-		return Err(tele_invalid(mid, event_pt, "volume exceeds 63"));
-	}
-	if !(MIN_DURATION..=MAX_DURATION).contains(&event.duration) {
-		let reason = "duration must be between 40 ms and 6 s";
-		return Err(tele_invalid(mid, event_pt, reason));
-	}
-	if !media.direction().is_sending() {
-		return Err(RtcError::NotSendingDirection(media.direction()));
-	}
-	if let Some(rid) = rid {
-		if !media.rids_tx().contains(rid) {
-			return Err(RtcError::UnknownRid(rid));
-		}
-	}
-	let midrid = MidRid(mid, rid);
-	let sender_missing = streams.stream_tx_by_midrid(midrid).is_none();
-	if sender_missing {
-		return Err(RtcError::NoSenderSource);
-	}
-	let too_soon = media.telephone_event_too_soon(wallclock);
-	if too_soon {
-		let reason = "telephone events must be at least 50 ms apart";
-		return Err(tele_invalid(mid, event_pt, reason));
-	}
-	Ok(event_pt)
-}
-
-fn tele_invalid(mid: Mid, pt: Pt, reason: &'static str) -> RtcError {
-	RtcError::Packet(mid, pt, PacketError::InvalidTelephoneEvent(reason))
 }
 
 /// Get a &mut Media in a slice for a `mid`.

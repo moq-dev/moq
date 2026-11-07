@@ -7,24 +7,21 @@ use crate::vendor::str0m::rtp_::{ExtensionValues, Frequency, Pt, SeqNo};
 use crate::vendor::str0m::streams::{RtpWrite, StreamTx};
 
 use super::PacketError;
-use super::red::RedSender;
 use super::{CodecPacketizer, Packetizer};
 
 /// Turns frames into RTP packets.
 ///
 /// The payloader is deliberately codec- and feature-agnostic: it packetizes via its
 /// [`CodecPacketizer`] and emits [`OutgoingPacket`]s through a [`PacketSink`]. All codec-specific
-/// behaviour (marker/nackable policy, DONL) lives on the packetizer, and RFC 2198 RED wrapping is
-/// applied by the sink (see [`RedSink`]), owned a level up in `Media`.
+/// behaviour (marker/nackable policy, DONL) lives on the packetizer.
 #[derive(Debug)]
 pub struct Payloader {
 	pack: CodecPacketizer,
 	clock_rate: Frequency,
 }
 
-/// A packet ready to hand to a [`PacketSink`]: the RTP fields plus the primary payload as an owned
-/// `Vec`. The payload is only wrapped into an `Arc` once, when the sink builds the [`RtpWrite`], so
-/// a RED sink can transform the bytes first without an extra allocation.
+/// A packet ready to hand to a [`PacketSink`]: the RTP fields plus the payload as an owned
+/// `Vec`. The payload is only wrapped into an `Arc` once, when the sink builds the [`RtpWrite`].
 pub(crate) struct OutgoingPacket {
 	pub pt: Pt,
 	pub seq_no: SeqNo,
@@ -36,10 +33,7 @@ pub(crate) struct OutgoingPacket {
 	pub payload: Vec<u8>,
 }
 
-/// Where a [`Payloader`] sends its packetized output. Implemented by [`StreamTx`] (plain) and
-/// [`RedSink`] (RFC 2198 wrapping), so the payloader stays unaware of both the concrete stream and
-/// RED. Dispatch is static: [`Payloader::push_sample`] is monomorphised per sink, so the plain
-/// path carries no RED branch at all.
+/// Where a [`Payloader`] sends its packetized output, implemented by [`StreamTx`].
 pub(crate) trait PacketSink {
 	/// The next sequence number to assign on the underlying stream.
 	fn next_seq_no(&mut self) -> SeqNo;
@@ -58,7 +52,7 @@ impl Payloader {
 
 		Payloader {
 			pack,
-			clock_rate: spec.rtp_clock_rate(),
+			clock_rate: spec.clock_rate,
 		}
 	}
 
@@ -142,50 +136,6 @@ impl PacketSink for StreamTx {
 				packet.rtp_time,
 				packet.wallclock,
 				packet.payload,
-			)
-			.marker(packet.marker)
-			.ext_vals(packet.ext_vals)
-			.nackable(packet.nackable),
-		);
-	}
-}
-
-/// Decorates a [`StreamTx`] so a [`Payloader`]'s output is wrapped in RFC 2198 RED and sent on the
-/// RED payload type. Holds only borrows: the [`RedSender`] state (history, distances) is owned by
-/// `Media`, and the same primary SSRC, sequence number, marker and extensions are preserved.
-pub(crate) struct RedSink<'a> {
-	stream: &'a mut StreamTx,
-	red: &'a mut RedSender,
-	/// Full aligned MTU; the RED payload (primary + redundancy) is shed to fit within this.
-	budget: usize,
-}
-
-impl<'a> RedSink<'a> {
-	pub(crate) fn new(stream: &'a mut StreamTx, red: &'a mut RedSender, budget: usize) -> Self {
-		RedSink { stream, red, budget }
-	}
-}
-
-impl PacketSink for RedSink<'_> {
-	fn next_seq_no(&mut self) -> SeqNo {
-		StreamTx::next_seq_no(self.stream)
-	}
-
-	fn last_packet(&self) -> Option<&[u8]> {
-		StreamTx::last_packet(self.stream)
-	}
-
-	fn send(&mut self, packet: OutgoingPacket) {
-		// Wrap the primary Vec before it becomes an Arc, so RED adds no extra allocation. Swap to
-		// the RED payload type; everything else on the packet is preserved.
-		let payload = self.red.wrap(packet.payload, packet.rtp_time, self.budget);
-		self.stream.write_rtp(
-			RtpWrite::new(
-				self.red.red_pt(),
-				packet.seq_no,
-				packet.rtp_time,
-				packet.wallclock,
-				payload,
 			)
 			.marker(packet.marker)
 			.ext_vals(packet.ext_vals)

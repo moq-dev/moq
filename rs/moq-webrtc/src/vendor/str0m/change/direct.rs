@@ -239,15 +239,6 @@ impl<'a> DirectApi<'a> {
 		self.rtc.session.remove_media(mid);
 	}
 
-	/// Turn RFC 2198 RED wrapping on or off on the send side at runtime.
-	///
-	/// This only decides whether outgoing packets are wrapped in RED right now; it needs no
-	/// renegotiation. Enabling has no effect on media where RED is not available. Returns whether
-	/// the setting changed (`false` if the media does not exist or the value was already set).
-	pub fn set_red_send(&mut self, mid: Mid, enabled: bool) -> bool {
-		self.rtc.session.set_red_send(mid, enabled)
-	}
-
 	/// Allow incoming traffic from remote peer for the given SSRC.
 	///
 	/// Can be called multiple times if the `rtx` is discovered later via RTP header extensions.

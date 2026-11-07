@@ -219,7 +219,7 @@ impl RtcConfig {
 	/// // For the session to use only OPUS and VP8.
 	/// let mut rtc = RtcConfig::default()
 	///     .clear_codecs()
-	///     .enable_opus(true, false)
+	///     .enable_opus(true)
 	///     .enable_vp8(true)
 	///     .build(Instant::now());
 	/// # }
@@ -229,70 +229,11 @@ impl RtcConfig {
 		self
 	}
 
-	/// Enable opus audio codec, optionally with RFC 2198 RED (redundant audio).
+	/// Enable opus audio codec.
 	///
-	/// Enabled by default (without RED). `use_red` folds a RED payload type onto Opus so the
-	/// receiver can recover packet loss without retransmission, at the cost of extra audio payload
-	/// size. Each audio codec carries its own RED payload type. The redundancy depth is set with
-	/// [`Self::set_red_distances`] (default one level, the previous frame), and wrapping can be
-	/// toggled at runtime on the send side without renegotiation via
-	/// [`DirectApi::set_red_send`][crate::vendor::str0m::change::DirectApi::set_red_send].
-	pub fn enable_opus(mut self, enabled: bool, use_red: bool) -> Self {
-		self.codec_config.enable_opus(enabled, use_red);
-		self
-	}
-
-	/// Set the RFC 2198 RED send-side redundancy pattern: how many packets back each redundant
-	/// level carries. `[1]` (the default) sends one level, the previous frame, as browsers do;
-	/// `[1, 3, 5]` sends three levels for higher loss at the cost of more bandwidth.
-	///
-	/// The pattern is sanitised (zeros and values deeper than the recovery depth are dropped, then
-	/// sorted and de-duped) and always includes distance 1 as the recovery anchor (so `[2, 4]`
-	/// becomes `[1, 2, 4]`), falling back to `[1]` if empty. This only sets the pattern; enable RED
-	/// via the `use_red` argument of an audio codec (e.g. [`Self::enable_opus`]) for it to take effect.
-	pub fn set_red_distances(mut self, distances: &[u32]) -> Self {
-		self.codec_config.set_red_distances(distances);
-		self
-	}
-
-	/// Enable PCM μ-law audio codec, optionally with RFC 2198 RED (see [`Self::enable_opus`] for
-	/// `use_red`).
-	///
-	/// This is 14-bit audio compressed to 8-bit as specified by G.711
-	pub fn enable_pcmu(mut self, enabled: bool, use_red: bool) -> Self {
-		self.codec_config.enable_pcmu(enabled, use_red);
-		self
-	}
-
-	/// Enable PCM a-law audio codec, optionally with RFC 2198 RED (see [`Self::enable_opus`] for
-	/// `use_red`).
-	///
-	/// This is 13-bit audio compressed to 8-bit as specified by G.711
-	pub fn enable_pcma(mut self, enabled: bool, use_red: bool) -> Self {
-		self.codec_config.enable_pcma(enabled, use_red);
-		self
-	}
-
-	/// Enable G722 audio codec.
-	///
-	/// This is 16 kHz audio compressed to 64 kbit/s as specified by G.722. Note that
-	/// per RFC 3551 §4.5.2 the RTP clock rate on the wire is 8000 Hz even though the
-	/// codec samples at 16 kHz. str0m treats G722 as a 16 kHz codec in the API and
-	/// handles the 8 kHz RTP timestamp mapping internally. See
-	/// <https://en.wikipedia.org/wiki/RTP_payload_formats#cite_note-55>
-	///
-	/// See [`Self::enable_opus`] for `use_red`.
-	pub fn enable_g722(mut self, enabled: bool, use_red: bool) -> Self {
-		self.codec_config.enable_g722(enabled, use_red);
-		self
-	}
-
-	/// Enable the RFC 3389 Comfort Noise payload at 8000 Hz.
-	///
-	/// Disabled by default. Higher clock rates require a dynamic payload type
-	/// and can be added through [`RtcConfig::codec_config`].
-	pub fn enable_comfort_noise(mut self, enabled: bool) -> Self {
-		self.codec_config.enable_comfort_noise(enabled);
+	/// Enabled by default.
+	pub fn enable_opus(mut self, enabled: bool) -> Self {
+		self.codec_config.enable_opus(enabled);
 		self
 	}
 
@@ -325,15 +266,6 @@ impl RtcConfig {
 	/// Enabled by default.
 	pub fn enable_h265(mut self, enabled: bool) -> Self {
 		self.codec_config.enable_h265(enabled);
-		self
-	}
-
-	/// Enable H266 (VVC) video codec.
-	///
-	/// Disabled by default: no major browser (Chrome, Safari, Firefox)
-	/// currently supports H.266/VVC, so it is opt-in.
-	pub fn enable_h266(mut self, enabled: bool) -> Self {
-		self.codec_config.enable_h266(enabled);
 		self
 	}
 
@@ -831,18 +763,6 @@ mod tests {
 			let config = RtcConfig::new().set_sctp_max_message_size(bytes);
 			assert_eq!(config.clone().sctp_max_message_size(), bytes);
 		}
-	}
-
-	#[test]
-	fn enable_comfort_noise_updates_codec_config() {
-		let mut cfg = RtcConfig::default().enable_comfort_noise(true);
-
-		assert!(
-			cfg.codec_config()
-				.params()
-				.iter()
-				.any(|p| p.spec().codec == crate::vendor::str0m::format::Codec::CN)
-		);
 	}
 
 	#[test]

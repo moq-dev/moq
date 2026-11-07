@@ -50,10 +50,7 @@ impl Frequency {
 
 	/// Cycles in a second of a 16 kHz signal.
 	///
-	/// This is the nominal codec clock rate for G722 and the RTP clock rate for
-	/// AMR-WB. G722 samples at 16 kHz but its RTP clock rate is 8000 Hz
-	/// (RFC 3551 §4.5.2). See
-	/// <https://en.wikipedia.org/wiki/RTP_payload_formats#cite_note-55>
+	/// This is the RTP clock rate for AMR-WB.
 	pub const SIXTEEN_KHZ: Frequency = Self::make(16_000);
 
 	/// Cycles in a second of a 8000 Hz signal.

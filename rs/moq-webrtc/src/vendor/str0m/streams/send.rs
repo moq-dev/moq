@@ -519,8 +519,8 @@ impl StreamTx {
 
 		let pt_main = header_ref.payload_type;
 
-		// The pt in next.pkt is the "main" pt, or a RED PT folded onto its primary codec.
-		let Some(param) = params.iter().find(|p| p.pt() == pt_main || p.red() == Some(pt_main)) else {
+		// The pt in next.pkt is the "main" pt.
+		let Some(param) = params.iter().find(|p| p.pt() == pt_main) else {
 			// PT does not exist in the connected media.
 			warn!("Media is missing PT ({}) used in RTP packet", pt_main);
 
@@ -536,14 +536,7 @@ impl StreamTx {
 
 		let mut header = match next.kind {
 			NextPacketKind::Regular => {
-				// A RED-wrapped packet (pt_main is the RED PT) must not be nackable: an RTX
-				// resend carries the RTX PT with the primary codec's apt, so the peer would
-				// parse the RED bytes as raw primary codec. RED carries its own redundancy, so
-				// it does not need RTX anyway. Plain packets on this PT stay nackable.
-				let is_red_packet = param.red() == Some(pt_main);
-				let rtx_possible = param.resend().is_some() && !is_red_packet;
-
-				if !rtx_possible {
+				if param.resend().is_none() {
 					// If the PT we're sending on doesn't have a corresponding RTX PT,
 					// the packet is de-facto not nackable.
 					//
@@ -552,7 +545,7 @@ impl StreamTx {
 					next.pkt.nackable = false;
 				}
 
-				let clock_rate = param.spec().rtp_clock_rate();
+				let clock_rate = param.spec().clock_rate;
 				set_cr = Some(clock_rate);
 
 				// Modify the cached packet time. This is so write_rtp can use u32 media time without

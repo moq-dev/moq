@@ -9,8 +9,8 @@ use crate::vendor::str0m::RtcError;
 use crate::vendor::str0m::change::AddMedia;
 use crate::vendor::str0m::format::CodecConfig;
 
+use crate::vendor::str0m::packet::RtpMeta;
 use crate::vendor::str0m::packet::{CodecDepacketizer, DepacketizingBuffer, Payloader};
-use crate::vendor::str0m::packet::{RedSender, RedSink, RtpMeta};
 use crate::vendor::str0m::rtp_::ExtensionMap;
 use crate::vendor::str0m::rtp_::MidRid;
 use crate::vendor::str0m::rtp_::SRTP_BLOCK_SIZE;
@@ -27,13 +27,10 @@ use crate::vendor::str0m::util::already_happened;
 mod event;
 pub use event::*;
 
-mod tele;
-
 mod writer;
 pub use writer::Writer;
 
 pub use crate::vendor::str0m::packet::MediaKind;
-pub use crate::vendor::str0m::packet::TelephoneEvent;
 pub use crate::vendor::str0m::rtp_::{Direction, ExtensionValues, Frequency, MediaTime, Mid, Pt, Rid};
 
 /// Mid used for SSRC 0 non-media BWE probes.
@@ -43,7 +40,7 @@ pub use crate::vendor::str0m::rtp_::{Direction, ExtensionValues, Frequency, Medi
 ///
 /// These probes carry `transport_cc` for TWCC feedback but no real media.
 pub(crate) const MID_PROBE: Mid = Mid::from_array(*b"~]probe\0\0\0\0\0\0\0\0\0");
-// A 6-second telephone event at 48 kHz needs about 306 packets.
+/// Bound on the writes queued between polls.
 const MAX_PENDING_PAYLOADS: usize = 512;
 
 #[derive(Debug)]
@@ -137,19 +134,10 @@ pub struct Media {
 	depayloaders: HashMap<(Pt, Option<Rid>), DepacketizingBuffer>,
 
 	/// Payloaders for outoing RTP packets.
-	payloaders: HashMap<(Pt, Option<Rid>), PayloaderEntry>,
-
-	/// Whether outgoing packets are wrapped in RFC 2198 RED right now. RED availability is fixed at
-	/// negotiation (or set up via DirectAPI); this is the runtime send-side lever, toggled with no
-	/// renegotiation. Defaults to `true`, so a negotiated RED PT wraps unless it is turned off.
-	red_send_enabled: bool,
+	payloaders: HashMap<(Pt, Option<Rid>), Payloader>,
 
 	/// Outgoing payloads ordered by their send deadlines or media wallclock times.
 	to_payload: VecDeque<ToPayload>,
-
-	/// End time of the last telephone event, for the minimum pause between tones.
-	/// The payload queue cannot supply this after the event's packets have been sent.
-	last_tele_end: Option<Instant>,
 
 	pub(crate) need_open_event: bool,
 	pub(crate) need_changed_event: bool,
@@ -205,21 +193,9 @@ pub(crate) struct ToPayload {
 	pub rid: Option<Rid>,
 	pub wallclock: Instant,
 	pub rtp_time: MediaTime,
-	/// Optional send deadline, acting as an informal pacer. Telephone packets use it to
-	/// spread updates over the event duration; regular media has no deadline.
-	pub not_before: Option<Instant>,
 	pub start_of_talk_spurt: bool,
 	pub data: Arc<[u8]>,
 	pub ext_vals: ExtensionValues,
-}
-
-/// Per-(pt, rid) outgoing payloader entry stored in [`Media::payloaders`]: the codec-agnostic
-/// [`Payloader`] together with its optional RFC 2198 RED send state. Bundling them keeps a single
-/// map keyed by (pt, rid) rather than parallel maps on the same key.
-#[derive(Debug)]
-struct PayloaderEntry {
-	payloader: Payloader,
-	red: Option<RedSender>,
 }
 
 impl Media {
@@ -412,10 +388,7 @@ impl Media {
 			let codec = params.spec.codec;
 
 			// How many packets to hold back in the jitter buffer.
-			let hold_back = if codec.is_tele() {
-				// Telephone-event reports are self-contained, so never wait for missing packets.
-				0
-			} else if codec.is_audio() {
+			let hold_back = if codec.is_audio() {
 				reordering_size_audio
 			} else {
 				reordering_size_video
@@ -423,21 +396,10 @@ impl Media {
 
 			let mut depack: CodecDepacketizer = codec.into();
 
-			if let CodecDepacketizer::Tele(ref mut tele) = depack {
-				tele.clock_rate = params.spec.rtp_clock_rate();
-			}
-
 			// Enable DONL for H.265 when sprop-max-don-diff > 0 (RFC 7798 §7.1)
 			if let CodecDepacketizer::H265(ref mut h265) = depack {
 				if params.spec.format.sprop_max_don_diff.unwrap_or(0) > 0 {
 					h265.with_donl(true);
-				}
-			}
-
-			// Enable DONL for H.266 when sprop-max-don-diff > 0 (RFC 9328 §7.2)
-			if let CodecDepacketizer::H266(ref mut h266) = depack {
-				if params.spec.format.sprop_max_don_diff.unwrap_or(0) > 0 {
-					h266.with_donl(true);
 				}
 			}
 
@@ -485,19 +447,7 @@ impl Media {
 
 		if !new_dir.is_sending() {
 			self.to_payload.clear();
-			self.last_tele_end = None;
 		}
-	}
-
-	/// Toggle RFC 2198 RED wrapping for outgoing packets. Takes effect on the next payloaded
-	/// packet; RED must be available (negotiated or set via DirectAPI) for `true` to wrap.
-	/// Returns whether the setting changed.
-	pub(crate) fn set_red_send(&mut self, enabled: bool) -> bool {
-		if self.red_send_enabled == enabled {
-			return false;
-		}
-		self.red_send_enabled = enabled;
-		true
 	}
 
 	pub(crate) fn set_simulcast(&mut self, s: SdpSimulcast) {
@@ -511,22 +461,18 @@ impl Media {
 		rid: Option<Rid>,
 		params: &[PayloadParams],
 		vp9_mode: Vp9PacketizerMode,
-	) -> &mut PayloaderEntry {
+	) -> &mut Payloader {
 		self.payloaders.entry((pt, rid)).or_insert_with(|| {
 			// Unwrap is OK, the pt should be checked already when calling this function.
 			let params = params.iter().find(|p| p.pt == pt).unwrap();
-			PayloaderEntry {
-				payloader: Payloader::new(params.spec, vp9_mode),
-				red: None,
-			}
+			Payloader::new(params.spec, vp9_mode)
 		})
 	}
 
 	fn queue_position(&self, to_payload: &ToPayload) -> usize {
-		let queue_time = to_payload.not_before.unwrap_or(to_payload.wallclock);
 		self.to_payload
 			.iter()
-			.position(|p| p.not_before.unwrap_or(p.wallclock) > queue_time)
+			.position(|p| p.wallclock > to_payload.wallclock)
 			.unwrap_or(self.to_payload.len())
 	}
 
@@ -540,26 +486,8 @@ impl Media {
 		Ok(())
 	}
 
-	pub(crate) fn telephone_event_too_soon(&self, start: Instant) -> bool {
-		self.last_tele_end.is_some_and(|end| start < end + tele::MIN_PAUSE)
-	}
-
-	pub(crate) fn queue_telephone_packets(
-		&mut self,
-		packets: impl Iterator<Item = ToPayload>,
-		end: Instant,
-	) -> Result<(), RtcError> {
-		for packet in packets {
-			self.set_to_payload(packet)?;
-		}
-		self.last_tele_end = Some(end);
-		Ok(())
-	}
-
 	pub(crate) fn poll_timeout(&self) -> Option<Instant> {
-		self.to_payload
-			.front()
-			.map(|p| p.not_before.unwrap_or_else(already_happened))
+		self.to_payload.front().map(|_| already_happened())
 	}
 
 	pub(crate) fn receive_buffers(&mut self) -> impl Iterator<Item = (Option<Rid>, &mut DepacketizingBuffer)> {
@@ -580,17 +508,10 @@ impl Media {
 		params: &[PayloadParams],
 		vp9_mode: Vp9PacketizerMode,
 		mtu: usize,
-		red_distances: &[u32],
 	) -> Result<(), RtcError> {
-		let Some(front) = self.to_payload.front() else {
+		let Some(to_payload) = self.to_payload.pop_front() else {
 			return Ok(());
 		};
-		let is_waiting = front.not_before.is_some_and(|deadline| deadline > now);
-		if is_waiting {
-			return Ok(());
-		}
-
-		let to_payload = self.to_payload.pop_front().expect("front was checked above");
 		let ToPayload { pt, rid, .. } = &to_payload;
 
 		let midrid = MidRid(self.mid, *rid);
@@ -607,32 +528,8 @@ impl Media {
 		// align to SRTP block size to minimize padding needs
 		let aligned_mtu: usize = rtp_size - rtp_size % SRTP_BLOCK_SIZE;
 
-		// The RED PT to wrap into, if RED is negotiated for this codec and send-side wrapping is
-		// on. When off we send on the plain PT even though RED stays negotiated on the m-line (it
-		// can be toggled back on with no renegotiation).
-		let red_pt = if self.red_send_enabled {
-			params.iter().find(|p| p.pt == pt).and_then(|p| p.red)
-		} else {
-			None
-		};
-
-		let PayloaderEntry { payloader, red } = self.payloader_for(pt, *rid, params, vp9_mode);
-
-		let result = if let Some(red_pt) = red_pt {
-			// Keep the RED sender current with the negotiated PT/pattern without discarding a live
-			// talk-spurt's history. Reserve the 1-byte RED primary header so the wrapped packet
-			// still fits the MTU; the sink uses the full aligned MTU as its shed budget.
-			let red = red.get_or_insert_with(|| RedSender::new(red_pt, pt, red_distances));
-			red.sync(red_pt, pt, red_distances);
-
-			let packetize_mtu = aligned_mtu.saturating_sub(1);
-			let mut sink = RedSink::new(stream, red, aligned_mtu);
-			payloader.push_sample(to_payload, packetize_mtu, &mut sink)
-		} else {
-			// Drop any stale sender so its history does not persist across a RED disable.
-			*red = None;
-			payloader.push_sample(to_payload, aligned_mtu, stream)
-		};
+		let payloader = self.payloader_for(pt, *rid, params, vp9_mode);
+		let result = payloader.push_sample(to_payload, aligned_mtu, stream);
 
 		result.map_err(|e| RtcError::Packet(self.mid, pt, e))
 	}
@@ -715,10 +612,8 @@ impl Default for Media {
 			payloaders: HashMap::new(),
 			depayloaders: HashMap::new(),
 			to_payload: VecDeque::default(),
-			last_tele_end: None,
 			need_open_event: true,
 			need_changed_event: false,
-			red_send_enabled: true,
 		}
 	}
 }

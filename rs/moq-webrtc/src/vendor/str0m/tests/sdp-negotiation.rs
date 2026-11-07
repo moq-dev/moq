@@ -48,65 +48,6 @@ pub fn change_default_pt() {
 }
 
 #[test]
-pub fn g722_negotiates_as_16khz_with_8khz_rtpmap() {
-	init_log();
-	init_crypto_default();
-
-	// Both sides support G722. It negotiates fine and, internally, is a 16 kHz codec.
-	let (l, r) = with_params(info_span!("L"), &[g722(9)], info_span!("R"), &[g722(9)]);
-
-	for rtc in [&l, &r] {
-		let p = &rtc.codec_config()[0];
-		assert_eq!(p.spec().codec, Codec::G722);
-		// Internally G722 is treated as a 16 kHz codec.
-		assert_eq!(p.spec().clock_rate, Frequency::SIXTEEN_KHZ);
-	}
-}
-
-#[test]
-pub fn g722_offer_rtpmap_uses_8khz() {
-	init_log();
-	init_crypto_default();
-
-	// The SDP a=rtpmap for G722 must use the 8000 Hz RTP clock rate (RFC 3551 §4.5.2),
-	// even though str0m treats G722 as a 16 kHz codec internally. See
-	// https://en.wikipedia.org/wiki/RTP_payload_formats#cite_note-55
-	let mut r = build_params(info_span!("R"), &[g722(9)]);
-
-	let mut change = r.sdp_api();
-	change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-	let (offer, _pending) = change.apply().unwrap();
-
-	let sdp = offer.to_sdp_string();
-
-	assert!(sdp.contains("a=rtpmap:9 G722/8000"), "SDP was:\n{sdp}");
-	assert!(!sdp.contains("G722/16000"), "SDP was:\n{sdp}");
-}
-
-#[test]
-pub fn g722_offer_accepts_explicit_mono_channel() {
-	init_log();
-	init_crypto_default();
-
-	let mut l = build_params(info_span!("L"), &[g722(9)]);
-	let mut r = build_params(info_span!("R"), &[g722(9)]);
-
-	let mut change = l.sdp_api();
-	change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-	let (offer, pending) = change.apply().unwrap();
-	let offer_sdp = offer.to_sdp_string().replace("G722/8000", "G722/8000/1");
-	let offer = SdpOffer::from_sdp_string(&offer_sdp).unwrap();
-
-	let answer = r.rtc.sdp_api().accept_offer(offer).unwrap();
-	let answer_sdp = answer.to_sdp_string();
-
-	assert!(answer_sdp.contains("a=rtpmap:9 G722/8000"), "SDP was:\n{answer_sdp}");
-	assert!(!answer_sdp.contains("m=audio 0"), "SDP was:\n{answer_sdp}");
-
-	l.rtc.sdp_api().accept_answer(pending, answer).unwrap();
-}
-
-#[test]
 pub fn answer_change_order() {
 	init_log();
 	init_crypto_default();
@@ -616,7 +557,7 @@ fn max_bundle_offer_accepted() {
 		info_span!("R"),
 		Rtc::builder()
 			.clear_codecs()
-			.enable_opus(true, false)
+			.enable_opus(true)
 			.enable_vp8(true)
 			.build(Instant::now()),
 	);
@@ -1493,20 +1434,6 @@ fn opus(pt: u8) -> PayloadParams {
 			codec: Codec::Opus,
 			channels: Some(2),
 			clock_rate: Frequency::FORTY_EIGHT_KHZ,
-			format: FormatParams::default(),
-		},
-	)
-}
-
-fn g722(pt: u8) -> PayloadParams {
-	PayloadParams::new(
-		pt.into(),
-		None,
-		CodecSpec {
-			codec: Codec::G722,
-			channels: None,
-			// G722 is a 16 kHz codec, even though its RTP clock rate is 8000 Hz.
-			clock_rate: Frequency::SIXTEEN_KHZ,
 			format: FormatParams::default(),
 		},
 	)
