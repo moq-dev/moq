@@ -183,6 +183,7 @@ federation) land.
 - [Bandwidth reservations ignore in-process readers](/quest/m3/reservation-local-readers.md) - a local recorder no longer counts as uplink demand
 - [Container export starts apart from its skip budget](/quest/m3/export-live-start.md) - fMP4 and MP4 export start at the live edge and report sample counts
 - [MP4 export trims exactly at both ends](/quest/m3/mp4-export-window.md) - a presentation window with no lead-in and no presented tail
+- [Container export ends cleanly when its broadcast closes](/quest/m3/export-close.md) - every container export returns `None` when its instance closes, whichever signal arrives first
 - [Audio capture opens a format the mix accepts](/quest/m3/audio-capture-negotiate.md) - multichannel and odd-rate devices capture, with discrete input selection
 - [A mix-minus removes several sources](/quest/m3/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
 - [Bus writes land at a bus position](/quest/m3/bus-positioned-write.md) - callers sync audio to video without copying the bus's private latency
