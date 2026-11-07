@@ -92,6 +92,9 @@ export class Transport implements WebTransport {
 		});
 		this.ready = this.#session.then((session) => session.ready);
 		void this.ready.catch((error) => {
+			// A session that started settles `closed` and closes the channel itself, gracefully
+			// when closed before its handshake finished. Only a channel that never opened has none.
+			if (this.#active) return;
 			this.#closed.reject(error);
 			this.#socket.close();
 		});
