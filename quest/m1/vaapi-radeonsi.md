@@ -41,9 +41,11 @@ there.
   `moq-vaapi` here. If it is the driver's, refuse a radeonsi node for H.264
   encode, using the driver's vendor string, so the candidate fails to open and
   OpenH264 takes over. Then link the Mesa issue.
-- Treat the chroma offset and the bitrate overshoot the same way: fix them if
-  they are ours, and if they are the driver's, record them with their Mesa
-  issue.
+- Fix the chroma offset and the bitrate overshoot if they are ours. If the
+  chroma offset is the driver's VPP, skip VPP on radeonsi and convert to NV12
+  before upload. If the overshoot is the driver's, refuse a radeonsi node for
+  that encode, as for the H.264 bytes, so `Kind::Auto` moves on. Link the
+  Mesa issue either way.
 - Vulkan Video still replaces VA-API on AMD later; this quest does not wait
   on it.
 

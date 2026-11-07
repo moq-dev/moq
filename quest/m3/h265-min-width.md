@@ -1,4 +1,4 @@
-# [S] H.265 rungs respect the encoder's minimum size
+# [S] H.265 encodes respect the encoder's minimum size
 
 ## Goal
 
@@ -6,8 +6,8 @@ An H.265 encode narrower than the hardware encoder's minimum never fails
 with an opaque driver error. moq-video's encoder probe reports the driver's
 minimum width and height, `Kind::Auto` passes over a hardware candidate
 whose minimum the frame is below, and with no candidate left the error names
-the minimum. The caller today is `moq-cli publish --video-codec h265`
-(`rs/moq-cli/src/publish.rs`).
+the minimum. The caller today is `moq import capture --codec h265`
+(`CaptureArgs::codec`, `rs/moq-cli/src/publish.rs`).
 
 ## Plan
 
@@ -27,6 +27,11 @@ rung: today `Pipeline::new` propagates it and aborts the whole transcode.
 Decided 2026-11-06 (maintainer, /quest-unblock): ✅ an S quest in m3. Not
 chosen: folding it into [the radeonsi quest](/quest/m1/vaapi-radeonsi.md),
 or dropping it.
+
+Decided 2026-11-07 (maintainer, /quest-complete): ✅ narrowed to the
+capture encode (`moq import capture --codec h265`), an S in m3, with H.265
+transcode output out of scope. Not chosen: making H.265 transcode output a
+prerequisite inside this quest.
 
 - Learn the minimum rather than hard-coding 384. libva has no minimum
   picture-size attribute (only `VAConfigAttribMaxPictureWidth`/`Height`), so
