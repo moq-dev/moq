@@ -2,7 +2,6 @@ use std::time::Instant;
 
 use crate::vendor::str0m::format::{CodecSpec, Vp9PacketizerMode};
 use crate::vendor::str0m::media::ToPayload;
-use crate::vendor::str0m::rtp::vla::VideoLayersAllocation;
 use crate::vendor::str0m::rtp_::{ExtensionValues, Frequency, Pt, SeqNo};
 use crate::vendor::str0m::streams::{RtpWrite, StreamTx};
 
@@ -91,7 +90,6 @@ impl Payloader {
 
 			if !first {
 				pkt_ext_vals.abs_capture_time = None;
-				pkt_ext_vals.user_values.remove::<VideoLayersAllocation>();
 			}
 
 			if !last {

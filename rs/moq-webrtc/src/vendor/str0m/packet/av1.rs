@@ -1,4 +1,4 @@
-use super::{BitRead, CodecExtra, Depacketizer, PacketError, Packetizer, encode_leb_u63};
+use super::{BitRead, CodecExtra, Depacketizer, PacketError, Packetizer};
 
 const OBU_EXTENSION_PRESENT_MASK: u8 = 0b0000_0100;
 const OBU_SIZE_PRESENT_MASK: u8 = 0b0000_0010;
@@ -616,6 +616,23 @@ fn parse_obus(payload: &[u8], parsed_obus: &mut Vec<Obu>) -> Result<(), PacketEr
 	// Trim any leftover entries from previous calls
 	parsed_obus.truncate(obu_idx);
 	Ok(())
+}
+
+fn encode_leb_u63(mut value: u64, buf: &mut [u8]) -> usize {
+	let mut index = 0;
+	loop {
+		if value < 0x80 {
+			buf[index] = value as u8;
+			index += 1;
+			break;
+		} else {
+			buf[index] = ((value & 0x7f) | 0x80) as u8;
+			value >>= 7;
+			index += 1;
+		}
+	}
+
+	index
 }
 
 #[cfg(test)]

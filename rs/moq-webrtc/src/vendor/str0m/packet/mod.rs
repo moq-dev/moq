@@ -6,8 +6,6 @@ use std::panic::UnwindSafe;
 use crate::vendor::str0m::format::Codec;
 use crate::vendor::str0m::sdp::MediaType;
 
-use crate::vendor::str0m::rtp::vla::encode_leb_u63;
-
 mod av1;
 pub use av1::Av1CodecExtra;
 pub use av1::detect_av1_keyframe;

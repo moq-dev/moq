@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::trace;
 
-use crate::vendor::str0m::rtp::vla::VideoLayersAllocation;
 use crate::vendor::str0m::rtp_::{ExtensionValues, MediaTime, RtpHeader, SenderInfo, SeqNo};
 
 use super::contiguity::Contiguity;
@@ -104,10 +103,6 @@ impl Depacketized {
 		// str0m strictly attaches some fields to the first packet of a frame.
 		if let Some(first_val) = &first.abs_capture_time {
 			merged.abs_capture_time = Some(*first_val);
-		}
-
-		if let Some(first_val) = first.user_values.get_arc::<VideoLayersAllocation>() {
-			merged.user_values.set_arc(first_val);
 		}
 
 		merged
@@ -718,7 +713,6 @@ mod test {
 	use super::*;
 	use crate::vendor::str0m::packet::Vp8Depacketizer;
 	use crate::vendor::str0m::packet::vp9::Vp9Depacketizer;
-	use crate::vendor::str0m::rtp::UserExtensionValues;
 	use crate::vendor::str0m::rtp_::{AbsCaptureTime, Frequency, MediaTime, Pt, Ssrc, VideoOrientation};
 
 	fn bounded_queue_meta(seq: u64) -> RtpMeta {
@@ -820,11 +814,6 @@ mod test {
 			capture_time: SystemTime::UNIX_EPOCH + Duration::from_secs(1),
 			clock_offset: None,
 		};
-		let mut vla = UserExtensionValues::default();
-		vla.set(VideoLayersAllocation {
-			current_simulcast_stream_index: 1,
-			simulcast_streams: vec![],
-		});
 
 		let first_header = RtpHeader {
 			version: 2,
@@ -839,7 +828,6 @@ mod test {
 			csrc: [0; 15],
 			ext_vals: ExtensionValues {
 				abs_capture_time: Some(abs_capture_time),
-				user_values: vla.clone(),
 				..Default::default()
 			},
 			header_len: 0,
@@ -881,16 +869,6 @@ mod test {
 		assert_eq!(
 			merged.abs_capture_time.unwrap().capture_time,
 			abs_capture_time.capture_time
-		);
-		assert_eq!(
-			merged
-				.user_values
-				.get::<VideoLayersAllocation>()
-				.unwrap()
-				.current_simulcast_stream_index,
-			vla.get::<VideoLayersAllocation>()
-				.unwrap()
-				.current_simulcast_stream_index,
 		);
 		assert_eq!(merged.video_orientation, Some(VideoOrientation::Deg90));
 	}
