@@ -5,6 +5,8 @@ import { Signal } from "@moq/signals";
 import { Consumer } from "./consumer.ts";
 import { Format } from "./legacy.ts";
 
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 for (const count of [1, 16, 256]) {
 	test(`Consumer summarizes ${count} skipped groups once per catch-up`, async () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -165,8 +167,8 @@ test("Consumer measures each skip's span over every group left, not just the new
 		] as const)
 			write(sequence, timestamp);
 		await buffered(12);
-		// Reading the first frame warms the reader, so the age skip runs on the max delay alone.
-		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
+		// Before the first read, the span alone ages a group out: once reading began, its successor's
+		// start bounds it instead, which the span always reaches past.
 		delay.set({ max: Milli(5) });
 		write(4n, 13_000);
 		await buffered(13);
@@ -175,9 +177,48 @@ test("Consumer measures each skip's span over every group left, not just the new
 			{ start: Milli(12), end: Milli(12) },
 			{ start: Milli(13), end: Milli(13) },
 		]);
-		// The skipped groups held media past the first frame, so their span reads as a gap first.
-		expect(await consumer.next()).toMatchObject({ kind: "gap", timestamp: 0, duration: 12_000 });
+		// Joining mid-track is not a gap: nothing was read before it.
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 3n });
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		warn.mockRestore();
+	}
+});
+
+// An open group blocks until its successor starts a whole budget behind the newest content, not until
+// its own first frame does: the skip moves the cursor past the groups still in flight between, which
+// a group arriving below the cursor never delivers.
+test("a blocking group is kept until its successor starts a budget behind the newest", async () => {
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const track = new Track.Producer("tone");
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
+		format: new Format("data"),
+		delay: { max: Milli(150) },
+	});
+	const sent = Time.Timestamp.now();
+	const write = (sequence: bigint, timestamp: number) => {
+		const group = track.createGroup(sequence);
+		group.writeFrame({ payload: Varint.encode(timestamp), timestamp: sent });
+		return group;
+	};
+	try {
+		const blocking = write(0n, 0);
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
+		// Group 3's stream wins the race, 160ms past group 0's first frame.
+		write(3n, 160_000).finish();
+		await flush();
+		write(1n, 100_000).finish();
+		write(2n, 130_000).finish();
+		blocking.finish();
+		const reads = [await consumer.next(), await consumer.next(), await consumer.next()];
+		expect(reads).toMatchObject([
+			{ kind: "frame", group: 1n },
+			{ kind: "frame", group: 2n },
+			{ kind: "frame", group: 3n },
+		]);
+		expect(warn).not.toHaveBeenCalled();
 	} finally {
 		consumer.close();
 		track.finish();

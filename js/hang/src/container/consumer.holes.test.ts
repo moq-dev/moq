@@ -286,12 +286,13 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 			write(2n, [60_000_000]);
 			await flush();
 			expect(results.slice(3)).toEqual([frame(2n, 60_000_000), frame(3n, 60_060_000)]);
-			// Resumed, a later hole past the budget is proven again without a wait.
-			write(5n, [61_000_000]);
+			// Resumed, a later hole whose head starts a budget behind the newest is proven without a wait.
+			write(5n, [61_000_000], [61_300_000]);
 			await flush();
 			expect(results.slice(5)).toEqual([
 				{ kind: "gap", timestamp: Micro(60_060_000), duration: Micro(940_000) },
 				frame(5n, 61_000_000),
+				frame(5n, 61_300_000),
 			]);
 		} else {
 			await clock.advance(Nano.fromMilli(Milli(1)));
@@ -306,5 +307,52 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 		track.close();
 		await reading;
 		installed.close();
+	}
+});
+
+// Groups go out newest first, so a flush's newest group lands just ahead of the rest. Where
+// presentation left off is a budget behind it, but the missing groups end where it starts, so they
+// may still play: skipping the hole would drop them on arrival, below the cursor.
+test("a newest-first flush past a hole delivers the groups landing behind its newest", async () => {
+	const track = new Track.Producer("audio");
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
+		format: new Format("audio"),
+		delay: { max: Milli(80) },
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	// One 20ms frame per group, as a voice publisher writes them, all sent at once.
+	const sent = Time.Timestamp.now();
+	const write = (sequence: number) => {
+		const group = track.createGroup(BigInt(sequence));
+		const timestamp = Micro(sequence * 20_000);
+		group.writeFrame({ payload: encodeFrame(new Uint8Array([1]), timestamp), timestamp: sent });
+		group.finish();
+	};
+	try {
+		for (const sequence of [0, 1, 2]) write(sequence);
+		await flush();
+		write(7);
+		await flush();
+		for (const sequence of [3, 4, 5, 6]) write(sequence);
+		await flush();
+		expect(results).toEqual(
+			[0, 1, 2, 3, 4, 5, 6, 7].map((sequence) => ({
+				kind: "frame",
+				group: BigInt(sequence),
+				frame: expect.objectContaining({ timestamp: Micro(sequence * 20_000) }),
+			})),
+		);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		await reading;
 	}
 });
