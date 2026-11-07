@@ -41,9 +41,8 @@ it clears with the same publication.
 does not publish it. [Watch opts in](/quest/m4/p2p/watch.md) owns its first
 publication, including claiming its names.
 
-Decided 2026-11-06 (maintainer, /quest-unblock): JSR is dropped
-([Stop publishing to JSR](/quest/m0/ci/jsr-retire.md)), so no JSR names are
-claimed.
+Decided 2026-11-06 (maintainer, /quest-unblock): JSR is dropped (every `@moq` JSR
+package was archived on 2026-11-07), so no JSR names are claimed.
 
 Public API: none. Wire: none.
 
