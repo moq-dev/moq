@@ -113,7 +113,7 @@ test-integration:
     bash sh/local.sh python3 bench/build.test.py
     python3 sh/rs/hakari.test.py
     python3 sh/rs/test-lints.test.py
-    python3 sh/gh/nightly.test.py FeaturesTest FuzzTest
+    python3 sh/gh/nightly.test.py
     python3 sh/dispatch-query.test.py --bench
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.

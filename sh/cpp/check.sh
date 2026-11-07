@@ -12,8 +12,9 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
 fi
 
 # Both configure and build need the cache session for CMake's compiler launchers.
+# Keep Visual Studio builds on plain CMake, as on the Windows platform job.
 cmake_command=(cmake)
-if command -v mbx >/dev/null 2>&1; then
+if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]] && command -v mbx >/dev/null 2>&1; then
     cmake_command=(mbx exec cmake)
 fi
 
