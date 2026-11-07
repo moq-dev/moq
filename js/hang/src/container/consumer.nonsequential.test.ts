@@ -92,3 +92,42 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 
 	consumer.close();
 });
+
+// A skip past a group already begun records where it ended, as Rust's `skip_to` does, so a later group
+// continuing its timeline plays on at once rather than waiting out the max delay as if a group were
+// missing in between. Sparse sequence numbers leave only the timeline to prove nothing is missing,
+// and the empty group in between says nothing of it.
+test("Consumer plays on a group continuing one it skipped mid-read", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), {
+		format: new LegacyFormat("audio"),
+		delay: { max: 500 as Milli },
+	});
+	const write = (sequence: bigint, timestamps: number[]) => {
+		const group = track.createGroup(sequence);
+		for (const timestamp of timestamps) {
+			group.writeFrame({
+				payload: encodeLegacyFrame(timestamp as Micro, new Uint8Array([0x01])),
+				timestamp: Time.Timestamp.now(),
+			});
+		}
+		group.finish();
+	};
+
+	write(0n, [0, 100_000, 200_000, 300_000, 400_000]);
+	expect((await nextFrame(consumer))?.group).toBe(0n);
+	const empty = track.createGroup(10n);
+	await clock.advance(Nano.zero);
+	// The newest frame is past the budget behind the first group's next, so its rest is skipped, up to
+	// the group in between, which ends without a frame.
+	write(20n, [400_000, 700_000]);
+	empty.finish();
+	await clock.advance(Nano.zero);
+	expect(await poll(consumer.next())).toMatchObject({ kind: "gap" });
+	const next = await poll(nextFrame(consumer));
+	expect(next === "pending" ? next : next?.group).toBe(20n);
+
+	consumer.close();
+	track.finish();
+	track.close();
+});

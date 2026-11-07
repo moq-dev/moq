@@ -194,7 +194,7 @@ export class Consumer {
 	#hole?: Instant;
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
 	// promotion guard can tell a timeline-continuous next group from one sitting after a gap.
-	// Maintained only via #recordPresented; see its comment for the invariant.
+	// Written only by #pass, which every move past a group goes through.
 	#presentedEnd?: Micro;
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
@@ -519,14 +519,13 @@ export class Consumer {
 		return group.consumer.closed.peek() ?? null;
 	}
 
-	// Record where a group's content ends as the cursor advances past it. next()'s promotion guard
-	// compares the following group's first PTS against this to tell an unbroken timeline from a real
-	// gap, so EVERY site that moves #active past a group must call this; a site that forgets leaves a
-	// stale end behind and silently blocks the next contiguous group forever. A group with no frames
-	// (empty, or errored before the first one) says nothing about the timeline, so it leaves the last
-	// known end in place rather than wiping it.
-	#recordPresented(group: Group): void {
+	// Move the cursor past `group` to `next`, recording where the group's content ends. next()'s
+	// promotion guard compares the following group's first PTS against that to tell an unbroken
+	// timeline from a real gap. A group with no frames (empty, or errored before the first one) says
+	// nothing about the timeline, so it leaves the last known end in place rather than wiping it.
+	#pass(group: Group, next: bigint | undefined): void {
 		if (group.end !== undefined) this.#presentedEnd = group.end;
+		this.#active = next;
 	}
 
 	// Skip the oldest groups while the buffered span exceeds the max delay. Returns true if any was skipped.
@@ -588,7 +587,7 @@ export class Consumer {
 			}
 
 			this.#groups.shift();
-			this.#active = this.#groups[0]?.consumer.sequence;
+			this.#pass(first, this.#groups[0]?.consumer.sequence);
 
 			const next = this.#groups[0];
 			const nextStart = next?.frames.at(0)?.timestamp ?? next?.end;
@@ -659,8 +658,7 @@ export class Consumer {
 
 		this.#groups.shift();
 		console.warn(`skipping covered group: ${active.consumer.sequence} -> ${next.consumer.sequence}`);
-		this.#recordPresented(active);
-		this.#active = next.consumer.sequence;
+		this.#pass(active, next.consumer.sequence);
 
 		this.#discard(active);
 		this.#updateBuffered();
@@ -692,8 +690,7 @@ export class Consumer {
 		const nextStart = next.frames.at(0)?.timestamp;
 		const marker = !head.empty && !head.media;
 		if (marker || !ptsContiguous(head.end ?? this.#presentedEnd, nextStart)) this.#lost = true;
-		this.#recordPresented(head);
-		this.#active = next.consumer.sequence;
+		this.#pass(head, next.consumer.sequence);
 
 		this.#discard(head);
 		this.#updateBuffered();
@@ -941,9 +938,8 @@ export class Consumer {
 						// the hole expired -- every group through the skip path, i.e. constant stutter. A real
 						// PTS gap is different: an intermediate group may still be in transit, so fall back to
 						// +1 there (the promotion guard above fixes it up once a continuous group arrives).
-						this.#recordPresented(head);
 						const next = this.#groups.at(0);
-						this.#active = continues(head, next) ? next.consumer.sequence : seq + 1n;
+						this.#pass(head, continues(head, next) ? next.consumer.sequence : seq + 1n);
 					}
 					head.consumer.close();
 					this.#release(head);

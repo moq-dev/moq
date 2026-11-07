@@ -30,7 +30,7 @@ struct State<E: CatalogExt> {
 
 	/// Gates the initial catalog publish until all reservations resolve (see
 	/// [`reserve`](Producer::reserve)).
-	reservations: Reservations,
+	gate: Gate,
 
 	/// Why the catalog tracks are closed, so [`Producer::modify`] refuses further edits with the
 	/// cause: [`Producer::finish`], [`Producer::abort`], or a failed drop-time publish.
@@ -67,6 +67,12 @@ impl<E: CatalogExt> State<E> {
 	/// promises no frames, so it doesn't count. A listed rendition covers application-defined
 	/// sections the base fields can't see, and an importer that lists tracks in the extension
 	/// reports them through [`ext_tracks`](Self::ext_tracks).
+	/// Whether a buffering gate opens now: no reservation is outstanding and the catalog lists a
+	/// track. The track scan runs last, so releasing each of many reservations stays linear.
+	fn gate_opens(&mut self) -> bool {
+		matches!(self.gate, Gate::Buffering { reservers: 0, .. }) && self.lists_track()
+	}
+
 	fn lists_track(&mut self) -> bool {
 		use std::any::TypeId;
 		// Video and audio carry `enabled`, which only the base check reads.
@@ -242,7 +248,7 @@ fn adopt(
 ///
 /// A panic under this lock comes from code we hand the catalog to: a [`RenditionConfig::insert`]
 /// implementation, or serializing an extension during a publish. Neither leaves the state
-/// inconsistent (at worst the catalog is missing an entry, while `owned` and `reservations` still
+/// inconsistent (at worst the catalog is missing an entry, while `owned` and `gate` still
 /// describe exactly what is live), so poisoning protects nothing here. It would only turn the next
 /// [`Rendition`](super::Rendition) drop into a panic during unwinding, which aborts the process.
 fn take<E: CatalogExt>(state: &Mutex<State<E>>) -> MutexGuard<'_, State<E>> {
@@ -256,23 +262,24 @@ fn owner_key<C: 'static>(name: &str) -> (std::any::TypeId, String) {
 
 /// The initial-publish gate, tracking the [`Reserved`](super::Reserved) handles still outstanding.
 ///
-/// The initial catalog snapshot is withheld from the broadcast until `reservers == 0`. A live
-/// `Reserved` counts as one reserver; a [`Rendition`](super::Rendition) holds its own `Reserved`
-/// clone until it's fulfilled (or dropped), so an unresolved rendition keeps the gate shut too. See
-/// [`Reserved`](super::Reserved).
+/// A live `Reserved` counts as one reserver; a [`Rendition`](super::Rendition) holds its own
+/// `Reserved` clone until it's fulfilled (or dropped), so an unresolved rendition keeps the gate
+/// shut too. See [`Reserved`](super::Reserved).
 #[derive(Default)]
-struct Reservations {
-	/// Live `Reserved` handles (including the one each unfulfilled `Rendition` holds).
-	reservers: usize,
-	/// A catalog change was made while buffering and is awaiting the initial publish. Without this
-	/// we'd emit an empty snapshot when the gate opens on a catalog nobody ever touched.
-	pending: bool,
-	/// Whether the initial snapshot has been published (buffering is over).
-	published: bool,
-	/// Whether anything ever reserved, making this an importer's catalog: its initial snapshot also
-	/// waits for a [listed track](State::lists_track), so input that declares none never announces.
-	/// An incremental producer that never reserves publishes as it goes.
-	reserved: bool,
+enum Gate {
+	/// Nothing ever reserved: an incremental producer publishes as it goes.
+	#[default]
+	Unreserved,
+	/// An importer's catalog, withholding its initial snapshot until no reservation is outstanding
+	/// and it [lists a track](State::lists_track), so input that declares none never announces.
+	Buffering {
+		reservers: usize,
+		/// A catalog change was made while buffering and is awaiting the initial publish. Without
+		/// this we'd emit an empty snapshot when the gate opens on a catalog nobody ever touched.
+		pending: bool,
+	},
+	/// The initial snapshot went out: every change publishes.
+	Published,
 }
 
 /// The catalog tracks.
@@ -512,7 +519,7 @@ impl<E: CatalogExt> Producer<E> {
 				catalog,
 				owned: BTreeMap::new(),
 				ext_tracks: None,
-				reservations: Reservations::default(),
+				gate: Gate::default(),
 				closed: None,
 				clock,
 				anchored,
@@ -807,8 +814,17 @@ impl<E: CatalogExt> Producer<E> {
 	/// Register a live [`Reserved`](super::Reserved) handle.
 	pub(super) fn add_reserver(&self) {
 		let mut state = take(&self.current);
-		state.reservations.reservers += 1;
-		state.reservations.reserved = true;
+		match &mut state.gate {
+			Gate::Unreserved => {
+				state.gate = Gate::Buffering {
+					reservers: 1,
+					pending: false,
+				}
+			}
+			Gate::Buffering { reservers, .. } => *reservers += 1,
+			// Only the initial publish waits for reservations.
+			Gate::Published => {}
+		}
 	}
 
 	/// Drop a [`Reserved`](super::Reserved) handle, flushing the initial snapshot if that was the
@@ -816,8 +832,9 @@ impl<E: CatalogExt> Producer<E> {
 	pub(super) fn release_reserver(&mut self) {
 		{
 			let mut state = take(&self.current);
-			let r = &mut state.reservations;
-			r.reservers = r.reservers.saturating_sub(1);
+			if let Gate::Buffering { reservers, .. } = &mut state.gate {
+				*reservers = reservers.saturating_sub(1);
+			}
 		}
 		self.flush_if_ready();
 	}
@@ -825,16 +842,12 @@ impl<E: CatalogExt> Producer<E> {
 	/// Publish the buffered snapshot once, if buffering has just finished with a change staged.
 	pub(super) fn flush_if_ready(&mut self) {
 		let mut state = take(&self.current);
-		let r = &state.reservations;
 		// Nothing was staged (e.g. every stream was ignored): stay unpublished so a later change
-		// still triggers the first emit, rather than publishing an empty catalog now. The track
-		// scan runs last, so releasing each of many reservations stays linear.
-		if r.published || r.reservers != 0 || !r.pending || !state.lists_track() {
+		// still triggers the first emit, rather than publishing an empty catalog now.
+		if !matches!(state.gate, Gate::Buffering { pending: true, .. }) || !state.gate_opens() {
 			return;
 		}
-		let r = &mut state.reservations;
-		r.pending = false;
-		r.published = true;
+		state.gate = Gate::Published;
 		// A snapshot on the wire is a mapping a reader may have copied.
 		state.anchored = true;
 		state.estimates.fold();
@@ -1123,20 +1136,16 @@ impl<E: CatalogExt> Guard<'_, E> {
 		self.state.catalog.media.clock = self.state.clock.wall();
 		adopted?;
 
-		{
-			// Withhold every emit while still buffering the initial reserved set, or until a reserved
-			// catalog names a track; the mutation stays in `current` and `pending` marks it for the
-			// flush once the gate opens. The track scan runs last, so a published catalog skips it.
-			let r = &self.state.reservations;
-			let withhold = !r.published && (r.reservers != 0 || (r.reserved && !self.state.lists_track()));
-			let r = &mut self.state.reservations;
-			if withhold {
-				r.pending = true;
-				return Ok(());
+		// Withhold every emit while still buffering the initial reserved set, or until a reserved
+		// catalog names a track; the mutation stays in `current` and `pending` marks it for the
+		// flush once the gate opens.
+		if matches!(self.state.gate, Gate::Buffering { .. }) && !self.state.gate_opens() {
+			if let Gate::Buffering { pending, .. } = &mut self.state.gate {
+				*pending = true;
 			}
-			r.pending = false;
-			r.published = true;
+			return Ok(());
 		}
+		self.state.gate = Gate::Published;
 		// A snapshot on the wire is a mapping a reader may have copied.
 		self.state.anchored = true;
 

@@ -127,8 +127,7 @@ pub(crate) enum Item {
 /// moves on to the next group like a skip past a slow group, read or not: the consumer can hold no
 /// more of what it would wait behind.
 pub struct Consumer<F: Container> {
-	// Dropped once an error ends the reader, releasing the publisher's demand.
-	track: Option<moq_net::track::Subscriber>,
+	reader: Reader<F::Error>,
 	name: std::sync::Arc<str>,
 
 	format: F,
@@ -152,22 +151,14 @@ pub struct Consumer<F: Container> {
 	// once a skip refunds room: it pulls again itself.
 	gated: bool,
 
-	// The subscription named no floor when the consumer was built, so the cursor has yet to
-	// choose its first group: the floor once resolved, raised to the publisher's resolved
-	// start, or else the first arrivals. Cleared once one is chosen.
-	startup: bool,
-
-	// Latch onto the newest group instead, discarding what arrived below it.
-	newest: bool,
+	// How the cursor chooses its first group.
+	startup: Startup,
 
 	// How far behind the live edge an unfloored start reaches, before the warmup: see `Delay::min`.
 	min_delay: std::time::Duration,
 
 	// How much further than the min delay an unfloored start reaches: see `Playout`.
 	warmup: std::time::Duration,
-
-	// When the newest group had landed as the first one arrived, once an unfloored start waits.
-	anchor: Option<Instant>,
 
 	// The point an unfloored start reached back to, the live edge less the reach, once it chose.
 	target: Option<std::time::Duration>,
@@ -207,9 +198,31 @@ pub struct Consumer<F: Container> {
 
 	// The group the last event came from.
 	group: u64,
+}
 
-	// The track failed, so no group can arrive. Returned once the groups already here drain.
-	track_error: Option<F::Error>,
+/// Whether a [`Consumer`] still reads its subscription.
+enum Reader<E> {
+	/// Receiving groups.
+	Reading(moq_net::track::Subscriber),
+	/// The track failed, so no group can arrive. The error is returned once the groups already here
+	/// drain.
+	Failed(moq_net::track::Subscriber, E),
+	/// An error ended the reader, which reads as finished from then on. The subscription is
+	/// released, and the publisher's demand with it.
+	Ended,
+}
+
+/// How a [`Consumer`]'s cursor chooses its first group.
+#[derive(Clone, Copy)]
+enum Startup {
+	/// The floor once resolved, raised to the publisher's resolved start, or else the first
+	/// arrivals. `anchor` is when the newest group had landed as the first one arrived, once such a
+	/// start waits for its reach.
+	Earliest { anchor: Option<Instant> },
+	/// The newest group, discarding what arrived below it.
+	Newest,
+	/// The cursor is on its first group or past it.
+	Started,
 }
 
 /// Two adjacent groups are timeline-contiguous when the next start is within this slack
@@ -365,7 +378,7 @@ impl<F: Container> Consumer<F> {
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
 			name: track.name().into(),
-			track: Some(track),
+			reader: Reader::Reading(track),
 			format,
 			current: start.unwrap_or(0),
 			pending: VecDeque::new(),
@@ -373,11 +386,9 @@ impl<F: Container> Consumer<F> {
 			collect_at: 1,
 			memory: Memory::new(DEFAULT_MAX_BUFFER),
 			gated: false,
-			startup: true,
-			newest: false,
+			startup: Startup::Earliest { anchor: None },
 			min_delay: subscription.delay.min.unwrap_or_default(),
 			warmup: std::time::Duration::ZERO,
-			anchor: None,
 			target: None,
 			warmed: None,
 			max_delay,
@@ -389,7 +400,6 @@ impl<F: Container> Consumer<F> {
 			gap: false,
 			next: None,
 			group: 0,
-			track_error: None,
 		}
 	}
 
@@ -398,8 +408,7 @@ impl<F: Container> Consumer<F> {
 	/// subscription keeps its budget, so every group after the start arrives as it would for any
 	/// reader; what arrived below the start is discarded.
 	pub(crate) fn live(mut self) -> Self {
-		self.startup = true;
-		self.newest = true;
+		self.startup = Startup::Newest;
 		self
 	}
 
@@ -485,14 +494,14 @@ impl<F: Container> Consumer<F> {
 	pub(crate) fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
 		// An error ended the reader, which reads as finished from then on: a decode error has
 		// already consumed the frame it came from, so reading on would skip it.
-		if self.track.is_none() {
+		if let Reader::Ended = self.reader {
 			return Poll::Ready(Ok(None));
 		}
 		let event = ready!(self.poll_event_inner(waiter));
 		if event.is_err() {
 			// Nothing more is read, so release the subscription and the groups it holds rather
 			// than pin the publisher's demand and cache for as long as the caller keeps this.
-			self.track = None;
+			self.reader = Reader::Ended;
 			self.pending.clear();
 		}
 		Poll::Ready(event)
@@ -519,7 +528,7 @@ impl<F: Container> Consumer<F> {
 		// below, since timestamps can't reveal it: a gap below the served window looks like
 		// in-flight groups until the budget expires, or forever on a quiet track. Skipping
 		// stays the budget's job.
-		if self.startup && !self.newest {
+		if let Startup::Earliest { .. } = self.startup {
 			let floor = self.subscriber().floor();
 			let served = match self.subscriber().poll_start(waiter) {
 				Poll::Ready(served) => served,
@@ -534,10 +543,10 @@ impl<F: Container> Consumer<F> {
 			if let Some(start) = start {
 				self.pending.retain(|group| group.sequence >= start);
 				self.current = start;
-				self.startup = false;
+				self.startup = Startup::Started;
 			}
 		}
-		if self.startup {
+		if !matches!(self.startup, Startup::Started) {
 			// NOTE: poll_min_timestamp buffers at least one frame per group and
 			// registers the waiter on the ones still empty. Any wire frame counts, so a
 			// paused track whose only group is a marker still reads its end. The oldest
@@ -552,7 +561,7 @@ impl<F: Container> Consumer<F> {
 				// largest names it before its stream lands: the backlog's oldest group can arrive
 				// first, and starting there loses the groups after it once the live edge moves a
 				// budget past them.
-				let start = match self.newest {
+				let start = match matches!(self.startup, Startup::Newest) {
 					true => {
 						let mut start = self.pending.back().expect("a group has a frame").sequence;
 						while let Poll::Ready(Some(largest)) = self.subscriber().poll_largest(waiter) {
@@ -569,7 +578,7 @@ impl<F: Container> Consumer<F> {
 				// Nothing has been read, so discarding what lies below the start is no gap.
 				self.discard(|group| group.sequence < start)?;
 				self.current = start;
-				self.startup = false;
+				self.startup = Startup::Started;
 			}
 		}
 
@@ -733,10 +742,12 @@ impl<F: Container> Consumer<F> {
 				let since = front.late;
 				let elapsed = since.elapsed() >= self.max_delay;
 				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
-				let excluded = self
-					.track
-					.as_ref()
-					.is_some_and(|track| track.next_in_range(self.current).is_none_or(|next| next >= sequence));
+				let excluded = match &self.reader {
+					Reader::Reading(track) | Reader::Failed(track, _) => {
+						track.next_in_range(self.current).is_none_or(|next| next >= sequence)
+					}
+					Reader::Ended => false,
+				};
 				// The groups past the hole already fill the max buffer, so it can hold none of what
 				// would arrive into it.
 				let full = self.memory.full();
@@ -798,7 +809,9 @@ impl<F: Container> Consumer<F> {
 			}
 
 			if finished && self.pending.is_empty() {
-				if let Some(err) = self.track_error.take() {
+				if let Reader::Failed(..) = self.reader
+					&& let Reader::Failed(_, err) = std::mem::replace(&mut self.reader, Reader::Ended)
+				{
 					// The caller only gets the bare error, with nothing to say which track died.
 					tracing::warn!(track = &*self.name, error = ?err, "track failed; ending the reader");
 					return Poll::Ready(Err(err));
@@ -912,6 +925,10 @@ impl<F: Container> Consumer<F> {
 
 		tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
 
+		// The group left behind presented this far, which a later hole is measured from.
+		if let Some(end) = current_end {
+			self.presented_end = Some(end);
+		}
 		self.current = new_current;
 		self.note_group_edge();
 		Ok(())
@@ -960,9 +977,11 @@ impl<F: Container> Consumer<F> {
 		}
 
 		// Wall time: the newest group landed a whole reach ago.
-		let arrived = *self
-			.anchor
-			.get_or_insert_with(|| self.pending.back().expect("a group has a frame").group.arrived());
+		let landed = self.pending.back().expect("a group has a frame").group.arrived();
+		let arrived = match &mut self.startup {
+			Startup::Earliest { anchor } => *anchor.get_or_insert(landed),
+			Startup::Newest | Startup::Started => landed,
+		};
 		if arrived.elapsed() >= reach {
 			return Some(lowest);
 		}
@@ -984,7 +1003,10 @@ impl<F: Container> Consumer<F> {
 
 	// The subscription, which only an error ending the reader drops.
 	fn subscriber(&mut self) -> &mut moq_net::track::Subscriber {
-		self.track.as_mut().expect("read only until an error ends the reader")
+		match &mut self.reader {
+			Reader::Reading(track) | Reader::Failed(track, _) => track,
+			Reader::Ended => unreachable!("read only until an error ends the reader"),
+		}
 	}
 
 	// Media this reader will never deliver: the next item is preceded by a gap.
@@ -1007,11 +1029,11 @@ impl<F: Container> Consumer<F> {
 
 	/// Receive group handles and wait for the track and every received group to finish.
 	pub(crate) fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if self.track.is_none() {
+		if let Reader::Ended = self.reader {
 			return Poll::Ready(());
 		}
 		ready!(self.poll_read_finish(waiter));
-		if self.track_error.is_some() {
+		if let Reader::Failed(..) = self.reader {
 			return Poll::Pending;
 		}
 		let first = self
@@ -1032,7 +1054,7 @@ impl<F: Container> Consumer<F> {
 	fn poll_read_finish(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		self.collect_pending(waiter);
 		self.gated = false;
-		if self.track_error.is_some() {
+		if let Reader::Failed(..) = self.reader {
 			return Poll::Ready(());
 		}
 		loop {
@@ -1045,7 +1067,9 @@ impl<F: Container> Consumer<F> {
 			let next = match ready!(self.subscriber().poll_recv_group(waiter)) {
 				Ok(next) => next,
 				Err(err) => {
-					self.track_error = Some(err.into());
+					if let Reader::Reading(track) = std::mem::replace(&mut self.reader, Reader::Ended) {
+						self.reader = Reader::Failed(track, err.into());
+					}
 					return Poll::Ready(());
 				}
 			};
@@ -1162,7 +1186,7 @@ impl<F: Container> Consumer<F> {
 	/// nothing older.
 	pub fn set_delay(&mut self, delay: Delay) {
 		// An ended reader has no subscription left to tune.
-		let Some(track) = &mut self.track else {
+		let (Reader::Reading(track) | Reader::Failed(track, _)) = &mut self.reader else {
 			return;
 		};
 		self.min_delay = delay.min.unwrap_or_default();
@@ -1514,6 +1538,14 @@ mod tests {
 	use super::Container as ContainerTrait;
 	use super::*;
 	use crate::catalog::hang::Container;
+
+	/// The subscription a consumer still reads.
+	fn subscribed<F: ContainerTrait>(consumer: &Consumer<F>) -> &moq_net::track::Subscriber {
+		match &consumer.reader {
+			Reader::Reading(track) | Reader::Failed(track, _) => track,
+			Reader::Ended => panic!("the reader ended"),
+		}
+	}
 	use std::time::Duration;
 
 	use bytes::Bytes;
@@ -3729,7 +3761,7 @@ mod tests {
 				max: Some(Duration::from_millis(500)),
 			});
 		assert!(
-			consumer.startup,
+			matches!(consumer.startup, Startup::Earliest { .. }),
 			"a local range names no start, so the start still reaches back"
 		);
 
@@ -3797,7 +3829,7 @@ mod tests {
 			Duration::from_millis(200),
 			Duration::from_millis(300),
 		);
-		let subscription = consumer.track.as_ref().unwrap().subscription();
+		let subscription = subscribed(&consumer).subscription();
 		assert_eq!(subscription.delay.min, Some(Duration::from_secs(2)));
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
@@ -3815,7 +3847,7 @@ mod tests {
 		let consumer_track = track.subscribe(moq_net::track::Subscription::default().with_delay(delay));
 		let consumer = Playout::new(delay, Duration::from_millis(300))
 			.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
-		let subscription = consumer.track.as_ref().unwrap().subscription();
+		let subscription = subscribed(&consumer).subscription();
 		assert_eq!(subscription.delay.min, Some(Duration::from_millis(100)));
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
@@ -3835,7 +3867,7 @@ mod tests {
 				min: Some(Duration::from_millis(500)),
 				max: None,
 			});
-		assert_eq!(consumer.track.as_ref().unwrap().subscription().delay.max, None);
+		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
 		assert!(
