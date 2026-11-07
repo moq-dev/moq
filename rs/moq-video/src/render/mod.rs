@@ -45,13 +45,16 @@
 //!
 //! [`export`] runs the other way, handing a texture you drew to an encoder as a
 //! [`Frame`](crate::Frame): on the GPU when the encoder reads this platform's
-//! GPU surface, read back to the CPU when it does not.
+//! GPU surface, read back to the CPU when it does not. [`readback`] is that
+//! read back on its own, for a consumer that wants the picture's RGBA pixels
+//! with no encoder behind it.
 //!
 //! Enabled by the non-default `render` feature, which is what pulls in `wgpu`.
 
 mod color;
 mod device;
 pub mod export;
+pub mod readback;
 mod renderer;
 mod source;
 

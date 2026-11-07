@@ -73,7 +73,7 @@ parameter, has landed, and the rest is API work that does not block the rename.
 The archive line's TRACKS request (a per-broadcast track listing that
 replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/6158)
 and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
-type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
+type for the browser [padding probes](/quest/m3/probe-padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
 Decided 2026-10-30 (maintainer, on
 [moq-dev/moq#7390](https://github.com/moq-dev/moq/pull/7390)): those probes

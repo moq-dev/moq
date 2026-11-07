@@ -12,7 +12,9 @@ lower renditions keep their share instead of every rung degrading together.
 Split from the native rung disable by the
 maintainer on 2026-10-20: the native publishers moved to m1 on native
 probing, while a browser can only probe with
-[padding](/quest/m2/probe/padding.md), which stays in m2.
+[padding](/quest/m3/probe-padding.md). Moved to m3 with padding on 2026-11-06
+(maintainer, /quest-unblock), since it recovers only through padding, which
+the maintainer parked for a rethink.
 
 - Mirror the native quest's rule and constants from `moq_mux::rate`, rather
   than tuning a JS-only one. Its decisions hold here too: catalog state
@@ -34,7 +36,7 @@ Public API: whatever knob `@moq/publish` exposes for the rule. Wire: none.
 
 ## Required
 
-- [Padding probes](/quest/m2/probe/padding.md) - the browser's sender, which raises the estimate so a disabled rung can resume
+- [Padding probes](/quest/m3/probe-padding.md) - the browser's sender, which raises the estimate so a disabled rung can resume
 
 ## Related
 

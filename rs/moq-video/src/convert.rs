@@ -44,6 +44,17 @@ pub struct Rgba {
 }
 
 impl Rgba {
+	/// Wrap tightly packed `size` RGBA8 pixels.
+	#[cfg(feature = "render")]
+	pub(crate) fn new(size: Size, data: Vec<u8>) -> Self {
+		debug_assert_eq!(data.len(), size.width as usize * size.height as usize * 4);
+		Self {
+			size,
+			stride: size.width as usize * 4,
+			data,
+		}
+	}
+
 	/// Image dimensions in pixels.
 	pub fn size(&self) -> Size {
 		self.size

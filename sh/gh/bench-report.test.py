@@ -197,6 +197,47 @@ class ReportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report.rust_tests(self.root)
 
+    def test_rust_capability_skip_keeps_the_other_measurements(self):
+        measured = (
+            "moq-uring::integration",
+            "socket_queues::benchmark_socket_queues::default",
+            "path,p99_ms\ntokio,2\n",
+        )
+        self.junit(
+            "nextest.xml",
+            [
+                measured,
+                (
+                    "moq-uring::integration",
+                    "socket_queues::benchmark_socket_queues::pool",
+                    "\nrunning 1 test\n# benchmark skipped: io_uring is unavailable; Tokio has no receive pool\n"
+                    "test socket_queues::benchmark_socket_queues::pool ... ok\n",
+                ),
+            ],
+        )
+        self.assertEqual(
+            report.rust_tests(self.root),
+            [
+                {
+                    "name": "rust-test/moq-uring/socket_queues/benchmark_socket_queues/default/path=tokio/p99_ms",
+                    "unit": "ms",
+                    "value": 2,
+                }
+            ],
+        )
+        for stdout in (
+            "",
+            "path,p99_ms\n",
+            "# benchmark skipped: \n",
+            "# benchmark skipped: unavailable\npath,p99_ms\n",
+        ):
+            self.junit(
+                "nextest.xml",
+                [measured, ("moq-uring::integration", "socket_queues::benchmark_socket_queues::pool", stdout)],
+            )
+            with self.assertRaises(ValueError):
+                report.rust_tests(self.root)
+
     def test_sizes_record_shipping_bytes(self):
         (self.root / "sizes.json").write_text(
             json.dumps(

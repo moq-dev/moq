@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from moq_carla_sim import world as world_module
 from moq_carla_sim.drive import Accepted, DriveState, Gear
 from moq_carla_sim.publish import Collision, Motion, Pose
+from moq_carla_sim.watchdog import Heartbeat
 from moq_carla_sim.world import (
     CAMERA_STANDOFF,
     COLLISION_WINDOW,
@@ -943,31 +945,28 @@ def test_holds_do_not_release_on_each_others_behalf() -> None:
 
 def test_parked_clock_keeps_beating_so_the_watchdog_lets_it_rest() -> None:
     """A parked clock is idle by design; the watchdog only exists for a wedged one."""
-    ticks = 0
+    ticked = threading.Event()
+    beats = threading.Semaphore(0)
 
-    def tick() -> None:
-        nonlocal ticks
-        ticks += 1
+    class Beats(Heartbeat):
+        def beat(self) -> None:
+            super().beat()
+            beats.release()
 
     async def scenario() -> None:
-        clock = Clock(SimpleNamespace(tick=tick), 30)
+        clock = Clock(SimpleNamespace(tick=ticked.set), 30)
+        clock.heartbeat = Beats("simulation clock")
         clock.release(world_module.STARTUP_HOLD)
         clock.start()
         try:
-            for _ in range(100):
-                if clock.heartbeat.age() > 0.0:
-                    break
-                await asyncio.sleep(0.01)
-            # Parked, but still proving the thread is alive.
-            assert clock.heartbeat.age() < 0.5
-            assert ticks == 0
+            # Parked, but still proving the thread is alive. A running clock beats
+            # only after a tick, so beats with no tick come from the parked loop.
+            for _ in range(2):
+                assert await asyncio.to_thread(beats.acquire, timeout=5.0)
+            assert not ticked.is_set()
 
             clock.hold(world_module.RENDER_HOLD)
-            for _ in range(100):
-                if ticks:
-                    break
-                await asyncio.sleep(0.01)
-            assert ticks > 0
+            assert await asyncio.to_thread(ticked.wait, 5.0)
         finally:
             clock.stop()
 
