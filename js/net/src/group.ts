@@ -5,7 +5,8 @@
  */
 import { type Instant, now } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
-import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import type { Charge } from "./cache.ts";
+import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError, TimestampMismatch } from "./error.ts";
 import { Compression, encodable, stored } from "./flate/group.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import { Queue } from "./queue.ts";
@@ -211,6 +212,9 @@ class GroupState {
 	offset = 0;
 
 	cacheBytes = 0;
+	// What the source copy bills its track's cache pool, while cached. A mirror shares its
+	// source's, so its reads count as accesses.
+	charge?: Charge;
 	compressed?: boolean;
 	flate?: Compression;
 	// The owning track's info, which every frame's timestamp must `rescale` to: a timed track's frames
@@ -341,10 +345,6 @@ export class Producer {
 	// past the track's end is refused rather than served as content that does not exist.
 	#limit?: number;
 
-	// When the group was created or last written. Retention ages a group from this,
-	// not from its creation, so a group still being filled is never reclaimed.
-	#activity = now();
-
 	// The frame being written in pieces, if any; no other frame is written until it ends.
 	#open?: FrameProducer;
 
@@ -378,7 +378,10 @@ export class Producer {
 			state.flate = flate;
 			const frames = Array.from(state.frames.peek(), (frame) => flate.push(frame));
 			state.frames.set(new Queue(frames));
-			state.cacheBytes = frames.reduce((bytes, frame) => bytes + frameBytes(frame), 0);
+			const bytes = frames.reduce((bytes, frame) => bytes + frameBytes(frame), 0);
+			if (bytes > state.cacheBytes) state.charge?.bill(bytes - state.cacheBytes);
+			else state.charge?.sub(state.cacheBytes - bytes);
+			state.cacheBytes = bytes;
 			for (const mirror of group.#mirrors?.keys() ?? []) {
 				mirror.frames.set(new Queue(frames.slice(mirror.start - state.start)));
 				mirror.flate = flate;
@@ -430,6 +433,12 @@ export class Producer {
 			const bytes = state.flate?.stored ?? state.cacheBytes - state.frames.peek().length * FRAME_BYTES;
 			return bytes - head > head * ratio;
 		};
+		hooks.chargeGroup = (group, charge) => {
+			const state = group.#state;
+			state.charge = charge;
+			charge?.bill(state.cacheBytes);
+		};
+		hooks.shedGroup = (group, debt, cap) => group.#shed(debt, cap);
 		hooks.limitGroup = (group, frames) => {
 			// A closed group takes no more frames, but one already past the cap still
 			// contradicts the end.
@@ -438,15 +447,6 @@ export class Producer {
 			}
 			group.#limit = frames;
 		};
-	}
-
-	/**
-	 * When the group was created or last written, on the installed clock.
-	 *
-	 * @internal Idle cache eviction only.
-	 */
-	get activity(): Instant {
-		return this.#activity;
 	}
 
 	/**
@@ -476,6 +476,7 @@ export class Producer {
 		dst.latest = this.#state.latest;
 		dst.flate = this.#state.flate;
 		dst.compressed = this.#state.compressed;
+		dst.charge = this.#state.charge;
 		// A track restamps its own mirror with when the group joined it.
 		dst.arrived = this.#state.arrived;
 		if (this.#state.start === this.#state.offset && !headShed(this.#state.frames.peek().first)) {
@@ -585,20 +586,22 @@ export class Producer {
 
 		const commits = this.#admit(frame);
 		const entry = new Chunked(info);
-		this.#append(entry, now(), commits);
+		this.#append(entry, commits);
 		const open = makeFrameProducer(info, {
 			written: () => entry.written.peek(),
 			write: (chunk) => {
 				if (this.#open !== open) throw new Error("group is closed");
-				this.#activity = now();
-				this.#state.cacheBytes += entry.write(chunk);
+				const bytes = entry.write(chunk);
+				this.#state.cacheBytes += bytes;
+				this.#state.charge?.add(bytes);
 				this.#trim();
+				this.#state.charge?.settle();
 			},
 			finish: () => {
 				if (this.#open !== open) throw new Error("group is closed");
 				this.#open = undefined;
 				entry.arrived = now();
-				this.#activity = entry.arrived;
+				this.#state.charge?.recordWrite();
 				entry.done.set(null);
 				// Wake whole-frame readers waiting for it to complete.
 				this.#state.frames.mutate(() => {});
@@ -626,7 +629,7 @@ export class Producer {
 		if (this.#state.flate) {
 			frame = this.#state.flate.push(frame, inflated);
 		}
-		this.#append(frame, arrived, commits);
+		this.#append(frame, commits);
 	}
 
 	// Check that the next frame may be written, returning what records its admission.
@@ -649,9 +652,10 @@ export class Producer {
 		return undefined;
 	}
 
-	#append(frame: Frame, arrived: Instant, commits: (() => void)[] | undefined) {
-		this.#activity = arrived;
-		this.#state.cacheBytes += frameBytes(frame);
+	#append(frame: Frame, commits: (() => void)[] | undefined) {
+		const bytes = frameBytes(frame);
+		this.#state.cacheBytes += bytes;
+		this.#state.charge?.add(bytes);
 		appendFrame(this.#state, frame);
 		if (commits) {
 			this.#admits = undefined;
@@ -663,13 +667,15 @@ export class Producer {
 			else appendFrame(mirror, frame);
 		}
 		this.#trim();
+		// Past the frame's own bookkeeping: paying the track's debt may evict other groups.
+		this.#state.charge?.settle();
 	}
 
+	// Shed the front past the live tail budget.
 	#trim(): void {
 		const state = this.#state;
 		const frames = state.frames.peek();
-		const start = state.start;
-		let shed = false;
+		const bytes = state.cacheBytes;
 		while (state.cacheBytes > TAIL_BYTES) {
 			const front = frames.first;
 			if (!front) break;
@@ -677,17 +683,52 @@ export class Producer {
 			const freed = front instanceof Chunked ? front.shed() : 0;
 			if (freed > 0) {
 				state.cacheBytes -= freed;
-				shed = true;
 				continue;
 			}
 			// The newest frame stays readable: its writer holds it whole anyway.
 			if (frames.length === 1) break;
-			frames.shift();
-			state.cacheBytes -= frameBytes(front);
-			if (front instanceof Chunked) front.release();
-			state.start++;
+			this.#shift();
 		}
-		if (state.start === start && !shed) return;
+		this.#shedMirrors(bytes);
+	}
+
+	// Shed whole frames from the front toward the cache pool's `debt`, freeing about `cap` at
+	// most, for a group the debt cannot evict whole: one being read, or the live edge. A frame
+	// larger than what is left of the debt stays, with everything after it. An open group keeps
+	// its newest frame, for the reader about to take it. Returns the bytes freed. Mirrors Rust's
+	// `GroupState::shed`.
+	#shed(debt: number, cap: number): number {
+		const state = this.#state;
+		if (state.closed.peek() instanceof Error) return 0;
+		const frames = state.frames.peek();
+		const keep = state.closed.peek() === undefined ? 1 : 0;
+		const bytes = state.cacheBytes;
+		while (frames.length > keep && bytes - state.cacheBytes < cap) {
+			const front = frames.first;
+			if (!front || (front instanceof Chunked && front.done.peek() === undefined)) break;
+			if (frameBytes(front) > debt - (bytes - state.cacheBytes)) break;
+			this.#shift();
+		}
+		this.#shedMirrors(bytes);
+		return bytes - state.cacheBytes;
+	}
+
+	// Drop the front frame.
+	#shift(): void {
+		const state = this.#state;
+		const front = state.frames.peek().shift() as Frame;
+		state.cacheBytes -= frameBytes(front);
+		if (front instanceof Chunked) front.release();
+		state.start++;
+	}
+
+	// Release what the front shed since it held `bytes`, and end the mirrors that can no longer
+	// read from their start.
+	#shedMirrors(bytes: number): void {
+		const state = this.#state;
+		const frames = state.frames.peek();
+		if (state.cacheBytes === bytes) return;
+		state.charge?.sub(bytes - state.cacheBytes);
 		state.flate?.shed(state.start);
 		const lost = headShed(frames.first);
 		for (const mirror of this.#mirrors?.keys() ?? []) {
@@ -1228,7 +1269,7 @@ export class Consumer {
 				group.#closed = undefined;
 		};
 		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
-		hooks.evictGroup = (group) => group.#evict();
+		hooks.evictGroup = (group, lost) => group.#evict(lost);
 		hooks.onShedRead = (group, notify) => {
 			group.#state.shedRead = notify;
 		};
@@ -1288,17 +1329,17 @@ export class Consumer {
 		return true;
 	}
 
-	#evict(): boolean {
+	#evict(lost: Error): boolean {
 		// A group read on from another copy is that copy's to reclaim.
 		if (this.#state !== this.#mirrored) return false;
 		const frames = this.#bufferedFrames();
 		if (frames.length > 0) {
 			// Unread content is going away either way. If the budget had already given up
 			// on this group that is the more specific reason, so ask it first; otherwise
-			// the reader simply lagged behind the cache.
+			// the cache reclaimed it before the reader got to it.
 			this.#expire();
 			if (!this.#terminal) {
-				this.#terminal = new TooFarBehind();
+				this.#terminal = lost;
 				if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 			}
 		}
@@ -1444,6 +1485,7 @@ export class Consumer {
 				const sequence = this.#state.start++;
 				this.#streamed = front;
 				this.#closed?.refresh();
+				this.#state.charge?.refresh();
 				return { sequence, frame: front, chunks: makeFrameConsumer(sequence, front) };
 			}
 			if (front.done.peek() === undefined) return undefined;
@@ -1467,6 +1509,7 @@ export class Consumer {
 		if (frames.length === 0 && this.#state.closed.peek() !== undefined) this.#state.flate = undefined;
 		const sequence = this.#state.start++;
 		this.#closed?.refresh();
+		this.#state.charge?.refresh();
 		return { sequence, frame, inflated: slice?.inflated };
 	}
 

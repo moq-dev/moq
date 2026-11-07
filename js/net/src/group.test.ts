@@ -949,10 +949,10 @@ test.each(["eviction", "expiry"] as const)("a group end wait observes reader %s"
 	const expired = new Signal(false);
 	hooks.expireGroup(reader, { expired: () => expired.peek(), changed: [expired] });
 	const end = hooks.groupEnd(reader);
-	if (failure === "eviction") hooks.evictGroup(reader);
+	if (failure === "eviction") hooks.evictGroup(reader, new StreamError(StreamCode.Evicted));
 	else expired.set(true);
 	await expect(end).rejects.toMatchObject({
-		code: failure === "eviction" ? StreamCode.TooFarBehind : StreamCode.Old,
+		code: failure === "eviction" ? StreamCode.Evicted : StreamCode.Old,
 	});
 	source.finish();
 	reader.close();

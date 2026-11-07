@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
 import { hostTime } from "@moq/clock/test";
 import { race } from "@moq/signals";
+import { DEFAULT_EXPIRY } from "./cache.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -14,8 +15,9 @@ import { unwanted } from "./util/demand.ts";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-// Matches the private idle cache window and Rust cache::DEFAULT_EXPIRY.
-const CACHE_WINDOW_MS = 30_000;
+const CACHE_WINDOW_MS = DEFAULT_EXPIRY;
+// How late the pool's sweep may reclaim a group nothing writes to: it runs every half window.
+const SWEEP_LAG_MS = CACHE_WINDOW_MS / 2;
 
 test("a cached transport tail covers only positions it actually holds", async () => {
 	const producer = new TrackProducer("test");
@@ -1899,7 +1901,7 @@ test("an abandoned open group ages out with no further write", async () => {
 		if (!group) throw new Error("missing group");
 		expect(await group.readString()).toBe("first");
 		const read = group.readFrame().catch((err: unknown) => err);
-		await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + SWEEP_LAG_MS);
 		expect(await read).toBeInstanceOf(TooFarBehind);
 	} finally {
 		producer.finish();
@@ -1917,10 +1919,10 @@ test("publisher maxAge does not change the idle cache deadline", async () => {
 			idle.writeFrame(textFrame("cached"));
 			producer.appendGroup();
 			// Eviction ends the idle open group a cache window after its last write, give or take
-			// the one slice a scan can lag.
+			// the lag of the pool's sweep.
 			await clock.advance(10_000 + CACHE_WINDOW_MS - 1);
 			expect(idle.closed.peek()).toBeUndefined();
-			await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+			await clock.advance(10_000 + CACHE_WINDOW_MS + SWEEP_LAG_MS);
 			expect(idle.closed.peek()).toBeInstanceOf(TooFarBehind);
 		} finally {
 			producer.finish();
@@ -2921,8 +2923,14 @@ test("no publisher limit still ages idle groups out", async () => {
 		expect(await (await within.recvGroup())?.readString()).toBe("old");
 		within.close();
 
-		// A scan runs at most once per slice of the window, so step past the next one.
-		clock.set(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		// The read was an access, as in Rust: past the write's window, the group stays.
+		clock.set(10_000 + CACHE_WINDOW_MS + 1_000);
+		const read = producer.subscribe({ delay: { max: Milli(100_000) } });
+		expect(read.tryRecvGroup()?.sequence).toBe(0n);
+		read.close();
+
+		// Past the read's window, a subscribe's own scan reclaims it.
+		clock.set(10_000 + 2 * CACHE_WINDOW_MS + 1_000);
 		const after = producer.subscribe({ delay: { max: Milli(100_000) } });
 		expect(after.tryRecvGroup()?.sequence).toBe(1n);
 		expect(after.tryRecvGroup()).toBeUndefined();
@@ -3095,7 +3103,7 @@ test("closed settles once the cache evicts the last open group below the end", a
 		await settle();
 		expect(producer.closed.peek()).toBeUndefined();
 
-		await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + SWEEP_LAG_MS);
 		await settle();
 		expect(open.closed.peek()).toBeInstanceOf(TooFarBehind);
 		expect(producer.closed.peek()).toBeNull();
@@ -3160,8 +3168,8 @@ test("an ended track's buffered groups age out for a stale subscriber", async ()
 				producer.close();
 			}
 
-			// Nothing writes after close; the scheduled cleanup can lag by one scan slice.
-			await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+			// Nothing writes after close, so the pool's sweep reclaims it.
+			await clock.advance(10_000 + CACHE_WINDOW_MS + SWEEP_LAG_MS);
 			if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
 			else expect(stale.tryRecvGroup()).toBeUndefined();
 		} finally {
