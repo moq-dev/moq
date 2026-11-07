@@ -182,8 +182,6 @@ quests that require them.
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out (held in m1 by an open claim)
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
-- [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them (held in m1 by an open claim)
-- [One typed WebTransport error per QUIC adapter](/quest/m2/web-error.md) - moq-tokio and moq-uring each expose one typed `quic::web::Error`, and uring's `quic::Error` loses its `Web` and `Http3` variants
 - [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
 - [Publish reports rendition stats as hang's type](/quest/m2/rendition-stats-type.md) - `Rendition.stats` and `Report.Writer` take the rendition stats schema's input type, so encoders write plain numbers
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)

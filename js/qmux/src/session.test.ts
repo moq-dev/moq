@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { type Installed, Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
@@ -597,7 +596,6 @@ describe("Session integration (scripted peer)", () => {
 	});
 
 	test("a RESET_STREAM received first keeps the stream terminal", async () => {
-		hostTime();
 		const { session, peer } = connect();
 		peer.send({ type: "transport_parameters", params: peerParams() });
 		await session.ready;
@@ -608,12 +606,10 @@ describe("Session integration (scripted peer)", () => {
 		peer.send({ type: "ping_request", sequence: 1n });
 		await waitFor(() => peer.has("ping_response"));
 
+		// The ping answered after the frames ahead of it, so a resurrected stream is already queued.
 		const reader = session.incomingUnidirectionalStreams.getReader();
 		const next = reader.read();
-		const resurrected = await Promise.race([
-			next.then(() => true),
-			sleep(Nano.fromMilli(Milli(50))).then(() => false as const),
-		]);
+		const resurrected = await Promise.race([next.then(() => true), yieldNow().then(() => false as const)]);
 		expect(resurrected).toBe(false);
 		session.close();
 		await next;
