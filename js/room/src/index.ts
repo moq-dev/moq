@@ -11,7 +11,7 @@
  * @module
  */
 
-/** Re-export of {@link https://jsr.io/@moq/clock | @moq/clock}, the time units this package's signatures take. */
+/** Re-export of {@link https://www.npmjs.com/package/@moq/clock | @moq/clock}, the time units this package's signatures take. */
 export * as Clock from "@moq/clock";
 
 /** Chat messages exchanged in the room. */

@@ -851,7 +851,7 @@ root = ["ca.pem"]
 				if path.extension().is_none_or(|ext| ext != "toml")
 					|| matches!(
 						path.file_name().and_then(|name| name.to_str()),
-						Some("Cargo.toml" | "rust-toolchain.toml")
+						Some("Cargo.toml" | "rust-toolchain.toml" | "bunfig.toml")
 					) {
 					continue;
 				}

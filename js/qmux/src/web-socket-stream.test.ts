@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Instant, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import {
 	openWebSocketStream,
 	type WebSocketConstructor,
@@ -96,6 +97,7 @@ describe("WebSocketStream ponyfill", () => {
 	});
 
 	test("writes are sent and backpressure follows bufferedAmount", async () => {
+		hostTime();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
 		const ws = FakeWebSocket.last as FakeWebSocket;
 		ws.open();
@@ -144,6 +146,7 @@ describe("WebSocketStream ponyfill", () => {
 	});
 
 	test("setHighWaterMark resizes backpressure live (mid-drain)", async () => {
+		hostTime();
 		const wss = new WebSocketStream("wss://x", { webSocket: ctor, highWaterMark: 100 });
 		const ws = FakeWebSocket.last as FakeWebSocket;
 		ws.open();
@@ -279,6 +282,7 @@ describe("WebSocketStream.adopt", () => {
 	});
 
 	test("backpressure applies to an adopted socket", async () => {
+		hostTime();
 		const ws = accepted();
 		ws.bufferedAmount = 100;
 		const wss = WebSocketStream.adopt(ws, { highWaterMark: 10 });

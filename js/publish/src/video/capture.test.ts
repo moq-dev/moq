@@ -465,7 +465,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: live,
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("video", {
@@ -579,7 +579,7 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 		config: new Signal(undefined),
 		stats: new Signal(undefined),
 		track: live,
-		joinInterval: new Signal(undefined),
+		join: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("video", {

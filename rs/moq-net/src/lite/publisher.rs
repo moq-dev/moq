@@ -17,7 +17,7 @@ use std::{
 
 use crate::{
 	Error, Hop, Hops, StreamError,
-	coding::{Decode, DecodeError, Decoder, Encode, Stream, Writer},
+	coding::{Decode, DecodeError, Decoder, Encode, Stream, StreamCodes as _, Writer},
 	lite,
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::Order,
@@ -5854,7 +5854,10 @@ impl GroupServe {
 				priority: handle.send_order().into(),
 			},
 		};
-		let stream = match ready!(session.poll_open_group(&mut self.open, waiter, options)) {
+		// A higher-priority open waiting for credit can reset this stream: the reader fell
+		// too far behind the publisher's streams, and the control stream drops the group.
+		let preempt = self.ctx.version.encode_stream_code(&StreamError::TooFarBehind);
+		let stream = match ready!(session.poll_open_group(&mut self.open, waiter, options, preempt)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.settle_open(false);
@@ -5951,9 +5954,10 @@ impl GroupServe {
 					records,
 				} => {
 					let outcome = 'serve: {
-						// The peer closing first cancels the group.
-						if writer.poll_closed(waiter).is_ready() {
-							break 'serve Err(Error::Cancel);
+						// The stream closing first cancels the group, or fails it with the reason
+						// it was reset for.
+						if let Poll::Ready(closed) = writer.poll_closed(waiter) {
+							break 'serve Err(closed.err().unwrap_or(Error::Cancel));
 						}
 						loop {
 							ready!(self.budget.poll_yield(waiter));

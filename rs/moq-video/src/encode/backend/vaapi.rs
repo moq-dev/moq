@@ -39,7 +39,7 @@ use std::path::Path;
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
-use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
+use super::super::encoder::{Applied, Codec, Config, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
 use crate::color::Matrix;
 use crate::frame::{DmaBuf, DrmFormat, I420, vaapi};
@@ -68,7 +68,7 @@ impl Vaapi {
 
 	fn new(config: &Config) -> Result<Self, Error> {
 		let bitrate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
-		let Gop::Keyframe { interval } = config.gop;
+		let interval = config.keyframe_interval();
 		// moq-vaapi derives the VUI's primaries and transfer from the matrix, the
 		// way SD and HD video pair them, so any other pairing is refused.
 		let color = config.resolved_color();

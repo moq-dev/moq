@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import Qmux from "@moq/qmux";
 import { Version } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -8,8 +9,8 @@ import { Writer } from "./stream.ts";
 const version = Version.DRAFT_07;
 const never = new Promise<void>(() => {});
 
-// A qmux session pair over an in-memory socket.
-function qmuxPair(): { client: WebTransport; server: WebTransport } {
+// A qmux session pair over an in-memory socket, the server granting `maxStreamsUni`.
+function qmuxPair(maxStreamsUni?: bigint): { client: WebTransport; server: WebTransport } {
 	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
 		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
 		return {
@@ -26,7 +27,7 @@ function qmuxPair(): { client: WebTransport; server: WebTransport } {
 	const down = pipe();
 	const config = { idleTimeout: null };
 	const client = new Qmux(socket(down.readable, up.writable), { config });
-	const server = Qmux.accept(socket(up.readable, down.writable), { config });
+	const server = Qmux.accept(socket(up.readable, down.writable), { config: { ...config, maxStreamsUni } });
 	return { client, server };
 }
 
@@ -80,4 +81,114 @@ test("a qmux group stream reports what the peer has acknowledged", async () => {
 	expect(await stream.acknowledged()).toBe(false);
 	client.close();
 	server.close();
+});
+
+test("an open waiting a round trip resets the lowest stream below it, one per waiting open", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { client, server } = qmuxPair(2n);
+	try {
+		const low = await openGroup(client, 1);
+		const mid = await openGroup(client, 2);
+		await low.write(new Uint8Array(16));
+		await mid.write(new Uint8Array(16));
+		// Before any RTT sample, an open waits 100 ms.
+		const wait = () => clock.advance(Nano.fromMilli(Milli(100)));
+
+		const below = Promise.withResolvers<void>();
+		const pending = Writer.tryOpen(client, { version, sendOrder: 0, cancel: below.promise, group: true });
+		await wait();
+		expect(orders(client)).toEqual([1, 2]);
+		below.resolve();
+		expect(await pending).toBeUndefined();
+
+		const high = openGroup(client, 5);
+		await wait();
+		expect(orders(client)).toEqual([2]);
+		await expect(low.closed).rejects.toThrow("lagged");
+		await wait();
+		expect(orders(client)).toEqual([2]);
+
+		const next = openGroup(client, 4);
+		await wait();
+		expect(orders(client)).toEqual([]);
+
+		// The peer is done with both reset streams, returning their credit.
+		const incoming = server.incomingUnidirectionalStreams.getReader();
+		for (let i = 0; i < 2; i++) {
+			const { value } = await incoming.read();
+			await value?.cancel();
+		}
+		expect((await high).sendOrder).toBe(5);
+		expect((await next).sendOrder).toBe(4);
+	} finally {
+		client.close();
+		server.close();
+		installed.close();
+	}
+});
+
+test("an open makes room only once it has waited a round trip itself", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { client, server } = qmuxPair(1n);
+	try {
+		const low = await openGroup(client, 1);
+		await low.write(new Uint8Array(16));
+		const wait = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+
+		const below = Promise.withResolvers<void>();
+		const pending = Writer.tryOpen(client, { version, sendOrder: 0, cancel: below.promise, group: true });
+		await wait(50);
+		const high = openGroup(client, 5);
+		await wait(50);
+		expect(orders(client)).toEqual([1]);
+		await wait(50);
+		expect(orders(client)).toEqual([]);
+
+		below.resolve();
+		expect(await pending).toBeUndefined();
+		const incoming = server.incomingUnidirectionalStreams.getReader();
+		const { value } = await incoming.read();
+		await value?.cancel();
+		expect((await high).sendOrder).toBe(5);
+	} finally {
+		client.close();
+		server.close();
+		installed.close();
+	}
+});
+
+test("an open ranked above an impatient one makes room for it at once", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { client, server } = qmuxPair(2n);
+	try {
+		const low = await openGroup(client, 1);
+		const mid = await openGroup(client, 2);
+		await low.write(new Uint8Array(16));
+		await mid.write(new Uint8Array(16));
+
+		const waiting = openGroup(client, 5);
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		expect(orders(client)).toEqual([2]);
+
+		// The reset's credit will reach this open instead, so the one still waiting is owed another.
+		const higher = openGroup(client, 10);
+		// Well short of its own round trip.
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		expect(orders(client)).toEqual([]);
+
+		const incoming = server.incomingUnidirectionalStreams.getReader();
+		for (let i = 0; i < 2; i++) {
+			const { value } = await incoming.read();
+			await value?.cancel();
+		}
+		expect((await higher).sendOrder).toBe(10);
+		expect((await waiting).sendOrder).toBe(5);
+	} finally {
+		client.close();
+		server.close();
+		installed.close();
+	}
 });

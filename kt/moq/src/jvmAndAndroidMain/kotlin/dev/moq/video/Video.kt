@@ -44,9 +44,6 @@ typealias ReadEnd = uniffi.moq.MoqVideoRead.End
 /** One encoded access unit from an [Encoder]. */
 typealias Packet = uniffi.moq.MoqVideoPacket
 
-/** How pictures are split into independently decodable groups. */
-typealias Gop = uniffi.moq.MoqVideoGop
-
 /** H.264 or H.265. */
 typealias Codec = uniffi.moq.MoqVideoCodec
 
