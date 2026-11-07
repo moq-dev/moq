@@ -136,6 +136,7 @@ federation) land.
 - [Lint override and deprecation audit](/quest/m3/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
 - [Clean ALSA playback onset](/quest/m3/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Read a bus source's own samples](/quest/m3/audio-strip-tap.md) - a tap reads one source's samples before its delay with their bus-clock positions, for the studio's clap sync
+- [Pan a bus source](/quest/m3/audio-strip-pan.md) - a strip's constant-power pan places its source between left and right in every mix, for the studio's Audio panel
 - [Interop audit](/quest/m3/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [moq-hls exposes each rendition's bound source](/quest/m3/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The memory bench finishes at 1 MiB frames](/quest/m3/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
