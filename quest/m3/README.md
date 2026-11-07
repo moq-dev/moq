@@ -61,6 +61,7 @@ federation) land.
 - [Plan: watch worker](/quest/m3/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m3/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
+- [H.265 encodes respect the encoder's minimum size](/quest/m3/h265-min-width.md) - an H.265 encode below AMD's 384-wide minimum is skipped by `Kind::Auto`, and the error names it
 - [VA-API encodes an external Vulkan image](/quest/m3/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
 - [C++ FFI reuse](/quest/m3/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
 - [OBS native codecs](/quest/m3/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
