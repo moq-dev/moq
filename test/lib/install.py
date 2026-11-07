@@ -3,6 +3,7 @@
 
 import fcntl
 import hashlib
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -11,19 +12,40 @@ ROOT = Path(__file__).resolve().parents[2]
 with (ROOT / ".tmp/bun-install.lock").open("w") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     digest = hashlib.sha256(subprocess.check_output(["bun", "--version"]))
+    digest.update(str(shutil.which("nix")).encode())
     # Include the postinstall build inputs as well as dependency manifests.
     paths = subprocess.check_output(
-        ["git", "ls-files", "-z", "--", "*package.json", "bun.lock",
-         "flake.nix", "flake.lock", "nix", "js/libav"], cwd=ROOT,
+        [
+            "git",
+            "ls-files",
+            "-z",
+            "--",
+            "*package.json",
+            "bun.lock",
+            "flake.nix",
+            "flake.lock",
+            "nix",
+            "js/libav",
+            "patches",
+        ],
+        cwd=ROOT,
     ).split(b"\0")
     for name in sorted(filter(None, paths)):
         digest.update(name)
-        digest.update((ROOT / name.decode()).read_bytes())
+        path = ROOT / name.decode()
+        if path.exists():
+            digest.update(path.read_bytes())
+        else:
+            digest.update(b"missing")
     fingerprint = digest.hexdigest()
     stamp = ROOT / "node_modules/.moq-install"
     # Another invocation must not relink dependencies or rebuild libav while
     # the first invocation is importing them or playing its bundled page.
-    if not stamp.exists() or stamp.read_text() != fingerprint:
+    if (
+        not stamp.exists()
+        or stamp.read_text() != fingerprint
+        or not (ROOT / "js/libav/dist/libav-opus-aac-af.mjs").exists()
+    ):
         stamp.unlink(missing_ok=True)
         subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=ROOT, check=True)
         stamp.write_text(fingerprint)
