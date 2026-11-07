@@ -43,11 +43,12 @@ grant; `Options::bandwidth` documents that
   the ceiling (`rs/moq-mux/src/rate.rs`); for Opus it is the codec floor. A
   grant below it disables the rendition until bandwidth recovers (decided
   2026-10-04 with the enabled flag), through the rung disable and re-enable
-  rule in `moq_mux::rate::Control` rather than a second one; the encoder never errors. Viewers with
-  no enabled alternative hold it ([push-to-talk](/quest/m1/push-to-talk/README.md)),
-  so its demand can stay while its grant is below the floor; recovery evaluates a
-  hypothetical share against the current estimate, as the ladder controller
-  does. The reservation's ceiling is
+  rule in `moq_mux::rate::Control` rather than a second one; the encoder never errors. This
+  assumed viewers with no enabled alternative hold it, so its demand stays while its grant is
+  below the floor, but [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) retired that
+  hold: players deselect a disabled rendition again. Settle how demand survives the disable
+  before building this. Recovery evaluates a hypothetical share against the current estimate,
+  as the ladder controller does. The reservation's ceiling is
   the configured bitrate; only the policy target moves.
 - PCM: `pcm::bitrate(sample_rate, channels)` is `pub(crate)`
   (`rs/moq-audio/src/pcm.rs`), `Settings::bitrate` is refused for it

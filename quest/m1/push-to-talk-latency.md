@@ -44,9 +44,10 @@ ring held when that PCM landed. The run also keeps 60 ms / 128 kbit/s Opus,
 the setup the nightly passes on. On the loaded agent host, 2026-11-06 runs at
 the fixed 300 ms delay had no underrun or stall but lost heads ("utterance
 head was not decoded"): 2 of 22 on the default 20 ms Opus and 1 on 60 ms.
-Whether 20 ms frames hit that ordering defect, which
-[Push-to-talk](/quest/m1/push-to-talk/README.md) owns, more often is not
-settled. What remains is to switch the page to the defaults, measure on `kixtop` again,
+The group after a head could overtake it, and the read took the mute's
+timestamp jump as proof the head was too late to wait for;
+[moq-dev/moq#8123](https://github.com/moq-dev/moq/pull/8123) fixed it, and two
+20 ms runs after the fix kept all 44 heads. What remains is to switch the page to the defaults, measure on `kixtop` again,
 and set and enforce the budget.
 
 Measured 2026-11-05 on the defaults, before Watch, one run of 22 presses
@@ -81,8 +82,8 @@ Measurement limits: the harness's headless Chromium mutes its output and reads
 a fake microphone, so `device` is Chromium's projected output for the default
 device and `capture` excludes the microphone's own input latency. Linux's
 render callbacks are 43 ms, so its `render` can be negative by up to one
-callback. The lost heads are the ordering defect
-[Push-to-talk](/quest/m1/push-to-talk/README.md) owns.
+callback. The lost heads were the ordering defect
+[moq-dev/moq#8123](https://github.com/moq-dev/moq/pull/8123) fixed.
 
 Knobs: the target's frame term (`frameDuration`, 20 ms by default) and its
 measured term (`js/watch/src/audio/latency.ts`); device and render follow the
