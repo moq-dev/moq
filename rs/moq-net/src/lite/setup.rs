@@ -332,7 +332,8 @@ impl<'a> Message<'a> for ReceivedSetup {
 		// so it decodes as "not declared" rather than an error.
 		let hop = params
 			.get_varint(PARAM_HOP, version)?
-			.and_then(|id| crate::Hop::new(id).ok());
+			.and_then(std::num::NonZeroU64::new)
+			.map(crate::Hop::from);
 		let implementation = if version.has_implementation() {
 			crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?
 		} else {

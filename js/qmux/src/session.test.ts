@@ -363,6 +363,29 @@ describe("Session integration (scripted peer)", () => {
 		});
 	}
 
+	test("a send stream's bytes count as acknowledged once they reach the socket", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await waitFor(() => peer.has("transport_parameters"));
+		const stream = await session.createUnidirectionalStream();
+		const writer = stream.getWriter();
+		expect(await stream.getStats()).toEqual({ bytesWritten: 0, bytesSent: 0, bytesAcknowledged: 0 });
+
+		// The ping response sticks in the socket; our write queues behind it.
+		peer.blockWrites();
+		peer.send({ type: "ping_request", sequence: 1n });
+		await settle();
+		const write = writer.write(new Uint8Array(10));
+		await settle();
+		expect(await stream.getStats()).toEqual({ bytesWritten: 10, bytesSent: 0, bytesAcknowledged: 0 });
+
+		peer.unblockWrites();
+		await write;
+		expect(await stream.getStats()).toEqual({ bytesWritten: 10, bytesSent: 10, bytesAcknowledged: 10 });
+		session.close();
+	});
+
 	test("aborting a write queued behind a wedged socket doesn't wait for it to drain", async () => {
 		const { session, peer } = connect();
 		await session.ready;

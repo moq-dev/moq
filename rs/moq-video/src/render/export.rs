@@ -21,18 +21,17 @@
 //!   Foundation hardware encoder reads it directly.
 //!
 //! Every other encoder reads frames on the CPU, so it takes
-//! [`Route::Readback`]: each slot is a staging buffer and the frame is read back
-//! as I420. An encoder never switches routes. Choosing among encoders passes over
+//! [`Route::Readback`]: each copy goes through a [`Readback`] and the frame is
+//! converted to I420. An encoder never switches routes. Choosing among encoders passes over
 //! one that cannot read this device's surface (NVENC with the device on another
 //! GPU), but one asked for by name fails [`Exporter::new`] instead, and a copy
 //! that fails on the GPU is an error.
 // The variants are deliberately not doc links: each exists on one platform, so
 // a link fails the `-D warnings` rustdoc build on every other.
 
-use std::sync::{Arc, Mutex};
-
 use moq_net::Timestamp;
 
+use super::readback::{self, Readback, extent, finish};
 use crate::{Error, Frame, Size, Surface};
 
 #[cfg(target_os = "windows")]
@@ -86,9 +85,9 @@ enum Slots {
 }
 
 impl Exporter {
-	/// Copies in flight at once: one being encoded, one being copied, and one
-	/// spare so a slow encode does not drop the very next picture.
-	pub const DEPTH: usize = 3;
+	/// Copies in flight at once, as many as a [`Readback`] holds: one being
+	/// encoded, one being copied, and one spare.
+	pub const DEPTH: usize = Readback::DEPTH;
 
 	/// Export textures drawn on `device` to an encoder `config` allows, and
 	/// return the rendition it produces.
@@ -226,7 +225,7 @@ impl Exporter {
 	fn open(device: &wgpu::Device, queue: &wgpu::Queue, size: Size, route: Route) -> Result<Self, Error> {
 		size.validate_nonzero("export")?;
 		let slots = match route {
-			Route::Readback => Slots::Readback(Readback::new(device, queue, size)),
+			Route::Readback => Slots::Readback(Readback::new(device, queue, size)?),
 			#[cfg(target_os = "linux")]
 			Route::Gpu => Slots::Vulkan(Box::new(vulkan::Export::open(device, queue, size)?)),
 			#[cfg(apple)]
@@ -275,23 +274,14 @@ impl Exporter {
 	/// `None` when every slot is still held by an earlier [`Pending`] or by the
 	/// encoder.
 	pub fn copy(&mut self, texture: &wgpu::Texture, timestamp: Timestamp) -> Result<Option<Pending>, Error> {
-		let size = Size::new(texture.width(), texture.height());
-		if size != self.size || texture.format() != wgpu::TextureFormat::Rgba8Unorm {
-			return Err(Error::Unsupported(format!(
-				"cannot export a {size} {:?} texture; expected {} Rgba8Unorm",
-				texture.format(),
-				self.size
-			)));
-		}
-		let usage = wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING;
-		if !texture.usage().contains(usage) {
-			return Err(Error::Unsupported(format!(
-				"cannot export a texture created without {usage:?}"
-			)));
-		}
+		readback::check(
+			texture,
+			self.size,
+			wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+		)?;
 
 		let wait = match &mut self.slots {
-			Slots::Readback(readback) => readback.copy(texture).map(Wait::Readback),
+			Slots::Readback(readback) => readback.copy(texture)?.map(Wait::Readback),
 			#[cfg(target_os = "linux")]
 			Slots::Vulkan(export) => export.copy(texture)?.map(Wait::Vulkan),
 			#[cfg(apple)]
@@ -315,7 +305,7 @@ pub struct Pending {
 }
 
 enum Wait {
-	Readback(Staged),
+	Readback(readback::Pending),
 	#[cfg(target_os = "linux")]
 	Vulkan(vulkan::Copy),
 	#[cfg(apple)]
@@ -328,7 +318,10 @@ impl Pending {
 	/// Block until the copy lands, then hand back the frame for an encoder.
 	pub fn wait(self) -> Result<Frame, Error> {
 		let surface = match self.wait {
-			Wait::Readback(staged) => staged.wait(&self.device)?,
+			Wait::Readback(pending) => {
+				let rgba = pending.wait()?;
+				Surface::rgba(rgba.data(), rgba.size())?
+			}
 			#[cfg(target_os = "linux")]
 			Wait::Vulkan(copy) => copy.wait(&self.device)?,
 			#[cfg(apple)]
@@ -345,165 +338,8 @@ impl Pending {
 	}
 }
 
-/// Block until `submission` has finished on the GPU.
-fn finish(device: &wgpu::Device, submission: wgpu::SubmissionIndex) -> Result<(), Error> {
-	device
-		.poll(wgpu::PollType::Wait {
-			submission_index: Some(submission),
-			timeout: None,
-		})
-		.map_err(|e| err(format!("waiting for the export copy: {e}")))?;
-	Ok(())
-}
-
-/// The CPU route: copies into a pool of staging buffers, read back as I420.
-struct Readback {
-	device: wgpu::Device,
-	queue: wgpu::Queue,
-	size: Size,
-	/// Bytes per row in a staging buffer, padded to the copy alignment.
-	row: u32,
-	pool: Arc<Mutex<Buffers>>,
-}
-
-/// Staging buffers not held by a [`Staged`].
-#[derive(Default)]
-struct Buffers {
-	free: Vec<wgpu::Buffer>,
-	/// Buffers in existence, up to [`Exporter::DEPTH`].
-	allocated: usize,
-}
-
-impl Readback {
-	fn new(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Self {
-		Self {
-			device: device.clone(),
-			queue: queue.clone(),
-			size,
-			row: (size.width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
-			pool: Arc::default(),
-		}
-	}
-
-	fn copy(&mut self, texture: &wgpu::Texture) -> Option<Staged> {
-		let mut pool = self.pool.lock().unwrap();
-		let buffer = match pool.free.pop() {
-			Some(buffer) => buffer,
-			None if pool.allocated < Exporter::DEPTH => {
-				pool.allocated += 1;
-				self.device.create_buffer(&wgpu::BufferDescriptor {
-					label: Some("moq-video export readback"),
-					size: u64::from(self.row) * u64::from(self.size.height),
-					usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-					mapped_at_creation: false,
-				})
-			}
-			None => return None,
-		};
-		drop(pool);
-
-		let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-			label: Some("moq-video export readback"),
-		});
-		encoder.copy_texture_to_buffer(
-			texture.as_image_copy(),
-			wgpu::TexelCopyBufferInfo {
-				buffer: &buffer,
-				layout: wgpu::TexelCopyBufferLayout {
-					offset: 0,
-					bytes_per_row: Some(self.row),
-					rows_per_image: Some(self.size.height),
-				},
-			},
-			extent(self.size),
-		);
-		let submission = self.queue.submit([encoder.finish()]);
-
-		Some(Staged {
-			buffer: Some(buffer),
-			submission,
-			size: self.size,
-			row: self.row,
-			pool: self.pool.clone(),
-			mapping: false,
-		})
-	}
-}
-
-/// One readback in flight. Dropping it returns its buffer to the pool.
-struct Staged {
-	buffer: Option<wgpu::Buffer>,
-	submission: wgpu::SubmissionIndex,
-	size: Size,
-	row: u32,
-	pool: Arc<Mutex<Buffers>>,
-	/// Set while a mapping was requested and not yet undone, so a wait that
-	/// failed partway does not hand a mapped buffer to the next copy.
-	mapping: bool,
-}
-
-impl Staged {
-	fn wait(mut self, device: &wgpu::Device) -> Result<Surface, Error> {
-		let rgba = self.rgba(device)?;
-		Surface::rgba(&rgba, self.size)
-	}
-
-	/// Block until the copy lands, then hand back tightly packed RGBA rows.
-	fn rgba(&mut self, device: &wgpu::Device) -> Result<Vec<u8>, Error> {
-		let buffer = self.buffer.as_ref().expect("held until drop");
-		let (send, recv) = std::sync::mpsc::channel();
-		self.mapping = true;
-		buffer.map_async(wgpu::MapMode::Read, .., move |result| {
-			let _ = send.send(result);
-		});
-		finish(device, self.submission.clone())?;
-		recv.recv()
-			.map_err(|_| err("the readback was dropped"))?
-			.map_err(|e| err(format!("mapping the readback: {e}")))?;
-
-		let width = self.size.width as usize * 4;
-		let mut rgba = Vec::with_capacity(width * self.size.height as usize);
-		{
-			let mapped = buffer
-				.slice(..)
-				.get_mapped_range()
-				.map_err(|e| err(format!("reading the readback: {e}")))?;
-			for row in mapped.chunks_exact(self.row as usize) {
-				rgba.extend_from_slice(&row[..width]);
-			}
-		}
-		buffer.unmap();
-		self.mapping = false;
-		Ok(rgba)
-	}
-}
-
-impl Drop for Staged {
-	fn drop(&mut self) {
-		let Some(buffer) = self.buffer.take() else {
-			return;
-		};
-		let mut pool = self.pool.lock().unwrap();
-		// The pool only holds buffers the next copy can write. One a failed wait
-		// left mapped, or waiting on a mapping, is let go and replaced.
-		if self.mapping {
-			pool.allocated -= 1;
-		} else {
-			pool.free.push(buffer);
-		}
-	}
-}
-
-fn extent(size: Size) -> wgpu::Extent3d {
-	wgpu::Extent3d {
-		width: size.width,
-		height: size.height,
-		depth_or_array_layers: 1,
-	}
-}
-
 /// A `size` texture an exporter takes, filled with `rgba` in every pixel.
-fn texture(device: &wgpu::Device, queue: &wgpu::Queue, size: Size, rgba: [u8; 4]) -> wgpu::Texture {
+pub(super) fn texture(device: &wgpu::Device, queue: &wgpu::Queue, size: Size, rgba: [u8; 4]) -> wgpu::Texture {
 	let texture = device.create_texture(&wgpu::TextureDescriptor {
 		label: Some("moq-video export"),
 		size: extent(size),
@@ -669,14 +505,6 @@ pub(crate) mod tests {
 		)
 	}
 
-	/// Tightly packed RGBA rows of a `COPY_SRC` texture.
-	#[cfg(target_os = "linux")]
-	pub(crate) fn pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {
-		let size = Size::new(texture.width(), texture.height());
-		let mut readback = Readback::new(device, queue, size);
-		readback.copy(texture).unwrap().rgba(device).unwrap()
-	}
-
 	/// The center pixel of `frame`, read on the CPU.
 	pub(crate) fn center(frame: &Frame) -> [u8; 4] {
 		let size = frame.size();
@@ -690,11 +518,11 @@ pub(crate) mod tests {
 		actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 24)
 	}
 
-	/// A readback hands back what was drawn, and drops copies past its depth
-	/// rather than queuing them.
+	/// The readback route hands back what was drawn as I420, and drops copies
+	/// past its depth rather than queuing them.
 	#[tokio::test]
 	#[ignore = "needs a GPU; run by just rs render-sw"]
-	async fn readback_round_trips_and_drops_past_its_depth() {
+	async fn the_readback_route_hands_back_i420() {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let size = Size::new(64, 32);
 		let red = texture(&device, &queue, size, [255, 0, 0, 255]);
@@ -711,7 +539,6 @@ pub(crate) mod tests {
 		assert!(matches!(frame.surface, Surface::I420(_)));
 		let actual = center(&frame);
 		assert!(near(actual, [255, 0, 0, 255]), "{actual:?}");
-		assert!(exporter.copy(&red, Timestamp::ZERO).unwrap().is_some());
 	}
 
 	/// The exporter takes the route the encoder it probed reads: GPU frames
@@ -808,15 +635,5 @@ pub(crate) mod tests {
 			panic!("exported BT.601 pixels under a BT.709 label");
 		};
 		assert!(matches!(err, Error::Unsupported(_)), "{err}");
-	}
-
-	/// A texture of another size or format is refused rather than misread.
-	#[tokio::test]
-	#[ignore = "needs a GPU; run by just rs render-sw"]
-	async fn refuses_a_mismatched_texture() {
-		let (device, queue) = gpu().await.expect("a GPU adapter");
-		let mut exporter = Exporter::open(&device, &queue, Size::new(64, 32), Route::Readback).unwrap();
-		let other = texture(&device, &queue, Size::new(32, 32), [0; 4]);
-		assert!(exporter.copy(&other, Timestamp::ZERO).is_err());
 	}
 }

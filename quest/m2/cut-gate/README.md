@@ -26,12 +26,10 @@ than release" child with its Goal and no measurements yet, and takes the
 run re-created in m3. The pre-cut audit is a one-time child and does not
 recur. Only `/quest-delete` ends the recurrence.
 
-Held by an open claim at the re-cut: [release-perf](/quest/m1/release-perf/README.md)
-stays in m1 until its claim merges, so this gate lists it as a blocker; the
-[re-cut follow-up](/quest/m2/recut-held.md) moves what remains of it here.
+The completed [release performance comparison](/.github/release-perf.md)
+records the accepted costs and final relay pairing for this cut.
 
 ## Required
 
 - [Pre-cut audit findings](/quest/m2/cut-gate/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
-- [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason (held in m1 by an open claim)
 - [moq-c at parity](/quest/m2/cut-gate/c/README.md) - the hand-written `moq-c` ships at the cut with every binding feature moq-ffi gains

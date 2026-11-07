@@ -117,7 +117,7 @@ impl AnnouncedRecord {
 			_captures: captures,
 			capture_views,
 			kind,
-			hops: update.route.hops().iter().map(|hop| hop.id()).collect(),
+			hops: update.route.hops().collect(),
 			cost: update.route.cost().value(),
 			instance: update.route.instance().to_string(),
 		}
