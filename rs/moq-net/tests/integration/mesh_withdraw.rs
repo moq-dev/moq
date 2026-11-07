@@ -679,3 +679,40 @@ async fn mixed_version_ring_withdraw_retracts() {
 		);
 	}
 }
+
+/// A relay never carries traffic between two upstreams, across versions too: a
+/// broadcast it learned from a moq-lite-06 upstream enters the route layer as one of
+/// its own claims, yet never reaches a moq-lite-07 upstream, while one published at
+/// the relay does.
+#[kio::test]
+async fn an_upstream_learned_claim_never_reaches_another_upstream() {
+	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
+	let lite06: Version = "moq-lite-06".parse().unwrap();
+	let first = produce_origin(1);
+	let relay = produce_origin(2);
+	let second = produce_origin(3);
+	let upstream = relay.clone().with_link(origin::Link::Upstream);
+	let mut pairs = Vec::new();
+	for (version, core) in [(lite06, &first), (lite07, &second)] {
+		let core = core.clone().with_link(origin::Link::Peer);
+		let mut options = MockConnectOptions::new(version);
+		options.client_publish = Some(upstream.consume().with_hidden(true));
+		options.client_subscribe = Some(upstream.clone());
+		options.server_publish = Some(core.consume().with_hidden(true));
+		options.server_subscribe = Some(core);
+		pairs.push(connect_mock(options).await);
+	}
+
+	let mut at_relay = watch(relay.consume().routes());
+	let mut at_second = watch(second.consume().routes());
+	let learned = first.route("room/learned", origin::RouteOptions::hidden()).unwrap();
+	learned.announce().unwrap();
+	let local = relay.route("room/local", origin::RouteOptions::hidden()).unwrap();
+	local.announce().unwrap();
+	kio::clock::sim::idle().await;
+	let relayed = drain(&mut at_relay);
+	assert!(relayed.contains_key("room/learned"), "{relayed:?}");
+	let seen = drain(&mut at_second);
+	assert_eq!(seen.get("room/local"), Some(&vec![Kind::Start]), "{seen:?}");
+	assert!(!seen.contains_key("room/learned"), "{seen:?}");
+}

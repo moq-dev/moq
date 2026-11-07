@@ -679,11 +679,10 @@ impl Pool {
 	}
 }
 
-/// Wake the worker for `path` through the claim and subscribe. Every wire carries the
-/// answer as an ordinary announcement, which resets the first subscription through the
-/// claim, so wake the worker first and subscribe through the exact route. Lite-07's
-/// takeover is gone until quest/m2/announce-takeover.md carries the claim's instance onto
-/// the exact route.
+/// Wake the worker for `path` through the claim and subscribe. Wake the worker first and
+/// subscribe through the exact route, so the test reads the same on every wire, whether
+/// it carries the answer as a takeover or as an ordinary announcement that resets the
+/// first subscription through the claim.
 async fn claimed(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
 	let cold = origin.consume().request(path, None).await.unwrap();
 	drop(cold.track("video").unwrap().subscribe(None).await);

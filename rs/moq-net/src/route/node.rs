@@ -41,6 +41,10 @@ pub(crate) struct Claim {
 	/// this claim's broadcast. Kept while the instance stays, and sent as
 	/// ANNOUNCE_TAKEOVER to a peer still holding that claim.
 	pub continues: Option<(Path, Instance)>,
+	/// This node's own claim, served through a route learned from an upstream peer: it
+	/// is never sent to another upstream, so this node never carries traffic between
+	/// two. Always unset on a claim off the wire.
+	pub upstream: bool,
 }
 
 /// A shown claim as the origin serves it through the selected route.
@@ -112,10 +116,9 @@ struct Outbox {
 	pending: HashMap<Id, (u64, Pending)>,
 	/// Outputs to read in order: the other kinds, and a pending entry once taken.
 	ready: VecDeque<Output>,
-	/// Each claim's last serving change, read after the rest: its identity as the peer
-	/// names it and how it is served, or `None` to stop serving it. Keyed by when it
-	/// last changed, so a takeover's successor still reads before its predecessor goes.
-	serves: BTreeMap<u64, (Id, Path, Option<(Id, Served)>)>,
+	/// Each claim's last Serve or Unserve, read after the rest. Keyed by when it last
+	/// changed, so a takeover's successor still reads before its predecessor goes.
+	serves: BTreeMap<u64, Output>,
 	/// Where each claim's last change sits in `serves`.
 	serving: HashMap<(Id, Path), u64>,
 	/// Each route the reader holds, and the claims it was sent under it.
@@ -209,17 +212,13 @@ impl Outbox {
 			}
 			// Each serving change replaces the last: the session acts on where the claim
 			// ends up, in place when it keeps its instance.
-			Output::Serve {
-				id,
-				named,
-				claim,
-				served,
-			} => {
-				self.serve(id, claim, Some((named, served)));
-				None
-			}
-			Output::Unserve { id, claim } => {
-				self.serve(id, claim, None);
+			Output::Serve { id, ref claim, .. } | Output::Unserve { id, ref claim } => {
+				let seq = self.next;
+				self.next += 1;
+				if let Some(old) = self.serving.insert((id, claim.clone()), seq) {
+					self.serves.remove(&old);
+				}
+				self.serves.insert(seq, output);
 				None
 			}
 			other => {
@@ -237,31 +236,15 @@ impl Outbox {
 					self.take(id, pending);
 				}
 				None => {
-					let (_, (id, claim, serve)) = self.serves.pop_first()?;
-					self.serving.remove(&(id, claim.clone()));
-					return Some(match serve {
-						Some((named, served)) => Output::Serve {
-							id,
-							named,
-							claim,
-							served,
-						},
-						None => Output::Unserve { id, claim },
-					});
+					let (_, output) = self.serves.pop_first()?;
+					if let Output::Serve { id, claim, .. } | Output::Unserve { id, claim } = &output {
+						self.serving.remove(&(*id, claim.clone()));
+					}
+					return Some(output);
 				}
 			}
 		}
 		self.ready.pop_front()
-	}
-
-	/// Replace the claim's queued serving change with `serve`, queued last.
-	fn serve(&mut self, id: Id, claim: Path, serve: Option<(Id, Served)>) {
-		let seq = self.next;
-		self.next += 1;
-		if let Some(old) = self.serving.insert((id, claim.clone()), seq) {
-			self.serves.remove(&old);
-		}
-		self.serves.insert(seq, (id, claim, serve));
 	}
 
 	/// Queue one identity's pending entry to read, as the router would have sent it.
@@ -716,6 +699,7 @@ mod tests {
 			epoch: 0,
 			cost,
 			continues: None,
+			upstream: false,
 		}
 	}
 

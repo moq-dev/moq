@@ -2,9 +2,9 @@
 //!
 //! The node sends the peer its routes and, closed by an ANNOUNCE_FLOOR, each route's
 //! claims under the requested prefix. The stream filters what it puts on the wire:
-//! hidden claims unless the peer asked for them, and anything this handle's scope or
-//! the session's grant leaves out, in which case a floor certifies nothing, since the
-//! peer cannot tell what was left out from what is gone.
+//! hidden claims unless the peer asked for them, and anything this handle's scope, the
+//! session's grant, or the upstream horizon leaves out, in which case a floor certifies
+//! nothing, since the peer cannot tell what was left out from what is gone.
 //!
 //! A handle's mounts beneath the prefix are read through a node stream each, at the
 //! target, and what they present is named under the mount point on the same routes.
@@ -66,8 +66,9 @@ enum Phase {
 /// Answers one lite-07 announce stream.
 pub(super) struct Answer {
 	origin: origin::Consumer,
-	/// The requested prefix, absolute.
-	prefix: Path,
+	/// The requested prefix, absolute. `None` when it is too long to lie beneath the
+	/// handle's root: nothing is there, so the stream announces nothing.
+	prefix: Option<Path>,
 	hidden: bool,
 	link: route::Link,
 	/// The prefix's own node stream, then one per mount beneath it. Empty until the
@@ -100,7 +101,7 @@ impl Answer {
 			proxy: origin.proxy(),
 			scope: None,
 		};
-		let absolute = origin.root().join(&prefix).unwrap_or_else(|_| origin.root().clone());
+		let absolute = origin.root().join(&prefix).ok();
 		Self {
 			gate: crate::auth::Gate::new(auth, prefix, crate::auth::Direction::Publish),
 			prefix: absolute,
@@ -139,8 +140,9 @@ impl Answer {
 				active: 0,
 			})?;
 			let node = self.origin.route_node();
-			let mounts = self.origin.mounted(&self.prefix);
-			let interests = std::iter::once((self.prefix.clone(), None))
+			let mounts = (self.prefix.as_ref()).map_or_else(Vec::new, |prefix| self.origin.mounted(prefix));
+			let interests = (self.prefix.iter())
+				.map(|prefix| (prefix.clone(), None))
 				.chain(mounts.into_iter().map(|mount| (mount.interest.clone(), Some(mount))));
 			for (interest, mount) in interests {
 				let stream = node
@@ -394,9 +396,13 @@ impl Answer {
 	/// Send the ANNOUNCE_FLOOR closing a batch for the route to `id`.
 	fn floor(&mut self, stream: &mut Stream<Transport, Version>, id: route::Id) -> Result<(), Error> {
 		let certified = self.certified();
+		let upstream = self.link.upstream;
 		let sent = self.routes.get_mut(&id).expect("only a held route has a batch");
 		sent.floored = true;
-		let revision = sent.floor.filter(|_| certified);
+		// Like the grant, the upstream horizon leaves claims out that a floor would
+		// certify absent.
+		let hides = upstream && sent.claims.values().any(|claim| claim.upstream);
+		let revision = sent.floor.filter(|_| certified && !hides);
 		stream.writer.buffer(&Msg::Floor {
 			id: sent.wire,
 			revision,
@@ -407,13 +413,21 @@ impl Answer {
 	/// scope or the session's grant leaves out lies beneath it. A hidden claim left out
 	/// does not count, since the peer did not ask to see it.
 	fn certified(&self) -> bool {
-		let relative = self.prefix.strip_prefix(self.origin.root()).unwrap_or_default();
-		self.origin.covers(&self.prefix) && self.permit.covers_subtree(relative.as_str())
+		let Some(prefix) = &self.prefix else {
+			return false;
+		};
+		let relative = prefix.strip_prefix(self.origin.root()).unwrap_or_default();
+		self.origin.covers(prefix) && self.permit.covers_subtree(relative.as_str())
+	}
+
+	/// The absolute `path` as the peer names it, under its requested prefix.
+	fn suffix(&self, path: &Path) -> Option<Path> {
+		path.strip_prefix(self.prefix.as_ref()?)
 	}
 
 	/// Whether the peer is shown the claim at the absolute `path`.
 	fn shows(&self, path: &Path) -> bool {
-		let Some(suffix) = path.strip_prefix(&self.prefix) else {
+		let Some(suffix) = self.suffix(path) else {
 			return false;
 		};
 		let Some(relative) = path.strip_prefix(self.origin.root()) else {
@@ -434,7 +448,9 @@ impl Answer {
 		started: &mut BTreeSet<Path>,
 	) -> Result<(), Error> {
 		let sent = self.routes.get(&id).expect("only a held route syncs");
-		let wanted = sent.claims.get(&path).filter(|_| self.shows(&path)).cloned();
+		let wanted = (sent.claims.get(&path))
+			.filter(|claim| self.shows(&path) && !(self.link.upstream && claim.upstream))
+			.cloned();
 		let wire = sent.wire;
 		let taken = (wanted.as_ref())
 			.and_then(|claim| self.continued(id, &path, claim))
@@ -442,10 +458,7 @@ impl Answer {
 		let key = (id, path);
 		match (self.live.get_mut(&key), wanted) {
 			(None, Some(claim)) => {
-				let suffix = key
-					.1
-					.strip_prefix(&self.prefix)
-					.expect("shown claims are under the prefix");
+				let suffix = self.suffix(&key.1).expect("shown claims are under the prefix");
 				let announce = match taken {
 					Some((taken, predecessor)) => {
 						tracing::debug!(route = %key.1, node = id, predecessor = %taken, "takeover");
@@ -476,10 +489,7 @@ impl Answer {
 					// In place: a new Announce ID replaces the one it continues.
 					Some((taken, predecessor)) if taken == key.1 => {
 						tracing::debug!(route = %key.1, node = id, "takeover");
-						let suffix = key
-							.1
-							.strip_prefix(&self.prefix)
-							.expect("held claims are under the prefix");
+						let suffix = self.suffix(&key.1).expect("held claims are under the prefix");
 						self.takeover(stream, wire, predecessor, suffix, &claim)?
 					}
 					_ if restart => {

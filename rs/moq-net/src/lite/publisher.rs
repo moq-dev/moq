@@ -3636,6 +3636,37 @@ mod announce_test {
 		);
 	}
 
+	/// A lite-07 prefix too long to lie beneath the handle's root names nothing there,
+	/// so the answer announces nothing rather than what the root holds.
+	#[test]
+	fn a_lite07_prefix_past_the_root_announces_nothing() {
+		let origin = Hop::new(1).unwrap().produce();
+		let root = "r".repeat(100);
+		let _route = origin.announce(format!("{root}/x"), origin::RouteInfo::default()).unwrap();
+		let consumer = origin
+			.consume()
+			.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap();
+		let prefix = crate::Path::new(&"p".repeat(crate::Path::MAX_BYTES - 50)).unwrap();
+		let mut answer = super::routed::Answer::new(consumer, prefix, true, crate::auth::Link::new(false));
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut stream = Stream::<Transport, Version> {
+			writer: Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			),
+			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
+		};
+		assert!(answer.poll(&mut stream, false, &kio::Waiter::noop()).is_pending());
+		wire.take_ok();
+		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Synced]);
+	}
+
 	#[test]
 	fn synced_survives_a_removed_initial_route_and_live_churn() {
 		let origin = Hop::new(1).unwrap().produce();
