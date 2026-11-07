@@ -78,8 +78,10 @@ handle and call `close()` to cancel it when finished. Sleep accepts an abort
 sleep is pending. Timeout cancels its own timer when the operation settles, but does
 not cancel the operation. An already-ready operation wins a zero timeout.
 
-This repository's `bun test` runs load a preload (`js/clock/src/preload.ts`)
-that fails a test when a timer it armed fires on the host clock, so a test
+In this repository, every workspace whose `bun test` script can reach
+`@moq/clock` loads a preload (`js/clock/src/preload.ts`) from its
+`bunfig.toml`, and `bun js/common/deps.ts` fails a workspace that doesn't. The
+preload fails a test when a timer it armed fires on the host clock, so a test
 can't prove that nothing happened by waiting in real time. A `timeout()` whose
 operation settles first never fires, and a timer firing after its test ended
 fails nothing. A test on real sockets, devices, or processes calls `hostTime()`
