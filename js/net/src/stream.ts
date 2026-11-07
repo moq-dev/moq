@@ -1,4 +1,4 @@
-import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
+import { fromTransport, StreamCode, TooFarBehind, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
@@ -837,6 +837,11 @@ export class Writer implements OpenStream {
 			throw fromTransport(err, { version: asIetf(this.version) });
 		});
 		return this.#closed;
+	}
+
+	/** Reset the stream to make room for a higher one, failing its writer as too far behind. */
+	preempt() {
+		this.reset(new TooFarBehind());
 	}
 
 	reset(reason: unknown) {

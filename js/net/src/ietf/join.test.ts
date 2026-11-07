@@ -1,5 +1,6 @@
 import { expect, jest, onTestFinished, test } from "bun:test";
 import { Elapsed, Instant, Manual, Milli, Nano, now, timeout } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import * as Connection from "../connection/index.ts";
 import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";
@@ -186,6 +187,7 @@ test("a draft-18 join subscribes at Largest Object and fetches Largest's group",
 });
 
 test("an empty track sends no joining FETCH", async () => {
+	hostTime();
 	const { fetching } = await join(null);
 	expect(fetching).toBeUndefined();
 });
@@ -246,6 +248,7 @@ test("an empty tail finishes a group the head already holds whole", async () => 
 
 for (const outcome of ["a refused joining FETCH", "an empty joining FETCH"] as const) {
 	test(`${outcome} costs only the group's head`, async () => {
+		hostTime();
 		const { subscriber, consumer, fetching, fetch, client } = await join();
 		if (!fetch) throw new Error("no fetch");
 		if (outcome === "an empty joining FETCH") {
@@ -312,6 +315,7 @@ test("a tail parked on a refused joining FETCH is dropped", async () => {
 });
 
 test("a joining FETCH has no deadline of its own", async () => {
+	hostTime();
 	jest.useFakeTimers();
 	onTestFinished(() => jest.useRealTimers());
 	const { subscriber, consumer, fetching, fetch, client } = await join();
@@ -518,6 +522,7 @@ for (const version of VERSIONS) {
 	if (version === VERSION) continue;
 
 	test(`${versionName(version)}: a join subscribes at Next Object with a StartGroup=1 fill, and sends no FETCH`, async () => {
+		hostTime();
 		const { subscribe, answer, client } = await subscribed(version);
 		expect(subscribe.filter).toEqual({ kind: "nextObject" });
 		expect(subscribe.fill).toEqual({ filter: { kind: "relative", groups: 1n }, rangeFilters: false });

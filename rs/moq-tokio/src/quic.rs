@@ -746,9 +746,9 @@ impl Resolved {
 		moq_quic::transport::keep_alive_interval(self.keep_alive, idle_timeout)
 	}
 
-	/// The flow-control limits as moq-quic spells them.
+	/// The flow-control limits as moq-quic and qmux spell them.
 	#[cfg(feature = "_transport")]
-	pub(crate) fn limits(&self) -> moq_quic::Limits {
+	pub fn limits(&self) -> moq_quic::Limits {
 		use std::num::NonZeroU64;
 
 		let mut limits = moq_quic::Limits::default();

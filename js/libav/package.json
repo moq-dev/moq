@@ -10,7 +10,6 @@
 		"directory": "js/libav"
 	},
 	"sideEffects": false,
-	"jsr": false,
 	"exports": {
 		".": {
 			"types": "./index.d.ts",

@@ -1,2 +1,3 @@
 [test]
-preload = ["./test/worklet.ts"]
+# The clock preload fails a test when a timer fires on the host clock, unless it called hostTime().
+preload = ["../../../js/clock/src/preload.ts", "./test/worklet.ts"]

@@ -38,13 +38,13 @@ ships, not the default.
   (`listen.lb_id` QUIC-LB server ids). That refusal is a recorded exception
   to parity, not a prerequisite, until a consumer asks.
 
-Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
-[the io_uring relay path using moq-net's policy](/quest/m1/session-policy/uring.md),
-so packaging never publishes the hand-copied lifecycle path.
+Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waited for the io_uring
+relay path to serve through moq-net's policy, so packaging never publishes the
+hand-copied lifecycle path; that landed in
+[moq-dev/moq#8082](https://github.com/moq-dev/moq/pull/8082).
 
 Public API: none. Wire: none.
 
 ## Required
 
 - [One port on the io_uring workers](/quest/m3/uring-demux.md) - a one-port config is served on the ring too
-- [The io_uring relay path uses moq-net's policy](/quest/m1/session-policy/uring.md) - the ring serves through the shared accept policy before it ships

@@ -65,4 +65,4 @@ The epic's own work, once every child has merged:
 
 ## Required
 
-- [moq-rtc on rind](/quest/m1/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
+- [moq-webrtc on rind](/quest/m1/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind

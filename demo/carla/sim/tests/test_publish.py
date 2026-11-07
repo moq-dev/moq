@@ -6,7 +6,7 @@ import moq
 import pytest
 
 from moq_carla_sim import publish
-from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry
+from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry, handle
 from moq_carla_sim.publish import (
     Collision,
     Motion,
@@ -56,6 +56,7 @@ def test_malformed_timestamp_does_not_drop_driver_command() -> None:
                 {"label": "received", "ts": 12.5},
             ],
         },
+        "s1",
     )
 
     assert command is not None
@@ -69,6 +70,7 @@ def test_only_the_players_pipeline_stages_are_kept() -> None:
     command = parse_command(
         "driver",
         {"type": "drive", "sequence": 1, "timestamps": [*stages, *junk, {"label": "received", "ts": 9.0}]},
+        "s1",
     )
 
     assert command is not None
@@ -79,7 +81,7 @@ def test_only_the_players_pipeline_stages_are_kept() -> None:
 
 
 def test_respawn_command_is_carla_only_control_input() -> None:
-    command = parse_command("driver", {"type": "respawn", "sequence": 8})
+    command = parse_command("driver", {"type": "respawn", "sequence": 8}, "s1")
 
     assert command is not None
     assert command.kind == "respawn"
@@ -287,7 +289,7 @@ def test_a_driver_whose_session_ends_loses_the_lease(monkeypatch: pytest.MonkeyP
         session.send(DRIVE)
         command = await next_command(commands, gate)
         assert (command.kind, command.driver_id, command.session) == ("drive", "driver-abc", "s1")
-        assert gate.driver == "driver-abc"
+        assert gate.driver == handle("s1")
 
         session.end()
         left = await next_command(commands, gate)
@@ -352,7 +354,7 @@ def test_a_new_session_of_the_same_driver_is_a_new_driver(monkeypatch: pytest.Mo
 
         second.end()
         assert (await next_command(commands, gate)).kind == "driver_left"
-        assert gate.driver == "driver-abc"
+        assert gate.driver == handle("s1")
         assert gate.holds(Command(kind="drive", driver_id="driver-abc", session="s1"))
 
     asyncio.run(serving(scenario, monkeypatch))
