@@ -23752,6 +23752,9 @@ mod test {
 	#[cfg(feature = "async")]
 	fn pool_debt_sheds_a_flight() {
 		const POOL: u64 = 4 * 1024 * 1024;
+		// A read held open elsewhere in the process stalls the log's deferred frees, which
+		// must not stall what the pool counts as freed.
+		let _read = crossbeam_epoch::pin();
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(POOL));
 		let producer = Producer::new(
 			Arc::new(broadcast::Info {
@@ -23805,6 +23808,9 @@ mod test {
 	#[cfg(feature = "async")]
 	fn pool_debt_sheds_a_flight_without_its_cached_group() {
 		const POOL: u64 = 4 * 1024 * 1024;
+		// A read held open elsewhere in the process stalls the log's deferred frees, which
+		// must not stall what the pool counts as freed.
+		let _read = crossbeam_epoch::pin();
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(POOL));
 		let producer = Producer::new(
 			Arc::new(broadcast::Info {
@@ -23833,6 +23839,10 @@ mod test {
 			flight.write_frame(None, numbered(index)).unwrap();
 			assert!(pool.used() < 2 * POOL, "frame {index}: {} bytes held", pool.used());
 		}
+		// Ending every copy frees what they held, though the read still holds their slots.
+		flight.abort(Error::Cancel).unwrap();
+		drop((late, old, newer));
+		assert_eq!(pool.used(), 0);
 	}
 
 	/// A handler that refuses a flight leaves the reader where a track without one does: a
