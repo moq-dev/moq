@@ -153,6 +153,11 @@ skipped the timing report. A TERM landing after a lane forked but before
 hung. The exit trap now waits again, and cancellation reads the job table,
 fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
 
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s
+`hedgeWebTransport` timer outliving its test, seen in
+[moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163)'s CI. The test
+it fails varies, so nothing is quarantined.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -160,3 +165,4 @@ Public API: none. Wire: none.
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
 - [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
+- [No WebTransport hedge timer outlives its test](/quest/m0/test-flakes-2/hedge-timer.md) - `hedgeWebTransport`'s 500 ms timer never fires in a later `js/net` test
