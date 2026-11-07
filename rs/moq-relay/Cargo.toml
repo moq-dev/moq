@@ -23,8 +23,9 @@ path = "src/main.rs"
 doc = false
 
 [features]
-# A programmatic relay fixture with generated TLS and ephemeral ports.
-test-support = []
+# A programmatic relay fixture with generated TLS and ephemeral ports, and
+# `cluster::Options::network`, which routes peer dials over in-memory links.
+test-support = ["moq-tokio/sim"]
 # The optional public STUN Binding listener (`--stun-bind`).
 stun = ["dep:stun-types"]
 default = ["cluster-lan", "quic", "websocket", "uds"]
