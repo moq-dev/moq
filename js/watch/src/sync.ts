@@ -10,7 +10,7 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
  *
  * `"instant"` drops the buffer and the pacing together: nothing is held, and the wait before
  * presenting a frame never sleeps, so it presents as soon as it exists. It also overrides
- * {@link SyncInput.buffer}, since holding a lookahead would contradict holding nothing. Audio is
+ * {@link SyncInput.lookahead}, since holding a lookahead would contradict holding nothing. Audio is
  * off: a ring with no depth underruns, so the audio decoder unsubscribes and flushes its ring.
  */
 export type Delay = "instant" | "auto" | Milli;
@@ -26,11 +26,11 @@ export type SyncInput = {
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
 	 * timestamps) build up instead of being skipped. Always finite, so worst case the audio ring
-	 * drops its oldest samples rather than exhausting memory. With a nonzero buffer, the first video
-	 * frame is a poster until every enabled media track holds the resolved delay; `buffer` is
-	 * lookahead, not the amount required to start.
+	 * drops its oldest samples rather than exhausting memory. With a nonzero lookahead, the first video
+	 * frame is a poster until every enabled media track holds the resolved delay; `lookahead` is
+	 * the most held ahead, not the amount required to start.
 	 */
-	buffer: Getter<Milli>;
+	lookahead: Getter<Milli>;
 };
 
 /** Signals the sync derives. */
@@ -57,7 +57,7 @@ export type SyncOutput = {
 	// would sit further than `maxDelay` ahead of the playhead. See `reset()`.
 	buffered: Signal<boolean>;
 
-	// Derived: `delay + buffer`, the furthest a held frame may sit ahead of the playhead. Feeds the
+	// Derived: `delay + lookahead`, the furthest a held frame may sit ahead of the playhead. Feeds the
 	// transport subscription and the container consumer, which bound the same span. Always finite.
 	maxDelay: Signal<Milli>;
 };
@@ -116,9 +116,10 @@ export class Clock {
 	owner?: Part;
 
 	constructor(props?: Inputs<SyncInput>) {
+		if (props && "buffer" in props) throw new Error("Watch.Sync: `buffer` was renamed to `lookahead`");
 		this.in = {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
-			buffer: getter(props?.buffer ?? Milli.zero),
+			lookahead: getter(props?.lookahead ?? Milli.zero),
 		};
 	}
 
@@ -438,10 +439,10 @@ export class Sync {
 		const out = this.#clock.out;
 		const delay = effect.get(out.delay);
 		// "instant" holds nothing, so a configured lookahead doesn't apply.
-		const buffer = effect.get(out.instant) ? Milli.zero : effect.get(this.in.buffer);
+		const lookahead = effect.get(out.instant) ? Milli.zero : effect.get(this.in.lookahead);
 
-		out.buffered.set(buffer > 0);
-		out.maxDelay.set(Milli(delay + buffer));
+		out.buffered.set(lookahead > 0);
+		out.maxDelay.set(Milli(delay + lookahead));
 	}
 
 	// A fixed delay is taken literally and "auto" holds the deepest track's target, so every track
