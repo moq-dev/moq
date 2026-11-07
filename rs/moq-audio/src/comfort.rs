@@ -27,6 +27,8 @@ pub(crate) struct Comfort {
 	filling: bool,
 	/// xorshift32 state, never zero.
 	seed: u32,
+	/// Frames filled with noise, ever.
+	filled: u64,
 }
 
 impl Comfort {
@@ -40,6 +42,7 @@ impl Comfort {
 			level: 0.0,
 			filling: false,
 			seed: 0x9e37_79b9,
+			filled: 0,
 		}
 	}
 
@@ -68,12 +71,18 @@ impl Comfort {
 		}
 	}
 
+	/// Frames [`fill`](Self::fill) has filled, ever.
+	pub(crate) fn filled(&self) -> u64 {
+		self.filled
+	}
+
 	/// Fill interleaved `output` with comfort noise.
 	pub(crate) fn fill(&mut self, output: &mut [f32]) {
 		if !std::mem::replace(&mut self.filling, true) && self.quietest.is_finite() {
 			// A silence after too little audio to measure keeps the previous level.
 			self.level = self.quietest.sqrt().min(MAX_LEVEL);
 		}
+		self.filled += (output.len() / self.channels) as u64;
 		// Uniform noise on [-a, a] has an RMS of a / sqrt(3).
 		let amplitude = (self.level * 3f64.sqrt()) as f32;
 		for sample in output {

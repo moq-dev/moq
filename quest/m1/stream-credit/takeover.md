@@ -20,6 +20,12 @@ otherwise queue behind the old group's retransmissions. Add the takeover
 wire to `drafts/draft-lcurley-moq-lite.md` before lite-07 finalizes, and
 define where a reset or taken-over group resumes.
 
+Choose from the session's open group streams: Rust's
+`transport::open::Lines::open_streams` (opened through
+`boxed::Session::poll_open_group`) and JS's `lines(quic).streams`, each lowest
+ranked first with whether the peer has acknowledged it. They report rank and
+acknowledgement only; add the handle that reaches the stream's writer here.
+
 Tests: a browser over WebTransport and a Rust relay, more live groups than
 the cap, the higher-priority group starting without waiting a round trip;
 a group that lost its stream resumes without loss.
@@ -35,5 +41,4 @@ Public API: none. Wire: lite-07 group stream takeover.
 ## Required
 
 - [Drop set](/quest/m1/drop-set.md) - its hold-the-duplicate rule governs a resumed group's second stream
-- [Open streams](/quest/m1/stream-credit/open-streams.md) - which open streams are fully acknowledged
 - [Reset fallback](/quest/m1/stream-credit/reset-fallback.md) - the fallback a takeover is tried before

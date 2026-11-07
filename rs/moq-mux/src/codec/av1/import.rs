@@ -322,7 +322,35 @@ fn is_sequence_header(obu: &[u8]) -> bool {
 fn parse_sequence_header(obu: &[u8]) -> Result<Option<SequenceHeaderObu>> {
 	let mut reader = obu;
 	let header = ObuHeader::parse(&mut reader)?;
-	Ok(SequenceHeaderObu::parse(header, &mut reader).ok())
+	Ok(validate_timing(reader)
+		.and_then(|()| SequenceHeaderObu::parse(header, &mut reader))
+		.ok())
+}
+
+/// Reject an out-of-range picture interval before scuffle-av1 counts its UVLC zeros in a u8.
+fn validate_timing(payload: &[u8]) -> std::io::Result<()> {
+	use bitstream_io::BitRead;
+
+	let mut bits = bitstream_io::BitReader::endian(payload, bitstream_io::BigEndian);
+	bits.skip(4)?; // seq_profile, still_picture
+	if bits.read_bit()? || !bits.read_bit()? {
+		return Ok(()); // reduced_still_picture_header or no timing_info
+	}
+	bits.skip(64)?; // num_units_in_display_tick, time_scale
+	if !bits.read_bit()? {
+		return Ok(()); // no equal_picture_interval
+	}
+	// AV1 timing-info semantics: num_ticks_per_picture_minus_1 is at most 2^32 - 2, whose UVLC
+	// has 31 leading zeros. Longer prefixes are invalid regardless of the suffix.
+	for _ in 0..32 {
+		if bits.read_bit()? {
+			return Ok(());
+		}
+	}
+	Err(std::io::Error::new(
+		std::io::ErrorKind::InvalidData,
+		"AV1 picture interval exceeds 2^32 - 2",
+	))
 }
 
 /// The colour a sequence header's `color_config` signals; its range is always explicit.
@@ -621,6 +649,32 @@ pub(crate) mod fixtures {
 mod tests {
 	use super::fixtures::*;
 	use super::*;
+
+	#[test]
+	fn picture_interval_has_a_bounded_uvlc_prefix() {
+		use bitstream_io::BitWrite;
+
+		for zeros in [0, 31, 32, 255, 256, 1024] {
+			let mut payload = Vec::new();
+			let mut bits = bitstream_io::BitWriter::endian(&mut payload, bitstream_io::BigEndian);
+			bits.write::<6, u8>(0b000001).unwrap(); // profile, still, reduced, timing present
+			bits.write::<32, u32>(1).unwrap(); // num_units_in_display_tick
+			bits.write::<32, u32>(1).unwrap(); // time_scale
+			bits.write_bit(true).unwrap(); // equal_picture_interval
+			for _ in 0..zeros {
+				bits.write_bit(false).unwrap();
+			}
+			bits.write_bit(true).unwrap();
+			bits.byte_align().unwrap();
+			assert_eq!(validate_timing(&payload).is_ok(), zeros < 32, "{zeros} zeros");
+		}
+		assert!(validate_timing(&[]).is_err());
+		assert!(validate_timing(&[0x04]).is_err(), "truncated timing info");
+		for payload in [&[][..], &[0x04]] {
+			let obu = [&[0x08], payload].concat();
+			assert!(parse_sequence_header(&obu).unwrap().is_none(), "unparseable config");
+		}
+	}
 
 	/// A key frame declares its own size below the sequence maximum, which is all
 	/// [`dimensions`] reads.

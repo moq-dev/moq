@@ -247,7 +247,7 @@ async function guardedPlayback(
 	reads: Read[],
 	hold: readonly number[] = [],
 	live = false,
-	buffer = 0,
+	lookahead = 0,
 	{ fields = {}, initial, feeds }: { fields?: Partial<Catalog.VideoConfig>; initial?: Delay; feeds?: Feeds } = {},
 ) {
 	// Load the optional container before the fixture drains only reactive microtasks.
@@ -371,8 +371,8 @@ async function guardedPlayback(
 		mediaProducer.close();
 	};
 	const source = new Source({ broadcast, supported: async () => true });
-	const delay = new Signal<Delay>(initial ?? (buffer ? Milli(100) : "instant"));
-	const sync = new Sync({ delay, buffer: Milli(buffer) });
+	const delay = new Signal<Delay>(initial ?? (lookahead ? Milli(100) : "instant"));
+	const sync = new Sync({ delay, lookahead: Milli(lookahead) });
 	const enabled = new Signal(true);
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
@@ -608,7 +608,7 @@ function marker(group: bigint, end: number): Read {
 
 for (const kind of ["legacy", "cmaf"] as const) {
 	// Another track skips the shared playhead to `skipTo` while a 1s picture is still inside
-	// WebCodecs (`queued`) or parked in Sync.wait, with a 100ms delay and no buffer. Reports what
+	// WebCodecs (`queued`) or parked in Sync.wait, with a 100ms delay and no lookahead. Reports what
 	// was showing before the skip and whether the picture presented once its deadline came due.
 	async function skipDuring(stage: "queued" | "parked", skipTo: number) {
 		const clock = manualAt(5000);

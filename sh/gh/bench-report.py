@@ -210,6 +210,9 @@ def rust_tests(directory):
             test = case.get("name").replace("::", "/")
             output = case.findtext("system-out") or ""
             text = "\n".join(line for line in output.splitlines() if not LIBTEST.fullmatch(line))
+            # A capability skip emits only this marker, never an empty CSV table.
+            if re.fullmatch(r"# benchmark skipped: [^\n]+", text.strip()):
+                continue
             entries += printed(text, f"rust-test/{package}/{test}", f"{path.name} {package} {test}")
     return checked(entries)
 

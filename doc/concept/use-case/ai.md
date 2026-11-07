@@ -20,8 +20,8 @@ latency budget, video skippable, prompts fully reliable, all on one connection.
 A TTS model emits a whole sentence in a burst with timestamps in the future.
 WebRTC keeps buffering and playout inside its media engine; MoQ exposes the
 timestamped burst to the application, and the player paces it. In the browser,
-set a latency ceiling on [`<moq-watch>`](/lib/js/watch#buffered-playback) to
-buffer ahead and call `reset()` on an interruption. The
+set a `lookahead` on [`<moq-watch>`](/lib/js/watch#buffered-playback) to
+play ahead of the live edge and call `reset()` on an interruption. The
 [Pipecat](https://github.com/pipecat-ai/pipecat) voice-agent framework ships
 a MoQ transport built on this.
 
