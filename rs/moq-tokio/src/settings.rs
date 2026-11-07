@@ -23,9 +23,6 @@ pub struct Listen {
 	#[usage(env = "MOQ_LISTEN_TIMEOUT", cli("--listen-timeout"))]
 	timeout: Option<String>,
 
-	#[usage(env = "MOQ_LISTEN_IMPLEMENTATION", cli("--listen-implementation"))]
-	implementation: Option<String>,
-
 	#[usage(env = "MOQ_LISTEN_PREFERRED_V4", cli("--listen-preferred-v4"))]
 	preferred_v4: Option<String>,
 
@@ -212,9 +209,6 @@ struct ConnectBackoff {
 
 	#[usage(env = "MOQ_CONNECT_BACKOFF_MAX", cli("--connect-backoff-max"))]
 	max: Option<String>,
-
-	#[usage(env = "MOQ_CONNECT_BACKOFF_HEALTHY", cli("--connect-backoff-healthy"))]
-	healthy: Option<String>,
 
 	#[usage(env = "MOQ_CONNECT_BACKOFF_TIMEOUT", cli("--connect-backoff-timeout"))]
 	timeout: Option<String>,

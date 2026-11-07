@@ -14,7 +14,7 @@ use crate::container::producer::Streamed;
 /// By default each fragment is unwrapped: every sample becomes one
 /// [`Legacy`](Container::Legacy) frame carrying the codec payload, timed at its presentation time,
 /// so a consumer needs no ISO BMFF parser. Either way, each track's edit list is applied to the
-/// frame timestamps and left out of the catalog. [`with_passthrough`](Self::with_passthrough) instead
+/// frame timestamps and left out of the catalog. [`with_cmaf`](Self::with_cmaf) instead
 /// republishes each fragment whole as one [`Cmaf`](Container::Cmaf) frame, for a source whose exact
 /// `trun` timing must survive.
 ///
@@ -55,7 +55,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	select: Option<crate::select::Broadcast>,
 
 	// Republish each fragment whole as CMAF instead of unwrapping its samples.
-	passthrough: bool,
+	cmaf: bool,
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track<E>>,
@@ -271,7 +271,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			select: None,
-			passthrough: false,
+			cmaf: false,
 			tracks: HashMap::default(),
 			text: HashMap::default(),
 			skipped: HashSet::default(),
@@ -331,8 +331,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	///
 	/// Keeps the source's exact `trun` timing (sample durations, composition offsets) at the cost
 	/// of every consumer parsing ISO BMFF. Text tracks are reconstructed as timed text either way.
-	pub fn with_passthrough(mut self, passthrough: bool) -> Self {
-		self.passthrough = passthrough;
+	pub fn with_cmaf(mut self, cmaf: bool) -> Self {
+		self.cmaf = cmaf;
 		self
 	}
 
@@ -352,12 +352,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// `default_base_moof`. Forward gaps and interleaved tracks are supported.
 	///
 	/// Media samples stream into their frames as bytes arrive. What must be held whole is
-	/// bounded: a `moov` or `moof` body larger than
-	/// [`MAX_METADATA_BYTES`](super::MAX_METADATA_BYTES), or a text sample larger than
-	/// [`MAX_HELD_BYTES`](super::MAX_HELD_BYTES), is refused before it is held. A `moof` declaring
-	/// more than [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples, or more than its
-	/// size accepts, is refused before they are planned, and a `moov` declaring more than
-	/// [`MAX_TRACKS`](super::MAX_TRACKS) tracks before any is created.
+	/// bounded: a `moov` or `moof` body larger than 2 MiB, or a text sample larger than the
+	/// transport's per-group bound ([`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES)), is
+	/// refused before it is held. A `moof` declaring more than 131,072 samples, or more than its
+	/// size accepts, is refused before they are planned, and a `moov` declaring more than 256
+	/// tracks before any is created.
 	///
 	/// A decode error is terminal: later decodes, cuts, seeks and discontinuities return the same
 	/// error without reading input or changing the tracks.
@@ -553,7 +552,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 			let edit = Edit::new(trak, moov.mvhd.timescale)?;
-			let output = match self.passthrough {
+			let output = match self.cmaf {
 				true => Output::Passthrough(Box::new(
 					self.init_passthrough(trak, &moov, &reserved, kind, timescale)?,
 				)),
@@ -705,7 +704,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// The container a rendition advertises: unwrapped samples are Legacy frames, while a
 	/// passthrough track carries its own single-track init segment.
 	fn container(&self, trak: &Trak, moov: &Moov) -> Result<Container> {
-		if !self.passthrough {
+		if !self.cmaf {
 			return Ok(Container::Legacy);
 		}
 
@@ -1895,7 +1894,7 @@ mod tests {
 		let pool = info.pool.clone();
 		let mut broadcast = info.produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let mut import = Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+		let mut import = Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
 		let mut data = include_bytes!("test_data/bbb.mp4").as_slice();
 		mp4_atom::Ftyp::decode(&mut data).unwrap();
 		let mut moov = Moov::decode(&mut data).unwrap();

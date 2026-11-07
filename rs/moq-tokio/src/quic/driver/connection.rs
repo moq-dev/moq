@@ -195,7 +195,6 @@ impl Future for ConnectionDriver {
 		// might need to reset a timer. Hence, we must loop until neither happens.
 		keep_going |= conn.drive_timer(cx);
 		conn.forward_endpoint_events();
-		conn.drain_events();
 
 		// Every datagram sent or received passes through this poll.
 		#[cfg(feature = "net")]
@@ -410,7 +409,7 @@ impl Connection {
 	///
 	/// The datagram is scheduled like one of its group's streams at its priority, or among the
 	/// ungrouped streams without a group. Sending never blocks: a full buffer drops the oldest
-	/// datagram of the lowest-priority group, see [`moq_quic::Datagrams::send`]. A header chained
+	/// datagram of the lowest-priority group, see [`moq_quic::connection::Datagrams::send`]. A header chained
 	/// in front of a [`Bytes`] payload costs no copy of the payload.
 	///
 	/// # Panics
@@ -777,11 +776,6 @@ impl State {
 				}
 			}
 		}
-	}
-
-	/// Drain moq-quic's events, which no handle waits on: moq-quic wakes its waiters itself.
-	fn drain_events(&mut self) {
-		while self.inner.poll().is_some() {}
 	}
 
 	fn drive_timer(&mut self, cx: &mut Context<'_>) -> bool {

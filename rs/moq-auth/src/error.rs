@@ -140,14 +140,6 @@ pub enum Error {
 	#[error("grant asks to be revalidated at no interval")]
 	ZeroRevalidate,
 
-	/// No ES256 or EdDSA key is available to sign or verify a peer grant.
-	#[error("peer grants need an ES256 or EdDSA key")]
-	NoPeerKey,
-
-	/// A peer grant's presenter key carries private material.
-	#[error("a peer grant's presenter key must be public")]
-	PrivatePresenter,
-
 	/// The grant's expiry has passed.
 	#[error("grant has already expired")]
 	GrantExpired,
