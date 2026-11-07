@@ -79,7 +79,13 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088)'s API audit):
   the switch renames it to the exporter's name for moq-net's
   `Route::instance()`, a Dart API change the PR's Impact section records for
-  the release cut's `MIGRATE.md`.
+  the release cut's `MIGRATE.md`. Open: rust2's C++ generator declares a
+  private `uint64_t instance` field in every object class
+  (`uniffi/cpp/bindgen/src/bindings/cpp/templates/obj.hpp`), which is why
+  moq-ffi names the method `instance_id` (`rs/moq-ffi/src/origin.rs`). Before
+  the rename, either rename rust2's private field (recommended, since rust2
+  is ours and the clash would hit any `instance` method), or keep the
+  generated `instance_id` and add the Dart name as a wrapper alias.
 - rust2's C backend still refuses `Duration`, which moq-ffi's audio configs
   use (moq's current generator accepts it), so the fork must accept it before
   the switch can generate C.

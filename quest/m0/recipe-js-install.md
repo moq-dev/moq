@@ -4,9 +4,11 @@
 
 `just test bare-fin`, `max-age`, `stream-limits`, `relay-fill`, and
 `receive-credit` pass in a fresh checkout. Each runs the root installer
-`sh/js/install.py frozen` (from `test/justfile`, a path relative to the
-repository root, not `test/`) before its Rust tests spawn `bun`, instead of relying on an earlier install
-(CI's `interop.yml` "Workspace dependencies" step hides the gap today).
+before its Rust tests spawn `bun`, instead of relying on an earlier install.
+`test/justfile` sets `working-directory := '.'`, so its recipes run in
+`test/` and invoke it as `uv run --no-project python ../sh/js/install.py
+frozen`, as [moq-dev/moq#7978](https://github.com/moq-dev/moq/pull/7978)'s
+recipes do (CI's `interop.yml` "Workspace dependencies" step hides the gap today).
 
 ## Plan
 
