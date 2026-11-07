@@ -68,17 +68,21 @@ Lines covered / measured:
 | moq-boy | 169 / 707 | moq-quic | 21696 / 22815 |
 | moq-c | 8946 / 9516 | moq-relay | 10952 / 11607 |
 | moq-cli | 6431 / 7566 | moq-room | 432 / 460 |
-| moq-clock | 1858 / 1921 | moq-webrtc | 2506 / 2882 |
+| moq-clock | 1858 / 1921 | moq-rtc | 2506 / 2882 |
 | moq-e2ee | 679 / 759 | moq-rtmp | 6826 / 7638 |
 | moq-ffi | 10819 / 11749 | moq-rtsp | 1033 / 1057 |
 | moq-flate | 839 / 892 | moq-shaper | 2149 / 2219 |
 | moq-gst | 6362 / 6740 | moq-sock | 1328 / 1486 |
 | moq-hls | 8473 / 8857 | moq-srt | 1286 / 1481 |
-| moq-webrtc's ICE module | 319 / 361 | moq-stats | 4414 / 4601 |
+| moq-ice | 319 / 361 | moq-stats | 4414 / 4601 |
 | moq-json | 4897 / 5231 | moq-tokio | 15962 / 18005 |
 | moq-uring | 4802 / 5558 | moq-transcode | 2997 / 3239 |
 | moq-v4l | 9 / 1457 | moq-video | 6462 / 9988 |
 | carla bridge (demo) | 923 / 1676 | | |
+
+moq-rtc, moq-ice, and moq-tokio's `webrtc` module have since merged into
+moq-webrtc, so its report compares with moq-rtc plus moq-ice, and moq-tokio's
+row above still counts the moved module.
 
 | JS package | Lines | Unloaded files | JS package | Lines | Unloaded files |
 | --- | --- | --- | --- | --- | --- |

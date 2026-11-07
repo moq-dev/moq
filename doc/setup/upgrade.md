@@ -41,7 +41,9 @@ These land with the next breaking release.
   `offerer.connect(&client)` for `client.connect_webrtc(&offerer)` and
   `answerer.accept(&listener)` for `listener.accept_webrtc(&answerer)`. The
   ICE agent that was `moq-ice`, never published, is a private module of
-  moq-webrtc. Nothing changes on the wire.
+  moq-webrtc. moq-cli's `webrtc` cargo feature is gone: drop it from your
+  build; `import rtc` and `export rtc` never needed it. Nothing changes on the
+  wire.
 - **The default priority byte moves again.** Priorities are signed in every
   API, -128 to 127 with 0 unset, so nobody has to know that 127 is the middle
   of a byte. The wire keeps one byte and one urgency on both protocols, so an

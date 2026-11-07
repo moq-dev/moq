@@ -43,7 +43,7 @@ missing required CPU feature before starting transport cryptography.
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [kio](/lib/rs/kio) | The async primitives everything polls through, and one clock for time and timers on tokio and a deterministic test simulator. |
-| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-webrtc](https://docs.rs/moq-webrtc) | The [gateways](/bin/), as libraries you can embed with your own auth. moq-webrtc's `p2p` feature also runs MoQ over a data channel with a browser peer, signaled by the caller. |
+| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-webrtc](https://github.com/moq-dev/moq/tree/main/rs/moq-webrtc) | The [gateways](/bin/), as libraries you can embed with your own auth. moq-webrtc's `p2p` feature also runs MoQ over a data channel with a browser peer, signaled by the caller. |
 | [moq-ffi](https://docs.rs/moq-ffi), [moq-c](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
 | [web-transport](https://github.com/moq-dev/web-transport) | The WebTransport traits and the browser transport, in a sibling repository. |

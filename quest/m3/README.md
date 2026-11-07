@@ -142,7 +142,7 @@ federation) land.
 - [Audio's Latest start reaches back](/quest/m3/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
 - [moq-lite tails count drops](/quest/m3/lite-tail-drop-count.md) - SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
 - [Audio track changes are gapless](/quest/m3/gapless-audio-switch.md) - no silence beyond a frame on audio format or rendition changes, enforced by media QA
-- [We own our WebRTC stack](/quest/m3/webrtc/README.md) - moq-webrtc becomes moq-webrtc with moq-webrtc's ICE module, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
+- [We own our WebRTC stack](/quest/m3/webrtc/README.md) - one moq-webrtc crate holds the gateway, its ICE module, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [PUBLISH_DONE says why](/quest/m3/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
 - [A revoked announce resets instead of FINning](/quest/m3/announce-revoke-reset.md) - a PUBLISH_NAMESPACE revoked after its OK resets with INTERNAL_ERROR, per draft-22 §6.4.2.3
 - [moq repair refuses a live recording](/quest/m3/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair mp4` off a file still being written

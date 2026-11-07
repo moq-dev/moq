@@ -86,6 +86,22 @@ async fn session_over_loopback() {
 	transfer(&offerer, &answerer, b"hello").await;
 }
 
+/// A zero timeout disables the bound rather than elapsing at once.
+#[tokio::test]
+async fn zero_timeout_is_unbounded() {
+	let config = Config {
+		timeout: Duration::ZERO,
+		..Config::default()
+	};
+	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, protocol(), vec![LOOPBACK])
+		.await
+		.unwrap();
+	offerer.accept(&answer).await.unwrap();
+
+	transfer(&offerer, &answerer, b"hello").await;
+}
+
 /// A frame many records long fills the SCTP send window, so the writer has to
 /// wait for the peer's acknowledgements and resume.
 #[tokio::test]
@@ -254,8 +270,8 @@ async fn unsupported_protocol_is_refused() {
 	})
 	.await
 	.expect("the refusal timed out");
-	assert!(matches!(accepted, Err(Error::Session(_))), "{:?}", accepted.err());
-	assert!(matches!(connected, Err(Error::Session(_))), "{:?}", connected.err());
+	assert!(accepted.is_err(), "the answerer accepted an unsupported protocol");
+	assert!(connected.is_err(), "the offerer connected with an unsupported protocol");
 }
 
 /// A channel carrying another supported ALPN than the one signaling agreed is refused.

@@ -14,6 +14,8 @@
 //! where `Transport.connect` creates the channel and `Transport.accept` adopts it.
 //! moq-net's session policy runs over the channel as over any other transport.
 //!
+//! Every entry point must run inside a tokio runtime, like the gateway's.
+//!
 //! The channel carries qmux-01, one record per SCTP message, capped at 16 KiB and
 //! the peer's SCTP message limit. Ordered delivery means one lost chunk stalls
 //! every stream until SCTP retransmits it.
@@ -146,6 +148,16 @@ impl Error {
 /// The longest [`Config::timeout`] waits by default, matching the ICE agent's own backstop.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Run `establish` within `timeout`, where zero means no bound.
+async fn bounded<T>(timeout: Duration, establish: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+	match timeout.is_zero() {
+		true => establish.await,
+		false => kio::clock::timeout(timeout, establish)
+			.await
+			.map_err(|_| Error::Timeout)?,
+	}
+}
+
 /// How an [`Offerer`] or [`Answerer`] gathers its local candidates and bounds its connection.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -154,7 +166,8 @@ pub struct Config {
 	/// host candidates and nothing else.
 	pub stun: Vec<Stun>,
 	/// How long [`Offerer::connect`] and [`Answerer::accept`] wait for ICE, DTLS, and the
-	/// data channel to come up, and qmux to start over it. 30 seconds by default.
+	/// data channel to come up, and qmux to start over it. 30 seconds by default; zero
+	/// disables the bound.
 	pub timeout: Duration,
 }
 
@@ -362,9 +375,7 @@ impl Offerer {
 			tokio::spawn(driver);
 			Ok::<_, Error>(session)
 		};
-		let session = kio::clock::timeout(self.timeout, establish)
-			.await
-			.map_err(|_| Error::Timeout)??;
+		let session = bounded(self.timeout, establish).await?;
 		let session = client.connect_with(session).await?;
 		tracing::info!(version = %session.version(), transport = %moq_tokio::Transport::WebRtc, "connected");
 		Ok(session)
@@ -462,9 +473,7 @@ impl Answerer {
 			tokio::spawn(driver);
 			Ok((session, opened.protocol))
 		};
-		let (session, protocol) = kio::clock::timeout(self.timeout, establish)
-			.await
-			.map_err(|_| Error::Timeout)??;
+		let (session, protocol) = bounded(self.timeout, establish).await?;
 		let mut link = moq_tokio::server::Link::default();
 		link.alpn = Some(protocol);
 		Ok(listener

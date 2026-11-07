@@ -160,6 +160,9 @@ class SelectTest(unittest.TestCase):
         calls = self.selected("rs/moq-webrtc/src/p2p/mod.rs", action="test")
         self.assertEqual(len(calls), 1, calls)
         self.assertIn(" moq-webrtc/p2p", calls[0])
+        # So is a change to qmux, which only that optional feature pulls in.
+        calls = self.selected("rs/qmux/src/lib.rs", action="test")
+        self.assertTrue(any(" moq-webrtc/p2p" in call for call in calls), calls)
         # A dependency of the media crates still runs both their device tests.
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
