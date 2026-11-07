@@ -1,20 +1,15 @@
 //! An HEVCDecoderConfigurationRecord canonicalized as its bytes arrive.
 
-use scuffle_h265::NALUnitType;
-
 use super::Error;
 use crate::Result;
+use crate::codec::h265::NalType;
 
 /// The record's fields before its arrays, through `numOfArrays` (ISO/IEC 14496-15 §8.3.2.1.2).
 const FIXED_LEN: usize = 23;
 
 /// The parameter set types a record keeps, and how many each can hold: one per id its
 /// `*_parameter_set_id` can name (H.265 §7.4.3.1 to §7.4.3.3).
-const SETS: [(NALUnitType, usize); 3] = [
-	(NALUnitType::VpsNut, 16),
-	(NALUnitType::SpsNut, 16),
-	(NALUnitType::PpsNut, 64),
-];
+const SETS: [(NalType, usize); 3] = [(NalType::VPS, 16), (NalType::SPS, 16), (NalType::PPS, 64)];
 
 /// Canonicalizes an hvcC as it arrives: the fixed fields and the parameter set arrays are kept,
 /// and every other array, such as the SEI holding x265's encoder settings, is discarded unread.
