@@ -406,6 +406,25 @@ function localStreamCode(err: unknown): StreamCode {
 }
 
 /**
+ * A group was created at a sequence its track declared skipped.
+ *
+ * A skip says the sequence will never be produced, so it is final. See the track producer's
+ * `skipGroups`. Mirrors the Rust `Error::Skipped`.
+ *
+ * @public
+ */
+export class Skipped extends Error {
+	/** The sequence that was refused. */
+	readonly sequence: bigint;
+
+	constructor(sequence: bigint) {
+		super(`sequence ${sequence} was skipped`);
+		this.name = "Skipped";
+		this.sequence = sequence;
+	}
+}
+
+/**
  * The {@link StreamCode | StreamCode.ControlTimeout} error for a control request the peer never answered.
  *
  * A control request that outlives its deadline is not late content, so it does not go out as

@@ -2225,6 +2225,20 @@ fn raw_track_supports_sparse_groups_and_known_end() {
 	track.finish().unwrap();
 }
 
+#[test]
+fn raw_track_skips_are_final() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("skipped".into(), None).unwrap();
+
+	track.create_group(0).unwrap().finish().unwrap();
+	track.skip_groups(0, 3).unwrap();
+	// The written group keeps what it is; the rest of the range is final.
+	assert!(track.create_group(2).is_err());
+	track.create_group(3).unwrap().finish().unwrap();
+	track.abort(1).unwrap();
+	assert!(matches!(track.skip_groups(4, 5), Err(MoqError::Closed)));
+}
+
 #[tokio::test]
 async fn abort_after_finish_keeps_the_track_handle() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
