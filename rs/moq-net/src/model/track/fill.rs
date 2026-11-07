@@ -914,8 +914,8 @@ impl Fill {
 	/// frames written keep the indices they have in the group. `info` sets the track's
 	/// [`Info`] if it hasn't been accepted yet (a fetch with no live subscription), and is
 	/// ignored otherwise. Errors with [`Error::InvalidRange`] outside the fill,
-	/// [`Error::Duplicate`] if the group was already answered or cached, or the track's abort
-	/// error.
+	/// [`Error::Duplicate`] if the group was already answered or cached, [`Error::Skipped`] if
+	/// the track skipped it, or the track's abort error.
 	pub fn accept(&self, sequence: u64, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.inner.accept(sequence, info.into())
 	}
@@ -1479,7 +1479,7 @@ impl TrackState {
 			}
 		}
 		for groups in dropped.iter() {
-			self.drop_groups(groups.clone(), err.clone());
+			self.drop_groups(groups.clone(), super::Hole::drop(err.clone()));
 		}
 	}
 }

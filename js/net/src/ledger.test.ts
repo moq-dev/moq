@@ -111,3 +111,30 @@ test("shuffled arrivals and bulk merges agree with the accounted sequence set", 
 	expect(ledger.hasGaps()).toBe(false);
 	expect(ledger.covers(0n, 4128n)).toBe(true);
 });
+
+test("unaccount reopens a gap for a fresh grace", () => {
+	const ledger = new Ledger();
+	const grace = Milli(1000);
+	ledger.account(0n, 10n, at(0));
+	ledger.unaccount(3n, 5n, at(1000));
+	expect(ledger.covers(0n, 3n) && ledger.covers(5n, 10n)).toBe(true);
+	expect(ledger.covers(3n, 5n)).toBe(false);
+	// Its grace runs from the reversal.
+	ledger.expire(at(1500), grace);
+	expect(ledger.covers(3n, 5n)).toBe(false);
+	ledger.expire(at(2000), grace);
+	expect(ledger.covers(0n, 10n)).toBe(true);
+});
+
+test("unaccount restarts the older gap it joins", () => {
+	const ledger = new Ledger();
+	const grace = Milli(1000);
+	ledger.account(0n, 2n, at(0));
+	ledger.account(4n, 6n, at(0));
+	ledger.unaccount(1n, 2n, at(900));
+	// Its grace runs from the reversal, not from when the older gap opened.
+	ledger.expire(at(1000), grace);
+	expect(ledger.covers(1n, 2n)).toBe(false);
+	ledger.expire(at(1900), grace);
+	expect(ledger.covers(0n, 6n)).toBe(true);
+});

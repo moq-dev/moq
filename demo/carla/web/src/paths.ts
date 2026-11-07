@@ -2,10 +2,10 @@
  * The paths and connection settings shared with the simulator.
  *
  * Trucks publish one media broadcast per camera at `carla/{truck}/{camera}.hang`,
- * and accept drivers on a socket endpoint named for the truck. A driver dials it
- * from an endpoint of its own, `driver-{id}`, a form the demo relay lets
+ * and accept drivers on a server socket endpoint named for the truck. A driver
+ * dials it from a client endpoint of its own, the only role the demo relay lets
  * anonymous viewers publish. The truck's public `status` names a driver by its
- * session's {@link handle} instead, so no viewer learns an id it could announce.
+ * session's {@link handle} instead of its id.
  *
  * @module
  */
@@ -29,7 +29,7 @@ export function parseCamera(path: string): Camera | undefined {
 	return { truck, id: `${truck}/${file.slice(0, -".hang".length)}` };
 }
 
-/** The prefix every truck and driver socket endpoint sits under, as `carla/.socket/{id}`. */
+/** The prefix every truck and driver socket endpoint sits under: `carla/.server/{truck}` and `carla/.client/{driver}`. */
 export const SOCKET = Moq.Path.from("carla");
 
 /**

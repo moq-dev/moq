@@ -140,10 +140,19 @@ the case's microtask drain. [moq-dev/moq#8000](https://github.com/moq-dev/moq/pu
 stubbed that budget, merging after the quarantine was written. The case was
 re-enabled in [moq-dev/moq#8110](https://github.com/moq-dev/moq/pull/8110).
 
+`sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
+landing just after the dispatcher's `wait -n` returned left Bash marking the
+exit trap's next `wait` as interrupted, so it returned 143 at once and errexit
+skipped the timing report. A TERM landing after a lane forked but before
+`running` recorded it left that lane uncancelled and the exit trap's `wait`
+hung. The exit trap now waits again, and cancellation reads the job table,
+fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [dispatch-query's terminate test survives load](/quest/m0/test-flakes-2/dispatch-query-terminate.md) - `test_terminating_the_run_stops_the_running_phase` passes reliably under host load, re-enabled once fixed
 - [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
+- [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
+- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
