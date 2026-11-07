@@ -1719,9 +1719,16 @@ mod tests {
 		let mut reader = program.reader();
 		feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 30);
 
+		// One block ramps; the next is already hard right, though the 100 ms
+		// of audio coming out of the delay went in hard left.
 		strip.set_pan(1.0).unwrap();
-		let last = feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 2);
-		for frame in last[0].data.as_chunks::<2>().0 {
+		for _ in 0..2 {
+			channel.write(&constant(0.5, BLOCK, 1)).unwrap();
+			step(&mut driver, &mut reader);
+		}
+		channel.write(&constant(0.5, BLOCK, 1)).unwrap();
+		let block = step(&mut driver, &mut reader);
+		for frame in block.data.as_chunks::<2>().0 {
 			assert!(frame[0].abs() < 1e-4 && (frame[1] - 0.5).abs() < 1e-4, "{frame:?}");
 		}
 	}
