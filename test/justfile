@@ -24,6 +24,7 @@ harness_browser_tests := '''
     ./net-cleanups.browser.ts
     ./open-gop.browser.ts
     ./publish-ui.browser.ts
+    ./qmux-datagrams.browser.ts
     ./signals-dom.browser.ts
     ./source-selection.browser.ts
     ./tone.test.ts
