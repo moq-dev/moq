@@ -17,10 +17,6 @@ use moq_relay::{Accepted, Connection};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Long enough for a listing to have reported a track had it listed one. The relay links
-/// are in memory, so this is many round trips.
-const SETTLE: Duration = Duration::from_millis(500);
-
 /// The socket prefix, and every token's root.
 const ROOT: &str = "room";
 
@@ -312,10 +308,8 @@ async fn a_reader_of_everything_lists_no_session() {
 			.await
 			.expect("listing timeout")
 			.expect("listing");
+		// The session tracks existed before this listing began, so a `Synced` first
+		// means it listed none of them.
 		assert!(matches!(event, Some(TracksEvent::Synced)), "{id} listed {event:?}");
-		assert!(
-			kio::clock::timeout(SETTLE, tracks.next()).await.is_err(),
-			"{id} listed a track"
-		);
 	}
 }

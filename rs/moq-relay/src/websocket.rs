@@ -491,6 +491,7 @@ mod tests {
 					let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
 					let (session, driver) = qmux::ws::Upgraded::new(socket, &wire)
 						.accept()
+						.await
 						.expect("the upgrade selected a QMux subprotocol");
 					tokio::spawn(driver);
 					let _ = tx.send(Observed {
@@ -719,6 +720,7 @@ mod tests {
 			&alpn,
 		)
 		.connect()
+		.await
 		.unwrap();
 		tokio::spawn(driver);
 
@@ -770,6 +772,7 @@ mod tests {
 			&alpn,
 		)
 		.connect()
+		.await
 		.unwrap();
 		tokio::spawn(driver);
 
