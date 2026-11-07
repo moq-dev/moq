@@ -345,6 +345,10 @@ export namespace Error {
 		});
 		readonly code: SessionCode;
 	}
+	export class Skipped extends Error {
+		constructor(sequence: bigint);
+		readonly sequence: bigint;
+	}
 	export class Stream extends Error {
 		constructor(code: StreamCode, options?: Error.StreamOptions);
 		readonly code: StreamCode;
@@ -751,6 +755,7 @@ export namespace Track {
 		readonly name: string;
 		get priority(): number;
 		requests(): Track.Requests;
+		skipGroups(start: bigint, end: bigint): void;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;

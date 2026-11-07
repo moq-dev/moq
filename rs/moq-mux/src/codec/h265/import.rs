@@ -16,7 +16,7 @@
 
 use bytes::Bytes;
 
-use super::{Error, split::nal_unit_type};
+use super::{Error, NalType};
 use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
@@ -244,7 +244,7 @@ impl Import {
 			return Ok(());
 		}
 		let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
-			nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
+			NalType::of(h) == NalType::PREFIX_SEI
 		});
 		// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
 		// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
@@ -280,8 +280,7 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 }
 
 fn is_sps(nal: &[u8]) -> bool {
-	nal.first()
-		.is_some_and(|h| nal_unit_type(*h) == scuffle_h265::NALUnitType::SpsNut)
+	nal.first().is_some_and(|h| NalType::of(*h) == NalType::SPS)
 }
 
 /// Find the first SPS NAL in an Annex-B payload, if any.

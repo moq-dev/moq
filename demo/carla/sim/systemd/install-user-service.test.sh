@@ -45,7 +45,7 @@ CARLA_SYSTEMD_USER_DIR="$tmp/units" \
 grep -Fxq '  MOQ_URL=https://cdn.moq.dev/demo?jwt=<token>' "$tmp/install.out"
 grep -Fxq '  CARLA_IMAGE=localhost/moq-carla:<tag printed by the moq-dev/carla build>' "$tmp/install.out"
 grep -Fq 'scoped to publish carla/** and subscribe' "$tmp/install.out"
-grep -Fq 'carla/.socket/driver-*, the endpoints drivers dial from. For local' "$tmp/install.out"
+grep -Fq 'carla/.client/**, the endpoints drivers dial from. For local' "$tmp/install.out"
 test "$(stat -c %a "$tmp/units")" = 700
 test "$(stat -c %a "$tmp/config")" = 700
 test "$(stat -c %a "$tmp/units/carla-sim.service")" = 600

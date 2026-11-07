@@ -1,4 +1,4 @@
-// Package socket dials and accepts point-to-point sessions over hidden broadcasts.
+// Package socket dials and accepts point-to-point sessions between server and client endpoints.
 package socket
 
 import (
@@ -8,10 +8,11 @@ import (
 	"moq.dev/moq/internal/bridge"
 )
 
-// Endpoint announces one hidden endpoint and accepts TCP and track dials separately.
+// Endpoint is a server, a client, or both, and accepts TCP and track dials separately.
 type Endpoint struct{ inner *ffi.MoqSocketEndpoint }
 
-// NewEndpoint announces id beneath prefix, using origin to find peers.
+// NewEndpoint makes the endpoint id beneath prefix, using origin to find peers. Its first
+// dial announces it as a client, and its first accept as a server.
 func NewEndpoint(origin *moq.OriginProducer, prefix, id string) (*Endpoint, error) {
 	inner, err := ffi.NewMoqSocketEndpoint(bridge.OriginProducer(origin), prefix, id)
 	if err != nil {
@@ -26,7 +27,7 @@ func (e *Endpoint) ID() string { return e.inner.Id() }
 // Prefix returns the shared endpoint prefix.
 func (e *Endpoint) Prefix() string { return e.inner.Prefix() }
 
-// Close retracts the endpoint and resets pending dials and sessions.
+// Close retracts the endpoint's broadcasts and resets pending dials and sessions.
 func (e *Endpoint) Close() { e.inner.Close() }
 
 // DialTCP dials a new tcp session; cancelling resets only this dial.
