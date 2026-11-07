@@ -25,7 +25,7 @@ because a downstream iGPU transcode trial needs it now.
 Held here by open claims: a quest's branch is its path, so a claimed quest
 cannot move until its PR merges, and an epic moves with its children. These
 breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: api-audit, drop-set, rind, session-policy, and
+`Required`, so the cut still waits on them: api-audit, drop-set, rind, and
 stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
 moves what remains of them once their claims merge.
 
@@ -48,7 +48,6 @@ moves what remains of them once their claims merge.
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
 - [Socket endpoints split into servers and clients](/quest/m1/socket-roles.md) - servers announce `.server/<id>` and clients `.client/<id>`, so plain grants keep a client from posing as a server or reading another client
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
-- [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-webrtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - AMD's VA-API H.264 encode decodes, or the node is refused for OpenH264
