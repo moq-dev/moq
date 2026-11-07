@@ -725,6 +725,15 @@ impl poll::Chunks for Chunks {
 
 		if let Some(lands) = channel.in_flight() {
 			drop(channel);
+			// Wait on the channel too: a reset or stop drops what is in flight, and the
+			// reader sees it at once rather than at the discarded message's landing.
+			let changed = |channel: &kio::Ref<'_, Channel>| match channel.in_flight() {
+				Some(_) => Poll::Pending,
+				None => Poll::Ready(()),
+			};
+			if self.channel.poll(waiter, changed).is_ready() {
+				return self.poll_read_chunk(waiter, max);
+			}
 			let landing = match &mut self.landing {
 				Some(landing) => {
 					// A reset wakes the task parked on the sleep, so resetting to the
@@ -1051,6 +1060,29 @@ mod tests {
 			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
 			assert_eq!(landed(&mut recv).await, None);
 			assert_eq!(start.elapsed(), LATENCY + LATENCY / 2);
+		});
+	}
+
+	#[test]
+	fn a_reset_skips_the_latency() {
+		kio::clock::sim::run(async {
+			let (a, b) = pair(Config {
+				latency: Duration::from_millis(10),
+				..Default::default()
+			});
+			let (mut send, mut recv) = uni(&a, &b);
+			let start = kio::clock::now();
+			ready(write(&mut send, &Bytes::from_static(b"dropped"))).unwrap();
+
+			// A reader parked on a message in flight wakes for the reset that drops it.
+			let count = Arc::new(Count::default());
+			let waiter = kio::Waiter::new(Waker::from(count.clone()));
+			assert!(poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX).is_pending());
+			send.reset(2);
+			assert!(count.0.load(Ordering::Relaxed) > 0, "the reset did not wake the reader");
+			let read = poll::Chunks::poll_read_chunk(recv.get_mut(), &waiter, usize::MAX);
+			assert!(matches!(ready(read), Err(Error::Reset(2))));
+			assert_eq!(start.elapsed(), Duration::ZERO);
 		});
 	}
 
