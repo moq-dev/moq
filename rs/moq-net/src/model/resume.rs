@@ -243,6 +243,11 @@ impl Producer {
 		}
 	}
 
+	/// Whether the track already ended, cleanly or not: its copy feeds it nothing more.
+	pub(super) fn ended(&self) -> bool {
+		self.state.read().phase.end().is_some()
+	}
+
 	/// The track ended: cleanly with `Ok`, or failed for good.
 	pub(super) fn end(&self, result: Result<()>) {
 		if let Ok(mut route) = self.state.write()

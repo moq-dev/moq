@@ -283,15 +283,16 @@ impl Net {
 		accepts
 	}
 
-	/// Serve `name` as a bare server publishing `origin` to every peer it accepts, and
-	/// hand each session to the returned stream.
+	/// Serve `name` as a bare server publishing `origin` to every peer it accepts,
+	/// including broadcasts it learned from its own upstream, since a test may relay
+	/// through it, and hand each session to the returned stream.
 	pub fn upstream(
 		&self,
 		name: &str,
 		origin: &moq_net::origin::Producer,
 	) -> futures::channel::mpsc::UnboundedReceiver<moq_net::Session> {
 		let mut accepted = self.listen(name);
-		let origin = origin.clone();
+		let origin = origin.clone().with_proxy(true);
 		let (sessions, received) = futures::channel::mpsc::unbounded();
 		drop(kio::clock::sim::spawn(async move {
 			while let Some((link, version)) = accepted.next().await {

@@ -28,12 +28,11 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
+- [JS qmux keeps credit and final sizes consistent with Rust](/quest/m0/qmux-js-credit.md) - a JS WebSocket session no longer stalls on cancelled streams or gets closed by a Rust peer with FINAL_SIZE_ERROR, and its control queue stays bounded
+- [Peer and config values never panic or wrap moq-net arithmetic](/quest/m0/peer-arithmetic.md) - a peer's retry interval, object id, drop end or sequence, and huge configured durations no longer panic a task or wrap
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
 - [Release's audio encoder rolls groups before the cap](/quest/m0/release-audio-group-cap.md) - a long `groupDuration` with short frames never throws `GroupTooLarge` on `release`
-- [Local checks pass on unchanged main](/quest/m0/local-checks-main.md) - `sh/go/publish-wrapper.test.sh` passes under a global `tag.gpgsign = true`, so `just check` passes on a clean `main`
 - [The invalid-attribute browser check matches moq-watch's attributes](/quest/m0/watch-invalid-attribute-check.md) - `publish-ui.browser.ts`'s invalid-attribute test passes on main again, with no stale `buffer` case
-- [Bun-spawning test recipes install the JS workspace](/quest/m0/recipe-js-install.md) - `bare-fin`, `max-age`, `stream-limits`, `relay-fill`, and `receive-credit` pass in a fresh checkout
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
-- [Tests can't wait on the real clock](/quest/m0/clock-guard/README.md) - a test whose real-clock timer fires fails every run, in JS and, if the spike holds, Rust
 - [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk

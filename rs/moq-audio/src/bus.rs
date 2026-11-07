@@ -1,7 +1,7 @@
 //! Route PCM sources into several mixes, advanced on the caller's clock.
 //!
 //! A [`Bus`] holds sources, each a [`Channel`] fed with PCM and controlled by a
-//! [`Strip`] of gain, mute, sync delay, and level meter, and [`Mix`]es, each
+//! [`Strip`] of gain, mute, pan, sync delay, and level meter, and [`Mix`]es, each
 //! the sum of the sources routed into it. A [`Minus`] is a mix-minus: one mix
 //! with one of its sources taken out, for a guest's return feed. Every mix
 //! publishes interleaved `f32` at the bus's [`Config`] to any number of
@@ -45,6 +45,7 @@
 //! Enabled by the default-on `bus` feature; `Bus::capture` also needs `capture`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::f32::consts::FRAC_PI_4;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, ready};
@@ -133,16 +134,61 @@ struct Mixer {
 /// A strip's identity: the address of its shared state, which every clone shares.
 type StripKey = usize;
 
+/// One open channel of a source, as the mixer reads it.
+struct Feed {
+	id: u64,
+	ring: ring::Consumer,
+	/// Panned with constant power rather than balanced.
+	mono: bool,
+}
+
 /// The channels sharing one strip, as the mixer sees them.
 struct Source {
 	strip: Strip,
-	channels: Vec<(u64, ring::Consumer)>,
+	channels: Vec<Feed>,
 	/// Gain actually applied, ramping toward the strip's target across a block.
 	applied: f32,
+	/// Pan actually applied, ramping toward the strip's pan across a block.
+	panned: f32,
+	/// Balanced channels, then mono ones a stereo bus pans with constant power.
+	/// Each class is delayed apart, so a pan change reaches audio already held
+	/// back by the sync delay.
+	lanes: [Lane; 2],
+	/// This source's share of the current block, after its delay, pan, and gain.
+	block: Vec<f32>,
+}
+
+/// A source's channels that share a pan law, summed and then delayed.
+#[derive(Default)]
+struct Lane {
+	block: Vec<f32>,
 	/// Samples held back for the strip's sync delay.
 	delay: VecDeque<f32>,
-	/// This source's share of the current block, after its delay and gain.
-	block: Vec<f32>,
+	/// A channel was read into `block` this advance.
+	fed: bool,
+	/// Samples advanced since a channel last fed this lane: once they cover
+	/// the delay line, it holds only silence.
+	idle: usize,
+}
+
+impl Lane {
+	/// Hold `block` back by exactly `held` samples. A change inserts silence or
+	/// skips ahead once, which a calibration rarely makes.
+	fn delay(&mut self, held: usize, samples: usize) {
+		if held == 0 && self.delay.is_empty() {
+			return;
+		}
+		while self.delay.len() < held {
+			self.delay.push_front(0.0);
+		}
+		if self.delay.len() > held {
+			self.delay.drain(..self.delay.len() - held);
+		}
+		self.delay.extend(self.block.iter().copied());
+		for (out, sample) in self.block.iter_mut().zip(self.delay.drain(..samples)) {
+			*out = sample;
+		}
+	}
 }
 
 struct Routed {
@@ -264,9 +310,12 @@ impl Bus {
 	///
 	/// The strip is the source's identity: it outlives the channel, so a source
 	/// that reopens with another format (a new decoder, a replugged device)
-	/// keeps its gain, mute, delay, meter, and routing by passing the same strip
-	/// again. Channels sharing a strip are summed. The channel leaves the bus
-	/// when dropped.
+	/// keeps its gain, mute, pan, delay, meter, and routing by passing the same
+	/// strip again. Channels sharing a strip are summed. The channel leaves the
+	/// bus when dropped.
+	///
+	/// Refuses a strip panned off center unless the bus is stereo, and holds
+	/// the strip at center while this channel is open on such a bus.
 	pub fn channel(&self, input: Input, strip: Strip) -> Result<Channel, Error> {
 		if input.sample_rate == 0 {
 			return Err(Error::Unsupported("channel sample rate must be > 0".into()));
@@ -277,6 +326,13 @@ impl Bus {
 		} else {
 			Some(Remix::new(input.layout, output)?)
 		};
+		// Only a stereo bus pans, so any other holds the strip at center for
+		// as long as this channel is open. Nothing below fails, so the hold
+		// is always released by the channel's drop.
+		let centered = output != Layout::Stereo;
+		if centered {
+			strip.hold_center(output)?;
+		}
 
 		let (prod, cons) = ring::channel(
 			output.channels() as usize,
@@ -301,11 +357,16 @@ impl Bus {
 				strip: strip.clone(),
 				channels: Vec::new(),
 				applied: strip.target(),
-				delay: VecDeque::new(),
+				panned: strip.pan(),
+				lanes: Default::default(),
 				block: Vec::new(),
 			})
 			.channels
-			.push((id, cons));
+			.push(Feed {
+				id,
+				ring: cons,
+				mono: input.layout == Layout::Mono,
+			});
 		drop(mixer);
 
 		Ok(Channel {
@@ -314,6 +375,7 @@ impl Bus {
 			remix,
 			input,
 			strip,
+			centered,
 			bus: Arc::downgrade(&self.inner),
 		})
 	}
@@ -388,6 +450,7 @@ impl Driver {
 			return;
 		}
 		let channels = self.inner.config.layout.channels() as usize;
+		let stereo = self.inner.config.layout == Layout::Stereo;
 		let sample_rate = u64::from(self.inner.config.sample_rate);
 		let samples = frames * channels;
 
@@ -402,7 +465,7 @@ impl Driver {
 		} = &mut *mixer;
 
 		for source in sources.values_mut() {
-			source.advance(samples, channels, sample_rate, scratch);
+			source.advance(samples, channels, stereo, sample_rate, scratch);
 		}
 
 		for routed in mixes.iter_mut().flatten() {
@@ -459,37 +522,67 @@ impl Drop for Driver {
 
 impl Source {
 	/// Compute this source's share of the next `samples`, interleaved.
-	fn advance(&mut self, samples: usize, channels: usize, sample_rate: u64, scratch: &mut Vec<f32>) {
-		self.block.clear();
-		self.block.resize(samples, 0.0);
-		let mut rings = self.channels.iter_mut();
-		if let Some((_, first)) = rings.next() {
-			first.read(&mut self.block);
+	///
+	/// Only a `stereo` bus pans; any other holds every strip on it at center.
+	fn advance(&mut self, samples: usize, channels: usize, stereo: bool, sample_rate: u64, scratch: &mut Vec<f32>) {
+		for lane in &mut self.lanes {
+			lane.fed = false;
 		}
-		for (_, cons) in rings {
-			scratch.resize(samples, 0.0);
-			cons.read(scratch);
-			for (out, sample) in self.block.iter_mut().zip(scratch.iter()) {
-				*out += *sample;
+		for feed in &mut self.channels {
+			let lane = &mut self.lanes[usize::from(stereo && feed.mono)];
+			if lane.fed {
+				scratch.resize(samples, 0.0);
+				feed.ring.read(scratch);
+				for (out, sample) in lane.block.iter_mut().zip(scratch.iter()) {
+					*out += *sample;
+				}
+			} else {
+				lane.block.clear();
+				lane.block.resize(samples, 0.0);
+				feed.ring.read(&mut lane.block);
+				lane.fed = true;
 			}
 		}
 
-		// The sync delay: hold back exactly this many samples. A change inserts
-		// silence or skips ahead once, which a calibration rarely makes.
+		// Delay, then pan, so a pan change applies from this block on.
 		let delay = self.strip.delay();
 		let held = (u128::from(sample_rate) * delay.as_nanos() / 1_000_000_000) as usize * channels;
-		if held > 0 || !self.delay.is_empty() {
-			while self.delay.len() < held {
-				self.delay.push_front(0.0);
+		let pan = self.strip.pan();
+		let mut first = true;
+		for (mono, lane) in [false, true].into_iter().zip(&mut self.lanes) {
+			if lane.fed {
+				lane.idle = 0;
+			} else {
+				// Nothing new, but audio held back from a closed channel plays out.
+				if lane.delay.is_empty() {
+					continue;
+				}
+				lane.block.clear();
+				lane.block.resize(samples, 0.0);
+				lane.idle += samples;
 			}
-			if self.delay.len() > held {
-				self.delay.drain(..self.delay.len() - held);
+			lane.delay(held, samples);
+			if stereo {
+				apply_pan(&mut lane.block, self.panned, pan, mono);
 			}
-			self.delay.extend(self.block.iter().copied());
-			for (out, sample) in self.block.iter_mut().zip(self.delay.drain(..samples)) {
-				*out = sample;
+			if first {
+				std::mem::swap(&mut self.block, &mut lane.block);
+				first = false;
+			} else {
+				for (out, sample) in self.block.iter_mut().zip(&lane.block) {
+					*out += *sample;
+				}
+			}
+			// The last held audio just played, so free the delay line.
+			if !lane.fed && lane.idle >= lane.delay.len() {
+				*lane = Lane::default();
 			}
 		}
+		if first {
+			self.block.clear();
+			self.block.resize(samples, 0.0);
+		}
+		self.panned = pan;
 
 		// Ramp across the block rather than stepping, so a fader move or a mute
 		// never clicks.
@@ -507,6 +600,50 @@ impl Source {
 
 		self.strip.shared.level.record(Level::measure(&self.block));
 	}
+}
+
+/// Pan interleaved stereo `block` from `start` toward `target` across it,
+/// moving the pan rather than each side's gain so a mono source keeps its
+/// loudness mid-move.
+fn apply_pan(block: &mut [f32], start: f32, target: f32, mono: bool) {
+	if start == target {
+		let [left, right] = pan_gains(target, mono);
+		// A centered stereo source passes through bit-exact.
+		if left == 1.0 && right == 1.0 {
+			return;
+		}
+		for frame in block.as_chunks_mut::<2>().0 {
+			frame[0] *= left;
+			frame[1] *= right;
+		}
+		return;
+	}
+	let frames = block.len() / 2;
+	let step = (target - start) / frames as f32;
+	for (index, frame) in block.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+		let [left, right] = pan_gains(start + step * (index + 1) as f32, mono);
+		frame[0] *= left;
+		frame[1] *= right;
+	}
+}
+
+/// The left and right gains for `pan`.
+///
+/// A mono source follows a sine/cosine law, -3 dB per side at center, so its
+/// loudness holds wherever it sits. Any other source is balanced: the same
+/// curve, scaled to unity at center, turns the far side down and leaves the
+/// near side alone.
+fn pan_gains(pan: f32, mono: bool) -> [f32; 2] {
+	if mono {
+		let (right, left) = ((pan + 1.0) * FRAC_PI_4).sin_cos();
+		// `cos` of a rounded π/2 is a hair below zero.
+		return [left.max(0.0), right.max(0.0)];
+	}
+	// The mono law's far side over its center gain, `√2·cos(π/4 + x)`,
+	// written as `cos x - sin x` so center is exactly unity.
+	let (sin, cos) = (pan.abs() * FRAC_PI_4).sin_cos();
+	let far = (cos - sin).max(0.0);
+	if pan < 0.0 { [1.0, far] } else { [far, 1.0] }
 }
 
 /// One mix: the sum of the sources routed into it.
@@ -731,6 +868,8 @@ pub struct Channel {
 	remix: Option<Remix>,
 	input: Input,
 	strip: Strip,
+	/// Holds the strip at center, since the bus cannot pan.
+	centered: bool,
 	bus: Weak<Inner>,
 }
 
@@ -765,7 +904,7 @@ impl Channel {
 		}
 	}
 
-	/// This source's gain, mute, delay, and meter.
+	/// This source's gain, mute, pan, delay, and meter.
 	pub fn strip(&self) -> &Strip {
 		&self.strip
 	}
@@ -773,11 +912,14 @@ impl Channel {
 
 impl Drop for Channel {
 	fn drop(&mut self) {
+		if self.centered {
+			self.strip.release_center();
+		}
 		let Some(bus) = self.bus.upgrade() else { return };
 		let mut mixer = bus.mixer.lock().unwrap();
 		let key = key(&self.strip);
 		if let Some(source) = mixer.sources.get_mut(&key) {
-			source.channels.retain(|(id, _)| *id != self.id);
+			source.channels.retain(|feed| feed.id != self.id);
 			if source.channels.is_empty() {
 				mixer.sources.remove(&key);
 			}
@@ -785,12 +927,12 @@ impl Drop for Channel {
 	}
 }
 
-/// The gain, mute, sync delay, and meter of one source in a [`Bus`].
+/// The gain, mute, pan, sync delay, and meter of one source in a [`Bus`].
 ///
 /// Cheap to clone and `Send + Sync`: clones control the same source, so a UI
 /// can hold one while a task owns the [`Channel`]. Its settings apply to every
 /// mix the source is routed into, from the next [`Driver::advance`], with gain
-/// ramped across it.
+/// and pan ramped across it.
 #[derive(Clone, Debug, Default)]
 pub struct Strip {
 	shared: Arc<StripState>,
@@ -801,16 +943,24 @@ struct StripState {
 	/// Linear gain, as [`f32::to_bits`] since there is no atomic float.
 	gain: AtomicU32,
 	muted: AtomicBool,
+	/// The pan as [`f32::to_bits`] in the low half, and in the high half how
+	/// many channels are open on buses that cannot pan. One atomic, so a pan
+	/// and a channel opening at once can't both pass the other's check.
+	pan: AtomicU64,
 	/// Sync delay in nanoseconds.
 	delay: AtomicU64,
 	level: Meter,
 }
+
+/// One channel open on a bus that cannot pan, in [`StripState::pan`].
+const CENTERED: u64 = 1 << 32;
 
 impl Default for StripState {
 	fn default() -> Self {
 		Self {
 			gain: AtomicU32::new(1.0f32.to_bits()),
 			muted: AtomicBool::new(false),
+			pan: AtomicU64::new(0),
 			delay: AtomicU64::new(0),
 			level: Meter::default(),
 		}
@@ -843,6 +993,43 @@ impl Strip {
 		self.shared.muted.load(Ordering::Relaxed)
 	}
 
+	/// Place this source between left and right: `-1.0` is hard left, `0.0`
+	/// center, and `1.0` hard right.
+	///
+	/// A mono source keeps its loudness as it moves, at -3 dB per side when
+	/// centered. Any other source is balanced: its far side is turned down and
+	/// each channel stays on its side, so sound on one side only goes silent
+	/// when balanced hard to the other.
+	///
+	/// # Errors
+	///
+	/// If `pan` is off center while this source has a channel open on a bus
+	/// that is not stereo, which cannot pan.
+	///
+	/// # Panics
+	///
+	/// If `pan` is outside `-1.0..=1.0`.
+	pub fn set_pan(&self, pan: f32) -> Result<(), Error> {
+		assert!((-1.0..=1.0).contains(&pan), "invalid pan {pan}");
+		self.shared
+			.pan
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |packed| {
+				let held = packed & !(CENTERED - 1);
+				(held == 0 || pan == 0.0).then_some(held | u64::from(pan.to_bits()))
+			})
+			.map_err(|_| {
+				Error::Unsupported(format!(
+					"cannot pan to {pan} with a channel open on a bus that is not stereo"
+				))
+			})?;
+		Ok(())
+	}
+
+	/// This source's pan, from `-1.0` hard left to `1.0` hard right.
+	pub fn pan(&self) -> f32 {
+		f32::from_bits(self.shared.pan.load(Ordering::Relaxed) as u32)
+	}
+
 	/// Delay this source in every mix it feeds, so a source that leads
 	/// another (a microphone ahead of its camera) lines up with it.
 	///
@@ -863,13 +1050,33 @@ impl Strip {
 	}
 
 	/// The loudest this source contributed since the previous call, after its
-	/// gain and mute.
+	/// gain, mute, pan, and sync delay.
 	pub fn level(&self) -> Level {
 		self.shared.level.take()
 	}
 
 	fn target(&self) -> f32 {
 		if self.muted() { 0.0 } else { self.gain() }
+	}
+
+	/// Hold this strip at center while a channel is open on a `layout` bus,
+	/// which cannot pan, or refuse if it is already panned.
+	fn hold_center(&self, layout: Layout) -> Result<(), Error> {
+		self.shared
+			.pan
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |packed| {
+				(f32::from_bits(packed as u32) == 0.0).then_some(packed + CENTERED)
+			})
+			.map_err(|packed| {
+				let pan = f32::from_bits(packed as u32);
+				Error::Unsupported(format!("a {layout:?} bus cannot pan, and the strip is at {pan}"))
+			})?;
+		Ok(())
+	}
+
+	/// Release a [`hold_center`](Self::hold_center) as its channel closes.
+	fn release_center(&self) {
+		self.shared.pan.fetch_sub(CENTERED, Ordering::Relaxed);
 	}
 }
 
@@ -917,6 +1124,9 @@ mod tests {
 
 	/// The default bus's 10 ms block.
 	const BLOCK: usize = 480;
+
+	/// Each side's gain for a centered mono source: -3 dB.
+	const CENTER: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 	/// Interleaved bytes of `frames` frames of `channels` channels, every sample `value`.
 	fn constant(value: f32, frames: usize, channels: usize) -> Vec<u8> {
@@ -1185,8 +1395,9 @@ mod tests {
 		assert!(block.data.windows(2).all(|pair| pair[1] <= pair[0] + 1e-6), "monotonic");
 	}
 
-	/// A mono source plays from both speakers of a stereo bus, and a source at
-	/// another rate is resampled to the bus's rather than played fast or slow.
+	/// A mono source plays from both speakers of a stereo bus, -3 dB each at
+	/// center, and a source at another rate is resampled to the bus's rather
+	/// than played fast or slow.
 	#[test]
 	fn converts_layout_and_rate() {
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
@@ -1198,8 +1409,8 @@ mod tests {
 		let last = feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 40);
 
 		for frame in last[0].data.as_chunks::<2>().0 {
-			assert!((frame[0] - 0.5).abs() < 1e-2, "{frame:?}");
-			assert!((frame[1] - 0.5).abs() < 1e-2, "{frame:?}");
+			assert!((frame[0] - 0.5 * CENTER).abs() < 1e-2, "{frame:?}");
+			assert!((frame[1] - 0.5 * CENTER).abs() < 1e-2, "{frame:?}");
 		}
 	}
 
@@ -1268,8 +1479,8 @@ mod tests {
 		let mut second = bus.channel(input(16_000, Layout::Mono), strip.clone()).unwrap();
 		let last = feed(&mut driver, &mut [(&mut second, 0.5)], &mut [&mut reader], 40);
 		let sample = *last[0].data.last().unwrap();
-		assert!((sample - 0.25).abs() < 1e-2, "{sample}");
-		assert!(strip.level().peak() > 0.2);
+		assert!((sample - 0.25 * CENTER).abs() < 1e-2, "{sample}");
+		assert!(strip.level().peak() > 0.2 * CENTER);
 	}
 
 	/// Readers advance independently: one that stalls loses only its own
@@ -1405,6 +1616,223 @@ mod tests {
 			(44_100 * 7 / 10 - 133..=44_100 * 9 / 10).contains(&resumed),
 			"{resumed}"
 		);
+	}
+
+	/// A mono source is panned with constant power: all on one side at either
+	/// end, -3 dB on each side at center.
+	#[test]
+	fn pans_a_mono_source() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let strip = Strip::default();
+		let mut channel = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+
+		for (pan, left, right) in [(-1.0, 0.5, 0.0), (0.0, 0.5 * CENTER, 0.5 * CENTER), (1.0, 0.0, 0.5)] {
+			strip.set_pan(pan).unwrap();
+			assert_eq!(strip.pan(), pan);
+			let last = feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 20);
+			for frame in last[0].data.as_chunks::<2>().0 {
+				assert!((frame[0] - left).abs() < 1e-4, "{pan}: {frame:?}");
+				assert!((frame[1] - right).abs() < 1e-4, "{pan}: {frame:?}");
+			}
+		}
+	}
+
+	/// A stereo source is balanced: the far side turns down, the near side and
+	/// center are left alone, and neither channel moves to the other side.
+	#[test]
+	fn balances_a_stereo_source() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let (mut channel, strip) = source(&bus);
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		let frame: Vec<u8> = [0.5f32, 0.25].iter().flat_map(|sample| sample.to_le_bytes()).collect();
+		let pcm = frame.repeat(BLOCK);
+
+		// Halfway right, the far side follows the mono law scaled to unity at center.
+		let half = std::f32::consts::SQRT_2 * (3.0 * std::f32::consts::FRAC_PI_8).cos();
+		driver.advance(BLOCK);
+		ready(&mut reader);
+		for (pan, left, right) in [
+			(0.0, 0.5, 0.25),
+			(0.5, 0.5 * half, 0.25),
+			(1.0, 0.0, 0.25),
+			(-1.0, 0.5, 0.0),
+		] {
+			strip.set_pan(pan).unwrap();
+			let mut last = None;
+			for _ in 0..20 {
+				channel.write(&pcm).unwrap();
+				last = Some(step(&mut driver, &mut reader));
+			}
+			for frame in last.unwrap().data.as_chunks::<2>().0 {
+				assert!((frame[0] - left).abs() < 1e-4, "{pan}: {frame:?}");
+				assert!((frame[1] - right).abs() < 1e-4, "{pan}: {frame:?}");
+			}
+		}
+	}
+
+	/// A pan move ramps the position across one block, so a mono source sweeps
+	/// from one side to the other without a click or a dip in loudness.
+	#[test]
+	fn pan_changes_ramp_at_constant_power() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let strip = Strip::default();
+		let mut channel = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		strip.set_pan(-1.0).unwrap();
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 20);
+
+		strip.set_pan(1.0).unwrap();
+		channel.write(&constant(0.5, BLOCK, 1)).unwrap();
+		let block = step(&mut driver, &mut reader);
+
+		let frames = block.data.as_chunks::<2>().0;
+		assert!(
+			frames[0][0] > 0.49 && frames[0][1] < 0.01,
+			"starts hard left: {:?}",
+			frames[0]
+		);
+		let end = frames[frames.len() - 1];
+		assert!(
+			end[0].abs() < 1e-6 && (end[1] - 0.5).abs() < 1e-6,
+			"ends hard right: {end:?}"
+		);
+		for pair in frames.windows(2) {
+			assert!(
+				pair[1][0] <= pair[0][0] + 1e-6 && pair[1][1] + 1e-6 >= pair[0][1],
+				"monotonic: {pair:?}"
+			);
+		}
+		for frame in frames {
+			let power = frame[0] * frame[0] + frame[1] * frame[1];
+			assert!((power - 0.25).abs() < 1e-4, "constant power: {frame:?}");
+		}
+	}
+
+	/// Mono and stereo channels sharing a strip each follow their own pan law,
+	/// and closing one plays out what the sync delay holds of it before its
+	/// delay line is freed.
+	#[test]
+	fn mixed_layouts_on_one_strip_pan_apart() {
+		use std::f32::consts::{FRAC_PI_8, SQRT_2};
+
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let strip = Strip::default();
+		let mut mono = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let mut stereo = bus.channel(input(48_000, Layout::Stereo), strip.clone()).unwrap();
+		strip.set_pan(0.5).unwrap();
+		strip.set_delay(Duration::from_millis(20));
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		let pcm: Vec<u8> = [0.5f32, 0.25].iter().flat_map(|sample| sample.to_le_bytes()).collect();
+		let pcm = pcm.repeat(BLOCK);
+
+		// Halfway right: mono 0.5 by the constant-power law, and stereo
+		// (0.5, 0.25) with only its far, left side turned down.
+		let angle = 3.0 * FRAC_PI_8;
+		let balanced = [0.5 * SQRT_2 * angle.cos(), 0.25];
+		let mixed = [0.5 * angle.cos() + balanced[0], 0.5 * angle.sin() + balanced[1]];
+		let assert_frames = |block: &Block, [left, right]: [f32; 2]| {
+			for frame in block.data.as_chunks::<2>().0 {
+				assert!(
+					(frame[0] - left).abs() < 1e-4 && (frame[1] - right).abs() < 1e-4,
+					"{frame:?}"
+				);
+			}
+		};
+
+		driver.advance(BLOCK);
+		ready(&mut reader);
+		let mut last = None;
+		for _ in 0..20 {
+			mono.write(&constant(0.5, BLOCK, 1)).unwrap();
+			stereo.write(&pcm).unwrap();
+			last = Some(step(&mut driver, &mut reader));
+		}
+		assert_frames(&last.unwrap(), mixed);
+
+		// The 20 ms delay still holds two blocks of the mono channel.
+		drop(mono);
+		let held_mono = |bus: &Bus| {
+			bus.inner.mixer.lock().unwrap().sources[&key(&strip)].lanes[1]
+				.delay
+				.capacity()
+		};
+		for _ in 0..2 {
+			stereo.write(&pcm).unwrap();
+			assert_frames(&step(&mut driver, &mut reader), mixed);
+		}
+		assert_eq!(held_mono(&bus), 0, "the drained delay line is freed");
+		stereo.write(&pcm).unwrap();
+		assert_frames(&step(&mut driver, &mut reader), balanced);
+	}
+
+	/// A pan change reaches audio the sync delay already holds back, as gain
+	/// does, rather than waiting out the delay.
+	#[test]
+	fn pan_applies_after_the_sync_delay() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let strip = Strip::default();
+		let mut channel = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		strip.set_delay(Duration::from_millis(100));
+		strip.set_pan(-1.0).unwrap();
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		feed(&mut driver, &mut [(&mut channel, 0.5)], &mut [&mut reader], 30);
+
+		// One block ramps; the next is already hard right, though the 100 ms
+		// of audio coming out of the delay went in hard left.
+		strip.set_pan(1.0).unwrap();
+		for _ in 0..2 {
+			channel.write(&constant(0.5, BLOCK, 1)).unwrap();
+			step(&mut driver, &mut reader);
+		}
+		channel.write(&constant(0.5, BLOCK, 1)).unwrap();
+		let block = step(&mut driver, &mut reader);
+		for frame in block.data.as_chunks::<2>().0 {
+			assert!(frame[0].abs() < 1e-4 && (frame[1] - 0.5).abs() < 1e-4, "{frame:?}");
+		}
+	}
+
+	/// A bus that is not stereo cannot pan: it refuses a panned strip, and a
+	/// strip open on it refuses a pan until its last such channel closes.
+	#[test]
+	fn only_a_stereo_bus_pans() {
+		let config = Config {
+			layout: Layout::Mono,
+			..Default::default()
+		};
+		let (bus, mut driver) = Bus::new(config).unwrap();
+		let strip = Strip::default();
+		strip.set_pan(0.5).unwrap();
+		assert!(bus.channel(input(48_000, Layout::Mono), strip.clone()).is_err());
+
+		strip.set_pan(0.0).unwrap();
+		let mut first = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let second = bus.channel(input(48_000, Layout::Stereo), strip.clone()).unwrap();
+		assert!(strip.set_pan(-0.5).is_err());
+		assert_eq!(strip.pan(), 0.0);
+		strip.set_pan(0.0).unwrap();
+
+		// A centered mono bus plays its sources as they are, with no pan law.
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		let last = feed(&mut driver, &mut [(&mut first, 0.5)], &mut [&mut reader], 20);
+		assert!(all_near(&last[0], 0.5));
+
+		drop(first);
+		assert!(strip.set_pan(-0.5).is_err(), "one channel is still open");
+		drop(second);
+		strip.set_pan(-0.5).unwrap();
 	}
 
 	#[test]
