@@ -1,11 +1,31 @@
-import { expect, test } from "bun:test";
-import { type Micro, Milli, Nano, sleep } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { type Installed, Manual, type Micro, Milli, Nano } from "@moq/clock";
 import { Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
 // Standalone from consumer.test.ts so it only pulls the Legacy format, not the CMAF decoder.
+
+// Every test runs on its own Manual clock, so the consumer's waits move only when a test advances it.
+let clock: Manual;
+let installed: Installed;
+beforeEach(() => {
+	clock = new Manual();
+	installed = clock.install();
+});
+afterEach(() => {
+	installed.close();
+});
+
+/** Flush the consumer's readers without moving time, then return what `read` settled with, or "pending". */
+async function poll<T>(read: Promise<T>): Promise<T | "pending"> {
+	const flushed = clock.advance(Nano.zero);
+	try {
+		return await Promise.race([read, flushed.then(() => "pending" as const)]);
+	} finally {
+		await flushed;
+	}
+}
 
 /** The next frame, passing over gaps and ends. */
 async function nextFrame(consumer: Consumer) {
@@ -24,7 +44,6 @@ function encodeLegacyFrame(timestamp: Micro, payload: Uint8Array): Uint8Array {
 }
 
 test("Consumer waits on a non-sequential hang group because it has no per-frame duration", async () => {
-	hostTime();
 	// The Legacy (hang) container encodes only a timestamp per frame, no duration, so a group's
 	// presentation end is unknown until the next group arrives. With non-sequential group ids we
 	// therefore cannot prove the timeline is unbroken across a jump: a large id gap is
@@ -68,9 +87,8 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 
 	// Within the max delay budget (5s), the parked next() stays parked: no duration means no proof of
 	// contiguity, so the consumer waits instead of eagerly delivering across the gap.
-	const result = await Promise.race([pending, sleep(Nano.fromMilli(Milli(500))).then(() => "timeout" as const)]);
-
-	expect(result).toBe("timeout");
+	await clock.advance(Nano.fromMilli(Milli(4_999)));
+	expect(await poll(pending)).toBe("pending");
 
 	consumer.close();
 });

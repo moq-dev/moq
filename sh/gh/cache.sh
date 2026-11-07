@@ -22,3 +22,8 @@ just infra nix push nix-ci-moq-dev "$roots/devshell"
 # upstream mirrors.
 nix build .#moq-libav .#moq-libav.wasm .#moq-libav.sources --out-link "$roots/libav"
 just infra nix push nix-ci-moq-dev "$roots"/libav*
+
+# `nix copy` skipped paths already uploaded, possibly weeks ago, so restart
+# their age now rather than leave them to the next daily refresh.
+just infra nix roots nix-ci-moq-dev "${GITHUB_SHA:?not set}" "dev-$(nix eval --impure --raw --expr builtins.currentSystem)" "$roots"/*
+just infra nix refresh nix-ci-moq-dev "$GITHUB_SHA"

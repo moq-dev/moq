@@ -139,6 +139,11 @@ publisher's write budget yielded under load while writing SUBSCRIBE_FINISH, past
 the case's microtask drain. [moq-dev/moq#8000](https://github.com/moq-dev/moq/pull/8000)
 stubbed that budget, merging after the quarantine was written. The case was
 re-enabled in [moq-dev/moq#8110](https://github.com/moq-dev/moq/pull/8110).
+Its follow-up: a peer's protocol violation, such as a duplicate SETUP, fails the
+session without the drain a close gets, so a lite-05/06 datagram track whose
+SUBSCRIBE_FINISH arrived before its FIN aborted with the session's error. Its
+datagrams now finish whenever the stream track's settled end survives the abort,
+fixed by [moq-dev/moq#8157](https://github.com/moq-dev/moq/pull/8157).
 
 `sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
 landing just after the dispatcher's `wait -n` returned left Bash marking the
@@ -148,11 +153,33 @@ skipped the timing report. A TERM landing after a lane forked but before
 hung. The exit trap now waits again, and cancellation reads the job table,
 fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
 
+moq-gst's sink-restart pad test caught a real source bug: a track that failed on
+an instance still up, such as a relay's copy cut off as its publisher's session
+closed, left no finished record, so the final catalog snapshot started the
+rendition again and replayed a group on its held pad. A failure now counts as
+the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160).
+
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s
+http:// fingerprint tests, whose slow real fetch lets the WebTransport hedge
+timer fire on the host clock, seen in
+[moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163)'s CI.
+
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s lite-07
+relative-start integration test, which failed once on main in
+[moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run.
+It is quarantined with `test.skip` until its child fixes it.
+
+Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
+`js/net`'s lite-07 empty-window reply test, which fails on main 12/200 under
+`--rerun-each 200`, found in [moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670).
+A subscriber FIN during the reply write's budget yield resets the stream. It is
+quarantined with `test.skip` until its child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [The datagram-end close follow-up](/quest/m0/test-flakes-2/datagram-end-close.md) - investigate whether duplicate SETUP can override an accepted lite-06 SUBSCRIBE_END during shutdown
-- [moq-transcode's idle-rung cancel test survives load](/quest/m0/test-flakes-2/transcode-idle-rung-cancel.md) - `cancelling_an_idle_rung_reports_cancel` stops seeing `serve` return before its abort lands
-- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
+- [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
+- [A lite-07 relative start resolves to the publisher's start every time](/quest/m0/test-flakes-2/lite07-relative-start.md) - `js/net`'s frameless-newest-group integration test stops reading a start of 0, and its `test.skip` is removed
+- [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher

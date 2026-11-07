@@ -18,8 +18,8 @@ test's clock):
   assertions.** Not chosen: only the first two; also the ~530 tests that
   only wait for progress under a timeout, which flake little and would cost
   a much larger migration.
-- ✅ m1, while the [guards](/quest/m0/clock-guard/README.md) that stop new
-  ones are m0.
+- ✅ m1, while the guards that stop new ones (the runtime guards and the
+  `REVIEW.md` rule) landed in m0.
 
 Rules every child keeps:
 
@@ -42,6 +42,4 @@ before starting, since tests land and move.
 
 ## Required
 
-- [js/net tests run on a mocked clock](/quest/m1/mock-clock-tests/js-net.md) - about 120 js/net tests stop waiting on real time, through their shared helpers
-- [Other JS tests run on a mocked clock](/quest/m1/mock-clock-tests/js-rest.md) - hang's `settle(20)`, publish's fanout helpers, and the rest of JS
-- [moq-relay's mesh tests run on a mocked clock](/quest/m1/mock-clock-tests/rs-relay.md) - the relay's multi-relay quiet windows and settle sleeps
+- [Manual.drive waits for mocked I/O the work is blocked on](/quest/m1/mock-clock-tests/manual-drive-host-io.md) - `drive` stops at the deadline the work meets, and `js/net`'s `driveUntil` workaround is deleted
