@@ -2,12 +2,11 @@
 
 ## Goal
 
-`Manual.drive` (`js/clock/src/manual.ts`) never fires a deadline while a
-mocked transport delivery is already queued for the work it drives, so time
-stops exactly at the deadline the work meets. A read with nothing in flight
-still times out when its deadline comes. `js/net`'s `driveUntil` test
-helper is deleted: every caller passes `drive` a promise, a predicate caller
-one that resolves on the event its predicate reads.
+`Manual.drive` (`js/clock/src/manual.ts`) stops time exactly at the deadline
+the driven work meets, even when the work first waits on a mocked transport
+delivery. `js/net`'s `driveUntil` test helper is deleted: every caller
+passes `drive` a promise, a predicate caller one that resolves on the event
+its predicate reads.
 
 ## Plan
 
@@ -17,26 +16,27 @@ Planned 2026-11-07 (maintainer, /quest-complete) from
 `yieldNow()` with 1 ms `advance` steps for up to ten mocked seconds.
 
 `drive` advances once a `drain()` (one host task) leaves no counted yield
-queued. Work parked on a mock transport's delivery, which resolves through a
-stream on a later host task the clock doesn't count, looks idle, so `drive`
-fires the next deadline early. Count that I/O: route the mock transport's
-deliveries through a clock-counted task, so `#tasks` covers them with no
-per-test annotation and `drive` keeps its promise that no wait outlives the
-call. Test it with work that reads from a mocked stream before meeting a
-deadline, asserting the clock stops at that deadline. Deliveries must not
-starve a deadline: hold time only for deliveries queued before the drain
-that would fire it, not ones each delivery queues in turn, and add a test
-with continuous background traffic whose deadline still fires.
+queued, so work parked on a mock delivery that resolves on a later,
+uncounted host task looks idle, and `drive` fires the next deadline early.
 
-Choices made while planning, open to review:
+Decided at the design checkpoint (maintainer, 2026-11-07): ✅ this quest
+states outcomes and required tests, and the mechanism is chosen in its PR.
+Not chosen: prescribing one here, which took three review rounds without
+settling. Required tests:
+
+- a read whose delivery is queued resolves before the clock passes its
+  deadline, and the clock stops at the deadline the work then meets;
+- a read with nothing in flight times out when its deadline comes;
+- continuous background deliveries never starve a deadline.
+
+Also settled:
 
 - A predicate caller (most of them, such as the ~19 in
   `js/net/src/connection/reload.test.ts`) passes `drive` a promise that
   resolves on the signal or event its predicate reads, per the epic's
-  "await the event it means" rule, so a timer the event depends on (such as
-  a give-up deadline) still fires. `drive` stays promise-only rather than
-  growing a predicate overload.
-- A dynamic `import()` is out of scope. JavaScript exposes no "host queue
+  "await the event it means" rule, so a timer the event depends on still
+  fires. `drive` stays promise-only.
+- A dynamic `import()` is out of scope: JavaScript exposes no "host queue
   empty" signal, so a clock-side quiescence check would be a quiet window,
   which the epic rules out. A test whose work imports a module loads it
   before driving.
