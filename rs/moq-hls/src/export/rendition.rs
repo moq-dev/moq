@@ -132,8 +132,6 @@ struct Handle {
 	/// The query pinning the track instance. Even an info query creates publisher demand,
 	/// so a lazy rendition holds it only while serving media.
 	track: Option<moq_net::track::Resolving>,
-	/// The bound sibling ended, so only its retained rows drain.
-	ended: bool,
 }
 
 impl Handle {
@@ -159,7 +157,6 @@ impl Media {
 		let mut handle = Handle {
 			binding: Arc::new(source.bind(rel, reference.instance())?),
 			track: None,
-			ended: false,
 		};
 		if !lazy && let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
 			handle.capture(&broadcast, track);
@@ -173,10 +170,11 @@ impl Media {
 		})
 	}
 
-	/// Whether incoming rows should be listed: not once the bound sibling ended.
+	/// Whether incoming rows should be listed: not once the window stopped listing, as it does
+	/// when the bound sibling ends.
 	fn admits(&self, window: &segments::Producer) -> bool {
 		self.sync(window);
-		!self.handle.lock().expect("media lock poisoned").ended
+		window.lists()
 	}
 
 	/// End the window when a bound sibling has ended; retain its rows and media for draining.
@@ -191,10 +189,9 @@ impl Media {
 			if !self.lazy {
 				handle.capture(&broadcast, &self.track);
 			}
-			if self.sibling && !handle.ended && broadcast.poll_closed(waiter).is_ready() {
+			if self.sibling && broadcast.poll_closed(waiter).is_ready() {
 				// End and Restart both drain only the pinned instance. Looking its path up again
 				// could serve a replacement under the old track's rows.
-				handle.ended = true;
 				window.end();
 			}
 		}
@@ -405,10 +402,9 @@ pub struct Rendition {
 	fanout: renditions::Fanout,
 	/// Follows the media track's groups into [`live`](Self::live); ends when the rendition drops.
 	watcher: Mutex<Watcher>,
-	/// Set once the catalog drops or replaces the rendition (see [`retire`](Self::retire)).
-	retiring: kio::Producer<bool>,
-	/// Which segments this instance lists.
-	claim: Mutex<Claim>,
+	/// Which segments this instance lists. A channel so the media watcher wakes once a
+	/// [`retire`](Self::retire) leaves no segment pending.
+	claim: kio::Producer<Claim>,
 	/// The retired instance this one replaced under the same playlist URI, whose segments its playlist
 	/// still lists ahead of its own until the window slides past them (see [`after`](Self::after)).
 	/// Released once none is listed, or by a restart.
@@ -528,7 +524,7 @@ impl kio::Task for Idle {
 		let Some(rendition) = self.rendition.upgrade() else {
 			return Poll::Ready(());
 		};
-		let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+		let mut claim = rendition.claim();
 		let mut watcher = rendition.watcher.lock().expect("watcher lock poisoned");
 		// A finished window keeps listing what it listed, inherited predecessor rows included,
 		// and keeps its track pin: reads of its retained groups go through it, since a closed
@@ -684,8 +680,7 @@ impl Rendition {
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
 			watcher: Mutex::default(),
-			retiring: kio::Producer::new(false),
-			claim: Mutex::default(),
+			claim: kio::Producer::default(),
 			previous: Mutex::new(None),
 			media: Arc::new(media),
 			run: kio::Producer::default(),
@@ -727,8 +722,7 @@ impl Rendition {
 			live: Arc::new(segments::Producer::new(0)),
 			fanout,
 			watcher: Mutex::default(),
-			retiring: kio::Producer::new(false),
-			claim: Mutex::default(),
+			claim: kio::Producer::default(),
 			previous: Mutex::new(None),
 			media: Arc::new(media),
 			run: kio::Producer::default(),
@@ -778,7 +772,7 @@ impl Rendition {
 		// The playlist URI stays the same, so it keeps its target duration (RFC 8216 6.2.1).
 		self.target_duration = handoff.target_duration;
 		let start = handoff.next;
-		self.claim = Mutex::new(Claim {
+		self.claim = kio::Producer::new(Claim {
 			start,
 			next: start,
 			..Claim::default()
@@ -799,7 +793,7 @@ impl Rendition {
 	/// the media and the catalog are separate tracks, so the successor's first group can arrive first.
 	pub(crate) fn retire(self: &Arc<Self>, successor: Option<&VideoConfig>) -> Handoff {
 		let (next, pending) = {
-			let mut claim = self.claim.lock().expect("claim lock poisoned");
+			let mut claim = self.claim();
 			claim.retired = true;
 			claim.boundary = claim.seen;
 			if let Some(resized) = self.handover(&claim, successor) {
@@ -815,10 +809,6 @@ impl Rendition {
 			}
 			(claim.next, claim.pending)
 		};
-		*self
-			.retiring
-			.write()
-			.unwrap_or_else(|_| unreachable!("the rendition holds its producer")) = true;
 		// Once retired, one that neither lists nor waits to list a segment never will, so the
 		// replacement keeps only what this one was keeping: churn can't stack empty instances.
 		let lists = pending || !self.live.window().segments.is_empty();
@@ -849,6 +839,12 @@ impl Rendition {
 		let (unplaced, _) = claim.unplaced?;
 		let resizes = size(successor).is_some_and(|size| size == resized.size) && size(successor) != size(current);
 		(same_track && resizes && resized.group >= unplaced).then_some(resized)
+	}
+
+	fn claim(&self) -> kio::Mut<'_, Claim> {
+		self.claim
+			.write()
+			.unwrap_or_else(|_| unreachable!("the rendition holds its claim"))
 	}
 
 	fn previous(&self) -> Option<Arc<Rendition>> {
@@ -1984,22 +1980,16 @@ fn broken(segments: &[u64], inherited: usize) -> usize {
 		.unwrap_or(0)
 }
 
-/// Ready once `rendition` is retired with no segment left waiting to list, or is gone.
-///
-/// The claim is read on every poll, so a retire that leaves nothing pending wakes it.
-fn poll_retired(retiring: &kio::Consumer<bool>, rendition: &Weak<Rendition>, waiter: &kio::Waiter) -> Poll<()> {
-	// Upgraded outside the channel's lock, so the last strong reference never drops under it.
-	let Some(rendition) = rendition.upgrade() else {
-		return Poll::Ready(());
-	};
-	let done = |retiring: &bool| *retiring && !rendition.claim.lock().expect("claim lock poisoned").pending;
+/// Ready once the rendition is retired with no segment left waiting to list, or is gone.
+fn poll_retired(claim: &kio::Consumer<Claim>, waiter: &kio::Waiter) -> Poll<()> {
 	// A closed channel means the rendition is gone, which ends the watch all the same.
-	retiring
-		.poll(waiter, |retiring| match done(retiring) {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		})
-		.map(|_| ())
+	match claim.poll(waiter, |claim| match claim.retired && !claim.pending {
+		true => Poll::Ready(()),
+		false => Poll::Pending,
+	}) {
+		Poll::Ready(_) => Poll::Ready(()),
+		Poll::Pending => Poll::Pending,
+	}
 }
 
 /// Follows a rendition's media track into its window, numbering its groups on the grid, until the
@@ -2011,7 +2001,7 @@ fn poll_retired(retiring: &kio::Consumer<bool>, rendition: &Weak<Rendition>, wai
 /// lists that segment whole, and the same URL must name the same bytes everywhere.
 struct WatchMedia {
 	rendition: Weak<Rendition>,
-	retiring: kio::Consumer<bool>,
+	claim: kio::Consumer<Claim>,
 	/// Taken from the rendition on the first poll.
 	follow: Option<Follow>,
 	/// The rendition's media and the binding it is read through, held while the watch runs.
@@ -2138,7 +2128,7 @@ impl Follow {
 			return Some(Ok(()));
 		};
 		// Held while listing, so a retire sees exactly what this instance lists.
-		let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+		let mut claim = rendition.claim();
 		// Retired, a group past the last it had read is the replacement's: this instance lists
 		// the segments and gaps before the first holding one, and its own part of that one, then
 		// stops there.
@@ -2242,7 +2232,7 @@ impl WatchMedia {
 	fn new(rendition: &Arc<Rendition>) -> Self {
 		Self {
 			rendition: Arc::downgrade(rendition),
-			retiring: rendition.retiring.consume(),
+			claim: rendition.claim.consume(),
 			follow: None,
 			held: None,
 			groups: None,
@@ -2253,7 +2243,7 @@ impl WatchMedia {
 	fn poll_watch(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		let follow = self.follow.as_mut().expect("taken on the first poll");
 		loop {
-			let retired = || poll_retired(&self.retiring, &self.rendition, waiter).is_ready();
+			let retired = || poll_retired(&self.claim, waiter).is_ready();
 			match &mut self.step {
 				Step::Start => {
 					// A replacement lists nothing until its predecessor has listed all it will, so
@@ -2274,7 +2264,7 @@ impl WatchMedia {
 					}
 					ready!(previous.live.poll_closed(waiter));
 					let (next, boundary) = {
-						let claim = previous.claim.lock().expect("claim lock poisoned");
+						let claim = previous.claim();
 						(claim.next, claim.boundary)
 					};
 					// Another track, or the same name in another broadcast, numbers its groups afresh.
@@ -2284,7 +2274,7 @@ impl WatchMedia {
 						.is_some_and(|rendition| rendition.continues(previous));
 					follow.after = boundary.filter(|_| continues);
 					if let Some(rendition) = self.rendition.upgrade() {
-						let mut claim = rendition.claim.lock().expect("claim lock poisoned");
+						let mut claim = rendition.claim();
 						claim.start = claim.start.max(next);
 						claim.next = claim.next.max(next);
 					}
@@ -2394,9 +2384,10 @@ impl kio::Task for WatchMedia {
 		let track = self.follow.take().expect("taken on the first poll").track;
 		match result {
 			Ok(()) => rendition.end(),
-			// A bound sibling that ended takes its track down with it: that ends the rendition,
-			// whose retained rows drain, rather than failing it.
-			Err(_) if !rendition.media.admits(&rendition.live) => rendition.end(),
+			// A bound sibling that ended takes its track down with it: that ended the rendition,
+			// whose retained rows drain, rather than failing it. A window cut or failed already
+			// keeps how it stopped.
+			Err(_) if !rendition.media.admits(&rendition.live) => {}
 			// Never retried (the origin already rides out transient source failures), and not
 			// papered over with gaps: the rendition's playlist answers the error.
 			Err(err) => {
@@ -2891,7 +2882,6 @@ mod tests {
 		let mut handle = Handle {
 			binding: Arc::new(moq_mux::Binding::new(consumer.clone())),
 			track: None,
-			ended: false,
 		};
 		handle.capture(&consumer, "video");
 		assert!(serve.track.lock().unwrap().is_some(), "the query was served");
