@@ -629,7 +629,7 @@ pub(crate) fn hop(id: Id) -> crate::Hop {
 		hash = hash.wrapping_mul(0x0100_0000_01b3);
 	}
 	let id = (hash & ((1 << 53) - 1)).max(1);
-	crate::Hop::new(id).expect("a non-zero hop id")
+	crate::Hop::from(std::num::NonZeroU64::new(id).expect("a non-zero hop id"))
 }
 
 #[cfg(test)]

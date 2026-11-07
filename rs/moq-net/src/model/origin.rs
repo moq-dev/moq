@@ -11415,9 +11415,7 @@ mod tests {
 
 		// The mark survives narrowing the handle.
 		let scoped = peer.scope("room", &Patterns::from(Pattern::all())).unwrap();
-		let _nested = scoped
-			.forward("x", RouteInfo::default().with_via(origin(8)))
-			.unwrap();
+		let _nested = scoped.forward("x", RouteInfo::default().with_via(origin(8))).unwrap();
 		assert_eq!(announced.expect_next_active("room/x").await.source(), Source::Peer(8));
 	}
 
