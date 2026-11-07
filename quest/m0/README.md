@@ -32,7 +32,6 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [A draft-18 session to Cloudflare outlives its first request](/quest/m0/cloudflare-draft18-session.md) - `moq fetch` against Cloudflare's draft-18 relay waits for its timeout instead of a `protocol violation`
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
 - [Release's audio encoder rolls groups before the cap](/quest/m0/release-audio-group-cap.md) - a long `groupDuration` with short frames never throws `GroupTooLarge` on `release`
-- [Local checks pass on unchanged main](/quest/m0/local-checks-main.md) - `sh/go/publish-wrapper.test.sh` passes under a global `tag.gpgsign = true`, so `just check` passes on a clean `main`
 - [Bun-spawning test recipes install the JS workspace](/quest/m0/recipe-js-install.md) - `bare-fin`, `max-age`, `stream-limits`, `relay-fill`, and `receive-credit` pass in a fresh checkout
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
