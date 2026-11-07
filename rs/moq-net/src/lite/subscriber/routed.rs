@@ -730,7 +730,10 @@ mod tests {
 			node: 9,
 			advert: ADVERT,
 		};
-		assert!(routed.receive(&prefix, route, &mut decoder).is_err(), "the unflushed echoes hold the cap");
+		assert!(
+			routed.receive(&prefix, route, &mut decoder).is_err(),
+			"the unflushed echoes hold the cap"
+		);
 
 		*budget.write().ok().expect("the budget is open") = usize::MAX;
 		routed.poll(&subscriber, &mut writer, &waiter).unwrap();

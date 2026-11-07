@@ -3642,7 +3642,9 @@ mod announce_test {
 	fn a_lite07_prefix_past_the_root_announces_nothing() {
 		let origin = Hop::new(1).unwrap().produce();
 		let root = "r".repeat(100);
-		let _route = origin.announce(format!("{root}/x"), origin::RouteInfo::default()).unwrap();
+		let _route = origin
+			.announce(format!("{root}/x"), origin::RouteInfo::default())
+			.unwrap();
 		let consumer = origin
 			.consume()
 			.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
