@@ -32,15 +32,6 @@ node table, and the public API drops what the route layer replaced.
   Remove them, or hide them behind those wires, when the rollout window
   closes (see Waiting).
 
-## Waiting
-
-- Maintainer: decide when `Hops`, `RouteInfo::hops`, and the saturating
-  `Cost` leave the public API. Every older wire still fills them, so an agent
-  cannot drop them without picking the rollout's end. Options: **when lite-06
-  retires (recommended)**, since removing them now only moves them behind a
-  private type; or **now**, keeping a private chain type for the older wires.
-  Done when the Plan item above names the point.
-
 Added 2026-11-07 (maintainer, /quest-plan from the API shape audit), for
 the PR that lands this ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)):
 
@@ -50,6 +41,15 @@ the PR that lands this ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8
   preference, never a saturated metric ("drain is a preference state", in
   the [epic](/quest/m2/cluster-routing/README.md)), so sessions stop
   stamping `Cost::DRAIN` on GOAWAY, including on moq-transport.
+
+## Waiting
+
+- Maintainer: decide when `Hops`, `RouteInfo::hops`, and the saturating
+  `Cost` leave the public API. Every older wire still fills them, so an agent
+  cannot drop them without picking the rollout's end. Options: **when lite-06
+  retires (recommended)**, since removing them now only moves them behind a
+  private type; or **now**, keeping a private chain type for the older wires.
+  Done when the Plan item above names the point.
 
 ## Related
 
