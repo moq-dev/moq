@@ -163,6 +163,12 @@ public final class TrackProducer: Sendable {
         GroupProducer(try ffi.createGroup(sequence: sequence))
     }
 
+    /// Declare that groups `start` up to the exclusive `end` will never be produced.
+    /// Readers move past them, and creating a group there then throws.
+    public func skipGroups(start: UInt64, end: UInt64) throws {
+        try ffi.skipGroups(start: start, end: end)
+    }
+
     /// Write a single-frame group with a presentation timestamp, or untimed when nil.
     public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
         try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
