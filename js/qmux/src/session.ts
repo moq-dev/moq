@@ -442,6 +442,12 @@ export interface SessionOptions extends WebTransportOptions {
 	sendBufferSize?: number;
 }
 
+// At least one byte, so a lone frame can always be written; non-finite sizes are a caller bug.
+function sendBufferSize(bytes: number): number {
+	if (!Number.isFinite(bytes)) throw new RangeError(`invalid sendBufferSize: ${bytes}`);
+	return Math.max(1, Math.floor(bytes));
+}
+
 /** Options for accepting a QMux Session on an already-negotiated socket.
  *
  * The handshake is done by the time [[Session.accept]] is called, so the
@@ -781,7 +787,7 @@ export default class Session implements WebTransport {
 		this.#config = resolveConfig(options?.config);
 		this.#requireProtocol = dial && (options?.requireProtocol ?? false);
 		this.#ourParams = configToTransportParams(this.#config);
-		this.#sendBufferSize = options?.sendBufferSize ?? DEFAULT_SEND_BUFFER_SIZE;
+		this.#sendBufferSize = sendBufferSize(options?.sendBufferSize ?? DEFAULT_SEND_BUFFER_SIZE);
 
 		// Recv stream count limits are version-independent.
 		this.#recvBiCredit = new Credit(this.#config.maxStreamsBidi);
@@ -2166,7 +2172,7 @@ export default class Session implements WebTransport {
 	 *  throughput) to keep the pipe full while leaving as much queued data as
 	 *  possible reprioritizable by the send scheduler. */
 	setSendBufferSize(bytes: number) {
-		this.#sendBufferSize = Math.max(1, Math.floor(bytes));
+		this.#sendBufferSize = sendBufferSize(bytes);
 		this.#wss?.setHighWaterMark?.(this.#sendBufferSize);
 		this.#backlog?.setHighWaterMark(this.#sendBufferSize);
 	}

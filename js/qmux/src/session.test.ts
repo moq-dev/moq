@@ -276,6 +276,13 @@ function connect(config?: Config): { session: Session; peer: FakePeer } {
 
 const ORIGINAL_WSS = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
 
+test("a non-finite sendBufferSize throws instead of parking every write", () => {
+	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
+	for (const sendBufferSize of [Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => new Session("https://example/test", { sendBufferSize })).toThrow(RangeError);
+	}
+});
+
 describe("Session integration (scripted peer)", () => {
 	afterEach(() => {
 		if (ORIGINAL_WSS === undefined) {
