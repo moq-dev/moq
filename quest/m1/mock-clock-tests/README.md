@@ -32,6 +32,10 @@ Rules every child keeps:
 - Each JS child removes the bare `hostTime();` opt-outs in its area, so the
   `bun test` guard (`js/clock/src/preload.ts`) covers the converted tests. An
   opt-out with a trailing reason comment is real I/O and stays.
+- Each Rust child removes the `kio::clock::host_time()` calls in the
+  tests it converts, so `just rs test`'s host-timer guard covers them. A test
+  over a real QUIC endpoint or ICE agent is exempt without one, since those
+  transports allow host timers themselves.
 
 The counts come from a heuristic scan on 2026-11-06; re-scan each area
 before starting, since tests land and move.

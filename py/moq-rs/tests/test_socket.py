@@ -184,11 +184,11 @@ async def late_peer(clock):
 async def test_cancelling_acceptance_drops_the_original_dial_while_proving_routability():
     origin = moq.OriginProducer()
     endpoint = socket.Endpoint(origin, "room", "server")
-    forged = origin.route("room/.socket/forged", hidden=True)
+    forged = origin.route("room/.client/forged", hidden=True)
     returning = forged.broadcast.requests()
     forged.announce()
     incoming = await start(endpoint.accept_tcp())
-    broadcast = await origin.consume().request("room/.socket/server")
+    broadcast = await origin.consume().request("room/.server/server")
     original = await start(broadcast.subscribe_track("tcp/forged/server/0123456789abcdef0123456789abcdef"))
     offered = await incoming
     accepting = await start(offered.accept())

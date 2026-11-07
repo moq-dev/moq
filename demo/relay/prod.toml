@@ -46,14 +46,16 @@ key = "key.pem"
 #   moq auth serve --listen 127.0.0.1:4440 --key root.jwk \
 #     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
 #     --public-publish 'anon/**' \
-#     --public-publish 'demo/boy/.socket/viewer-*' \
-#     --public-publish 'demo/carla/.socket/driver-*' \
+#     --public-publish 'demo/boy/.client/*' \
+#     --public-publish 'demo/carla/.client/*' \
 #     --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer
 #
 # Anonymous MoQ Boy viewers and CARLA drivers get one shared grant each, covering only
-# `viewer-*` and `driver-*` endpoint ids: a game's or truck's endpoint stays its
-# publisher's, which signs in with a token. Each viewer's id is 128 random bits, so no
-# viewer can guess another's.
+# client socket endpoints: a game's or truck's server endpoint, `.server/<name>`, stays
+# its publisher's, which signs in with a token. `demo/**` lets viewers dial those
+# servers, and also read another viewer's client endpoint, which yields nothing without
+# a session's secret id. Each viewer's id is 128 random bits, so no viewer can guess
+# another's.
 #
 # For multiple keys with rotation, give it `--key-dir /path/to/keys/` instead:
 # keys are named {kid}.jwk and resolved by the kid in the JWT header.

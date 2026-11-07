@@ -387,6 +387,7 @@ mod tests {
 	/// `<path>/@<instance>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
+		kio::clock::host_time();
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 
@@ -483,6 +484,7 @@ mod tests {
 	/// instance, serving its stored groups.
 	#[tokio::test]
 	async fn an_exported_broadcast_imports() {
+		kio::clock::host_time();
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 

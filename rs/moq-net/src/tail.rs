@@ -12,6 +12,8 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
+use rangemap::RangeSet;
+
 pub(crate) use crate::ledger::{GRACE, grace};
 use crate::{
 	ledger::Ledger,
@@ -28,6 +30,10 @@ pub(crate) struct Tail {
 	// The publisher's FIN ended the track, its only end before lite-05, so a session that
 	// dies before the tail settles declares that end before aborting.
 	ended: bool,
+	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under
+	// that update names one only if it was sent before the publisher served the group, so the
+	// group won over it, even once the cache evicted it.
+	finished: RangeSet<u64>,
 }
 
 impl Default for Tail {
@@ -44,6 +50,7 @@ impl Tail {
 			streams: 0,
 			active: 0,
 			ended: false,
+			finished: RangeSet::new(),
 		}
 	}
 
@@ -69,6 +76,12 @@ impl Tail {
 		}
 		self.ledger.account(groups, now);
 		self.expire(now);
+	}
+
+	/// Owe `groups` again from `now`: a stale drop that accounted for them was reversed by a
+	/// widening, so the publisher serves or drops them anew.
+	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
+		self.ledger.unaccount(groups, now);
 	}
 
 	/// Restart the age of every gap reaching into `groups`, which the demand newly asks for.
@@ -97,6 +110,17 @@ impl Tail {
 		self.ledger.folds_at(group, self.ledger.grace())
 	}
 
+	/// The runs of `groups` whose stream finished since the last update was sent.
+	pub fn finished(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		self.finished.overlapping(groups).cloned()
+	}
+
+	/// Forget which streams finished, for an update being sent: a stale drop under an earlier
+	/// one is no verdict, so none needs them.
+	pub fn updated(&mut self) {
+		self.finished = RangeSet::new();
+	}
+
 	/// Whether a data stream whose header arrived is still being read.
 	pub fn is_reading(&self) -> bool {
 		self.active > 0
@@ -111,6 +135,7 @@ impl Tail {
 /// A data stream whose header arrived, holding its subscription's end open until dropped.
 pub(crate) struct Reading {
 	tail: Option<kio::Producer<Tail>>,
+	group: Option<u64>,
 	active: bool,
 }
 
@@ -120,6 +145,7 @@ impl Reading {
 		let Ok(mut state) = tail.write() else {
 			return Self {
 				tail: None,
+				group,
 				active: false,
 			};
 		};
@@ -130,7 +156,17 @@ impl Reading {
 		}
 		Self {
 			tail: Some(tail.clone()),
+			group,
 			active: true,
+		}
+	}
+
+	/// Record that the stream's group arrived whole, once it finished.
+	pub fn finish(&self) {
+		if let (Some(tail), Some(group)) = (&self.tail, self.group)
+			&& let Ok(mut state) = tail.write()
+		{
+			state.finished.insert(group..group.saturating_add(1));
 		}
 	}
 
