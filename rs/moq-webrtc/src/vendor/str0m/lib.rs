@@ -1899,9 +1899,16 @@ impl Rtc {
     fn poll_timeout(&mut self) -> Instant {
         if self.readiness.wants_timeout() {
             let stats_timeout = self.stats.as_mut().and_then(|s| s.poll_timeout());
+            // ICE has no clock until its first timeout and asks for none, yet a remote
+            // candidate gives it checks to run: drive it at once, since a passive peer
+            // may have no other timer that would.
+            let ice_timeout = self
+                .ice
+                .poll_timeout()
+                .or_else(|| self.ice.remote_candidates().next().map(|_| self.last_now));
             let time_and_reason = (None, Reason::NotHappening)
                 .soonest((self.next_dtls_timeout, Reason::DTLS))
-                .soonest((self.ice.poll_timeout(), Reason::Ice))
+                .soonest((ice_timeout, Reason::Ice))
                 .soonest(self.session.poll_timeout())
                 .soonest((self.sctp.poll_timeout(), Reason::Sctp))
                 .soonest((self.chan.poll_timeout(&self.sctp), Reason::Channel))
@@ -2330,6 +2337,7 @@ pub fn init_crypto_default() {
 #[cfg(test)]
 mod test {
     use std::panic::UnwindSafe;
+    use std::time::Duration;
 
     use super::*;
 
@@ -2351,6 +2359,47 @@ mod test {
     fn event_is_reasonably_sized() {
         let n = std::mem::size_of::<Event>();
         assert!(n < 530);
+    }
+
+    /// A passive answerer has no DTLS or SCTP timer before the peer speaks, so a
+    /// trickled candidate must still start its checks when driven only on the
+    /// timeouts it asks for.
+    #[test]
+    fn idle_answerer_checks_a_trickled_candidate() {
+        crate::vendor::str0m::init_crypto_default();
+        let start = Instant::now();
+
+        let mut offerer = Rtc::new(start);
+        let mut change = offerer.sdp_api();
+        change.add_channel("data".into());
+        let (offer, _pending) = change.apply().unwrap();
+
+        let mut answerer = Rtc::new(start);
+        let local = Candidate::host("127.0.0.1:2000".parse().unwrap(), "udp").unwrap();
+        answerer.add_local_candidate(local);
+        answerer.sdp_api().accept_offer(offer).unwrap();
+        let remote = Candidate::host("127.0.0.1:1000".parse().unwrap(), "udp").unwrap();
+        answerer.add_remote_candidate(remote);
+
+        let mut now = start;
+        loop {
+            match answerer.poll_output().unwrap() {
+                Output::Transmit(transmit) => {
+                    assert_eq!(transmit.destination, "127.0.0.1:1000".parse().unwrap());
+                    return;
+                }
+                Output::Timeout(at) => {
+                    assert!(
+                        at < start + Duration::from_secs(1),
+                        "the answerer waits until {:?} to check its candidate",
+                        at - start
+                    );
+                    now = now.max(at);
+                    answerer.handle_input(Input::Timeout(now)).unwrap();
+                }
+                Output::Event(_) => {}
+            }
+        }
     }
 }
 
