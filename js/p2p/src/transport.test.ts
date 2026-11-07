@@ -94,7 +94,7 @@ test("the accepting side stays silent until the dialer's first record proves its
 	await Promise.all([client.closed, server.closed]);
 });
 
-test("an accepted channel whose dialer stays silent still idles out without sending", async () => {
+test("an accepted channel whose dialer stays silent closes at the handshake deadline without sending", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	try {
@@ -102,11 +102,10 @@ test("an accepted channel whose dialer stays silent still idles out without send
 		left.createDataChannel("moq", { ordered: true, protocol });
 		const server = Transport.accept({ peer: right.asPeer(), channel: right.incoming.asChannel(), protocol });
 		right.incoming.open();
-		// The session starts on open, so its 30 s idle deadline runs while its first write waits.
-		// Its `ready` waits for the silent dialer's parameters; the idle deadline still runs.
-		// The idle check polls every 5 s and skips ticks a single long jump would miss.
-		for (let i = 0; i < 7; i++) await clock.advance(Nano.fromMilli(Milli(5_000)));
-		await expect(server.closed).rejects.toThrow("idle timeout");
+		// The session starts on open, so its 10 s handshake deadline runs while its first write
+		// waits on the silent dialer's parameters.
+		await clock.advance(Nano.fromMilli(Milli(11_000)));
+		await expect(server.closed).rejects.toThrow("handshake timeout");
 		expect(right.incoming.records).toEqual([]);
 		expect(right.incoming.listeners.size).toBe(0);
 	} finally {
