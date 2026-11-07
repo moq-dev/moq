@@ -63,7 +63,7 @@ harness_begin audio-quality-record "$RERUN"
 echo "building the pages..."
 (
     cd "$CLIENT"
-    bun install --frozen-lockfile
+    python3 "$WORKSPACE/sh/js/install.py" frozen
     bunx vite build --outDir "$HARNESS_RUN/page" --emptyOutDir
 )
 

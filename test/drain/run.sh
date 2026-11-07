@@ -61,7 +61,7 @@ flag=()
 TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
 [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
 
-python3 "$WORKSPACE/test/lib/install.py"
+python3 "$WORKSPACE/sh/js/install.py" frozen
 
 # ── relays ──────────────────────────────────────────────────────────────────
 # Start one relay on a reserved port: `start <name> [extra relay args...]`.

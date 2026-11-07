@@ -12,7 +12,7 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-bun install --frozen-lockfile
+python3 sh/js/install.py frozen
 cd drafts
 
 if grep -n "$(printf '\t')" draft-*.md; then

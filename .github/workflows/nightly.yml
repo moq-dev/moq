@@ -425,7 +425,7 @@ jobs:
       - name: Install publisher and player engines
         # Firefox loads libpulse at runtime; Playwright's engine dependencies omit it.
         run: |
-          nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
+          nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" bash -c "python3 sh/js/install.py frozen && bunx playwright install --with-deps chromium firefox"
           sudo apt-get install -y libpulse0
       - name: Media and negative controls
         run: nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" just test media --media-engines firefox

@@ -30,7 +30,7 @@ relay="$WORKSPACE/${CARGO_TARGET_DIR:-target}/debug/moq-relay"
 # Cargo accepts an absolute target directory too.
 [[ "${CARGO_TARGET_DIR:-}" != /* ]] || relay="$CARGO_TARGET_DIR/debug/moq-relay"
 
-python3 "$WORKSPACE/test/lib/install.py"
+python3 "$WORKSPACE/sh/js/install.py" frozen
 harness_begin ietf-conformance "$(harness_env HARNESS_RESULTS)just test ietf-conformance$(harness_argv "$@")"
 python3 "$CONFORMANCE_DIR/prepare.py" "$package/share/moxygen/conformance_test.sh" "$HARNESS_RUN/conformance.sh"
 # LibreSSL in the dev shell has no system-wide openssl.cnf.

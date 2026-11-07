@@ -19,7 +19,7 @@ export HARNESS_KEEP="${HARNESS_KEEP:-1}"
     exit 2
 }
 
-bun install --frozen-lockfile
+python3 sh/js/install.py frozen
 cargo build --locked -p moq-relay
 TARGET_BASE="${CARGO_TARGET_DIR:-$ROOT/target}"
 harness_port relay

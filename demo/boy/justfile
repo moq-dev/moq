@@ -2,7 +2,7 @@ set fallback
 
 # Run the GB demo: relay + emulator publisher + web viewer.
 default:
-    bun install
+    python3 ../../sh/js/install.py update
 
     bun run concurrently --kill-others --prefix-colors auto \
     	"just relay" \
@@ -57,12 +57,12 @@ web url='http://localhost:4443':
 
 # Deploy the rom.moq.dev worker
 deploy:
-    bun install
+    python3 ../../sh/js/install.py update
     bun wrangler deploy
 
 # Upload a single ROM to R2
 upload file:
-    bun install
+    python3 ../../sh/js/install.py update
     bun wrangler r2 object put "rom-moq-dev/{{ file }}" --file "rom/{{ file }}" --remote
 
 # Sync all ROMs to R2
@@ -72,5 +72,5 @@ sync dir="rom":
 
 # List files in the R2 bucket
 list:
-    bun install
+    python3 ../../sh/js/install.py update
     bun wrangler r2 object list "rom-moq-dev"

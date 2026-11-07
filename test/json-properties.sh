@@ -7,7 +7,7 @@ MOQ_JSON_SEED=${MOQ_JSON_SEED:-$(python3 -c 'import secrets; print(secrets.randb
 MOQ_JSON_CASES=${MOQ_JSON_CASES:-4096}
 export MOQ_JSON_SEED MOQ_JSON_CASES
 echo "JSON codec properties: MOQ_JSON_SEED=$MOQ_JSON_SEED MOQ_JSON_CASES=$MOQ_JSON_CASES"
-python3 test/lib/install.py
+python3 sh/js/install.py frozen
 just rs test -p moq-json --lib -E 'test(snapshot_codec_property) | test(window_codec_property)'
 bun test ./js/json/src/snapshot/properties.test.ts ./js/json/src/window/properties.test.ts
 bunx tsc --noEmit --project js/json/bench/tsconfig.json

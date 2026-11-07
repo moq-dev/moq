@@ -66,7 +66,7 @@ def main():
     (ROOT / "target/coverage/js/summary.json").unlink(missing_ok=True)
     for directory in selected:
         (ROOT / "target/coverage/js" / directory.name / "lcov.info").unlink(missing_ok=True)
-    subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=ROOT, check=True)
+    subprocess.run(["python3", str(ROOT / "sh/js/install.py"), "frozen"], cwd=ROOT, check=True)
     for directory in selected:
         out = ROOT / "target/coverage/js" / directory.name
         out.mkdir(parents=True, exist_ok=True)

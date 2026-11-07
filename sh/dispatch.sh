@@ -129,9 +129,9 @@ module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-form
 # the libobs headers it compiles against.
 module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
-# The bun lane exists because `bun install` relinks the root workspace's
-# packages even when nothing changed, so a concurrent install or import of
-# them fails. Biome checks the whole repository. It registers before js so
+# The bun lane serializes fixers and JS builds that write shared outputs.
+# Dependency setup separately uses sh/js/install.py across every entry point.
+# Biome checks the whole repository. It registers before js so
 # that fix runs it first, since Biome can fix sources that the package build
 # rejects, such as a type-only export.
 module biome '' \
@@ -372,7 +372,7 @@ step() {
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
         check:biome) just biome ;;
         check:markdown)
-            bun install --frozen-lockfile
+            python3 sh/js/install.py frozen
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
@@ -392,7 +392,7 @@ step() {
         fix:js) just js fix-changed "$js_list" ;;
         fix:biome) just biome-fix ;;
         fix:markdown)
-            bun install
+            python3 sh/js/install.py update
             sh/markdown.sh fix
             ;;
         fix:python)
