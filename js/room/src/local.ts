@@ -73,6 +73,11 @@ export class Local {
 	readonly cameraCapture: Publish.Video.Capture;
 	/** Shared capture feeding the screen renditions. */
 	readonly screenCapture: Publish.Video.Capture;
+	/** Camera microphone encoder, including its volume and capture graph. */
+	readonly cameraAudio: Publish.Audio.Encoder;
+	/** Screenshare audio encoder, including its volume and capture graph. */
+	readonly screenAudio: Publish.Audio.Encoder;
+
 	#preview = new Signal<Preview>({});
 	#cameraVideo = new Signal<Publish.Video.Source | undefined>(undefined);
 	#cameraAudio = new Signal<Publish.Audio.Source | undefined>(undefined);
@@ -209,13 +214,13 @@ export class Local {
 		// reaches them at once; its capture is still released.
 		const microphoneMuted = new Signal(!this.microphoneEnabled.peek());
 		this.#signals.run((effect) => microphoneMuted.set(!effect.get(this.microphoneEnabled)));
-		const cameraAudio = new Publish.Audio.Encoder("audio", {
+		this.cameraAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.camera,
 			capture: cameraAudioCapture,
 			muted: microphoneMuted,
 			bandwidth,
 		});
-		this.#signals.cleanup(() => cameraAudio.close());
+		this.#signals.cleanup(() => this.cameraAudio.close());
 
 		const screenHd = new Publish.Video.Encoder("video/hd", {
 			broadcast: this.screen,
@@ -241,13 +246,13 @@ export class Local {
 		});
 		this.#signals.cleanup(() => screenAudioCapture.close());
 
-		const screenAudio = new Publish.Audio.Encoder("audio", {
+		this.screenAudio = new Publish.Audio.Encoder("audio", {
 			broadcast: this.screen,
 			capture: screenAudioCapture,
 			enabled: this.#screenLive,
 			bandwidth,
 		});
-		this.#signals.cleanup(() => screenAudio.close());
+		this.#signals.cleanup(() => this.screenAudio.close());
 
 		this.#signals.run((effect) => {
 			const source = effect.get(this.share.out.source);
