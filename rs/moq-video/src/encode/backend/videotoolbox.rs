@@ -42,7 +42,7 @@ use objc2_video_toolbox::{
 	kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
+use super::super::encoder::{Applied, Codec, Config, Preset};
 use super::{Backend, Encoded, keyframe_nal};
 use crate::color::{Matrix, Primaries, Transfer};
 use crate::frame::Surface;
@@ -144,11 +144,10 @@ impl VideoToolbox {
 			unsafe { kVTCompressionPropertyKey_AverageBitRate },
 			clamp_i32(config.resolved_bitrate().as_bps()),
 		)?;
-		let Gop::Keyframe { interval } = config.gop;
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_MaxKeyFrameInterval },
-			clamp_i32(interval.into()),
+			clamp_i32(config.keyframe_interval().into()),
 		)?;
 		set_number(
 			&session,

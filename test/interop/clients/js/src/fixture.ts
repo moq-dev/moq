@@ -161,7 +161,7 @@ export class Fixture {
 			config: {
 				codec: "avc1",
 				frameRate: Pattern.FPS,
-				keyframeInterval: KEYFRAME_INTERVAL,
+				join: KEYFRAME_INTERVAL,
 				maxBitrate: MAX_BITRATE,
 			},
 		});

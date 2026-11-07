@@ -309,7 +309,7 @@ instantiating the whole map.
 - Explained, no action: aws-lc-sys's build script remains the longest unit
   in clean builds; the crypto provider stays (m0). usage-rs derive output
   scales with config fields and is external code. serde visitors per
-  deserializer are inherent to TOML config. moq-rtmp, moq-srt and moq-rtc
+  deserializer are inherent to TOML config. moq-rtmp, moq-srt and moq-webrtc
   entry points generic over `impl Into<Path>` instantiate their async bodies in
   the `moq` bin (20,327 lines with drop glue, 1.8%); a non-generic inner
   function would move them, but adds code for little. The catalog JSON diff

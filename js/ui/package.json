@@ -2,7 +2,6 @@
 	"name": "@moq/ui",
 	"type": "module",
 	"version": "0.1.0",
-	"jsr": false,
 	"description": "Presentation components shared by the @moq/watch and @moq/publish overlays",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {
