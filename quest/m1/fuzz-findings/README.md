@@ -22,7 +22,9 @@ instead. The epic is deleted once every target runs green. Not chosen:
 deleting it once its last child merged.
 
 Triage of the 2026-11-03 to 2026-11-06 scheduled runs
-([moq-dev/moq#7961](https://github.com/moq-dev/moq/pull/7961)):
+([moq-dev/moq#7961](https://github.com/moq-dev/moq/pull/7961) through
+2026-11-05, and [moq-dev/moq#8042](https://github.com/moq-dev/moq/pull/8042)
+with this triage for 2026-11-06):
 
 - `annexb` (scuffle-h265 SPS overflow) and `ts` (step look-ahead overflow),
   2026-11-03: fixed by [moq-dev/moq#7685](https://github.com/moq-dev/moq/pull/7685)
