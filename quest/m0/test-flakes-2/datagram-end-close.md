@@ -10,6 +10,10 @@ removed.
 
 ## Plan
 
+The original end/close case was re-enabled by PR #8110 after PR #8000
+stubbed the publisher write budget. The additional duplicate-SETUP
+investigation below remains open.
+
 Added 2026-11-06 (maintainer's standing rule that flakes join this epic).
 [moq-dev/moq#7986](https://github.com/moq-dev/moq/pull/7986)'s Check failed
 in this case, whose diff touches only `bench/`, `justfile`, and quest prose.
