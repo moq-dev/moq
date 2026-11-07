@@ -152,21 +152,27 @@ impl Session {
 	/// if the peer completes the transport handshake but never sends its parameters, this
 	/// returns [`Error::HandshakeTimeout`] rather than hanging.
 	pub async fn connect<T: Transport>(transport: T, config: Config) -> Result<(Session, Driver<T>), Error> {
-		let (session, mut driver) = Self::new(transport, Side::Client, config)?;
-		let session = session.established(&mut driver).await?;
-		Ok((session, driver))
+		Self::start(transport, Side::Client, config).await
 	}
 
 	/// Open a server-side session over the given transport, waiting until it is
 	/// established. See [`Session::connect`] for the semantics.
 	pub async fn accept<T: Transport>(transport: T, config: Config) -> Result<(Session, Driver<T>), Error> {
-		let (session, mut driver) = Self::new(transport, Side::Server, config)?;
+		Self::start(transport, Side::Server, config).await
+	}
+
+	/// Start a session over the transport and wait until it is established.
+	pub(crate) async fn start<T: Transport>(
+		transport: T,
+		side: Side,
+		config: Config,
+	) -> Result<(Session, Driver<T>), Error> {
+		let (session, mut driver) = Self::new(transport, side, config)?;
 		let session = session.established(&mut driver).await?;
 		Ok((session, driver))
 	}
 
-	/// Start a session over the transport without waiting for the handshake, for callers
-	/// that resolved the protocol out of band (the WebSocket subprotocol, say).
+	/// Start a session over the transport without waiting for the handshake.
 	pub(crate) fn new<T: Transport>(mut transport: T, side: Side, config: Config) -> Result<(Self, Driver<T>), Error> {
 		let conn = mux::Connection::new(config.to_mux()?, side, kio::clock::now());
 		transport.bind(&config);
@@ -588,6 +594,18 @@ impl poll::SendStream for SendStream {
 			// The ID is only released on drop, so this does not happen.
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
 		}
+	}
+
+	/// Whether every byte written so far went to the transport, which acknowledges it on a
+	/// reliable transport.
+	fn acknowledged(&self) -> Option<bool> {
+		if self.reset {
+			return Some(false);
+		}
+		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
+		let offset = stream.offset();
+		Some(stream.acked(offset).unwrap_or(false))
 	}
 }
 

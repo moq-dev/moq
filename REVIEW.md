@@ -22,10 +22,19 @@ Assume a better approach exists until you have tried to find one:
 - **Layer**: does the logic live where it belongs (library vs runtime adapter, application vs relay, moq-lite model vs IETF layer, our crate vs upstream)? Does a package boundary leak?
 - **Public API and wire**: would we want to support this shape for years, in every language? Look for foot-guns, names tied to today's implementation, a new surface that could merge into an existing one, and exports nothing needs yet. Is every API or wire change listed under the body's Impact, with breaking ones marked `!`?
 - **Completeness**: does it fix every instance of the problem and the gaps it exposes, or land a partial version plus follow-ups?
+- **Bounds**: can a peer grow a queue or map here? It should hold the latest state per key, or be bounded by credit the peer already spent, never one entry per event.
 - **Evidence**: is a performance claim measured, a bug reproduced, and is each new test worth running forever?
 
 An approach finding names the alternative and why it holds up better long-term.
 "Rework or abandon this PR" is a valid finding when the case is strong.
+
+# Tests
+
+Unit tests mock time instead of depending on the real clock: a test that sleeps to let work settle, waits out a timeout to prove nothing happened, or asserts that an operation finished within a real-time budget passes on a quiet machine and flakes under load.
+Flag one in any language, even when the timer goes through `kio::clock` or `@moq/clock`, whose timers still wait in real time until the test installs a paused, simulated, or `Manual` clock.
+The fix is a mocked clock or an awaited event, never a shorter or longer real wait or a looser budget, and the same fix lands in every language's sibling test.
+The exception is a test that drives real sockets, devices, or processes, which may wait on the real clock and opts out with `host_time()` or `hostTime()`; that opt-out belongs nowhere else.
+The runtime guards fail Rust and bun tests only when a timer fires on the host clock, so they miss Go and Python tests, elapsed-time assertions, and any wait that bypasses those clocks; and Rust's `host_time()` lasts for the whole process, so it hides other tests' waits outside nextest's one-test-per-process runs.
 
 # Not findings
 

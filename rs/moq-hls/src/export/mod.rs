@@ -803,6 +803,8 @@ mod tests {
 	}
 
 	/// The next rendition event, or `None` if the set is quiet.
+	///
+	/// Callers run on paused time, so the timeout fires only once every task has run.
 	async fn next_event(cursor: &mut renditions::Consumer) -> Option<renditions::Event> {
 		kio::clock::timeout(Duration::from_millis(50), cursor.next())
 			.await
@@ -942,8 +944,9 @@ mod tests {
 
 	// No rendition is served until the catalog declares its join interval: without that grid
 	// nothing numbers their segments. Once it does, every rendition is added.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn renditions_wait_for_the_join_interval() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1026,8 +1029,9 @@ mod tests {
 	// moves, writing those two fields and nothing else. That must not churn the rendition:
 	// rebuilding resets the playlist window, the cached init segment and EXT-X-MEDIA-SEQUENCE,
 	// and makes every recording cursor see a Removed followed by an Added.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn estimate_only_catalog_update_keeps_the_rendition() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1096,8 +1100,9 @@ mod tests {
 	// The estimator also measures the framerate and publishes it once it settles, so an
 	// imported source gains one about a second in. Rebuilding for it would re-time the fMP4
 	// (its timescale derives from the framerate) and churn every recording cursor mid-stream.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn estimated_framerate_keeps_the_rendition() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1160,8 +1165,9 @@ mod tests {
 	// The other half: a change that alters how the rendition decodes, or which track it
 	// lists, still rebuilds it, so the cached init segment can never describe media it no
 	// longer matches.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn decoder_config_change_rebuilds_the_rendition() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1227,6 +1233,7 @@ mod tests {
 	// groups' timestamps, and a segment request fetches and transmuxes exactly its groups.
 	#[tokio::test]
 	async fn master_lists_only_playable_renditions() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1867,6 +1874,7 @@ mod tests {
 	// playlist still lists the segments muxed under them.
 	#[tokio::test]
 	async fn a_reconfigure_versions_the_init_url() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -2159,6 +2167,7 @@ mod tests {
 	/// counts only the catalog and what a client fetches.
 	#[tokio::test]
 	async fn a_metered_source_counts_only_what_clients_fetch() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -2670,6 +2679,7 @@ mod tests {
 	// A finished broadcast renders a static presentation.
 	#[tokio::test]
 	async fn dash_manifest_turns_static_when_finished() {
+		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())

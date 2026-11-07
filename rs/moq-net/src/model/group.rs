@@ -907,11 +907,25 @@ impl GroupState {
 			self.pace.shed(shed);
 			let heap = kio::log::Writer::<Entry>::HEAP;
 			let before = self.log.heap().max(heap);
-			self.log.evict(end as u64);
+			self.evict_log(end as u64);
 			freed += charged + (before - self.log.heap().max(heap)) as u64;
 		}
 		self.charge.sub(freed);
 		freed
+	}
+
+	/// Evict the log below `end`, letting go of each frame's canonical content now.
+	///
+	/// The log drops an evicted entry only once epoch reclamation runs, which reads on any
+	/// other thread can hold back, so content billed until its last holder drops would stay
+	/// billed that long, past the eviction that was meant to free it.
+	fn evict_log(&mut self, end: u64) {
+		for index in self.log.base()..end.min(self.log.end()) {
+			let entry = self.log.get(index).expect("committed below the end");
+			let owner = entry.owner.lock().unwrap_or_else(PoisonError::into_inner).take();
+			drop(owner);
+		}
+		self.log.evict(end);
 	}
 
 	/// Shed the oldest committed frames until `extra` more bytes fit the live tail
@@ -1332,7 +1346,7 @@ impl GroupState {
 			flate.release(self.abort.clone().unwrap_or(Error::Dropped), shared);
 		}
 		self.front = VecDeque::new();
-		self.log.evict(self.log.end());
+		self.evict_log(self.log.end());
 		self.partial = None;
 		if let Some(content) = self.content.take() {
 			content.detach(self.abort.clone().unwrap_or(Error::Dropped));
@@ -5477,6 +5491,7 @@ mod test {
 	}
 
 	/// `count` frames of 1 MiB, each naming its index and incompressible.
+	#[cfg(feature = "async")]
 	fn mebibytes(count: usize) -> Vec<Bytes> {
 		let mut seed = 0x9e37_79b9_7f4a_7c15u64;
 		(0..count)

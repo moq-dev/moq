@@ -43,5 +43,5 @@ Once the original publisher leaves, the session ends with an error, and the
 player or `export rtc --connect` must reconnect to reach the replacement.
 `--connect` runs until its session ends.
 
-Built on [str0m](https://crates.io/crates/str0m); the library is
-[`moq-rtc`](https://docs.rs/moq-rtc).
+Built on a vendored, trimmed copy of [str0m](https://github.com/algesten/str0m); the library is
+[`moq-webrtc`](https://github.com/moq-dev/moq/tree/main/rs/moq-webrtc).

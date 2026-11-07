@@ -52,7 +52,7 @@ What to check first:
   dev-dependencies (tests, lint, benches), such as the mux test-profile IR
   count. Treat a shift in those rows across it as the hack's, not the code's.
   Keep feature-unification and cross-job cache work with the
-  [hakari quest](/quest/m0/ci/hakari.md), and test work with the
+  [hakari follow-ups](/quest/m0/ci/hakari-followups.md), and test work with the
   [test cost audit](/quest/m3/audit-test-cost.md). Dependency and manifest
   removal belongs to the [dependency audit](/quest/m3/audit-deps.md).
 - Transport-session duplication is fixed by
@@ -309,7 +309,7 @@ instantiating the whole map.
 - Explained, no action: aws-lc-sys's build script remains the longest unit
   in clean builds; the crypto provider stays (m0). usage-rs derive output
   scales with config fields and is external code. serde visitors per
-  deserializer are inherent to TOML config. moq-rtmp, moq-srt and moq-rtc
+  deserializer are inherent to TOML config. moq-rtmp, moq-srt and moq-webrtc
   entry points generic over `impl Into<Path>` instantiate their async bodies in
   the `moq` bin (20,327 lines with drop glue, 1.8%); a non-generic inner
   function would move them, but adds code for little. The catalog JSON diff

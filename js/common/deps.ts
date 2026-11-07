@@ -1,9 +1,11 @@
-// Verifies that every workspace package declares the `@moq/*` packages it imports.
+// Verifies that every workspace package declares the `@moq/*` packages it imports, and
+// that every workspace whose tests can reach `@moq/clock` loads its test preload.
 //
 // A bundler resolves an undeclared import through hoisting, so the tree builds and
 // the tests pass while a published consumer with a stricter resolver gets `undefined`.
+// Without the preload, a test that waits on the host clock passes silently.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "@babel/parser";
@@ -15,6 +17,7 @@ type Manifest = {
 	peerDependencies?: Record<string, string>;
 	optionalDependencies?: Record<string, string>;
 	devDependencies?: Record<string, string>;
+	scripts?: Record<string, string>;
 	workspaces?: string[];
 };
 
@@ -116,12 +119,49 @@ function packageName(specifier: string): string | undefined {
 	return name ? `${scope}/${name}` : undefined;
 }
 
+const PRELOAD = join(root, "js", "clock", "src", "preload.ts");
+
+/** Every package a manifest depends on, followed through the workspace manifests. */
+function reachable(pkg: Manifest, manifests: Map<string, Manifest>, found = new Set<string>()): Set<string> {
+	for (const list of [pkg.dependencies, pkg.peerDependencies, pkg.optionalDependencies, pkg.devDependencies]) {
+		for (const name of Object.keys(list ?? {})) {
+			if (found.has(name)) continue;
+			found.add(name);
+			const next = manifests.get(name);
+			if (next) reachable(next, manifests, found);
+		}
+	}
+	return found;
+}
+
+/** Whether `bun test` in this directory loads the clock guard preload. */
+function preloaded(dir: string): boolean {
+	const path = join(dir, "bunfig.toml");
+	if (!existsSync(path)) return false;
+	const config = Bun.TOML.parse(readFileSync(path, "utf8")) as { test?: { preload?: string | string[] } };
+	const preload = config.test?.preload ?? [];
+	return (Array.isArray(preload) ? preload : [preload]).some((entry) => resolve(dir, entry) === PRELOAD);
+}
+
 function main() {
 	const problems = new Set<string>();
 
-	for (const workspace of manifest(root).workspaces ?? []) {
+	const workspaces = (manifest(root).workspaces ?? []).map((workspace) => ({
+		workspace,
+		pkg: manifest(join(root, workspace)),
+	}));
+	const manifests = new Map(workspaces.flatMap(({ pkg }) => (pkg.name ? [[pkg.name, pkg] as const] : [])));
+
+	for (const { workspace, pkg } of workspaces) {
 		const dir = join(root, workspace);
-		const pkg = manifest(dir);
+
+		const tested = Object.values(pkg.scripts ?? {}).some((script) => /\bbun\s+test\b/.test(script));
+		const clock = pkg.name === "@moq/clock" || reachable(pkg, manifests).has("@moq/clock");
+		if (tested && clock && !preloaded(dir)) {
+			problems.add(
+				`${workspace}/bunfig.toml: tests reach @moq/clock, missing [test] preload of js/clock/src/preload.ts`,
+			);
+		}
 
 		const runtime = new Set([...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.peerDependencies ?? {})]);
 		const dev = new Set([
@@ -147,12 +187,12 @@ function main() {
 	}
 
 	if (problems.size > 0) {
-		console.error(`❌ ${problems.size} undeclared @moq dependencies:`);
+		console.error(`❌ ${problems.size} workspace dependency problems:`);
 		for (const problem of [...problems].sort()) console.error(`   ${problem}`);
 		process.exit(1);
 	}
 
-	console.log("✅ every imported @moq package is declared");
+	console.log("✅ every imported @moq package is declared and every clock test is guarded");
 }
 
 if (Bun.main === fileURLToPath(import.meta.url)) main();

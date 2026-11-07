@@ -195,14 +195,14 @@ pub struct moq_audio_hint {
 	/// Whether `bitrate` is present.
 	pub has_bitrate: bool,
 
-	/// The longest span between two group starts on this track, in
-	/// microseconds, when `has_group_duration` is true: a video GOP, or the span
-	/// between the audio cuts you make. An upper bound, so a broadcast may take
-	/// the largest across its tracks. Must be at least 1 and at most
+	/// The time between join points, the longest span between two group starts
+	/// on this track, in microseconds, when `has_join` is true: a video GOP, or
+	/// the span between the audio cuts you make. An upper bound, so a broadcast
+	/// may take the largest across its tracks. Must be at least 1 and at most
 	/// 2^53 - 1 milliseconds.
-	pub group_duration_us: u64,
-	/// Whether `group_duration_us` is present.
-	pub has_group_duration: bool,
+	pub join_us: u64,
+	/// Whether `join_us` is present.
+	pub has_join: bool,
 }
 
 impl moq_audio_hint {
@@ -212,25 +212,24 @@ impl moq_audio_hint {
 		Ok(())
 	}
 
-	/// The supplied group duration, for the broadcast's join interval.
-	fn group_duration(&self) -> Result<Option<std::time::Duration>, Error> {
-		group_duration(self.has_group_duration, self.group_duration_us)
+	/// The supplied join, for the broadcast's join interval.
+	fn join(&self) -> Result<Option<std::time::Duration>, Error> {
+		join(self.has_join, self.join_us)
 	}
 }
 
-/// The longest group duration a hint may give: 2^53 - 1 milliseconds, the largest
-/// integer a JavaScript reader of the catalog holds exactly.
-const MAX_GROUP_DURATION_US: u64 = ((1 << 53) - 1) * 1000;
+/// The longest join a hint may give: 2^53 - 1 milliseconds, the largest integer a
+/// JavaScript reader of the catalog holds exactly.
+const MAX_JOIN_US: u64 = ((1 << 53) - 1) * 1000;
 
-/// A supplied group duration, `None` when absent, or an error for 0 or past
-/// [MAX_GROUP_DURATION_US].
-fn group_duration(present: bool, us: u64) -> Result<Option<std::time::Duration>, Error> {
+/// A supplied join, `None` when absent, or an error for 0 or past [MAX_JOIN_US].
+fn join(present: bool, us: u64) -> Result<Option<std::time::Duration>, Error> {
 	if !present {
 		return Ok(None);
 	}
-	if us == 0 || us > MAX_GROUP_DURATION_US {
+	if us == 0 || us > MAX_JOIN_US {
 		return Err(Error::InvalidConfig(format!(
-			"group_duration_us must be 1..={MAX_GROUP_DURATION_US}, got {us}"
+			"join_us must be 1..={MAX_JOIN_US}, got {us}"
 		)));
 	}
 	Ok(Some(std::time::Duration::from_micros(us)))
@@ -305,14 +304,14 @@ pub struct moq_video_hint {
 	/// Whether `optimize_for_latency` is present.
 	pub has_optimize_for_latency: bool,
 
-	/// The longest span between two group starts on this track, in
-	/// microseconds, when `has_group_duration` is true: a video GOP, or the span
-	/// between the audio cuts you make. An upper bound, so a broadcast may take
-	/// the largest across its tracks. Must be at least 1 and at most
+	/// The time between join points, the longest span between two group starts
+	/// on this track, in microseconds, when `has_join` is true: a video GOP, or
+	/// the span between the audio cuts you make. An upper bound, so a broadcast
+	/// may take the largest across its tracks. Must be at least 1 and at most
 	/// 2^53 - 1 milliseconds.
-	pub group_duration_us: u64,
-	/// Whether `group_duration_us` is present.
-	pub has_group_duration: bool,
+	pub join_us: u64,
+	/// Whether `join_us` is present.
+	pub has_join: bool,
 }
 
 impl moq_video_hint {
@@ -333,9 +332,9 @@ impl moq_video_hint {
 		Ok(out)
 	}
 
-	/// The supplied group duration, for the broadcast's join interval.
-	fn group_duration(&self) -> Result<Option<std::time::Duration>, Error> {
-		group_duration(self.has_group_duration, self.group_duration_us)
+	/// The supplied join, for the broadcast's join interval.
+	fn join(&self) -> Result<Option<std::time::Duration>, Error> {
+		join(self.has_join, self.join_us)
 	}
 }
 
@@ -2746,7 +2745,7 @@ unsafe fn parse_audio_init(
 	let mut audio = moq_mux::import::AudioInit::new(audio_format_from_u32(config.format)?, init.to_vec());
 	audio.label = label.map(str::to_string);
 	config.hint.apply(&mut audio)?;
-	Ok((audio, config.hint.group_duration()?))
+	Ok((audio, config.hint.join()?))
 }
 
 /// Publish one video codec as a new media track.
@@ -2787,7 +2786,7 @@ unsafe fn parse_video_init(
 			.media_video_priority(ffi::parse_id(config.lower)?)?
 			.saturating_sub(1);
 	}
-	Ok((video, config.hint.group_duration()?))
+	Ok((video, config.hint.join()?))
 }
 
 /// Publish a container, which demuxes and publishes its own tracks.
@@ -3399,6 +3398,20 @@ pub extern "C" fn moq_publish_track_group_at(track: u32, sequence: u64) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().publish.track_group_at(track, sequence)
+	})
+}
+
+/// Declare that a raw track will never produce groups `start` up to the exclusive `end`.
+///
+/// Readers waiting on them move past without ending. The skip is final: creating a group
+/// there with [moq_publish_track_group_at] then fails, though a group already written stays.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_skip(track: u32, start: u64, end: u64) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		State::lock().publish.track_skip(track, start, end)
 	})
 }
 

@@ -14,7 +14,7 @@ Planned 2026-11-04 with the maintainer, from the limit
 [moq-dev/moq#7888](https://github.com/moq-dev/moq/pull/7888) documented.
 Milestone m2 (maintainer).
 
-Where it gets lost: an endpoint's `.socket/<id>` broadcast is hidden, and
+Where it gets lost: an endpoint's `.server/<id>` broadcast is hidden, and
 before lite-07 ANNOUNCE_REQUEST has no hidden opt-in. When a peer `P`
 reaches its relay `R` over a moq-lite-06 (or older) client session whose
 publish half isn't opted into hidden routes, `R` never learns `P`'s
@@ -35,7 +35,7 @@ look, and the evidence has to name the endpoint.
 
 Recommended design, to settle in this quest:
 
-- **Find the endpoint.** When a dial's interest in `<prefix>/.socket/<peer>`
+- **Find the endpoint.** When a dial's interest in `<prefix>/.server/<peer>`
   reaches a relay, the relay asks each of its older sessions whose publish
   grant covers that path, with an ANNOUNCE_REQUEST naming the path, held
   open while the dial waits so a peer that comes online later is seen. Such a
@@ -57,7 +57,7 @@ Recommended design, to settle in this quest:
   see the dial, and a dial sends no SUBSCRIBE until the endpoint is
   announced. Settle how the dialer's narrow interest reaches the holding
   relay (for example, cluster links forwarding narrow interest under
-  `.socket`), and how markers cross cluster links.
+  `.server`), and how markers cross cluster links.
 - **Where the marker rides.** Its own announce-stream message, or a flag on
   the [route layer](/quest/m2/cluster-routing/routes/README.md)'s messages if
   that layer has landed. Choose whichever leaves the draft simpler.

@@ -25,8 +25,8 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
-aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-rs = { version = "1" }
+base16ct = { version = "1", default-features = false, features = ["alloc"] }
 base64-2b5c6dc72f624058 = { package = "base64", version = "0.23" }
 base64-3c51e837cfc5589a = { package = "base64", version = "0.22" }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
@@ -36,13 +36,13 @@ camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive"] }
 clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "help", "std", "suggestions", "usage"] }
-const-oid = { version = "0.9", default-features = false, features = ["db"] }
+const-oid = { version = "0.10", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
-der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["oid", "pem", "std"] }
-der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["oid", "pem", "std"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "oid", "std"] }
 digest-a6292c17cd707f01 = { package = "digest", version = "0.11", features = ["alloc", "mac", "oid"] }
@@ -87,8 +87,7 @@ pkcs8-a6292c17cd707f01 = { package = "pkcs8", version = "0.11", default-features
 portable-atomic = { version = "1" }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
-rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
-rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
+rand = { version = "0.8" }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
@@ -96,6 +95,7 @@ regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+sec1 = { version = "0.8", features = ["ctutils", "pem", "std", "subtle"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
@@ -134,8 +134,8 @@ zeroize = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
-aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-rs = { version = "1" }
+base16ct = { version = "1", default-features = false, features = ["alloc"] }
 base64-2b5c6dc72f624058 = { package = "base64", version = "0.23" }
 base64-3c51e837cfc5589a = { package = "base64", version = "0.22" }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
@@ -146,13 +146,13 @@ cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive"] }
 clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "help", "std", "suggestions", "usage"] }
-const-oid = { version = "0.9", default-features = false, features = ["db"] }
+const-oid = { version = "0.10", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
-der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["oid", "pem", "std"] }
-der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["oid", "pem", "std"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 derive_more-impl = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "oid", "std"] }
@@ -201,8 +201,7 @@ ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "s
 proc-macro2 = { version = "1" }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
 quote = { version = "1" }
-rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
-rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
+rand = { version = "0.8" }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
@@ -210,6 +209,7 @@ regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+sec1 = { version = "0.8", features = ["ctutils", "pem", "std", "subtle"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
@@ -250,13 +250,15 @@ winnow-dff4ba8e3ae991db = { package = "winnow", version = "1", features = ["simd
 zeroize = { version = "1", features = ["derive"] }
 
 [target.aarch64-apple-darwin.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 block2 = { version = "0.6" }
 crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -282,13 +284,15 @@ tower-http = { version = "0.6", default-features = false, features = ["decompres
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 block2 = { version = "0.6" }
 crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -314,6 +318,8 @@ tower-http = { version = "0.6", default-features = false, features = ["decompres
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
@@ -322,10 +328,11 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31", features = ["net", "uio"] }
@@ -334,7 +341,6 @@ proc-macro2 = { version = "1" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
 regex = { version = "1" }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
@@ -347,6 +353,8 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-unknown-linux-gnu.build-dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
@@ -355,17 +363,17 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
@@ -377,10 +385,11 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-pc-windows-msvc.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -398,10 +407,11 @@ windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", feat
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-pc-windows-msvc.build-dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -419,6 +429,8 @@ windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", feat
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
@@ -427,10 +439,11 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31", features = ["net", "uio"] }
@@ -439,7 +452,6 @@ proc-macro2 = { version = "1" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 quote = { version = "1" }
 regex = { version = "1" }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
@@ -452,6 +464,8 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
@@ -460,17 +474,17 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
+itertools = { version = "0.13" }
 libc = { version = "0.2", features = ["extra_traits"] }
 linux-raw-sys = { version = "0.12", features = ["auxvec", "elf", "if_ether", "ioctl", "net", "netlink", "no_std", "prctl", "system", "xdp"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 nom-15128469a54ed75a = { package = "nom", version = "7" }
 quick-xml = { version = "0.41", features = ["overlapped-lists", "serialize"] }
 regex = { version = "1" }
-rustc-hash = { version = "1" }
 rustix = { version = "1", features = ["event", "net", "param", "pipe", "process", "shm", "system", "termios", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "aws_lc_rs"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }

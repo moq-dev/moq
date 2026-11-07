@@ -728,8 +728,8 @@ test("a selected camera stays announced while real capture is reopening", async 
 			return { publish };
 		});
 
-		// Muting and hiding only flip each rendition to `enabled: false`: the same tracks stay live and
-		// unmuting reopens nothing.
+		// Hiding only flips video to `enabled: false` and muting keeps audio enabled while it sends
+		// nothing: the same tracks stay live and unmuting reopens nothing.
 		const opened = await captured(publication);
 		await gate.evaluate((gate) => {
 			gate.hold = true;
@@ -741,7 +741,8 @@ test("a selected camera stays announced while real capture is reopening", async 
 		});
 		await page.waitForFunction(
 			({ publish }) =>
-				publish.audio.out.catalog.peek()?.enabled === false &&
+				!!publish.audio.out.catalog.peek() &&
+				publish.audio.out.catalog.peek()?.enabled === undefined &&
 				publish.video.out.catalog.peek()?.enabled === false,
 			publication,
 		);
@@ -1071,7 +1072,7 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 				["moq-watch", "backend", "gpu", "backend", "auto"],
 				["moq-watch", "visible", "sometimes", "visible", "never"],
 				["moq-watch", "delay", "30", "delay", "instant"],
-				["moq-watch", "buffer", "30", "buffer", 0],
+				["moq-watch", "lookahead", "30", "lookahead", 0],
 				["moq-watch", "catalog-format", "guess", "catalogFormat", "manual"],
 				["moq-publish", "source", "monitor", "source", undefined],
 				["moq-publish", "preview", "mse", "preview", "none"],
@@ -1103,6 +1104,26 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 		});
 		for (const result of results)
 			expect(result).toEqual({ ...result, refused: true, threw: true, recovered: true });
+		// `buffer` was renamed to `lookahead`: the old attribute reports the rename until removed.
+		const renamedBuffer = await page.evaluate(() => {
+			const errors: string[] = [];
+			const listener = (event: ErrorEvent) => {
+				errors.push(event.message);
+				event.preventDefault();
+			};
+			window.addEventListener("error", listener);
+			const watch = document.createElement("moq-watch");
+			watch.setAttribute("buffer", "30s");
+			document.body.append(watch);
+			const refused = !watch.connection.enabled.peek() && errors.some((error) => error.includes("lookahead"));
+			watch.removeAttribute("buffer");
+			const recovered = watch.connection.enabled.peek();
+			watch.remove();
+			watch.signals.close();
+			window.removeEventListener("error", listener);
+			return { refused, recovered };
+		});
+		expect(renamedBuffer).toEqual({ refused: true, recovered: true });
 		const blocked = await page.evaluate(() => {
 			const watch = document.createElement("moq-watch");
 			watch.setAttribute("backend", "bad");

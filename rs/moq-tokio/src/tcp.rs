@@ -319,7 +319,7 @@ impl TlsAcceptor {
 			let session = crate::server::within(deadline, handshake).await?;
 			let incoming = crate::server::Incoming::tcp(&session, Some(&self.tls), remote, local, deadline, active)
 				.with_alpn(alpn);
-			crate::server::accept_stream(&self.server, session, incoming).await
+			crate::server::Request::accept_qmux(&self.server, session, incoming).await
 		})
 		.await
 	}
@@ -667,6 +667,7 @@ mod tests {
 	/// through to the loopback listener within the stagger delay.
 	#[tokio::test]
 	async fn failover_recovers_from_blackhole_candidate() {
+		kio::clock::host_time();
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
 			.await
 			.expect("bind listener")

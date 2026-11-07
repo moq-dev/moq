@@ -80,6 +80,9 @@ pub struct Client {
 	/// in-memory sessions on a paused clock.
 	#[cfg(test)]
 	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
+	/// Where every dial goes instead of the network, set by [`Self::with_network`].
+	#[cfg(feature = "sim")]
+	network: Option<crate::sim::Network>,
 }
 
 /// A test stand-in for [`Client::dial`], handed the address and the MoQ client a real dial
@@ -176,6 +179,8 @@ impl Client {
 			qmux,
 			#[cfg(test)]
 			dialer: None,
+			#[cfg(feature = "sim")]
+			network: None,
 		})
 	}
 
@@ -228,10 +233,17 @@ impl Client {
 		self
 	}
 
-	/// Pin the identity a dialed peer's routes are attributed to, for a peer whose
+	/// Pin the hop id a dialed peer's routes are attributed to, for a peer whose
 	/// identity the caller has established; see [`moq_net::Client::with_peer_hop`].
-	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
+	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
 		self.moq = self.moq.with_peer_hop(hop);
+		self
+	}
+
+	/// Dial through `network` instead of opening sockets, whatever a URL's scheme.
+	#[cfg(feature = "sim")]
+	pub fn with_network(mut self, network: crate::sim::Network) -> Self {
+		self.network = Some(network);
 		self
 	}
 
@@ -322,38 +334,22 @@ impl Client {
 		Some(self.with_subscriber(origin).connect(url))
 	}
 
-	/// Run a MoQ client session over the data channel an [`crate::webrtc::Offerer`] opened.
+	/// Run a MoQ client session over a qmux session established outside this client, such
+	/// as over a WebRTC data channel.
 	///
-	/// Waits for ICE and the channel to come up, bounded by the connect timeout. A
-	/// peer link cannot be redialed, so there is no reconnect: the session ends with
-	/// the peer connection.
-	#[cfg(feature = "webrtc")]
-	pub async fn connect_webrtc(&self, peer: &crate::webrtc::Offerer) -> crate::Result<moq_net::Session> {
+	/// The connect timeout bounds the MoQ handshake from this call. A transport handed
+	/// over cannot be redialed, so there is no reconnect: the session ends with it.
+	#[cfg(feature = "qmux")]
+	pub async fn connect_with(&self, session: qmux::Session) -> crate::Result<moq_net::Session> {
+		let timeout = self.policy.timeout;
+		let connect = connect_session(&self.moq, session);
 		crate::runtime::scope(async move {
-			let protocol = peer.protocol();
-			if !self.versions.alpns().contains(&protocol) {
-				return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
+			match timeout.is_zero() {
+				true => Ok(connect.await?),
+				false => Ok(kio::clock::timeout(timeout, connect)
+					.await
+					.map_err(|_| Error::ConnectTimeout(timeout))??),
 			}
-
-			let attempt = async {
-				let opened = peer.channel().await?;
-				let config = opened.config;
-				let session = qmux::Session::connect(opened.channel, config)
-					.await
-					.map(crate::spawn_qmux)
-					.map_err(crate::webrtc::Error::from)?;
-				Ok::<_, Error>(connect_session(&self.moq, session).await?)
-			};
-
-			let timeout = self.policy.timeout;
-			let session = match timeout.is_zero() {
-				true => attempt.await?,
-				false => kio::clock::timeout(timeout, attempt)
-					.await
-					.map_err(|_| Error::ConnectTimeout(timeout))??,
-			};
-			tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
-			Ok(session)
 		})
 		.await
 	}
@@ -396,6 +392,16 @@ impl Client {
 		#[cfg(test)]
 		if let Some(dialer) = &self.dialer {
 			return dialer(addr, client.moq.clone()).await;
+		}
+		#[cfg(feature = "sim")]
+		if let Some(network) = &self.network {
+			let link = network.dial(addr.url().clone(), self.versions.clone()).await?;
+			// As a socket dial does, so a SETUP that carries the target carries this one.
+			let moq = client.moq.clone().with_url(addr.url().clone());
+			let (session, driver) = moq.connect(moq_net::time::Instant::now(), link).await?;
+			crate::runtime::Spawner::current().spawn(moq_net::time::run(driver));
+			// What the link stands in for: a session the relay labels as QUIC.
+			return Ok(Dialed::new(session, crate::Transport::Quic));
 		}
 
 		// Each compiled backend adds state to this dispatch future. Keep it off the

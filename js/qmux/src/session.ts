@@ -1,4 +1,15 @@
-import { Instant, type Interval, interval, Milli, MissedTickBehavior, Nano, now, Second, timeout } from "@moq/clock";
+import {
+	Elapsed,
+	Instant,
+	type Interval,
+	interval,
+	Milli,
+	MissedTickBehavior,
+	Nano,
+	now,
+	Second,
+	timeout,
+} from "@moq/clock";
 import { Credit, replenishWindow } from "./credit.ts";
 import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
@@ -6,7 +17,7 @@ import * as Frame from "./frame.ts";
 import { DEFAULT_TRANSPORT_PARAMS, usesRecords } from "./frame.ts";
 import { RecvStream } from "./recv.ts";
 import { RecvOpen } from "./recv-open.ts";
-import { DEFAULT_SEND_ORDER, SendScheduler, type SendSink, WritableStreamSink } from "./scheduler.ts";
+import { BacklogSink, DEFAULT_SEND_ORDER, SendScheduler, type SendSink, WritableStreamSink } from "./scheduler.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 import {
@@ -37,6 +48,9 @@ export interface Config {
 	streamReceiveWindow?: bigint;
 	/** Idle timeout in milliseconds, or null to disable it; zero is refused. */
 	idleTimeout?: number | null;
+	/** How long `ready` waits for the peer's transport parameters, in milliseconds, or null to wait
+	 *  indefinitely; zero is refused. The session closes when it passes. */
+	handshakeTimeout?: number | null;
 	/** Maximum QMux Record size in bytes (draft-01). */
 	maxRecordSize?: bigint;
 	/** Largest DATAGRAM *frame* (RFC 9221: type + length + payload) we advertise
@@ -54,6 +68,7 @@ const DEFAULT_CONFIG: Required<Config> = {
 	receiveWindow: 1_048_576n,
 	streamReceiveWindow: 262_144n,
 	idleTimeout: 30_000,
+	handshakeTimeout: 10_000,
 	maxRecordSize: Frame.DEFAULT_MAX_RECORD_SIZE,
 	// Fill a full record by default; the record layer bounds the size.
 	maxDatagramFrameSize: Frame.DEFAULT_MAX_RECORD_SIZE,
@@ -72,9 +87,9 @@ function resolveConfig(config?: Config): Required<Config> {
 		if (value !== undefined) Object.assign(resolved, { [key]: value });
 	}
 	for (const [key, value] of Object.entries(resolved)) {
-		if (key === "idleTimeout") {
+		if (key === "idleTimeout" || key === "handshakeTimeout") {
 			if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) {
-				throw new TypeError("idleTimeout must be a positive safe integer or null");
+				throw new TypeError(`${key} must be a positive safe integer or null`);
 			}
 		} else if (key !== "maxDatagramFrameSize" || value !== null) {
 			if (typeof value !== "bigint") throw new TypeError(`${key} must be a bigint`);
@@ -352,6 +367,30 @@ export interface StreamCredit {
 	blocked: boolean;
 }
 
+/** What a send stream has sent so far, the shape of W3C WebTransport's `WebTransportSendStreamStats`. */
+export interface SendStreamStats {
+	/** The bytes written to the stream. */
+	bytesWritten: number;
+	/** The bytes handed to the WebSocket. */
+	bytesSent: number;
+	/** The bytes the peer has acknowledged, which are `bytesSent`: QMux acknowledges data once
+	 *  it is passed to the underlying transport. */
+	bytesAcknowledged: number;
+}
+
+/** A stream's send half, with W3C `WebTransportSendStream`'s `sendOrder` and `getStats()`. */
+export interface SendStream extends WritableStream<Uint8Array> {
+	/** Its priority against the session's other streams; higher sends first. */
+	sendOrder: number;
+	/** What the stream has written, sent, and had acknowledged so far. */
+	getStats(): Promise<SendStreamStats>;
+}
+
+/** A bidirectional stream whose send half is a {@link SendStream}. */
+export interface BidirectionalStream extends WebTransportBidirectionalStream {
+	readonly writable: SendStream;
+}
+
 /** Options for opening a QMux Session over WebSocket. */
 export interface SessionOptions extends WebTransportOptions {
 	/** Application-level subprotocols to advertise via `Sec-WebSocket-Protocol`.
@@ -394,14 +433,19 @@ export interface SessionOptions extends WebTransportOptions {
 	config?: Config;
 
 	/** Initial send-buffer high-water mark in bytes, used for write
-	 *  backpressure. Only takes effect when falling back to the
-	 *  `WebSocketStream` ponyfill (no native `WebSocketStream`); the
-	 *  native API sizes its own send buffer. Defaults to 64 KiB.
+	 *  backpressure: past it, writes wait and datagrams are dropped.
+	 *  Defaults to 64 KiB.
 	 *
 	 *  For best throughput *and* prioritization, set this to roughly the
 	 *  bandwidth-delay product (RTT × estimated throughput) and adjust it at
 	 *  runtime with {@link Session.setSendBufferSize}. */
 	sendBufferSize?: number;
+}
+
+// At least one byte, so a lone frame can always be written; non-finite sizes are a caller bug.
+function sendBufferSize(bytes: number): number {
+	if (!Number.isFinite(bytes)) throw new RangeError(`invalid sendBufferSize: ${bytes}`);
+	return Math.max(1, Math.floor(bytes));
 }
 
 /** Options for accepting a QMux Session on an already-negotiated socket.
@@ -422,7 +466,7 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 	protocol?: string;
 }
 
-/** Default send-buffer high-water mark (bytes) for the WebSocketStream ponyfill. */
+/** Default send-buffer high-water mark (bytes). */
 const DEFAULT_SEND_BUFFER_SIZE = 64 * 1024;
 
 /** How long a closing session waits for a backed-up socket to take its close
@@ -597,11 +641,13 @@ interface StreamFlowState {
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
 export default class Session implements WebTransport {
-	// The transport: a native `WebSocketStream` when the platform has one (real
-	// backpressure), otherwise the `WebSocketStream` ponyfill over a plain
-	// `WebSocket` (bufferedAmount-based backpressure). Either way, one API.
+	// The transport: a native `WebSocketStream` when the platform has one,
+	// otherwise the `WebSocketStream` ponyfill over a plain `WebSocket`. Either
+	// way, one API.
 	#wss?: WebSocketStreamLike;
 	#scheduler?: SendScheduler;
+	// Counts the send backlog of any transport but the ponyfill, which counts its own.
+	#backlog?: BacklogSink;
 	#sendBufferSize: number;
 	// The stream-id role: false dials (client), true accepts (server). Set by
 	// [[Session.accept]]; every id we mint and every id we allow the peer to mint
@@ -636,7 +682,8 @@ export default class Session implements WebTransport {
 		return this.#protocol;
 	}
 
-	/** Resolves once the WebSocket opens and the session can carry streams. */
+	/** Resolves once the peer's transport parameters arrive, as a WebTransport handshake completes:
+	 *  stream limits and `datagrams.maxDatagramSize` are known from then on. */
 	readonly ready: Promise<void>;
 	#readyResolve: () => void;
 	#readyReject: (err: Error) => void;
@@ -646,8 +693,8 @@ export default class Session implements WebTransport {
 	#closedReject: (err: Error) => void;
 
 	/** Bidirectional streams the peer opens, in arrival order. */
-	readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
-	#incomingBidirectionalQueue: IncomingStreamQueue<WebTransportBidirectionalStream>;
+	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
+	#incomingBidirectionalQueue: IncomingStreamQueue<BidirectionalStream>;
 	/** Unidirectional streams the peer opens, in arrival order. */
 	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
 	#incomingUnidirectionalQueue: IncomingStreamQueue<ReadableStream<Uint8Array>>;
@@ -740,7 +787,7 @@ export default class Session implements WebTransport {
 		this.#config = resolveConfig(options?.config);
 		this.#requireProtocol = dial && (options?.requireProtocol ?? false);
 		this.#ourParams = configToTransportParams(this.#config);
-		this.#sendBufferSize = options?.sendBufferSize ?? DEFAULT_SEND_BUFFER_SIZE;
+		this.#sendBufferSize = sendBufferSize(options?.sendBufferSize ?? DEFAULT_SEND_BUFFER_SIZE);
 
 		// Recv stream count limits are version-independent.
 		this.#recvBiCredit = new Credit(this.#config.maxStreamsBidi);
@@ -763,7 +810,7 @@ export default class Session implements WebTransport {
 		// observe the rejection.
 		this.closed.catch(() => {});
 
-		this.#incomingBidirectionalQueue = new IncomingStreamQueue<WebTransportBidirectionalStream>();
+		this.#incomingBidirectionalQueue = new IncomingStreamQueue<BidirectionalStream>();
 		this.incomingBidirectionalStreams = this.#incomingBidirectionalQueue.readable;
 
 		this.#incomingUnidirectionalQueue = new IncomingStreamQueue<ReadableStream<Uint8Array>>();
@@ -771,10 +818,9 @@ export default class Session implements WebTransport {
 
 		this.#attach(
 			dial
-				? // Open the transport via `WebSocketStream` - native when present (real
-					// backpressure), else the ponyfill over a plain `WebSocket`. One code
-					// path for both, so the path exercised in tests is the one Chromium
-					// runs natively.
+				? // Open the transport via `WebSocketStream` - native when present, else
+					// the ponyfill over a plain `WebSocket`. One code path for both, so the
+					// path exercised in tests is the one Chromium runs natively.
 					openWebSocketStream(toWebSocketUrl(source as string | URL), {
 						protocols: subprotocols,
 						highWaterMark: this.#sendBufferSize,
@@ -831,7 +877,12 @@ export default class Session implements WebTransport {
 						this.#transportClose();
 						return;
 					}
-					this.#startSession(protocol, new WritableStreamSink(conn.writable));
+					// Only the ponyfill's `desiredSize` measures bytes; the native API's counts
+					// writes, so it would read as backpressured with any write in flight.
+					let sink: SendSink;
+					if (wss instanceof WebSocketStream) sink = new WritableStreamSink(conn.writable);
+					else sink = this.#backlog = new BacklogSink(conn.writable, this.#sendBufferSize);
+					this.#startSession(protocol, sink);
 					void this.#readLoop(conn.readable.getReader());
 				} catch (error) {
 					this.#closeReason ??= error instanceof Error ? error : new Error("Invalid QMux subprotocol");
@@ -932,11 +983,19 @@ export default class Session implements WebTransport {
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
 		this.#recvDataMax = this.#ourParams.initialMaxData;
-		// Our own deadline applies until the peer's parameters arrive, so a peer
-		// that never sends them can't hold the session open.
+		// Our own idle deadline applies until the peer's parameters arrive.
 		this.#startIdleTimerIfEnabled();
-
-		this.#readyResolve();
+		// The handshake deadline also covers qmux-00 and a disabled idle timeout, so
+		// a peer that never sends its parameters can't hold `ready` forever.
+		const handshake = this.#config.handshakeTimeout;
+		if (handshake !== null) {
+			timeout(Nano.fromMilli(Milli(handshake)), this.ready).catch((err) => {
+				if (!(err instanceof Elapsed)) return;
+				this.#closeReason ??= new Error("handshake timeout");
+				this.#abort(0, "handshake timeout");
+				this.#transportClose();
+			});
+		}
 	}
 
 	#onData(data: Uint8Array) {
@@ -1112,6 +1171,7 @@ export default class Session implements WebTransport {
 
 		// The peer's limit may be shorter than ours.
 		this.#startIdleTimerIfEnabled();
+		this.#readyResolve();
 	}
 
 	/** Effective idle timeout in ms, or 0 if disabled.
@@ -1701,7 +1761,13 @@ export default class Session implements WebTransport {
 		await scheduler.enqueueStream(streamId, bytes);
 	}
 
-	async #sendStreamDataWithFlowControl(id: Stream.Id, streamId: bigint, data: Uint8Array, signal: AbortSignal) {
+	async #sendStreamDataWithFlowControl(
+		id: Stream.Id,
+		streamId: bigint,
+		data: Uint8Array,
+		signal: AbortSignal,
+		stats: SendStreamStats,
+	) {
 		const flow = this.#streamFlow.get(streamId);
 		if (!flow) throw new Error(`missing flow state for stream ${streamId}`);
 
@@ -1738,13 +1804,16 @@ export default class Session implements WebTransport {
 
 			flow.sendOffset += BigInt(sendable);
 			offset += sendable;
+			stats.bytesSent += sendable;
+			stats.bytesAcknowledged = stats.bytesSent;
 		}
 	}
 
-	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal) {
+	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal, stats: SendStreamStats) {
 		const streamId = id.value.value;
 
-		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal);
+		stats.bytesWritten += data.byteLength;
+		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal, stats);
 	}
 
 	/** Send the FIN. Routed through the stream's own queue so it stays ordered
@@ -1836,7 +1905,7 @@ export default class Session implements WebTransport {
 
 	/** Open a bidirectional stream, waiting for the peer to grant stream credit
 	 *  unless `waitUntilAvailable` is false. */
-	async createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream> {
+	async createBidirectionalStream(options?: SendStreamOptions): Promise<BidirectionalStream> {
 		await this.#claimStream(Stream.Dir.Bi, options, "Failed to create bidirectional stream.");
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
@@ -1882,7 +1951,7 @@ export default class Session implements WebTransport {
 
 	/** Open a send-only stream, waiting for the peer to grant stream credit
 	 *  unless `waitUntilAvailable` is false. */
-	async createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>> {
+	async createUnidirectionalStream(options?: SendStreamOptions): Promise<SendStream> {
 		await this.#claimStream(Stream.Dir.Uni, options, "Failed to create send stream.");
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
@@ -1906,8 +1975,9 @@ export default class Session implements WebTransport {
 	}
 
 	/** The writable for a stream's send half. */
-	#sendWritable(id: Stream.Id, sendOrder: number): WritableStream<Uint8Array> {
+	#sendWritable(id: Stream.Id, sendOrder: number): SendStream {
 		const streamId = id.value.value;
+		const stats: SendStreamStats = { bytesWritten: 0, bytesSent: 0, bytesAcknowledged: 0 };
 		let signal!: AbortSignal;
 		const reset = (e: unknown) => {
 			this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
@@ -1941,7 +2011,7 @@ export default class Session implements WebTransport {
 				);
 			},
 			write: async (chunk, controller) => {
-				await this.#sendStreamData(id, chunk, controller.signal);
+				await this.#sendStreamData(id, chunk, controller.signal, stats);
 			},
 			abort: reset,
 			close: async () => {
@@ -1960,7 +2030,13 @@ export default class Session implements WebTransport {
 			},
 		});
 		this.#attachSendOrder(writable, streamId, sendOrder);
-		return writable;
+		// W3C `WebTransportSendStream.getStats()`, so a caller can tell what the peer has.
+		Object.defineProperty(writable, "getStats", {
+			configurable: true,
+			value: async (): Promise<SendStreamStats> => ({ ...stats }),
+		});
+		// Both properties are defined above.
+		return writable as SendStream;
 	}
 
 	/** Shared teardown for both terminal transitions: tears down streams,
@@ -2094,13 +2170,11 @@ export default class Session implements WebTransport {
 	 *  backpressure. A QMux extension beyond the standard `WebTransport` API:
 	 *  set this to roughly the bandwidth-delay product (RTT × estimated
 	 *  throughput) to keep the pipe full while leaving as much queued data as
-	 *  possible reprioritizable by the send scheduler.
-	 *
-	 *  No-op when a native `WebSocketStream` is in use (it sizes its own send
-	 *  buffer); effective with the `WebSocketStream` ponyfill fallback. */
+	 *  possible reprioritizable by the send scheduler. */
 	setSendBufferSize(bytes: number) {
-		this.#sendBufferSize = Math.max(1, Math.floor(bytes));
+		this.#sendBufferSize = sendBufferSize(bytes);
 		this.#wss?.setHighWaterMark?.(this.#sendBufferSize);
+		this.#backlog?.setHighWaterMark(this.#sendBufferSize);
 	}
 
 	/** Always `"default"`: the underlying TCP connection does its own congestion control. */

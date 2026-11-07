@@ -23,6 +23,7 @@ deleted.
 - [Weekly mutation testing on critical modules](/quest/m4/mutants.md) - cargo-mutants runs weekly on moq-auth and moq-net's permission, resume, and expiry code
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [moq-auth drops the unused peer grant API](/quest/m4/auth-drop-peer-grant.md) - P2P trusts its peers, so `PeerGrant` and its `KeySet` methods go
+- [Challenge proof for certificate credentials](/quest/m4/cert-challenge.md) - a relay can require a signed nonce, so a certificate credential replayed within its time window admits nothing
 - [Benchmark sources](/quest/m4/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
 - [HLS and DASH browser playback](/quest/m4/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly
 - [Cache fair share](/quest/m4/cache-fairness.md) - one tenant cannot crowd another out of the relay's shared group cache
@@ -66,12 +67,13 @@ deleted.
 - [Drop kio's epoch fence](/quest/m4/crossbeam-pin-fence.md) - waiting on crossbeam#1352, then the `Read::drop` fence goes
 - [A cancelled miss stops waiting](/quest/m4/fill-wait-cancel-test.md) - a test proves a relay miss waiting on its own fill ends when no reader wants it
 - [No MOQ_* knobs outside the binaries](/quest/m4/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
+- [The API diff reports GStreamer element properties](/quest/m4/api-diff-gst.md) - `just api-diff` lists added, removed, and changed moq-gst properties
+- [Hand-written wrappers reach every FFI item](/quest/m4/binding-export-coverage.md) - Python, Go, and Swift fail a test when an FFI item has no wrapper path, as Kotlin does
 - [The HLS server follows each path once](/quest/m4/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m4/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
 - [moq-bench reports sub-millisecond latency](/quest/m4/bench-latency-resolution.md) - steady-window latency resolves finer than 1 ms
 - [Benchmark series stay meaningful](/quest/m4/bench-hygiene.md) - a warm `burst` variant, stale series pruned, and slow-group `bytes` kept out of series names
 - [Re-run the SPS fuzzer on h264-reader](/quest/m4/sps-fuzz-h264-reader.md) - the H.264 SPS overflow is rechecked on the new parser
-- [Drop the H.265 SPS pre-walk once scuffle is fixed](/quest/m4/scuffle-sps-bump.md) - waiting on ScuffleCloud/scuffle#653 and #654 releases, then bump and drop the walk
 - [PCM encodes in one pass](/quest/m4/pcm-bulk-encode.md) - the PCM encoder converts a frame in bulk instead of one sample at a time
 - [moq-quic's internal dev-dependencies are path-only](/quest/m4/quic-dev-dep-path.md) - moq-congestion is a path dev-dependency
 - [moq-mux's AAC config reports SBR](/quest/m4/aac-sbr-config.md) - moq-audio reads backward-compatible SBR from the config

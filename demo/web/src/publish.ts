@@ -142,7 +142,7 @@ function encoderConfig(effect: Signals.Effect, target: VideoTarget): Video.Confi
 		codec: effect.get(codec),
 		maxPixels: target.width && target.height ? target.width * target.height : undefined,
 		maxBitrate: br != null ? br * 1000 : undefined,
-		keyframeInterval: kf != null ? Milli(kf) : undefined,
+		join: kf != null ? Milli(kf) : undefined,
 		frameRate: target.frameRate,
 	};
 }

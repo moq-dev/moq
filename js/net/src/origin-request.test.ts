@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
 import { StreamCode, StreamError } from "./error";
-import { RouteInfo } from "./hop";
+import { WireRoute } from "./hop";
 import * as Instance from "./instance.ts";
 import { type Following, Producer, type Requesting } from "./origin";
 import * as Path from "./path";
@@ -294,7 +294,7 @@ for (const received of [false, true]) {
 		const events: string[] = [];
 		const stop = wireOf(origin).interests((prefix, wanted) => events.push(`${prefix} ${wanted}`));
 		const source = new BroadcastProducer();
-		const route = received ? wireOf(origin).receive(path, RouteInfo.default) : origin.routePrefix(path);
+		const route = received ? wireOf(origin).receive(path, WireRoute.default) : origin.routePrefix(path);
 		void (async () => {
 			for await (const request of route.requested()) request.serve(source.consume());
 		})();

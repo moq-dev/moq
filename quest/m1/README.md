@@ -19,21 +19,26 @@ Placements decided in the re-cut: read-backfill (a JS fix that matches Rust),
 buffered-ascending (lite-07 already carries the order field), webrtc-vendor
 (internal, though it requires the m2 rename), and the crates.io trusted
 publisher and OIDC quests (setup after the cut's first publishes) are
-additive. [video-vaapi](/quest/m1/video-vaapi.md) moved up from later work
+additive. video-vaapi moved up from later work
 because a downstream iGPU transcode trial needs it now.
 
 Held here by open claims: a quest's branch is its path, so a claimed quest
 cannot move until its PR merges, and an epic moves with its children. These
 breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: api-audit, datagram-tracks, drop-set, rind, session-policy, and
+`Required`, so the cut still waits on them: api-audit, drop-set, rind, and
 stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
-moves what remains of them once their claims merge. release-perf, held for
-the same reason, gates the cut through the
-[cut gate](/quest/m2/cut-gate/README.md).
+moves what remains of them once their claims merge.
 
 ## Required
 
-- [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
+- [JS cache pool](/quest/m1/js-cache-pool.md) - `js/net` bills cached frames and drop-set runs to a per-broadcast byte pool ported from Rust
+- [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
+- [Only the relay's own stats publisher uses the stats prefix](/quest/m1/stats-prefix.md) - a broad grant can no longer publish unmetered media or spoof node stats under `.stats`
+- [js/net and moq-net decode the same inputs the same way](/quest/m1/js-net-input-checks.md) - a shared input corpus pins both decoders, and a typed endpoint stops loopback spellings from slipping past GOAWAY checks
+- [Rust and JS run one token and key-set corpus](/quest/m1/token-parse-strict.md) - a shared corpus pins both parsers, so a null `exp` no longer means never-expiring in Rust
+- [Resetting a kio sleep to its deadline does not wake it](/quest/m1/kio-reset-same-deadline.md) - a caller that resets on every poll no longer spins the simulator
+- [A refused lite SUBSCRIBE_UPDATE ends the subscription](/quest/m1/lite-update-refused.md) - the publisher no longer serves a removed range or reports the wrong start after the model refuses an update
+- [A cluster peer's identity is a type, not a string](/quest/m1/cluster-peer-identity.md) - a canonical `PeerKey` and a refused duplicate cluster id stop self-dials, double links, and silent mesh partitions
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
@@ -41,24 +46,23 @@ the same reason, gates the cut through the
 - [Group errors are cached by kind](/quest/m1/group-error-cache.md) - permanent group errors bind every reader, retryable ones are kept only for a bounded time, and a live SUBSCRIBE_DROP or FETCH answered `Old` no longer caches it for good
 - [A route answer behind its idle copy's cache fails the copy](/quest/m1/answer-behind-cache.md) - a resuming copy whose route answers behind its cache fails loud instead of refusing the feed's groups as duplicates, so readers resubscribe onto a fresh copy
 - [The overcommitted receive-window cells run again](/quest/m1/receive-windows-evicted.md) - `benchmark_receive_windows` measures its 256-stream and 4 MiB-frame cells again, reporting delivered frames and evictions instead of stalling
-- [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; time-stretched browser playback without steady-state underruns and a native trace replay remain
-- [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
-- [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - an unmute is heard from its first frame with no catalog round trip: mute moves from holding a disabled rendition to suppressed silence with comfort noise, after a route spike; capture delivers frames on a steady cadence
+- [One assets() for every hosted file](/quest/m1/hosted-assets.md) - `@moq/hang` owns `assets()`, which also points the libav polyfill at the hosted wasm
+- [Watch sources default to the decoder's probe](/quest/m1/watch-supported-default.md) - a source built without `in.supported` plays instead of selecting nothing
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
-- [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
-- [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
-- [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
-- [VAAPI encode and decode](/quest/m1/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
-- [Read a texture back without an encoder](/quest/m1/video-readback.md) - moq-video copies a wgpu texture into packed RGBA with no encoder probe, for the studio's Linux virtual camera
-- [The over-limit PUBLISH refusal invites a retry](/quest/m1/retry-interval-overload.md) - `EXCESSIVE_LOAD` sends the may-pass retry interval, not 0
-- [A relay forwards an upstream refusal's retry interval](/quest/m1/retry-interval-forward.md) - a forwarded SUBSCRIBE refusal keeps the upstream's retry interval
+- [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - AMD's VA-API H.264 encode decodes, once moq takes moq-vaapi 0.2.1
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
+- [moq-mux reads only the base layer's H.265 SPS](/quest/m1/h265-base-layer-sps.md) - a layered MV-HEVC or SHVC stream imports as its base layer instead of misreading an enhancement-layer SPS, which still reaches the track
+- [A cancelled dispatch lane stops its phase promptly](/quest/m1/dispatch-cancel-race.md) - a TERM landing just before a lane forks its phase's command still stops that command, instead of waiting out the phase
+- [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
+- [Copies of one group identity must agree beyond their bytes](/quest/m1/copy-identity.md) - copies that differ in timestamp, object fields, or frame count fail as a protocol violation
+- [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
+- [Relay settings parse once into a validated configuration](/quest/m1/relay-config-checks.md) - settings that cannot work together are refused at load instead of accepted and ignored
+- [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 
 ## Related
 

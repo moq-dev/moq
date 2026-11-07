@@ -11,6 +11,7 @@ export {
 	ProtocolViolation,
 	RefusedRedirect,
 	Session,
+	Skipped,
 	Stream,
 	type StreamOptions,
 	TimestampMismatch,

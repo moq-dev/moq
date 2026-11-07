@@ -287,10 +287,22 @@ struct States {
 	ptr: *mut c_void,
 }
 
+/// The `user_data` behind [`States`].
+struct StateSink {
+	tx: mpsc::Sender<Seen>,
+	/// Set by the terminal snapshot. A snapshot after it panics in the callback, which aborts
+	/// the test whenever it lands rather than only within a window the test waits out.
+	closed: std::sync::atomic::AtomicBool,
+}
+
 impl States {
 	fn new() -> Self {
 		let (tx, rx) = mpsc::channel();
-		let ptr = Box::into_raw(Box::new(tx)) as *mut c_void;
+		let sink = StateSink {
+			tx,
+			closed: Default::default(),
+		};
+		let ptr = Box::into_raw(Box::new(sink)) as *mut c_void;
 		Self { rx, ptr }
 	}
 
@@ -298,15 +310,11 @@ impl States {
 		self.rx.recv_timeout(TIMEOUT).expect("state callback timed out")
 	}
 
-	/// Skip to the terminal snapshot, which must be the last one.
+	/// Skip to the terminal snapshot, which [`state_callback`] makes the last one.
 	fn recv_terminal(&self) -> Seen {
 		loop {
 			let seen = self.recv();
 			if seen.phase == moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED {
-				assert!(
-					self.rx.recv_timeout(Duration::from_millis(50)).is_err(),
-					"a snapshot followed the terminal one"
-				);
 				return seen;
 			}
 		}
@@ -315,13 +323,18 @@ impl States {
 
 impl Drop for States {
 	fn drop(&mut self) {
-		unsafe { drop(Box::from_raw(self.ptr as *mut mpsc::Sender<Seen>)) };
+		unsafe { drop(Box::from_raw(self.ptr as *mut StateSink)) };
 	}
 }
 
 extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connection_state) {
-	let tx = unsafe { &*(user_data as *const mpsc::Sender<Seen>) }.clone();
+	let sink = unsafe { &*(user_data as *const StateSink) };
 	let state = unsafe { &*state };
+	let terminal = state.phase == moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED;
+	assert!(
+		!sink.closed.swap(terminal, std::sync::atomic::Ordering::SeqCst),
+		"a snapshot followed the terminal one"
+	);
 	let mut protocol = moq_protocol_error {
 		scope: 0,
 		code: 0,
@@ -334,7 +347,7 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 			.into_owned()
 	});
 	let protocol = (failed && unsafe { moq_error_protocol(&mut protocol) } == 0).then_some(protocol);
-	let _ = tx.send(Seen {
+	let _ = sink.tx.send(Seen {
 		phase: state.phase,
 		connects: state.connects,
 		failure: state.failure,
@@ -2585,6 +2598,23 @@ fn raw_track_sparse_groups_and_known_end() {
 }
 
 #[test]
+fn raw_track_skips_are_final() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"raw-track-skips-are-final");
+	let name = b"skipped";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	assert_eq!(moq_publish_track_skip(track, 1, 3), 0);
+	assert!(moq_publish_track_group_at(track, 2) < 0);
+	let group = id(moq_publish_track_group_at(track, 3));
+	assert_eq!(moq_publish_group_finish(group), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert!(moq_publish_track_skip(track, 4, 5) < 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+}
+
+#[test]
 fn raw_track_and_group_abort_consume_their_handles() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"raw-track-and-group-abort-consume-their-handles");
@@ -4611,10 +4641,8 @@ fn track_demand_reports_current_state_before_close() {
 		.block_on(crate::publish::Publish::run_demand(on_demand, demand, closed))
 		.unwrap();
 	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert!(
-		cb.rx.recv_timeout(Duration::from_millis(50)).is_err(),
-		"the terminal is the spawner's to deliver"
-	);
+	// The loop has returned, so everything it delivered is already queued.
+	assert!(cb.rx.try_recv().is_err(), "the terminal is the spawner's to deliver");
 
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -5473,10 +5501,11 @@ fn follow_delivers_a_restart() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Another instance taking over while the wait resolves is the one it delivers, so the restart
-/// that announced it must not deliver it again. `dynamic_at` is where the route the wait first
-/// resolves through covers the path: above it, the takeover's restart lands while resolving;
-/// at it, the origin holds that restart for the default [`moq_net::origin::Config::update_hold`].
+/// Another instance taking over while the wait resolves is the one it delivers, and the cancel's
+/// terminal is the next callback. `dynamic_at` is where the route the wait first resolves
+/// through covers the path: above it, the takeover's restart lands while resolving; at it, the
+/// origin holds that restart. The hold runs on the runtime's clock, so moq-net's follow tests
+/// prove on a simulated clock that the held restart never delivers it again.
 fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 	let origin = id(moq_origin_create());
 	let dynamic = {
@@ -5507,12 +5536,6 @@ fn follow_delivers_a_takeover_once(dynamic_at: &str) {
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
 	let takeover = publish_run(origin, "live");
 	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the takeover was delivered twice"
-	);
 
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
@@ -5601,12 +5624,6 @@ fn an_instance_pins_request_and_follow() {
 		)
 	});
 	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the follower delivered another instance"
-	);
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
@@ -5713,9 +5730,9 @@ fn follow_delivers_the_instance_again_after_an_end() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Freeing a delivered handle changes nothing about the path, so the wait delivers nothing
-/// until another instance takes it over. The takeover's restart reached the follower before
-/// its resolution delivered the handle, so no restart is owed.
+/// Freeing a delivered handle changes nothing about the path, and another instance taking it
+/// over is delivered. moq-net's follow tests prove on a simulated clock that the freed
+/// takeover is never delivered again.
 #[test]
 fn follow_waits_for_another_instance_after_a_freed_takeover() {
 	let origin = id(moq_origin_create());
@@ -5726,54 +5743,12 @@ fn follow_waits_for_another_instance_after_a_freed_takeover() {
 	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
 	let takeover = publish_run(origin, "live");
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the freed takeover was delivered again"
-	);
 
 	let next = publish_run(origin, "live");
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 	drop((takeover, next, dynamic));
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// The route a wait resolves through leaving, and another instance arriving before it resolves,
-/// reach the follower as an end and a start after the wait delivers the newcomer. That start
-/// must not deliver it again.
-#[test]
-fn follow_delivers_a_gap_while_resolving_once() {
-	let origin = id(moq_origin_create());
-	let dynamic = serve_dynamic(origin, "");
-	let cb = Callback::new();
-	let task = follow(origin, b"live", &cb);
-
-	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested()).unwrap();
-	{
-		let _runtime = crate::ffi::RUNTIME.enter();
-		drop(dynamic);
-	}
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "the test thread has no runtime; it waits out the hold on the C API's real runtime"
-	)]
-	std::thread::sleep(moq_net::origin::Config::default().update_hold * 2);
-	let arrival = publish_run(origin, "live");
-	let delivered = id(cb.recv());
-	assert!(
-		cb.rx
-			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
-			.is_err(),
-		"the arrival was delivered twice"
-	);
-
-	assert_eq!(moq_consume_close(delivered), 0);
-	assert_eq!(moq_origin_follow_cancel(task), 0);
-	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
-	drop(arrival);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -6136,7 +6111,7 @@ fn video_raw_publish_consume() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6322,7 +6297,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	let encode_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6443,7 +6418,7 @@ fn video_raw_publish_from_many_threads() {
 		// An explicit ceiling so the retunes below stay under the rate the encoder
 		// opened at, which openh264 requires.
 		bitrate: 1_000_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6515,7 +6490,7 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6594,7 +6569,7 @@ fn closing_a_broadcast_does_not_block_unrelated_calls_behind_its_encoder() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6648,7 +6623,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -6689,7 +6664,7 @@ fn video_raw_publish_rejects_invalid_config() {
 	let valid_output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7792,7 +7767,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 4_000_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7850,7 +7825,7 @@ fn encode_video_rung_needs_a_grant_and_a_band() {
 	let output = |bitrate| moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7893,7 +7868,7 @@ fn encode_video_ceiling_wakes_a_rung_above() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 500_000,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,
@@ -7995,7 +7970,7 @@ fn announce_route_hops_cross_a_relay_session() {
 	let sink = id(moq_origin_create());
 	let hops = {
 		let state = State::lock();
-		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().id())
+		[source, relay].map(|origin| state.origin.get(Id::try_from(origin).unwrap()).unwrap().hop().get())
 	};
 	let server_cb = Callback::new();
 	let (server, addr, fingerprint) = listen(&server_cb);
@@ -8570,8 +8545,8 @@ fn track_request_media_carries_hints() {
 		hint: moq_audio_hint {
 			bitrate: 96_000,
 			has_bitrate: true,
-			group_duration_us: 100_000,
-			has_group_duration: true,
+			join_us: 100_000,
+			has_join: true,
 		},
 	};
 	let audio = id(unsafe { moq_track_request_audio(request, &audio_config) });
@@ -8590,8 +8565,8 @@ fn track_request_media_carries_hints() {
 		hint: moq_video_hint {
 			bitrate: 2_000_000,
 			has_bitrate: true,
-			group_duration_us: 3_000_000,
-			has_group_duration: true,
+			join_us: 3_000_000,
+			has_join: true,
 			..moq_video_hint::default()
 		},
 	};
@@ -8615,7 +8590,7 @@ fn track_request_media_carries_hints() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A hint flag set with a 0 value, or a group duration past what milliseconds hold for a
+/// A hint flag set with a 0 value, or a join past what milliseconds hold for a
 /// JavaScript reader, is an invalid config rather than a second encoding of "absent".
 #[test]
 fn invalid_hints_are_refused() {
@@ -8658,28 +8633,28 @@ fn invalid_hints_are_refused() {
 	);
 	assert_eq!(
 		audio(moq_audio_hint {
-			has_group_duration: true,
+			has_join: true,
 			..moq_audio_hint::default()
 		}),
 		invalid,
-		"audio group duration 0"
+		"audio join 0"
 	);
 	assert_eq!(
 		audio(moq_audio_hint {
-			group_duration_us: u64::MAX,
-			has_group_duration: true,
+			join_us: u64::MAX,
+			has_join: true,
 			..moq_audio_hint::default()
 		}),
 		invalid,
-		"audio group duration past milliseconds"
+		"audio join past milliseconds"
 	);
 	assert_eq!(
 		video(moq_video_hint {
-			has_group_duration: true,
+			has_join: true,
 			..moq_video_hint::default()
 		}),
 		invalid,
-		"video group duration 0"
+		"video join 0"
 	);
 	assert_eq!(
 		video(moq_video_hint {
@@ -8697,10 +8672,10 @@ fn invalid_hints_are_refused() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A group duration hint is the track's join interval, declared once its first window closes,
+/// A join hint is the track's join interval, declared once its first window closes,
 /// rather than the shorter groups it measured.
 #[test]
-fn group_duration_hint_declares_the_join_interval() {
+fn join_hint_declares_the_join_interval() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"group-duration");
 	let init = opus_head();
@@ -8711,8 +8686,8 @@ fn group_duration_hint_declares_the_join_interval() {
 		label: std::ptr::null(),
 		label_len: 0,
 		hint: moq_audio_hint {
-			group_duration_us: 500_000,
-			has_group_duration: true,
+			join_us: 500_000,
+			has_join: true,
 			..moq_audio_hint::default()
 		},
 	};

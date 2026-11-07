@@ -1,14 +1,14 @@
 import { expect, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Viewers } from "../bandwidth.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
-import { RouteInfo } from "../hop.ts";
+import { WireRoute } from "../hop.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
+import { createMockTransportPair, driveUntil, type MockTransport, manual, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
@@ -128,6 +128,7 @@ test("closing mid-connect aborts the pending attempt", async () => {
 });
 
 test("a peer that severs immediately keeps escalating the backoff", async () => {
+	using clock = manual();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;
@@ -153,7 +154,7 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 		delay: { initial: Milli(1000), multiplier: 2, max: Milli(1000), timeout: Milli(1) },
 	});
 	try {
-		await waitUntil(() => reload.error.peek() !== undefined);
+		await driveUntil(clock, () => reload.error.peek() !== undefined);
 		expect(reload.closed.peek()).toBeUndefined();
 
 		// Giving up this URL does not dispose the loop: a disable/re-enable starts another sequence.
@@ -173,6 +174,7 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 });
 
 test("an explicitly undefined delay field falls back to its default", async () => {
+	using clock = manual();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let dials = 0;
@@ -194,8 +196,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: Milli(0) },
 	});
 	try {
-		await waitUntil(() => dials > 0);
-		await sleep(Nano.fromMilli(Milli(100)));
+		await clock.advance(Nano.fromMilli(Milli(100)));
 		// The default initial delay is 1000ms, so the first retry is still pending.
 		expect(dials).toBe(1);
 	} finally {
@@ -215,6 +216,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 }
 
 test("a follower follows the reconnect on the same handle", async () => {
+	using clock = manual();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -244,12 +246,12 @@ test("a follower follows the reconnect on the same handle", async () => {
 	const watched = clientOrigin.follow(Path.from("late"));
 
 	try {
-		await waitUntil(() => watched.active.peek() !== undefined);
+		await driveUntil(clock, () => watched.active.peek() !== undefined);
 		const first = watched.active.peek();
 
 		// The session dies; the same request follows the next session's announcement.
 		sessions[0]?.abort();
-		await waitUntil(() => watched.active.peek() !== undefined && watched.active.peek() !== first);
+		await driveUntil(clock, () => watched.active.peek() !== undefined && watched.active.peek() !== first);
 		expect(watched.closed.peek()).toBeUndefined();
 	} finally {
 		watched.close();
@@ -434,6 +436,7 @@ function refusing(refused: string, release: Promise<void>) {
 }
 
 test("a refused credential replaced since its dial redials with the new one", async () => {
+	using clock = manual();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
 	const { dialed, stub } = refusing("old", release);
@@ -448,12 +451,12 @@ test("a refused credential replaced since its dial redials with the new one", as
 		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
 	});
 	try {
-		await waitUntil(() => reload.established.peek() !== undefined);
+		await driveUntil(clock, () => reload.established.peek() !== undefined);
 		tokens.set(["new"]);
 		resolve();
-		await waitUntil(() => dialed.includes("new"));
+		await driveUntil(clock, () => dialed.includes("new"));
 		expect(dialed).toEqual(["old", "new"]);
-		await waitUntil(() => reload.established.peek() !== undefined);
+		await driveUntil(clock, () => reload.established.peek() !== undefined);
 		expect(reload.error.peek()).toBeUndefined();
 	} finally {
 		reload.close();
@@ -462,6 +465,7 @@ test("a refused credential replaced since its dial redials with the new one", as
 });
 
 test("new tokens redial a URL that stopped on refusing the old ones", async () => {
+	using clock = manual();
 	const original = globalThis.WebTransport;
 	const { dialed, stub } = refusing("old", Promise.resolve());
 	globalThis.WebTransport = stub;
@@ -475,11 +479,11 @@ test("new tokens redial a URL that stopped on refusing the old ones", async () =
 		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
 	});
 	try {
-		await waitUntil(() => reload.error.peek() !== undefined);
+		await driveUntil(clock, () => reload.error.peek() !== undefined);
 		expect(dialed).toEqual(["old"]);
 		tokens.set(["new"]);
-		await waitUntil(() => dialed.includes("new"));
-		await waitUntil(() => reload.established.peek() !== undefined);
+		await driveUntil(clock, () => dialed.includes("new"));
+		await driveUntil(clock, () => reload.established.peek() !== undefined);
 		expect(reload.error.peek()).toBeUndefined();
 	} finally {
 		reload.close();
@@ -540,6 +544,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 // disjoint. Reading a stream reset off the session table would call every SETUP-stream reset
 // an auth rejection and suppress reconnect for the life of the page.
 test("a setup stream reset is not mistaken for an unauthorized session", async () => {
+	using clock = manual();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;
@@ -569,7 +574,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 	});
 
 	try {
-		await waitUntil(() => attempts >= 2);
+		await driveUntil(clock, () => attempts >= 2);
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -577,6 +582,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 });
 
 test("origins span reconnects: local re-announces, remote re-populates", async () => {
+	using clock = manual();
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/origins");
 
@@ -617,17 +623,17 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 	try {
 		// First session: the server's broadcast lands in the client origin, and the client's
 		// publish lands in the server's.
-		await waitUntil(() => wireOf(reader).routes(Path.from("remote")));
-		await waitUntil(() => (servers[0] ? wireOf(servers[0].saw).routes(Path.from("mine")) : false));
+		await driveUntil(clock, () => wireOf(reader).routes(Path.from("remote")));
+		await driveUntil(clock, () => (servers[0] ? wireOf(servers[0].saw).routes(Path.from("mine")) : false));
 
 		// Kill the session: the remote entry retracts, the local publish stays put.
 		servers[0]?.session.abort();
-		await waitUntil(() => !wireOf(reader).routes(Path.from("remote")));
+		await driveUntil(clock, () => !wireOf(reader).routes(Path.from("remote")));
 
 		// The reconnect re-announces the (untouched) publish and re-populates the table.
-		await waitUntil(() => servers.length > 1);
-		await waitUntil(() => wireOf(reader).routes(Path.from("remote")));
-		await waitUntil(() => (servers[1] ? wireOf(servers[1].saw).routes(Path.from("mine")) : false));
+		await driveUntil(clock, () => servers.length > 1);
+		await driveUntil(clock, () => wireOf(reader).routes(Path.from("remote")));
+		await driveUntil(clock, () => (servers[1] ? wireOf(servers[1].saw).routes(Path.from("mine")) : false));
 	} finally {
 		watching.close();
 		for (const server of servers) server.watching.close();
@@ -942,8 +948,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 
 // A publication only a token's grant covers keeps that grant while the session drains, so
 // closing the loop ends the tokens after the drain rather than cutting the final group.
-// Quarantined pending quest/m0/test-flakes-2/reload-close-drain.md.
-test.skip("closing the loop keeps the tokens until the session drains", async () => {
+test("closing the loop keeps the tokens until the session drains", async () => {
 	const original = globalThis.WebTransport;
 	const clock = new Manual();
 	const installed = clock.install();
@@ -1031,7 +1036,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 			prefix: Path.from("alice/camera.hang"),
 			captures: undefined,
 			kind: "start",
-			route: RouteInfo.default,
+			route: WireRoute.default,
 		});
 		await consumer.next();
 		upstream.close();
@@ -1065,6 +1070,7 @@ test("announced accepts a non-prefix scope before any session exists", () => {
  * a reconnect takes it back until the next session's set lands.
  */
 test("a watcher syncs with the server's initial set, and again after a reconnect", async () => {
+	using clock = manual();
 	// Through the consume origin, and through the handle's own stream without one.
 	for (const [alpn, viaOrigin] of [
 		[Lite.ALPN_06, true],
@@ -1108,12 +1114,12 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 		try {
 			// Nothing is connected yet, which is not the same as nothing being announced.
 			expect(watching.synced.peek()).toBe(false);
-			await waitUntil(() => watching.synced.peek());
+			await driveUntil(clock, () => watching.synced.peek());
 			expect([...seen].sort()).toEqual(["a", "b"]);
 
 			sessions[0]?.abort();
-			await waitUntil(() => !watching.synced.peek());
-			await waitUntil(() => sessions.length > 1 && watching.synced.peek());
+			await driveUntil(clock, () => !watching.synced.peek());
+			await driveUntil(clock, () => sessions.length > 1 && watching.synced.peek());
 			expect([...seen].sort()).toEqual(["a", "b"]);
 		} finally {
 			watching.close();
@@ -1137,7 +1143,7 @@ test("a pump owes the retractions of the upstream it replaces", async () => {
 	const consumer = producer.consume();
 
 	const first = new Announce.Producer();
-	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: RouteInfo.default });
+	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: WireRoute.default });
 	first.synced();
 	const upstream = new Signal(first);
 	const pump = new Effect((effect) => pumpAnnounced(effect, effect.get(upstream).consume(), producer));

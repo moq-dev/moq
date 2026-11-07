@@ -33,6 +33,10 @@ impl Logs {
 	}
 
 	/// Wait until the output contains `needle`.
+	#[cfg_attr(
+		not(feature = "websocket"),
+		allow(dead_code, reason = "only the `websocket` feature uses it")
+	)]
 	pub async fn wait_for(&self, needle: &str) {
 		loop {
 			// Created before the check, so a write in between still wakes it.

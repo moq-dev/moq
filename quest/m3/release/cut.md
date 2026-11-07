@@ -12,7 +12,14 @@ then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Right after merging release into main, set
 every eligible package with `just version 0.22.0` for this cut, then one
 minor up per cut, following [Versions](/CONTRIBUTING.md#versions), including
-packages that did not change. Rust
+packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
+exempt from that version (`version.json`), so check each against its
+registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
+from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
+fails, and `workspace:^` would resolve `@moq/net`'s dependency to
+web-transport's 0.3.4, a different API. `js/qmux` must publish above 0.3.4;
+the maintainer picks the version (found 2026-11-07 by the API shape audit).
+Rust
 publication remains owned by release-plz. This supersedes keeping `moq-rs` at
 its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify
@@ -84,6 +91,20 @@ token, and catalog/container lane, with lite-07-wip skipped as its accepted
 planned break. Dart's tests and both staged publish dry-runs passed with no
 warnings. Neither main is the cut tree, and the full Linux gate was not run:
 repeat these checks after the documented release-to-main merge.
+
+The [2026-10-24 pre-cut audit](https://github.com/moq-dev/moq/pull/6707)
+closed with its 37 findings' regression tests re-run together in
+[moq-dev/moq#8059](https://github.com/moq-dev/moq/pull/8059). At
+[main 1ae5c5f808](https://github.com/moq-dev/moq/commit/1ae5c5f808f5fb695a42dcb451611edce81802d7),
+each fix's test still exists or was replaced by a later deliberate change.
+These passed: the moq-net, moq-net-tests, moq-mux, moq-rtmp, moq-tokio,
+moq-uring, hang, and moq-audio suites (7,027 tests, with the fuzz regression
+replays), every JS package's unit tests (5,745), the `just test harness`
+browser checks (48), and `just test video` (11). Nightly's harness step fails
+before it reaches its browser checks, which is how two of them stayed broken
+after [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) until the
+re-run fixed them. Run those browser checks by hand on the cut tree, along
+with the suites above.
 
 ## Required
 

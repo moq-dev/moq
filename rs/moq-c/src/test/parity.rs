@@ -485,7 +485,7 @@ fn video_encoder_without_a_broadcast() {
 	let output = moq_video_encoder_output {
 		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
 		bitrate: 0,
-		gop: 0,
+		join_us: 0,
 		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
 		encoder: std::ptr::null(),
 		encoder_len: 0,

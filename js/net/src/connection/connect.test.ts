@@ -1,11 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
 import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
 import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as Lite } from "../lite/version.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, driveUntil, manual } from "../mock.ts";
 import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
@@ -227,6 +228,7 @@ test("an http:// fingerprint of the wrong length or status is refused", async ()
 });
 
 test("aborting connect aborts a pending http:// fingerprint fetch", async () => {
+	hostTime(); // a real HTTP server
 	// Answer nothing, so only the abort ends the request.
 	const server = fingerprintServer(() => new Promise<Response>(() => {}));
 	const original = globalThis.WebTransport;
@@ -553,13 +555,18 @@ for (const protocol of ["", undefined]) {
 }
 
 test("SETUP refuses a version the client did not name", async () => {
+	using clock = manual();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
 		const server = accept({ url, transport: pair.server, version: Lite.DRAFT_05 }).catch(() => undefined);
-		await expect(
-			connect(url, { versions: ["moq-lite-07-wip", "moq-lite-06"], websocket: { enabled: false } }),
-		).rejects.toThrow("unsupported server version: 0xff0dad05");
+		const connecting = connect(url, {
+			versions: ["moq-lite-07-wip", "moq-lite-06"],
+			websocket: { enabled: false },
+		});
+		// The refusal waits out the grace a peer's close code gets.
+		await driveUntil(clock, connecting);
+		await expect(connecting).rejects.toThrow("unsupported server version: 0xff0dad05");
 		(await server)?.abort();
 	} finally {
 		restore();
@@ -582,6 +589,7 @@ test("a peer without an ALPN is refused when no named version negotiates in SETU
 const IETF_VERSIONS = Object.values(Ietf.Version).map((v) => [Ietf.versionName(v), v] as const);
 
 test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async (_, version) => {
+	using clock = manual();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
@@ -592,6 +600,8 @@ test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async
 		if (!stream) throw new Error("no SETUP stream");
 		await ClientSetup.decode(stream.reader);
 		await new ServerSetup(version).encode(stream.writer);
+		// The refusal waits out the grace a peer's close code gets.
+		await driveUntil(clock, connecting);
 		await expect(connecting).rejects.toThrow(`unsupported server version: 0x${version.toString(16)}`);
 	} finally {
 		restore();
@@ -1063,12 +1073,7 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = sleep(Nano.fromMilli(Milli(100))).then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = sleep(Nano.fromMilli(Milli(100))).then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -1105,12 +1110,7 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = opened.then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = opened.then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -1229,6 +1229,20 @@ test("an invalid timeout throws before touching the caller's signal", async () =
 	await expect(connect(url, { timeout: -1 as Milli })).rejects.toThrow("invalid time: -1");
 });
 
+/** An opened WebSocketStream whose QMux server sent only its TRANSPORT_PARAMETERS (all
+ *  defaults), which a session's `ready` waits for. */
+function qmuxStreams() {
+	return {
+		readable: new ReadableStream({
+			start: (controller) =>
+				controller.enqueue(new Uint8Array([0xff, 0x51, 0x53, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0])),
+		}),
+		writable: new WritableStream(),
+		protocol: "qmux-01",
+		extensions: "",
+	};
+}
+
 type WebSocketDial = "hang" | "open" | { failAfter: Milli } | { openAfter: Milli };
 
 // Their own host: a WebSocket that wins drops WebTransport's head start for its host and port afterwards.
@@ -1243,12 +1257,7 @@ function webSocketPlan(clock: Manual, plan: (dial: number) => WebSocketDial) {
 	const originalTransport = native.WebTransport;
 	native.WebTransport = undefined;
 	const dials: { at: number; closes: number }[] = [];
-	const streams = () => ({
-		readable: new ReadableStream(),
-		writable: new WritableStream(),
-		protocol: "qmux-01",
-		extensions: "",
-	});
+	const streams = qmuxStreams;
 	native.WebSocketStream = class {
 		url: string;
 		opened: Promise<unknown>;

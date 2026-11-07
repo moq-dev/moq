@@ -10,7 +10,7 @@ use crate::support;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Client, Hop, Server, Timestamp, Version, origin, transport::memory};
+use moq_net::{Client, Server, Timestamp, Version, origin, transport::memory};
 use support::harness::{now, spawn, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VERSIONS: &[&str] = &["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }

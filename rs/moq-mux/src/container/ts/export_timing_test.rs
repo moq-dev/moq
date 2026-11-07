@@ -242,10 +242,9 @@ impl Live {
 
 	/// A receiver joining now.
 	async fn join(&self, every: Duration) -> Leg {
-		let export = super::export_test::open_export(self.source.clone())
+		let export = super::export_test::open_export(self.source.clone(), DELAY)
 			.await
 			.unwrap()
-			.with_delay(DELAY)
 			.with_mux_rate(self.rate);
 		let woken = Arc::new(Woken(AtomicBool::new(true)));
 		Leg {

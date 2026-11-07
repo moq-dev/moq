@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/4be350816f2a5c1157f799773ee1594f199fd9a7";
+      url = "github:moq-dev/quest/6a18b8a815c2d15d37d7433a619f961ec5a07165";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -223,9 +223,6 @@
           bun
           # Only for NPM publishing
           nodejs_24
-          # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
-          # so the release doesn't race on a runtime binary download.
-          deno
           # One browser build for local and CI Playwright checks.
           playwright-driver.browsers
         ];

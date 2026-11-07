@@ -9,6 +9,7 @@ import {
 	getter,
 	type Inputs,
 	type Readonlys,
+	race,
 	readonlys,
 	Signal,
 } from "@moq/signals";
@@ -22,7 +23,7 @@ import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
 
 // The keyframe interval when the config sets none.
-const DEFAULT_KEYFRAME_INTERVAL = Milli.fromSecond(2 as Second);
+const DEFAULT_JOIN = Milli.fromSecond(2 as Second);
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
 export interface Stats {
@@ -63,13 +64,14 @@ export interface Config {
 	maxScale?: number;
 
 	/**
-	 * The longest interval between keyframes. A joining subscriber forces one sooner once the
-	 * group's deltas outweigh the track's refresh ratio. The broadcast declares the longest
-	 * interval as its catalog's `media.join.interval` when media is first listed, which then bounds
-	 * every GOP: a live change past it, including to infinite, is capped there until a new network
-	 * broadcast declares again. (default: 2000 milliseconds)
+	 * The time between join points: the longest a group runs before the next keyframe. A joining
+	 * subscriber forces one sooner once the group's deltas outweigh the track's refresh ratio. The
+	 * broadcast declares the longest as its catalog's `media.join.interval` when media is first
+	 * listed, which then bounds every group: a live change past it, including to infinite, is capped
+	 * there until a new network broadcast declares again. Anything but a positive duration refuses
+	 * the rendition. (default: 2000 milliseconds)
 	 */
-	keyframeInterval?: Milli;
+	join?: Milli;
 
 	/** If not provided, the encoder will use the best bitrate for the given width, height, and framerate. */
 	maxBitrate?: number;
@@ -354,10 +356,10 @@ export class Encoder {
 		effect.proxy(this.#slot, rendition.slot);
 		effect.cleanup(() => this.#slot.set(undefined));
 
-		// The longest GOP, which the broadcast declares as the catalog's join interval.
+		// The longest group, which the broadcast declares as the catalog's join interval. Keyframes
+		// follow timestamps rather than a frame count, so the requested join is the effective one.
 		effect.run((effect) => {
-			const interval = effect.get(this.config)?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
-			rendition.joinInterval.set(interval);
+			rendition.join.set(effect.get(this.config)?.join ?? DEFAULT_JOIN);
 		});
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
@@ -372,7 +374,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.order, broadcast.join, effect);
+			this.#encode(rendition.track, broadcast.order, broadcast.join, effect);
 		});
 
 		// Reserve against the connection while a subscriber is attached. Wait for a ceiling so we
@@ -408,7 +410,14 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, order: Order, join: Getter<Milli | undefined>, effect: Effect): void {
+	#encode(
+		tracks: Getter<Moq.Track.Producer | undefined>,
+		order: Order,
+		join: Getter<Milli | undefined>,
+		effect: Effect,
+	): void {
+		const track = effect.get(tracks);
+		if (!track) return;
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
@@ -459,7 +468,7 @@ export class Encoder {
 					producer.encode(frame, frame.timestamp as Micro, key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
-					if (this.#estimator.write(frame.timestamp, order, key)) {
+					if (!tearingDown && this.#estimator.write(frame.timestamp, order, key)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -539,7 +548,10 @@ export class Encoder {
 
 							// The catalog's declared join interval is the longest GOP, fixed for the network
 							// broadcast, so a live raise past it stops there.
-							const requested = config?.keyframeInterval ?? DEFAULT_KEYFRAME_INTERVAL;
+							const requested = config?.join ?? DEFAULT_JOIN;
+							// Refused with the config (see #runDimensions), so an encoder already running stops
+							// rather than keyframing every frame.
+							if (!(requested > 0)) continue;
 							const declared = join.peek();
 							const interval = declared === undefined ? requested : Milli(Math.min(requested, declared));
 
@@ -578,6 +590,8 @@ export class Encoder {
 			// and shows black instead of a frozen picture.
 			await new Promise((resolve) => effect.abort.addEventListener("abort", resolve, { once: true }));
 			tearingDown = true;
+			// A cosmetic flush must not hold sibling renditions to our stale delay.
+			order.leave(this.#estimator);
 			try {
 				const config = configured;
 				if (
@@ -595,14 +609,26 @@ export class Encoder {
 					} finally {
 						frame.close();
 					}
-					// A rejected flush already reported through the error callback.
-					await encoder.flush().catch(() => {});
+					// A cosmetic frame must never hold the next enable or track close behind a codec
+					// flush. The old codec is closed below even if the browser never settles it.
+					const flushed = encoder.flush().then(
+						() => true,
+						() => true,
+					);
+					do {
+						if (track.closed.peek() !== undefined || tracks.peek() !== track) break;
+						const done = await race([
+							flushed,
+							Signal.race(this.in.enabled),
+							Signal.race(tracks),
+							track.closed,
+							effect.closed,
+						]);
+						if (done === true || done === undefined) break;
+					} while (!this.in.enabled.peek());
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
-				// A stopped rendition stops holding the others' delay back. Not a cleanup: the black
-				// keyframe above is written after one would run, and would seat this rendition again.
-				order.leave(this.#estimator);
 				// The broadcast owns this static track across gaps (a disable, or with `onDemand` a demand
 				// gap). Close the current group, marking the break so a later subscriber resumes on the same
 				// track without the pre-gap group reading as live. A fatal encoder error aborts the track instead.
@@ -680,7 +706,9 @@ export class Encoder {
 			try {
 				let detected: Probe;
 				try {
-					detected = await this.#bestCodec(dimensions, target);
+					const result = await this.#bestCodec(dimensions, target, effect);
+					if (!result) return;
+					detected = result;
 				} catch (err) {
 					// A capture that outgrew the accepted ceiling to a size the hardware refuses encodes scaled
 					// down to fit it, until a smaller capture reruns the probe. Re-probing the ceiling with the
@@ -698,7 +726,9 @@ export class Encoder {
 						`video ${dimensions.width}x${dimensions.height} unsupported, keeping ${accepted.width}x${accepted.height}:`,
 						err,
 					);
-					detected = await this.#bestCodec(accepted, target);
+					const result = await this.#bestCodec(accepted, target, effect);
+					if (!result) return;
+					detected = result;
 				}
 				if (superseded.aborted) return;
 
@@ -766,6 +796,10 @@ export class Encoder {
 		if (!source) return;
 
 		const user = effect.get(this.config);
+		// Refused here, with the other knobs, so an invalid join settles the encoder without a config.
+		if (user?.join !== undefined && !(user.join > 0)) {
+			throw new Error(`join must be greater than 0 ms: ${user.join}`);
+		}
 
 		const sourcePixels = display.width * display.height;
 
@@ -809,7 +843,11 @@ export class Encoder {
 	}
 
 	// Try to determine the best config for the given settings.
-	async #bestCodec(dimensions: { width: number; height: number }, target: Target): Promise<Probe> {
+	async #bestCodec(
+		dimensions: { width: number; height: number },
+		target: Target,
+		effect: Effect,
+	): Promise<Probe | undefined> {
 		// A list of codecs to try, in order of preference. Only full RFC 6381 strings: Chrome, Firefox,
 		// and Safari all refuse a bare `avc1` or `vp09`, and native players can't decode without the profile.
 		const HARDWARE_CODECS = [
@@ -889,10 +927,12 @@ export class Encoder {
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 
-			const { supported } = await VideoEncoder.isConfigSupported(config);
-			if (!supported) continue;
+			const support = await effect.race(VideoEncoder.isConfigSupported(config));
+			if (!support) return;
+			if (!support.supported) continue;
 
-			const probed = await probeEncoder(config);
+			const probed = await probeEncoder(config, effect);
+			if (!probed) return;
 			if ("reported" in probed) return { config, reported: probed.reported };
 			console.warn(`moq-publish: skipping ${codec}: ${probed.refused}`);
 		}
@@ -903,7 +943,7 @@ export class Encoder {
 	/**
 	 * Request a keyframe, opening a new group at a frame no earlier than this call.
 	 *
-	 * For a resume, a recording cut, or a known tune-in moment; {@link Config.keyframeInterval} is the
+	 * For a resume, a recording cut, or a known tune-in moment; {@link Config.join} is the
 	 * longest a group runs, and a joining subscriber already opens one through the track's refresh
 	 * ratio. Requests between two frames coalesce into one keyframe on the next, with no spacing: a
 	 * caller in a loop pins the encoder at all-keyframe. A request while not encoding is served by the
@@ -1014,7 +1054,10 @@ const PROBE_FRAMES = 4;
 //   length-prefixed NAL units with an hvcC description, which no subscriber can decode. A
 //   description means length-prefixed output (per the AVC and HEVC WebCodecs registrations), which
 //   also catches a four-byte length that happens to read as a start code, such as `00 00 01 2c`.
-async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: string } | { refused: string }> {
+async function probeEncoder(
+	config: VideoEncoderConfig,
+	effect: Effect,
+): Promise<{ reported: string } | { refused: string } | undefined> {
 	let reported: string | undefined;
 	let reordered = false;
 	let last: number | undefined;
@@ -1034,6 +1077,12 @@ async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: str
 		// flush() rejects with the same error.
 		error: () => {},
 	});
+
+	// A superseded probe must release its codec even if the browser never settles flush().
+	const close = () => {
+		if (encoder.state !== "closed") encoder.close();
+	};
+	effect.cleanup(close);
 
 	try {
 		encoder.configure(config);
@@ -1055,9 +1104,10 @@ async function probeEncoder(config: VideoEncoderConfig): Promise<{ reported: str
 			}
 		}
 
-		await encoder.flush();
+		await effect.race(encoder.flush());
+		if (effect.abort.aborted) return;
 	} finally {
-		if (encoder.state !== "closed") encoder.close();
+		close();
 	}
 
 	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);

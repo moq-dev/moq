@@ -1019,6 +1019,7 @@ mod tests {
 	/// do have to keep serving, and the passthrough entry has to follow.
 	#[tokio::test]
 	async fn ladder_follows_a_source_resize() {
+		kio::clock::host_time();
 		let mut source = source_catalog(640, 360);
 
 		let config = Config {
@@ -1103,7 +1104,9 @@ mod tests {
 		);
 
 		// The rung the new picture still fits keeps serving: its subscriber sees
-		// nothing at all, since the source has no media.
+		// nothing at all, since the source has no media. Paused, so the timeout
+		// fires only once every task has run; no codec works without media.
+		tokio::time::pause();
 		assert!(
 			kio::clock::timeout(std::time::Duration::from_millis(100), kept.recv_group())
 				.await

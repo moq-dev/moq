@@ -412,10 +412,10 @@ async fn publish_capture_from<E: CatalogExt, S: CaptureSource>(
 		probe_config.kind = options.kind.clone();
 		probe_config.color = camera.color();
 		let rendition = probe_config.probe().await?;
-		// The encoder is built from the same defaults, so the probe's GOP is the one it emits.
-		Ok::<_, Error>((rendition, probe_config.gop.duration(probe_config.framerate), camera))
+		// The encoder is built from the same defaults, so the probe's join is the one it emits.
+		Ok::<_, Error>((rendition, probe_config.effective_join(), camera))
 	};
-	let (rendition, gop, camera) = match rendition.await {
+	let (rendition, join, camera) = match rendition.await {
 		Ok(probed) => probed,
 		Err(err) => {
 			// A track that already ended has nobody left to tell.
@@ -427,7 +427,7 @@ async fn publish_capture_from<E: CatalogExt, S: CaptureSource>(
 	// The importer consumes the track, so keep a handle to abort it if setup fails,
 	// then drop it so it never outlives the importer's.
 	let fallback = track.clone();
-	let mut producer = match Producer::with_track(track, catalog.reserve().with_interval(gop), rendition) {
+	let mut producer = match Producer::with_track(track, catalog.reserve().with_interval(join), rendition) {
 		Ok(producer) => producer,
 		Err(err) => {
 			let _ = fallback.abort(moq_net::Error::Transport(err.to_string()));
@@ -689,6 +689,8 @@ async fn capture_loop<S: CaptureSource>(
 	let on_demand = options.on_demand;
 	// The published track's demand, followed onto the next track when a frame moves the rendition.
 	let mut demand = producer.demand();
+	// The last timestamp sent to an encoder, which a reopened camera's frames must exceed.
+	let mut last: Option<Timestamp> = None;
 
 	loop {
 		// On demand, idle until a viewer subscribes. The catalog rendition was published when
@@ -706,7 +708,7 @@ async fn capture_loop<S: CaptureSource>(
 		// Capture timestamps use a private monotonic timeline. Sample both clocks
 		// once at open so every queued frame maps to the shared broadcast epoch
 		// without mistaking dequeue time for acquisition time.
-		let capture_epoch =
+		let mut capture_epoch =
 			u64::try_from(clock.now().as_micros().saturating_sub(camera.now().as_micros())).unwrap_or(u64::MAX);
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
@@ -803,7 +805,19 @@ async fn capture_loop<S: CaptureSource>(
 				producer.report_skipped(skipped - reported);
 			}
 			reported = Some(skipped);
-			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+			let mut mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+			// A camera never rewinds its own stream, but a reopened one maps from the shared clock,
+			// which the previous stream can lead: a device re-anchor floors just past its last
+			// timestamp, ahead of arrival. Shift the new stream past it, keeping its spacing.
+			if let Some(last) = last
+				&& mapped <= last
+			{
+				let behind = u64::try_from(last.as_micros() - mapped.as_micros()).unwrap_or(u64::MAX);
+				capture_epoch = capture_epoch.saturating_add(behind).saturating_add(1);
+				mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+			}
+			last = Some(mapped);
+			frame.timestamp = mapped;
 			// A backend that cannot cut leaves every group to its cadence.
 			let wanted = cuts.then(|| producer.wanted()).flatten();
 			if forced.due(wanted) {
@@ -893,7 +907,7 @@ mod tests {
 
 		let mut producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -966,7 +980,7 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let mut producer = Producer::with_track(
 			track,
-			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -996,7 +1010,7 @@ mod tests {
 		initial.kind = encoder::Kind::Software;
 		let mut producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_interval(initial.gop.duration(initial.framerate)),
+			catalog.reserve().with_interval(initial.effective_join()),
 			initial.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1069,7 +1083,7 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let _producer = Producer::new(
 			broadcast,
-			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1115,7 +1129,7 @@ mod tests {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::with_track(
 			track,
-			catalog.reserve().with_interval(config.gop.duration(config.framerate)),
+			catalog.reserve().with_interval(config.effective_join()),
 			config.probe().await.unwrap(),
 		)
 		.unwrap();
@@ -1154,7 +1168,9 @@ mod tests {
 	}
 
 	/// Clock fixtures: the real capture loop, fed by a synthetic camera against a pinned
-	/// broadcast clock, graded on the timestamps a subscriber reads back.
+	/// broadcast clock, graded on the timestamps a subscriber reads back. The fixture installs a
+	/// manual clock, since paused tokio time would skip ahead while the encoder thread works:
+	/// time passes only where a test advances it, so a slow runner moves nothing.
 	///
 	/// Each expectation is the acquisition instant measured on the broadcast clock. The loop
 	/// samples the broadcast clock and then the camera's timeline when it opens a camera, so a
@@ -1189,6 +1205,7 @@ mod tests {
 		}
 
 		struct Fixture {
+			time: kio::clock::Installed,
 			epoch: Instant,
 			clock: moq_mux::Clock,
 			catalog: moq_mux::catalog::Producer,
@@ -1202,6 +1219,8 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: Wall) -> Self {
+				let time = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
+				time.advance(behind).unwrap();
 				let epoch = kio::clock::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
@@ -1223,7 +1242,7 @@ mod tests {
 				probe.kind = encoder::Kind::Software;
 				let mut producer = Producer::with_track(
 					track,
-					catalog.reserve().with_interval(probe.gop.duration(probe.framerate)),
+					catalog.reserve().with_interval(probe.effective_join()),
 					probe.probe().await.unwrap(),
 				)
 				.unwrap();
@@ -1248,6 +1267,7 @@ mod tests {
 				});
 
 				Self {
+					time,
 					epoch,
 					clock,
 					catalog,
@@ -1356,6 +1376,7 @@ mod tests {
 		/// acquisition: not zero, and not the later instant the loop dequeued it.
 		#[tokio::test]
 		async fn a_late_first_frame_publishes_its_acquisition() {
+			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall()).await;
@@ -1364,7 +1385,7 @@ mod tests {
 
 					let captured = Instant::now();
 					// Delivered well after acquisition: dequeue time must not leak into the timestamp.
-					kio::clock::sleep(Duration::from_millis(50)).await;
+					fixture.time.advance(Duration::from_millis(50)).unwrap();
 					camera.push_at(surface(), captured);
 					let published = read(&mut track).await;
 
@@ -1434,25 +1455,27 @@ mod tests {
 		/// broadcast forward with the device's spacing instead of rewinding it.
 		#[tokio::test]
 		async fn a_device_clock_restart_continues_forward() {
+			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
-					// The device numbers from zero, and real time keeps pace with it.
+					// The device numbers from zero, and the clock keeps pace with it.
 					camera.push_native(surface(), us(0));
 					let first = read(&mut track).await;
-					kio::clock::sleep(Duration::from_millis(40)).await;
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					camera.push_native(surface(), us(40_000));
 					let second = read(&mut track).await;
 					assert_eq!(second - first, 40_000, "the device's spacing survives");
 
-					// The device restarts its clock without the stream ending.
+					// The device restarts its clock without the stream ending, re-anchoring just past
+					// the last timestamp and so ahead of the clock.
 					camera.push_native(surface(), us(0));
 					let restarted = read(&mut track).await;
 					assert!(restarted >= second, "{restarted}us rewound behind {second}us");
-					kio::clock::sleep(Duration::from_millis(40)).await;
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					camera.push_native(surface(), us(40_000));
 					let resumed = read(&mut track).await;
 					assert_eq!(resumed - restarted, 40_000, "the device's spacing resumes");
@@ -1473,9 +1496,10 @@ mod tests {
 		}
 
 		/// Releasing the camera while nobody watches keeps the broadcast clock running: the
-		/// frame after a resume lands after the real idle gap, at its own acquisition.
+		/// frame after a resume lands after the idle gap, at its own acquisition.
 		#[tokio::test]
 		async fn a_restart_after_idle_keeps_the_gap() {
+			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let idle = Duration::from_millis(300);
@@ -1488,9 +1512,13 @@ mod tests {
 					let before = read(&mut track).await;
 					fixture.assert_acquired(before, captured);
 					drop(track);
+					// The loop releases the camera before the idle gap starts.
+					while !camera.released() {
+						tokio::task::yield_now().await;
+					}
 					drop(camera);
 
-					kio::clock::sleep(idle).await;
+					fixture.time.advance(idle).unwrap();
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1532,6 +1560,8 @@ mod tests {
 
 					// The device goes away and comes back in a mode four times the size.
 					camera.close();
+					// Reopening takes the device a while, so its first frame is newer than the last.
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					let camera = fixture.camera_sized(640, 480);
 					camera.push_native(surface_sized(640, 480), us(40_000));
 					// The probed track ends without the reopened camera's frames.
@@ -1553,6 +1583,8 @@ mod tests {
 						.unwrap()
 						.clone();
 					assert_eq!(name, format!("{probed}/1"));
+					// Another reopen, another while.
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
 					let camera = fixture.camera_sized(640, 480);
 					camera.push_native(surface_sized(640, 480), us(80_000));
 					let first = read(&mut moved).await;
@@ -1970,9 +2002,7 @@ mod tests {
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
 				track,
-				catalog
-					.reserve()
-					.with_interval(rendition.gop.duration(rendition.framerate)),
+				catalog.reserve().with_interval(rendition.effective_join()),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();
@@ -2028,9 +2058,7 @@ mod tests {
 			rendition.kind = encoder::Kind::Software;
 			let mut producer = Producer::with_track(
 				track,
-				catalog
-					.reserve()
-					.with_interval(rendition.gop.duration(rendition.framerate)),
+				catalog.reserve().with_interval(rendition.effective_join()),
 				rendition.probe().await.unwrap(),
 			)
 			.unwrap();
