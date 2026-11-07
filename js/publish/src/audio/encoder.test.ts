@@ -70,6 +70,8 @@ class LaggingAudioEncoder {
 
 	// Called on configure; the encoder publishes its pipeline synchronously right after.
 	static onConfigure: ((config: AudioEncoderConfig) => void) | undefined;
+	// The size of every chunk it outputs.
+	static bytes = 1;
 
 	state: CodecState = "unconfigured";
 	#output: EncodedAudioChunkOutputCallback;
@@ -97,8 +99,8 @@ class LaggingAudioEncoder {
 				type: "key",
 				timestamp,
 				duration,
-				byteLength: 1,
-				copyTo: (dest: Uint8Array) => dest.set([1]),
+				byteLength: LaggingAudioEncoder.bytes,
+				copyTo: (dest: Uint8Array) => dest.fill(1),
 			};
 			this.#output(chunk as unknown as EncodedAudioChunk);
 		}
@@ -365,6 +367,47 @@ test("a group duration packs frames until the minimum and restarts after a deman
 	// 120ms opens the next group, closing the five frames at 20-100ms. The gap ends the 120-140ms
 	// group early, so resumed frames start a fresh group after the marker.
 	expect(groups).toEqual([5, 2, 1, 2]);
+});
+
+// A long group duration with short frames would pass the net per-group caps, which abort the
+// group with GroupTooLarge, so the writer rolls to a new group first.
+test("a long group duration rolls the group at the frame cap", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), { mime: "opus", frameDuration: Time.Milli(2.5) }, Time.Milli(60_000));
+	const { feed, groups, appended } = env;
+
+	const frames = Moq.Group.MAX_GROUP_FRAMES + 3;
+	for (let i = 0; i < frames; i++) {
+		await feed.push({ timestamp: Time.Micro(i * 2_500), channels: [new Float32Array(120)] });
+	}
+	await feed.drain();
+
+	// The fake encoder holds two frames back.
+	expect(groups).toEqual([Moq.Group.MAX_GROUP_FRAMES, 1]);
+	expect(appended[0].closed.peek()).toBeNull();
+	expect(appended[1].closed.peek()).toBeUndefined();
+});
+
+test("a long group duration rolls the group at the byte cap", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const bytes = LaggingAudioEncoder.bytes;
+	LaggingAudioEncoder.bytes = 1024 * 1024;
+	try {
+		using env = await setup(new Baseline(), undefined, Time.Milli(60_000));
+		const { feed, groups, appended } = env;
+
+		for (let i = 0; i < 40; i++) {
+			await feed.push({ timestamp: Time.Micro(i * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+
+		// Each frame carries a timestamp header, so 31 full MiB chunks fit under the 32 MiB cap.
+		expect(groups).toEqual([31, 7]);
+		expect(appended[0].closed.peek()).toBeNull();
+		expect(appended[1].closed.peek()).toBeUndefined();
+	} finally {
+		LaggingAudioEncoder.bytes = bytes;
+	}
 });
 
 // A negative or non-finite duration has no meaning, so the rendition drops out of the catalog.
