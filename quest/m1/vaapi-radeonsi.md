@@ -1,55 +1,40 @@
-# [M] VA-API encode is correct on radeonsi
+# [S] VA-API encode is correct on radeonsi
 
 ## Goal
 
-On an AMD RX 9070 (radeonsi), moq-video's VA-API H.264 encoder either
-produces a stream that ffmpeg decodes, or refuses the node, so `Kind::Auto`
-falls to the next H.264 encoder (OpenH264 in a build that has it; a build
-without one gets `NoEncoder` naming the refused driver). Its VPP NV12 conversion carries no chroma offset, and its
-rate control stays near the target bitrate. The ignored VA-API encode tests
-in `rs/moq-video/src/encode/backend/vaapi.rs` pass on that card with
-`MOQ_VAAPI_DEVICE` naming its node, or skip with a reason that names the
-refused driver.
+On an AMD RX 9070 (radeonsi), moq-video's VA-API H.264 encoder produces a
+stream that ffmpeg decodes, its VPP NV12 conversion matches the space it
+labels, and its rate control stays near the target bitrate. The VA-API
+tests in `rs/moq-video/src/encode/backend/vaapi.rs`, ignored ones included,
+pass on that card with `MOQ_VAAPI_DEVICE` naming its node.
 
 ## Plan
 
-Found 2026-11-06 in [moq-dev/moq#8013](https://github.com/moq-dev/moq/pull/8013)'s
-hardware run on an RX 9070 (Mesa 26.0.8, `renderD129`): 6 of 19 VA-API tests
-failed, all of them H.264 encode. A 320x240 dump gives ffprobe
-`Invalid data found when processing input`, and its first NAL unit has type
-0. This also reproduces on main's moq-vaapi. H.265 encode and both decoders
-pass there. [moq-dev/vaapi#10](https://github.com/moq-dev/vaapi/pull/10)
-also noted a chroma offset in radeonsi's VPP NV12 output and a bitrate
-overshoot.
+The causes were in moq-vaapi and are fixed in
+[moq-dev/vaapi#13](https://github.com/moq-dev/vaapi/pull/13). With it patched
+in, all 19 of moq-video's VA-API tests pass on the RX 9070 (`renderD129`,
+Mesa 26.2.5); on moq-vaapi 0.2.0, 7 fail. That PR's body has the evidence.
 
-Decided 2026-11-06 (maintainer, /quest-unblock): ✅ keep #8013 queued, which
-puts `vaapi` on by default in moq-cli and moq-transcode, and fix this in m1.
-Until it lands, an AMD-only host encodes H.264 through VA-API and publishes
-a stream nobody can decode; moq-c and moq-ffi already did. Not chosen:
-pulling #8013 to refuse radeonsi first, or keeping `vaapi` opt-in. Also
-decided: ✅ find the root cause in m1. Not chosen: m3 beside
-[Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md), or only a note
-there.
+- H.264 bytes: radeonsi writes the packed SPS and PPS, and the slice's NAL
+  header, only from a packed slice header, which moq-vaapi did not send.
+- Bitrate: moq-vaapi's QP ceiling of 36 set a smallest picture on both iHD
+  and radeonsi; it is now 51.
+- Chroma: not an offset. Mesa's VPP reads the BT.601 standard as SMPTE 170M
+  primaries and gamut-maps; moq-vaapi now names each side explicitly on Mesa.
 
-- Find whether the H.264 bytes are ours. NAL type 0 at the start points at
-  how moq-vaapi reads the coded buffer (a segment's `bit_offset`, or more
-  than one segment) or at packed headers radeonsi does not take for H.264.
-  [moq-dev/vaapi#10](https://github.com/moq-dev/vaapi/pull/10) had to
-  require packed H.265 parameter sets for the same reason. Compare against
-  `ffmpeg -c:v h264_vaapi` on the same node.
-- If it is moq-vaapi's, fix it there with a test, release the crate, and bump
-  `moq-vaapi` here. If it is the driver's, refuse a radeonsi node for H.264
-  encode, using the driver's vendor string, so the candidate fails to open and
-  OpenH264 takes over. Then link the Mesa issue.
-- Fix the chroma offset and the bitrate overshoot if they are ours. If the
-  chroma offset is the driver's VPP, skip VPP on radeonsi and convert to NV12
-  before upload. If the overshoot is the driver's, refuse a radeonsi node for
-  that encode, as for the H.264 bytes, so `Kind::Auto` moves on. Link the
-  Mesa issue either way.
-- Vulkan Video still replaces VA-API on AMD later; this quest does not wait
-  on it.
+What remains here: bump `moq-vaapi` in the root `Cargo.toml` to the release
+with #13, and say in the module docs of
+`rs/moq-video/src/encode/backend/vaapi.rs` that the tests pass on radeonsi.
+Then delete this quest.
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: merge [moq-dev/vaapi#13](https://github.com/moq-dev/vaapi/pull/13)
+  and publish it as moq-vaapi 0.2.1 (a patch: no public API change). Version
+  bumps are a person's call, so an agent does not cut the release. Check that
+  `cargo search moq-vaapi` lists 0.2.1.
 
 ## Related
 
