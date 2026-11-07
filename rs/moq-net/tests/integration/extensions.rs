@@ -46,8 +46,7 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 		match event {
 			moq_net::origin::RouteEvent::Start(update)
 			| moq_net::origin::RouteEvent::Update(update)
-			| moq_net::origin::RouteEvent::Restart(update)
-			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } => {
+			| moq_net::origin::RouteEvent::Restart(update) => {
 				live |= update.prefix.as_str() == path;
 			}
 			moq_net::origin::RouteEvent::End(update) => {

@@ -119,8 +119,11 @@ class BroadcastRequest:
     def route(self, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0) -> Route:
         """Answer with the path's own exact :class:`Route`, owning a new broadcast.
 
-        The route serves a fresh instance unless ``instance`` names one, so a job that
-        restarts is a new stream. Created visible, it announces now and answers the waiting
+        Unless ``instance`` names one, the route takes the instance its prefix route lends
+        when it first announces, so readers that resolved the path through the prefix route
+        continue on it; its end then moves the prefix route to a fresh instance, so a job that
+        restarts is a new stream. A prefix route that names its instance lends none, and the
+        route mints its own. Created visible, it announces now and answers the waiting
         requesters; created ``hidden``, they wait until :meth:`Route.announce`, so the job can
         fill its catalog first, and cancelling the route before then refuses them. Ending the
         route withdraws only this path.
@@ -163,8 +166,11 @@ class Route(_Stream[BroadcastRequest]):
 
     @property
     def instance(self) -> str:
-        """The stream this route serves, minted at creation unless one was named, and kept
-        across :meth:`withdraw` and :meth:`announce`."""
+        """The stream this route serves now.
+
+        A named instance never changes. Unnamed, a prefix route moves to a fresh one each time
+        a job holding its current one ends, and a job's route reports its prefix route's
+        current one until it first announces. Withdrawing and announcing keep it."""
         return self._inner.instance_id()
 
     def announce(self) -> None:

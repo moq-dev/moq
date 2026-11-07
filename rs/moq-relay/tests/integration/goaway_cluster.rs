@@ -223,8 +223,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 			// Under another instance, B's route is another source: a restart.
 			if let moq_net::origin::RouteEvent::Start(update)
 			| moq_net::origin::RouteEvent::Update(update)
-			| moq_net::origin::RouteEvent::Restart(update)
-			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } = event
+			| moq_net::origin::RouteEvent::Restart(update) = event
 				&& update.route.cost() != moq_net::origin::Cost::DRAIN
 			{
 				break;
@@ -255,7 +254,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 }
 
 /// A fake sibling upstream: a stream-only moq server publishing `origin`'s
-/// broadcasts to whoever connects. Returns its port, a receiver yielding each
+/// broadcasts to whoever connects, including those it learned from its own upstream,
+/// since a test may relay through it. Returns its port, a receiver yielding each
 /// accepted [`moq_net::Session`] (so the test can drain it), and the task.
 async fn spawn_upstream(
 	origin: moq_net::origin::Producer,
@@ -265,6 +265,7 @@ async fn spawn_upstream(
 	tokio::task::JoinHandle<()>,
 ) {
 	let (port, mut server) = listen_tcp().await;
+	let origin = origin.with_proxy(true);
 
 	let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -889,8 +890,7 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 	match announced.next().await? {
 		moq_net::origin::RouteEvent::Start(route)
 		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route)
-		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
 		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

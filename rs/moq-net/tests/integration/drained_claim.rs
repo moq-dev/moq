@@ -86,10 +86,10 @@ impl Worker {
 	}
 }
 
-/// Read the first frame of `video` at `pool/p` through `relay`. moq-lite-07 announces the
-/// answer as a takeover of the claim, so the first subscription reads. Older wires carry it
-/// as an ordinary announcement, which resets the first subscription through the claim, so
-/// they wake the worker first.
+/// Read the first frame of `video` at `pool/p` through `relay`. On moq-lite-07 the answer's
+/// exact route carries the claim's instance, so the first subscription reads. Older wires
+/// mint an instance per announcement, so the answer resets the first subscription through
+/// the claim: they wake the worker first.
 async fn watch(version: Version, relay: &origin::Producer) -> String {
 	if version != "moq-lite-07-wip".parse().unwrap() {
 		let cold = relay.consume().request("pool/p", None).await.unwrap();

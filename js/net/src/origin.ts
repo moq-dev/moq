@@ -378,6 +378,8 @@ class ServeState {
 	settled = new Signal(0);
 	/** Counts {@link reset}s, so a waiter can tell its request was released rather than answered. */
 	resets = 0;
+	/** Set on a claim serving an instance it minted, which it hands to its jobs' exact routes. */
+	handoff?: Handoff;
 	onChange: (path: Path.Valid) => void = () => {};
 	onReject: (path: Path.Valid, err: Error) => void = () => {};
 
@@ -478,6 +480,19 @@ class ServeState {
 	}
 }
 
+/**
+ * What a claim that minted its instance shares with its jobs. A job naming no instance
+ * continues the claim's, so a reader resolved through the claim continues on the job's exact
+ * route; once that job stops being advertised the claim moves to a fresh instance, so the next
+ * job for the path is a new stream and nothing answers the ended one's instance again.
+ */
+interface Handoff {
+	/** The instance and epoch the claim serves now, which a job binds when it first announces. */
+	current(): { instance: Instance.Valid; epoch: bigint };
+	/** A job serving `instance` stopped being advertised; the claim moves on if it still serves it. */
+	advance(instance: Instance.Valid): void;
+}
+
 interface Presented extends Advertised {
 	readonly captures: Path.Pattern[] | undefined;
 }
@@ -499,10 +514,12 @@ function publishPath(path: Path.Valid): void {
 	}
 }
 
-// A broadcast created through the origin: its producer, and the handle the origin routes.
+// A broadcast created through the origin: its producer, the handle the origin routes, and
+// how its route stops being advertised.
 interface Created {
 	producer: broadcast.Producer;
 	front: broadcast.Consumer;
+	retract: () => void;
 }
 
 // End a created broadcast the origin no longer routes. Consumer handles never end a produced
@@ -1249,7 +1266,8 @@ export interface Table extends Reader {
  * credential, and, rarely, a stable instance.
  *
  * The default announces at once, at cost 0, under the session's scope, serving a fresh random
- * instance minted when the route is created.
+ * instance minted when the route is created. A job's route ({@link Request.route}) instead
+ * continues its prefix route's instance when that one was minted; see {@link Route.instance}.
  */
 export interface RouteOptions {
 	/**
@@ -1441,14 +1459,26 @@ export class Producer implements Table {
 			auth: options.auth,
 		});
 
+		// A job naming no instance continues its claim's, bound when it first announces rather
+		// than now, so a job still being prepared is never invalidated by the claim moving on.
+		const claim = request && options.instance === undefined ? requestHandoff(request) : undefined;
+		let bound = false;
+
 		const producer = new broadcast.Producer();
 		hooks.stampPath(producer, path);
 		const front = producer.consume();
-		const entry = { producer, front };
+		const announced = () => this.#state.local.peek()?.get(path) === front;
+		// The claim moves on before the retraction reroutes anything, so no request resolving the
+		// claim in this step is answered under the ended stream.
+		const retract = () => {
+			if (bound && announced()) claim?.advance(info.instance as Instance.Valid);
+			this.#retractExact(path, front);
+		};
+		const entry = { producer, front, retract };
 		const previous = created.get(path);
 		created.set(path, entry);
 		if (previous) {
-			this.#retractExact(path, previous.front);
+			previous.retract();
 			retire(previous);
 		}
 
@@ -1459,7 +1489,7 @@ export class Producer implements Table {
 		// a later announce. A job's unanswered request can never be answered now.
 		const release = this.#hold(() => {
 			stop();
-			this.#retractExact(path, front);
+			retract();
 			if (created.get(path) === entry) created.delete(path);
 			retire(entry);
 			const job = pending;
@@ -1469,7 +1499,6 @@ export class Producer implements Table {
 		// Synchronous, so a request made right after the broadcast closes finds it gone.
 		const stop = hooks.onClosed(producer, release);
 
-		const announced = () => this.#state.local.peek()?.get(path) === front;
 		const announce = () => {
 			if (producer.closed.peek() !== undefined) throw new Error("broadcast is closed");
 			const job = pending;
@@ -1481,6 +1510,10 @@ export class Producer implements Table {
 			try {
 				// A request released meanwhile can never be answered, so this route never announces.
 				if (!jobPending(job)) throw unroutable();
+				if (claim) {
+					info = { ...info, ...claim.current() };
+					bound = true;
+				}
 				this.#advertiseExact(path, front, info);
 			} catch (err) {
 				release();
@@ -1498,9 +1531,9 @@ export class Producer implements Table {
 
 		const route = makeRoute({
 			broadcast: producer,
-			instance: () => info.instance as Instance.Valid,
+			instance: () => (claim && !bound ? claim.current().instance : (info.instance as Instance.Valid)),
 			announce,
-			withdraw: () => this.#retractExact(path, front),
+			withdraw: retract,
 			announced,
 			change: (update) => change(WireRoute.normalize({ ...info, ...update })),
 			requested: async function* () {},
@@ -1554,9 +1587,12 @@ export class Producer implements Table {
 	 * A consumer resolving a path under it that no announced local broadcast wins is handed to
 	 * {@link Route.requested} as a {@link Request}: answer it by serving a broadcast already held
 	 * ({@link Request.serve}), under this route's instance, or by creating the path's own exact
-	 * route ({@link Request.route}), under a fresh instance, so restarting one job never splices
-	 * into a copy of the last. A publisher that knows its broadcasts creates each one's exact
-	 * {@link route} instead, so subscribers can enumerate them.
+	 * route ({@link Request.route}), a job. Without {@link RouteOptions.instance} this route
+	 * serves a minted instance that its jobs continue, so a reader resolved through it keeps
+	 * reading when the job's route lands; once a job stops being advertised, this route moves to
+	 * a fresh instance, so restarting the job never splices into a copy of the last. With a named
+	 * instance, each job mints its own. A publisher that knows its broadcasts creates each one's
+	 * exact {@link route} instead, so subscribers can enumerate them.
 	 */
 	routePrefix(prefix: Path.Valid, options: RouteOptions = {}): Route {
 		const info = WireRoute.normalize({
@@ -1575,8 +1611,9 @@ export class Producer implements Table {
 
 	#serving(prefix: Path.Valid, route: WireRoute, originated: boolean, publishes: boolean, visible: boolean): Route {
 		prefix = this.#scope.prefix(prefix);
-		// A route that names no instance serves one of its own.
-		if (route.instance === undefined) route = { ...route, instance: Instance.random(), epoch: 0n };
+		// A route that names no instance serves one of its own, and a claim hands that one to its jobs.
+		const minted = route.instance === undefined;
+		if (minted) route = { ...route, instance: Instance.random(), epoch: 0n };
 		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix);
 		server.onChange = (path) => this.#state.refresh(path);
@@ -1644,18 +1681,38 @@ export class Producer implements Table {
 			if (visible) insert();
 		}
 
-		const update = (next: WireRoute) => {
+		// An `advance` to a fresh instance of the claim's own keeps the requests its handler holds,
+		// which a job binding at announce answers under the new instance, and the held answers it
+		// served; only readers restart.
+		const update = (next: WireRoute, advance = false) => {
 			open();
 			const previous = entry.route.peek().instance;
 			const restart = inserted && previous !== next.instance;
 			if (restart) this.#state.restart(entry);
 			entry.route.set(next);
-			if (previous !== next.instance) server.reset();
+			if (previous !== next.instance) {
+				// Wakes a peer's demand pinned to the old instance, which then refuses it.
+				if (advance) server.settled.update((n) => n + 1);
+				else server.reset();
+			}
 			if (!inserted) return;
 			this.#state.rebuildOriginated();
 			this.#state.refreshPrefix(prefix);
 			this.#state.routes.mutate(() => {});
 		};
+
+		if (publishes && minted) {
+			server.handoff = {
+				current: () => {
+					const { instance, epoch } = entry.route.peek();
+					return { instance: instance as Instance.Valid, epoch: epoch ?? 0n };
+				},
+				advance: (instance) => {
+					if (ended || !this.#state.routes.peek() || entry.route.peek().instance !== instance) return;
+					update({ ...entry.route.peek(), instance: Instance.random(), epoch: 0n }, true);
+				},
+			};
+		}
 
 		const publisher = publishes ? this : undefined;
 		return makeRoute({
@@ -1889,6 +1946,7 @@ let setRequestPublisher: (request: Request, publisher: Producer | undefined) => 
 let jobPending: (request: Request) => boolean;
 let answerJob: (request: Request) => void;
 let rejectJob: (request: Request, err: Error) => void;
+let requestHandoff: (request: Request) => Handoff | undefined;
 
 /**
  * An owned request for one publisher instance at a broadcast path; see {@link Consumer.request}.
@@ -2600,8 +2658,14 @@ export class Consumer implements Reader {
 				try {
 					for (;;) {
 						signal?.throwIfAborted();
-						// The route may name another instance by the time its handler answers.
-						if (instance !== undefined && entry.route.peek().instance !== instance) throw unroutable();
+						// The route may name another instance by the time its handler answers, as when a
+						// sibling job ending moves a claim on. A job's route still carrying the requested
+						// instance serves it.
+						if (instance !== undefined && entry.route.peek().instance !== instance) {
+							const job = this.#local(path, instance);
+							if (job) return job;
+							throw unroutable();
+						}
 						const served = server.served.get(path);
 						if (served && served.closed.peek() === undefined) return served;
 						const rejected = server.rejected.get(path);
@@ -2615,7 +2679,15 @@ export class Consumer implements Reader {
 						}
 						// Released by an instance change, which also dropped this pass's count: ask again.
 						if (server.resets !== resets) break;
-						if (!server.pending.has(path)) return undefined;
+						if (!server.pending.has(path)) {
+							// Answered by a job's exact route. A peer naming no instance cannot tell
+							// that route's stream from the claim's, so it is refused and subscribes
+							// again once the route's announcement reaches it.
+							if (instance === undefined) return undefined;
+							const job = this.#local(path, instance);
+							if (job) return job;
+							throw unroutable();
+						}
 						await race([Signal.race(server.settled, server.closed), cancelled]);
 					}
 				} finally {
@@ -2717,7 +2789,16 @@ export class Route {
 		return producer;
 	}
 
-	/** The stream this route serves, minted when it was created unless {@link RouteOptions.instance} named one. */
+	/**
+	 * The stream this route serves, minted when it was created unless {@link RouteOptions.instance}
+	 * named one.
+	 *
+	 * A prefix route that minted its instance moves to a fresh one, as a restart, the moment a
+	 * job's route carrying its instance stops being advertised. A job's route
+	 * ({@link Request.route}) naming no instance takes its prefix route's current one when it
+	 * first announces, and reports that until then; a prefix route naming its instance gives each
+	 * job a fresh one instead.
+	 */
 	get instance(): Instance.Valid {
 		return this.#control.instance();
 	}
@@ -2792,8 +2873,8 @@ export class Route {
  *
  * Yielded by {@link Route.requested}. Answer it one of three ways: {@link serve} a broadcast
  * already held, under the prefix route's instance; create the path's own exact route with
- * {@link route}, under a fresh instance; or {@link reject} it with an error. Advancing the
- * iterator or closing it without answering rejects the request.
+ * {@link route}, a job; or {@link reject} it with an error. Advancing the iterator or closing it
+ * without answering rejects the request.
  *
  * @public
  */
@@ -2824,6 +2905,7 @@ export class Request {
 			request.#server.settled.update((n) => n + 1);
 		};
 		rejectJob = (request, err) => request.#server.reject(request, err);
+		requestHandoff = (request) => request.#server.handoff;
 		finishRequest = (request, err) => {
 			request.#done = true;
 			request.#withdrawn = true;
@@ -2834,9 +2916,13 @@ export class Request {
 	/**
 	 * Answer with the path's own exact route, owning a new broadcast.
 	 *
-	 * The route serves a fresh instance unless `options` names one, so a job that ends and
-	 * restarts beneath the same prefix is a new stream for its restarted sequences. Closing the
-	 * route withdraws only this path: the prefix route keeps answering later requests. Created
+	 * Unless `options` names an instance, the route continues the prefix route's minted
+	 * instance, bound when it first announces, so readers that resolved the path through the
+	 * prefix route keep reading the same stream. Once this route stops being advertised the
+	 * prefix route moves to a fresh instance, so a job that restarts beneath it is a new stream
+	 * for its restarted sequences, and a request naming the ended instance is refused. Under a
+	 * prefix route naming its instance, the route mints a fresh one. Closing the route withdraws
+	 * only this path: the prefix route keeps answering later requests. Created
 	 * visible, the route announces now and answers the requesters waiting on its path. Created
 	 * {@link RouteOptions.hidden | hidden}, they wait until {@link Route.announce}, so the job can
 	 * fill its catalog first; closing the route or its broadcast before then refuses them.

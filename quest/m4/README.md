@@ -67,7 +67,7 @@ deleted.
 - [A cancelled miss stops waiting](/quest/m4/fill-wait-cancel-test.md) - a test proves a relay miss waiting on its own fill ends when no reader wants it
 - [No MOQ_* knobs outside the binaries](/quest/m4/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
 - [The HLS server follows each path once](/quest/m4/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
-- [moq-bench pins the instances it measures](/quest/m4/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
+- [moq-bench pins the instances it measures](/quest/m4/bench-epoch-pin.md) - pooled requests pin their announced instance, so another instance at the path is not counted as the same broadcast
 - [moq-bench reports sub-millisecond latency](/quest/m4/bench-latency-resolution.md) - steady-window latency resolves finer than 1 ms
 - [Benchmark series stay meaningful](/quest/m4/bench-hygiene.md) - a warm `burst` variant, stale series pruned, and slow-group `bytes` kept out of series names
 - [Re-run the SPS fuzzer on h264-reader](/quest/m4/sps-fuzz-h264-reader.md) - the H.264 SPS overflow is rechecked on the new parser

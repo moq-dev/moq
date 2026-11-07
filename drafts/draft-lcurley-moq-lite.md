@@ -411,7 +411,6 @@ The publisher replies with a single ANNOUNCE_OK message followed by the matching
 - ANNOUNCE_END: the origin withdrew a claim.
 - ANNOUNCE_UPDATE: a claim's cost changed.
 - ANNOUNCE_RESTART: a claim now serves another Instance, or a higher Epoch of the same one.
-- ANNOUNCE_TAKEOVER: a matching claim continues what a live claim served beneath it.
 - ANNOUNCE_FLOOR: a batch of a route's claims is complete.
 - SYNCED: the initial set is complete.
 
@@ -423,16 +422,16 @@ The initial set is relative to this hop: a relay answers with what it holds with
 The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
 A retraction of a claim or route already sent MAY precede SYNCED.
 
-Each ROUTE_START implicitly assigns the next Route ID on the stream, and each ANNOUNCE_START or ANNOUNCE_TAKEOVER the next Announce ID: two counters starting at 0 that increment by 1 per assignment.
+Each ROUTE_START implicitly assigns the next Route ID on the stream, and each ANNOUNCE_START the next Announce ID: two counters starting at 0 that increment by 1 per assignment.
 Neither id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the origin node or the claim's prefix.
 Ids are never reused within a stream.
 A ROUTE_END retires its Route ID and the Announce ID of every claim under the route; an ANNOUNCE_END retires one Announce ID.
 
 A stream has at most one live route per origin node, and each route at most one live claim per prefix.
 Another origin claiming the same prefix is another claim, under its own route.
-An ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces a claim while keeping its id live, and an ANNOUNCE_TAKEOVER at its predecessor's own prefix replaces it under a new id; a claim never moves to another route.
+An ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces a claim while keeping its id live; a claim never moves to another route.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives a message referencing a Route ID or Announce ID that was never assigned or already retired, a ROUTE_START for an origin node that already has a live route on the stream, an ANNOUNCE_START or ANNOUNCE_TAKEOVER for a prefix its route already claims other than as its predecessor, or any message before ANNOUNCE_OK.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives a message referencing a Route ID or Announce ID that was never assigned or already retired, a ROUTE_START for an origin node that already has a live route on the stream, an ANNOUNCE_START for a prefix its route already claims, or any message before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that every route and claim on it is gone.
 
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, including one resolved by [Compression](#announce-compression).
@@ -457,9 +456,9 @@ A floor that certifies nothing proves no claim absent: the stream's claims stay 
 While a receiver has a usable route to the origin and every peer whose last advertised route to it is feasible here has answered the current request, it lets go of a claim none of those peers certifies or carries: it goes offline, which is not an ANNOUNCE_END.
 
 #### Compression {#announce-compression}
-An ANNOUNCE_START or ANNOUNCE_TAKEOVER MAY copy the head of its path from a live claim on the same stream, its base.
-`Path Base` names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Path Base`, so 1 names the latest ANNOUNCE_START or ANNOUNCE_TAKEOVER, and 0 names no base.
-The receiver resolves the base against the claims live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing, including a predecessor that the ANNOUNCE_TAKEOVER naming it as a base retires.
+An ANNOUNCE_START MAY copy the head of its path from a live claim on the same stream, its base.
+`Path Base` names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Path Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
+The receiver resolves the base against the claims live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
 The base need not share the new claim's route.
 A publisher MAY always send a `Path Base` of 0.
 
@@ -522,7 +521,6 @@ Claims with the same Instance serve the same Broadcast, so a relay MAY move a li
 A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
 When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the claim goes; new requests resolve the winner, and the ANNOUNCE_RESTART tells subscribers to request again.
 A receiver of an ANNOUNCE_RESTART (or of the ANNOUNCE_END and ANNOUNCE_START standing in for one) MUST NOT serve a new request under its prefix from anything resolved through the replaced claim.
-An ANNOUNCE_TAKEOVER is the one exception to staying on an Instance: what was resolved through its predecessor beneath its prefix is the Broadcast the new claim serves, so those subscriptions continue on the new claim and new requests MAY join them, whatever either claim's Instance.
 A version before this one carries no Instance, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Instance.
 A minted Instance SHOULD start with `~` (0x7E), so a reader can tell it names an announcement rather than the publisher's stream; a publisher SHOULD NOT name its own Instance with that prefix.
 A minted Instance is new for every announcement, so a publisher reconnecting or re-announcing through such a hop is another stream.
@@ -543,6 +541,7 @@ When choosing which claim to advertise for a prefix, the requested path is the p
 
 A claim resolved this way serves the request like any other, and the claim is not consumed by it.
 A relay MUST NOT announce a path merely because it resolved it: the covering claim stays the only advertisement until the advertiser announces the concrete path, which it SHOULD do once it is producing, so a later request finds the running broadcast by its exact path instead of resolving a second producer.
+The advertiser MAY announce the path under the claim's Instance, so subscriptions resolved through the claim continue on it (see [Routing](#routing)); when that announcement ends, a claim still serving its Instance restarts under a new one, so a restarted answer is another Broadcast.
 
 An advertiser that will not serve a resolved request resets the request stream with a typed code (see [Error Codes](#error-codes)).
 Every refusal is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
@@ -1113,7 +1112,7 @@ An Announce Stream ending before SYNCED is a PROTOCOL_VIOLATION; a Tracks Stream
 
 ## ROUTE_START {#route-start}
 A publisher sends a ROUTE_START message when it reaches an origin node (see [Routing](#routing)).
-Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, ANNOUNCE_FLOOR, ANNOUNCE_START, and ANNOUNCE_TAKEOVER (see [Announce](#announce)).
+Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, ANNOUNCE_FLOOR, and ANNOUNCE_START (see [Announce](#announce)).
 
 ~~~
 ROUTE_START Message {
@@ -1241,7 +1240,7 @@ A publisher MUST close the session with a PROTOCOL_VIOLATION if it receives any 
 
 ## ANNOUNCE_START {#announce-start}
 A publisher sends an ANNOUNCE_START message to advertise a claim of a route's origin node: that paths under a prefix can be served.
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and ANNOUNCE_TAKEOVER (see [Announce](#announce)).
+Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [Announce](#announce)).
 
 Only the suffix is encoded on the wire, as the full claim prefix can be constructed by prepending the requested prefix.
 
@@ -1282,7 +1281,7 @@ A relay forwards the Instance unchanged.
 Which incarnation of the Instance the claim serves: a counter the publisher raises within one Instance, 0 unless it keeps an Instance across restarts.
 A relay forwards the Epoch unchanged.
 
-Only an ANNOUNCE_RESTART or ANNOUNCE_TAKEOVER changes the Instance or the Epoch; ANNOUNCE_UPDATE never does.
+Only an ANNOUNCE_RESTART changes the Instance or the Epoch; ANNOUNCE_UPDATE never does.
 
 **Announce Cost**:
 The origin's price for this prefix, in the units of the [Cost Parameter](#cost-parameter): 0 for content it already produces, larger for a standby that starts work on demand.
@@ -1308,7 +1307,7 @@ ANNOUNCE_END Message {
 Set to 0x1 to indicate an ANNOUNCE_END message.
 
 **Announce ID**:
-The ordinal implicitly assigned by a prior ANNOUNCE_START or ANNOUNCE_TAKEOVER on this stream.
+The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 A claim that is announced again after an ANNOUNCE_END gets a fresh id from its next ANNOUNCE_START.
 
 
@@ -1361,44 +1360,6 @@ As defined for [ANNOUNCE_END](#announce-end).
 
 **Instance**, **Epoch**, and **Announce Cost**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the claim's.
-
-## ANNOUNCE_TAKEOVER {#announce-takeover}
-A publisher sends an ANNOUNCE_TAKEOVER message to advertise a claim that continues what a live claim, its predecessor, served beneath the new claim's prefix.
-A worker advertising a prefix under its own Instance answers a request under it by publishing that path under a fresh Instance; the ANNOUNCE_TAKEOVER keeps subscriptions already resolved through the prefix rather than resetting them to the more specific claim.
-It is an ANNOUNCE_START in every other respect and assigns the next Announce ID.
-
-~~~
-ANNOUNCE_TAKEOVER Message {
-  Type (i) = 0x5
-  Message Length (i)
-  Predecessor (i),
-  Path Base (i),
-  Path Keep (i),
-  Claim Prefix Suffix (s),
-  Route ID (i),
-  Instance (b),
-  Epoch (i),
-  Announce Cost (i),
-}
-~~~
-
-**Type**:
-Set to 0x5 to indicate an ANNOUNCE_TAKEOVER message.
-
-**Predecessor**:
-The Announce ID of a live claim under the same route whose prefix covers the new claim's prefix.
-One at the predecessor's own prefix retires the predecessor's id, which this claim replaces; otherwise the predecessor stays live.
-The receiver MUST close the session with a PROTOCOL_VIOLATION if the predecessor was never assigned, is already retired, is under another route, or does not cover the new prefix.
-
-**Path Base**, **Path Keep**, **Claim Prefix Suffix**, **Route ID**, **Instance**, **Epoch**, and **Announce Cost**:
-As defined for [ANNOUNCE_START](#announce-start), resolved before the predecessor retires.
-
-The receiver treats whatever it resolved through the predecessor beneath the new prefix as served by the new claim: subscriptions on it continue, and a new request for those paths MAY join them.
-Only what the predecessor's current claim resolved continues; anything resolved before an earlier ANNOUNCE_RESTART of it does not.
-
-A publisher MUST send an ANNOUNCE_TAKEOVER only when the new claim serves exactly what the subscriber resolved through the predecessor beneath its prefix: the publisher that answered requests through the predecessor now advertises their paths.
-A relay forwards one only when the subscriber was last sent that predecessor, and every claim the relay sent at its prefix serves the same Instance; otherwise it sends an ANNOUNCE_START, or an ANNOUNCE_RESTART at the predecessor's own prefix.
-
 
 ## ANNOUNCE_FLOOR {#announce-floor}
 A publisher sends an ANNOUNCE_FLOOR message to close a batch of a route's claims (see [Floors](#floors)).
@@ -2156,10 +2117,10 @@ The `Message Length` describes the payload size on the wire.
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining claims that end before delivery.
 - Added `Instance` and `Epoch` to ANNOUNCE_START and ANNOUNCE_RESTART, and `Instance` to TRACK, TRACKS, SUBSCRIBE, and FETCH. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): a live advertisement now serves another Instance, or a higher Epoch of the same one.
-- Added ANNOUNCE_TAKEOVER (0x5): a claim that continues what a live claim served beneath it, such as a job answering a request through a worker's prefix at its exact path, so subscriptions resolved through the prefix are not reset.
+- An advertiser MAY announce a path it answers through a claim under the claim's Instance, so subscriptions resolved through the claim continue, and a claim still serving that Instance when the announcement ends restarts under a new one.
 - A receiver mints an Instance, starting with `~`, for each announcement a session of an earlier version delivers.
-- Added announce compression: ANNOUNCE_START and ANNOUNCE_TAKEOVER gain `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
-- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START and ANNOUNCE_TAKEOVER names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list, ANNOUNCE_OK's Hop ID, and the SETUP Hop parameter (0x5).
+- Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
+- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list, ANNOUNCE_OK's Hop ID, and the SETUP Hop parameter (0x5).
 - Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.

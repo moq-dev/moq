@@ -27,6 +27,8 @@ use crate::{
 
 use super::Version;
 
+mod routed;
+
 pub(super) struct PublisherConfig {
 	/// The runtime that arms the publisher's timers.
 	pub runtime: crate::time::Deadlines,
@@ -198,6 +200,19 @@ impl Shared {
 	/// SETUP (sent at startup on every lite-05+ session, well before it could
 	/// learn of anything to subscribe to); the result is cached, since the peer
 	/// sends exactly one SETUP per session.
+	/// The routes a request naming the origin node `node` resolves through: that
+	/// node's, this node's own when it names this one, or any for 0.
+	fn node_filter(&self, origin: origin::Consumer, node: u64) -> origin::Consumer {
+		if node == 0 {
+			return origin;
+		}
+		let filter = match origin.route_node().declared() == node {
+			true => origin::NodeFilter::Own,
+			false => origin::NodeFilter::Is(node),
+		};
+		origin.with_node(filter)
+	}
+
 	fn poll_serving_origin(&self, waiter: &kio::Waiter) -> Poll<origin::Consumer> {
 		if let Some(origin) = self.serving.get() {
 			return Poll::Ready(origin.clone());
@@ -950,6 +965,15 @@ impl AnnounceServe {
 		})?;
 		let prefix: crate::Path = interest.prefix.clone();
 		let hidden: bool = interest.hidden;
+		// Lite-07 answers from the origin's route node instead of the route table.
+		let answer: Option<routed::Answer> = self.shared.version.has_routes().then(|| {
+			routed::Answer::new(
+				self.shared.origin.clone(),
+				prefix.clone(),
+				hidden,
+				self.shared.auth.clone(),
+			)
+		});
 
 		// The identity whose routes we filter out. Lite-04/05 carry it per
 		// announce stream; lite-06+ reads the session-wide SETUP Hop
@@ -970,34 +994,56 @@ impl AnnounceServe {
 			Some(hop) => Poll::Ready(*hop),
 			None => self.shared.peer_setup.poll_hop(waiter).map(|hop| hop.unwrap_or(*assigned)),
 		});
-		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) =
-			self.start(prefix, exclude_hop, hidden);
+		let (origin, announced, run): (origin::Consumer, origin::Routes, AnnounceRun) = match answer.is_some() {
+			// The route table goes unread.
+			true => {
+				let origin = self.shared.origin.empty();
+				let announced = origin.routes();
+				(
+					origin,
+					announced,
+					AnnounceRun::new(prefix, exclude_hop, self.shared.version),
+				)
+			}
+			false => self.start(prefix, exclude_hop, hidden),
+		};
 
 		// Streaming announce updates.
 		wait!(Run => {
 			let stream = self.stream.as_mut().expect("stream present");
-			if self.shared.withdrawal.poll(waiter).is_ready() {
-				run.withdraw(stream, origin, announced)?;
-			}
-			let res = ready!(run.poll(stream, origin, announced, waiter));
-			if let Err(err) = res {
-				match &err {
-					Error::Cancel
-					| Error::Stream(crate::StreamError::Cancel)
-					| Error::Session(crate::SessionError::Cancel)
-					| Error::Transport(_)
-					| Error::IdleTimeout => {
-						tracing::debug!(prefix = %origin.root(), "announcing cancelled");
+			let withdrawing = self.shared.withdrawal.poll(waiter).is_ready();
+			let res = match answer {
+				Some(answer) => ready!(answer.poll(stream, withdrawing, waiter)),
+				None => {
+					if withdrawing {
+						run.withdraw(stream, origin, announced)?;
 					}
-					err => {
-						tracing::warn!(%err, prefix = %origin.root(), "announcing error");
-					}
+					ready!(run.poll(stream, origin, announced, waiter))
 				}
-				self.stream.take().expect("stream present").writer.abort(&err);
+			};
+			if let Err(err) = res {
+				Self::abort(&mut self.stream, origin.root(), err);
 			}
 			Poll::Ready(())
 		});
 		Poll::Ready(Ok(()))
+	}
+
+	/// End the stream on an error, quietly when the session is only closing.
+	fn abort(stream: &mut Option<Stream<Transport, Version>>, prefix: &crate::Path, err: Error) {
+		match &err {
+			Error::Cancel
+			| Error::Stream(crate::StreamError::Cancel)
+			| Error::Session(crate::SessionError::Cancel)
+			| Error::Transport(_)
+			| Error::IdleTimeout => {
+				tracing::debug!(%prefix, "announcing cancelled");
+			}
+			err => {
+				tracing::warn!(%err, %prefix, "announcing error");
+			}
+		}
+		stream.take().expect("stream present").writer.abort(&err);
 	}
 
 	fn start(
@@ -1097,6 +1143,14 @@ fn served(route: &crate::origin::RouteInfo) -> Served {
 	(route.instance.clone(), route.epoch)
 }
 
+/// The hop chain as `version` carries it: lite-07 names a claim's route instead.
+fn chain(version: Version, hops: Hops) -> Hops {
+	match version.has_routes() {
+		true => Hops::new(),
+		false => hops,
+	}
+}
+
 enum AnnouncePhase {
 	/// The version-specific initial burst has not been sent yet.
 	Init,
@@ -1179,8 +1233,7 @@ impl AnnounceRun {
 			match event {
 				origin::RouteEvent::Start(update)
 				| origin::RouteEvent::Update(update)
-				| origin::RouteEvent::Restart(update)
-				| origin::RouteEvent::Takeover { announce: update, .. } => {
+				| origin::RouteEvent::Restart(update) => {
 					current.insert(update.prefix, update.route);
 				}
 				origin::RouteEvent::End(update) => {
@@ -1225,19 +1278,18 @@ impl AnnounceRun {
 				tracing::debug!(route = %absolute, "reannounce");
 				advertised.hops = hops.clone();
 				advertised.cost = cost;
+				let hops = chain(self.version, hops);
 				match advertised.id {
-					Some(id) => {
-						let hops = self.encoder.update(id, hops);
-						stream
-							.writer
-							.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?
-					}
+					Some(id) => stream
+						.writer
+						.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?,
 					// lite-05: a duplicate ANNOUNCE, which assigns no id.
 					None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+						route: 0,
 						instance: None,
 						epoch: 0,
 						suffix: lite::PathRef::literal(suffix),
-						hops: lite::HopsRef::literal(hops),
+						hops,
 						cost,
 					})?,
 				}
@@ -1297,7 +1349,8 @@ impl AnnounceRun {
 		// Fixed while the peer holds the advertisement: a new one is a restart.
 		route: Served,
 	) -> Result<(), Error> {
-		let (id, wire, chain) = self.encoder.start(suffix.clone(), hops.clone());
+		let (id, wire) = self.encoder.start(suffix.clone());
+		let wire_hops = chain(self.version, hops.clone());
 		self.live.insert(
 			suffix,
 			Advertised {
@@ -1309,47 +1362,11 @@ impl AnnounceRun {
 		);
 		let (instance, epoch) = route;
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+			route: 0,
 			instance,
 			epoch,
 			suffix: wire,
-			hops: chain,
-			cost,
-		})?;
-		self.sent(stream)?;
-		Ok(())
-	}
-
-	/// Advertise `suffix` as continuing the peer's live `predecessor` (suffix and id):
-	/// ANNOUNCE_TAKEOVER, which retires the predecessor when it held `suffix`.
-	#[expect(clippy::too_many_arguments, reason = "private plumbing mirroring start and restart")]
-	fn takeover(
-		&mut self,
-		stream: &mut Stream<Transport, Version>,
-		predecessor: (crate::Path, u64),
-		suffix: crate::Path,
-		hops: Hops,
-		cost: crate::origin::Cost,
-		route: Served,
-		absolute: &crate::Path,
-	) -> Result<(), Error> {
-		tracing::debug!(route = %absolute, predecessor = %predecessor.0, "takeover");
-		let (id, wire, chain) = self.encoder.takeover(predecessor.1, suffix.clone(), hops.clone());
-		self.live.insert(
-			suffix,
-			Advertised {
-				id: Some(id),
-				hops,
-				cost,
-				served: route.clone(),
-			},
-		);
-		let (instance, epoch) = route;
-		stream.writer.buffer(&lite::AnnounceBroadcast::Takeover {
-			predecessor: predecessor.1,
-			suffix: wire,
-			instance,
-			epoch,
-			hops: chain,
+			hops: wire_hops,
 			cost,
 		})?;
 		self.sent(stream)?;
@@ -1375,18 +1392,16 @@ impl AnnounceRun {
 					suffix,
 					Advertised {
 						id: Some(id),
-						hops: hops.clone(),
+						hops,
 						cost,
 						served: route.clone(),
 					},
 				);
-				let hops = self.encoder.update(id, hops);
 				let (instance, epoch) = route;
 				stream.writer.buffer(&lite::AnnounceBroadcast::Restart {
 					id,
 					instance,
 					epoch,
-					hops,
 					cost,
 				})?;
 				self.sent(stream)?;
@@ -1582,15 +1597,10 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let (update, active, restart, predecessor) = match next {
-				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => {
-					(update, true, false, None)
-				}
-				Some(origin::RouteEvent::Restart(update)) => (update, true, true, None),
-				Some(origin::RouteEvent::Takeover { announce, predecessor }) => {
-					(announce, true, false, Some(predecessor))
-				}
-				Some(origin::RouteEvent::End(update)) => (update, false, false, None),
+			let (update, active, restart) = match next {
+				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => (update, true, false),
+				Some(origin::RouteEvent::Restart(update)) => (update, true, true),
+				Some(origin::RouteEvent::End(update)) => (update, false, false),
 				None => {
 					if self.initial.take().is_some() {
 						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
@@ -1612,26 +1622,7 @@ impl AnnounceRun {
 				continue;
 			}
 
-			// A takeover names its predecessor's id, so only one the peer holds. Elsewhere it
-			// is another instance, in place or not.
-			let taken = predecessor
-				.as_ref()
-				.filter(|_| self.version.has_announce_takeover())
-				.filter(|predecessor| **predecessor == suffix || !self.live.contains_key(&suffix))
-				.and_then(|predecessor| Some((predecessor.clone(), self.live.get(predecessor)?.id?)));
-			let restart = restart || predecessor.as_ref() == Some(&suffix);
 			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) if let Some((predecessor, id)) = taken => {
-					self.takeover(
-						stream,
-						(predecessor, id),
-						suffix,
-						hops,
-						cost,
-						served(&update.route),
-						&absolute,
-					)?;
-				}
 				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
 					self.restart(stream, suffix, hops, cost, served(&update.route), &absolute)?;
 				}
@@ -1690,6 +1681,9 @@ trait Request: Sized {
 
 	/// The instance the request pins, if any.
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance>;
+
+	/// The origin node the request names (lite-07), or 0 to let this side select.
+	fn node(msg: &Self::Message) -> u64;
 
 	/// Start answering, once the broadcast resolves. `track` is the name [`Request::take_track`]
 	/// moved out of `msg`, which no longer holds it.
@@ -1959,6 +1953,7 @@ impl<R: Request> RequestServe<R> {
 						// served on demand by the route covering it (an `origin::Route`), or
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
+						let origin = self.shared.node_filter(origin, R::node(msg));
 						let path = R::target(msg).0.clone();
 						*requesting = Some(origin.lookup(path, R::instance(msg)).into_inner());
 					}
@@ -2125,6 +2120,10 @@ impl Request for TrackInfoServe {
 		msg.instance.as_ref()
 	}
 
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
+	}
+
 	fn start(
 		shared: &Shared,
 		_: Self::Message,
@@ -2235,6 +2234,10 @@ impl Request for TracksServe {
 
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
 		msg.instance.as_ref()
+	}
+
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
 	}
 
 	fn start(shared: &Shared, _: Self::Message, _: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -2349,6 +2352,10 @@ impl Request for SubscribeServe {
 
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
 		msg.instance.as_ref()
+	}
+
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
 	}
 
 	fn start(
@@ -2996,6 +3003,10 @@ impl Request for DatagramServe {
 		msg.instance.as_ref()
 	}
 
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
+	}
+
 	fn start(
 		_: &Shared,
 		msg: Self::Message,
@@ -3146,6 +3157,10 @@ impl Request for FetchServe {
 
 	fn instance(msg: &Self::Message) -> Option<&crate::Instance> {
 		msg.instance.as_ref()
+	}
+
+	fn node(msg: &Self::Message) -> u64 {
+		msg.node
 	}
 
 	fn start(
@@ -3612,6 +3627,39 @@ mod announce_test {
 		);
 	}
 
+	/// A lite-07 prefix too long to lie beneath the handle's root names nothing there,
+	/// so the answer announces nothing rather than what the root holds.
+	#[test]
+	fn a_lite07_prefix_past_the_root_announces_nothing() {
+		let origin = Hop::new(1).unwrap().produce();
+		let root = "r".repeat(100);
+		let _route = origin
+			.announce(format!("{root}/x"), origin::RouteInfo::default())
+			.unwrap();
+		let consumer = origin
+			.consume()
+			.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap();
+		let prefix = crate::Path::new(&"p".repeat(crate::Path::MAX_BYTES - 50)).unwrap();
+		let mut answer = super::routed::Answer::new(consumer, prefix, true, crate::auth::Link::new(false));
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut stream = Stream::<Transport, Version> {
+			writer: Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			),
+			reader: Reader::new(crate::transport::boxed::RecvStream::new(PendingRecv), Version::Lite07),
+		};
+		assert!(answer.poll(&mut stream, false, &kio::Waiter::noop()).is_pending());
+		wire.take_ok();
+		assert_eq!(wire.take_announces(), [lite::AnnounceBroadcast::Synced]);
+	}
+
 	#[test]
 	fn synced_survives_a_removed_initial_route_and_live_churn() {
 		let origin = Hop::new(1).unwrap().produce();
@@ -4004,7 +4052,7 @@ mod announce_test {
 		match initial.as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {
 				assert_eq!(suffix.rest.as_str(), "cam");
-				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
+				assert_eq!(hops, &chain(version, pub_hops()));
 				assert_eq!(*cost, crate::origin::Cost::new(7));
 			}
 			other => panic!("expected the initial announce, got {other:?}"),
@@ -4056,7 +4104,7 @@ mod announce_test {
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
-				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
+				assert_eq!(hops, &pub_hops());
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}
 			other => panic!("expected a restart, got {other:?}"),
@@ -7920,7 +7968,8 @@ mod serve_group_test {
 					.unwrap();
 				track.start_at(0).unwrap();
 				broadcast.announce().unwrap();
-				let relay = origin(2);
+				// A relay forwards what it learned from its upstream (moq-lite-07).
+				let relay = origin(2).with_proxy(true);
 				let _upstream = connect(version, &publisher, &relay).await;
 				let remote = relay
 					.consume()
@@ -8706,14 +8755,13 @@ mod tests {
 				crate::origin::RouteInfo::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
-				None,
 			)
 			.unwrap();
 
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops), None)
+			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops))
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
@@ -9287,13 +9335,7 @@ mod tests {
 		let mut _route = None;
 		let mut held = None;
 		match wait {
-			Wait::Broadcast => {
-				_route = Some(
-					origin
-						.forward("room", crate::origin::RouteInfo::default(), None)
-						.unwrap(),
-				)
-			}
+			Wait::Broadcast => _route = Some(origin.forward("room", crate::origin::RouteInfo::default()).unwrap()),
 			Wait::Track => {
 				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 				let dynamic = broadcast.broadcast().requests();
@@ -9383,6 +9425,7 @@ mod tests {
 				for close in [Close::Fin, Close::Reset] {
 					let track = lite::Track {
 						instance: None,
+						node: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 					};
@@ -9391,6 +9434,7 @@ mod tests {
 					let subscribe = lite::Subscribe {
 						order: crate::track::Order::Descending,
 						instance: None,
+						node: 0,
 						id: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
@@ -9403,6 +9447,7 @@ mod tests {
 
 					let fetch = lite::Fetch {
 						instance: None,
+						node: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
@@ -9451,6 +9496,7 @@ mod tests {
 			lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -9516,6 +9562,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Track {
 			instance: None,
+			node: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 		}
@@ -9591,6 +9638,7 @@ mod tests {
 	fn legacy_track() -> lite::Track<'static> {
 		lite::Track {
 			instance: None,
+			node: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
 		}
@@ -9600,6 +9648,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
@@ -9783,6 +9832,7 @@ mod tests {
 					let mut script = Vec::new();
 					lite::Track {
 						instance: None,
+						node: 0,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 					}
@@ -9930,6 +9980,7 @@ mod tests {
 					let msg = lite::Subscribe {
 						order: crate::track::Order::Ascending,
 						instance: None,
+						node: 0,
 						id: 0,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
@@ -10063,6 +10114,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -10192,6 +10244,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -10445,6 +10498,7 @@ mod tests {
 			&publisher.shared,
 			lite::Fetch {
 				instance: None,
+				node: 0,
 				broadcast: crate::Path::new("room").unwrap(),
 				track: Default::default(),
 				priority: 0,
@@ -10497,6 +10551,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Fetch {
 			instance: None,
+			node: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 0,
@@ -10620,6 +10675,7 @@ mod tests {
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -10678,6 +10734,7 @@ mod tests {
 		let request = lite::Tracks {
 			broadcast: crate::Path::from_static("room"),
 			instance: None,
+			node: 0,
 		};
 		let request = request.encode_bytes(version).unwrap().to_vec();
 		let session = ScriptedSession::per_stream(vec![request.clone(), request]);
@@ -10732,6 +10789,7 @@ mod tests {
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -10870,6 +10928,7 @@ mod tests {
 		let msg = lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
+			node: 0,
 			id: 0,
 			broadcast: crate::Path::new(broadcast).unwrap(),
 			track: track.into(),

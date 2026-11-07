@@ -104,8 +104,7 @@ async fn next_active(announced: &mut moq_net::origin::Routes) -> String {
 		{
 			moq_net::origin::RouteEvent::Start(route)
 			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route)
-			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => return route.prefix.to_string(),
+			| moq_net::origin::RouteEvent::Restart(route) => return route.prefix.to_string(),
 			moq_net::origin::RouteEvent::End(_) => {}
 		}
 	}

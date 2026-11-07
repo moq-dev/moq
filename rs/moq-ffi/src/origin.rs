@@ -152,8 +152,8 @@ pub struct MoqRoute {
 	reads: Polled<moq_net::origin::Route>,
 	/// An exact route's broadcast, wrapped once so every caller shares its catalog.
 	broadcast: Option<Arc<MoqBroadcastProducer>>,
-	/// Minted at creation and kept for the route's lifetime.
-	instance: String,
+	/// The instance last read, reported once the route is cancelled.
+	instance: std::sync::Mutex<String>,
 	driver: Background,
 }
 
@@ -441,7 +441,7 @@ impl MoqRoute {
 
 	fn new(route: moq_net::origin::Route, broadcast: Option<Arc<MoqBroadcastProducer>>, driver: Background) -> Self {
 		Self {
-			instance: route.instance().to_string(),
+			instance: std::sync::Mutex::new(route.instance().to_string()),
 			reads: Polled::new(route).supervised(driver.clone()),
 			broadcast,
 			driver,
@@ -469,13 +469,21 @@ impl MoqRoute {
 		})
 	}
 
-	/// The stream this route serves, minted at creation unless the options named one.
+	/// The stream this route serves now, or the last one once cancelled.
+	///
+	/// Named options keep one instance. Unnamed, a prefix route moves to a fresh one each
+	/// time a job holding its current one ends, and a job's route reports its prefix route's
+	/// current one until it first announces, binding whichever that is then.
 	///
 	/// Named `instance_id` rather than `instance` because the generated C and C++
 	/// objects keep their handle in a private field named `instance`; the wrappers
 	/// expose it as `instance`.
 	pub fn instance_id(&self) -> String {
-		self.instance.clone()
+		let mut last = self.instance.lock().unwrap();
+		if let Some(current) = self.reads.peek(|route| route.instance().to_string()) {
+			*last = current;
+		}
+		last.clone()
 	}
 
 	/// Make the route visible, or keep it so.
@@ -553,8 +561,11 @@ impl MoqBroadcastRequest {
 
 	/// Answer with the path's own exact route, owning a new broadcast.
 	///
-	/// The route serves a fresh instance unless `options` names one, so a job that restarts
-	/// is a new stream. Created visible, it announces now and answers the waiting
+	/// Unless `options` names an instance, the route takes the one its prefix route lends
+	/// when it first announces, so readers that resolved the path through the prefix route
+	/// continue on it; its end then moves the prefix route to a fresh instance, so a job that
+	/// restarts is a new stream. A prefix route that names its instance lends none, and the
+	/// route mints its own. Created visible, it announces now and answers the waiting
 	/// requesters; created hidden, they wait until [`MoqRoute::announce`], so the job can
 	/// fill its catalog first, and cancelling the route before then refuses them. Ending the
 	/// route withdraws only this path.
@@ -571,7 +582,8 @@ impl MoqBroadcastRequest {
 	/// Serve a held broadcast under the prefix route's instance without announcing an exact route.
 	///
 	/// Every answer at this path must continue the same sequences and bytes. Start a new
-	/// prefix route for different content, or route a job with its own instance.
+	/// prefix route for different content, or route a job, whose end moves the prefix route
+	/// to another instance.
 	pub fn serve(&self, broadcast: &Arc<MoqBroadcastConsumer>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;

@@ -61,7 +61,7 @@ one is, so it fences out an older run. Nothing assumes it is a clock.
 | A restarted or replaced publisher | A fresh one | A restart, then the new stream from its start |
 | A publisher that continues its sequences across restarts | Stable, with a higher epoch each run | The same stream; readers continue without a seam |
 | Independent publishers of one source | One each | Two streams; see [redundant ingest](/setup/redundancy) |
-| A pool of hosts producing paths on demand | One per host and one per job | See [work on demand](#work-on-demand) |
+| A pool of hosts producing paths on demand | One per host, carried by its jobs; a fresh one per restart | See [work on demand](#work-on-demand) |
 
 ## Choosing a route
 
@@ -73,9 +73,10 @@ A route resolving a path is chosen in this order:
    because the sequence space continues.
 3. Among different instances: the preferred link, then an identified chain
    over an anonymous one, then the lowest cost, then a broadcast published on
-   this origin, then the shortest hop chain, then a hash of the instance and
-   the full requested path. Every relay agrees on the hash, and it spreads a
-   pool's paths over its hosts. A route that entered a node for exactly the
+   this origin, then the shortest hop chain, then a hash of the full requested
+   path with the route's origin node, which moq-lite 07 carries, or else with
+   the instance. Every relay agrees on the hash, and it spreads a pool's paths
+   over its hosts. A route that entered a node for exactly the
    requested path is not hashed: the newest one wins, so a restarted publisher
    takes over from its lingering session at once.
 
@@ -94,7 +95,7 @@ it as minted. A minted instance names the announcement, not the publisher's
 stream, so:
 
 - An announcement ending and starting again, such as a job re-announced on one
-  session, is a new stream, never spliced to its predecessor.
+  session, is a new stream, never spliced to the earlier one.
 - Continuity does not survive such a hop: a reconnect of the same publisher
   through it reads as another stream. Do not rely on seamless failover through
   an older hop.
@@ -161,7 +162,7 @@ or relay now serving another refuses them rather than answer with the wrong
 stream. A catalog's `instance` is weaker. It never proves a subscription may
 resume across routes, and against a minted instance it cannot be checked at
 all. Set it only when you know the stream; omit it for a broadcast produced on
-demand, which has none until a worker answers.
+demand, whose instance changes each time its job restarts.
 
 ## Work on demand
 
@@ -175,12 +176,12 @@ the prefix route without a restart.
 A job that may restart independently, such as a transcoder claiming
 `transcode`, instead creates each requested path's own exact route. A claim
 promises capability, not content. Each requested path is a separate job,
-announced at its exact path under a fresh instance of its own.
+announced at its exact path.
 
 ```rust
 let claim = origin.route_prefix("transcode", RouteOptions::default())?;
 while let Some(request) = claim.requested().await {
-    // A fresh instance for this job, never one shared with another path or run.
+    // Takes the claim's instance, so readers resolved through the claim continue.
     // Hidden until its tracks exist.
     let job = request.route(RouteOptions::hidden())?;
     let video = job.broadcast().create_track("video", info.clone())?;
@@ -193,33 +194,32 @@ while let Some(request) = claim.requested().await {
 JavaScript mirrors this with `request.route({ hidden: true })` and
 `job.announce()`; see [`@moq/net`](/lib/js/net) and [`moq-net`](/lib/rs/moq-net).
 A hidden job route is unannounced until it announces, and dropping it before
-then refuses the request. Ending a job's route withdraws only its path: the
+then refuses the request. Ending a job's route withdraws its path, and the
 prefix route keeps answering later requests.
 
 A lazy job's lifecycle, as a viewer of `transcode/alice` sees it through a relay:
 
-1. **Request.** The relay resolves the path through the claim and forwards the
-   request. The worker starts job A and publishes `transcode/alice` under
-   instance A.
-2. **Takeover.** Publishing the answer through the claim proves it was job A,
-   so job A's route takes over the claim: what the viewer already resolved
-   through the claim beneath `transcode/alice` keeps playing, now as instance
-   A. A Rust follower is handed nothing new (a JavaScript follower still moves
-   to a new broadcast). A different worker, or a job restarted under the same
-   claim, never inherits it. Only moq-lite 07 carries the takeover
-   across relays. Older wires, and paths where a relay cannot vouch for it,
-   send an ordinary announcement instead, so the first subscription through
-   the claim is reset there: a follower is handed the new broadcast, and a
-   holder's track ends with an error, and it requests again. Either way the
-   second request reaches job A.
-3. **Steady state.** Requests resolve instance A by its exact route. Routes
-   carrying instance A through other relays fail over without a seam.
-4. **Job restart.** The worker drops job A's route. The path falls back
-   to the claim, the next request asks the worker again, and job B publishes
-   under a fresh instance. Followers are handed each new broadcast; relays drop
-   job A's cached groups, so a viewer returning within the cache window never
-   gets them. Other paths under the claim, such as `transcode/bob`, are
-   untouched.
+1. **Request.** The relay resolves the path through the claim, under the
+   claim's instance, and forwards the request. The worker starts a job, whose
+   route takes the claim's instance and publishes `transcode/alice` under it.
+2. **Continue.** The job's exact route carries the instance the viewer
+   resolved, so on moq-lite 07 every relay keeps the viewer on it: it keeps
+   playing, and a Rust or JavaScript follower is handed nothing new. Older
+   wires mint an instance per announcement, so there the first subscription
+   through the claim is reset: a follower is handed the new broadcast, and a
+   holder's track ends with an error, and it requests again. The same happens
+   on any wire under a claim that names a stable instance, whose jobs each take
+   a fresh one, since a restarted job could not keep that promise.
+3. **Steady state.** Requests resolve the job by its exact route. Routes
+   carrying its instance through other relays fail over without a seam.
+4. **Job restart.** The worker drops the job's route, and the claim moves to a
+   fresh instance at once, so readers see a restart. The next request starts a
+   new job under the claim's new instance, a new stream; a request pinned to
+   the old instance is refused as unroutable. Relays drop the old job's cached
+   groups, so a viewer returning within the cache window never gets them.
+   Other running jobs, such as `transcode/bob`, keep their instance, while
+   paths the claim answered with a held broadcast resolve afresh under its new
+   one.
 5. **Done.** Closing the last job leaves only the claim, which serves the next
    request as in step 1.
 

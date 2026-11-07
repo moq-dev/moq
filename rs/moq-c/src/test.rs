@@ -4123,19 +4123,22 @@ fn dynamic_serves_a_request_under_a_prefix() {
 		crate::error::MOQ_ERROR_UTF8
 	);
 
-	// A hidden job route answers nobody until it announces, under its own fresh instance.
+	// A hidden job route answers nobody until it announces, under the instance its prefix
+	// route lends.
 	let job = id(unsafe { moq_broadcast_request_route(request, &hidden()) });
 	assert!(
 		unsafe { moq_broadcast_request_route(request, std::ptr::null()) } < 0,
 		"request is consumed"
 	);
-	assert_ne!(instance_of(job), instance_of(dynamic));
+	let lent = instance_of(dynamic);
+	assert_eq!(instance_of(job), lent);
 	let served = id(moq_route_broadcast(job));
 	assert_eq!(moq_route_announce(job), 0);
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
-	// The answer's route is the job's to withdraw.
+	// The answer's route is the job's to withdraw, which moves the prefix route on.
 	assert_eq!(moq_route_withdraw(job), 0);
+	assert_ne!(instance_of(dynamic), lent);
 	assert_eq!(moq_route_free(job), 0);
 
 	assert_eq!(moq_route_free(dynamic), 0);
