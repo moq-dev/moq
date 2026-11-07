@@ -61,7 +61,7 @@ flag=()
 TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
 [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
 
-(cd "$WORKSPACE" && bun install --frozen-lockfile)
+python3 "$WORKSPACE/test/lib/install.py"
 
 # ── relays ──────────────────────────────────────────────────────────────────
 # Start one relay on a reserved port: `start <name> [extra relay args...]`.
