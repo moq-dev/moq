@@ -14,7 +14,7 @@ import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
 import { changed, REST, takeoverState } from "./input.ts";
-import { driverId, parseCamera, SOCKET } from "./paths.ts";
+import { driverId, handle, parseCamera, SOCKET } from "./paths.ts";
 import type { DriveState, Gear, LatencyEntry, Reply, TruckStatus } from "./schemas.ts";
 import { ReplySchema, TruckStatusSchema } from "./schemas.ts";
 
@@ -73,7 +73,8 @@ export class Truck {
 	readonly active = new Moq.Signals.Signal(false);
 	readonly status = new Moq.Signals.Signal<TruckStatus | undefined>(undefined);
 	readonly statusState = new Moq.Signals.Signal<"pending" | "available" | "unavailable">("pending");
-	readonly driverId = new Moq.Signals.Signal<string | undefined>(undefined);
+	/** How `status` names this player's lease, once the truck accepted the driving session. */
+	readonly handle = new Moq.Signals.Signal<string | undefined>(undefined);
 	readonly estopped = new Moq.Signals.Signal(false);
 	readonly respawning = new Moq.Signals.Signal(false);
 	readonly roundTripMs = new Moq.Signals.Signal<number | undefined>(undefined);
@@ -259,7 +260,7 @@ export class Truck {
 			this.estopped.peek() ||
 			!status ||
 			status.estopped ||
-			status.driver !== this.driverId.peek()
+			status.driver !== this.handle.peek()
 		) {
 			return false;
 		}
@@ -350,8 +351,9 @@ export class Truck {
 	#runRespawn(effect: Moq.Signals.Effect) {
 		if (!effect.get(this.respawning)) return;
 		const status = effect.get(this.status);
-		const driverId = effect.get(this.driverId);
-		if (!status || status.driver === driverId) return;
+		// No handle means the driving session already ended, and the lease with it.
+		const handle = effect.get(this.handle);
+		if (!status || (handle !== undefined && status.driver === handle)) return;
 		this.respawning.set(false);
 		if (this.#driving.peek() === this.id) this.#driving.set(undefined);
 	}
@@ -410,21 +412,23 @@ export class Truck {
 
 		// A fresh endpoint and session per lease: the truck binds its single
 		// driver to the session, so a new lease is a new claimant.
-		const id = driverId();
-		this.driverId.set(id);
 		effect.cleanup(() => {
-			this.driverId.set(undefined);
+			this.handle.set(undefined);
 			this.roundTripMs.set(undefined);
 			this.pipeline.set(undefined);
 			this.#sentAt.clear();
 		});
 
-		const session = this.#dial(effect, id);
+		const session = this.#dial(effect, driverId());
 		effect.run((nested) => {
 			const stream = nested.get(session);
 			// The truck refused the dial or ended the session, which ended the lease.
 			if (stream === null) return this.#release();
 			if (!stream) return;
+			nested.spawn(async () => {
+				const name = await handle(stream.session);
+				if (!nested.abort.aborted) this.handle.set(name);
+			});
 			nested.spawn(async () => {
 				if (await this.#readReplies(nested, stream)) this.#release();
 			});
