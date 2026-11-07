@@ -1,4 +1,4 @@
-# [S] Release tags push to nix.moq.dev, and Cachix stops taking writes
+# [XS] Release tags push to nix.moq.dev, and Cachix stops taking writes
 
 ## Goal
 
@@ -33,22 +33,37 @@ to `release` on 2026-11-06: `main`'s `release-nix.yml` (on `release`'s
 names nix.moq.dev instead of Cachix. Every tag before it, through
 `moq-relay-v0.17.13` on 2026-11-05, pushed only to Cachix.
 
-- On the first `moq-relay-v*` or `moq-cli-v*` tag after the backport, record
-  its `release-nix.yml` pushes from all three legs, then
-  `nix run github:moq-dev/moq/<tag>#moq-relay --accept-flake-config`
-  substituting on a clean machine (`#moq` for a CLI tag), such as a fresh
-  container with only Nix installed. An agent can run both checks once the
-  tag exists.
-- Then the maintainer deletes `CACHIX_AUTH_TOKEN` (a repository secret, so
-  `Maintainer:`), and docs stop naming Cachix as a current cache.
+Recorded 2026-11-07 (/quest-iterate): the first tags after the backport,
+`moq-relay-v0.17.14` and `moq-cli-v0.14.14` from
+[moq-dev/moq#8096](https://github.com/moq-dev/moq/pull/8096), pushed from all
+three Release Nix legs. Each of `macos-latest`, `ubuntu-24.04-arm`, and
+`ubuntu-latest` logged `copying path ... to 's3://nix-moq-dev?...'` for its
+package in runs
+[42321547211](https://github.com/moq-dev/moq/actions/runs/42321547211) (relay)
+and [42321696950](https://github.com/moq-dev/moq/actions/runs/42321696950)
+(CLI). In a fresh `nixos/nix` container (Nix 2.35.4, x86_64-linux),
+`nix run github:moq-dev/moq/<tag>#<pkg> --accept-flake-config -- --version`
+built nothing for either tag: it fetched
+`9qidys7z...-moq-relay-0.17.14` and `y2j3pxyl...-moq-cli-0.14.14`, the paths
+the `ubuntu-latest` legs pushed, from `https://nix.moq.dev` and their seven
+runtime dependencies from `cache.nixos.org`.
+
+`main` names Cachix nowhere outside `quest/`. `release`'s workflows still list
+`kixelated.cachix.org` as a read-only substituter; the m2 cut's merge of
+`main` replaces them, so they need no backport.
+
+What remains is the maintainer's:
+
+- Delete `CACHIX_AUTH_TOKEN`. No workflow on `main` or `release` reads it.
+- Record both bucket sizes against the CI bucket's 30-day expiry.
 
 Public API: none. Wire: none.
 
 ## Waiting
 
-- moq-dev/moq: the first `moq-relay-v*` or `moq-cli-v*` tag cut from
-  `release` after 2026-11-06. Check:
-  `gh run list --workflow release-nix.yml --json headBranch,conclusion`.
+- Maintainer: delete the `CACHIX_AUTH_TOKEN` repository secret (Settings,
+  Secrets and variables, Actions), which agents may not delete. Check:
+  `gh secret list --repo moq-dev/moq` no longer lists it.
 - Maintainer: record both bucket sizes no earlier than 2026-11-24, a month
   after the first `cache.yml` push to `nix-ci-moq-dev` on 2026-10-24, against
   the 30-day expiry in `infra/nix/lifecycle.json`. Sizes need a
