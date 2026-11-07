@@ -321,7 +321,7 @@ impl Hops {
 	}
 
 	/// The entries' ids, in hop order, reusing the list's allocation.
-	#[cfg(any(test, feature = "fuzz"))]
+	#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 	pub(crate) fn into_ids(self) -> Vec<u64> {
 		self.0.into_iter().map(|hop| hop.id).collect()
 	}

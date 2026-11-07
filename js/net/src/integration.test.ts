@@ -499,6 +499,45 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 	}
 });
 
+// A publisher counts a relative start back from its newest group, which may hold no frame yet and
+// so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
+// the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust
+// `a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group`.
+test("integration: lite-07 reports a relative start over a frameless newest group", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { maxAge: null });
+	for (let sequence = 0; sequence < 5; sequence++) {
+		const group = producer.appendGroup();
+		group.writeFrame({ payload: new Uint8Array([sequence]) });
+		group.finish();
+	}
+	const newest = producer.appendGroup();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const reader = remote.track("video").subscribe({ delay: { max: null }, ranges: [{ start: { relative: 0n } }] });
+	try {
+		// Accepting the track subscribes it upstream, whose answer resolves the start.
+		await reader.info();
+		expect(await reader.start()).toBe(5n);
+		newest.writeFrame({ payload: new Uint8Array([5]) });
+		newest.finish();
+		expect((await reader.recvGroup())?.sequence).toBe(5n);
+	} finally {
+		reader.close();
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
 // A lite-07 publisher keeps a covered bounded subscription open for an update: the read ends
 // with its window, the same range reads again from the cache, and a wider one reaches upstream
 // for the rest, past a group that never existed. The demand goes with the readers. Mirrors the

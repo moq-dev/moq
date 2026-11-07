@@ -128,9 +128,10 @@ class SelectTest(unittest.TestCase):
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = self.selected(path)
-                self.assertEqual(len(calls), 2, calls)
+                self.assertEqual(len(calls), 3, calls)
                 self.assertTrue(calls[0].startswith("rs lint "), calls)
                 self.assertEqual(calls[1], "rs media-defaults", calls)
+                self.assertEqual(calls[2], "rs no-async", calls)
         self.assertEqual(self.selected("sh/rs/send-depth.sh"), [])
 
     def test_media_defaults_are_isolated_from_device_features(self):
@@ -138,13 +139,27 @@ class SelectTest(unittest.TestCase):
             for github_actions in (False, True):
                 with self.subTest(path=path, github_actions=github_actions):
                     calls = self.selected(path, github_actions=github_actions)
-                    self.assertEqual(calls[-1], "rs media-defaults", calls)
+                    self.assertIn("rs media-defaults", calls)
                     self.assertEqual(calls.count("rs media-defaults"), 1, calls)
         # A crate with no media dependents needs no extra compile.
         for action in ("lint", "test"):
             self.assertNotIn("rs media-defaults", self.selected("rs/moq-auth/src/lib.rs", action=action))
         # The device-feature test build stays a single build.
         self.assertNotIn("rs media-defaults", self.selected("rs/moq-audio/src/lib.rs", action="test"))
+
+    def test_gate_builds_net_without_async(self):
+        # Every other build unifies `async` back in, so the gate compiles it alone.
+        for path in ("rs/moq-net/src/lib.rs", "Cargo.lock"):
+            for action in ("check", "check-test", "lint"):
+                with self.subTest(path=path, action=action):
+                    calls = self.selected(path, action=action)
+                    self.assertEqual(calls.count("rs no-async"), 1, calls)
+        # A crate with no moq-net dependents needs no extra compile.
+        for action in ("check", "check-test", "lint"):
+            self.assertNotIn("rs no-async", self.selected("rs/moq-auth/src/lib.rs", action=action))
+        # The test and fix lanes build the default features only.
+        for action in ("test", "fix"):
+            self.assertNotIn("rs no-async", self.selected("rs/moq-net/src/lib.rs", action=action))
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (

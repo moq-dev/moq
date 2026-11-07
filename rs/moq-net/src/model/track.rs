@@ -8703,8 +8703,11 @@ impl Subscriber {
 	/// resolved: the first group a publisher tells its peer it serves. A feed starting
 	/// below the floor serves the floor's group too, and a fill this cursor waits on starts it
 	/// lower still. `None` when the source declares none and no fill is out.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+	///
+	/// Where a reader that waits on each group in sequence starts when [`Self::floor`] names
+	/// none: groups arrive newest first, so the first to arrive is not the oldest served.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
 			Inner::Plain(cursor) => cursor,
 			Inner::Resume(resume, _) => return resume.poll_start(waiter),

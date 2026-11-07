@@ -169,6 +169,10 @@ interface SubscribeEntry {
 	// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range starts on lite-07, by Range
 	// ID, undefined for one with nothing to deliver.
 	starts: Map<bigint, bigint | undefined>;
+	// The first group the ranges last sent ask for, which a lite-07 declaration answers.
+	floor?: bigint;
+	// What `#declare` last declared, so an unchanged one is not declared again.
+	declared?: { start?: bigint | null; requested?: bigint };
 	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
 	updated?: boolean;
 	// Whether SUBSCRIBE_START arrived, which `start` alone cannot say when no range starts.
@@ -1526,6 +1530,7 @@ export class Subscriber {
 				grace: () => hooks.tailGrace(producer),
 			}),
 			requested: msg.startGroup,
+			floor: msg.startGroup,
 			asked: [...ranges],
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
@@ -2068,7 +2073,10 @@ export class Subscriber {
 				entry.started = true;
 				// A lite-07 tail waits for SUBSCRIBE_START to say where delivery starts.
 				entry.tail.touch();
-				hooks.startTrack(entry.track, { start: entry.start ?? null, requested: entry.requested });
+				// Lite-07 says where every live range starts, so the declaration follows them
+				// whatever an update changed since.
+				if (hasRanges(this.version)) this.#declare(entry);
+				else hooks.startTrack(entry.track, { start: entry.start ?? null, requested: entry.requested });
 				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.
@@ -2105,6 +2113,7 @@ export class Subscriber {
 					entry.starts.set(id, start);
 					// The tail judges what is owed again.
 					entry.tail.touch();
+					this.#declare(entry);
 				}
 			} else if ("drop" in resp) {
 				// The publisher will never send these groups, so they are accounted for without a
@@ -2252,6 +2261,9 @@ export class Subscriber {
 			if (hasRanges(this.version)) {
 				edit = entry.live.edit(toWireRanges(ranges, entry.scale));
 				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
+				entry.floor = span.start;
+				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.
+				this.#declare(entry);
 			}
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/delay/etc.
@@ -2283,6 +2295,28 @@ export class Subscriber {
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
+	}
+
+	// Declare where a lite-07 feed starts: the lowest start the live ranges report, or the
+	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
+	// say where one starts. Mirrors the Rust `SubStream::declare`.
+	#declare(entry: SubscribeEntry): void {
+		let start: bigint | null = null;
+		let pending = !entry.started;
+		for (const id of entry.live.ids()) {
+			if (!entry.starts.has(id)) {
+				pending = true;
+				break;
+			}
+			const at = entry.starts.get(id);
+			// A range with no group there serves nothing to start from.
+			if (at !== undefined && (start === null || at < start)) start = at;
+		}
+		const next = { start: pending ? undefined : start, requested: entry.floor };
+		const last = entry.declared;
+		if (last && last.start === next.start && last.requested === next.requested) return;
+		entry.declared = next;
+		hooks.startTrack(entry.track, next);
 	}
 
 	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
