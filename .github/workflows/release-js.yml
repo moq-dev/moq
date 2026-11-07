@@ -48,7 +48,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install dependencies
-        run: nix develop --command python3 sh/js/install.py frozen
+        run: nix develop --command just js install frozen
 
       - name: Release packages
         env:

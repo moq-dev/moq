@@ -55,7 +55,7 @@ jobs:
 
       - name: Workspace dependencies
         id: setup
-        run: nix develop --command python3 sh/js/install.py frozen
+        run: nix develop --command just js install frozen
         shell: bash -leo pipefail {0}
 
       # Each suite reports independently after setup, while a failed step still fails the job.

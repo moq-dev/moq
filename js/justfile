@@ -6,6 +6,10 @@
 
 set working-directory := '.'
 
+# Install root workspace dependencies: frozen for validation, update for lockfile changes.
+install mode:
+    python3 ../sh/js/install.py {{ mode }}
+
 # Run all checks by default.
 default:
     just check
