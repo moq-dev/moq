@@ -38,13 +38,7 @@ def test_relay_url_defaults_to_the_local_relay(monkeypatch: pytest.MonkeyPatch) 
 
 def test_paths_match_the_player() -> None:
     assert broadcast_path("truck1", "front") == "carla/truck1/front.hang"
-    assert Drivers("truck1", asyncio.Queue()).path == "carla/.socket/truck1"
-
-
-def test_a_truck_named_like_a_driver_is_refused() -> None:
-    """Anonymous drivers may publish `driver-*` endpoints, so such a truck could be impersonated."""
-    with pytest.raises(SystemExit):
-        parse_args(["--url", "http://localhost:4443", "--truck", "driver-1"])
+    assert Drivers("truck1", asyncio.Queue()).path == "carla/.server/truck1"
 
 
 def test_log_level_configures_python_and_rust(monkeypatch: pytest.MonkeyPatch) -> None:

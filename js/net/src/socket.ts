@@ -1,7 +1,9 @@
 /**
- * Point-to-point sessions over one hidden broadcast per endpoint.
+ * Point-to-point sessions between server and client endpoints.
  *
- * Sessions use the existing MoQ wire and need lite-07 (currently an explicit
+ * An endpoint's first dial announces its hidden client broadcast, `<prefix>/.client/<id>`,
+ * and its first accept its hidden server broadcast, `<prefix>/.server/<id>`, so ordinary
+ * grants decide which roles it may take. Sessions use the existing MoQ wire and need lite-07 (currently an explicit
  * `moq-lite-07-wip` offer) or moq-transport on every hop. While the endpoint's origin
  * has a moq-lite client session before 07, dials and accepts fail as unsupported.
  * Their track names are secrets and are never listed. See the socket concept page.
@@ -11,7 +13,7 @@
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { NotFound, ProtocolViolation, StreamCode, StreamError } from "./error.ts";
 import * as Group from "./group.ts";
-import { hooks, SOCKET } from "./internal.ts";
+import { hooks } from "./internal.ts";
 import type * as Origin from "./origin.ts";
 import * as Path from "./path.ts";
 import type * as Track from "./track.ts";
@@ -22,6 +24,9 @@ import { wireOf } from "./wire.ts";
 
 type Protocol = "tcp" | "track";
 type Stream = TcpStream | TrackStream;
+/** A server accepts dials, and a client dials. */
+type Role = "server" | "client";
+const SEGMENT: Record<Role, string> = { server: ".server", client: ".client" };
 const reliable: Track.Subscription = {
 	order: "ascending",
 	delay: { max: null },
@@ -35,9 +40,9 @@ function segment(id: string): void {
 	if (!id || id.includes("/") || id.includes("\\")) throw new TypeError("socket id must be one plain segment");
 }
 
-function endpointPath(prefix: Path.Valid, id: string): Path.Valid {
+function endpointPath(prefix: Path.Valid, role: Role, id: string): Path.Valid {
 	segment(id);
-	return Path.encode(Path.from(prefix, SOCKET, id));
+	return Path.encode(Path.from(prefix, SEGMENT[role], id));
 }
 
 function parse(name: string): { protocol: string; dialer: string; acceptor: string; session: string } | undefined {
@@ -197,7 +202,13 @@ class Queue {
 }
 
 /**
- * Announces one endpoint, dials peers under the same prefix, and accepts each protocol separately.
+ * A server, a client, or both: dials servers under the same prefix, and accepts each protocol
+ * separately.
+ *
+ * Its first dial announces its client broadcast, which holds its half of each session it dials,
+ * and its first accept announces its server broadcast, where peers dial it. A pure client never
+ * announces a server broadcast, and until the first accept a dial to it waits as for a peer not
+ * online yet.
  *
  * Every hop between two endpoints must carry hidden broadcasts: moq-lite-07 or moq-transport.
  * While the origin has a moq-lite client session before 07, whose peer never hears this
@@ -216,36 +227,44 @@ export class Endpoint {
 	#closed = new Once<Error | null>();
 	#abort = new AbortController();
 	#origin: Origin.Producer;
-	#route: Origin.Route;
+	#routes: Partial<Record<Role, Origin.Route>> = {};
 	#queues = { tcp: new Queue(), track: new Queue() };
-	#serving = false;
 	#sessions = new Set<Session>();
-	#unclose: Dispose;
+	#unclose: Dispose[] = [];
 	#withheld: Getter<number>;
 
-	/** Publish this endpoint on origin, which must also reach its peers. */
+	/** An endpoint on origin, which must also reach its peers; nothing is announced until it dials or accepts. */
 	constructor(origin: Origin.Producer, prefix: Path.Valid, id: string) {
 		this.id = id;
 		this.prefix = Path.from(prefix);
+		for (const role of ["server", "client"] as const) endpointPath(this.prefix, role, id);
 		this.#origin = origin;
 		this.#withheld = hooks.hiddenWithheld(origin);
-		this.#route = origin.route(endpointPath(this.prefix, id));
-		this.#unclose = hooks.onClosed(this.#route.broadcast, () => this.close());
+	}
+
+	// This endpoint's broadcast in role, announced on first use.
+	#route(role: Role): Origin.Route {
+		const existing = this.#routes[role];
+		if (existing) return existing;
+		const route = this.#origin.route(endpointPath(this.prefix, role, this.id));
+		this.#routes[role] = route;
+		this.#unclose.push(hooks.onClosed(route.broadcast, () => this.close()));
+		return route;
 	}
 
 	static {
 		accept = (endpoint, protocol, request, info, options) => endpoint.#accept(protocol, request, info, options);
 	}
 
-	/** Dial a TCP session; waits for the peer's announcement and acceptance until cancelled. */
+	/** Dial the server peer in a TCP session; waits for its announcement and acceptance until cancelled. */
 	dialTcp(peer: string, options?: Options): Promise<TcpStream> {
 		return this.#dial("tcp", peer, {}, options) as Promise<TcpStream>;
 	}
-	/** Dial a track session; omitted info keeps every message with no publisher max age. */
+	/** Dial the server peer in a track session; omitted info keeps every message with no publisher max age. */
 	dialTrack(peer: string, info: Track.InfoInit = { maxAge: null }, options?: Options): Promise<TrackStream> {
 		return this.#dial("track", peer, info, options) as Promise<TrackStream>;
 	}
-	/** Take the next TCP dial; the first call starts queueing TCP dials until close. */
+	/** Take the next TCP dial; the first call starts queueing TCP dials until close, and the first accept announces the server. */
 	acceptTcp(options?: Options): Promise<Incoming<TcpStream>> {
 		return this.#next<TcpStream>("tcp", options);
 	}
@@ -262,10 +281,7 @@ export class Endpoint {
 			signal.throwIfAborted();
 			const queue = this.#queues[protocol];
 			queue.listening = true;
-			if (!this.#serving) {
-				this.#serving = true;
-				void this.#serve();
-			}
+			if (!this.#routes.server) void this.#serve(this.#route("server"));
 			for (;;) {
 				await waitFor(queue.dials, (dials) => dials.size > 0, signal);
 				signal.throwIfAborted();
@@ -292,10 +308,10 @@ export class Endpoint {
 		return unwatch;
 	}
 
-	async #serve(): Promise<void> {
+	async #serve(route: Origin.Route): Promise<void> {
 		try {
 			for (;;) {
-				const request = await wireOf(this.#route.broadcast).requested();
+				const request = await wireOf(route.broadcast).requested();
 				if (!request) return;
 				const name = parse(request.name);
 				if (!name || name.acceptor !== this.id || name.dialer === this.id) {
@@ -334,14 +350,16 @@ export class Endpoint {
 		return options?.signal ? AbortSignal.any([this.#abort.signal, options.signal]) : this.#abort.signal;
 	}
 
+	// Subscribe to the session's half in the peer's broadcast, its server or client one by role.
 	async #remote(
 		protocol: Protocol,
+		role: Role,
 		peer: string,
 		name: string,
 		signal: AbortSignal,
 		hold: (following: Origin.Following) => void,
 	): Promise<{ consumer: Track.Subscriber; peer: GetPromise<Error | null> }> {
-		const following = this.#origin.follow(endpointPath(this.prefix, peer));
+		const following = this.#origin.follow(endpointPath(this.prefix, role, peer));
 		hold(following);
 		const abort = new AbortController();
 		const stop = following.closed.subscribe(() => abort.abort(following.closed.peek() ?? ended()));
@@ -370,14 +388,14 @@ export class Endpoint {
 		signal.throwIfAborted();
 		const session = fromBytes(crypto.getRandomValues(new Uint8Array(16)));
 		const name = `${protocol}/${this.id}/${peer}/${session}`;
-		const answer = hooks.reserveUnlistedTrack(this.#route.broadcast, name);
+		const answer = hooks.reserveUnlistedTrack(this.#route("client").broadcast, name);
 		let following: Origin.Following | undefined;
 		let consumer: Track.Subscriber | undefined;
 		let producer: Track.Producer | undefined;
 		let stop: Dispose = () => {};
 		const unreached = this.#reachable(abort);
 		try {
-			const remote = await this.#remote(protocol, peer, name, signal, (value) => {
+			const remote = await this.#remote(protocol, "server", peer, name, signal, (value) => {
 				following = value;
 			});
 			consumer = remote.consumer;
@@ -424,7 +442,7 @@ export class Endpoint {
 		try {
 			check();
 			signal.throwIfAborted();
-			const remote = await this.#remote(protocol, name.dialer, request.name, signal, (value) => {
+			const remote = await this.#remote(protocol, "client", name.dialer, request.name, signal, (value) => {
 				following = value;
 			});
 			consumer = remote.consumer;
@@ -465,7 +483,7 @@ export class Endpoint {
 		}
 	}
 
-	/** Reset every held session, cancel pending operations, and retract the endpoint; idempotent. */
+	/** Reset every held session, cancel pending operations, and retract the endpoint's broadcasts; idempotent. */
 	close(): void {
 		this.#end(null);
 	}
@@ -473,11 +491,11 @@ export class Endpoint {
 	#end(error: Error | null): void {
 		if (this.#closed.peek() !== undefined) return;
 		this.#closed.set(error);
-		this.#unclose();
+		for (const unclose of this.#unclose) unclose();
 		this.#abort.abort(error ?? ended());
 		for (const queue of Object.values(this.#queues)) queue.close();
 		for (const session of this.#sessions) session.reset(ended());
-		this.#route.broadcast.close();
+		for (const route of Object.values(this.#routes)) route.broadcast.close();
 	}
 }
 

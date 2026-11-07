@@ -25,7 +25,7 @@ the holder's next dial.
 - Publish a display handle in `status`, such as a short hash of the session or
   a per-lease counter, that the truck maps to its lease. `driver` and
   `estop_by` keep showing who holds the truck.
-- If [socket roles](/quest/m1/socket-roles.md) lands first, the ids live
-  under `.client/` and need no `driver-` prefix.
+- Driver endpoints live under `.client/`, which the anonymous grant covers,
+  so the ids need no `driver-` prefix.
 
 Public API: none. Wire: none.
