@@ -44,7 +44,7 @@ Reproduce first: temporarily remove the case's `test.skip`, then run the
 whole file beside CPU loops, as above. Keep the failing output before making
 other changes to the test or the end path. Restore the skip until the fix.
 
-## Additional lite-06 investigation
+### Additional lite-06 investigation
 
 Planned 2026-11-06 under the maintainer's rule that a known flaky test is
 quarantined immediately and its investigation planned. `Check` failed on this
