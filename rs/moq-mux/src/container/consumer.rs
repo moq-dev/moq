@@ -118,7 +118,7 @@ pub(crate) enum Item {
 ///
 /// ## Memory
 ///
-/// Decoded frames waiting to be read are charged to a byte cap, [`set_max_buffer`](Self::set_max_buffer),
+/// Decoded frames waiting to be read are charged to a byte cap, one group at the transport's size cap,
 /// counting the whole wire payload they share, along with each buffered frame's and group's own
 /// overhead. Once it is full the consumer stops
 /// decoding ahead and stops pulling new groups past one successor to the cursor's group, so the
@@ -218,8 +218,8 @@ pub struct Consumer<F: Container> {
 /// about one group duration.
 const CONTIGUITY_TOLERANCE: std::time::Duration = std::time::Duration::from_millis(1);
 
-/// The default [`Consumer::set_max_buffer`]: one group at the transport's size cap.
-pub const DEFAULT_MAX_BUFFER: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+/// The default decoded-byte cap: one group at the transport's size cap.
+pub(crate) const DEFAULT_MAX_BUFFER: usize = moq_net::group::MAX_CACHE_BYTES as usize;
 
 /// The decoded bytes a consumer's groups hold, shared with each group so one dropped by any path
 /// refunds what it held.
@@ -247,6 +247,7 @@ impl Memory {
 		self.used() >= self.0.max.load(Ordering::Relaxed)
 	}
 
+	#[cfg(test)]
 	fn set_max(&self, max: usize) {
 		self.0.max.store(max, Ordering::Relaxed);
 	}
@@ -1184,7 +1185,8 @@ impl<F: Container> Consumer<F> {
 	/// Cap the bytes of decoded frames held ahead of the reader, counting the wire payload they share
 	/// and each frame's and group's own overhead (default [`DEFAULT_MAX_BUFFER`]). Past it the consumer stops decoding ahead
 	/// and pulling new groups; see the type docs.
-	pub fn set_max_buffer(&mut self, bytes: usize) {
+	#[cfg(test)]
+	pub(crate) fn set_max_buffer(&mut self, bytes: usize) {
 		self.memory.set_max(bytes);
 	}
 

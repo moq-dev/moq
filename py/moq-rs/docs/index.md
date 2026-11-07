@@ -154,6 +154,7 @@ Every importer takes a broadcast; single-track imports choose a `Named` or `Requ
    TrackStreamProducer
    ContainerProducer
    ContainerInit
+   VideoInit
    Timebase
    TrackConsumer
    GroupConsumer

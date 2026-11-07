@@ -72,8 +72,9 @@ Readers that fall behind the shed front receive `Evicted`; tracks with a
 `refresh` ratio also request a fresh group. A join never starts at an arbitrary
 frame in the retained tail.
 
-Frames have no size cap either. `group.createFrame({ size })` writes one in
-pieces, and `group.nextFrame()` reads it as it arrives with `readChunk()`, so a
+Frames have no size cap either. `group.createFrame({ size })` returns a
+`Moq.Frame.Producer` that writes one in pieces, and `group.nextFrame()` returns a
+`Moq.Frame.Consumer` that reads it as it arrives with `readChunk()`, so a
 file-sized frame passes through holding only the tail. The tail sheds a large
 frame's oldest 1 MiB segments while it is written, so a chunk reader more than
 the tail behind gets `Evicted`. `readFrame()` still works for any size, but it
@@ -92,7 +93,7 @@ for (let chunk = await reader?.readChunk(); chunk; chunk = await reader?.readChu
 
 ## Sockets
 
-Use `Moq.socket.Endpoint` for [point-to-point sessions](/concept/socket), with the same
+Use `Moq.Socket.Endpoint` for [point-to-point sessions](/concept/socket), with the same
 origin publishing and consuming through the relay. Each endpoint announces one hidden
 broadcast; accepting verifies that the named peer actually dialed this session.
 Every hop needs moq-lite-07 or moq-transport. Lite-07 currently requires explicitly
@@ -106,7 +107,7 @@ const connection = await Moq.Connection.connect({
     url, versions: ["moq-lite-07-wip"],
     publish: origin.consume(), consume: origin,
 });
-const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from("game"), "viewer");
+const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer");
 const session = await endpoint.dialTcp("server", { signal: abort.signal });
 session.producer.writeFrame({ payload: new TextEncoder().encode("hello") });
 session.producer.finish(); // FIN in this direction; the peer may still reply.

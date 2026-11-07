@@ -5,10 +5,7 @@ use std::task::{Poll, ready};
 use moq_net::{Path, broadcast};
 use serde::de::DeserializeOwned;
 
-use crate::{
-	GroupFrame, PrefixFrame, PresenceFrame, Result, TotalsFrame, group_track, prefix_track, presence_track,
-	totals_track,
-};
+use crate::{PrefixFrame, PresenceFrame, Result, TotalsFrame, prefix_track, presence_track, totals_track};
 
 /// Configuration for a [`Consumer`]. Empty for now; construct with
 /// [`Config::new`]. The struct is `#[non_exhaustive]`, so new options stay
@@ -28,11 +25,8 @@ impl Config {
 /// yielding typed frames per track.
 ///
 /// Subscribe to the tracks you care about with [`Self::totals`],
-/// [`Self::group`], [`Self::presence`], and [`Self::prefix`]. A label's
-/// presence track and a prefix's track are produced only while subscribed.
-/// At depth 0 the one group is the empty one; otherwise discover live groups
-/// from the broadcast's [track listing](moq_net::broadcast::Consumer::tracks)
-/// with [`crate::parse_group_track`].
+/// [`Self::presence`], and [`Self::prefix`]. A label's presence track and a
+/// prefix's track are produced only while subscribed.
 pub struct Consumer {
 	broadcast: broadcast::Consumer,
 }
@@ -70,9 +64,10 @@ impl Consumer {
 	/// Subscribe to group `group`'s track; see [`Self::totals`]. The first read
 	/// fails with [`NotFound`](moq_net::Error::NotFound) unless the group is
 	/// listed.
-	pub fn group(&self, group: impl Into<Path>) -> Result<GroupConsumer> {
+	#[cfg(test)]
+	pub(crate) fn group(&self, group: impl Into<Path>) -> Result<GroupConsumer> {
 		Ok(GroupConsumer {
-			inner: self.subscribe(&group_track(group))?,
+			inner: self.subscribe(&crate::group_track(group))?,
 		})
 	}
 
@@ -140,17 +135,19 @@ impl PrefixConsumer {
 }
 
 /// A typed reader over one group's track; see [`TotalsConsumer`].
-pub struct GroupConsumer {
-	inner: Reader<GroupFrame>,
+#[cfg(test)]
+pub(crate) struct GroupConsumer {
+	inner: Reader<crate::GroupFrame>,
 }
 
+#[cfg(test)]
 impl GroupConsumer {
 	/// The next frame, or `None` once the track ends (the producer went away
 	/// or the group lingered out of the listing). Fails with
 	/// [`FrameTooLarge`](moq_net::Error::FrameTooLarge) once the frame outgrows
 	/// the cache.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<GroupFrame>>> {
+	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::GroupFrame>>> {
 		self.inner.poll_latest(waiter)
 	}
 }

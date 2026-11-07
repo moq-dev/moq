@@ -11793,12 +11793,7 @@ mod tests {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: vec![0x00, 0xff],
 		};
-		let verdict = auth.verify_request(
-			token,
-			Some(hold.clone()),
-			crate::auth::RequestKind::PublishNamespace,
-			&path,
-		);
+		let verdict = auth.verify_request(token, Some(hold.clone()));
 		let _issued = requests.next().await.unwrap().accept(crate::auth::Grant::all());
 		let answered = verdict.grant().await;
 		let grant = crate::auth::RequestGrant::new(

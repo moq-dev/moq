@@ -1,4 +1,4 @@
-# [M] A smaller, safer API than release
+# A smaller, safer API than release
 
 ## Goal
 
@@ -8,9 +8,9 @@ or is removed or made private. Overlapping operations are collapsed into one.
 Names mirror across Rust, JS, and the bindings. Every break says how
 to migrate.
 
-This epic's own work, now that its children have landed: diff `main`'s public
-API against `release`'s once more, and make private, remove, or record here
-each surface added since the audit below that breaks these rules.
+The epic's own work, a final diff of `main`'s public API against `release`'s,
+landed in [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088). It
+finishes with its last child: that child's PR deletes this README.
 
 Non-goals: redesigning independently scoped surfaces
 ([subscribe ranges](/quest/m2/subscribe-ranges/README.md),

@@ -22,10 +22,7 @@ export class Game {
 	readonly expanded: Moq.Signals.Signal<string | undefined>;
 	readonly heldButtons: Set<string>;
 	readonly hovered: Moq.Signals.Signal<boolean>;
-	readonly latency: Moq.Signals.Signal<{
-		label: string;
-		ms: number;
-	}[] | undefined>;
+	readonly latency: Moq.Signals.Signal<LatencyEntry[] | undefined>;
 	sendButtons(): void;
 	sendCommand(cmd: Record<string, unknown>): void;
 	readonly sessionId: string;
@@ -50,7 +47,7 @@ export class Game {
 
 export interface GameConfig {
 	connection: Moq.Connection;
-	endpoint: Moq.socket.Endpoint;
+	endpoint: Moq.Socket.Endpoint;
 	expanded: Moq.Signals.Signal<string | undefined>;
 	gamePrefix: string;
 	origin: Moq.Origin.Producer;
@@ -82,12 +79,10 @@ export const GameStatusSchema: ZodMiniObject<{
 
 export const KEY_MAP: Record<string, string>;
 
-export type LatencyEntry = infer<typeof LatencyEntrySchema>;
-
-export const LatencyEntrySchema: ZodMiniObject<{
-	label: ZodMiniString<string>;
-	ms: ZodMiniNumber<number>;
-}, $strip>;
+export interface LatencyEntry {
+	label: string;
+	ms: number;
+}
 
 export * as Moq from "@moq/net";
 

@@ -1202,7 +1202,6 @@ mod tests {
 			now: kio::clock::Instant::now(),
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
-			max_pacing_rate: None,
 			seed: 0,
 		};
 

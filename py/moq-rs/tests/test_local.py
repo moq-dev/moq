@@ -573,7 +573,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
     dynamic = track.requests()
     pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
     fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
-    assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
+    assert (fill.start, fill.end) == (moq.Position(group=7, frame=0), 8)
     assert fill.priority == 11
     assert fill.wanted() == 7
     assert fill.is_wanted(7)
@@ -635,9 +635,9 @@ async def test_json_window_roundtrip():
 
     for n in range(3):
         event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-        assert event == moq.json.Timed(moq.json.WindowPush(n, {"n": n}), moq.Timestamp(n * 1_000, 1_000_000))
+        assert event == moq.json.Timed(moq.json.WindowEventPush(n, {"n": n}), moq.Timestamp(n * 1_000, 1_000_000))
     event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert event == moq.json.Timed(moq.json.WindowPop(range(0, 2)), moq.Timestamp(3_000, 1_000_000))
+    assert event == moq.json.Timed(moq.json.WindowEventPop(range(0, 2)), moq.Timestamp(3_000, 1_000_000))
 
     producer.finish()
     with pytest.raises(moq.Error.Closed):
@@ -656,10 +656,10 @@ async def test_json_window_cut_restates_the_window():
     producer.pop(1, moq.Timestamp(3, 1_000))
     events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(4)]
     assert events == [
-        moq.json.WindowPush(0, {"n": 0}),
-        moq.json.WindowPush(1, {"n": 1}),
-        moq.json.WindowPush(2, {"n": 2}),
-        moq.json.WindowPop(range(0, 1)),
+        moq.json.WindowEventPush(0, {"n": 0}),
+        moq.json.WindowEventPush(1, {"n": 1}),
+        moq.json.WindowEventPush(2, {"n": 2}),
+        moq.json.WindowEventPop(range(0, 1)),
     ]
 
     producer.cut()
@@ -675,7 +675,7 @@ async def test_json_window_cut_restates_the_window():
 
     # The restated records were already delivered, so the reader sees only the new one.
     event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert event.value == moq.json.WindowPush(3, {"n": 3})
+    assert event.value == moq.json.WindowEventPush(3, {"n": 3})
     producer.finish()
 
 
@@ -697,9 +697,9 @@ async def test_json_window_skips_records_outside_the_checkpoint():
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(3)]
     assert events == [
-        moq.json.WindowSkip(range(0, 3)),
-        moq.json.WindowPush(3, {"n": 3}),
-        moq.json.WindowPush(4, {"n": 4}),
+        moq.json.WindowEventSkip(range(0, 3)),
+        moq.json.WindowEventPush(3, {"n": 3}),
+        moq.json.WindowEventPush(4, {"n": 4}),
     ]
 
     producer.finish()

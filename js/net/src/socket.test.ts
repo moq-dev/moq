@@ -5,7 +5,7 @@ import { accept as acceptConnection } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
 import { NotFound, ProtocolViolation, StreamCode, StreamError } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
-import { Origin, Path, socket } from "./index.ts";
+import { Origin, Path, Socket } from "./index.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -29,8 +29,8 @@ const bytes = (value: number) => ({ payload: new Uint8Array([value]) });
 function setup() {
 	const origin = new Origin.Producer();
 	origins.add(origin);
-	const a = new socket.Endpoint(origin, Path.from("room"), "alice");
-	const b = new socket.Endpoint(origin, Path.from("room"), "bob");
+	const a = new Socket.Endpoint(origin, Path.from("room"), "alice");
+	const b = new Socket.Endpoint(origin, Path.from("room"), "bob");
 	return { origin, a, b };
 }
 async function tcp() {
@@ -57,10 +57,10 @@ async function raw(origin: Origin.Producer, id: string, name: string): Promise<T
 	return (await broadcast(origin, id)).track(name).subscribe({ order: "ascending", delay: { max: null } });
 }
 
-test("socket namespace exposes endpoint and both stream roles", () => {
-	expect(socket.Endpoint).toBeFunction();
-	expect(socket.TcpStream).toBeFunction();
-	expect(socket.TrackStream).toBeFunction();
+test("Socket namespace exposes endpoint and both stream roles", () => {
+	expect(Socket.Endpoint).toBeFunction();
+	expect(Socket.TcpStream).toBeFunction();
+	expect(Socket.TrackStream).toBeFunction();
 });
 
 test("TCP carries ordered frames in both directions, with independent FIN", async () => {
@@ -221,7 +221,7 @@ for (const protocol of ["tcp", "track"] as const) {
 		const next = protocol === "tcp" ? b.acceptTcp() : b.acceptTrack();
 		void next.catch(() => {});
 		const reset = new StreamError(StreamCode(70));
-		const oldReader = local instanceof socket.TcpStream ? local.consumer : local.consumer.ordered();
+		const oldReader = local instanceof Socket.TcpStream ? local.consumer : local.consumer.ordered();
 		remote.producer.abort(reset);
 		await expect(oldReader.readFrame()).rejects.toBeInstanceOf(Error);
 		const source = await broadcast(origin, "bob");
@@ -254,7 +254,7 @@ for (const protocol of ["tcp", "track"] as const) {
 			const localFresh = await dialing;
 			localFresh.producer.writeFrame(bytes(9));
 			const frame =
-				remoteFresh instanceof socket.TcpStream
+				remoteFresh instanceof Socket.TcpStream
 					? await remoteFresh.consumer.readFrame()
 					: await remoteFresh.consumer.ordered().readFrame();
 			expect(frame?.payload).toEqual(bytes(9).payload);
@@ -353,7 +353,7 @@ test("a dial waits for the peer to announce, without an arbitrary timeout", asyn
 	const { origin, a } = setup();
 	const dialing = a.dialTcp("later");
 	await clock.advance(Nano.fromSecond(Second(3600)));
-	const later = new socket.Endpoint(origin, Path.from("room"), "later");
+	const later = new Socket.Endpoint(origin, Path.from("room"), "later");
 	const incoming = await later.acceptTcp();
 	const remote = await incoming.accept();
 	const local = await dialing;
@@ -514,7 +514,7 @@ test("unpaced TCP eviction is an error, never a skipped frame or clean FIN", asy
 test("endpoint ids refuse separators, and close is idempotent", async () => {
 	const { origin, a } = setup();
 	for (const id of ["", "a/b", "a\\b"]) {
-		expect(() => new socket.Endpoint(origin, Path.from("room"), id)).toThrow();
+		expect(() => new Socket.Endpoint(origin, Path.from("room"), id)).toThrow();
 		await expect(a.dialTcp(id)).rejects.toBeInstanceOf(Error);
 	}
 	a.close();
@@ -531,7 +531,7 @@ for (const protocol of ["tcp", "track"] as const) {
 		const bo = new Origin.Producer();
 		origins.add(ao);
 		origins.add(bo);
-		const a = new socket.Endpoint(ao, Path.from("room"), "alice");
+		const a = new Socket.Endpoint(ao, Path.from("room"), "alice");
 		const route = bo.route(Path.from("room/.socket/bob"), { hidden: true });
 		const requested = wireOf(route.broadcast).requested();
 		route.announce();
@@ -575,7 +575,7 @@ for (const protocol of ["tcp", "track"] as const) {
 			staged.commit();
 			await clock.advance(Nano.zero);
 			const local = await dialing;
-			const reader = local instanceof socket.TcpStream ? local.consumer : local.consumer.ordered();
+			const reader = local instanceof Socket.TcpStream ? local.consumer : local.consumer.ordered();
 			const received: number[] = [];
 			let completed = false;
 			let failure: unknown;
@@ -615,8 +615,8 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 			const bo = new Origin.Producer();
 			origins.add(ao);
 			origins.add(bo);
-			const a = new socket.Endpoint(ao, Path.from("room"), "alice");
-			const b = new socket.Endpoint(bo, Path.from("room"), "bob");
+			const a = new Socket.Endpoint(ao, Path.from("room"), "alice");
+			const b = new Socket.Endpoint(bo, Path.from("room"), "bob");
 			const pair = createMockTransportPair(alpn);
 			const url = new URL("https://localhost/socket");
 			const [client, server] = await Promise.all([
@@ -657,8 +657,8 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 			const bo = new Origin.Producer();
 			origins.add(ao);
 			origins.add(bo);
-			const a = new socket.Endpoint(ao, Path.from("room"), "alice");
-			const b = new socket.Endpoint(bo, Path.from("room"), "bob");
+			const a = new Socket.Endpoint(ao, Path.from("room"), "alice");
+			const b = new Socket.Endpoint(bo, Path.from("room"), "bob");
 			const pair = createMockTransportPair(alpn);
 			const url = new URL("https://localhost/socket");
 			const [client, server] = await Promise.all([
@@ -684,7 +684,7 @@ for (const alpn of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_20, Ie
 				const local = await dialing;
 				local.producer.writeFrame(bytes(7));
 				const frame =
-					remote instanceof socket.TcpStream
+					remote instanceof Socket.TcpStream
 						? await remote.consumer.readFrame()
 						: await remote.consumer.ordered().readFrame();
 				expect(frame?.payload).toEqual(bytes(7).payload);
@@ -707,8 +707,8 @@ test("a socket endpoint behind a lite-06 client fails its dials and accepts, not
 	const bo = new Origin.Producer();
 	origins.add(ao);
 	origins.add(bo);
-	const a = new socket.Endpoint(ao, Path.from("room"), "alice");
-	const b = new socket.Endpoint(bo, Path.from("room"), "bob");
+	const a = new Socket.Endpoint(ao, Path.from("room"), "alice");
+	const b = new Socket.Endpoint(bo, Path.from("room"), "bob");
 	// Already waiting before the session attaches, as when an endpoint's client reconnects.
 	const waiting = a.dialTcp("bob").then(
 		() => undefined,
