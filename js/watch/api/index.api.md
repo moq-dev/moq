@@ -163,16 +163,15 @@ export type PlayerInput = {
 		target: Signals.Getter<Audio.Target | undefined>;
 		volume: Signals.Getter<number>;
 	};
-	buffer: Signals.Getter<Clock.Milli>;
 	catalog: Signals.Getter<Hang.Catalog.Root | undefined>;
 	catalogFormat: Signals.Getter<CatalogFormat | undefined>;
 	delay: Signals.Getter<Delay>;
 	enabled: Signals.Getter<boolean>;
 	follow: Signals.Getter<boolean>;
+	lookahead: Signals.Getter<Clock.Milli>;
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
-	probe: Signals.Getter<Net.Connection.Probe | undefined>;
 	text: {
 		container: Signals.Getter<HTMLElement | undefined>;
 		target: Signals.Getter<string | undefined>;
@@ -203,8 +202,8 @@ export class Sync {
 }
 
 export type SyncInput = {
-	buffer: Signals.Getter<Clock.Milli>;
 	delay: Signals.Getter<Delay>;
+	lookahead: Signals.Getter<Clock.Milli>;
 };
 
 export type SyncOutput = {
@@ -311,7 +310,7 @@ export namespace Video {
 	}
 	export type SourceInput = {
 		broadcast: Signals.Getter<Broadcast | undefined>;
-		probe: Signals.Getter<Net.Connection.Probe | undefined>;
+		rate: Signals.Getter<number | undefined>;
 		supported: Signals.Getter<Video.Supported | undefined>;
 		target: Signals.Getter<Video.Target | undefined>;
 	};

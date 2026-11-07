@@ -80,7 +80,9 @@ esac
         source = (ROOT / "test/interop/interop.sh").read_text()
         setup, runtime = source.split("# ── setup", 1)
         setup = re.sub(r"^INTEROP_DIR=.*$", "INTEROP_DIR=" + shlex.quote(str(ROOT / "test/interop")), setup, flags=re.M)
-        for name in re.findall(r"\$EXAMPLES/(interop-[\w-]+)", runtime):
+        # Stage every example the build list names, including those only helper scripts run.
+        built = re.search(r"examples=\(([^)]*)\)", source).group(1).split()
+        for name in set(built) | set(re.findall(r"\$EXAMPLES/(interop-[\w-]+)", runtime)):
             executable(self.profile / "examples" / name, "echo owned-example\n")
         # Exercise dereferencing, including a symlink to a cache outside target.
         cached = self.root / "cache"

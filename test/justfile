@@ -258,6 +258,10 @@ video:
 max-age:
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
+# Datagram tracks between Rust and JavaScript on lite-07, direct and through a Rust relay.
+datagram-tracks:
+    bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^datagram_tracks::/)' --run-ignored only
+
 # JavaScript publisher and reader over WebSocket, through a Rust relay, past qmux's default stream limit.
 stream-limits:
     bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^stream_limits::/)' --run-ignored only
@@ -273,7 +277,7 @@ receive-credit:
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
-    just rs test -p moq-net --lib bare_fin_interop owed_tail_death_interop --run-ignored all
+    just rs test -p moq-net --features async --lib bare_fin_interop owed_tail_death_interop --run-ignored all
 
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:

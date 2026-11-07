@@ -1,4 +1,15 @@
-import { Instant, type Interval, interval, Milli, MissedTickBehavior, Nano, now, Second, timeout } from "@moq/clock";
+import {
+	Elapsed,
+	Instant,
+	type Interval,
+	interval,
+	Milli,
+	MissedTickBehavior,
+	Nano,
+	now,
+	Second,
+	timeout,
+} from "@moq/clock";
 import { Credit, replenishWindow } from "./credit.ts";
 import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
@@ -37,6 +48,9 @@ export interface Config {
 	streamReceiveWindow?: bigint;
 	/** Idle timeout in milliseconds, or null to disable it; zero is refused. */
 	idleTimeout?: number | null;
+	/** How long `ready` waits for the peer's transport parameters, in milliseconds, or null to wait
+	 *  indefinitely; zero is refused. The session closes when it passes. */
+	handshakeTimeout?: number | null;
 	/** Maximum QMux Record size in bytes (draft-01). */
 	maxRecordSize?: bigint;
 	/** Largest DATAGRAM *frame* (RFC 9221: type + length + payload) we advertise
@@ -54,6 +68,7 @@ const DEFAULT_CONFIG: Required<Config> = {
 	receiveWindow: 1_048_576n,
 	streamReceiveWindow: 262_144n,
 	idleTimeout: 30_000,
+	handshakeTimeout: 10_000,
 	maxRecordSize: Frame.DEFAULT_MAX_RECORD_SIZE,
 	// Fill a full record by default; the record layer bounds the size.
 	maxDatagramFrameSize: Frame.DEFAULT_MAX_RECORD_SIZE,
@@ -72,9 +87,9 @@ function resolveConfig(config?: Config): Required<Config> {
 		if (value !== undefined) Object.assign(resolved, { [key]: value });
 	}
 	for (const [key, value] of Object.entries(resolved)) {
-		if (key === "idleTimeout") {
+		if (key === "idleTimeout" || key === "handshakeTimeout") {
 			if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) {
-				throw new TypeError("idleTimeout must be a positive safe integer or null");
+				throw new TypeError(`${key} must be a positive safe integer or null`);
 			}
 		} else if (key !== "maxDatagramFrameSize" || value !== null) {
 			if (typeof value !== "bigint") throw new TypeError(`${key} must be a bigint`);
@@ -350,6 +365,30 @@ export interface StreamCredit {
 	/** Whether an open was refused for lack of credit since the peer last granted more, so
 	 *  this side waits for the peer, as QUIC's STREAMS_BLOCKED says. */
 	blocked: boolean;
+}
+
+/** What a send stream has sent so far, the shape of W3C WebTransport's `WebTransportSendStreamStats`. */
+export interface SendStreamStats {
+	/** The bytes written to the stream. */
+	bytesWritten: number;
+	/** The bytes handed to the WebSocket. */
+	bytesSent: number;
+	/** The bytes the peer has acknowledged, which are `bytesSent`: QMux acknowledges data once
+	 *  it is passed to the underlying transport. */
+	bytesAcknowledged: number;
+}
+
+/** A stream's send half, with W3C `WebTransportSendStream`'s `sendOrder` and `getStats()`. */
+export interface SendStream extends WritableStream<Uint8Array> {
+	/** Its priority against the session's other streams; higher sends first. */
+	sendOrder: number;
+	/** What the stream has written, sent, and had acknowledged so far. */
+	getStats(): Promise<SendStreamStats>;
+}
+
+/** A bidirectional stream whose send half is a {@link SendStream}. */
+export interface BidirectionalStream extends WebTransportBidirectionalStream {
+	readonly writable: SendStream;
 }
 
 /** Options for opening a QMux Session over WebSocket. */
@@ -636,7 +675,8 @@ export default class Session implements WebTransport {
 		return this.#protocol;
 	}
 
-	/** Resolves once the WebSocket opens and the session can carry streams. */
+	/** Resolves once the peer's transport parameters arrive, as a WebTransport handshake completes:
+	 *  stream limits and `datagrams.maxDatagramSize` are known from then on. */
 	readonly ready: Promise<void>;
 	#readyResolve: () => void;
 	#readyReject: (err: Error) => void;
@@ -646,8 +686,8 @@ export default class Session implements WebTransport {
 	#closedReject: (err: Error) => void;
 
 	/** Bidirectional streams the peer opens, in arrival order. */
-	readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
-	#incomingBidirectionalQueue: IncomingStreamQueue<WebTransportBidirectionalStream>;
+	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
+	#incomingBidirectionalQueue: IncomingStreamQueue<BidirectionalStream>;
 	/** Unidirectional streams the peer opens, in arrival order. */
 	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
 	#incomingUnidirectionalQueue: IncomingStreamQueue<ReadableStream<Uint8Array>>;
@@ -763,7 +803,7 @@ export default class Session implements WebTransport {
 		// observe the rejection.
 		this.closed.catch(() => {});
 
-		this.#incomingBidirectionalQueue = new IncomingStreamQueue<WebTransportBidirectionalStream>();
+		this.#incomingBidirectionalQueue = new IncomingStreamQueue<BidirectionalStream>();
 		this.incomingBidirectionalStreams = this.#incomingBidirectionalQueue.readable;
 
 		this.#incomingUnidirectionalQueue = new IncomingStreamQueue<ReadableStream<Uint8Array>>();
@@ -932,11 +972,19 @@ export default class Session implements WebTransport {
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
 		this.#recvDataMax = this.#ourParams.initialMaxData;
-		// Our own deadline applies until the peer's parameters arrive, so a peer
-		// that never sends them can't hold the session open.
+		// Our own idle deadline applies until the peer's parameters arrive.
 		this.#startIdleTimerIfEnabled();
-
-		this.#readyResolve();
+		// The handshake deadline also covers qmux-00 and a disabled idle timeout, so
+		// a peer that never sends its parameters can't hold `ready` forever.
+		const handshake = this.#config.handshakeTimeout;
+		if (handshake !== null) {
+			timeout(Nano.fromMilli(Milli(handshake)), this.ready).catch((err) => {
+				if (!(err instanceof Elapsed)) return;
+				this.#closeReason ??= new Error("handshake timeout");
+				this.#abort(0, "handshake timeout");
+				this.#transportClose();
+			});
+		}
 	}
 
 	#onData(data: Uint8Array) {
@@ -1112,6 +1160,7 @@ export default class Session implements WebTransport {
 
 		// The peer's limit may be shorter than ours.
 		this.#startIdleTimerIfEnabled();
+		this.#readyResolve();
 	}
 
 	/** Effective idle timeout in ms, or 0 if disabled.
@@ -1701,7 +1750,13 @@ export default class Session implements WebTransport {
 		await scheduler.enqueueStream(streamId, bytes);
 	}
 
-	async #sendStreamDataWithFlowControl(id: Stream.Id, streamId: bigint, data: Uint8Array, signal: AbortSignal) {
+	async #sendStreamDataWithFlowControl(
+		id: Stream.Id,
+		streamId: bigint,
+		data: Uint8Array,
+		signal: AbortSignal,
+		stats: SendStreamStats,
+	) {
 		const flow = this.#streamFlow.get(streamId);
 		if (!flow) throw new Error(`missing flow state for stream ${streamId}`);
 
@@ -1738,13 +1793,16 @@ export default class Session implements WebTransport {
 
 			flow.sendOffset += BigInt(sendable);
 			offset += sendable;
+			stats.bytesSent += sendable;
+			stats.bytesAcknowledged = stats.bytesSent;
 		}
 	}
 
-	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal) {
+	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal, stats: SendStreamStats) {
 		const streamId = id.value.value;
 
-		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal);
+		stats.bytesWritten += data.byteLength;
+		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal, stats);
 	}
 
 	/** Send the FIN. Routed through the stream's own queue so it stays ordered
@@ -1836,7 +1894,7 @@ export default class Session implements WebTransport {
 
 	/** Open a bidirectional stream, waiting for the peer to grant stream credit
 	 *  unless `waitUntilAvailable` is false. */
-	async createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream> {
+	async createBidirectionalStream(options?: SendStreamOptions): Promise<BidirectionalStream> {
 		await this.#claimStream(Stream.Dir.Bi, options, "Failed to create bidirectional stream.");
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
@@ -1882,7 +1940,7 @@ export default class Session implements WebTransport {
 
 	/** Open a send-only stream, waiting for the peer to grant stream credit
 	 *  unless `waitUntilAvailable` is false. */
-	async createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>> {
+	async createUnidirectionalStream(options?: SendStreamOptions): Promise<SendStream> {
 		await this.#claimStream(Stream.Dir.Uni, options, "Failed to create send stream.");
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
@@ -1906,8 +1964,9 @@ export default class Session implements WebTransport {
 	}
 
 	/** The writable for a stream's send half. */
-	#sendWritable(id: Stream.Id, sendOrder: number): WritableStream<Uint8Array> {
+	#sendWritable(id: Stream.Id, sendOrder: number): SendStream {
 		const streamId = id.value.value;
+		const stats: SendStreamStats = { bytesWritten: 0, bytesSent: 0, bytesAcknowledged: 0 };
 		let signal!: AbortSignal;
 		const reset = (e: unknown) => {
 			this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
@@ -1941,7 +2000,7 @@ export default class Session implements WebTransport {
 				);
 			},
 			write: async (chunk, controller) => {
-				await this.#sendStreamData(id, chunk, controller.signal);
+				await this.#sendStreamData(id, chunk, controller.signal, stats);
 			},
 			abort: reset,
 			close: async () => {
@@ -1960,7 +2019,13 @@ export default class Session implements WebTransport {
 			},
 		});
 		this.#attachSendOrder(writable, streamId, sendOrder);
-		return writable;
+		// W3C `WebTransportSendStream.getStats()`, so a caller can tell what the peer has.
+		Object.defineProperty(writable, "getStats", {
+			configurable: true,
+			value: async (): Promise<SendStreamStats> => ({ ...stats }),
+		});
+		// Both properties are defined above.
+		return writable as SendStream;
 	}
 
 	/** Shared teardown for both terminal transitions: tears down streams,

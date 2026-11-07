@@ -33,7 +33,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   replacing its removal); published versions keep it, answered through the same model.
 - **Holes.** Lite-07 names every sequence in the requested ranges the
   publisher won't deliver: SUBSCRIBE_SKIP one that never existed, and
-  SUBSCRIBE_DROP (restored in lite-07) one expired or refused upstream. On lite-01..06 datagram groups are always dropped in a past range (#4982); on lite-07 ranges never cover datagrams ([Datagram tracks](/quest/m1/datagram-tracks/README.md)). The
+  SUBSCRIBE_DROP (restored in lite-07) one expired or refused upstream. On lite-01..06 datagram groups are always dropped in a past range (#4982); on lite-07 ranges never cover datagrams, which have their own track kind. The
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
@@ -87,8 +87,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   premise that ranges are group-only because a group's timestamp isn't always
   known: timed tracks know it, and untimed ones refuse. The cache half landed in its own PR after #5929.
   A datagram was judged on its own (maintainer, 2026-10-20). Superseded
-  2026-11-01 (maintainer): datagrams become their own track kind
-  ([Datagram tracks](/quest/m1/datagram-tracks/README.md)), so on lite-07
+  2026-11-01 (maintainer): datagrams become their own track kind, so on lite-07
   a range never covers a datagram.
 - Ranges are whole groups: a range always starts at a group's first frame
   (maintainer, on [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)). The IETF joining FETCH for the

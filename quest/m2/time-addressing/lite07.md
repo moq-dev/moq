@@ -4,7 +4,7 @@
 
 moq-lite-07 carries no group sequence numbers: a GROUP names its start and
 its predecessor's start, GROUP_END says where a whole group ends, and every
-subscription bound and drop is a time. Datagrams keep a sequence of their own ([Datagram tracks](/quest/m1/datagram-tracks/README.md)). Rust speaks it, the lite
+subscription bound and drop is a time. Datagrams keep a sequence of their own on their own track kind. Rust speaks it, the lite
 draft specifies it, and lite-01..06 are unchanged.
 
 ## Plan

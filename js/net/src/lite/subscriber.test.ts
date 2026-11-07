@@ -1286,6 +1286,38 @@ test("a lite SUBSCRIBE open given up leaves its stream to the next open", async 
 	}
 });
 
+// Leaving during SUBSCRIBE setup releases its TRACK bridge while the broadcast stays live.
+test.each(["credit", "answer"] as const)("abandoning SUBSCRIBE during %s releases TRACK", async (stage) => {
+	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const room = subscriber.consume(Path.from("room"));
+	try {
+		const video = room.track("video").subscribe();
+		await opened(0);
+		await streams[0].reading;
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		await opened(1);
+		if (stage === "answer") await streams[1].reading;
+		video.close();
+		await drainReactions();
+		if (stage === "credit") await streams[0].aborted;
+		else await streams[0].finished;
+		if (stage === "credit") {
+			streams[1].release();
+			await drainReactions();
+			expect(streams[1].written).toEqual([]);
+		}
+		const audio = room.track("audio").subscribe();
+		await (await opened(stage === "credit" ? 1 : 2)).writing;
+		audio.close();
+	} finally {
+		room.close();
+		subscriber.close();
+		warn.mockRestore();
+	}
+});
+
 // The last reader leaving gives the setup up while its TRACK stream still waits for a slot, so
 // the stream admitted for it goes unused to the next open.
 test("a lite subscribe whose readers leave while it waits for a stream gives up the wait", async () => {

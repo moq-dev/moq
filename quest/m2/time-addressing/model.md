@@ -90,7 +90,7 @@ it:
 - Resume across route flips (`resume.rs`), mid-group `Position` and
   `frame_start`, priority order within a subscription, `Demand::wanted`, and
   refresh.
-- Not datagrams: they become their own track kind with their own sequence ([Datagram tracks](/quest/m1/datagram-tracks/README.md)).
+- Not datagrams: they are their own track kind with their own sequence.
 - The legacy codecs: lite GROUP, SUBSCRIBE and SUBSCRIBE_UPDATE bounds,
   SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_SKIP,
   SUBSCRIBE_DROP, FETCH, and
