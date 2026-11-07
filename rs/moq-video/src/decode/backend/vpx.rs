@@ -42,7 +42,9 @@ enum Chain {
 	/// Delta frames in between are dropped rather than decoded against
 	/// references that are missing or wrong. `lost` counts the frames dropped
 	/// since it broke, so a run of them logs once.
-	Broken { lost: u64 },
+	Broken {
+		lost: u64,
+	},
 }
 
 impl Vpx {

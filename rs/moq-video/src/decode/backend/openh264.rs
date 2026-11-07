@@ -313,7 +313,6 @@ impl Backend for Openh264 {
 	}
 }
 
-
 #[cfg(test)]
 mod tests {
 	use std::collections::HashMap;

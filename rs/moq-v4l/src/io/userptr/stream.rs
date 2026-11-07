@@ -4,9 +4,9 @@ use std::{io, mem, sync::Arc};
 
 use crate::buffer::{Metadata, Type};
 use crate::device::{Device, Handle};
-use crate::io::State;
 use crate::io::traits::{CaptureStream, Stream as StreamTrait};
 use crate::io::userptr::arena::Arena;
+use crate::io::State;
 use crate::memory::Memory;
 use crate::sys::*;
 use crate::v4l2;
