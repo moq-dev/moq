@@ -24,7 +24,3 @@ that moq-webrtc never calls but a browser could need stays for
 [the dead-API trim](/quest/m3/webrtc/dead-api.md).
 
 Public API: none. Wire: none toward browsers.
-
-## Required
-
-- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - the vendored code this trims

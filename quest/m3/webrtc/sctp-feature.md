@@ -18,7 +18,3 @@ build without `p2p` neither compiles nor links `sctp_proto`. The feature
 keeps its name.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - vendors the SCTP modules this gates
