@@ -6462,6 +6462,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room/host"),
 				instance: None,
+				node: 0,
 				name: "audio".to_string(),
 			};
 
@@ -6559,6 +6560,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room/host"),
 			instance: None,
+			node: 0,
 			name: "audio".to_string(),
 		};
 
@@ -6621,6 +6623,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room/host"),
 				instance: None,
+				node: 0,
 				name: "audio".to_string(),
 			};
 
