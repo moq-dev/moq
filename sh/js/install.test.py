@@ -53,20 +53,7 @@ else:
 """)
             bun.chmod(0o755)
             os.mkfifo(root / "continue")
-            (root / "sitecustomize.py").write_text("""import fcntl, os
-flock = fcntl.flock
-def observed(fd, operation):
-    if os.environ.get('TRACE_LOCK'):
-        try:
-            flock(fd, operation | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print('waiting', flush=True)
-            flock(fd, operation)
-    else:
-        flock(fd, operation)
-fcntl.flock = observed
-""")
-            env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"], "PYTHONPATH": str(root)}
+            env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]}
             recipe = subprocess.Popen(
                 ["just", "biome"], cwd=root, env=env, stdout=subprocess.PIPE, text=True, start_new_session=True
             )
@@ -74,23 +61,25 @@ fcntl.flock = observed
             self.addCleanup(lambda: os.killpg(recipe.pid, signal.SIGKILL) if recipe.poll() is None else None)
             self.assertEqual(recipe.stdout.readline(), "ready\n")
             test = subprocess.Popen(
-                ["just", "--justfile", "test/justfile", "media"],
+                ["just", "--quiet", "--justfile", "test/justfile", "media"],
                 cwd=root,
-                env={**env, "TRACE_LOCK": "1"},
+                env=env,
+                stderr=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 text=True,
                 start_new_session=True,
             )
+            self.addCleanup(test.stderr.close)
             self.addCleanup(test.stdout.close)
             self.addCleanup(lambda: os.killpg(test.pid, signal.SIGKILL) if test.poll() is None else None)
-            self.assertEqual(test.stdout.readline(), "waiting\n")
+            self.assertEqual(test.stderr.readline(), "waiting for another workspace dependency install\n")
             with (root / "continue").open("w"):
                 pass
             self.assertEqual(recipe.wait(), 0)
             self.assertEqual(test.wait(), 0)
             self.assertEqual((root / "calls").read_text(), "install\n")
             # Frozen readers reuse the post-update fingerprint as well.
-            subprocess.run(["just", "--justfile", "test/justfile", "media"], cwd=root, env=env, check=True)
+            subprocess.run(["just", "--quiet", "--justfile", "test/justfile", "media"], cwd=root, env=env, check=True)
             self.assertEqual((root / "calls").read_text(), "install\n")
 
 

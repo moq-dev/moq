@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,7 +63,11 @@ with (ROOT / ".tmp/bun-install.lock").open("ab") as lock:
     if os.name != "nt":
         import fcntl
 
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("waiting for another workspace dependency install", file=sys.stderr, flush=True)
+            fcntl.flock(lock, fcntl.LOCK_EX)
     current = fingerprint()
     stamp = ROOT / "node_modules/.moq-install"
     # Identical inputs reuse the tree while other invocations consume it.

@@ -19,8 +19,16 @@ export HARNESS_KEEP="${HARNESS_KEEP:-1}"
     exit 2
 }
 
+for tool in python3 pulseaudio; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "error: $tool not found; run inside 'nix develop'" >&2
+        exit 1
+    }
+done
+
 uv run --no-project python sh/js/install.py frozen
-cargo build --locked -p moq-relay
+# The native listener is the shipped player, built with its speaker.
+cargo build --locked --features moq-cli/play -p moq-relay -p moq-cli
 TARGET_BASE="${CARGO_TARGET_DIR:-$ROOT/target}"
 harness_port relay
 relay_port=$HARNESS_PORT
@@ -35,7 +43,7 @@ if ! lsof -nP -a -p "$HARNESS_PID" -iTCP:"$relay_port" -sTCP:LISTEN >/dev/null 2
     exit 1
 fi
 harness_spawn driver "$HARNESS_RUN/driver.log" bun test/audio-quality/clients/js/ptt.ts \
-    --relay "http://127.0.0.1:$relay_port" --out "$HARNESS_RUN"
+    --relay "http://127.0.0.1:$relay_port" --moq "$TARGET_BASE/debug/moq" --out "$HARNESS_RUN"
 driver_status=0
 harness_wait "$HARNESS_PID" || driver_status=$?
 if [[ $driver_status -ne 0 ]]; then
