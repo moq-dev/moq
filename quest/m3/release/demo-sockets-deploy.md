@@ -17,9 +17,8 @@ Main's moq-boy ([moq-dev/moq#8008](https://github.com/moq-dev/moq/pull/8008))
 and CARLA ([moq-dev/moq#8011](https://github.com/moq-dev/moq/pull/8011)) talk
 over sockets, which need lite-07 (or moq-transport) on every hop. Until
 moq.dev's relays accept it, the released `<moq-boy>` can't connect at all.
-The grants below follow [socket roles](/quest/m1/socket-roles.md); if it
-hasn't landed by the cut, use the `.socket/viewer-*` and `.socket/driver-*`
-grants documented in `demo/relay/prod.toml` instead.
+The grants below are the server and client socket roles that
+`demo/relay/prod.toml` documents.
 
 ## Waiting
 

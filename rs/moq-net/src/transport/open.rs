@@ -12,11 +12,13 @@
 //!
 //! The session also lists the group streams it has open, each with its rank and whether the
 //! peer has acknowledged everything written to it. A unidirectional open waiting for the peer's
-//! credit resets the lowest-ranked one below it to make room, at most one reset in flight per
+//! credit resets the lowest-ranked one it preempts to make room: one in a lower-priority group,
+//! or an older one of its own group, never a tied group's. At most one reset is in flight per
 //! waiting open, since each frees credit only once the peer's MAX_STREAMS arrives.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Poll;
 
@@ -27,24 +29,57 @@ use super::{Dir, StreamCredit};
 /// Where an open or an open stream ranks: the order the transport sends its stream in.
 ///
 /// Mirrors the transport's send scheduling: streams outside every group go before all of
-/// them, then a higher group priority, then a higher priority within the group.
+/// them, then a higher group priority, then a higher priority within the group. Groups of
+/// equal priority take turns, as the transport's round robin shares bytes between them: the
+/// one that took credit longest ago goes first. A group's stream priority orders only its own
+/// streams, so a subscription whose groups are numbered higher, say from a clock, never
+/// starves another of the same priority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rank {
-	Grouped { group: i64, stream: i64 },
-	Ungrouped { stream: i64 },
+	Grouped {
+		group: i64,
+		turn: Reverse<u64>,
+		stream: i64,
+	},
+	Ungrouped {
+		stream: i64,
+	},
 }
 
 impl Rank {
-	/// The rank of a stream at `stream` priority, in a group at `group` priority if any.
-	pub(super) fn new(group: Option<i64>, stream: i64) -> Self {
+	/// The rank of a stream at `stream` priority, in a group at this priority and turn if any.
+	pub(super) fn new(group: Option<(i64, u64)>, stream: i64) -> Self {
 		match group {
-			Some(group) => Self::Grouped { group, stream },
+			Some((group, turn)) => Self::Grouped {
+				group,
+				turn: Reverse(turn),
+				stream,
+			},
 			None => Self::Ungrouped { stream },
 		}
 	}
 
+	/// Whether an open at this rank may reset a stream at `other` to make room: one outside
+	/// every group or in a higher-priority group, or an older stream of its own group. A tied
+	/// group's stream is only behind in turn, so resetting it would just hand the turn back.
+	fn preempts(self, other: Self) -> bool {
+		match (self, other) {
+			(Self::Ungrouped { stream }, Self::Ungrouped { stream: other }) => stream > other,
+			(Self::Ungrouped { .. }, Self::Grouped { .. }) => true,
+			(Self::Grouped { .. }, Self::Ungrouped { .. }) => false,
+			(
+				Self::Grouped { group, turn, stream },
+				Self::Grouped {
+					group: other_group,
+					turn: other_turn,
+					stream: other,
+				},
+			) => group > other_group || (group == other_group && turn == other_turn && stream > other),
+		}
+	}
+
 	fn of(options: &SendOptions<'_, super::boxed::Group>) -> Self {
-		Self::new(options.group.map(super::boxed::Group::priority), options.priority)
+		Self::new(options.group.map(super::boxed::Group::rank), options.priority)
 	}
 }
 
@@ -153,6 +188,8 @@ pub(crate) struct Lines {
 	uni: Mutex<Line>,
 	bi: Mutex<Line>,
 	listing: Mutex<Listing>,
+	/// The last turn handed to a send group, so every group's turn is its own.
+	turns: AtomicU64,
 	/// Whose stream credit the opens wait for.
 	pub(super) transport: Transport,
 }
@@ -163,8 +200,14 @@ impl Lines {
 			uni: Default::default(),
 			bi: Default::default(),
 			listing: Default::default(),
+			turns: AtomicU64::new(0),
 			transport,
 		}
+	}
+
+	/// A turn after every one handed out before.
+	pub(super) fn next_turn(&self) -> u64 {
+		self.turns.fetch_add(1, Ordering::Relaxed) + 1
 	}
 
 	/// List an open group stream, returning the key it leaves with.
@@ -181,7 +224,7 @@ impl Lines {
 		self.listing().streams.remove(&key);
 	}
 
-	/// Reset the lowest-ranked open group stream below each waiting open not yet owed a reset,
+	/// Reset the lowest-ranked open group stream each waiting open not yet owed a reset preempts,
 	/// unless the transport reports it refused no open, so the open waits on something else,
 	/// such as a WebTransport header.
 	fn make_room(&self, line: &mut Line) {
@@ -199,17 +242,29 @@ impl Lines {
 			.iter()
 			.filter_map(|(key, stream)| Some((*key, stream.upgrade()?)))
 			.collect();
-		let mut open: Vec<_> = listed
+		let mut open: BTreeMap<(Rank, u64), _> = listed
 			.into_iter()
-			.map(|(key, stream)| (stream.read().rank, key, stream))
+			.map(|(key, stream)| ((stream.read().rank, key), stream))
 			.collect();
-		// Sorted highest first, so the lowest pops off the end.
-		open.sort_by_key(|(rank, key, _)| Reverse((*rank, *key)));
 		for rank in owed {
-			let Some((lowest, key, stream)) = open.pop_if(|(lowest, _, _)| *lowest < rank) else {
-				// The opens behind rank lower still.
-				break;
+			// An open that cannot preempt the lowest stream finds no lower-priority group open,
+			// which would rank lower, so only its own group's oldest stream is left to check.
+			let candidate = match (open.first_key_value(), rank) {
+				(Some((&(lowest, key), _)), _) if rank.preempts(lowest) => (lowest, key),
+				(Some(_), Rank::Grouped { group, turn, .. }) => {
+					let first = Rank::Grouped {
+						group,
+						turn,
+						stream: i64::MIN,
+					};
+					match open.range((first, 0)..).next() {
+						Some((&(oldest, key), _)) if rank.preempts(oldest) => (oldest, key),
+						_ => continue,
+					}
+				}
+				_ => continue,
 			};
+			let ((lowest, key), stream) = open.remove_entry(&candidate).expect("just found");
 			tracing::debug!(?lowest, waiting = ?rank, "reset a lower-ranked stream to make room");
 			stream.preempt();
 			self.unlist(key);
@@ -267,7 +322,7 @@ impl Open {
 			// Nobody is waiting: take credit if there is any, and join the line only without it.
 			None if line.waiting.is_empty() => {
 				if let Poll::Ready(res) = open(waiter) {
-					return Poll::Ready(res);
+					return Poll::Ready(took_turn(res, lines, options));
 				}
 				Line::start(boxed::stream_credit(&lines.transport, dir), lines);
 				let key = line.join(rank);
@@ -320,8 +375,16 @@ impl Open {
 		}
 		// Whoever is next may find credit left over, or the same failure.
 		line.leave(key);
-		Poll::Ready(res)
+		Poll::Ready(took_turn(res, lines, options))
 	}
+}
+
+/// Move an opened stream's group to the back of its priority's turns.
+fn took_turn<T, E>(res: Result<T, E>, lines: &Lines, options: &SendOptions<'_, super::boxed::Group>) -> Result<T, E> {
+	if let (Ok(_), Some(group)) = (&res, options.group) {
+		group.take_turn(lines.next_turn());
+	}
+	res
 }
 
 impl Drop for Open {
@@ -632,17 +695,120 @@ mod tests {
 	#[test]
 	fn ungrouped_streams_outrank_every_group() {
 		let ungrouped = Rank::Ungrouped { stream: i64::MIN };
-		let grouped = Rank::Grouped {
-			group: i64::MAX,
-			stream: i64::MAX,
-		};
+		let grouped = Rank::new(Some((i64::MAX, 0)), i64::MAX);
 		assert!(ungrouped > grouped);
-		assert!(
-			Rank::Grouped { group: 2, stream: 0 }
-				> Rank::Grouped {
-					group: 1,
-					stream: i64::MAX
+		assert!(Rank::new(Some((2, 9)), 0) > Rank::new(Some((1, 0)), i64::MAX));
+		assert!(Rank::new(Some((1, 1)), 0) > Rank::new(Some((1, 2)), i64::MAX));
+	}
+
+	/// Groups of one priority take turns at credit, whatever their streams' priorities, so a
+	/// subscription whose groups are numbered higher, say from a clock, never starves another.
+	#[test]
+	fn tied_groups_take_turns() {
+		use super::super::poll::Session as _;
+
+		let session = boxed::Session::new(crate::lite::test_transport::SinkSession::default().with_groups());
+		let lines = &session.opens;
+		let credit = Mutex::new(Credit::default());
+		// Live subscriptions in their own groups, numbering their groups far apart.
+		let groups = [("early", 10), ("late", 1_000_000)]
+			.map(|(name, sequence)| (name, sequence, session.send_group(0).expect("the sink opens groups")));
+		let waiter = kio::Waiter::noop();
+		let mut order = Vec::new();
+		for round in 0..4 {
+			// Each round's group replaces the one still waiting, as a zero delay budget gives
+			// up a group once its successor exists.
+			let mut opens: Vec<_> = groups
+				.iter()
+				.map(|(name, sequence, group)| {
+					let options = SendOptions {
+						group: Some(group),
+						priority: sequence + round,
+					};
+					(*name, options, Open::default())
+				})
+				.collect();
+			let poll = |open: &mut Open, options: &SendOptions<'_, boxed::Group>| {
+				open.poll(lines, Dir::Uni, &waiter, options, |waiter| {
+					let mut credit = credit.lock().unwrap();
+					if credit.available == 0 {
+						waiter.register(&mut credit.waiters);
+						return Poll::Pending;
+					}
+					credit.available -= 1;
+					Poll::Ready(Ok::<(), ()>(()))
+				})
+				.is_ready()
+			};
+			for (_, options, open) in &mut opens {
+				assert!(!poll(open, options));
+			}
+			credit.lock().unwrap().grant(1);
+			// Polled highest stream priority first, so only the line's order can pick `early`.
+			for (name, options, open) in opens.iter_mut().rev() {
+				if poll(open, options) {
+					order.push(*name);
 				}
+			}
+		}
+		assert_eq!(order, ["early", "late", "early", "late"]);
+	}
+
+	/// Out of credit, a waiting open resets a stream only of a lower group priority or of its
+	/// own group, never a tied group's, so tied subscriptions take turns instead of resetting
+	/// each other's streams.
+	#[test]
+	fn tied_groups_never_reset_each_other() {
+		use super::super::poll::Session as _;
+
+		let credit = kio::Producer::new(true);
+		let session = boxed::Session::new(
+			crate::lite::test_transport::SinkSession::gated_open_uni(credit.consume()).with_groups(),
 		);
+		let waiter = kio::Waiter::noop();
+		let [served, tied, high] =
+			[0, 0, 1].map(|priority| session.send_group(priority).expect("the sink opens groups"));
+		let grant = |open: bool| {
+			let Ok(mut credit) = credit.write() else {
+				panic!("the gate stays open");
+			};
+			*credit = open;
+		};
+		let open = |open: &mut Open, group: &boxed::Group, stream| {
+			let options = SendOptions {
+				group: Some(group),
+				priority: stream,
+			};
+			session.poll_open_group(open, &waiter, options, 7)
+		};
+		let Poll::Ready(Ok(_older)) = open(&mut Open::default(), &served, 1) else {
+			panic!("credit is free");
+		};
+		grant(false);
+
+		let mut waiting = Open::default();
+		assert!(open(&mut waiting, &tied, 1).is_pending());
+		assert_eq!(session.open_streams().len(), 1, "a tied group waits its turn");
+
+		let mut newer = Open::default();
+		assert!(open(&mut newer, &served, 2).is_pending());
+		assert!(
+			session.open_streams().is_empty(),
+			"a group's newer stream resets its older one"
+		);
+		drop((waiting, newer));
+
+		grant(true);
+		let Poll::Ready(Ok(_other)) = open(&mut Open::default(), &tied, 0) else {
+			panic!("credit is free");
+		};
+		grant(false);
+		let mut higher = Open::default();
+		assert!(open(&mut higher, &high, 0).is_pending());
+		assert!(
+			session.open_streams().is_empty(),
+			"a higher group priority resets a lower"
+		);
+		drop(higher);
 	}
 }
