@@ -21,7 +21,7 @@ const watch = {
 		out: { stalled: new Signal(!video) },
 	},
 	video: {
-		source: { out: { config: new Signal(undefined), error: new Signal(undefined) } },
+		source: { out: { config: new Signal({ codec: "avc1.42E01E" }), error: new Signal(undefined) } },
 		out: { stalled: new Signal(video) },
 	},
 	broadcast: { out: { status: new Signal("live"), error: new Signal(undefined) } },
