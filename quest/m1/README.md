@@ -49,7 +49,6 @@ moves what remains of them once their claims merge.
 - [Socket endpoints split into servers and clients](/quest/m1/socket-roles.md) - servers announce `.server/<id>` and clients `.client/<id>`, so plain grants keep a client from posing as a server or reading another client
 - [CARLA's driver ids stay private](/quest/m1/carla-driver-ids.md) - 128-bit driver ids, and `status` shows a handle that isn't the endpoint id
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
-- [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Session policy lives in moq-net](/quest/m1/session-policy/README.md) - accept and connect deadlines, admission, window widening and reconnect live once in moq-net; moq-tokio and moq-relay's io_uring path call them
 - [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed, so moq-rtc can take rind
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
