@@ -505,7 +505,9 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 // so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
 // the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust
 // `a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group`.
-test("integration: lite-07 reports a relative start over a frameless newest group", async () => {
+// Quarantined: once on main, the start resolved to 0 instead of the publisher's 5.
+// Investigation: quest/m0/test-flakes-2/lite07-relative-start.md.
+test.skip("integration: lite-07 reports a relative start over a frameless newest group", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([

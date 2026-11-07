@@ -1022,6 +1022,12 @@ pub struct Options {
 
 	/// Stats publishing on the cluster's origin. Disabled by default.
 	pub stats: crate::stats::Config,
+
+	/// How peers are reached in place of the network, for tests on `kio::clock::sim`:
+	/// every peer dial becomes a [`Dial`](moq_tokio::sim::Dial) the test routes.
+	/// `None` dials over sockets.
+	#[cfg(feature = "test-support")]
+	pub network: Option<moq_tokio::sim::Network>,
 }
 
 impl Options {
@@ -1278,6 +1284,9 @@ pub struct Cluster {
 	/// clone and every future holding one would copy it, on the stack in debug builds.
 	connect: Option<Arc<moq_tokio::connect::Config>>,
 	quic: Option<Arc<moq_tokio::quic::Config>>,
+	/// Where peer dials go in place of the network; see [`Options::network`].
+	#[cfg(feature = "test-support")]
+	network: Option<moq_tokio::sim::Network>,
 	/// The client static and API peers share when the template binds a fixed
 	/// `[connect]` port, so that port stays the cluster's egress port. Otherwise
 	/// `None`, and every session builds its own client on an ephemeral port. Built
@@ -1392,6 +1401,8 @@ impl Cluster {
 			session,
 			peer,
 			stats,
+			#[cfg(feature = "test-support")]
+			network,
 		} = options;
 		let deprecated = config.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
@@ -1443,6 +1454,8 @@ impl Cluster {
 			config,
 			connect: None,
 			quic: None,
+			#[cfg(feature = "test-support")]
+			network,
 			dial: None,
 			dialers: Dialers::new(),
 			advertise: None,
@@ -2260,7 +2273,13 @@ impl Cluster {
 		}
 		let mut quic = self.quic.as_deref().cloned().unwrap_or_default();
 		self.peer_quic.dial(&mut quic);
-		Ok(connect.init(quic)?)
+		let client = connect.init(quic)?;
+		#[cfg(feature = "test-support")]
+		let client = match &self.network {
+			Some(network) => client.with_network(network.clone()),
+			None => client,
+		};
+		Ok(client)
 	}
 
 	/// Start a reconnecting LAN session from discovered details. Tests wire this
