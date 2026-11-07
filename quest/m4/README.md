@@ -67,6 +67,8 @@ deleted.
 - [Drop kio's epoch fence](/quest/m4/crossbeam-pin-fence.md) - waiting on crossbeam#1352, then the `Read::drop` fence goes
 - [A cancelled miss stops waiting](/quest/m4/fill-wait-cancel-test.md) - a test proves a relay miss waiting on its own fill ends when no reader wants it
 - [No MOQ_* knobs outside the binaries](/quest/m4/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
+- [The API diff reports GStreamer element properties](/quest/m4/api-diff-gst.md) - `just api-diff` lists added, removed, and changed moq-gst properties
+- [Hand-written wrappers reach every FFI item](/quest/m4/binding-export-coverage.md) - Python, Go, and Swift fail a test when an FFI item has no wrapper path, as Kotlin does
 - [The HLS server follows each path once](/quest/m4/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m4/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
 - [moq-bench reports sub-millisecond latency](/quest/m4/bench-latency-resolution.md) - steady-window latency resolves finer than 1 ms
