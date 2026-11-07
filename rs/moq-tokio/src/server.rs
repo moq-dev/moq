@@ -2202,10 +2202,11 @@ mod tests {
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
 		let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-		(
-			crate::spawn_qmux(qmux::ws::Upgraded::new(client, ALPN).connect().unwrap()),
-			crate::spawn_qmux(qmux::ws::Upgraded::new(server, ALPN).accept().unwrap()),
-		)
+		let (client, server) = tokio::join!(
+			qmux::ws::Upgraded::new(client, ALPN).connect(),
+			qmux::ws::Upgraded::new(server, ALPN).accept(),
+		);
+		(crate::spawn_qmux(client.unwrap()), crate::spawn_qmux(server.unwrap()))
 	}
 
 	/// HTTP connection facts and the admission guard survive the upgraded-socket handoff.
@@ -2232,6 +2233,7 @@ mod tests {
 		let client = crate::spawn_qmux(
 			qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
 				.connect()
+				.await
 				.unwrap(),
 		);
 		let mut setup = client.open_uni(SendOptions::default()).await.unwrap();
@@ -2271,7 +2273,7 @@ mod tests {
 				);
 				options.link.alpn = Some(protocol.into());
 				let accept = tokio::spawn(crate::websocket::accept(server, options));
-				let client = crate::spawn_qmux(qmux::ws::Upgraded::new(client, protocol).connect().unwrap());
+				let client = crate::spawn_qmux(qmux::ws::Upgraded::new(client, protocol).connect().await.unwrap());
 				// A single Path parameter, including the empty value: lite uses a
 				// counted parameter bag; IETF uses a u16-sized SETUP option block.
 				let mut bytes = if protocol.contains("moq-lite") {

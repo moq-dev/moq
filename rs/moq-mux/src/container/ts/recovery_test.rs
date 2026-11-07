@@ -17,7 +17,7 @@
 //! - Every delivered frame missing from the output is counted: `trimmed` before its track's
 //!   first frame went out, `dropped` after, and each skip upstream is one of `gaps`.
 //! - Every unit arrives before it decodes, the continuity counters run unbroken, and the PCR
-//!   signals declared boundaries and delivery skips with PCR discontinuities.
+//!   signals declared boundaries and skipped clock slots with PCR discontinuities.
 //! - Each point a receiver acquires at carries its own PAT and PMT, and FFmpeg decodes the output
 //!   without an error from there, presenting every picture that went out, once, as the
 //!   continuous source decode's picture at the same presentation time.
@@ -645,7 +645,7 @@ impl Bottleneck {
 struct Arm {
 	profile: Profile,
 	schedule: Schedule,
-	/// Expected PCR flags from declared boundaries and overlapping delivery skips.
+	/// Expected PCR flags from declared boundaries and skipped clock slots.
 	breaks: usize,
 	/// A bottleneck after the faults.
 	path: Option<Bottleneck>,
@@ -668,7 +668,7 @@ fn arm(profile: Profile, schedule: Schedule) -> Arm {
 }
 
 impl Arm {
-	/// Expect this many PCR flags from the arm's boundaries and losses.
+	/// Expect this many PCR flags from the arm's clock breaks.
 	fn breaks(mut self, count: usize) -> Self {
 		self.breaks = count;
 		self
@@ -960,7 +960,9 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 
 	kio::clock::sleep_until(start + arm.join).await;
 	let source = crate::source::announced(&consumer).await;
-	let mut export = (open_ts(source, crate::catalog::CatalogFormat::Hang).await.unwrap()).with_delay(DELAY);
+	let mut export = open_ts(source, crate::catalog::CatalogFormat::Hang, DELAY)
+		.await
+		.unwrap();
 	let mut frames = Vec::new();
 	let mut samples = Vec::new();
 	while let Ok(next) = kio::clock::timeout(STALL, export.next()).await {
@@ -1418,7 +1420,7 @@ async fn recover(arm: Arm) -> Run {
 	assert_eq!(
 		count_discontinuity(&run.frames),
 		arm.breaks,
-		"one PCR flag per declared boundary or overlapping delivery gap"
+		"one PCR flag per declared boundary or skipped clock interval"
 	);
 
 	let reference = Reference::new(profile, run.ledger(true));
@@ -1479,7 +1481,7 @@ async fn a_skipped_group_resumes_at_the_next() {
 			true => Delivery::Omitted,
 			false => clean(slot),
 		})
-		.breaks(1),
+		.breaks(0),
 	)
 	.await;
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
@@ -1496,7 +1498,7 @@ async fn a_cut_group_keeps_what_it_delivered() {
 				false => clean(slot),
 			}
 		})
-		.breaks(1),
+		.breaks(0),
 	)
 	.await;
 	let video = run.ledger(true);
@@ -1511,7 +1513,7 @@ async fn a_cut_group_keeps_what_it_delivered() {
 /// resumes on the first keyframe delivered in time, on the same clock.
 #[tokio::test(start_paused = true)]
 async fn a_stall_drops_what_it_made_late() {
-	let run = recover(arm(Profile::Closed, |slot| hold(slot.video, slot)).breaks(1)).await;
+	let run = recover(arm(Profile::Closed, |slot| hold(slot.video, slot)).breaks(0)).await;
 	let (video, audio) = (run.ledger(true), run.ledger(false));
 	assert!(
 		video.units.iter().any(|unit| unit.on_time == Some(false)),
@@ -1530,32 +1532,13 @@ async fn a_stall_drops_what_it_made_late() {
 /// deadline is dropped rather than sent late.
 #[tokio::test(start_paused = true)]
 async fn a_path_stall_drops_what_it_made_late() {
-	recover(arm(Profile::Closed, |slot| hold(true, slot)).breaks(1)).await;
-}
-
-/// Audio and reordered video lose the same last-frame interval before a keyframe. Their
-/// decode reserves differ, but the missing media shares one PCR flag.
-#[tokio::test(start_paused = true)]
-async fn a_short_outage_across_both_tracks_flags_once() {
-	let run = recover(
-		arm(Profile::Closed, |slot| {
-			let missing = if slot.video {
-				slot.group == 5 && slot.frame == 11
-			} else {
-				(SPLICE - FRAME..SPLICE).contains(&slot.nominal)
-			};
-			if missing { Delivery::Omitted } else { clean(slot) }
-		})
-		.breaks(1),
-	)
-	.await;
-	assert_eq!(run.stats.release.gaps, 2, "both tracks skipped media");
+	recover(arm(Profile::Closed, |slot| hold(true, slot)).breaks(0)).await;
 }
 
 /// Audio loses an interval that ends before video's, though video's send-ahead releases its
-/// loss first. Disjoint losses each flag the PCR, whichever is muxed first.
+/// loss first. Both holes keep the padded PCR clock.
 #[tokio::test(start_paused = true)]
-async fn disjoint_outages_across_both_tracks_flag_twice() {
+async fn disjoint_outages_across_both_tracks_keep_the_clock() {
 	let run = recover(
 		arm(Profile::Closed, |slot| {
 			let missing = if slot.video {
@@ -1565,7 +1548,7 @@ async fn disjoint_outages_across_both_tracks_flag_twice() {
 			};
 			if missing { Delivery::Omitted } else { clean(slot) }
 		})
-		.breaks(2),
+		.breaks(0),
 	)
 	.await;
 	assert_eq!(run.stats.release.gaps, 2, "both tracks skipped media");
@@ -1584,7 +1567,7 @@ fn hold(held: bool, slot: Slot) -> Delivery {
 /// audio's row stops counting and its quiet grows on the output's clock, and the audio resumes.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_track_leaves_the_others_running() {
-	let run = recover(arm(Profile::Closed, stall_audio).breaks(1)).await;
+	let run = recover(arm(Profile::Closed, stall_audio).breaks(0)).await;
 	let video = run.ledger(true);
 	assert_eq!(out(video), video.units.len(), "every picture goes out");
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
@@ -1632,7 +1615,7 @@ async fn skewed_audio_survives_a_video_skip() {
 			(true, _) => clean(slot),
 			(false, _) => Delivery::At(slot.nominal + Duration::from_millis(200)),
 		})
-		.breaks(1),
+		.breaks(0),
 	)
 	.await;
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
@@ -1641,7 +1624,7 @@ async fn skewed_audio_survives_a_video_skip() {
 /// A skipped group around the 33-bit wrap keeps the clock, and the pictures either side decode.
 #[tokio::test(start_paused = true)]
 async fn a_skip_across_the_wrap_keeps_the_clock() {
-	let run = recover(arm(Profile::Wrap, skip_group_5).breaks(1)).await;
+	let run = recover(arm(Profile::Wrap, skip_group_5).breaks(0)).await;
 	let video = run.ledger(true);
 	let pts: Vec<u64> = video
 		.units
@@ -1686,7 +1669,7 @@ fn leading_out(video: &Ledger, group: usize) -> usize {
 /// are trimmed, while every group after a whole one keeps its own.
 #[tokio::test(start_paused = true)]
 async fn open_gop_trims_only_the_orphans() {
-	let run = recover(arm(Profile::Open, skip_and_cut).breaks(2)).await;
+	let run = recover(arm(Profile::Open, skip_and_cut).breaks(0)).await;
 	let video = run.ledger(true);
 	assert_eq!(
 		(leading_out(video, 6), leading_out(video, 9)),
@@ -1707,7 +1690,7 @@ async fn open_gop_trims_only_the_orphans() {
 async fn mpeg2_open_gop_trims_only_the_orphans() {
 	let run = recover(Arm {
 		join: Duration::from_millis(1100),
-		..arm(Profile::Mpeg2, skip_and_cut).breaks(2)
+		..arm(Profile::Mpeg2, skip_and_cut).breaks(0)
 	})
 	.await;
 	let video = run.ledger(true);
@@ -1729,7 +1712,7 @@ async fn mpeg2_open_gop_trims_only_the_orphans() {
 /// its own, and the output decodes straight through the CRA it resumes at.
 #[tokio::test(start_paused = true)]
 async fn hevc_trims_only_orphaned_rasl() {
-	let run = recover(arm(Profile::Rasl, skip_and_cut).breaks(2)).await;
+	let run = recover(arm(Profile::Rasl, skip_and_cut).breaks(0)).await;
 	let video = run.ledger(true);
 	assert_eq!(
 		(leading_out(video, 6), leading_out(video, 9)),
@@ -1746,7 +1729,7 @@ async fn hevc_trims_only_orphaned_rasl() {
 /// HEVC RADL pictures reference only their own IDR, so after a skip or a cut they go out with it.
 #[tokio::test(start_paused = true)]
 async fn hevc_keeps_radl_after_a_hole() {
-	let run = recover(arm(Profile::Radl, skip_and_cut).breaks(2)).await;
+	let run = recover(arm(Profile::Radl, skip_and_cut).breaks(0)).await;
 	let video = run.ledger(true);
 	assert_eq!(
 		(leading_out(video, 6), leading_out(video, 9)),
@@ -1783,7 +1766,7 @@ async fn a_late_catalog_starts_on_the_group_in_flight() {
 				false => clean(slot),
 			}
 		})
-		.breaks(1)
+		.breaks(0)
 	})
 	.await;
 	let video = run.ledger(true);
@@ -1804,14 +1787,14 @@ async fn a_skip_across_a_resolution_change_takes_the_new_parameters() {
 				false => clean(slot),
 			}
 		})
-		.breaks(1),
+		.breaks(0),
 	)
 	.await;
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
 
 /// The clock jumps 20 s at a declared discontinuity, and the path loses the group before the
-/// break and the one after it: the output signals the declared break and the delivery skip
+/// break and the one after it: the output signals only the declared break
 /// on the PCR, and resumes on the keyframe after.
 #[tokio::test(start_paused = true)]
 async fn a_declared_discontinuity_survives_loss_either_side() {
@@ -1822,14 +1805,14 @@ async fn a_declared_discontinuity_survives_loss_either_side() {
 				false => clean(slot),
 			}
 		})
-		.breaks(2),
+		.breaks(1),
 	)
 	.await;
 	assert_eq!(run.stats.release.dropped, 0);
 }
 
 /// The path loses the marker that declares the break, and every frame on either side arrives:
-/// the export marks the overlapping delivery skips and recovered clock jump once.
+/// the export marks the recovered clock jump once.
 #[tokio::test(start_paused = true)]
 async fn a_lost_discontinuity_marker_still_breaks_the_clock() {
 	let run = recover(
@@ -1854,7 +1837,7 @@ async fn a_congested_path_sheds_what_it_made_late() {
 			queue: 2 * DELAY,
 			congested: |at| (Duration::from_millis(1500)..Duration::from_millis(3500)).contains(&at),
 		}),
-		..arm(Profile::Closed, clean).breaks(1)
+		..arm(Profile::Closed, clean).breaks(0)
 	})
 	.await;
 	let video = run.ledger(true);
@@ -1941,8 +1924,8 @@ async fn long_faults_hold_their_latency() {
 			// Two seconds of every twenty.
 			congested: |at| (17..19).contains(&(at.as_secs() % 20)) && at < Duration::from_secs(100),
 		}),
-		// Five cycles, each with four scheduled losses and one shared congestion interval.
-		..arm(Profile::Long, faults).breaks(5 * 5)
+		// Live pacing pads these delivery holes while media is absent, so the PCR clock never jumps.
+		..arm(Profile::Long, faults).breaks(0)
 	})
 	.await;
 	assert!(run.stats.release.gaps >= 20, "every fault skipped: {:?}", run.stats);
