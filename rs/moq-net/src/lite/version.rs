@@ -20,9 +20,9 @@ pub enum Version {
 	/// Lite-07. Adds the hidden opt-in to ANNOUNCE_REQUEST: without it, a route with
 	/// a `.`-prefixed segment below the requested prefix is left out. SUBSCRIBE_DROP
 	/// accounts for every group the subscription will not deliver.
-	/// ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a
-	/// live announcement on the same stream. Adds the Auth Stream. SUBSCRIBE carries a
-	/// list of ranges. The wire format is
+	/// ANNOUNCE_START and ANNOUNCE_TAKEOVER may copy a path head from a live
+	/// announcement on the same stream, and name a Route ID in place of the hop chain.
+	/// Adds the Auth Stream. SUBSCRIBE carries a list of ranges. The wire format is
 	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
 	/// only when explicitly requested; the default version sets leave it out.
 	Lite07,
@@ -268,8 +268,8 @@ impl Version {
 		)
 	}
 
-	/// Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail
-	/// from a live announcement on the same stream. Added in lite-07.
+	/// Whether ANNOUNCE_START and ANNOUNCE_TAKEOVER may copy a path head from a live
+	/// announcement on the same stream. Added in lite-07.
 	pub fn has_announce_compression(self) -> bool {
 		!matches!(
 			self,
@@ -347,7 +347,9 @@ impl Version {
 
 	/// Whether the announce stream carries the route layer: ROUTE_START, ROUTE_UPDATE,
 	/// ROUTE_HOLD, ROUTE_END, and ANNOUNCE_FLOOR toward the subscriber, and ROUTE_REQUEST
-	/// and the ROUTE_END echo back. Added in lite-07.
+	/// and the ROUTE_END echo back. A claim names its Route ID in place of a hop chain,
+	/// ANNOUNCE_OK and SETUP carry no Hop ID, and requests name the origin's Node ID.
+	/// Added in lite-07.
 	pub(crate) fn has_routes(self) -> bool {
 		!matches!(
 			self,

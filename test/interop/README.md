@@ -20,6 +20,12 @@ and Bun over WebSocket and WebTransport. Fresh readers request or follow the
 claim's own path and child paths. A reader-first case checks that an absent
 request ends while its follower waits for the publisher to arrive.
 
+Until [`js/net` speaks lite-07's route layer](../../quest/m2/cluster-routing/routes/js.md),
+native JS dials its defaults in the matrix, leaving its grant unchecked, and every
+lane that would run it on lite-07 records a skip naming that quest: claims, track
+replacement, sockets, and the lite-07 compress and drop legs. The compressed catalog
+runs without its lite-07 reader, and `--versions moq-lite-07-wip` refuses JS clients.
+
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in

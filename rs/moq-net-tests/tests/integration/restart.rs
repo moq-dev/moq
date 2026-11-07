@@ -210,25 +210,12 @@ impl Worker {
 	}
 }
 
-/// The worker that wins `path` among `workers`: the lowest spread hash of the path and its
-/// instance, which every relay computes alike (`instance_key` in `moq-net`).
-fn spread(path: &str, workers: &[u64]) -> String {
-	let key = |hop: &u64| {
-		let mut hash: u64 = 0x420C0DECB00B;
-		for byte in path.bytes().chain(format!("worker-{hop}").into_bytes()) {
-			hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
-		}
-		hash
-	};
-	workers.iter().min_by_key(|hop| key(hop)).unwrap().to_string()
-}
-
-/// Workers `10` and `11` claim `pool` behind `U -> D`, each under its own instance. `U`
-/// spreads the pool's paths over them, but advertises one route for `pool`, its own winner
-/// for the prefix, and `D` names that route's instance on every request it forwards, so
-/// every hop serves the instance the first one chose: behind `D` the pool collapses onto
-/// that one worker. Worker `12` joining takes `U`'s requests for the paths it wins, and
-/// `D`'s whenever `U` advertises it for `pool`.
+/// Workers `10` and `11` claim `pool` behind `U -> D`, each under its own instance, and
+/// lite-07 routes each claim to its own origin node. Only the first hop selects the
+/// origin, by a rendezvous hash of the path and the origin's identity that every node
+/// computes alike, so `D` spreads the pool's paths over the workers exactly as `U` does
+/// and names the chosen origin on every request it forwards. Worker `12` joining takes
+/// over only the paths it wins, at both.
 async fn prefix_pool(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let upstream = produce_origin(2);
@@ -241,53 +228,52 @@ async fn prefix_pool(version: &str) {
 	}
 	settle().await;
 
-	// The worker whose instance `D`'s route for `pool` names.
+	// `D`'s route for `pool` names one of the workers.
 	let advertised = |announce: announce::Announce| {
 		assert_eq!(announce.prefix.as_str(), "pool");
 		let instance = announce.route.instance().clone();
-		instance.as_str().strip_prefix("worker-").expect("a worker").to_string()
+		assert!(instance.as_str().starts_with("worker-"), "{instance:?}");
 	};
 	let mut announced = downstream.consume().routes();
-	let mut prefix = match next_event(&mut announced).await {
+	match next_event(&mut announced).await {
 		origin::RouteEvent::Start(announce) => advertised(announce),
 		other => panic!("{version}: expected the pool, got {other:?}"),
+	}
+
+	// The worker serving `path` at `U`, which `D` must agree on.
+	let served = async |path: &str| {
+		let (_broadcast, mut subscription) = subscribe(&upstream, path).await;
+		let at_upstream = read(&mut subscription).await;
+		let (_broadcast, mut subscription) = subscribe(&downstream, path).await;
+		assert_eq!(read(&mut subscription).await, at_upstream, "{version}: {path} at D");
+		at_upstream
 	};
 
 	let paths = ["pool/job-0", "pool/job-1", "pool/job-2", "pool/job-3"];
-	let mut held = Vec::new();
+	let mut before = Vec::new();
 	for path in paths {
-		let (broadcast, mut subscription) = subscribe(&downstream, path).await;
-		assert_eq!(read(&mut subscription).await, prefix, "{version}: {path}");
-		held.push((broadcast, subscription));
-		let (_broadcast, mut subscription) = subscribe(&upstream, path).await;
-		assert_eq!(
-			read(&mut subscription).await,
-			spread(path, &[10, 11]),
-			"{version}: {path} at U"
+		let worker = served(path).await;
+		assert!(
+			["10", "11"].contains(&worker.as_str()),
+			"{version}: {path} served by {worker}"
 		);
+		before.push(worker);
 	}
-	assert!(
-		paths.iter().any(|path| spread(path, &[10, 11, 12]) == "12"),
-		"the paths must exercise the joining worker"
-	);
 
 	links.push(link(version, &workers[2].origin, &upstream).await);
 	settle().await;
 	while let Ok(Some(event)) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		match event {
-			origin::RouteEvent::Restart(announce) => prefix = advertised(announce),
+			origin::RouteEvent::Restart(announce) => advertised(announce),
 			other => panic!("{version}: expected a restart at most, got {other:?}"),
 		}
 	}
 
-	for path in paths {
-		let (_broadcast, mut subscription) = subscribe(&downstream, path).await;
-		assert_eq!(read(&mut subscription).await, prefix, "{version}: {path}");
-		let (_broadcast, mut subscription) = subscribe(&upstream, path).await;
-		assert_eq!(
-			read(&mut subscription).await,
-			spread(path, &[10, 11, 12]),
-			"{version}: {path} at U"
+	for (path, before) in paths.into_iter().zip(before) {
+		let worker = served(path).await;
+		assert!(
+			worker == before || worker == "12",
+			"{version}: {path} moved from {before} to {worker}, not to the joining worker"
 		);
 	}
 }
@@ -693,16 +679,14 @@ impl Pool {
 	}
 }
 
-/// Wake the worker for `path` through the claim and subscribe. moq-lite-07 announces the
-/// answer as a takeover of the claim, so the first subscription keeps reading. Older wires
-/// carry it as an ordinary announcement, which resets the first subscription through the
-/// claim, so they wake the worker first and subscribe through the exact route.
-async fn claimed(version: Version, origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
-	if version != "moq-lite-07-wip".parse().unwrap() {
-		let cold = origin.consume().request(path, None).await.unwrap();
-		drop(cold.track("video").unwrap().subscribe(None).await);
-		settle().await;
-	}
+/// Wake the worker for `path` through the claim and subscribe. Wake the worker first and
+/// subscribe through the exact route, so the test reads the same on every wire, whether
+/// it carries the answer as a takeover or as an ordinary announcement that resets the
+/// first subscription through the claim.
+async fn claimed(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
+	let cold = origin.consume().request(path, None).await.unwrap();
+	drop(cold.track("video").unwrap().subscribe(None).await);
+	settle().await;
 	subscribe(origin, path).await
 }
 
@@ -719,11 +703,11 @@ async fn claim_restart(version: &str) {
 	let pool = Pool::new(&worker);
 	settle().await;
 
-	let (_sibling, mut sibling) = claimed(version, &edge, "pool/q").await;
+	let (_sibling, mut sibling) = claimed(&edge, "pool/q").await;
 	pool.write("pool/q", "q:0");
 	assert_eq!(read(&mut sibling).await, "q:0", "{version}");
 
-	let (old, mut first) = claimed(version, &edge, "pool/p").await;
+	let (old, mut first) = claimed(&edge, "pool/p").await;
 	for group in 0..3 {
 		pool.write("pool/p", &format!("old:{group}"));
 		assert_eq!(read(&mut first).await, format!("old:{group}"), "{version}");
@@ -732,7 +716,7 @@ async fn claim_restart(version: &str) {
 	pool.close("pool/p");
 	settle().await;
 
-	let (fresh, mut returning) = claimed(version, &edge, "pool/p").await;
+	let (fresh, mut returning) = claimed(&edge, "pool/p").await;
 	assert!(!fresh.is_clone(&old), "{version}: joined the old output");
 	assert_eq!(*pool.answered.borrow(), 3, "{version}: the worker was not asked again");
 	pool.write("pool/p", "new:0");
