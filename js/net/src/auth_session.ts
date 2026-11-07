@@ -157,7 +157,17 @@ class Presented {
 }
 
 /** A token the application added to a {@link Handle}, presented on every session of it. */
-class Token implements Credential {
+/**
+ * A token {@link Handle.present} returned before its answer.
+ *
+ * @internal
+ */
+export interface Pending extends Credential {
+	/** Resolves once a peer accepts the token, or rejects as {@link Handle.add} does. */
+	readonly answered: Promise<void>;
+}
+
+class Token implements Pending {
 	readonly grant = new Signal<Grant | undefined>(undefined);
 	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
@@ -359,11 +369,21 @@ export class Handle {
 	 * request whose route names it carries it.
 	 */
 	async add(token: string | Uint8Array): Promise<Credential> {
-		// A copy, so the caller reusing its buffer never changes what a request carries.
-		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
-		const added = stateOf(this).add(bytes);
+		const added = this.present(token);
 		await added.answered;
 		return added;
+	}
+
+	/**
+	 * Present another token like {@link add}, returning it at once with its answer, so it can be
+	 * withdrawn before the peer answers.
+	 *
+	 * @internal
+	 */
+	present(token: string | Uint8Array): Pending {
+		// A copy, so the caller reusing its buffer never changes what a request carries.
+		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
+		return stateOf(this).add(bytes);
 	}
 
 	/**
@@ -445,6 +465,8 @@ class IssuedGrant implements Issued {
 	#stream: Stream;
 	#wire: AuthWire;
 	#writes = Promise.resolve();
+	/** The latest grant, until its write starts: a newer one replaces it rather than queueing. */
+	#queued: Grant | undefined;
 	#done = false;
 
 	constructor(stream: Stream, wire: AuthWire) {
@@ -470,20 +492,31 @@ class IssuedGrant implements Issued {
 			// reply that fails to encode.
 			if (!(err instanceof Unsupported)) console.warn("auth reply not sent", err);
 			this.#done = true;
+			this.#queued = undefined;
 			return this.#wire.unsupported(this.#stream, error(err).message).catch(() => void 0);
 		});
 	}
 
 	update(grant: Grant): void {
 		if (this.#done) return;
-		const expires = grant.expires === undefined ? undefined : grant.expires - wall();
-		this.#write(() =>
-			this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires }),
-		);
+		// A grant still waiting to be written is replaced, so a peer withholding stream credit
+		// holds at most one.
+		const queued = this.#queued !== undefined;
+		this.#queued = grant;
+		if (queued) return;
+		this.#write(async () => {
+			const grant = this.#queued;
+			this.#queued = undefined;
+			if (grant === undefined) return;
+			const expires = grant.expires === undefined ? undefined : grant.expires - wall();
+			await this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires });
+		});
 	}
 
 	revoke(code: SessionCode, reason: string): void {
 		if (this.#done) return;
+		// The peer never saw a grant still queued, so the refusal replaces it.
+		this.#queued = undefined;
 		this.#write(() => this.#wire.refuse(this.#stream, code, reason));
 		this.close();
 	}

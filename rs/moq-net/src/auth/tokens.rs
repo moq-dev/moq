@@ -64,8 +64,8 @@ pub struct EmptyToken;
 /// The first is the connection credential, which each dial carries in SETUP or its URL,
 /// unless the URL already has a `?jwt=`. Every other token rides its own AUTH stream on the
 /// sessions of [`handle`](Self::handle), widening the grant. Replacing them presents the new
-/// ones on the live session at once, withdrawing the ones they replace only after every new
-/// one has its answer, so the grant never narrows in between.
+/// ones on the live session at once, withdrawing the granted ones they replace only after
+/// every new one has its answer, so the grant never narrows in between.
 ///
 /// A reconnect loop builds each session on [`handle`](Self::handle), calls
 /// [`dial`](Self::dial) before each dial and [`connected`](Self::connected) once it
@@ -401,13 +401,13 @@ impl State {
 			if self.configured(id) {
 				continue;
 			}
-			// Only a granted token keeps the grant wide; one refused or never answered, such
+			// Only a token holding a grant keeps the grant wide; one refused or unanswered, such
 			// as one retrying while its backend fails, is withdrawn at once so repeated sets
 			// never pile up retrying streams.
 			let granted = self
-				.tokens
-				.get(&id)
-				.is_some_and(|entry| entry.ended.is_none() && matches!(entry.answered, Some(Ok(Answer::Granted))));
+				.links
+				.values()
+				.any(|link| link.slots.get(&id).is_some_and(|slot| slot.grant.is_some()));
 			match granted {
 				true => self.configured.as_mut().expect("checked configured").retiring.push(id),
 				false => self.withdraw(id),
@@ -672,6 +672,24 @@ mod tests {
 
 		session.link.granted(id(&set, "second"), Grant::all());
 		ok(&set);
+		assert!(!presented(&set, old));
+	}
+
+	/// A token first taken only for requests, then granted on a session with AUTH, keeps the
+	/// grant wide until its replacement answers.
+	#[test]
+	fn a_token_granted_after_a_requests_answer_retires() {
+		let set = Tokens::new(tokens(&["connection", "old"]));
+		let first = dial(&set, false, true);
+		let old = id(&set, "old");
+		first.lost();
+		let session = dial(&set, true, false);
+		session.grant_credential();
+		session.link.granted(old, Grant::all());
+
+		set.set(tokens(&["connection", "new"]));
+		assert!(presented(&set, old), "withdrawn before its replacement was answered");
+		session.link.granted(id(&set, "new"), Grant::all());
 		assert!(!presented(&set, old));
 	}
 

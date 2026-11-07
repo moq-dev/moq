@@ -1358,6 +1358,50 @@ test("withdrawn queued tokens are pruned before the next application decision", 
 	}
 });
 
+test("grants issued while a reply is blocked replace the one still queued", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
+	const grants = Array.from({ length: 100 }, (_, i) => grant([`${i}`], []));
+	const original = LiteAuthWire.prototype.grant;
+	// Which of `grants` reached the wire, in order.
+	const sent: number[] = [];
+	let release!: () => void;
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const spy = spyOn(LiteAuthWire.prototype, "grant").mockImplementation(async function (
+		this: LiteAuthWire,
+		stream,
+		grant,
+	) {
+		const index = grants.findIndex((issued) => issued.publish === grant.publish);
+		if (index >= 0) sent.push(index);
+		if (index === 0) await blocked;
+		return original.call(this, stream, grant);
+	});
+	try {
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("setup token missing");
+		setup.accept(grant(["a"], []));
+		const live = client.auth.add("live");
+		live.catch(() => void 0);
+		const request = await requests.next();
+		if (!request) throw new Error("live token missing");
+		const issued = request.accept(grants[0]);
+		await settles(() => sent.length === 1);
+		for (const update of grants.slice(1)) issued.update(update);
+		release();
+		await live;
+		await settles(() => sent.length === 2);
+		for (let i = 0; i < 10; i++) await yieldNow();
+		expect(sent).toEqual([0, 99]);
+	} finally {
+		spy.mockRestore();
+		client.abort();
+		server.abort();
+	}
+});
+
 // Capture the acceptor's actual AUTH writer after a valid setup grant. The following
 // bytes travel through the same connection dispatcher and presenter as a real peer.
 describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("AUTH violations %s", (protocol) => {

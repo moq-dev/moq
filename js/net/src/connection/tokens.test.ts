@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
-import type { Credential, Handle } from "../auth.ts";
+import type { Grant, Handle } from "../auth.ts";
+import type { Pending } from "../auth_session.ts";
 import * as Ietf from "../ietf/index.ts";
 import { createMockTransportPair } from "../mock.ts";
+import * as Path from "../path.ts";
 import { Reader } from "../stream.ts";
 import type { Established } from "./established.ts";
 import { offered } from "./extensions.ts";
@@ -55,19 +57,30 @@ test("no tokens present nothing", () => {
 
 /** A handle whose answers the test releases one token at a time. */
 function handle() {
-	const answers = new Map<string, (auth: Credential) => void>();
+	const answers = new Map<string, () => void>();
 	const closed: string[] = [];
 	const presented: string[] = [];
 	const fake = {
-		add(token: string) {
+		present(token: string) {
 			presented.push(token);
-			return new Promise<Credential>((resolve) => answers.set(token, resolve));
+			let granted: Grant | undefined;
+			const answered = new Promise<void>((resolve) =>
+				answers.set(token, () => {
+					granted = { publish: new Path.Patterns(), subscribe: new Path.Patterns() };
+					resolve();
+				}),
+			);
+			return {
+				grant: { peek: () => granted },
+				answered,
+				close: () => closed.push(token),
+			} as unknown as Pending;
 		},
 	} as unknown as Handle;
 	const answer = async (token: string) => {
 		const resolve = answers.get(token);
 		if (!resolve) throw new Error(`${token} was never presented`);
-		resolve({ close: () => closed.push(token) } as unknown as Credential);
+		resolve();
 		// Let the answer and the settle it schedules run.
 		for (let i = 0; i < 3; i++) await Promise.resolve();
 	};
@@ -89,15 +102,17 @@ test("a replaced token is withdrawn only once its replacement answers", async ()
 	expect(closed).toEqual(["old"]);
 });
 
-test("a token replaced before its answer closes when it arrives", async () => {
+test("a token replaced before its answer is withdrawn at once", async () => {
 	const { fake, closed, answer } = handle();
 	const held = new Held(fake, credential(URL_, ["connection"], true));
 	held.update(["connection", "old"]);
-	held.update(["connection", "new"]);
-	await answer("new");
-	expect(closed).toEqual([]);
 	await answer("old");
-	expect(closed).toEqual(["old"]);
+	held.update(["connection", "first"]);
+	held.update(["connection", "second"]);
+	// The unanswered replacement adds nothing; the granted token waits for an answer.
+	expect(closed).toEqual(["first"]);
+	await answer("second");
+	expect(closed).toEqual(["first", "old"]);
 });
 
 test("sessions sharing an auth handle present each configured token once", async () => {
