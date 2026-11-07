@@ -45,6 +45,10 @@ Also sweep:
 - The preview `Transcode.#active`.
 - The `<moq-watch>` and `<moq-publish>` enable latches (`#enabled`,
   `#connected`, `#invalid`, `#resume`). Derive enabled as connected with no
-  invalid attributes.
+  invalid attributes. `<moq-publish>`'s `announce` getter returns
+  `AnnounceMode`, and an invalid `announce` attribute suspends announcing
+  through `#invalid` like every other attribute, instead of the getter
+  returning `undefined` (added 2026-11-07, maintainer, /quest-plan from the
+  API shape audit).
 - `js/moq-boy/src/game.ts`: a command sent while disconnected replays on
   reconnect.

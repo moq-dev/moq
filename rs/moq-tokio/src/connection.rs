@@ -12,7 +12,7 @@ use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthPro
 use moq_net::kio;
 use moq_net::reconnect::{Action, Verdict};
 
-use crate::abort::AbortOnDrop;
+use crate::abort::Detached;
 use crate::connect::Endpoint;
 use crate::{Addrs, Client, Error};
 
@@ -774,7 +774,7 @@ pub struct Connection {
 /// The connection loop, shared by every [`Connection`] clone and aborted when the
 /// last one drops.
 struct Task {
-	handle: AbortOnDrop,
+	handle: Detached,
 	/// A graceful close retains the loop's resources while its sessions drain.
 	running: std::sync::Weak<Running>,
 	closed: CloseGuard,
@@ -787,7 +787,7 @@ struct Running {
 
 /// Serializes [`Connection::abort`] and [`Connection::close`] against the loop publishing a fresh session.
 ///
-/// Aborting a tokio task doesn't interrupt it before its next yield, so a redial
+/// Aborting the task doesn't interrupt it before its next yield, so a redial
 /// completing in that window would otherwise hand [`Shared::connected`] a session
 /// that `abort` had already looked for and missed, and it would be closed by the
 /// refcount drop instead of carrying the caller's error code to the peer. Both
@@ -828,7 +828,7 @@ impl Connection {
 
 		let running = std::sync::Arc::new(Running { shared });
 		let task_running = std::sync::Arc::downgrade(&running);
-		let task = crate::runtime::spawn(async move {
+		let task = Detached::spawn(async move {
 			let shared = &running.shared;
 			let reconnect = !client.policy.once;
 			// Isolated inside `shared`, so a panic still records a terminal error
@@ -849,7 +849,7 @@ impl Connection {
 		});
 		Self {
 			task: std::sync::Arc::new(Task {
-				handle: AbortOnDrop::new(task),
+				handle: task,
 				running: task_running,
 				closed,
 			}),
