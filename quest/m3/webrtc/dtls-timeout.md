@@ -11,17 +11,13 @@ logs it at debug as abandoned-session churn, not as a warning.
 ## Plan
 
 Today `Agent::drain` (`rs/moq-webrtc/src/ice/agent.rs`) maps any DTLS failure before
-ICE connects to `Error::Timeout`, and stringifies everything else. str0m flattens
-dimpl's typed `Error::Timeout(TimeoutError::Handshake)` into
-`CryptoError::Other(String)` (`str0m/src/dtls.rs`), so the variant is lost
-before moq-webrtc's ICE module sees it.
+ICE connects to `Error::Timeout`, and stringifies everything else. The vendored
+str0m's `dtls.rs` carries dimpl's typed `Error::Timeout(TimeoutError::Handshake)`
+through as `RtcError::Dtls(DtlsError::CryptoError(CryptoError::DtlsImpl(_)))`,
+where upstream flattened it into `CryptoError::Other(String)`.
 
 - Classify it once at the str0m boundary in moq-webrtc's ICE module, the only place that sees
-  str0m's error. Until the [vendored stack](/quest/m1/webrtc-vendor.md) lands,
-  that is a text match there, pinned by a test against the crate's real
-  message. If the vendoring lands first, carry dimpl's variant through the
-  vendored `dtls.rs` typed instead, and add no text match. Otherwise the
-  vendoring quest replaces the match; its plan says so.
+  str0m's error, by matching that variant; add no text match.
 - Add the variant to moq-webrtc's `ice::Error` and `moq_webrtc::Error`, named by role (for
   example `DtlsTimeout`), and map it in `moq-webrtc`'s session loop and its
   `p2p` transport, which also matches moq-webrtc's `ice::Error`.
@@ -34,5 +30,4 @@ Public API: additive variants on non-exhaustive error enums. Wire: none.
 
 ## Related
 
-- [Vendor and trim the WebRTC stack](/quest/m1/webrtc-vendor.md) - replaces this quest's text match with dimpl's typed timeout
 - [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md) - after it, every DTLS handshake timeout comes after nomination, which is the case this types

@@ -155,6 +155,7 @@ mod tests {
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	use super::*;
+	use crate::vendor::str0m;
 
 	/// How long the fake takes to answer, on the paused clock.
 	const DELAY: Duration = Duration::from_secs(1);

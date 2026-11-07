@@ -61,10 +61,6 @@ Public API: a rate handle on moq-webrtc's WHEP server. Decided 2026-10-30
 `whep::Request` struct with `Request::with_rate(rate::Limit)`, replacing
 its argument list rather than adding a fifth argument. Wire: none.
 
-## Required
-
-- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - the vendored str0m this adds the NACK hook to
-
 ## Related
 
 - [SRT rate handle](/quest/m3/srt-rate-handle.md) - the same pacing and retransmit charging on SRT
