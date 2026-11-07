@@ -20,7 +20,6 @@ Decided 2026-10-30 with the maintainer (planning interview), after the str0m wor
 
 ## Required
 
-- [Vendor and trim the stack](/quest/m1/webrtc-vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed
 - [A typed DTLS handshake timeout error](/quest/m3/webrtc/dtls-timeout.md) - callers match a DTLS handshake timeout by variant, and session end treats it like an ICE timeout
 - [Several bandwidth lines per media section](/quest/m3/webrtc/sdp-bandwidth.md) - answers carry both `b=TIAS` and `b=AS` without splicing
 - [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md) - DTLS flights start once ICE nominates a pair, so a late ICE path can't exhaust them
