@@ -12306,9 +12306,7 @@ mod test {
 	fn a_refusal_releases_the_live_edge_a_fill_cached() {
 		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
 		let mut guard = state.write().ok().unwrap();
-		let _group = guard
-			.insert_group_request(0, group::Bounds::default(), None)
-			.unwrap();
+		let _group = guard.insert_group_request(0, group::Bounds::default(), None).unwrap();
 		assert!(guard.protects(0));
 		guard.reject(Error::NotFound, None);
 		assert!(!guard.protects(0));

@@ -950,7 +950,8 @@ export class Consumer {
 			group.#recover = recover;
 			// A front serving another front attaches its recovery after the inner one handed the
 			// group out, whose reads may have latched a failure this recovery continues past.
-			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined) group.#closed = undefined;
+			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined)
+				group.#closed = undefined;
 		};
 		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
 		hooks.evictGroup = (group) => group.#evict();
