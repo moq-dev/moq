@@ -99,8 +99,11 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	let delegate = Delegate::new(chan.clone(), device_id.clone());
 	let dispatch = DispatchQueue::new("dev.moq.video.capture", None);
 
-	let output = video_output();
+	let output = unsafe { AVCaptureVideoDataOutput::new() };
 	unsafe {
+		output.setVideoSettings(Some(&nv12_settings()));
+		// Drop late frames instead of queuing them; we want the newest.
+		output.setAlwaysDiscardsLateVideoFrames(true);
 		let proto = ProtocolObject::from_ref(&*delegate);
 		output.setSampleBufferDelegate_queue(Some(proto), Some(&dispatch));
 	}
@@ -155,22 +158,13 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	))
 }
 
-/// The camera's sample output, before its delegate is attached.
-fn video_output() -> Retained<AVCaptureVideoDataOutput> {
-	let output = unsafe { AVCaptureVideoDataOutput::new() };
-
-	// Without a pixel format AVFoundation passes the device's native one through.
+/// The `videoSettings` that make the output deliver NV12. Without a pixel
+/// format AVFoundation passes the device's native one through.
+fn nv12_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
 	let key: &NSString = unsafe { kCVPixelBufferPixelFormatTypeKey }.as_ref();
 	let format = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
 	let format: &AnyObject = &format;
-	let settings = NSDictionary::from_slices(&[key], &[format]);
-
-	unsafe {
-		output.setVideoSettings(Some(&settings));
-		// Drop late frames instead of queuing them; we want the newest.
-		output.setAlwaysDiscardsLateVideoFrames(true);
-	}
-	output
+	NSDictionary::from_slices(&[key], &[format])
 }
 
 /// Ensure the process is authorized to use the camera, prompting once if the
@@ -473,12 +467,11 @@ mod tests {
 		(chan, session, guard)
 	}
 
-	/// CI has no camera, so check the request itself: the output `open` uses
-	/// asks AVFoundation for NV12.
+	/// CI has no camera, and `videoSettings` reads back nil until a device is
+	/// connected, so check the settings `open` hands the output.
 	#[test]
 	fn the_output_requests_nv12() {
-		let output = video_output();
-		let settings = unsafe { output.videoSettings() };
+		let settings = nv12_settings();
 		let key: &NSString = unsafe { kCVPixelBufferPixelFormatTypeKey }.as_ref();
 		let format = settings.objectForKey(key).expect("pixel format requested");
 		let format = format.downcast::<NSNumber>().expect("pixel format is a number");
