@@ -585,7 +585,11 @@ impl Connection {
 		// The peer's maximum UDP payload size can reduce the path MTU below our configured minimum.
 		let min_mtu = Ord::min(self.config.min_mtu, self.path.current_mtu());
 
-		if let Some(challenge) = self.send_path_challenge(now, buf) {
+		// A closing endpoint sends only CONNECTION_CLOSE (RFC 9000 §10.2.1), so a challenge the
+		// previous path still owes stays unsent.
+		if !self.state.is_closed()
+			&& let Some(challenge) = self.send_path_challenge(now, buf)
+		{
 			return Some(challenge);
 		}
 
