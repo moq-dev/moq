@@ -114,7 +114,12 @@ export class Fanout<T> {
 		);
 	}
 
-	/** Stop distributing, cancel the source, and release anything still queued. */
+	/**
+	 * Stop distributing, cancel the source, and release anything still queued. Only the capture that
+	 * owns the fanout closes it; a reader cancels its own stream instead.
+	 *
+	 * @internal
+	 */
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;

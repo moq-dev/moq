@@ -365,6 +365,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		context: decoder.out.context,
 		stalled: () => decoder.out.stalled.peek(),
 		stats: () => decoder.out.stats.peek(),
+		timestamp: () => decoder.out.timestamp.peek(),
+		feedback: () => decoder.feedback(Moq.Path.from("watched")),
 		arrivals: () => decoder.arrivals(),
 		error: decoder.out.error,
 		play,
@@ -1003,6 +1005,93 @@ for (const cmaf of [false, true]) {
 		}
 	});
 }
+
+describe("Decoder stalls", () => {
+	// Play a quantum, so the rendition is playing, then end it the given way and run the ring dry.
+	async function stopAfterPlaying(stop: (playback: Awaited<ReturnType<typeof play>>) => void) {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			expect(ring.read([new Float32Array(128), new Float32Array(128)])).toBe(128);
+			await microtasks();
+			expect(playback.stalled()).toBe(false);
+
+			stop(playback);
+			await microtasks();
+			drain(ring);
+			await microtasks();
+			return { stalls: playback.stats()?.stalls ?? 0, feedback: playback.feedback().audio?.stalls ?? 0 };
+		} finally {
+			playback.close();
+		}
+	}
+
+	it("counts a playing rendition that runs dry", async () => {
+		expect(await stopAfterPlaying(() => {})).toEqual({ stalls: 1, feedback: 1 });
+	});
+
+	it("counts nothing once the rendition leaves the catalog", async () => {
+		expect(await stopAfterPlaying((playback) => playback.remove())).toEqual({ stalls: 0, feedback: 0 });
+	});
+
+	it("counts nothing once the rendition fails to decode", async () => {
+		const counts = await stopAfterPlaying(() => codecErrors.at(-1)?.(new DOMException("bad", "EncodingError")));
+		expect(counts).toEqual({ stalls: 0, feedback: 0 });
+	});
+
+	it("counts nothing after a switch to instant", async () => {
+		expect(await stopAfterPlaying((playback) => playback.delay.set("instant"))).toEqual({ stalls: 0, feedback: 0 });
+	});
+
+	it("counts nothing while the decoder is disabled", async () => {
+		expect(await stopAfterPlaying((playback) => playback.decoding.set(false))).toEqual({ stalls: 0, feedback: 0 });
+	});
+
+	it("treats the return from instant as a startup", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			ring.read([new Float32Array(128), new Float32Array(128)]);
+			await microtasks();
+			playback.delay.set("instant");
+			await microtasks();
+			// The worklet keeps rendering the flushed ring, which reports it stalled.
+			ring.read([new Float32Array(128), new Float32Array(128)]);
+			await microtasks();
+			expect(playback.stalled()).toBe(true);
+			// The ring waits for the returning rendition's first audio, which is no stall.
+			playback.delay.set(Milli(100));
+			await microtasks();
+			await playback.play(12);
+			ring.read([new Float32Array(128), new Float32Array(128)]);
+			await microtasks();
+			expect(playback.stats()?.stalls ?? 0).toBe(0);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("clears the playhead and stall state with the ring that reported them", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			ring.read([new Float32Array(128), new Float32Array(128)]);
+			await microtasks();
+			expect(playback.timestamp()).toBeDefined();
+			expect(playback.stalled()).toBe(false);
+
+			playback.enabled.set(false);
+			await microtasks();
+			expect(playback.timestamp()).toBeUndefined();
+			expect(playback.stalled()).toBe(true);
+		} finally {
+			playback.close();
+		}
+	});
+});
 
 describe("fatal decoder errors", () => {
 	// A failure in the read loop, not a WebCodecs callback, must still reach `error` and release the

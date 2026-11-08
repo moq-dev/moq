@@ -29,7 +29,7 @@ ship as is.
 
 The first run must cover the MPEG-TS work (decided 2026-10-19 instead of a
 separate TS audit): everything since the 2026-10-11 TS audit, judged against
-the contracts in [TS fidelity and recovery](/quest/m1/ts-reliability/README.md).
+the contracts in the [MPEG-TS guide](/doc/bin/ts.md).
 Question each TS capability's premise the way the move to distinct importer
 epochs dropped active-active publishers.
 

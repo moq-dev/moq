@@ -725,15 +725,7 @@ impl Handshaking {
 					};
 					// Stats attach in `ok()`: a caller may still replace them on the handshake.
 					let (client, client_setup_size) = ready!(stream.reader.poll_decode_sized::<setup::Client>(waiter))?;
-					let version = client
-						.versions
-						.iter()
-						.flat_map(|v| Version::try_from(*v).ok())
-						.find(|v| supported.contains(v))
-						.ok_or(Error::Version)?;
-					let Version::Lite(version) = version else {
-						return Poll::Ready(Err(Error::Version));
-					};
+					let version = client.select(supported)?;
 					let AcceptStep::Negotiate {
 						runtime,
 						session,
@@ -1812,8 +1804,6 @@ mod tests {
 					value: b"jwt".to_vec(),
 				},
 				None,
-				crate::auth::RequestKind::Subscribe,
-				&crate::Path::from_static("room"),
 			);
 			let received = requests.next().await.expect("the pre-ok consumer receives the request");
 			assert_eq!(received.token().as_ref(), b"jwt", "{version:?}");

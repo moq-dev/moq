@@ -10,6 +10,7 @@ Trust this checkout's source over published API references, which may describe a
 
 - Immediately disable a flaky test and plan a follow-up to investigate.
 - The same identity (ex. broadcast+track+group+frame) always has the same content. Use a new identity for new content.
+- A publisher that breaks that, such as by reusing or restarting group sequences, hurts only its own broadcast. Code spends no cycles detecting it: the violation must only never panic, cost unbounded work, or affect other broadcasts.
 - Never match on errors; it's brittle.
 - moq-lite and moq-net take priority over moq-transport and other IETF drafts, which are a low-effort compatibility layer. Ignore their requirements (even MUSTs) that add cost without a clear behavioral benefit, and never add API for functionality only they have.
 
@@ -17,6 +18,7 @@ Trust this checkout's source over published API references, which may describe a
 
 - Impair networks with bufferbloat, queuing until packets drop, instead of random loss.
 - Anything that fans out gets a benchmark swept over both axes.
+- Model a lifecycle as one enum or union whose variants carry their data, mark it terminal only after the work that can fail, and guard each value with one lock (see State in `REVIEW.md`).
 
 # Public API
 
@@ -44,7 +46,7 @@ just check   # Lint, compile, and test what the branch changed
 just fix     # Auto-fix lint/formatting, same scope
 ```
 
-Quests: before any work, run `quest context` and follow it.
+Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary and its skills come from the moq-dev/quest flake input; change them upstream and bump the input.
 `quest init` refuses Claude Code's worktree hooks: drop them from `.claude/settings.json` for its run, then restore them.
 

@@ -8,10 +8,12 @@
 import { type Instant, Milli } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
-import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { Consumer as FrameConsumer } from "./frame.ts";
+import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
@@ -474,7 +476,7 @@ export interface StagedTrack {
 
 /**
  * How a received copy's start bounds the fills its readers ask below it. Mirrors the Rust
- * `TrackState::start_resolved` and `fills_from_start`.
+ * `Start::Resolved` and `Producer::fills_from_start`.
  *
  * Below a start the publisher resolved from the budget (`resolvesStart`), a reader fills the
  * history its own budget reaches: an update can cross the response, so nobody knows which
@@ -526,6 +528,8 @@ export const hooks: {
 	 * as a dead route. Assigned by `track.ts`.
 	 */
 	releaseTrack: (producer: Producer) => void;
+	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
+	poolTrack: (producer: Producer, pool: Pool) => void;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -556,8 +560,9 @@ export const hooks: {
 	 */
 	supersedeStale: (producer: Producer, judged: readonly Run[] | undefined) => Run[];
 	/**
-	 * Mark a track as fed by a wire subscription, which owes missing groups. `starts` says how
-	 * that wire's start bounds the fills its readers ask below it. Assigned by `track.ts`.
+	 * Mark a track as fed by a wire subscription, which owes missing groups, until
+	 * {@link cacheTrack} ends it. `starts` says how that wire's start bounds the fills its readers
+	 * ask below it. Assigned by `track.ts`.
 	 */
 	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
@@ -584,7 +589,8 @@ export const hooks: {
 	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
 	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
-	 * waits on its START, as the Rust `request_start`.
+	 * waits on its START, as the Rust `request_start`. Only after {@link receiveTrack}: the start
+	 * is that subscription's, and ends with it.
 	 */
 	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint }) => void;
 	/**
@@ -769,6 +775,13 @@ export const hooks: {
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
+	/** Bill a cached group's bytes to `charge` from now on, or stop billing them with undefined. */
+	chargeGroup: (group: GroupProducer, charge: Charge | undefined) => void;
+	/**
+	 * Shed whole frames from a group's front toward a cache `debt`, freeing about `cap` at most,
+	 * and end the `readers` its track holds that lost a shed frame; returns the bytes freed.
+	 */
+	shedGroup: (group: GroupProducer, debt: number, cap: number, readers: Iterable<GroupConsumer>) => number;
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
 	/**
@@ -815,7 +828,12 @@ export const hooks: {
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
-	/** Carry a handed-out group across its logical track's route changes. */
+	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
+	groupFailed: (group: GroupConsumer) => Error | undefined;
+	/**
+	 * Carry a group across its logical track's route changes. Attached before the group is handed
+	 * out, so its `closed` never settles on a failure the recovery continues past.
+	 */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
@@ -824,10 +842,13 @@ export const hooks: {
 	/** Notify the owning track when a reader reaches its shed front. */
 	onShedRead: (group: GroupConsumer, notify: () => void) => void;
 	/**
-	 * Make an evicted mirror terminal while its track timeline still contains it. Whether the
-	 * mirror is released too: not when its group reads on, or may yet, from another copy.
+	 * Make an evicted mirror terminal while its track timeline still contains it, failing its
+	 * unread content with `lost`. Whether the mirror is released too: not when its group reads
+	 * on, or may yet, from another copy.
 	 */
-	evictGroup: (group: GroupConsumer) => boolean;
+	evictGroup: (group: GroupConsumer, lost: Error) => boolean;
+	/** Record a cache access on a group a reader takes, restarting its idle window. */
+	refreshGroup: (group: GroupConsumer) => void;
 	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Reserve an on-demand track without listing it or enabling a request handler. */
@@ -879,6 +900,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	releaseTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	poolTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackReleased: () => {
@@ -1085,6 +1109,12 @@ export const hooks: {
 	groupCacheBytes: () => {
 		throw new Error("group.ts not loaded");
 	},
+	chargeGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	shedGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupFrameCount: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1139,6 +1169,9 @@ export const hooks: {
 	expireGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupFailed: () => {
+		throw new Error("group.ts not loaded");
+	},
 	recoverGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1152,6 +1185,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	refreshGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	onClosed: () => {

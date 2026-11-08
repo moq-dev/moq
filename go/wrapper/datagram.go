@@ -143,5 +143,5 @@ func (r *DatagramRequest) Accept(info *DatagramInfo) (*DatagramProducer, error) 
 	return &DatagramProducer{inner: inner}, nil
 }
 
-// Abort rejects this request with an application error code.
-func (r *DatagramRequest) Abort(code uint16) error { return r.inner.Abort(code) }
+// Reject rejects this request with an application error code.
+func (r *DatagramRequest) Reject(code uint16) error { return r.inner.Reject(code) }

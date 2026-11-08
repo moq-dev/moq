@@ -578,11 +578,11 @@ impl AuthServe {
 					// needs someone to verify it. Tell the presenter explicitly.
 					None if !msg.token.is_empty() => {
 						let mut state = issue.lock();
-						state.outbox.push_back(crate::auth::Reply::Refuse {
+						state.queue(crate::auth::Reply::Refuse {
 							code: crate::SessionError::Unsupported,
 							reason: Error::Unsupported.to_string(),
 						});
-						state.done = true;
+						state.finish();
 						self.unsupported = true;
 					}
 					None => {
@@ -626,24 +626,22 @@ impl AuthServe {
 			if let Some(default) = &mut self.default
 				&& let Poll::Ready(grant) = default.poll(waiter)
 			{
-				issue.lock().outbox.push_back(crate::auth::Reply::Grant(grant));
+				issue.lock().queue(crate::auth::Reply::Grant(grant));
 			}
 
-			let mut state = match issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
+			let mut state = match issue.poll(waiter, |issue| match issue.idle() {
 				true => Poll::Pending,
 				false => Poll::Ready(()),
 			}) {
 				Poll::Ready(state) => state,
 				Poll::Pending => return Poll::Pending,
 			};
-			match state.outbox.pop_front() {
+			match state.next() {
 				Some(reply) => {
 					drop(state);
 					if !Self::write(&self.shared, stream, reply)? {
 						self.unsupported = true;
-						let mut state = issue.lock();
-						state.outbox.clear();
-						state.done = true;
+						issue.lock().refused();
 					}
 				}
 				// The app is done with the grant, or refused the token: close our side.
@@ -1234,8 +1232,7 @@ impl AnnounceRun {
 			match event {
 				origin::RouteEvent::Start(update)
 				| origin::RouteEvent::Update(update)
-				| origin::RouteEvent::Restart(update)
-				| origin::RouteEvent::Takeover { announce: update, .. } => {
+				| origin::RouteEvent::Restart(update) => {
 					current.insert(update.prefix, update.route);
 				}
 				origin::RouteEvent::End(update) => {
@@ -1599,15 +1596,10 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let (update, active, restart, predecessor) = match next {
-				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => {
-					(update, true, false, None)
-				}
-				Some(origin::RouteEvent::Restart(update)) => (update, true, true, None),
-				Some(origin::RouteEvent::Takeover { announce, predecessor }) => {
-					(announce, true, false, Some(predecessor))
-				}
-				Some(origin::RouteEvent::End(update)) => (update, false, false, None),
+			let (update, active, restart) = match next {
+				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => (update, true, false),
+				Some(origin::RouteEvent::Restart(update)) => (update, true, true),
+				Some(origin::RouteEvent::End(update)) => (update, false, false),
 				None => {
 					if self.initial.take().is_some() {
 						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
@@ -1629,9 +1621,6 @@ impl AnnounceRun {
 				continue;
 			}
 
-			// Only lite-07 carries a takeover, and it answers from the route layer. Here one
-			// is another instance, in place or not.
-			let restart = restart || predecessor.as_ref() == Some(&suffix);
 			match self.outgoing(&update.route, &absolute) {
 				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
 					self.restart(stream, suffix, hops, cost, served(&update.route), &absolute)?;
@@ -2946,7 +2935,7 @@ impl DatagramSend {
 	/// Send one datagram over a QUIC datagram, newest first within the subscription. It is
 	/// dropped, as a datagram may be anywhere, if its body doesn't fit the transport's
 	/// datagram size or the transport has no room for it now.
-	fn send(&self, datagram: crate::Datagram) {
+	fn send(&self, datagram: crate::datagram::Datagram) {
 		let Ok(timestamp) = self
 			.stamp
 			.map(|stamp| stamp.wire(datagram.timestamp, &self.runtime))
@@ -5086,21 +5075,20 @@ impl TrackRun {
 		};
 		let groups = bounds.groups();
 		let (start, end) = (groups.start(), groups.end());
-		if self
-			.track
-			.update(crate::track::Subscription {
-				priority: upd.priority,
-				delay: crate::track::Delay {
-					min: upd.min_delay,
-					max: serving_max_delay(self.ctx.version, upd.max_delay),
-				},
-				order: upd.order,
-				..groups
-			})
-			.is_ok()
-		{
-			self.named = start;
+		// A refusal leaves the model's ranges as they were, so this side keeps them too.
+		if let Err(err) = self.track.update(crate::track::Subscription {
+			priority: upd.priority,
+			delay: crate::track::Delay {
+				min: upd.min_delay,
+				max: serving_max_delay(self.ctx.version, upd.max_delay),
+			},
+			order: upd.order,
+			..groups
+		}) {
+			self.refused = Some(err);
+			return;
 		}
+		self.named = start;
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to
 		// drop back to 0: the cursor only rises on its own, and a finished group
@@ -7375,7 +7363,7 @@ mod serve_group_test {
 					let log = session.log.clone();
 					// Lite-07's type adds one byte to the three one-byte fields.
 					let header = if version.has_padding() { 4 } else { 3 };
-					datagram_send(version, session).send(crate::Datagram {
+					datagram_send(version, session).send(crate::datagram::Datagram {
 						sequence: 1,
 						timestamp: Some(Timestamp::ZERO),
 						payload: bytes::Bytes::from(vec![0; size - header]),
@@ -7397,7 +7385,7 @@ mod serve_group_test {
 		let log = session.log.clone();
 		let send = datagram_send(Version::Lite07, session);
 		for sequence in [4, 9] {
-			send.send(crate::Datagram {
+			send.send(crate::datagram::Datagram {
 				sequence,
 				timestamp: Some(Timestamp::ZERO),
 				payload: bytes::Bytes::from_static(b"d"),
@@ -7411,7 +7399,7 @@ mod serve_group_test {
 		// Without send groups, the rank goes alone.
 		let session = SinkSession::new(Log::default()).with_datagrams(1200);
 		let log = session.log.clone();
-		datagram_send(Version::Lite07, session).send(crate::Datagram {
+		datagram_send(Version::Lite07, session).send(crate::datagram::Datagram {
 			sequence: 4,
 			timestamp: Some(Timestamp::ZERO),
 			payload: bytes::Bytes::from_static(b"d"),
@@ -7678,6 +7666,46 @@ mod serve_group_test {
 		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
 		let resolved = run.track.resolved()[1].map(|r| (r.start, r.end));
 		assert_eq!(resolved, Some((2, None)), "the update kept where it started");
+	}
+
+	/// An update the model refuses, here a time start that a group-only copy's cache cannot
+	/// settle, ends the subscription with the refusal and keeps the ranges it had, rather
+	/// than serving under terms the model never took.
+	#[kio::test]
+	async fn lite07_a_refused_update_ends_the_subscription() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.anchored_cached();
+		for sequence in 0..5 {
+			write_group(&mut track, sequence, sequence * 1000);
+		}
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_range(0..1),
+		);
+		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		while run.start.is_none() {
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		}
+
+		// Swap range 0 for one ending at a time later groups may still start before.
+		let later = lite::Range {
+			start: Some(lite::Anchor::Time(1_000)),
+			end: Some(lite::Anchor::Time(100_000)),
+		};
+		run.update(lite07_add(&[], 1, &[later]));
+		assert_eq!(run.ids, [0], "kept the ranges the model holds");
+		assert!(run.unstarted.is_empty(), "owes no start for a refused range");
+		let result = loop {
+			if let Poll::Ready(Err(err)) = run.poll_step(&mut writer, &kio::Waiter::noop()) {
+				break err;
+			}
+		};
+		assert!(matches!(result, Error::Unsupported), "ended with {result:?}");
 	}
 
 	/// Where an added time start `time` resolves among `groups` (sequence and start, in
@@ -9627,14 +9655,13 @@ mod tests {
 				crate::origin::RouteInfo::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
-				None,
 			)
 			.unwrap();
 
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops), None)
+			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops))
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
@@ -10208,13 +10235,7 @@ mod tests {
 		let mut _route = None;
 		let mut held = None;
 		match wait {
-			Wait::Broadcast => {
-				_route = Some(
-					origin
-						.forward("room", crate::origin::RouteInfo::default(), None)
-						.unwrap(),
-				)
-			}
+			Wait::Broadcast => _route = Some(origin.forward("room", crate::origin::RouteInfo::default()).unwrap()),
 			Wait::Track => {
 				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 				let dynamic = broadcast.broadcast().requests();

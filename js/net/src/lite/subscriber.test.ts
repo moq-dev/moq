@@ -4,6 +4,7 @@ import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { Viewers } from "../bandwidth.ts";
+import { DEFAULT_EXPIRY } from "../cache.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import {
 	error,
@@ -21,7 +22,7 @@ import type { Consumer as GroupConsumer } from "../group.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
-import { CACHE_EXPIRY, GRACE } from "../ledger.ts";
+import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -387,90 +388,6 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 	held.close();
 	announced.close();
-	subscriber.close();
-});
-
-test("a lite-07 takeover surfaces as a start beneath its predecessor, or a restart of it", async () => {
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
-	const announced = subscriber.routes();
-	await settle();
-	const pool = Path.from("pool");
-	const job = Path.from("pool/job");
-
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: pool, instance: Instance.random(), hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
-	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
-
-	// Beneath the claim: a start with the next id (1), and the claim stays live.
-	const instance = Instance.random();
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "takeover", predecessor: 0n, suffix: job, instance, hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
-	expect(await announced.next()).toMatchObject({ prefix: job, kind: "start", route: { instance } });
-
-	// At the job's own path: a restart that retires id 1 and assigns id 2.
-	const next = Instance.random();
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "takeover", predecessor: 1n, suffix: job, instance: next, hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
-	expect(await announced.next()).toMatchObject({ prefix: job, kind: "restart", route: { instance: next } });
-
-	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 2n }, Version.DRAFT_07));
-	expect(await announced.next()).toMatchObject({ prefix: job, kind: "end" });
-	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_07));
-	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "end" });
-
-	announced.close();
-	subscriber.close();
-});
-
-// A takeover must name a live predecessor whose path covers its own.
-test.each([
-	["a retired predecessor", 1n, "pool/job"],
-	["a predecessor not covering it", 0n, "other"],
-] as const)("a lite-07 takeover of %s ends the stream", async (_, predecessor, suffix) => {
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
-	const announced = subscriber.routes();
-	await settle();
-
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{ status: "active", suffix: Path.from("pool"), instance: Instance.random(), hops: [PUBLISHER_A] },
-			Version.DRAFT_07,
-		),
-	);
-	expect(await announced.next()).toMatchObject({ kind: "start" });
-	await send((w) =>
-		encodeAnnounceBroadcast(
-			w,
-			{
-				status: "takeover",
-				predecessor,
-				suffix: Path.from(suffix),
-				instance: Instance.random(),
-				hops: [PUBLISHER_A],
-			},
-			Version.DRAFT_07,
-		),
-	);
-	await expect(announced.next()).rejects.toThrow();
-
 	subscriber.close();
 });
 
@@ -1999,7 +1916,7 @@ test.each([
 	["answered on lite-06 stays", Version.DRAFT_06, "answered"],
 	["unanswered on lite-05 finishes", Version.DRAFT_05, "withdrawn"],
 	["unanswered on lite-06 finishes", Version.DRAFT_06, "withdrawn"],
-] as const)("an unpinned SUBSCRIBE %s at a takeover or withdrawal", async (_, version, outcome) => {
+] as const)("an unpinned SUBSCRIBE %s at a replacement or withdrawal", async (_, version, outcome) => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
@@ -2827,7 +2744,7 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 				new Reader(new ReadableStream({ start: (controller) => controller.close() }), undefined, version),
 			);
 		// Everything below the live edge ages out of the cache.
-		const evict = () => clock.advance(Nano.fromMilli(Milli(2 * CACHE_EXPIRY)));
+		const evict = () => clock.advance(Nano.fromMilli(Milli(2 * DEFAULT_EXPIRY)));
 		let priority = 0;
 		const update = async () => {
 			track.update({ priority: ++priority, delay: { max: Milli(500) } });

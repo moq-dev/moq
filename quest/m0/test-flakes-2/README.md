@@ -145,6 +145,12 @@ SUBSCRIBE_FINISH arrived before its FIN aborted with the session's error. Its
 datagrams now finish whenever the stream track's settled end survives the abort,
 fixed by [moq-dev/moq#8157](https://github.com/moq-dev/moq/pull/8157).
 
+moq-relay's `embed::worker_tokio_custom_route_and_quic` was never load-bound
+either. Its socket-ownership check matched the HTTP and QUIC ports without
+their protocol, so the test's own QUIC client, still draining, counted as the
+relay's whenever its UDP port shared the HTTP listener's TCP port number.
+Fixed by [moq-dev/moq#8236](https://github.com/moq-dev/moq/pull/8236).
+
 `sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
 landing just after the dispatcher's `wait -n` returned left Bash marking the
 exit trap's next `wait` as interrupted, so it returned 143 at once and errexit
@@ -153,10 +159,29 @@ skipped the timing report. A TERM landing after a lane forked but before
 hung. The exit trap now waits again, and cancellation reads the job table,
 fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
 
-Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s lite-07
-relative-start integration test, which failed once on main in
-[moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run.
-It is quarantined with `test.skip` until its child fixes it.
+moq-gst's sink-restart pad test caught a real source bug: a track that failed on
+an instance still up, such as a relay's copy cut off as its publisher's session
+closed, left no finished record, so the final catalog snapshot started the
+rendition again and replayed a group on its held pad. A failure now counts as
+the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160).
+
+moq-gst's stale-completion sink test, which failed once in 30 stress iterations
+in [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160)'s validation,
+because the sink reported a stopped session as a terminal failure; the session
+now tells a stop from a give-up through `Connection::closed`, fixed by
+[moq-dev/moq#8246](https://github.com/moq-dev/moq/pull/8246).
+
+`js/net`'s lite-07 relative-start integration test, which failed once on main in
+[moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run,
+read a start of 0 when the newest group landed before the reader asked: its
+window had yet to settle the relative anchor, so it asked a fill from group 0.
+`start()` now settles the window first, as the Rust `poll_start` does, fixed by
+[moq-dev/moq#8197](https://github.com/moq-dev/moq/pull/8197).
+
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s
+http:// fingerprint tests, whose slow real fetch lets the WebTransport hedge
+timer fire on the host clock, seen in
+[moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163)'s CI.
 
 Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
 `js/net`'s lite-07 empty-window reply test, which fails on main 12/200 under
@@ -164,11 +189,20 @@ Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
 A subscriber FIN during the reply write's budget yield resets the stream. It is
 quarantined with `test.skip` until its child fixes it.
 
+Added 2026-11-07 (maintainer, /quest-complete): moq-relay's
+`socket_auth::a_forged_dial_never_connects`, which failed
+[moq-dev/moq#8204](https://github.com/moq-dev/moq/pull/8204)'s Check when
+mallory's request for bob's endpoint synced before his announce arrived. It is
+quarantined with `#[ignore]` until its child fixes it.
+
+Added 2026-11-07 (maintainer, /quest-complete): moq-uring's qlog accounting
+test, which spins a fixed count waiting on a background thread, from
+[moq-dev/moq#8208](https://github.com/moq-dev/moq/pull/8208)'s follow-ups.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
-- [A lite-07 relative start resolves to the publisher's start every time](/quest/m0/test-flakes-2/lite07-relative-start.md) - `js/net`'s frameless-newest-group integration test stops reading a start of 0, and its `test.skip` is removed
-- [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
+- [moq-relay's forged-dial test waits for bob's endpoint](/quest/m0/test-flakes-2/forged-dial-announce.md) - `a_forged_dial_never_connects` requests bob's endpoint only after its announce reaches mallory, and its `#[ignore]` is removed
+- [moq-uring's qlog accounting test waits on the accounting](/quest/m0/test-flakes-2/qlog-staging-spin.md) - `an_open_trace_accounts_for_staging_and_close` waits for the accounting, not 10,000 spins

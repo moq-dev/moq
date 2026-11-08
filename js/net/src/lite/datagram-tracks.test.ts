@@ -1,11 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
 import { SessionCode } from "../error.ts";
 import { hooks } from "../internal.ts";
-import { createMockTransportPair, type MockTransport } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, manual } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
@@ -22,7 +21,7 @@ const path = Path.from("live");
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	for (const streams of [false, true]) {
 		test(`${alpn}: ${streams ? "same-name kinds" : "datagram-only track"} delivery`, async () => {
-			hostTime();
+			using clock = manual();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio", {
@@ -62,7 +61,8 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 				while (datagrams.priority.peek() !== -9) await datagrams.priority.changed();
 				datagrams.finish();
 				track?.finish();
-				expect(await reader.recv()).toBeUndefined();
+				// The end waits out the grace a late datagram gets.
+				expect(await clock.drive(reader.recv())).toBeUndefined();
 			} finally {
 				reader.close();
 				remote.close();
@@ -342,7 +342,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		[100, true],
 	] as const) {
 		test(`${alpn}: a datagram sent right behind its answer arrives (answer ${lag} microtasks late${finish ? ", then the end" : ""})`, async () => {
-			hostTime();
+			using clock = manual();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
 			const datagrams = publication.broadcast.createDatagrams("audio");
@@ -364,8 +364,12 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 				await reader.info();
 				if (!finish) datagrams.append(undefined, Uint8Array.of(2));
 				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
-				if (finish) expect(await reader.recv()).toBeUndefined();
-				else expect((await reader.recv())?.payload).toEqual(Uint8Array.of(2));
+				if (finish) {
+					// The end waits out the grace a late datagram gets.
+					expect(await clock.drive(reader.recv())).toBeUndefined();
+				} else {
+					expect((await reader.recv())?.payload).toEqual(Uint8Array.of(2));
+				}
 				expect((await client.stats()).datagramsUnrouted).toBe(0);
 			} finally {
 				reader.close();
@@ -382,7 +386,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // of its track's end. The subscriber routes the datagram before it ends the track.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a datagram sent right before its end arrives`, async () => {
-		hostTime();
+		using clock = manual();
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
@@ -401,7 +405,8 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			datagrams.append(undefined, Uint8Array.of(1));
 			datagrams.finish();
 			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
-			expect(await reader.recv()).toBeUndefined();
+			// The end waits out the grace a late datagram gets.
+			expect(await clock.drive(reader.recv())).toBeUndefined();
 			expect((await client.stats()).datagramsUnrouted).toBe(0);
 		} finally {
 			reader.close();
@@ -417,7 +422,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // with some of it still queued. The end waits for the loop to read the queue empty.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 	test(`${alpn}: a burst sent right before its end arrives past a budget yield`, async () => {
-		hostTime();
+		using clock = manual();
 		// As many as a datagram track buffers unread, past two receive budgets.
 		const BURST = 64;
 		const source = new Origin();
@@ -442,9 +447,13 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			while (datagrams.priority.peek() !== 5) await datagrams.priority.changed();
 			for (let i = 0; i < BURST; i++) datagrams.append(undefined, Uint8Array.of(i));
 			datagrams.finish();
-			let count = 0;
-			while ((await reader.recv()) !== undefined) count++;
-			expect(count).toBe(BURST);
+			const counted = (async () => {
+				let count = 0;
+				while ((await reader.recv()) !== undefined) count++;
+				return count;
+			})();
+			// The end waits out the grace a late datagram gets.
+			expect(await clock.drive(counted)).toBe(BURST);
 			expect((await client.stats()).datagramsUnrouted).toBe(0);
 		} finally {
 			budget.mockRestore();

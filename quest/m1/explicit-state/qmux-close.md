@@ -30,11 +30,10 @@ Recommended shape: `#state: { kind: "open" } | { kind: "closed", clean:
 true, info } | { kind: "closed", clean: false, cause }`, with the close frame
 carried in the transition.
 
-Also sweep `js/qmux/src/recv.ts` and `js/qmux/src/credit.ts`:
-
-- In `recv.ts`, `#fin`, `#error`, and `#terminal` encode the stream's end,
-  and `error()` never marks it terminal.
-- In `credit.ts`, `#closed` and `#closeReason` are always set together.
+Also sweep `js/qmux/src/credit.ts`, where `Credit`'s `#closed` and
+`#closeReason` are always set together. Streams already have explicit states
+(`SendHalf` in `send.ts`, `RecvStream` in `recv.ts`, RFC 9000 §3), so the
+session close phase sits above them: its teardown ends every stream's halves.
 
 [moq-dev/moq#8136](https://github.com/moq-dev/moq/pull/8136) and
 [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088) also edit

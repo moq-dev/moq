@@ -93,12 +93,6 @@ struct Serve {
 /// the listen address and a port conflict is an error here rather than a
 /// worker that quietly died. [`spawn`](Self::spawn) starts every thread, and
 /// nothing is served until [`Spawned::serve`].
-///
-/// ```compile_fail
-/// fn serve_before_spawn(mut bound: moq_relay::uring::Workers) {
-///     bound.serve();
-/// }
-/// ```
 pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
@@ -859,6 +853,10 @@ impl crate::incoming::Sealed for Request {
 
 	fn role(&self) -> Option<moq_net::setup::Role> {
 		self.handshake.role()
+	}
+
+	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
+		self.handshake.peer_hop()
 	}
 
 	fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {

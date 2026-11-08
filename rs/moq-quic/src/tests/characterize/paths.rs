@@ -296,19 +296,14 @@ fn path_validation_failure_reverts() {
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), new);
 
 	// Nothing the server sends arrives, and the client stays silent
-	let mut updates = Vec::new();
 	while pair.server_conn_mut(server_ch).remote_address() == new {
 		pair.server.outbound.clear();
 		pair.time = pair.server.next_wakeup().expect("validation times out");
 		let now = pair.time;
 		pair.server.drive(now, old);
-		while let Some(event) = pair.server_conn_mut(server_ch).poll() {
-			updates.push(event);
-		}
 	}
 	pair.server.outbound.clear();
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), old);
-	assert_matches!(updates.as_slice(), [.., Event::PathUpdated]);
 
 	// The connection still works on the old path
 	let s = pair

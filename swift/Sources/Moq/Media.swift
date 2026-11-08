@@ -50,7 +50,7 @@ public enum Media {
         }
     }
     /// A single-track producer of either kind, such as a video rendition's `lower`.
-    public enum Producer {
+    public enum Producer: Sendable {
         /// Imports complete encoded frames.
         case track(TrackProducer)
         /// Imports a byte stream.
@@ -64,8 +64,33 @@ public enum Media {
     }
     /// An audio codec, its initialization bytes, and label.
     public typealias AudioInit = MoqAudioInit
-    /// A video codec, its initialization bytes, label, and hints.
-    public typealias VideoInit = MoqVideoInit
+    /// A video codec, its initialization bytes, label, hints, and lower rendition.
+    public struct VideoInit: Sendable {
+        /// The video codec.
+        public var format: VideoFormat
+        /// Codec init bytes (an avcC, an hvcC, ...). May be empty for a format that resolves in band.
+        public var data: Data
+        /// Human-readable rendition name for a track picker.
+        public var label: String?
+        /// Catalog fields the stream cannot reveal itself.
+        public var hint: VideoHint?
+        /// The next lower rendition of the same source, of either producer kind: this track then
+        /// sits one priority below it, so a bandwidth allocator funds that one first.
+        public var lower: Producer?
+        /// Describe a video publish.
+        public init(
+            format: VideoFormat, data: Data, label: String? = nil, hint: VideoHint? = nil, lower: Producer? = nil
+        ) {
+            self.format = format
+            self.data = data
+            self.label = label
+            self.hint = hint
+            self.lower = lower
+        }
+        var ffi: MoqVideoInit {
+            MoqVideoInit(format: format, data: data, label: label, hint: hint, lower: lower?.ffi)
+        }
+    }
     /// Shares one source's timestamp offset without keeping its broadcast open.
     public final class Timebase: Sendable {
         let ffi: MoqMediaTimebase
@@ -246,18 +271,11 @@ public enum Media {
             TrackProducer(try MoqMediaTrackProducer.audio(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         /// Import complete video frames on a named or requested track.
-        ///
-        /// Pass `lower`, the next lower rendition of the same source and of either producer
-        /// kind, to publish this track one priority below it, so a bandwidth allocator funds
-        /// that one first.
-        public static func video(
-            broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil),
-            lower: Producer? = nil
-        ) throws -> TrackProducer {
-            var initData = initData
-            if let lower { initData.lower = lower.ffi }
-            return TrackProducer(
-                try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
+        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil))
+            throws -> TrackProducer
+        {
+            TrackProducer(
+                try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData.ffi))
         }
         init(_ ffi: MoqMediaTrackProducer) {
             self.ffi = ffi
@@ -357,16 +375,11 @@ public enum Media {
         let ffi: MoqMediaTrackStreamProducer
 
         /// Import a video byte stream, inferring frame boundaries.
-        ///
-        /// `lower` is as for ``TrackProducer/video(broadcast:initData:target:lower:)``.
-        public static func video(
-            broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil),
-            lower: Producer? = nil
-        ) throws -> TrackStreamProducer {
-            var initData = initData
-            if let lower { initData.lower = lower.ffi }
-            return TrackStreamProducer(
-                try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
+        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil))
+            throws -> TrackStreamProducer
+        {
+            TrackStreamProducer(
+                try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData.ffi))
         }
         init(_ ffi: MoqMediaTrackStreamProducer) {
             self.ffi = ffi

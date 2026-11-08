@@ -1862,8 +1862,7 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 	match announced.next().await? {
 		moq_net::origin::RouteEvent::Start(route)
 		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route)
-		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
 		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }
@@ -2038,7 +2037,7 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 		.established()
 		.await
 		.unwrap();
-	let (token, _) = publisher.auth().add("shared").await.unwrap();
+	let token = publisher.auth().add("shared").await.unwrap();
 	let first = origin
 		.route(
 			"first",

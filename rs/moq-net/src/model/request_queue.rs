@@ -81,6 +81,22 @@ impl<K: Clone + Eq + Hash, V> RequestQueue<K, V> {
 		Some(key)
 	}
 
+	/// Queue a popped request again, still joinable, for the next handler to pop. Returns
+	/// `false`, leaving it as it is, when no handler is alive or nothing popped is pending.
+	pub fn requeue(&mut self, key: K) -> bool {
+		if self.handlers == 0 {
+			return false;
+		}
+		match self.pending.get_mut(&key) {
+			Some(entry) if !entry.queued => {
+				entry.queued = true;
+				self.order.push_back(key);
+				true
+			}
+			_ => false,
+		}
+	}
+
 	/// The pending request for `key`, if any.
 	pub fn get<Q>(&self, key: &Q) -> Option<&V>
 	where

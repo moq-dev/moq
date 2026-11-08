@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Manual, Milli, Nano, Wall, yieldNow } from "@moq/clock";
 import { race } from "@moq/signals";
+import { DEFAULT_EXPIRY } from "./cache.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
@@ -14,8 +14,9 @@ import { unwanted } from "./util/demand.ts";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-// Matches the private idle cache window and Rust cache::DEFAULT_EXPIRY.
-const CACHE_WINDOW_MS = 30_000;
+const CACHE_WINDOW_MS = DEFAULT_EXPIRY;
+// How late the pool's sweep may reclaim a group nothing writes to: it runs every half window.
+const SWEEP_LAG_MS = CACHE_WINDOW_MS / 2;
 
 test("a cached transport tail covers only positions it actually holds", async () => {
 	const producer = new TrackProducer("test");
@@ -1899,7 +1900,7 @@ test("an abandoned open group ages out with no further write", async () => {
 		if (!group) throw new Error("missing group");
 		expect(await group.readString()).toBe("first");
 		const read = group.readFrame().catch((err: unknown) => err);
-		await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + SWEEP_LAG_MS);
 		expect(await read).toBeInstanceOf(TooFarBehind);
 	} finally {
 		producer.finish();
@@ -1917,10 +1918,10 @@ test("publisher maxAge does not change the idle cache deadline", async () => {
 			idle.writeFrame(textFrame("cached"));
 			producer.appendGroup();
 			// Eviction ends the idle open group a cache window after its last write, give or take
-			// the one slice a scan can lag.
+			// the lag of the pool's sweep.
 			await clock.advance(10_000 + CACHE_WINDOW_MS - 1);
 			expect(idle.closed.peek()).toBeUndefined();
-			await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+			await clock.advance(10_000 + CACHE_WINDOW_MS + SWEEP_LAG_MS);
 			expect(idle.closed.peek()).toBeInstanceOf(TooFarBehind);
 		} finally {
 			producer.finish();
@@ -2451,7 +2452,6 @@ test("end is group 0 for an empty track and undefined after an abort", async () 
 });
 
 test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
-	hostTime();
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe().ordered();
 
@@ -2461,8 +2461,8 @@ test("readFrame does not livelock when a sole group finishes before the next arr
 	const g0 = producer.appendGroup();
 	g0.finish();
 
-	// The next group arrives via a macrotask; if the reader livelocks on microtasks it never runs.
-	void sleep(Nano.fromMilli(Milli(10))).then(() => {
+	// The next group arrives in a later host task; if the reader livelocks on microtasks it never runs.
+	void yieldNow().then(() => {
 		const g1 = producer.appendGroup();
 		g1.writeFrame(textFrame("hello"));
 		g1.finish();
@@ -2921,8 +2921,15 @@ test("no publisher limit still ages idle groups out", async () => {
 		expect(await (await within.recvGroup())?.readString()).toBe("old");
 		within.close();
 
-		// A scan runs at most once per slice of the window, so step past the next one.
-		clock.set(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		// The read was an access, as in Rust: past the write's window, the group stays. Taking it
+		// again is another access.
+		clock.set(10_000 + CACHE_WINDOW_MS + 1_000);
+		const read = producer.subscribe({ delay: { max: Milli(100_000) } });
+		expect(read.tryRecvGroup()?.sequence).toBe(0n);
+		read.close();
+
+		// Past that delivery's window, a subscribe's own scan reclaims it.
+		clock.set(10_000 + 2 * CACHE_WINDOW_MS + 2_000);
 		const after = producer.subscribe({ delay: { max: Milli(100_000) } });
 		expect(after.tryRecvGroup()?.sequence).toBe(1n);
 		expect(after.tryRecvGroup()).toBeUndefined();
@@ -3095,7 +3102,7 @@ test("closed settles once the cache evicts the last open group below the end", a
 		await settle();
 		expect(producer.closed.peek()).toBeUndefined();
 
-		await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + SWEEP_LAG_MS);
 		await settle();
 		expect(open.closed.peek()).toBeInstanceOf(TooFarBehind);
 		expect(producer.closed.peek()).toBeNull();
@@ -3160,8 +3167,8 @@ test("an ended track's buffered groups age out for a stale subscriber", async ()
 				producer.close();
 			}
 
-			// Nothing writes after close; the scheduled cleanup can lag by one scan slice.
-			await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+			// Nothing writes after close, so the pool's sweep reclaims it.
+			await clock.advance(10_000 + CACHE_WINDOW_MS + SWEEP_LAG_MS);
 			if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
 			else expect(stale.tryRecvGroup()).toBeUndefined();
 		} finally {
@@ -3964,6 +3971,7 @@ async function settled(read: Promise<unknown>): Promise<boolean> {
 test("a received end behind a hole settles only once the hole fills", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 0n });
 	const late = producer.createGroup(2n);
 	late.finish();
@@ -4013,6 +4021,46 @@ test("a pending tail ends readers at the boundary once the track closes", async 
 	expect(await reader.closed).toBeNull();
 });
 
+// A FETCH_OK's end of track on a copy no subscription feeds: nothing is in flight below it, so a
+// reader above the groups another reader's floor still lacks ends at the boundary.
+test("an end no subscription feeds owes no tail", async () => {
+	const producer = new TrackProducer("test");
+	const history = producer.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(60_000) } });
+	const group = producer.createGroup(2n);
+	group.finish();
+	hooks.endTrack(producer, { group: 3n, frame: 0 });
+	const live = producer.subscribe({ ranges: [{ start: { absolute: 2n } }], delay: { max: Milli(60_000) } });
+	expect((await live.recvGroup())?.sequence).toBe(2n);
+	const next = live.recvGroup();
+	expect(await settled(next)).toBe(true);
+	expect(await next).toBeUndefined();
+	history.close();
+	live.close();
+	producer.close();
+});
+
+// A group still in flight when the subscription ended may refine the end, but no subscription
+// feeds the tail `cacheTrack` cleared anymore.
+test("an end refined after the subscription ended owes no tail", async () => {
+	const producer = new TrackProducer("test");
+	hooks.receiveTrack(producer);
+	const history = producer.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(60_000) } });
+	const group = producer.createGroup(2n);
+	group.writeFrame({ payload: new Uint8Array([1]) });
+	group.finish();
+	hooks.endTrack(producer, { group: 3n, frame: 0 });
+	hooks.cacheTrack(producer);
+	hooks.endTrack(producer, { group: 2n, frame: 1 });
+	const live = producer.subscribe({ ranges: [{ start: { absolute: 2n } }], delay: { max: Milli(60_000) } });
+	expect((await live.recvGroup())?.sequence).toBe(2n);
+	const next = live.recvGroup();
+	expect(await settled(next)).toBe(true);
+	expect(await next).toBeUndefined();
+	history.close();
+	live.close();
+	producer.close();
+});
+
 test("without a declared start, the first arrival stands in for it", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
@@ -4029,6 +4077,7 @@ test("a source start follows the current requested floor after an update", async
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ ranges: [{ start: { absolute: 5n } }] });
 	try {
+		hooks.receiveTrack(producer);
 		hooks.startTrack(producer, { start: 6n, requested: 5n });
 		expect(hooks.sourceStart(reader)).toBe(6n);
 		const lower = producer.subscribe({ ranges: [{ start: { absolute: 2n } }] });
@@ -4057,6 +4106,7 @@ test("a source start follows the current requested floor after an update", async
 test("a pending tail owes from SUBSCRIBE_START while the demand keeps its floor", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) }, ranges: [{ start: { absolute: 1n } }] });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 3n, requested: 1n });
 	hooks.endTrack(producer, { group: 4n, frame: 0 });
 	const group = producer.createGroup(3n);
@@ -4077,6 +4127,7 @@ test("a pending tail owes from SUBSCRIBE_START while the demand keeps its floor"
 test("an end after the highest group holds the reader at the hole", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 0n });
 	const high = producer.createGroup(2n);
 	high.finish();
@@ -4663,4 +4714,14 @@ test("reopening stale drops reports again what is stale at the max age bound", (
 	expect(drain()).toEqual([[1n, 2n, 1500], [2n, 3n, 1500], 3n, 4n]);
 	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
 	expect(drain()).toEqual([[1n, 3n, 1500]]);
+});
+
+test("group sequences stop at 2^64-1, as a u64 does", () => {
+	const producer = new TrackProducer("test").accept({});
+	expect(() => producer.createGroup(1n << 64n)).toThrow(RangeError);
+	producer.createGroup((1n << 64n) - 1n).finish();
+	expect(() => producer.appendGroup()).toThrow(RangeError);
+	// A run's exclusive end may sit just past the last group.
+	producer.skipGroups(1n << 63n, 1n << 64n);
+	expect(() => producer.skipGroups(0n, (1n << 64n) + 1n)).toThrow(RangeError);
 });

@@ -1,7 +1,5 @@
 import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
-import type { Getter } from "@moq/signals";
+import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import type * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import {
@@ -22,7 +20,7 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
-import { createMockTransportPair, textFrame } from "./mock.ts";
+import { createMockTransportPair, manual, settlesWithin, textFrame, waitFor } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -52,8 +50,6 @@ function accept(
 ): Promise<Established> {
 	return acceptSession({ transport, url, ...props });
 }
-
-const sleepMs = (ms: number) => sleep(Nano.fromMilli(Milli(ms)));
 
 /**
  * Have every peer refuse announce requests for the rest of the test, the way a relay without
@@ -332,7 +328,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 });
 
 test("integration: lite applies initial and updated group bounds", async () => {
-	hostTime();
+	using clock = manual();
 	const GROUP_COUNT = 6n;
 	const INITIAL_START_GROUP = 1n;
 	const INITIAL_END_GROUP = 3n; // exclusive: groups 1 and 2
@@ -385,8 +381,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 			delay: { max: Milli(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { absolute: GROUP_COUNT } }],
 		});
-		const live = subscriber.nextGroup();
-		expect(await Promise.race([live, sleepMs(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
+		expect(await settlesWithin(subscriber.nextGroup(), clock, Milli(PENDING_ASSERT_MS))).toBe(false);
 	} finally {
 		subscriber.close();
 		remote.close();
@@ -505,9 +500,9 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 // so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
 // the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust
 // `a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group`.
-// Quarantined: once on main, the start resolved to 0 instead of the publisher's 5.
-// Investigation: quest/m0/test-flakes-2/lite07-relative-start.md.
-test.skip("integration: lite-07 reports a relative start over a frameless newest group", async () => {
+// The newest group lands before the reader asks, as it can under load: a sibling reads it, so the
+// reader's own window has yet to settle on it when it asks where it starts.
+test("integration: lite-07 reports a relative start over a frameless newest group", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -525,15 +520,19 @@ test.skip("integration: lite-07 reports a relative start over a frameless newest
 	const newest = producer.appendGroup();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const reader = remote.track("video").subscribe({ delay: { max: null }, ranges: [{ start: { relative: 0n } }] });
+	const subscription = { delay: { max: null }, ranges: [{ start: { relative: 0n } }] };
+	const reader = remote.track("video").subscribe(subscription);
+	const sibling = remote.track("video").subscribe(subscription);
 	try {
 		// Accepting the track subscribes it upstream, whose answer resolves the start.
 		await reader.info();
+		expect((await sibling.recvGroup())?.sequence).toBe(5n);
 		expect(await reader.start()).toBe(5n);
 		newest.writeFrame({ payload: new Uint8Array([5]) });
 		newest.finish();
 		expect((await reader.recvGroup())?.sequence).toBe(5n);
 	} finally {
+		sibling.close();
 		reader.close();
 		remote.close();
 		broadcast.close();
@@ -653,7 +652,7 @@ test("integration: lite draft-06", async () => {
 test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	"integration: %s demand holds across a subscription's TRACK and SUBSCRIBE",
 	async (protocol) => {
-		hostTime();
+		using clock = manual();
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const [client, server] = await Promise.all([
@@ -687,7 +686,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const remote = wireOf(client).consume(Path.from("test"));
 		const track = remote.track("video").subscribe().ordered();
 		expect(await track.readString()).toBe("hello");
-		await sleepMs(50);
+		await clock.advance(Nano.fromMilli(Milli(50)));
 		// One request, wanted from its subscription on and never let go in between.
 		if (!producer) throw new Error("the track was never answered");
 		const served = producer;
@@ -1429,14 +1428,6 @@ async function runConsumeDedup(protocol: string, version?: number) {
 	server.abort();
 }
 
-async function waitUntil(predicate: () => boolean): Promise<void> {
-	for (let i = 0; i < 200; i++) {
-		if (predicate()) return;
-		await sleepMs(5);
-	}
-	throw new Error("condition not met within timeout");
-}
-
 // Closing the last subscriber to a track tears the wire subscription down, so the publisher stops
 // serving it (the muted-watch-tile case in #2355) instead of sending groups to a reader that left.
 async function runSubscriberTeardown(protocol: string, version?: number) {
@@ -1456,12 +1447,12 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 	expect(await sub.readString()).toBe("hello");
 
 	// The publisher now has a live downstream reader for the track.
-	await waitUntil(() => video.demand().wanted.peek() !== undefined);
+	await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
 
 	// Closing the only subscriber must tear the wire subscription down, so demand drops on the
 	// publisher rather than the relay serving groups to nobody.
 	sub.close();
-	await waitUntil(() => video.demand().wanted.peek() === undefined);
+	await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
 
 	broadcast.close();
 	remote.close();
@@ -1470,19 +1461,16 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 }
 
 test("integration: lite subscriber teardown on last unsubscribe", async () => {
-	hostTime();
 	await runSubscriberTeardown(Lite.ALPN_06);
 });
 
 test("integration: ietf subscriber teardown on last unsubscribe", async () => {
-	hostTime();
 	await runSubscriberTeardown(Ietf.ALPN.DRAFT_18);
 });
 
 // A fetched group can stay open indefinitely (a catalog track, a JSON stream), so abandoning the
 // fetch must cancel the FETCH stream rather than wait for a stream end that never comes.
 test("integration: lite fetch teardown when the reader abandons an open group", async () => {
-	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1500,12 +1488,12 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	expect(await fetched.readString()).toBe("hello");
 
 	// The publisher is now serving the still-open group.
-	await waitUntil(() => group.demand().wanted.peek());
+	await waitFor(group.demand().wanted, (wanted) => wanted);
 
 	// Abandoning the fetch cancels the FETCH stream, so the publisher stops serving instead of
 	// pumping an open group to a reader that left.
 	fetched.close();
-	await waitUntil(() => !group.demand().wanted.peek());
+	await waitFor(group.demand().wanted, (wanted) => !wanted);
 
 	group.finish();
 	broadcast.close();
@@ -1517,14 +1505,12 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 // Older drafts have no TRACK stream or SUBSCRIBE_UPDATE, so the demand loop must still tear the
 // subscription down through the plain stream-close path.
 test("integration: lite draft-01 subscriber teardown on last unsubscribe", async () => {
-	hostTime();
 	await runSubscriberTeardown("", Lite.Version.DRAFT_01);
 });
 
 // Two subscribers to one track dedupe onto a single wire subscription: closing one keeps it alive
 // for the other, and only the last close tears it down.
 test("integration: lite fan-out keeps the upstream until the last subscriber leaves", async () => {
-	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1541,7 +1527,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	const b = remote.track("video").subscribe().ordered();
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
-	await waitUntil(() => video.demand().wanted.peek() !== undefined);
+	await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
 
 	// Closing one leaves the shared upstream serving the other.
 	a.close();
@@ -1551,7 +1537,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 
 	// The last close tears it down.
 	b.close();
-	await waitUntil(() => video.demand().wanted.peek() === undefined);
+	await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
 
 	broadcast.close();
 	remote.close();
@@ -1562,7 +1548,6 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 // Repeated subscribe/unsubscribe cycles must each tear down and re-open cleanly (the 40-toggle
 // scenario in the issue), never wedging the shared cache or leaking a subscription.
 test("integration: lite re-subscribe re-opens the upstream after each teardown", async () => {
-	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1579,10 +1564,10 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 		video.writeFrame(textFrame(`hello-${i}`));
 		const sub = remote.track("video").subscribe().ordered();
 		expect(await sub.readString()).toBe(`hello-${i}`);
-		await waitUntil(() => video.demand().wanted.peek() !== undefined);
+		await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
 
 		sub.close();
-		await waitUntil(() => video.demand().wanted.peek() === undefined);
+		await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
 	}
 
 	broadcast.close();
@@ -1594,7 +1579,6 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 // Coalesced fetches of one open group share a single FETCH stream: closing one keeps it flowing
 // for the other, and only the last abandon cancels it.
 test("integration: lite coalesced fetch stays until every reader abandons the open group", async () => {
-	hostTime();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1612,7 +1596,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	const f2 = await remote.track("video").fetchGroup(group.sequence);
 	expect(await f1.readString()).toBe("hello");
 	expect(await f2.readString()).toBe("hello");
-	await waitUntil(() => group.demand().wanted.peek());
+	await waitFor(group.demand().wanted, (wanted) => wanted);
 
 	// Closing one coalesced reader keeps the shared FETCH flowing for the other.
 	f1.close();
@@ -1622,7 +1606,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 
 	// The last abandon cancels the FETCH.
 	f2.close();
-	await waitUntil(() => !group.demand().wanted.peek());
+	await waitFor(group.demand().wanted, (wanted) => !wanted);
 
 	group.finish();
 	broadcast.close();
@@ -1635,6 +1619,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 // the demand watch. The frame read in flight across that re-arm must still reach the group. The
 // window is a few microtasks wide, so the late reader arrives after every delay across it.
 test("integration: lite fetch re-armed by a late reader keeps every frame", async () => {
+	using clock = manual();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -1659,8 +1644,9 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 		expect(await f2.readString()).toBe("hello");
 
 		group.writeFrame(textFrame("more"));
-		const more = await Promise.race([f2.readString(), sleepMs(500).then(() => "dropped" as const)]);
-		expect(`${delay}: ${more}`).toBe(`${delay}: more`);
+		const more = f2.readString();
+		expect(`${delay}: ${await settlesWithin(more, clock, Milli(500))}`).toBe(`${delay}: true`);
+		expect(await more).toBe("more");
 
 		f2.close();
 		group.finish();
@@ -1736,16 +1722,8 @@ test("integration: subscribe to non-existent broadcast", async () => {
 });
 
 // Resolves once `signal` satisfies `pred`, returning the matching value.
-async function waitFor<T>(signal: Getter<T>, pred: (value: T) => boolean): Promise<T> {
-	for (;;) {
-		const value = signal.peek();
-		if (pred(value)) return value;
-		await signal.changed();
-	}
-}
-
 test("integration: a follower waits for a late publisher", async () => {
-	hostTime();
+	using clock = manual();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -1766,7 +1744,7 @@ test("integration: a follower waits for a late publisher", async () => {
 	// Nobody publishes this path yet. A blind consume would be reset (see the
 	// "subscribe to non-existent broadcast" test); the handle just stays offline.
 	const watched = clientOrigin.follow(Path.from("late"));
-	await sleepMs(50);
+	await clock.advance(Nano.fromMilli(Milli(50)));
 	expect(watched.active.peek()).toBeUndefined();
 
 	// The publisher arrives afterwards.
@@ -2176,7 +2154,7 @@ test("origin: remote entries retract when the session dies, local ones survive",
 });
 
 test("origin: one origin on both directions consumes locally and never echoes", async () => {
-	hostTime();
+	using clock = manual();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 
 	// The client routes both directions through one origin, the FFI default shape.
@@ -2219,7 +2197,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	// The critical part: the client must NOT re-announce "from-server" back. If it did, the
 	// server's forwarder would insert it as a remote entry in serverSees. Give the wire a
 	// moment, then check the only remote entry the server has is the client's own broadcast.
-	await sleepMs(50);
+	await clock.advance(Nano.fromMilli(Milli(50)));
 	expect(wireOf(serverReader).routes(Path.from("from-server"))).toBe(false);
 
 	watchingShared.close();
@@ -2462,7 +2440,7 @@ test.each([Ietf.ALPN.DRAFT_18])(
 );
 
 test("origin: a blind request ends with its session, and the next session answers a fresh one", async () => {
-	hostTime();
+	using clock = manual();
 	withoutDiscovery();
 	const original = globalThis.WebTransport;
 	const reconnectUrl = new URL("https://example.com/re-request");
@@ -2491,18 +2469,17 @@ test("origin: a blind request ends with its session, and the next session answer
 	const request = clientOrigin.request(Path.from("standing"));
 
 	try {
-		await until(() => request.active.peek() !== undefined);
-		const first = request.active.peek();
+		const first = await waitFor(request.active, (b) => b !== undefined);
 
 		// The answering session dies, and the request it answered ends with it: the next session
 		// is another publisher instance as far as anything here can tell.
 		servers[0]?.session.close();
-		await until(() => request.closed.peek() !== undefined);
+		await Promise.resolve(request.closed);
 		expect(request.active.peek()).toBeUndefined();
 
-		// The next session answers a fresh request.
+		// The next session answers a fresh request, once the reconnect delay passes.
 		const fresh = clientOrigin.request(Path.from("standing"));
-		await until(() => fresh.active.peek() !== undefined);
+		await clock.drive(waitFor(fresh.active, (b) => b !== undefined));
 		expect(fresh.active.peek()).not.toBe(first);
 		fresh.close();
 	} finally {
@@ -2514,7 +2491,7 @@ test("origin: a blind request ends with its session, and the next session answer
 });
 
 test("origin: a reactive handle follows announcements across a republish", async () => {
-	hostTime();
+	using clock = manual();
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const serverOrigin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -2527,7 +2504,7 @@ test("origin: a reactive handle follows announcements across a republish", async
 	const watch = clientOrigin.follow(Path.from("show"));
 
 	// Nothing published yet: the handle waits instead of subscribing blind.
-	for (let i = 0; i < 5; i++) await sleepMs(1);
+	await clock.advance(Nano.fromMilli(Milli(5)));
 	expect(watch.active.peek()).toBeUndefined();
 
 	// The publish resolves it through the wire.
@@ -2553,7 +2530,7 @@ test("origin: a reactive handle follows announcements across a republish", async
 });
 
 test("origin: overlapping sessions carrying one path fail over", async () => {
-	hostTime();
+	using clock = manual();
 	// Two live relays announce the same broadcast into one origin, the redundant-relay
 	// shape (and the GOAWAY drain shape, where old and new sessions briefly overlap).
 	const clientOrigin = new OriginProducer();
@@ -2586,7 +2563,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	// The newer session dies; the older one still carries the path and must keep serving.
 	second.client.abort();
 	second.server.abort();
-	await sleepMs(50);
+	await clock.advance(Nano.fromMilli(Milli(50)));
 
 	const remote = await routed(reader, Path.from("redundant"));
 	if (!remote) throw new Error("route black-holed despite a live session");
@@ -2721,7 +2698,8 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 	},
 );
 
-test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+// Without an instance on the wire nothing says the job's route continues the claim's stream.
+test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 	"publishing a job still resets its first subscribe on %s",
 	async (protocol) => {
 		const pair = createMockTransportPair(protocol);
@@ -2758,6 +2736,58 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 	},
 );
 
+// On lite-07 a job's exact route continues its claim's minted instance, so a reader resolved
+// through the claim keeps its broadcast and its subscription once that route lands.
+test.each(["request", "follow"] as const)(
+	"a job's route continues a reader resolved through its claim (%s)",
+	async (method) => {
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		const origin = new OriginProducer();
+		const consumer = new OriginProducer();
+		const path = Path.from("live/cam");
+		const handle = origin.routePrefix(Path.empty());
+		const serving = (async () => {
+			const requests = handle.requested();
+			const request = (await requests.next()).value;
+			if (!request) throw new Error("missing job request");
+			const job = request.route({ hidden: true });
+			const chat = job.broadcast.createTrack("chat", { timescale: Timescale.MILLI });
+			chat.writeFrame(textFrame("job"));
+			job.announce();
+			return { job, chat };
+		})();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: consumer }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const listing = consumer.announced(Path.Pattern.literal(path));
+		const requested = method === "request" ? consumer.request(path) : consumer.follow(path);
+		const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
+		if (!remote) throw new Error("request did not resolve");
+		const track = remote.track("chat").subscribe().ordered();
+		expect(await track.readString()).toBe("job");
+
+		// Written once the job's route is listed at the reader: the same subscription carries it.
+		const { job, chat } = await serving;
+		expect(job.instance).toBe(handle.instance);
+		expect(await listing.next()).toMatchObject({ kind: "present", prefix: path });
+		chat.writeFrame(textFrame("later"));
+		expect(await track.readString()).toBe("later");
+		expect(requested.active.peek()).toBe(remote);
+		expect(requested.closed.peek()).toBeUndefined();
+
+		track.close();
+		listing.close();
+		requested.close();
+		handle.close();
+		job.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		consumer.close();
+	},
+);
+
 // The peer's close code a killed session carries.
 const DEATH = SessionCode(71);
 
@@ -2770,6 +2800,7 @@ async function runSessionDeath(
 	version?: number,
 	kill: "death" | "remote" | "local" = "death",
 ): Promise<[Error | null, Error | null, Position | undefined]> {
+	using clock = manual();
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 
@@ -2798,10 +2829,8 @@ async function runSessionDeath(
 	else if (kill === "remote") void server.close().catch(() => {});
 	else pair.server.close({ closeCode: DEATH, reason: "killed" });
 	const groupEnd = Promise.resolve(group.closed);
-	const closed = await withTimeout(
-		Promise.resolve(track.closed),
-		Nano.fromMilli(Milli(2000)),
-		"the track never ended",
+	const closed = await clock.drive(
+		withTimeout(Promise.resolve(track.closed), Nano.fromMilli(Milli(2000)), "the track never ended"),
 	);
 
 	broadcast.close();
@@ -2812,7 +2841,7 @@ async function runSessionDeath(
 	origin.close();
 	return [
 		closed,
-		await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended"),
+		await clock.drive(withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended")),
 		hooks.subscriberEnd(track),
 	];
 }
@@ -2834,7 +2863,6 @@ for (const [name, protocol, version] of [
 	// continues past it.
 	for (const kill of ["remote", "local"] as const) {
 		test(`integration: ${name} cancels the track on a ${kill} session close`, async () => {
-			hostTime();
 			const [closed, groupEnd, end] = await runSessionDeath(protocol, version, kill);
 			expect(closed).toBeInstanceOf(SessionError);
 			expect((closed as SessionError).code).toBe(SessionCode.Cancel);

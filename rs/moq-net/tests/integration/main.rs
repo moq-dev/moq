@@ -8,13 +8,14 @@
 //! apply to every test in the binary.
 
 mod announce_covering_route;
-mod announce_takeover;
 mod announce_to_serve;
+mod answer_behind_cache;
 mod auth;
 mod broadcast_close;
 mod catalog_acquisition;
 mod catalog_churn;
 mod catalog_handover;
+mod claim_continues;
 mod compress;
 mod control_stats;
 mod datagram;
@@ -60,7 +61,6 @@ mod route_health;
 mod routing_contracts;
 mod segmented_frame;
 mod session_close;
-mod session_idle;
 mod session_panic;
 mod settled_end_survives_abort;
 mod setup_negotiation;

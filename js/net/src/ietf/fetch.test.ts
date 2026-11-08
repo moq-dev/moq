@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { error } from "../error.ts";
 import { hooks } from "../internal.ts";
-import { CACHE_EXPIRY } from "../ledger.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -436,7 +436,7 @@ test("a FETCH fills never-cached and evicted history, then reuses the cache", as
 			using fx = serve(version, undefined, undefined, null);
 			if (evicted) {
 				writeGroup(fx.track, 1n, ["1-0", "1-1", "1-2"]);
-				await clock.advance(ms(CACHE_EXPIRY * 2));
+				await clock.advance(ms(DEFAULT_EXPIRY * 2));
 			}
 			writeGroup(fx.track, 3n, ["live"]);
 			const cache = fx.track.subscribe({ ranges: [] });

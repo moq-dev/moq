@@ -45,12 +45,13 @@ Decided 2026-11-07 (maintainer):
   chosen: m3 after the cut, or small fixes in m1 with the redesigns in m3.
   This replaces the earlier split from the same session (user-visible fixes
   in m1, internal ones in m3).
-- ✅ Guard against new instances in both REVIEW.md and AGENTS.md (see
-  [Review and agent rule](/quest/m1/explicit-state/rule.md)). Not chosen:
+- ✅ Guard against new instances in both REVIEW.md and AGENTS.md (done:
+  REVIEW.md's State check and its AGENTS.md line). Not chosen:
   REVIEW.md only, or no rule change.
 - ✅ `quic::driver::Endpoint::rebind` becomes crate-private, since only
-  tests call it (see [Transport close](/quest/m1/explicit-state/transport-close.md)).
-  Not chosen: refusing to rebind after close.
+  tests call it (done: test-only, and unreleased, so it broke no published
+  surface and needed no m2 quest). Not chosen: refusing to rebind after
+  close.
 
 Every child reproduces each folded bug in a test before fixing it. A bug
 that doesn't reproduce is dropped from the child, and its PR says why. A
@@ -68,18 +69,11 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 
 ## Required
 
-- [Review and agent rule](/quest/m1/explicit-state/rule.md) - REVIEW.md and AGENTS.md ask for one enum per lifecycle, terminal transitions after fallible work, and one lock per value
-- [moq-boy pause state](/quest/m1/explicit-state/boy-pause.md) - a new viewer always wakes a paused emulator
-- [Transport close](/quest/m1/explicit-state/transport-close.md) - connection status ends with its error, and every Rust QUIC backend agrees when a connection is closed
-- [Video codec drains](/quest/m1/explicit-state/video-drain.md) - a hardware codec whose drain fails is ready for input again or terminally failed, never left stuck
-- [Watch playback phases](/quest/m1/explicit-state/watch-playback.md) - watch counts a stall only while a rendition plays
 - [Publish capture phases](/quest/m1/explicit-state/publish-capture.md) - dismissing the screen-share picker turns sharing off
 - [js/qmux close](/quest/m1/explicit-state/qmux-close.md) - a graceful remote close ends qmux streams cleanly
 - [FFI handle state](/quest/m1/explicit-state/ffi-state.md) - FFI handles hold one state each: video follow under one lock, requests answered once, drivers Cancelled after shutdown
-- [A failed finish is final](/quest/m1/explicit-state/finish-final.md) - producers and importers are never half-finished, and refuse input after finish
-- [Track and group end-of-life](/quest/m1/explicit-state/track-end.md) - moq-net's track and group outcomes are one enum each, in Rust and JS
 - [moq-net phase data](/quest/m1/explicit-state/net-phases.md) - moq-net's session and subscription state machines keep each phase's data in its variant
-- [moq-mux and moq-gst lifecycles](/quest/m1/explicit-state/mux-gst.md) - export sources, TS and fMP4 export tracks, and gst pads are explicit state
+- [TS and fMP4 export lifecycles](/quest/m1/explicit-state/mux-gst.md) - the TS export program and tracks and the fMP4 export track are explicit state
 
 ## Related
 

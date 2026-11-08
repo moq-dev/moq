@@ -16,6 +16,8 @@
 mod announce;
 mod auth;
 mod compress;
+#[cfg(test)]
+mod corpus;
 mod datagram;
 pub(crate) mod error;
 mod fetch;
