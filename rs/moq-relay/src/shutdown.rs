@@ -278,8 +278,10 @@ impl Observer {
 		}
 		Serving {
 			_active: self.activity.enter(),
-			counted,
-			closed: None,
+			count: match counted {
+				true => Count::Open,
+				false => Count::Uncounted,
+			},
 			shutdown: self.clone(),
 		}
 	}
@@ -417,46 +419,59 @@ pub struct Serving {
 	// `None` only once the drain closed admission, which the connection's own
 	// admission prevents while it is held before the SETUP reply.
 	_active: Option<moq_net::server::Active>,
-	/// False for a session served after the deadline, which is not counted.
-	counted: bool,
-	closed: Option<Instant>,
+	count: Count,
 	pub(crate) shutdown: Observer,
+}
+
+/// Where a [`Serving`] session is counted in the [`Tally`].
+#[derive(Clone, Copy)]
+enum Count {
+	/// Served after the deadline, so not counted at all.
+	Uncounted,
+	/// Counted as open.
+	Open,
+	/// Closed at this instant, and counted as ending until it drops.
+	Ending(Instant),
 }
 
 impl Serving {
 	pub(crate) async fn drain(&self, session: &moq_net::Session) {
-		self.shutdown.drain(session, self.counted).await;
+		let counted = !matches!(self.count, Count::Uncounted);
+		self.shutdown.drain(session, counted).await;
 	}
 
+	/// The session closed: count it as ending until this drops. Only the first call counts.
 	pub(crate) fn closed(&mut self) {
-		self.closed = Some(Instant::now());
-		if self.counted {
-			self.shutdown.state.send_modify(|state| {
-				state.tally.open -= 1;
-				state.tally.ending += 1;
-			});
+		if !matches!(self.count, Count::Open) {
+			return;
 		}
+		self.count = Count::Ending(Instant::now());
+		self.shutdown.state.send_modify(|state| {
+			state.tally.open -= 1;
+			state.tally.ending += 1;
+		});
 	}
 }
 
 impl Drop for Serving {
 	fn drop(&mut self) {
-		if self.counted {
-			let now = Instant::now();
-			let ending = self
-				.closed
-				.zip(self.shutdown.deadline())
-				.is_some_and(|(closed, deadline)| closed < deadline && now >= deadline);
-			self.shutdown.state.send_modify(|state| {
-				if self.closed.is_some() {
-					state.tally.ending -= 1;
-				} else {
-					state.tally.open -= 1;
-				}
-				state.ending += usize::from(ending);
-				state.last_left = Some(state.last_left.map_or(now, |last| last.max(now)));
-			});
-		}
+		let closed = match self.count {
+			Count::Uncounted => return,
+			Count::Open => None,
+			Count::Ending(closed) => Some(closed),
+		};
+		let now = Instant::now();
+		let ending = closed
+			.zip(self.shutdown.deadline())
+			.is_some_and(|(closed, deadline)| closed < deadline && now >= deadline);
+		self.shutdown.state.send_modify(|state| {
+			match closed {
+				Some(_) => state.tally.ending -= 1,
+				None => state.tally.open -= 1,
+			}
+			state.ending += usize::from(ending);
+			state.last_left = Some(state.last_left.map_or(now, |last| last.max(now)));
+		});
 	}
 }
 
@@ -753,6 +768,19 @@ mod tests {
 		})
 		.join()
 		.unwrap();
+	}
+
+	/// A session reported closed twice is counted as ending once, and leaves the tally
+	/// empty when it drops.
+	#[tokio::test(start_paused = true)]
+	async fn a_session_closed_twice_ends_once() {
+		let (_trigger, shutdown) = Observer::new(Duration::from_secs(10));
+		let mut serving = shutdown.serve();
+		serving.closed();
+		serving.closed();
+		assert_eq!(shutdown.tally(), Tally { open: 0, ending: 1 });
+		drop(serving);
+		assert_eq!(shutdown.tally(), Tally::default());
 	}
 
 	/// A drain whose admissions emptied before the deadline still waits for a session

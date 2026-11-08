@@ -52,8 +52,6 @@ pub enum Psk {
 	},
 }
 
-use crate::vendor::dimpl::crypto::aws_lc_rs;
-
 /// DTLS configuration shared by all connections.
 ///
 /// Build with [`Config::builder()`] or use [`Config::default()`].
@@ -369,8 +367,7 @@ impl ConfigBuilder {
 
 	/// Set a custom crypto provider.
 	///
-	/// If not set, the default aws-lc-rs provider will be used, if the feature
-	/// flag `aws-lc-rs` is enabled.
+	/// If not set, the process default or else rind's provider is used.
 	pub fn with_crypto_provider(mut self, provider: CryptoProvider) -> Self {
 		self.crypto_provider = Some(provider);
 		self
@@ -438,7 +435,7 @@ impl ConfigBuilder {
 	/// The crypto provider is selected in the following priority order:
 	/// 1. Explicit provider set via `with_crypto_provider()`
 	/// 2. Default provider installed via `CryptoProvider::install_default()`
-	/// 3. The aws-lc-rs provider
+	/// 3. rind's provider, refusing a CPU rind cannot run on
 	pub fn build(self) -> Result<Config, Error> {
 		if self.handshake_timeout.is_zero() || self.handshake_timeout > MAX_TIMING_DURATION {
 			return Err(ConfigError::InvalidHandshakeTimeout.into());
@@ -447,10 +444,10 @@ impl ConfigBuilder {
 			return Err(ConfigError::InvalidFlightStartRto.into());
 		}
 
-		let crypto_provider = self
-			.crypto_provider
-			.or_else(|| CryptoProvider::get_default().cloned())
-			.unwrap_or_else(aws_lc_rs::default_provider);
+		let crypto_provider = match self.crypto_provider.or_else(|| CryptoProvider::get_default().cloned()) {
+			Some(provider) => provider,
+			None => crate::vendor::dimpl::crypto::rind::default_provider().map_err(ConfigError::UnsupportedCpu)?,
+		};
 
 		// Always validate the crypto provider
 		crypto_provider.validate()?;
@@ -850,7 +847,7 @@ mod tests {
 	fn filter_with_explicit_provider() {
 		{
 			let config = Config::builder()
-				.with_crypto_provider(aws_lc_rs::default_provider())
+				.with_crypto_provider(crate::vendor::dimpl::crypto::rind::default_provider().unwrap())
 				.dtls12_cipher_suites(&[Dtls12CipherSuite::ECDHE_ECDSA_AES256_GCM_SHA384])
 				.kx_groups(&[NamedGroup::X25519, NamedGroup::Secp256r1])
 				.build()
