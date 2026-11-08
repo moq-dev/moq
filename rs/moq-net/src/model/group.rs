@@ -1319,10 +1319,12 @@ impl GroupState {
 	}
 
 	/// Where this copy declared the whole group ends, as a frame position its copies share:
-	/// not a copy a transport cut short, nor one whose ordinals left its Object IDs.
-	fn declared_fin(&self) -> Option<u64> {
+	/// not a copy a transport cut short, nor one whose ordinals left its Object IDs. Exact
+	/// only when the copy holds the frame before it, or starts the group: an empty copy
+	/// starting later says only that nothing lies past its start.
+	fn declared_fin(&self) -> Option<(u64, bool)> {
 		let fin = self.fin.filter(|_| self.range_end.is_none() && !self.sparse())?;
-		Some(fin as u64)
+		Some((fin as u64, fin == 0 || fin > self.offset))
 	}
 
 	/// Whether the frames held start at the group's first object.
@@ -2220,8 +2222,8 @@ impl Producer {
 		state.fin = Some(fin);
 		// Another copy of the group finished elsewhere, or holds a frame past this end.
 		if let Some(content) = &state.content
-			&& let Some(fin) = state.declared_fin()
-			&& let Err(err) = content.finish(fin)
+			&& let Some((fin, exact)) = state.declared_fin()
+			&& let Err(err) = content.finish(fin, exact)
 		{
 			state.fin = None;
 			return Err(self.abort_conflict(state, err));
@@ -2472,8 +2474,8 @@ impl Handle {
 				)?;
 			}
 			// A copy that already finished the whole group says where it ends.
-			if let Some(fin) = state.declared_fin() {
-				content.finish(fin)?;
+			if let Some((fin, exact)) = state.declared_fin() {
+				content.finish(fin, exact)?;
 			}
 			Ok(())
 		})();
@@ -3464,12 +3466,15 @@ struct Carry {
 	recover: Option<super::resume::Recover>,
 	// Boarding or riding a flight, once the copy read shed the frame read next.
 	ride: Option<Ride>,
+	// Frames the copies read before held, which the copy read now must not end short of.
+	committed: usize,
 }
 
 impl Clone for Carry {
 	fn clone(&self) -> Self {
 		Self {
 			recover: self.recover.clone(),
+			committed: self.committed,
 			// A clone reads in parallel, so it boards for itself.
 			ride: self.ride.as_ref().map(|ride| Ride {
 				boarding: None,
@@ -3731,7 +3736,12 @@ impl Consumer {
 				return res;
 			}
 			let index = self.cursor.index;
-			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
+			let Some(Carry {
+				recover: Some(recover),
+				committed,
+				..
+			}) = self.carry.as_deref_mut()
+			else {
 				return res;
 			};
 			let failed = match &res {
@@ -3751,8 +3761,8 @@ impl Consumer {
 				}
 				// Read to its end: no route is needed for it any more.
 				Poll::Ready(Ok(None)) => {
-					// The copy read before held frames past where this one ends.
-					if self.cursor.state.read().fin.is_some_and(|fin| fin < index) {
+					// A copy read before held frames past where this one ends.
+					if self.cursor.state.read().fin.is_some_and(|fin| fin < *committed) {
 						let err = Error::ProtocolViolation;
 						recover.failed(index, &err);
 						return Poll::Ready(Err(err));
@@ -3787,8 +3797,14 @@ impl Consumer {
 				}
 				Poll::Pending => return Poll::Pending,
 			};
-			let recover = (self.carry.as_mut().and_then(|carry| carry.recover.as_mut()))
-				.expect("a replacement comes from recovery");
+			// Only a frame it holds proves where it reaches; an empty copy proves nothing past its start.
+			let committed = {
+				let state = self.cursor.state.read();
+				Some(state.committed()).filter(|committed| *committed > state.offset)
+			};
+			let carry = self.carry.as_mut().expect("a replacement comes from recovery");
+			carry.committed = carry.committed.max(committed.unwrap_or(0));
+			let recover = carry.recover.as_mut().expect("a replacement comes from recovery");
 			// Same frames by index, so only the channel changes; read progress and the
 			// cap stay this cursor's.
 			let (index, end, raw) = (self.cursor.index, self.cursor.end, self.cursor.raw);
@@ -4227,8 +4243,8 @@ impl Consumer {
 			(Some(carry), ride) => carry.ride = ride,
 			(None, Some(ride)) => {
 				self.carry = Some(Box::new(Carry {
-					recover: None,
 					ride: Some(ride),
+					..Default::default()
 				}))
 			}
 			(None, None) => {}
@@ -7128,6 +7144,16 @@ mod test {
 			cut.bound(Bounds { start: 0, end: Some(1) }).unwrap();
 			cut.write_frame(None, verbose(0)).unwrap();
 			cut.finish().unwrap();
+
+			// An empty copy starting at or past the end says only that nothing lies past it.
+			for start in [2, 3] {
+				let mut past = copy();
+				past.start_at(start).unwrap();
+				past.finish().unwrap();
+			}
+			let mut within = copy();
+			within.start_at(1).unwrap();
+			assert!(matches!(within.finish(), Err(Error::ProtocolViolation)));
 		}
 	}
 

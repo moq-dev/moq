@@ -1111,6 +1111,8 @@ export class Consumer {
 	#attempt?: Attempt;
 	// The frame a replacement copy resumes at: frames below it were read from an earlier copy.
 	#skip = 0;
+	// How far the copies read before held frames, which the copy read now must not end short of.
+	#held = 0;
 	// Sticky failure, set once, including a budget that gave up on the group.
 	#terminal?: Error;
 	#verdict = new Once<Error | null>();
@@ -1397,6 +1399,9 @@ export class Consumer {
 			return;
 		}
 		replacement.adopt();
+		// Only a frame it holds proves where it reaches; an empty copy proves nothing past its start.
+		const total = this.#state.total.peek();
+		if (total > this.#state.offset) this.#held = Math.max(this.#held, total);
 		// The copy left behind stops teeing into the state this consumer read.
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
 		this.#arrived ??= this.#state.arrived;
@@ -1600,7 +1605,7 @@ export class Consumer {
 				this.#abandon();
 				// Unless it finished before frames an earlier copy delivered, so the copies
 				// disagree on where the group ends.
-				if (this.#state.total.peek() < this.#skip) {
+				if (this.#state.total.peek() < this.#held) {
 					this.#terminal = new ProtocolViolation(`group ${this.sequence} ended before frames already read`);
 					if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 					this.#closed?.refresh();

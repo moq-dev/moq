@@ -539,6 +539,30 @@ test("a resumed read refuses a replacement that ends before the frames already r
 	}
 });
 
+test("a resumed read of a copy that held nothing takes the replacement's end", async () => {
+	// The copy starts past the group's end, so it proves no frame there.
+	const producer = new Producer(0n);
+	hooks.startGroup(producer, 3);
+	const consumer = producer.mirror();
+	const replacement = new Producer(0n);
+	replacement.writeFrame(textFrame("zero"));
+	replacement.writeFrame(textFrame("one"));
+	replacement.finish();
+	const failed = new Error("route failed");
+	hooks.recoverGroup(consumer, {
+		changed: new Signal(false),
+		wants: (error) => error === failed,
+		replace: async () => ({
+			group: replacement.mirror(),
+			expiry: { expired: () => false, changed: [] },
+			adopt: () => {},
+			discard: () => {},
+		}),
+	});
+	producer.abort(failed);
+	expect(await consumer.readFrame()).toBeUndefined();
+});
+
 test("buffered frames are still readable after the group closes", async () => {
 	const { producer, consumer } = pair(0n);
 	producer.writeFrame(textFrame("a"));

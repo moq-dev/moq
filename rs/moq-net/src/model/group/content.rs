@@ -198,14 +198,22 @@ impl Content {
 		Ok(shared)
 	}
 
-	/// Declare the group complete at frame position `fin`, refusing a copy that disagrees:
-	/// one finished elsewhere at another position, or one short of a frame another opened.
-	pub(super) fn finish(&self, fin: u64) -> Result<()> {
+	/// Declare that the group ends at frame position `fin`, or at most there unless `exact`,
+	/// refusing a copy that disagrees: one finished elsewhere at another position, or one
+	/// short of a frame another opened.
+	pub(super) fn finish(&self, fin: u64, exact: bool) -> Result<()> {
 		let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-		if state.fin.is_some_and(|prior| prior != fin) || state.reached > fin {
+		let agrees = match state.fin {
+			Some(prior) if exact => prior == fin,
+			Some(prior) => prior <= fin,
+			None => true,
+		};
+		if !agrees || state.reached > fin {
 			return Err(Error::ProtocolViolation);
 		}
-		state.fin = Some(fin);
+		if exact {
+			state.fin = Some(fin);
+		}
 		Ok(())
 	}
 
