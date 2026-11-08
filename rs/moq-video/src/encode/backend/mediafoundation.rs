@@ -228,10 +228,10 @@ impl MediaFoundation {
 	fn stream(&mut self) -> Result<&mut Stream, Error> {
 		match &mut self.phase {
 			Phase::Streaming(stream) => Ok(stream),
-			Phase::Unstarted => Err(Error::Codec(anyhow::anyhow!(
+			Phase::Unstarted => Err(Error::codec(anyhow::anyhow!(
 				"the mediafoundation encoder has not started"
 			))),
-			Phase::Ended => Err(Error::Codec(anyhow::anyhow!(
+			Phase::Ended => Err(Error::codec(anyhow::anyhow!(
 				"the mediafoundation encoder has ended its stream and takes no more frames"
 			))),
 		}
@@ -389,7 +389,7 @@ impl MediaFoundation {
 				reason = "the other surfaces exist only on some platforms and features"
 			)]
 			_ => {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"unsupported frame for mediafoundation encoder"
 				)));
 			}
@@ -776,7 +776,7 @@ fn enumerate_encoder(subtype: GUID) -> Result<IMFTransform, Error> {
 		.map_err(|e| mf_err("MFTEnumEx", e))?;
 	}
 	if count == 0 {
-		return Err(Error::Codec(anyhow::anyhow!("no hardware encoder found")));
+		return Err(Error::codec(anyhow::anyhow!("no hardware encoder found")));
 	}
 
 	let entries = unsafe { std::slice::from_raw_parts_mut(activates, count as usize) };
@@ -793,7 +793,7 @@ fn enumerate_encoder(subtype: GUID) -> Result<IMFTransform, Error> {
 		windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const std::ffi::c_void));
 	}
 
-	transform.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to activate encoder MFT")))
+	transform.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to activate encoder MFT")))
 }
 
 /// The Media Foundation output type for a codec: the format subtype enumerated
@@ -830,7 +830,7 @@ fn device_manager(device: &ID3D11Device) -> Result<IMFDXGIDeviceManager, Error> 
 	unsafe {
 		MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(|e| mf_err("MFCreateDXGIDeviceManager", e))?;
 	}
-	let manager = manager.ok_or_else(|| Error::Codec(anyhow::anyhow!("MFCreateDXGIDeviceManager returned null")))?;
+	let manager = manager.ok_or_else(|| Error::codec(anyhow::anyhow!("MFCreateDXGIDeviceManager returned null")))?;
 	unsafe {
 		manager
 			.ResetDevice(device, token)

@@ -68,6 +68,9 @@ pub(crate) struct VideoToolbox {
 	framerate_numerator: i32,
 	framerate_denominator: i64,
 	frame_index: i64,
+	/// A cut whose frame VideoToolbox dropped, carried to the next frame so the
+	/// group it asked for still opens.
+	keyframe_pending: bool,
 	applied: Applied,
 }
 
@@ -111,7 +114,7 @@ impl VideoToolbox {
 			let session = NonNull::new(session_ptr)
 				.filter(|_| status == 0)
 				.map(|p| unsafe { CFRetained::from_raw(p) })
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
+				.ok_or_else(|| Error::codec(anyhow::anyhow!("VTCompressionSessionCreate failed: {status}")))?;
 
 			// Every preset forbids reordering. A failure here cannot be fixed by downgrading.
 			set_bool(
@@ -198,7 +201,7 @@ impl VideoToolbox {
 			"opened video encoder"
 		);
 		let framerate_numerator = i32::try_from(config.framerate.numerator())
-			.map_err(|_| Error::Codec(anyhow::anyhow!("VideoToolbox frame-rate numerator exceeds i32")))?;
+			.map_err(|_| Error::codec(anyhow::anyhow!("VideoToolbox frame-rate numerator exceeds i32")))?;
 		Ok(Self {
 			session,
 			sink,
@@ -206,6 +209,7 @@ impl VideoToolbox {
 			framerate_numerator,
 			framerate_denominator: i64::from(config.framerate.denominator()),
 			frame_index: 0,
+			keyframe_pending: false,
 			applied,
 		})
 	}
@@ -234,6 +238,7 @@ impl Backend for VideoToolbox {
 		};
 		self.frame_index += 1;
 
+		let cut = cut || self.keyframe_pending;
 		let frame_properties = cut.then_some(&*self.force_keyframe);
 
 		let status = unsafe {
@@ -247,7 +252,7 @@ impl Backend for VideoToolbox {
 			)
 		};
 		if status != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"VTCompressionSessionEncodeFrame failed: {status}"
 			)));
 		}
@@ -255,16 +260,18 @@ impl Backend for VideoToolbox {
 		// Force this frame out; with no reordering there's nothing else pending.
 		let status = unsafe { self.session.complete_frames(kCMTimeInvalid) };
 		if status != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"VTCompressionSessionCompleteFrames failed: {status}"
 			)));
 		}
 
 		if let Some(status) = self.sink.error.take() {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"VideoToolbox encode callback failed: {status}"
 			)));
 		}
+		// A dropped frame comes back with no packet and no error.
+		self.keyframe_pending = cut && self.sink.packets.is_empty();
 		// `complete_frames` above forces this frame out before returning, so every
 		// packet collected here came from it and carries its timestamp.
 		Ok(std::mem::take(&mut self.sink.packets)
@@ -493,13 +500,13 @@ fn force_keyframe_dict() -> Result<CFRetained<CFDictionary>, Error> {
 			&objc2_core_foundation::kCFTypeDictionaryValueCallBacks,
 		)
 	}
-	.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build force-keyframe dictionary")))
+	.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build force-keyframe dictionary")))
 }
 
 fn set_property(session: &VTCompressionSession, key: &CFString, value: &CFType) -> Result<(), Error> {
 	let status = unsafe { VTSessionSetProperty(session, key, Some(value)) };
 	if status != 0 {
-		return Err(Error::Codec(anyhow::anyhow!("VTSessionSetProperty failed: {status}")));
+		return Err(Error::codec(anyhow::anyhow!("VTSessionSetProperty failed: {status}")));
 	}
 	Ok(())
 }
@@ -511,7 +518,7 @@ fn set_bool(session: &VTCompressionSession, key: &CFString, value: bool) -> Resu
 
 fn set_number(session: &VTCompressionSession, key: &CFString, value: i32) -> Result<(), Error> {
 	let number = unsafe { CFNumber::new(None, CFNumberType::SInt32Type, &value as *const i32 as *const c_void) }
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build CFNumber")))?;
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build CFNumber")))?;
 	set_property(session, key, number.as_ref())
 }
 

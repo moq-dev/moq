@@ -8,7 +8,7 @@ import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { Order } from "./order";
 import { type Identity, identity, type Listing, Publication, type Slot } from "./publication";
-import type { Kind, Rendition, RenditionStats } from "./rendition";
+import type { Kind, Rendition } from "./rendition";
 import { makeRendition } from "./rendition-internal";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
@@ -377,7 +377,7 @@ export class Broadcast {
 
 	// Name the stats track in the catalog and write a report every interval while someone subscribes.
 	// The track lives as long as the network broadcast, so disabling stats only stops reporting.
-	#runStats(effect: Effect, report: () => Report.Writer<Stats.Snapshot>) {
+	#runStats(effect: Effect, report: () => Report.Writer<Stats.Snapshot, Stats.SnapshotInput>) {
 		if (!effect.get(this.in.stats)) return;
 		const writer = report();
 
@@ -396,12 +396,12 @@ export class Broadcast {
 			if (demand.get(watched)) demand.get(this.in.probe);
 		});
 
-		effect.interval(() => writer.update(this.#stats() as Stats.Snapshot), Nano.fromMilli(Milli(Report.INTERVAL)));
+		effect.interval(() => writer.update(this.#stats()), Nano.fromMilli(Milli(Report.INTERVAL)));
 	}
 
 	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.
-	#stats(): { transport?: { rtt: number }; renditions: Record<string, RenditionStats> } {
-		const renditions: Record<string, RenditionStats> = Object.create(null);
+	#stats(): Stats.SnapshotInput {
+		const renditions: Record<string, Stats.RenditionInput> = Object.create(null);
 		for (const rendition of this.#renditions.peek().values()) {
 			const stats = rendition.stats.peek();
 			if (stats && rendition.config.peek() !== undefined) renditions[rendition.name] = stats;
@@ -472,7 +472,7 @@ export class Broadcast {
 		});
 
 		// Created on first use and kept with the broadcast, like a rendition's track.
-		let stats: Report.Writer<Stats.Snapshot> | undefined;
+		let stats: Report.Writer<Stats.Snapshot, Stats.SnapshotInput> | undefined;
 		const report = () => {
 			stats ??= new Report.Writer(broadcast, STATS_TRACK, Stats.SnapshotSchema);
 			return stats;

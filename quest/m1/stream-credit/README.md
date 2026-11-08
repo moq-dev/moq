@@ -37,8 +37,9 @@ which JS cannot raise; Chrome stalled at 103, Firefox at 100):
   quest until #7670 merges.
 
 - Decided 2026-11-07 (maintainer, /quest-plan from the API shape audit):
-  ✅ delete Rust's `StreamCredit` hook too, with no replacement hook
-  ([no-credit-hook](/quest/m1/stream-credit/no-credit-hook.md)). #7894's
+  ✅ delete Rust's `StreamCredit` hook too, with no replacement hook: a
+  transport's open waits only for credit, writing a WebTransport header as
+  the stream's first data. #7894's
   reversal removed the JS half; the Rust trait kept it because the open line
   reads it. Not chosen: keeping the hook and recording why.
 
@@ -49,4 +50,3 @@ receiving every group, and nothing hanging.
 ## Required
 
 - [Takeover](/quest/m1/stream-credit/takeover.md) - on lite-07 a higher-priority group takes over an acknowledged stream, and a group that lost its stream resumes
-- [Transports report no stream credit](/quest/m1/stream-credit/no-credit-hook.md) - `StreamCredit` and the `poll::Session::stream_credit` hook are gone, and the open line infers a credit wait from its own state

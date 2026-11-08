@@ -277,7 +277,7 @@ Its edge relay then advertises the covering namespace as it would forward that P
 SUBSCRIBE_TRACKS reaches it through that advertisement.
 The request stays open ({{moqt}} Section 3.6), so a namespace advertised later is covered when it is advertised.
 
-A receiver identifies a track by its namespace, its name, and, when MoQ Epoch is negotiated, its EPOCH.
+A receiver identifies a track by its namespace, its name, and, when MoQ Epoch is negotiated, its instance.
 It serves each demand for the track's objects, such as a downstream subscription, from the source Path Selection prefers among those eligible for that demand ({{selection}}), and resumes that source by sending REQUEST_UPDATE with Forward set to 1 on its subscription ({{moqt}} Section 9.5); once a source serves no demand, the receiver pauses it again with REQUEST_UPDATE setting Forward to 0.
 Demands usually share one source, but a downstream peer that the preferred path runs through is served from another, so several sources can be active at once.
 A later PUBLISH for the track that Path Selection prefers takes over the same way, but only where {{publishers}} allows moving a subscription between the two: the receiver resumes it for the demand it now serves and pauses a source left serving none.
@@ -291,8 +291,7 @@ Under this extension an advertisement is a path, so a session advertises a names
 A namespace names one broadcast whichever publisher serves it, so several publishers of it are redundant copies: their groups are one sequence, and a subscription moves between them without a gap.
 A publisher MUST NOT reuse a namespace for different content, and publishes a new instance under a new namespace instead.
 
-A session that negotiated MoQ Epoch names the instance instead: the namespace and EPOCH together name the content, so only advertisements with the same EPOCH are redundant copies, and a publisher MAY reuse the namespace for a new instance under a new EPOCH.
-A receiver MUST NOT move a subscription between advertisements with different EPOCHs, or between advertisements without one.
+A session that negotiated MoQ Epoch names the instance instead, so only advertisements of the same instance are redundant copies, and a publisher MAY reuse the namespace for a new instance (see draft-lcurley-moq-epoch).
 A refusal never moves to another publisher ({{selection}}).
 A relay that moves to another publisher MUST update its advertisement to the new path ({{updating}}).
 
@@ -344,7 +343,7 @@ The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a le
 
 ## moq-cluster-02
 - Hop IDs span 64 bits; a link whose integer encoding cannot carry one sends 0 in its place.
-- Exactly one NAMESPACE parameter block is appended when any extension that uses it is negotiated, holding the parameters of all of them. Under MoQ Epoch, only advertisements with the same EPOCH are redundant copies, and an update never changes the instance.
+- Exactly one NAMESPACE parameter block is appended when any extension that uses it is negotiated, holding the parameters of all of them. Under MoQ Epoch, only advertisements of the same instance are redundant copies, and an update never changes the instance.
 - A namespace names one broadcast whichever publisher serves it, and a publisher MUST NOT reuse one for different content. A receiver MAY fail a subscription over between any of its advertisements, continuing from the first object the subscriber lacks instead of at a group boundary. Replaces the first-Hop-ID publisher identity.
 - Defined request resolution against the longest covering prefix; every refusal is terminal, including between several publishers of one namespace, and capacity is signaled only by withdrawing or re-pricing the advertisement.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.

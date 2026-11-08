@@ -103,7 +103,7 @@ pub(crate) struct Openh264 {
 fn new_decoder() -> Result<Decoder, Error> {
 	let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
 	Decoder::with_api_config(OpenH264API::from_source(), config)
-		.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 decoder init: {e}")))
+		.map_err(|e| Error::codec(anyhow::anyhow!("openh264 decoder init: {e}")))
 }
 
 impl Openh264 {
@@ -118,7 +118,7 @@ impl Openh264 {
 	/// drain it through a method the [`Backend`] trait does not carry.
 	fn new(codec: Codec, _config: &Config) -> Result<Self, Error> {
 		if codec != Codec::H264 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"openh264 cannot decode {}",
 				codec.label()
 			)));
@@ -156,7 +156,7 @@ impl Openh264 {
 	fn picture_lost(&mut self, timestamp: Timestamp, err: &openh264::Error) -> Result<Vec<Frame>, Error> {
 		let state = i32::try_from(err.native_code()).unwrap_or(dsErrorFree);
 		if state == dsErrorFree || state & !PICTURE_LOST != 0 {
-			return Err(Error::Codec(anyhow::anyhow!("openh264 decode: {err}")));
+			return Err(Error::codec(anyhow::anyhow!("openh264 decode: {err}")));
 		}
 
 		if state & DECODER_RESET != 0 {
@@ -219,7 +219,7 @@ impl Openh264 {
 		let tail = self
 			.decoder
 			.flush_remaining()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 flush: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("openh264 flush: {e}")))?;
 		// `tail` borrows the decoder, so copy the pictures before taking their
 		// timestamps. The placeholder is replaced before any frame reaches a
 		// caller; an unstamped picture is dropped below.
@@ -255,7 +255,7 @@ impl Openh264 {
 fn picture(yuv: &impl YUVSource, timestamp: Timestamp) -> Result<Frame, Error> {
 	let (width, height) = yuv.dimensions();
 	if width % 2 != 0 || height % 2 != 0 {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"decoded frame has odd dimensions {width}x{height}, expected 4:2:0"
 		)));
 	}

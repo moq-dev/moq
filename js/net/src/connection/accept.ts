@@ -25,7 +25,7 @@ export interface AcceptProps {
 	/** Abort the handshake and release the transport; ignored after acceptance completes. */
 	signal?: AbortSignal;
 
-	/** The moq-lite version to select in a `moql` SETUP, instead of the client's first. */
+	/** The only moq-lite version to accept in a `moql` SETUP, instead of the client's first; refused unless the client offers it. */
 	version?: number;
 
 	/**
@@ -185,12 +185,7 @@ async function acceptNegotiated(
 	if (!stream) throw new Error("no incoming bidi stream for SETUP");
 
 	const client = await Lite.ClientSetup.decode(stream.reader);
-	const selected = version ?? client.versions.find(Lite.isNegotiated);
-	if (selected === undefined || !Lite.isNegotiated(selected)) {
-		throw new Error(
-			`no common version found; client offered: ${client.versions.map((v) => v.toString(16)).join(", ")}`,
-		);
-	}
+	const selected = select(client, version);
 
 	await new Lite.ServerSetup(selected).encode(stream.writer);
 	if (handsOff(selected)) {
@@ -198,4 +193,20 @@ async function acceptNegotiated(
 		return new Lite.Connection({ url, quic: transport, version: selected, ...wiring });
 	}
 	return new Lite.Connection({ url, quic: transport, version: selected, session: stream, ...wiring });
+}
+
+/**
+ * The moq-lite version a server answers a `moql` SETUP with: the client's first, or `pinned`
+ * only when the client offered it. Mirrors `setup::Client::select` in moq-net.
+ *
+ * @internal
+ */
+export function select(client: Lite.ClientSetup, pinned?: number): Lite.Version {
+	const selected = client.versions.find((v) => (pinned === undefined ? Lite.isNegotiated(v) : v === pinned));
+	if (selected === undefined || !Lite.isNegotiated(selected)) {
+		throw new Error(
+			`no common version found; client offered: ${client.versions.map((v) => v.toString(16)).join(", ")}`,
+		);
+	}
+	return selected;
 }

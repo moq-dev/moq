@@ -92,11 +92,9 @@ export namespace Audio {
 		kind: Audio.Kind;
 		track: Audio.StreamTrack;
 	}
-	export interface Stats {
-		bitrate?: number;
-		bytes: number;
-		frames: number;
-	}
+	export type Stats = Required<Pick<Hang.Stats.RenditionInput, "frames" | "bytes">> & {
+		bitrate?: NonNullable<Hang.Stats.RenditionInput["bitrate"]>;
+	};
 	export interface StreamTrack extends MediaStreamTrack {
 		clone(): Audio.StreamTrack;
 		getSettings(): Audio.TrackSettings;
@@ -215,16 +213,14 @@ export class Rendition<Config> {
 	readonly join: Signals.Signal<Clock.Milli | undefined>;
 	readonly kind: Kind;
 	readonly name: string;
-	readonly stats: Signals.Signal<RenditionStats | undefined>;
+	readonly stats: Signals.Signal<{
+		bitrate?: number | null | undefined;
+		bytes?: number | undefined;
+		frames?: number | undefined;
+		keyframes?: number | undefined;
+		skipped?: number | undefined;
+	} | undefined>;
 	readonly track: Signals.Getter<Net.Track.Producer | undefined>;
-}
-
-export interface RenditionStats {
-	bitrate?: number;
-	bytes?: number;
-	frames?: number;
-	keyframes?: number;
-	skipped?: number;
 }
 
 export * as Signals from "@moq/signals";
@@ -402,13 +398,9 @@ export namespace Video {
 		scale?: number;
 		track: Video.StreamTrack;
 	}
-	export interface Stats {
-		bitrate?: number;
-		bytes: number;
-		frames: number;
-		keyframes: number;
-		skipped: number;
-	}
+	export type Stats = Required<Pick<Hang.Stats.RenditionInput, "frames" | "bytes" | "keyframes" | "skipped">> & {
+		bitrate?: NonNullable<Hang.Stats.RenditionInput["bitrate"]>;
+	};
 	export interface StreamTrack extends MediaStreamTrack {
 		clone(): Video.StreamTrack;
 		getSettings(): Video.TrackSettings;

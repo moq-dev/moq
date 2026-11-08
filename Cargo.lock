@@ -3953,6 +3953,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libcrux-sha2"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86aa35d8fc9576a41df34af4d95d1f11186c1f65cd6c829329748915ea556d71"
+dependencies = [
+ "libcrux-hacl-rs",
+ "libcrux-macros",
+ "libcrux-traits",
+]
+
+[[package]]
 name = "libcrux-traits"
 version = "0.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7511,9 +7522,9 @@ dependencies = [
 
 [[package]]
 name = "rind"
-version = "0.1.12"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "422500e50252ad3bd319f359c54431441711a8fd55cb228973dde123ff8c2039"
+checksum = "5b1b559e7ba7aa39bc4aa9b581dd2254919b3434d50669898bb8c8e7b154cfb8"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",
@@ -7524,14 +7535,15 @@ dependencies = [
  "libcrux-hacl-rs",
  "libcrux-macros",
  "libcrux-poly1305",
+ "libcrux-sha2",
  "libcrux-traits",
 ]
 
 [[package]]
 name = "rind-jsonwebtoken"
-version = "0.1.2"
+version = "11.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3dbbb3e3d229205e18f9a5b3ee418071a29eacdb61aec66a5f34eeffef8e55f"
+checksum = "dd34e9d4695a1a34a4d8fc31d3db5acda9a24cfd2ca90ffbd36f7c62dc4bb7eb"
 dependencies = [
  "jsonwebtoken",
  "pkcs1",
@@ -7540,9 +7552,9 @@ dependencies = [
 
 [[package]]
 name = "rind-object-store"
-version = "0.1.2"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd6733c2630ffae76432b1d1a9c4e43febf2a4959292e43c9a922978f11b550a"
+checksum = "9150c3274a6f8789e0cb6a971cd22bae40698df54f596b9b663c18088ad144d5"
 dependencies = [
  "object_store",
  "rind",
@@ -7551,9 +7563,9 @@ dependencies = [
 
 [[package]]
 name = "rind-rcgen"
-version = "0.1.12"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b0f7d386858c030aff879c224a0c3d59b02e7ff953ca96214825a3e77ecba76"
+checksum = "8c29833453b6f7def587d905c234d65e9172045504b77300084614d5df23dfdf"
 dependencies = [
  "rcgen",
  "rind",
@@ -7563,9 +7575,9 @@ dependencies = [
 
 [[package]]
 name = "rind-rustls"
-version = "0.1.12"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e67845e30d1c9a194485cdcb585abf7dcc011a4413488d57634ec39d7e832f0"
+checksum = "8f91c7ed15f653d52782f482dbea8d2ec350b49ee88a911660acf539e7cf6752"
 dependencies = [
  "rind",
  "rustls",

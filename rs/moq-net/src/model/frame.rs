@@ -1732,7 +1732,7 @@ impl Consumer {
 			// Park on the group's channel; the producer notifies it on each write and
 			// on abort. Re-check the atomic on wake.
 			ready!(poll_state(&self.state, waiter, |state| {
-				if let Some(err) = &state.abort {
+				if let Some(err) = state.outcome.error() {
 					return Poll::Ready(Err(err.clone()));
 				}
 				let w = buf.written(Ordering::Acquire);
@@ -1775,7 +1775,7 @@ impl Consumer {
 			return Poll::Ready(Err(Error::Old));
 		}
 		ready!(poll_state(&self.state, waiter, |state| {
-			if let Some(err) = &state.abort {
+			if let Some(err) = state.outcome.error() {
 				return Poll::Ready(Err(err.clone()));
 			}
 			if buf.written(Ordering::Acquire) >= size {
@@ -1799,7 +1799,7 @@ where
 {
 	Poll::Ready(match ready!(state.poll(waiter, f)) {
 		Ok(res) => res,
-		Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		Err(state) => Err(state.outcome.error().cloned().unwrap_or(Error::Dropped)),
 	})
 }
 

@@ -40,7 +40,7 @@ impl Importer {
 					completion.complete(reusable);
 				}
 			})
-			.map_err(|e| Error::Codec(anyhow::anyhow!("start Vulkan/CUDA completion worker: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("start Vulkan/CUDA completion worker: {e}")))?;
 		let thread_id = thread.thread().id();
 		Ok(Self {
 			backend: Arc::new(Backend {
@@ -356,5 +356,5 @@ fn timeline_signal(value: u64) -> sys::CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS {
 }
 
 fn cuda(action: &'static str) -> impl FnOnce(cudarc::driver::result::DriverError) -> Error {
-	move |error| Error::Codec(anyhow::anyhow!("{action}: {error:?}"))
+	move |error| Error::codec(anyhow::anyhow!("{action}: {error:?}"))
 }
