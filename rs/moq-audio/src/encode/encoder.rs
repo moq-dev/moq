@@ -447,8 +447,7 @@ impl Encoder {
 	/// whose packet [`receive`](Self::receive) returns.
 	///
 	/// A codec that pipelines holds the packet past later frames; libopus and
-	/// PCM ready it at once. [`receive`](Self::receive) every ready packet before
-	/// the next frame: libopus refuses one while its last packet waits.
+	/// PCM ready it at once.
 	///
 	/// `pcm.len()` must equal `frame_size() * codec_channels()`. The
 	/// [`Producer`](super::Producer) handles format conversion and resampling

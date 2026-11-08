@@ -1,5 +1,7 @@
 //! Opus through libopus 1.3.1, via [`unsafe_libopus`].
 
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 use unsafe_libopus::{
 	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_RESET_STATE,
@@ -19,8 +21,8 @@ const MAX_PACKET_BYTES: usize = 4_000;
 pub(super) struct Libopus {
 	inner: *mut OpusEncoder,
 	scratch: Vec<u8>,
-	/// The packet submitted but not yet received: libopus readies each frame's at once.
-	ready: Option<Encoded>,
+	/// Packets submitted but not yet received, which reuse their slots across calls.
+	ready: VecDeque<Encoded>,
 	sample_rate: u32,
 	channels: u32,
 	frame_size: usize,
@@ -63,7 +65,7 @@ impl Libopus {
 		let mut backend = Self {
 			inner,
 			scratch: vec![0u8; MAX_PACKET_BYTES],
-			ready: None,
+			ready: VecDeque::new(),
 			sample_rate,
 			channels,
 			frame_size,
@@ -122,11 +124,6 @@ impl Libopus {
 
 impl Backend for Libopus {
 	fn encode(&mut self, pcm: &[f32]) -> Result<(), Error> {
-		if self.ready.is_some() {
-			return Err(Error::Unsupported(
-				"receive the ready packet before encoding the next frame".into(),
-			));
-		}
 		// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices are
 		// bounded by the lengths we pass, and the front end sized `pcm` to one frame.
 		let n = unsafe {
@@ -143,12 +140,12 @@ impl Backend for Libopus {
 		}
 		let payload = Bytes::copy_from_slice(&self.scratch[..n as usize]);
 		let activity = opus::activity(&payload, false);
-		self.ready = Some(Encoded { payload, activity });
+		self.ready.push_back(Encoded { payload, activity });
 		Ok(())
 	}
 
 	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
-		Ok(self.ready.take())
+		Ok(self.ready.pop_front())
 	}
 
 	/// libopus readies each frame's packet as soon as it is submitted.
@@ -160,7 +157,7 @@ impl Backend for Libopus {
 		// SAFETY: `inner` owns a live encoder and OPUS_RESET_STATE takes no arguments.
 		let rc = unsafe { opus_encoder_ctl_impl(self.inner, OPUS_RESET_STATE, varargs![]) };
 		debug_assert_eq!(rc, OPUS_OK, "OPUS_RESET_STATE failed with {rc}");
-		self.ready = None;
+		self.ready.clear();
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
