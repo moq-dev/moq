@@ -3,10 +3,10 @@
 // rule, and inside the copy, once it evicted what it received.
 import { expect, test } from "bun:test";
 import { Elapsed, Manual, Milli, Nano, sleep, timeout } from "@moq/clock";
+import { DEFAULT_EXPIRY } from "../cache.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
-import { CACHE_EXPIRY } from "../ledger.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -204,7 +204,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 
 			// Both caches age out what nobody touched, a prune slice past the window; only the
 			// live edge stays.
-			await clock.advance(Nano.fromMilli(Milli(CACHE_EXPIRY + 10_000)));
+			await clock.advance(Nano.fromMilli(Milli(DEFAULT_EXPIRY + 10_000)));
 			write(peer.track.createGroup(4n), 4n, "live");
 			expect((await first.recvGroup())?.sequence).toBe(4n);
 			const before = peer.fetches();
