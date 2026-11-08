@@ -114,7 +114,8 @@ pub(super) struct Subscriber {
 	/// The instances minted for the paths the peer advertises without one, shared by the
 	/// announce streams.
 	minted: Minted,
-	/// The identities the origin routes to over lite-07, whose hop chains are held back.
+	/// The identities the origin routes to over lite-07, whose chains are held back where
+	/// those routes reach.
 	known: kio::Shared<crate::route::node::Known>,
 }
 
@@ -747,6 +748,15 @@ impl Subscriber {
 		route
 	}
 
+	/// Whether the route the peer advertised at `path` names, in its chain, an identity
+	/// the origin routes to over lite-07 through a route that carries that path.
+	fn shadowed(&self, path: &Path, route: &crate::origin::RouteInfo) -> bool {
+		let Ok(path) = self.origin.root().join(path) else {
+			return false;
+		};
+		self.known.read().names(&route.hops, &path)
+	}
+
 	/// The announcing session's declared or assigned identity, for split-horizon.
 	///
 	/// A non-zero AnnounceOk origin is the declared id. Otherwise the caller-assigned
@@ -793,7 +803,7 @@ impl Subscriber {
 		// A re-price keeps the route's prefix (and its
 		// served paths) and re-prices in place. In-flight tracks keep flowing. A chain
 		// that now names an identity routed over lite-07 is offered, to be held back.
-		if !self.known.read().names(&metadata.hops)
+		if !self.shadowed(&path, &metadata)
 			&& let Some(entry) = announced.attached(&path)
 		{
 			entry.update(metadata);
@@ -9645,8 +9655,8 @@ enum Held {
 	/// Outside the session's limit: the route as advertised, attached once a
 	/// limit allows it.
 	Withheld(crate::origin::RouteInfo),
-	/// Its chain names an identity the origin routes to over lite-07: the route as
-	/// advertised, attached once no usable route to it is left. Filed now, it would be
+	/// Its chain names an identity the origin routes to over lite-07 through a route
+	/// that carries this path: the route as advertised, attached once none is left. Filed now, it would be
 	/// another copy of that identity's claim under this node's own, outliving its
 	/// withdrawal until this chain retracts too.
 	Shadowed(crate::origin::RouteInfo),
@@ -9700,7 +9710,7 @@ impl Announced {
 	/// session on demand, or hold it back when the session's limit does not cover it.
 	/// Returns whether it attached.
 	fn offer(&mut self, subscriber: &Subscriber, path: Path, route: crate::origin::RouteInfo) -> bool {
-		if subscriber.known.read().names(&route.hops) {
+		if subscriber.shadowed(&path, &route) {
 			tracing::debug!(route = %subscriber.log_path(&path), "holding back announce of an identity routed over lite-07");
 			self.routes.insert(path, Held::Shadowed(route));
 			return false;
@@ -9846,17 +9856,14 @@ impl Announced {
 	/// route whose chain now names such an identity, closing its sources, and offer every
 	/// held-back one whose chain no longer does, so the lite-06 path takes over.
 	fn reconsider(&mut self, subscriber: &Subscriber) {
-		let changed: Vec<Path> = {
-			let known = subscriber.known.read();
-			(self.routes.iter())
-				.filter(|(_, held)| match held {
-					Held::Attached(entry) => known.names(&entry.route.hops),
-					Held::Shadowed(route) => !known.names(&route.hops),
-					Held::Declined | Held::Withheld(_) => false,
-				})
-				.map(|(path, _)| path.clone())
-				.collect()
-		};
+		let changed: Vec<Path> = (self.routes.iter())
+			.filter(|(path, held)| match held {
+				Held::Attached(entry) => subscriber.shadowed(path, &entry.route),
+				Held::Shadowed(route) => !subscriber.shadowed(path, route),
+				Held::Declined | Held::Withheld(_) => false,
+			})
+			.map(|(path, _)| path.clone())
+			.collect();
 		for path in changed {
 			let mut route = match self.routes.remove(&path) {
 				Some(Held::Attached(entry)) => entry.route.clone(),

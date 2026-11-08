@@ -276,8 +276,39 @@ impl Peer {
 	/// claim lies within what this node asked it for and within its scope. A route
 	/// reaches an origin node, not each of its claims.
 	fn carries(&self, claim: &Path) -> bool {
-		self.asked.as_ref().is_none_or(|asked| within(claim, asked))
-			&& (self.link.scope.as_ref()).is_none_or(|scope| scope.regions.iter().any(|region| within(claim, region)))
+		carries(
+			self.asked.as_ref(),
+			self.link.scope.as_ref().map(|scope| &scope.regions[..]),
+			claim,
+		)
+	}
+
+	fn carried(&self) -> Carried {
+		Carried {
+			asked: self.asked.clone(),
+			regions: self.link.scope.as_ref().map(|scope| scope.regions.clone()),
+		}
+	}
+}
+
+/// Whether `claim` lies within the prefix `asked` of a neighbor and within its scope's
+/// `regions`, either unbounded when `None`.
+fn carries(asked: Option<&Path>, regions: Option<&[Path]>, claim: &Path) -> bool {
+	asked.is_none_or(|asked| within(claim, asked))
+		&& regions.is_none_or(|regions| regions.iter().any(|region| within(claim, region)))
+}
+
+/// Which claims one route can carry; see [`Router::carried`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Carried {
+	asked: Option<Path>,
+	regions: Option<Vec<Path>>,
+}
+
+impl Carried {
+	/// Whether a claim at `claim` goes through this route.
+	pub fn carries(&self, claim: &Path) -> bool {
+		carries(self.asked.as_ref(), self.regions.as_deref(), claim)
 	}
 }
 
@@ -867,6 +898,20 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 			.filter(|(_, entry)| !entry.held && self.feasible(id, entry.advert))
 			.filter(|(next, _)| self.neighbors[*next].carries(claim))
 			.filter_map(|(&next, entry)| Some((next, add(entry.advert.metric, self.neighbors[&next].link.cost)?)))
+			.collect()
+	}
+
+	/// What each usable feasible route to `id` can carry, as [`Self::routes`] filters
+	/// it per claim. Empty for an identity this node serves itself or has no usable
+	/// route to.
+	pub fn carried(&self, id: Id) -> Vec<Carried> {
+		if self.origins.contains_key(&id) {
+			return Vec::new();
+		}
+		(self.rx.get(&id).into_iter().flatten())
+			.filter(|(_, entry)| !entry.held && self.feasible(id, entry.advert))
+			.filter(|(next, entry)| add(entry.advert.metric, self.neighbors[*next].link.cost).is_some())
+			.map(|(next, _)| self.neighbors[next].carried())
 			.collect()
 	}
 

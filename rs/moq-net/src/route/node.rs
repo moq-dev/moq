@@ -15,7 +15,7 @@
 //! only once another serves it, so the origin always holds a route for it.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
 	sync::{Arc, Mutex, MutexGuard},
 	task::{Poll, ready},
 };
@@ -24,7 +24,7 @@ use crate::{Instance, Path};
 
 use rand::RngExt;
 
-use super::{Error, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
+use super::{Carried, Error, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
 
 /// One announce stream in one direction.
 pub(crate) type Key = u64;
@@ -89,19 +89,22 @@ pub(crate) enum Output {
 	Unserve { id: Id, claim: Path },
 }
 
-/// The lite-06 hops of the identities a node routes to over lite-07, so its
-/// older-version sessions recognize a hop chain that names one.
+/// The identities a node routes to over lite-07, by the lite-06 hop each travels
+/// as, and what their usable routes can carry, so its older-version sessions
+/// recognize a hop chain that names one.
 #[derive(Debug, Default)]
 pub(crate) struct Known {
-	hops: HashSet<crate::Hop>,
+	hops: HashMap<crate::Hop, Vec<Carried>>,
 	/// Bumped on every change, for a reader to tell when to look again.
 	epoch: u64,
 }
 
 impl Known {
-	/// Whether `hops` names an identity with a usable lite-07 route.
-	pub fn names(&self, hops: &crate::Hops) -> bool {
-		hops.iter().any(|hop| self.hops.contains(hop))
+	/// Whether `hops` names an identity with a usable lite-07 route that carries a
+	/// claim at the absolute `path`.
+	pub fn names(&self, hops: &crate::Hops, path: &Path) -> bool {
+		(hops.iter().filter_map(|hop| self.hops.get(hop)))
+			.any(|carried| carried.iter().any(|route| route.carries(path)))
 	}
 
 	pub fn epoch(&self) -> u64 {
@@ -321,8 +324,8 @@ struct State {
 	queues: Queues,
 	/// Each shown claim of another identity, and the streams serving it.
 	homes: BTreeMap<(Id, Path), Home>,
-	/// The other identities with a usable route, and the hop each travels as.
-	routed: BTreeMap<Id, crate::Hop>,
+	/// The other identities with a usable route, and what those routes carry.
+	routed: BTreeMap<Id, Vec<Carried>>,
 	known: kio::Shared<Known>,
 }
 
@@ -644,15 +647,23 @@ impl State {
 			if Some(id) == declared {
 				continue;
 			}
-			known |= match self.router.selected(id).is_some() {
-				true => self.routed.insert(id, hop(id)).is_none(),
-				false => self.routed.remove(&id).is_some(),
+			let carried = self.router.carried(id);
+			known |= match carried.is_empty() {
+				true => self.routed.remove(&id).is_some(),
+				false => self.routed.insert(id, carried.clone()).as_ref() != Some(&carried),
 			};
 			self.home(id);
 		}
 		if known {
 			let mut published = self.known.lock();
-			published.hops = self.routed.values().copied().collect();
+			published.hops.clear();
+			for (id, carried) in &self.routed {
+				published
+					.hops
+					.entry(hop(*id))
+					.or_default()
+					.extend(carried.iter().cloned());
+			}
 			published.epoch += 1;
 		}
 	}
@@ -802,6 +813,34 @@ mod tests {
 		(outputs.into_iter())
 			.filter(|output| matches!(output, Output::Serve { .. } | Output::Unserve { .. }))
 			.collect()
+	}
+
+	/// What a node publishes for its older-version sessions: the route it holds to
+	/// another identity, by that identity's lite-06 hop, only where that route carries
+	/// a claim. A withdrawn claim leaves the route, and losing the route clears it.
+	#[test]
+	fn known_names_a_routed_identity_where_its_route_carries() {
+		let known = kio::Shared::<Known>::default();
+		let (origin, relay) = (Node::new(1, 1), Node::publishing(2, 2, known.clone()));
+		let answer = origin.answer(Link::default(), p("live")).unwrap();
+		let receive = relay.receive(Link::default(), p("live")).unwrap();
+		origin.own(p("live/x"), Some(claim(&Instance::random(), 5)), None);
+		pump(&answer, &receive);
+		let mut chain = crate::Hops::new();
+		chain.push(hop(1)).unwrap();
+		let names = |path| known.read().names(&chain, &p(path));
+		assert!(names("live/x"));
+		assert!(names("live/y"), "a route reaches the node, not each of its claims");
+		assert!(!names("other/x"), "nothing asked of the peer there");
+
+		origin.own(p("live/x"), None, None);
+		pump(&answer, &receive);
+		assert!(names("live/x"), "a withdrawal keeps the route");
+
+		let epoch = known.read().epoch();
+		drop(receive);
+		assert!(!names("live/x"));
+		assert!(known.read().epoch() > epoch);
 	}
 
 	#[test]
