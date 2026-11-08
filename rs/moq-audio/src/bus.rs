@@ -380,7 +380,7 @@ impl Bus {
 	}
 
 	/// Add a source on the bus's own clock, whose every write says the bus
-	/// position its first frame is mixed at, as [`channel`](Self::channel) adds
+	/// position its first frame is mixed at, as [`live`](Self::live) adds
 	/// one running on a clock of its own.
 	///
 	/// For audio scheduled against something else on the bus's clock, such as
@@ -388,7 +388,7 @@ impl Bus {
 	/// and its position, and no drift correction to move it.
 	///
 	/// Refuses `input` at another rate than the bus's, which positions count
-	/// frames of, and a strip as [`channel`](Self::channel) does.
+	/// frames of, and a strip as [`live`](Self::live) does.
 	pub fn positioned(&self, input: Input, strip: Strip) -> Result<Positioned, Error> {
 		let sample_rate = self.inner.config.sample_rate;
 		if input.sample_rate != sample_rate {
