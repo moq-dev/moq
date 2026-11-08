@@ -178,7 +178,6 @@ owns that feedback.
 
 ## Required
 
-- [io_uring runs an application's controller](/quest/m3/quic-realtime/uring-controller.md) - moq-uring takes a controller factory, so the winner installs the same way on both runtimes
 - [moqsink encoder feedback](/quest/m3/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate
 
 ## Related

@@ -28,6 +28,8 @@ behind a new optional audio `mediacodec` feature and the decode seam, on `target
 - The binding ships in the moq-ffi Android slice, which is how Kotlin and Dart
   reach it.
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [audio-codec-seam](/quest/m2/audio-codec-seam.md) makes moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break.
+
 ## Related
 
 - [Android capture](/quest/m3/mobile-capture-android.md) - the video MediaCodec family this sits beside

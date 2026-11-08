@@ -54,4 +54,4 @@ The fix is history rather than a withhold rule:
 
 ## Required
 
-- [Plan: recovery boundaries](/quest/m3/intra-refresh/plan-boundary.md) - K derives from `warmup`, which must be a safe upper bound
+- [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - K derives from `warmup`, which must be a safe upper bound

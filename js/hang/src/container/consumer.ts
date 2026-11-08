@@ -201,9 +201,6 @@ export class Consumer {
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
 	#mediaGroup?: bigint;
-	// The group of the last declared end read, until a frame from a later group resumes the timeline.
-	// Not at the next frame: the stopped encoder's final packets may follow the end in its group.
-	#paused?: bigint;
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	#lost = false;
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
@@ -539,6 +536,9 @@ export class Consumer {
 		const start = this.#groups[0]?.consumer.sequence;
 		// The span left after each further skip, computed once the first skip shows more may follow.
 		let spans: Spans | undefined;
+		// The index of the first stamped group past the head, kept across skips so a run of unstamped
+		// groups ahead of it stays linear: each skip shifts it down one, and only a skip onto it rescans.
+		let stamped = 0;
 
 		// Keep skipping the oldest group while the buffered span exceeds the max delay.
 		// This also handles gaps in group sequence numbers: if #active points to a missing
@@ -571,25 +571,32 @@ export class Consumer {
 
 			const age = max - min;
 			if (age <= threshold) break;
-			// Until the reader warms, a group may cover the start's reach though it began before it.
-			if (this.#warming()) {
-				const nextStart = this.#groups[1].start;
-				if (nextStart === undefined) break;
-				if (this.#edge === undefined) {
-					// Before the first item, a backlog that landed whole starts within the budget, so only
-					// the group covering the live edge less the reach is kept: one whose successor starts
-					// past that point. Rust's start skip, in `Consumer::poll_event_once`, measures the same.
-					// `max` is the live edge of the groups left, so this stays O(1) per skip.
+			if (this.#edge === undefined) {
+				// Until the reader warms, a group may cover the start's reach though it began before it.
+				// Before the first item, a backlog that landed whole starts within the budget, so only
+				// the group covering the live edge less the reach is kept: one whose successor starts
+				// past that point. Rust's start skip, in `Consumer::poll_event_once`, measures the same.
+				// `max` is the live edge of the groups left, so this stays O(1) per skip.
+				if (this.#warming()) {
+					const successor = this.#groups[1].start;
+					if (successor === undefined) break;
 					const target = this.#startTarget(this.#reach(this.#delay.peek()), max);
-					if (target !== undefined && nextStart > target) break;
-				} else if (max - nextStart < threshold) {
-					// Once reading began, it is stale only once its successor starts a whole budget behind
-					// the newest content.
-					break;
+					if (target !== undefined && successor > target) break;
 				}
+			} else {
+				// Once reading began, the head is stale only once the first stamped group past it starts a
+				// whole budget behind the newest content: everything the head and any group between could
+				// still present ends there. Its own first frame is no bound, since the skip moves the cursor
+				// past every missing group in between, which a group arriving below it then never delivers.
+				// An unstamped group between ages out on a later pass, as the head. Mirrors Rust's skip of
+				// a blocking group, which measures from `poll_next_group`.
+				if (stamped < 1) stamped = this.#groups.findIndex((group, i) => i > 0 && group.start !== undefined);
+				const successor = stamped < 1 ? undefined : this.#groups[stamped].start;
+				if (successor === undefined || max - successor < threshold) break;
 			}
 
 			this.#groups.shift();
+			stamped--;
 			this.#active = this.#groups[0]?.consumer.sequence;
 
 			const next = this.#groups[0];
@@ -828,11 +835,13 @@ export class Consumer {
 			// only applies at startup.
 			// Otherwise promote #active when the first buffered group continues the timeline we left off at,
 			// when a completed empty group can be walked (empty groups mean nothing), or when the hole
-			// is proven: the head already reaches past where presentation left off by more than the
-			// max delay, so anything still missing in between would arrive too old to play. Proving it
-			// here matters: #checkMaxDelay would instead drop the head, the very group to play next.
-			// A declared end proves nothing: the jump past it is the pause, and the media that resumes
-			// it may still be in flight behind the group after it.
+			// is proven: everything a missing group could still present ends where the first group past
+			// it begins, so once that start falls a whole max delay behind the newest content, all of it
+			// would arrive too old to play. Mirrors Rust's `aged`. Where presentation left off proves only
+			// the oldest of it stale, and groups go out newest first, so a flush's newest group lands just
+			// ahead of the groups behind it, which would then arrive below the cursor and never play.
+			// Proving it here matters: #checkMaxDelay would instead drop the head, the very group to play
+			// next.
 			// After track termination no missing group can arrive, so drain across any remaining gap.
 			// A missing sequence also expires on elapsed monotonic time, so timestamp-free markers
 			// behind a hole can end a paused track without more arrivals. It is late since a group
@@ -847,29 +856,16 @@ export class Consumer {
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
 					const maxDelay = maxMicros(this.#delay.peek());
-					const skipHole =
-						head.frames.length > 0 &&
-						(maxDelay === 0 ||
-							(this.#paused === undefined &&
-								this.#presentedEnd !== undefined &&
-								head.latest !== undefined &&
-								head.latest - this.#presentedEnd > maxDelay));
+					const bound = this.#groups.find((group) => group.start !== undefined)?.start;
+					const edge = this.#liveEdge();
+					const aged = bound !== undefined && edge !== undefined && edge - bound >= maxDelay;
 					const elapsed = Instant.durationSince(now(), this.#hole) >= maxDelay * 1000;
 					// The ranges ask for nothing in between, so nothing there is owed.
 					const next = this.#track.nextInRange(this.#active);
 					const excluded = next === undefined || next >= head.consumer.sequence;
 					// The groups past the hole already fill the max buffer, so it can hold none of what would arrive into it.
 					const full = this.#full();
-					if (
-						startup ||
-						empty ||
-						contiguous ||
-						skipHole ||
-						elapsed ||
-						excluded ||
-						full ||
-						ended !== undefined
-					) {
+					if (startup || empty || contiguous || aged || elapsed || excluded || full || ended !== undefined) {
 						if (!contiguous && !empty) {
 							this.#lost = true;
 							if (!startup) {
@@ -1084,8 +1080,6 @@ export class Consumer {
 		const edge = this.#edge;
 		const lost = this.#lost;
 		this.#lost = false;
-		if (read.kind === "end") this.#paused = read.group;
-		else if (this.#paused !== undefined && read.group > this.#paused) this.#paused = undefined;
 		this.#advance(read.kind === "frame" ? Micro(resume + (read.frame.duration ?? Micro.zero)) : resume);
 		if (!lost || edge === undefined) return read;
 

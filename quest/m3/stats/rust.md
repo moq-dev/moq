@@ -63,6 +63,8 @@
   TS release section holds the drops (from
   [moq-dev/moq#6654](https://github.com/moq-dev/moq/pull/6654)).
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): a gateway takes its report and echo as fields on its request struct or on `moq_mux::Ingest` ([gateway-ingest](/quest/m2/gateway-ingest.md)), not as `with_report` and `with_echo` builders.
+
 ## Related
 
 - [Encrypted native CLI](/quest/m5/e2ee/cli.md) - refuses stats and feedback on an encrypted broadcast

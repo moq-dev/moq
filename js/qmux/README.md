@@ -67,6 +67,11 @@ Any already-accepted `WebSocket` works - `Deno.upgradeWebSocket`, Node's `ws`, o
 when `selectSubprotocol` returns `undefined`. If your host doesn't expose the
 negotiated value on the socket, pass it explicitly as `{ protocol }`.
 
+Each WebSocket message carries one QMux record, so cap the host's message size at one record where it
+allows it, and an oversized message is refused before it is buffered. With `ws`, set `maxPayload` to
+the larger of `config.maxRecordSize` (16382 by default) and 16384, draft-00's frame limit. The
+session refuses a larger message anyway, but only after the host buffered it whole.
+
 The result is an ordinary `WebTransport`: the only difference from a client session is which half of
 the stream-id space each side owns.
 

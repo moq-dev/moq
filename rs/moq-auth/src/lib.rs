@@ -25,6 +25,8 @@
 
 mod algorithm;
 mod claims;
+#[cfg(test)]
+mod corpus;
 mod crypto;
 mod error;
 mod fs;

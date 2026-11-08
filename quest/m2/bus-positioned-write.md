@@ -8,7 +8,7 @@ copying the bus's private latency and padding rules.
 
 ## Plan
 
-Decided 2026-11-05 (maintainer, on moq-dev/studio's /quest-plan): m3, since the studio is a named consumer that is not urgent.
+Decided 2026-11-05 (maintainer, on moq-dev/studio's /quest-plan): m3, since the studio is a named consumer that is not urgent. Moved to m2: Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests). `moq_audio::bus` is new since `release`, so the cut publishes `Channel::write` for the first time, and this break after it would cost another moq-audio major. If the positioned-write semantics can't settle in time, land `write(Write { position: Option<u64>, data })` so positioning is additive.
 
 - ✅ **Positioned writes**, a breaking change to `Channel::write`.
   Rejected: exposing a channel's buffered depth and latency, which leaves the
