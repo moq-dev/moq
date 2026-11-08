@@ -51,9 +51,7 @@ impl DropSet {
 		let track = broadcast.create_track("drops", track::Info::default()).unwrap();
 		let stride = span + 1;
 		let from = runs.saturating_sub(reported) * stride;
-		let mut readers: Vec<_> = (0..readers)
-			.map(|_| track.subscribe(None).with_range(from..))
-			.collect();
+		let mut readers: Vec<_> = (0..readers).map(|_| track.subscribe(None).with_range(from..)).collect();
 		for run in 0..runs {
 			track.drop_groups(run * stride..run * stride + span, crate::StreamError::Old);
 		}

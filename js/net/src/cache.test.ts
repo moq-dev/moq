@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import * as cache from "./cache.ts";
-import { StreamCode, TooFarBehind } from "./error.ts";
+import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
@@ -272,5 +272,71 @@ test("the debt sheds the front of an open live edge", async () => {
 		expect(pool.used).toBeLessThanOrEqual(capacity + 512 * 1024);
 		// A reader that never read lost the shed front.
 		await expect(behind?.readFrame()).rejects.toThrow();
+	});
+});
+
+// Every run a fresh reader of `producer` is told was given up: what the track still holds.
+function dropsHeld(producer: TrackProducer): bigint[] {
+	const reader = producer.subscribe({ delay: { max: null } });
+	const held: bigint[] = [];
+	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) held.push(run.start);
+	reader.close();
+	return held;
+}
+
+const old = () => ({ error: new StreamError(StreamCode.Old) });
+
+// A drop-only flood of disjoint runs bills the pool and sheds its lowest runs to stay within it,
+// with no cached group to evict; a shed run is unknown again, so a reader reports only the runs
+// the track still holds. Mirrors Rust `a_drop_flood_stays_within_the_pool`.
+test("a drop flood stays within the pool", () => {
+	const runs = 1000n;
+	const capacity = 64 * cache.RUN_OVERHEAD;
+	const pool = new cache.Pool({ capacity });
+	const producer = pooled(pool);
+	const reader = producer.subscribe({ delay: { max: null } });
+	const reported: bigint[] = [];
+	for (let run = 0n; run < runs; run++) {
+		hooks.dropTrackGroups(producer, 2n * run, 2n * run + 1n, old());
+		expect(pool.used).toBeLessThanOrEqual(capacity + 2 * cache.RUN_OVERHEAD);
+		// Midway, the reader takes in every run held then and reports the lowest; the rest are
+		// shed before it reports them.
+		if (run === runs / 2n) {
+			const first = hooks.tryDrop(reader);
+			if (!first) throw new Error("a run is owed");
+			reported.push(first.start);
+		}
+	}
+	const held = dropsHeld(producer);
+	expect(pool.used).toBe(held.length * cache.RUN_OVERHEAD);
+	expect(held[0]).toBeGreaterThan(0n);
+	expect(held.every((start, i) => i === 0 || start === held[i - 1] + 2n)).toBe(true);
+	expect(held[held.length - 1]).toBe(2n * (runs - 1n));
+	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) reported.push(run.start);
+	expect(reported.slice(1)).toEqual(held);
+});
+
+// A run given up longer than the pool's idle window ago is forgotten by the sweep, even on a
+// track that caches nothing, and a run given up since stays. Mirrors Rust
+// `the_sweep_forgets_runs_past_the_expiry_window`.
+test("the sweep forgets runs past the idle window", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const producer = pooled(pool);
+		hooks.dropTrackGroups(producer, 0n, 1n, old());
+		hooks.dropTrackGroups(producer, 2n, 3n, old());
+		await clock.advance(500);
+		hooks.dropTrackGroups(producer, 4n, 5n, old());
+		// Each run and its expiry are billed.
+		expect(pool.used).toBe(3 * (cache.RUN_OVERHEAD + cache.BORN_OVERHEAD));
+
+		// The sweep at 1.5 s forgets the first two, given up at 0 s.
+		await clock.advance(1_000);
+		expect(dropsHeld(producer)).toEqual([4n]);
+		expect(pool.used).toBe(cache.RUN_OVERHEAD + cache.BORN_OVERHEAD);
+
+		await clock.advance(1_000);
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(pool.used).toBe(0);
 	});
 });

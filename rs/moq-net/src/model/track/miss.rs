@@ -94,6 +94,12 @@ pub(super) struct Misses {
 	evictions: u64,
 	/// Judged again after an eviction, within the judged span: never refilled twice.
 	refilled: RangeSet<u64>,
+	/// The last sequence of the highest received stale run above the newest group that this
+	/// reader cannot trust, as of [`Self::unknown_at`]; see [`Self::unknown`].
+	unknown: Option<u64>,
+	/// The drops revision, judged revision, budget, and coverage [`Self::unknown`] was found
+	/// under: while the terms hold, only the runs changed since are looked at.
+	unknown_at: Option<(u64, u64, Duration, super::Coverage)>,
 }
 
 /// A run of misses the reader gives up, for the drop cursor to name, with the budget it was
@@ -604,6 +610,54 @@ impl Misses {
 		clippy::too_many_arguments,
 		reason = "one probe's inputs, borrowed apart from its cursor"
 	)]
+	/// The last sequence of the highest received stale run above the newest group that `drift`
+	/// does not settle. While the terms hold and the run it found still stands, only the runs
+	/// changed since are looked at, so a drop costs each reader the runs it touches.
+	fn unknown(&mut self, state: &TrackState, drift: &Drift) -> Option<u64> {
+		let above = |run: &ops::Range<u64>| state.newest_produced.is_none_or(|newest| run.end - 1 > newest);
+		let unsettled = |run: &ops::Range<u64>, hole| above(run) && !drift.settles(state, run.start, hole);
+		let revision = state.drops_changes.revision();
+		let since = self
+			.unknown_at
+			.as_ref()
+			.filter(|(_, judged, budget, coverage)| {
+				*judged == state.judged_revision && *budget == drift.budget && *coverage == drift.coverage
+			})
+			.map(|(seen, ..)| *seen)
+			// The newest group only rises, so the run found stays the highest unless it fell
+			// below it or changed.
+			.filter(|_| {
+				self.unknown.is_none_or(|top| {
+					state
+						.drops
+						.get_key_value(&top)
+						.is_some_and(|(run, hole)| unsettled(run, hole))
+				})
+			});
+		self.unknown = match since {
+			Some(seen) => {
+				let mut unknown = self.unknown;
+				for changed in state.drops_changes.since(seen) {
+					for (run, hole) in state.drops.overlapping(&changed) {
+						if unsettled(run, hole) {
+							unknown = unknown.max(Some(run.end - 1));
+						}
+					}
+				}
+				unknown
+			}
+			None => state
+				.drops
+				.iter()
+				.rev()
+				.take_while(|(run, _)| above(run))
+				.find(|(run, hole)| !drift.settles(state, run.start, hole))
+				.map(|(run, _)| run.end - 1),
+		};
+		self.unknown_at = Some((revision, state.judged_revision, drift.budget, drift.coverage.clone()));
+		self.unknown
+	}
+
 	pub fn judge(
 		&mut self,
 		state: &TrackState,
@@ -630,13 +684,7 @@ impl Misses {
 		// it arrived: only an update brings it back otherwise, and a reader narrower than the
 		// upstream's terms changes none. See `TrackState::unfed`. Only runs above the newest
 		// group need a look.
-		let unknown = state
-			.drops
-			.iter()
-			.rev()
-			.take_while(|(run, _)| state.newest_produced.is_none_or(|newest| run.end - 1 > newest))
-			.find(|(run, hole)| !drift.settles(state, run.start, hole))
-			.map(|(run, _)| run.end - 1);
+		let unknown = self.unknown(state, drift);
 		let Some(newest) = state.newest_produced.max(bound).max(unknown) else {
 			return asks;
 		};

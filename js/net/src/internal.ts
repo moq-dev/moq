@@ -223,7 +223,7 @@ export interface DropRun extends Run, Hole {
 }
 
 /** Whether two runs say the same thing, so they may merge. */
-function sameHole(a: DropRun, b: DropRun): boolean {
+export function sameHole(a: DropRun, b: DropRun): boolean {
 	return (
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
@@ -724,7 +724,7 @@ export const hooks: {
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
-	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown> };
+	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
 	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
 	 * new terms superseded is gone. Mirrors the Rust crate-private `track::Subscriber::stale_held`.

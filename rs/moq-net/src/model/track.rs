@@ -678,7 +678,8 @@ pub(crate) struct TrackState {
 	// At most the lowest tick in `drops_born`, so an expiry scan finds nothing to forget
 	// without walking it.
 	drops_oldest: Option<u64>,
-	// What `drops` and `drops_born` bill to the pool: [`RUN_OVERHEAD`] per entry. Paying
+	// What `drops` and `drops_born` bill to the pool: [`RUN_OVERHEAD`] and [`BORN_OVERHEAD`]
+	// per entry. Paying
 	// eviction debt sheds the lowest runs, and the expiry scan forgets those older than the
 	// pool's window; either leaves their sequences unknown again.
 	drops_bill: cache::Extra,
@@ -962,15 +963,16 @@ impl Slot {
 pub(super) const CACHE_OVERHEAD: u64 =
 	2 * (2 * size_of::<u64>() + size_of::<Slot>() + size_of::<(u64, Timestamp)>() + 2 * size_of::<(u64, u32)>()) as u64;
 
-/// Heap the track keeps per run of its drop set: the run and its reason in `drops`, its two
-/// entries in `drops_changes`, and its expiry in `drops_born`, billed per entry of either map.
-/// Doubled for half-full `BTreeMap` nodes, as [`CACHE_OVERHEAD`] is. Billed to the pool, so a peer fragmenting its drops into runs costs
+/// Heap the track keeps per run of its drop set: the run and its reason in `drops`, and its
+/// two entries in `drops_changes`. Doubled for half-full `BTreeMap` nodes, as
+/// [`CACHE_OVERHEAD`] is. Billed to the pool, so a peer fragmenting its drops into runs costs
 /// what the cache would hold, never more.
-pub(super) const RUN_OVERHEAD: u64 = 2
-	* (size_of::<(ops::Range<u64>, Hole)>()
-		+ size_of::<(u64, (u64, u64))>()
-		+ size_of::<(u64, u64)>()
-		+ size_of::<(ops::Range<u64>, u64)>()) as u64;
+pub(super) const RUN_OVERHEAD: u64 =
+	2 * (size_of::<(ops::Range<u64>, Hole)>() + size_of::<(u64, (u64, u64))>() + size_of::<(u64, u64)>()) as u64;
+
+/// Heap the track keeps per entry of its drop set's expiry index, `drops_born`, doubled as
+/// [`RUN_OVERHEAD`] is.
+pub(super) const BORN_OVERHEAD: u64 = 2 * size_of::<(ops::Range<u64>, u64)>() as u64;
 
 /// Where the groups this hop holds start, for resolving time anchors: ordered lookups in
 /// the starts index and the cache, so no query walks more than the run it answers.
@@ -1402,7 +1404,8 @@ impl TrackState {
 			affected.end = affected.end.max(run.end);
 		}
 		let entries = |state: &Self, affected: &ops::Range<u64>| {
-			(state.drops.overlapping(affected).count() + state.drops_born.overlapping(affected).count()) as u64
+			state.drops.overlapping(affected).count() as u64 * RUN_OVERHEAD
+				+ state.drops_born.overlapping(affected).count() as u64 * BORN_OVERHEAD
 		};
 		let before = entries(self, &affected);
 		match hole {
@@ -1414,7 +1417,10 @@ impl TrackState {
 					// than the window after it was given up.
 					let quarter = (max_ticks / 4).max(1);
 					let now = self.cache.pool().now();
-					let expires = (now / quarter).saturating_add(1).saturating_mul(quarter).saturating_add(max_ticks);
+					let expires = (now / quarter)
+						.saturating_add(1)
+						.saturating_mul(quarter)
+						.saturating_add(max_ticks);
 					self.drops_born.insert(groups, expires);
 					self.drops_oldest = Some(self.drops_oldest.map_or(expires, |oldest| oldest.min(expires)));
 				}
@@ -1429,9 +1435,9 @@ impl TrackState {
 		}
 		let after = entries(self, &affected);
 		if after > before {
-			self.drops_bill.add((after - before) * RUN_OVERHEAD);
+			self.drops_bill.add(after - before);
 		} else {
-			self.drops_bill.sub((before - after) * RUN_OVERHEAD);
+			self.drops_bill.sub(before - after);
 		}
 		self.drops_revision += 1;
 	}
@@ -7674,10 +7680,7 @@ impl DropCursor {
 			// again: only the part the track still holds as it was folded in is owed.
 			let range = match pending.received {
 				true => {
-					let Some((held, _)) = state
-						.drops
-						.overlapping(&range)
-						.find(|(_, hole)| **hole == pending.hole)
+					let Some((held, _)) = state.drops.overlapping(&range).find(|(_, hole)| **hole == pending.hole)
 					else {
 						continue;
 					};
@@ -19864,8 +19867,13 @@ mod test {
 		let settling = producer.state.downgrade().upgrade().expect("open");
 		drop(producer);
 
-		// What remains is the drop the teardown recorded for the open group, held by the state.
-		assert_eq!(pool.used(), RUN_OVERHEAD, "the abrupt teardown still released the cache");
+		// What remains is the drop the teardown recorded for the open group and its expiry, held
+		// by the state.
+		assert_eq!(
+			pool.used(),
+			RUN_OVERHEAD + BORN_OVERHEAD,
+			"the abrupt teardown still released the cache"
+		);
 		drop(settling);
 		assert_eq!(pool.used(), 0, "the state's drop set goes with it");
 	}
@@ -23688,14 +23696,21 @@ mod test {
 		producer.drop_groups(2..3, StreamError::Old);
 		elapse(&producer, cache::DEFAULT_EXPIRY / 2);
 		producer.drop_groups(4..5, StreamError::Old);
-		assert_eq!(pool.used(), used + 6 * RUN_OVERHEAD, "each run and its expiry are billed");
+		assert_eq!(
+			pool.used(),
+			used + 3 * (RUN_OVERHEAD + BORN_OVERHEAD),
+			"each run and its expiry are billed"
+		);
 
 		elapse(&producer, cache::DEFAULT_EXPIRY);
 		pool.sweep();
 		let held: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.clone()).collect();
 		assert_eq!(held, [4..5], "only the run given up within the window stays");
-		assert_eq!(pool.used(), used + 2 * RUN_OVERHEAD);
-		assert!(producer.state.read().given_up(0).is_none(), "a forgotten run is unknown again");
+		assert_eq!(pool.used(), used + RUN_OVERHEAD + BORN_OVERHEAD);
+		assert!(
+			producer.state.read().given_up(0).is_none(),
+			"a forgotten run is unknown again"
+		);
 
 		elapse(&producer, cache::DEFAULT_EXPIRY);
 		pool.sweep();
@@ -23709,7 +23724,7 @@ mod test {
 	#[test]
 	fn a_drop_flood_stays_within_the_pool() {
 		const RUNS: u64 = 1000;
-		let capacity = 64 * RUN_OVERHEAD;
+		let capacity = 64 * (RUN_OVERHEAD + BORN_OVERHEAD);
 		let (producer, pool) = pooled_producer(capacity);
 		let waiter = kio::Waiter::noop();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
@@ -23717,7 +23732,7 @@ mod test {
 		for run in 0..RUNS {
 			producer.drop_groups(2 * run..2 * run + 1, StreamError::Old);
 			assert!(
-				pool.used() <= capacity + 2 * RUN_OVERHEAD,
+				pool.used() <= capacity + 2 * (RUN_OVERHEAD + BORN_OVERHEAD),
 				"run {run} took the pool to {}",
 				pool.used()
 			);
@@ -23731,12 +23746,19 @@ mod test {
 			}
 		}
 		let held: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.clone()).collect();
-		assert_eq!(pool.used(), held.len() as u64 * RUN_OVERHEAD);
+		// Each disjoint run is an entry in the drop set and one in its expiry index.
+		assert_eq!(pool.used(), held.len() as u64 * (RUN_OVERHEAD + BORN_OVERHEAD));
 		let lowest = held.first().expect("the newest runs stay").start;
 		assert!(lowest > 0, "the lowest runs were shed first");
-		assert!(held.windows(2).all(|pair| pair[1].start == pair[0].start + 2), "only a prefix was shed");
+		assert!(
+			held.windows(2).all(|pair| pair[1].start == pair[0].start + 2),
+			"only a prefix was shed"
+		);
 		assert_eq!(held.last().map(|run| run.start), Some(2 * (RUNS - 1)));
-		assert!(producer.state.read().given_up(0).is_none(), "a shed run is unknown again");
+		assert!(
+			producer.state.read().given_up(0).is_none(),
+			"a shed run is unknown again"
+		);
 
 		while let Poll::Ready((run, _)) = subscriber.poll_drop(&waiter) {
 			reported.push(run);
@@ -24144,7 +24166,7 @@ mod test {
 
 	/// A cut stays readable for as long as the group it was: the sweep that reclaims
 	/// spent slots leaves it to a reader still behind, and once it expires like a group,
-	/// a relay still forwards it as a drop.
+	/// a relay still forwards it as a drop until that drop outlives the window too.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_cut_outlives_the_sweep_until_it_expires() {
@@ -24167,10 +24189,8 @@ mod test {
 		assert_eq!(first.sequence, 0, "the sweep kept the cut");
 		assert!(matches!(first.read_frame().now_or_never(), Some(Err(Error::App(5)))));
 
-		for _ in 0..2 {
-			elapse(&producer, Duration::from_secs(20));
-			pool.sweep();
-		}
+		elapse(&producer, Duration::from_secs(20));
+		pool.sweep();
 		assert!(!producer.state.read().lookup.contains_key(&0), "the cut expired");
 		let mut relay = producer.subscribe(replay());
 		let waiter = kio::Waiter::noop();
@@ -24178,6 +24198,11 @@ mod test {
 			relay.poll_drop(&waiter),
 			Poll::Ready((range, Hole::Drop { error: StreamError::App(5), .. })) if range == (0..1)
 		));
+
+		// The drop it left ages out a window later like any run, unknown again.
+		elapse(&producer, Duration::from_secs(20));
+		pool.sweep();
+		assert!(producer.state.read().given_up(0).is_none());
 	}
 
 	/// A cut above a reader's cap is handed out once the cap rises over it.
