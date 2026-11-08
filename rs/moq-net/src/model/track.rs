@@ -4129,7 +4129,7 @@ impl Producer {
 		for (range, resolved) in subscription.ranges.iter_mut().zip(resolved) {
 			if match range.start {
 				super::subscription::Anchor::Time(_) => true,
-				super::subscription::Anchor::Relative(back) => back != 0 && back != u64::MAX,
+				super::subscription::Anchor::Relative(back) => back != 0,
 				_ => false,
 			} {
 				range.start = super::subscription::Anchor::Absolute(resolved.ok_or(Error::Unsupported)?.start);
