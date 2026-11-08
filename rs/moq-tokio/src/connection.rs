@@ -439,8 +439,8 @@ struct Migrating {
 }
 
 /// The policy's draining predecessor and its handover deadline, so [`Connection::close`] drains it
-/// too without overstaying that window.
-type Predecessor = (moq_net::Session, kio::clock::Instant);
+/// too without overstaying that window. Boxed: only a migration holds one, and only briefly.
+type Predecessor = Box<(moq_net::Session, kio::clock::Instant)>;
 
 impl Lifecycle {
 	/// What [`Connection::status`] reports: `None` before the first connect and once closed.
@@ -556,7 +556,7 @@ impl Shared {
 		if predecessor.is_none() && self.state.read().lifecycle.predecessor().is_none() {
 			return;
 		}
-		let predecessor = predecessor.map(|(session, deadline)| (session.clone(), deadline));
+		let predecessor = predecessor.map(|(session, deadline)| Box::new((session.clone(), deadline)));
 		if let Ok(mut state) = self.state.write() {
 			match &mut state.lifecycle {
 				Lifecycle::Live(live) => live.predecessor = predecessor,
@@ -1010,7 +1010,7 @@ impl Connection {
 			}
 		};
 		let predecessor = async move {
-			let Some((session, deadline)) = predecessor else {
+			let Some((session, deadline)) = predecessor.map(|predecessor| *predecessor) else {
 				return Ok(());
 			};
 			let abort = session.clone();
