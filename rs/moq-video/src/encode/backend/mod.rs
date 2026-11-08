@@ -55,7 +55,9 @@ pub(crate) trait Backend {
 	/// [`Config::keyframe_interval`] frames, so this is only the encoder's extra
 	/// request: a caller's [`Encoder::cut`](super::Encoder::cut), or a
 	/// [`Config::join`] that a source slower than its frame rate reached first. It
-	/// arrives only on a backend whose [`can_cut`](Self::can_cut) said yes.
+	/// arrives only on a backend whose [`can_cut`](Self::can_cut) said yes. A
+	/// backend that drops the frame carries the cut to the next one it encodes,
+	/// or the group waits a whole join for its keyframe.
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error>;
 
 	/// Return every access unit the codec is still holding, leaving the encoder
