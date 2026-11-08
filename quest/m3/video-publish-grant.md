@@ -12,11 +12,12 @@ Decided 2026-11-05 (maintainer, on moq-dev/studio's /quest-plan): m3, since the 
 
 moq-net already exposes the grant (`bandwidth::Reservation::rate`, also in
 moq-ffi), but `encode::publish_capture` (`rs/moq-video/src/encode/producer.rs`)
-holds the reservation privately in its capture loop and returns nothing. The
-only figure a caller sees is the target reported through the catalog stats.
+holds the reservation privately in its capture loop, and the `Publication`
+handle it returns reports only its lifecycle state. The only figure a caller
+sees is the target reported through the catalog stats.
 
 Consumer: the studio's encode-control rungs and Health panel
 ([moq-dev/studio#25](https://github.com/moq-dev/studio/pull/25)). Recommendation: return a handle from the publish
 call that carries the grant, rather than a callback.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/native](/quest/m2/api-shape/native.md) makes `publish_capture` return a handle in both crates before the cut, so `grant()` is an additive method on it.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `publish_capture` returns an `encode::Publication` handle in both moq-video and moq-audio before the cut, so `grant()` is an additive method on it.
