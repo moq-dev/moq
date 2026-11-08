@@ -7,7 +7,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use futures::FutureExt;
 
 use crate::quic::driver::send;
@@ -15,8 +15,9 @@ use crate::quic::web::CloseReason;
 
 /// A stream that can be used to send bytes. See [`crate::quic::driver::send::Stream`].
 ///
-/// Dropping it before [`finish`](Self::finish) resets it with code 0, still delivering the
-/// WebTransport header.
+/// A stream this side opened writes its WebTransport header ahead of its first data, so opening
+/// one waits only for the peer's stream credit. Dropping it before [`finish`](Self::finish)
+/// resets it with code 0, still delivering the header once written.
 ///
 /// This wrapper is mainly needed for error codes, which is unfortunate.
 /// WebTransport uses u32 error codes and they're mapped in a reserved HTTP/3 error space.
@@ -24,9 +25,14 @@ use crate::quic::web::CloseReason;
 pub struct Stream {
 	state: State,
 	close: Arc<CloseReason>,
-	/// The end of the WebTransport header this side wrote first, which a reset must still deliver.
+	/// The WebTransport header still to write ahead of any data, empty once written or for a
+	/// stream without one.
+	unwritten: Bytes,
+	/// The end of the WebTransport header once written, which a reset must still deliver.
 	header: Option<send::Offset>,
 	id: crate::quic::driver::stream::Id,
+	/// Holds the waiter of an [`AsyncWrite`](tokio::io::AsyncWrite) write across polls.
+	park: kio::Park,
 }
 
 /// The mutable terminal state required by moq-net's poll trait.
@@ -39,14 +45,48 @@ enum State {
 }
 
 impl Stream {
-	pub(crate) fn new(mut stream: send::Stream, close: Arc<CloseReason>, header: Option<send::Offset>) -> Self {
-		stream.set_drop_reset(header, close.encode_stream_code(0));
-		Self {
+	/// Wrap `stream`, writing `header` ahead of its data: a WebTransport stream this side
+	/// opened, or empty for one without a header.
+	pub(crate) fn new(mut stream: send::Stream, close: Arc<CloseReason>, header: Bytes) -> Self {
+		stream.set_drop_reset(None, close.encode_stream_code(0));
+		let mut this = Self {
 			id: stream.id(),
 			state: State::Open(stream),
 			close,
-			header,
+			unwritten: header,
+			header: None,
+			park: Default::default(),
+		};
+		// Write the header now when it fits, so the peer can accept the stream before its
+		// first data. Whatever does not fit waits for that data; a failure resurfaces there.
+		let _ = this.poll_header(&kio::Waiter::noop());
+		this
+	}
+
+	/// Write what is left of the WebTransport header, ready once none is left.
+	fn poll_header(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if !self.unwritten.has_remaining() {
+			return Poll::Ready(Ok(()));
 		}
+		let State::Open(stream) = &mut self.state else {
+			return Poll::Ready(Err(Error::ClosedStream));
+		};
+		while self.unwritten.has_remaining() {
+			if let Err(err) = std::task::ready!(stream.poll_write_buf(waiter, &mut self.unwritten)) {
+				return Poll::Ready(Err(self.map_error(err)));
+			}
+		}
+		let offset = stream.offset();
+		stream.set_drop_reset(Some(offset), self.close.encode_stream_code(0));
+		self.header = Some(offset);
+		Poll::Ready(Ok(()))
+	}
+
+	/// Write from `buf` after the header, returning the size written.
+	fn poll_write_buf(&mut self, waiter: &kio::Waiter, buf: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		std::task::ready!(self.poll_header(waiter))?;
+		let result = std::task::ready!(self.open()?.poll_write_buf(waiter, buf));
+		Poll::Ready(result.map_err(|e| self.map_error(e)))
 	}
 
 	/// Decode the peer's stop code, and report a session error, or a stop for a session
@@ -78,8 +118,8 @@ impl Stream {
 	/// This is a u32 with WebTransport because we share the error space with HTTP/3.
 	/// A raw QUIC session sends the code as is. Does nothing once already reset.
 	///
-	/// The WebTransport header still reaches the peer, so it can tell which session the reset
-	/// belongs to.
+	/// A WebTransport header already written still reaches the peer, so it can tell which
+	/// session the reset belongs to.
 	fn reset_mut(&mut self, code: u32) {
 		let code = self.close.encode_stream_code(code);
 		// The driver task can process a STOP_SENDING at any moment. The reset settles, under the
@@ -147,19 +187,27 @@ impl Stream {
 
 	/// Write from `buf`, returning the size written. See [`send::Stream::write`].
 	pub async fn write(&mut self, buf: &mut impl Buf) -> Result<usize, Error> {
-		let result = self.open()?.write(buf).await;
-		result.map_err(|e| self.map_error(e))
+		kio::wait(|waiter| self.poll_write_buf(waiter, buf)).await
 	}
 
 	/// Write all of `buf` to the stream. See [`send::Stream::write_all`].
-	pub async fn write_all(&mut self, buf: impl Buf) -> Result<(), Error> {
-		let result = self.open()?.write_all(buf).await;
-		result.map_err(|e| self.map_error(e))
+	pub async fn write_all(&mut self, mut buf: impl Buf) -> Result<(), Error> {
+		while buf.has_remaining() {
+			self.write(&mut buf).await?;
+		}
+		Ok(())
 	}
 
 	/// Mark the stream as finished, such that no more data can be written. See
 	/// [`send::Stream::finish`]. Does nothing if it was already finished or reset.
+	///
+	/// A stream whose header still does not fit carried nothing the peer could attribute to
+	/// its session, so it is reset instead, as dropping it would.
 	fn finish_mut(&mut self) {
+		if self.poll_header(&kio::Waiter::noop()).is_pending() {
+			self.reset_mut(0);
+			return;
+		}
 		if matches!(self.state, State::Open(_)) {
 			let State::Open(stream) = std::mem::replace(&mut self.state, State::Reset(Ok(None))) else {
 				unreachable!()
@@ -209,11 +257,13 @@ impl Stream {
 }
 
 impl tokio::io::AsyncWrite for Stream {
-	fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-		match &mut self.state {
-			State::Open(stream) => Pin::new(stream).poll_write(cx, buf),
-			_ => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
-		}
+	fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, mut buf: &[u8]) -> Poll<io::Result<usize>> {
+		let this = self.get_mut();
+		let waiter = this.park.hold(cx).clone();
+		this.poll_write_buf(&waiter, &mut buf).map_err(|err| match err {
+			Error::ClosedStream => io::ErrorKind::BrokenPipe.into(),
+			err => io::Error::other(err),
+		})
 	}
 
 	fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
@@ -235,8 +285,7 @@ impl moq_net::transport::poll::SendStream for Stream {
 		self.poll_write_buf(waiter, &mut buf)
 	}
 	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-		let result = self.open()?.poll_write_buf(waiter, buf);
-		result.map_err(|e| self.map_error(e))
+		Self::poll_write_buf(self, waiter, buf)
 	}
 	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority);
@@ -259,6 +308,9 @@ impl moq_net::transport::poll::SendStream for Stream {
 		})
 	}
 	fn acknowledged(&self) -> Option<bool> {
+		if self.unwritten.has_remaining() {
+			return Some(false);
+		}
 		Some(match &self.state {
 			State::Open(stream) => stream.acknowledged(),
 			State::Finished(stream) => stream.acknowledged(),

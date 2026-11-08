@@ -10,6 +10,7 @@
 use crate::support;
 
 use std::net::UdpSocket;
+use std::task::Poll;
 
 use moq_net::origin;
 use moq_net::transport::poll::SendStream as _;
@@ -283,6 +284,74 @@ fn a_clean_finish_closes_a_stream() {
 			let closed = within(&handle, "the ACK", send.finish()).await;
 			assert!(closed.is_ok(), "{closed:?}");
 			kio::wait(|waiter| session.poll_closed(waiter)).await;
+		})
+		.expect("worker");
+	client.join().expect("client thread");
+}
+
+/// Out of the peer's connection window, an open still returns its stream at once and the
+/// stream's header waits for room with its data, so an open waits only for stream credit.
+#[test]
+fn an_open_waits_only_for_stream_credit() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let payload = vec![0xa5; 64 * 1024];
+	// The client reads nothing until the server opened its second stream.
+	let (opened, wait) = tokio::sync::oneshot::channel::<()>();
+	let url = format!("https://{}/window", endpoint.local_addr());
+	let expected = payload.clone();
+	let client = std::thread::spawn(move || {
+		let _ = rind_rustls::default_provider().unwrap().install_default();
+		let rt = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime");
+		rt.block_on(async move {
+			let request = moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
+				.with_protocol(PROTO);
+			let mut transport = moq_tokio::quic::driver::transport::Config::default();
+			transport.limits.receive_window = std::num::NonZeroU64::new(16 * 1024);
+			let session = crate::support::web_connect(request, transport).await.expect("connect");
+			wait.await.expect("the server opened both streams");
+			let mut read = Vec::new();
+			for _ in 0..2 {
+				let mut recv = session.accept_uni().await.expect("accept uni");
+				read.push(read_all(&mut recv).await);
+			}
+			read.sort_by_key(Vec::len);
+			assert_eq!(read, [b"second".to_vec(), expected]);
+			session.close(0, "done");
+			session.closed().await;
+		});
+	});
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
+			let session = request
+				.respond(quic::web::proto::ConnectResponse::OK.with_protocol(PROTO))
+				.await
+				.expect("respond");
+			let mut first = kio::wait(|waiter| session.poll_open_uni(waiter, Default::default()))
+				.await
+				.expect("open uni");
+			let mut rest = bytes::Bytes::from(payload);
+			while matches!(
+				first.poll_write_buf(&kio::Waiter::noop(), &mut rest),
+				Poll::Ready(Ok(_))
+			) {}
+			assert!(!rest.is_empty(), "the client's window never ran out");
+			let Poll::Ready(Ok(mut second)) = session.poll_open_uni(&kio::Waiter::noop(), Default::default()) else {
+				panic!("the open waited on more than stream credit");
+			};
+			opened.send(()).expect("the client waits");
+			first.write_all(rest).await.expect("write");
+			second.write_all(&b"second"[..]).await.expect("write");
+			let (first, second) = (first.finish(), second.finish());
+			kio::wait(|waiter| session.poll_closed(waiter)).await;
+			drop((first, second));
 		})
 		.expect("worker");
 	client.join().expect("client thread");
