@@ -42,7 +42,8 @@ type Selection = { kind: "none" } | { kind: "selected"; rendition: Rendition } |
 
 // One run of the active rendition's playback. A poster may show while it starts, and only a picture
 // that played and then froze is a stall.
-type Playback = "starting" | "playing" | "stalled";
+// A picture held through the publisher's declared end is no stall either.
+type Playback = "starting" | "playing" | "ended" | "stalled";
 
 /** Signals the decoder reads. */
 export type DecoderInput = {
@@ -456,6 +457,13 @@ export class Decoder {
 			return;
 		}
 
+		// After the publisher's declared end no picture is coming, whether one shows or not.
+		const active = effect.get(this.#active);
+		if (active && effect.get(active.ended) !== undefined) {
+			this.#out.stalled.set(false);
+			return;
+		}
+
 		const frame = effect.get(this.#out.frame);
 		if (!frame) {
 			this.#out.stalled.set(true);
@@ -463,7 +471,6 @@ export class Decoder {
 		}
 
 		this.#out.stalled.set(false);
-
 		effect.timer(() => {
 			this.#out.stalled.set(true);
 		}, Nano.fromMilli(BUFFERING));
@@ -481,6 +488,10 @@ export class Decoder {
 			// Undefined while the picture is only a poster, as it is again once the timeline restarts.
 			if (inner.get(active.timestamp) === undefined) {
 				playback.set("starting");
+				return;
+			}
+			if (inner.get(active.ended) !== undefined) {
+				playback.set("ended");
 				return;
 			}
 			playback.set("playing");
@@ -604,8 +615,9 @@ class DecoderTrack {
 
 	// A hole or timeline restart makes the next decoded frame decide whether the codec resets.
 	#resetPending = false;
-	// A declared endpoint stays in force through holes until a later group starts a new timeline.
-	#endGroup?: bigint;
+	// The group the publisher declared the media ends with. It stays in force through holes until a
+	// later group starts a new timeline.
+	readonly ended = new Signal<bigint | undefined>(undefined);
 
 	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
 	// is only held until the first one opens.
@@ -958,9 +970,11 @@ class DecoderTrack {
 		if (read.kind === "gap") {
 			if (latest !== undefined) this.#resetPending = true;
 		} else if (read.kind === "end") {
-			if (latest === undefined || read.group >= latest) this.#endGroup = read.group;
-		} else if (this.#endGroup !== undefined && read.group > this.#endGroup) {
-			this.#endGroup = undefined;
+			if (latest === undefined || read.group >= latest) this.ended.set(read.group);
+		} else {
+			const ended = this.ended.peek();
+			if (ended === undefined || read.group <= ended) return;
+			this.ended.set(undefined);
 			this.#onBreak(read.group);
 		}
 	}
@@ -1175,6 +1189,11 @@ class Rendition {
 
 	get spread(): Getter<Milli | undefined> {
 		return this.min.spread;
+	}
+
+	// The group the publisher declared the clock-driving decoder's media ends with.
+	get ended(): Getter<bigint | undefined> {
+		return this.min.ended;
 	}
 
 	// Show the max-delay picture when it is at or past the min-delay one, so it wins ties, else the
