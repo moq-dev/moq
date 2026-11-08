@@ -28,8 +28,6 @@ pub struct Stream {
 	unwritten: Bytes,
 	/// The end of the WebTransport header once written, which a reset must still deliver.
 	header: Option<send::Offset>,
-	/// Finished before its header fit, so it was reset with nothing sent.
-	unsent: bool,
 	id: crate::quic::stream::Id,
 }
 
@@ -38,6 +36,8 @@ pub struct Stream {
 enum State {
 	Open(send::Stream),
 	Finished(send::Finished),
+	/// Finished before its header fit, so it was reset with nothing sent.
+	Unsent,
 	/// Reset, with the peer's stop code if it arrived first.
 	Reset(Result<Option<crate::quic::VarInt>, send::Error>),
 }
@@ -53,7 +53,6 @@ impl Stream {
 			close: close.clone(),
 			unwritten: header,
 			header: None,
-			unsent: false,
 		};
 		// Write the header now when it fits, so the peer can accept the stream before its
 		// first data. Whatever does not fit waits for that data; a failure resurfaces there.
@@ -99,7 +98,7 @@ impl Stream {
 		let stopped = match &self.state {
 			State::Open(stream) => stream.poll_closed(&kio::Waiter::noop()),
 			State::Finished(stream) => stream.poll_closed(&kio::Waiter::noop()),
-			State::Reset(_) => return,
+			State::Reset(_) | State::Unsent => return,
 		};
 		let stopped = match stopped {
 			Poll::Ready(result) => result,
@@ -114,7 +113,7 @@ impl Stream {
 				Some(header) => stream.reset_at(header, code),
 				None => stream.reset(code),
 			},
-			State::Reset(_) => unreachable!(),
+			State::Reset(_) | State::Unsent => unreachable!(),
 		}
 	}
 
@@ -122,13 +121,11 @@ impl Stream {
 	/// session closed.
 	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<u32>, Error>> {
-		if self.unsent {
-			return Poll::Ready(Err(Error::Unsent));
-		}
 		let result = match &self.state {
 			State::Open(stream) => stream.poll_closed(waiter),
 			State::Finished(stream) => stream.poll_closed(waiter),
 			State::Reset(result) => Poll::Ready(result.clone()),
+			State::Unsent => return Poll::Ready(Err(Error::Unsent)),
 		};
 		result.map(|result| match result {
 			Ok(None) => Ok(None),
@@ -202,21 +199,22 @@ impl Stream {
 	/// A stream whose header still does not fit could never deliver its FIN, so it is reset
 	/// instead, failing with [`Error::Unsent`] here and from `poll_closed`.
 	fn finish_mut(&mut self) -> Result<(), Error> {
+		if !matches!(self.state, State::Open(_)) {
+			return Ok(());
+		}
 		match self.poll_header(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(())) => {}
 			Poll::Ready(Err(err)) => return Err(err),
 			Poll::Pending => {
 				self.reset_mut(0);
-				self.unsent = true;
+				self.state = State::Unsent;
 				return Err(Error::Unsent);
 			}
 		}
-		if matches!(self.state, State::Open(_)) {
-			let State::Open(stream) = std::mem::replace(&mut self.state, State::Reset(Ok(None))) else {
-				unreachable!()
-			};
-			self.state = State::Finished(stream.finish());
-		}
+		let State::Open(stream) = std::mem::replace(&mut self.state, State::Reset(Ok(None))) else {
+			unreachable!()
+		};
+		self.state = State::Finished(stream.finish());
 		Ok(())
 	}
 
@@ -225,7 +223,7 @@ impl Stream {
 		match &mut self.state {
 			State::Open(stream) => stream.set_priority(priority),
 			State::Finished(stream) => stream.set_priority(priority),
-			State::Reset(_) => {}
+			State::Reset(_) | State::Unsent => {}
 		}
 	}
 
@@ -234,7 +232,7 @@ impl Stream {
 		match &self.state {
 			State::Open(stream) => stream.priority(),
 			State::Finished(stream) => stream.priority(),
-			State::Reset(_) => 0,
+			State::Reset(_) | State::Unsent => 0,
 		}
 	}
 
@@ -243,7 +241,7 @@ impl Stream {
 		match &mut self.state {
 			State::Open(stream) => stream.set_group(group),
 			State::Finished(stream) => stream.set_group(group),
-			State::Reset(_) => {}
+			State::Reset(_) | State::Unsent => {}
 		}
 	}
 
@@ -296,7 +294,7 @@ impl moq_net::transport::poll::SendStream for Stream {
 		Some(match &self.state {
 			State::Open(stream) => stream.acknowledged(),
 			State::Finished(stream) => stream.acknowledged(),
-			State::Reset(_) => false,
+			State::Reset(_) | State::Unsent => false,
 		})
 	}
 }
