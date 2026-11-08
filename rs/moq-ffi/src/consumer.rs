@@ -126,6 +126,8 @@ pub enum MoqAnchor {
 		/// The presentation time.
 		timestamp: MoqTimestamp,
 	},
+	/// The oldest group still around, as far back as the max delay allows. A start only.
+	Oldest,
 }
 
 /// Which of a subscription's pending groups the publisher sends first, mirroring
@@ -143,6 +145,7 @@ impl TryFrom<MoqAnchor> for moq_net::track::Anchor {
 
 	fn try_from(anchor: MoqAnchor) -> Result<Self, MoqError> {
 		Ok(match anchor {
+			MoqAnchor::Oldest => Self::Oldest,
 			MoqAnchor::Absolute { group } => Self::Absolute(group),
 			MoqAnchor::Relative { groups } => Self::Relative(groups),
 			MoqAnchor::Time { timestamp } => Self::Time(timestamp.try_into()?),

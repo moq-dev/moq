@@ -501,9 +501,9 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 // so counts neither in the largest it reports nor where the copy resolves the start. The copy reports
 // the publisher's start, where a reader waiting on each group in sequence starts. Mirrors the Rust
 // `a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group`.
-// Quarantined: once on main, the start resolved to 0 instead of the publisher's 5.
-// Investigation: quest/m0/test-flakes-2/lite07-relative-start.md.
-test.skip("integration: lite-07 reports a relative start over a frameless newest group", async () => {
+// The newest group lands before the reader asks, as it can under load: a sibling reads it, so the
+// reader's own window has yet to settle on it when it asks where it starts.
+test("integration: lite-07 reports a relative start over a frameless newest group", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -521,15 +521,19 @@ test.skip("integration: lite-07 reports a relative start over a frameless newest
 	const newest = producer.appendGroup();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const reader = remote.track("video").subscribe({ delay: { max: null }, ranges: [{ start: { relative: 0n } }] });
+	const subscription = { delay: { max: null }, ranges: [{ start: { relative: 0n } }] };
+	const reader = remote.track("video").subscribe(subscription);
+	const sibling = remote.track("video").subscribe(subscription);
 	try {
 		// Accepting the track subscribes it upstream, whose answer resolves the start.
 		await reader.info();
+		expect((await sibling.recvGroup())?.sequence).toBe(5n);
 		expect(await reader.start()).toBe(5n);
 		newest.writeFrame({ payload: new Uint8Array([5]) });
 		newest.finish();
 		expect((await reader.recvGroup())?.sequence).toBe(5n);
 	} finally {
+		sibling.close();
 		reader.close();
 		remote.close();
 		broadcast.close();

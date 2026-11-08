@@ -1421,8 +1421,8 @@ mod test {
 	use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 	fn sha1_hmac(key: &[u8], payloads: &[&[u8]]) -> [u8; 20] {
-		use aws_lc_rs::hmac;
-		let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
+		use rind::hmac;
+		let key = hmac::Key::new(&hmac::legacy::HMAC_SHA1, key);
 		let mut ctx = hmac::Context::with_key(&key);
 		for p in payloads {
 			ctx.update(p);

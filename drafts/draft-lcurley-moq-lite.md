@@ -139,6 +139,8 @@ A continuous stream is named by an Instance, carried on its claims (see [ANNOUNC
 Within one Instance, group sequences never restart and never name two different groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
 A publisher that starts its group sequences over, such as a restarted process, uses a new Instance, while replicas of the same content share one.
 A publisher MAY keep an Instance across restarts only if it continues the sequence space and announces a higher Epoch each time.
+A Track recreated within one Instance likewise continues past every Group Sequence its predecessor published.
+A receiver does not detect a publisher that breaks this, which corrupts only that Broadcast for its subscribers.
 The Epoch is a counter within one Instance that picks its live incarnation while a stale claim lingers; it is never compared across Instances.
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a claim covering every broadcast path beneath it.
@@ -867,7 +869,7 @@ A subscriber MUST silently drop a datagram with an unknown Subscribe ID, or one 
 
 **Sequence**:
 The datagram's sequence number within its datagram Track, which the publisher assigns in the order it produces them.
-It is the Track's own, not a Group Sequence.
+It is the Track's own, not a Group Sequence, and names no cached content: a Sequence may repeat, as from a restarted publisher, and a subscriber delivers a repeat like any other datagram.
 
 **Timestamp**:
 The absolute presentation timestamp of the datagram, in the Track's `Timescale`.

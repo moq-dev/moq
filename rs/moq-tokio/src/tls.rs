@@ -3060,6 +3060,7 @@ mod tests {
 	) -> (CertificateDer<'static>, rcgen::Issuer<'static, rind_rcgen::KeyPair>) {
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		params.serial_number = Some(1u64.into());
 		params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let cert = match parent {
 			Some(parent) => params.signed_by(&key, parent).unwrap(),
@@ -3070,7 +3071,8 @@ mod tests {
 
 	fn lineage_leaf(issuer: &rcgen::Issuer<'_, rind_rcgen::KeyPair>) -> CertificateDer<'static> {
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-		let params = rcgen::CertificateParams::new(vec!["client.invalid".to_string()]).unwrap();
+		let mut params = rcgen::CertificateParams::new(vec!["client.invalid".to_string()]).unwrap();
+		params.serial_number = Some(1u64.into());
 		params.signed_by(&key, issuer).unwrap().into()
 	}
 

@@ -128,7 +128,7 @@ async fn export(format: &str, source: moq_mux::Source, stream: impl Stream, coll
 fn cmaf_import(passthrough: bool) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+	let import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
 	(catalog, import)
 }
 

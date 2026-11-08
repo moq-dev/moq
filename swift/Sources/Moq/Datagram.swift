@@ -132,5 +132,5 @@ public final class DatagramRequest: Sendable {
     }
 
     /// Reject this request with an application error code.
-    public func abort(errorCode: UInt16) throws { try ffi.abort(errorCode: errorCode) }
+    public func reject(errorCode: UInt16) throws { try ffi.reject(errorCode: errorCode) }
 }

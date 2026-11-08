@@ -14427,7 +14427,7 @@ mod serve_tests {
 		IdleEnded,
 		/// An idle copy whose track ends after its newest group: that group's last object.
 		IdleFinished,
-		/// A live feed whose newest group was aborted mid-write: unknown.
+		/// A live feed whose newest group was aborted mid-write: the last object before it.
 		Aborted,
 	}
 
@@ -14493,7 +14493,7 @@ mod serve_tests {
 				)
 				.await;
 				match largest {
-					Largest::Finished | Largest::Live | Largest::IdleFinished => assert_eq!(
+					Largest::Finished | Largest::Live | Largest::IdleFinished | Largest::Aborted => assert_eq!(
 						fetch_refusal(buf, version),
 						INVALID_RANGE,
 						"{version} {largest:?} start={start}"
@@ -20526,13 +20526,14 @@ mod tests {
 struct LiveEdge {
 	/// The newest group sequence, `None` before any group exists.
 	latest: Option<u64>,
-	/// The precise Largest Object. `None` when the track is empty, or when the newest
-	/// group's frames cannot be read right now (none written yet), in which case nothing
-	/// is advertised and no fill is servable.
+	/// The precise Largest Object: the newest object held, skipping a newest group whose
+	/// frames cannot be read. `None` when no object is held, in which case nothing is
+	/// advertised and no fill is servable.
 	largest: Option<Location>,
-	/// One past the Largest Object, which is where a Next Object subscription begins.
-	/// When the edge is imprecise this falls back to the next group boundary: never below
-	/// the true Next Object, at worst under-delivering the current group's tail.
+	/// Where a Next Object subscription begins: one past the Largest Object, or past a
+	/// newest group that cannot be read. When the edge is imprecise this falls back to the
+	/// next group boundary: never below the true Next Object, at worst under-delivering the
+	/// current group's tail.
 	next: Option<Location>,
 }
 
@@ -20596,9 +20597,12 @@ fn cached_edge(track: &track::Consumer) -> LiveEdge {
 				next: Some(next),
 			}
 		}
+		// The newest group cannot be read, such as one aborted when this copy went idle, so
+		// the largest is the last object held before it, and nothing of the newest group
+		// can be served, so a subscription starts past it.
 		_ => LiveEdge {
 			latest: Some(latest),
-			largest: None,
+			largest: largest_before(track, latest),
 			next: Some(Location {
 				group: latest.saturating_add(1),
 				object: 0,
@@ -21150,6 +21154,35 @@ mod range_tests {
 		assert_eq!(edge.latest, Some(2));
 		assert_eq!(edge.largest, Some(Location { group: 0, object: 0 }));
 		assert_eq!(edge.next, Some(Location { group: 0, object: 1 }));
+	}
+
+	/// A newest group that cannot be read, such as one aborted when an idle copy cancelled
+	/// it, leaves the last object held before it as the largest, while a subscription still
+	/// starts past it so nothing is stranded behind its floor.
+	#[test]
+	fn an_aborted_newest_group_leaves_the_earlier_largest() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for _ in 0..2 {
+			first
+				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+				.unwrap();
+		}
+		first.finish().unwrap();
+		let mut newest = track.create_group(group::Info { sequence: 1 }).unwrap();
+		newest
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+			.unwrap();
+		newest.abort(Error::Cancel).unwrap();
+
+		let edge = live_edge(&track.consume());
+		assert_eq!(edge.latest, Some(1));
+		assert_eq!(edge.largest, Some(Location { group: 0, object: 1 }));
+		assert_eq!(edge.next, Some(Location { group: 2, object: 0 }));
 	}
 
 	/// Both ends carry through, object bounds included, so the boundary groups can be
