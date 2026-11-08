@@ -48,6 +48,7 @@ moves what remains of them once their claims merge.
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 - [A macOS camera delivers frames the renderer imports](/quest/m1/camera-nv12-macos.md) - AVFoundation capture asks for NV12, so a camera whose native format is `2vuy` reaches the renderer
 - [Encoders keyframe by time, not frame count](/quest/m1/keyframe-by-time.md) - groups stay within the declared join interval when a source's frame rate drifts from the configured one
+- [A WebSocket fallback session returns to QUIC](/quest/m1/websocket-quic-upgrade.md) - a session that fell back to WebSocket re-probes QUIC and migrates back once UDP works, and a post-outage redial prefers QUIC
 
 ## Related
 
