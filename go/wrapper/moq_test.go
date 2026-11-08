@@ -1202,8 +1202,8 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if mediaName != "requested-audio" {
 		t.Fatalf("media name = %q, want requested-audio", mediaName)
 	}
-	if _, err := request.Name(); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
+	if _, err := request.Name(); !errors.Is(err, moq.ErrAlreadyResponded) {
+		t.Fatalf("request name after accept error = %v, want ErrAlreadyResponded", err)
 	}
 
 	var mediaConsumer *moqmedia.TrackConsumer

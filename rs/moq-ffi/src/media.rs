@@ -1091,11 +1091,12 @@ impl MoqMediaTrackStreamProducer {
 		broadcast.with_state(|state| {
 			let priority = init.priority;
 			target.import(&state.broadcast, init.format, |request| {
-				let import = moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(
-					|err| MoqError::Codec {
-						reason: format!("init failed: {err}"),
-					},
-				)?;
+				let import =
+					moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
+						MoqError::Codec {
+							reason: format!("init failed: {err}"),
+						}
+					})?;
 				state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
 					inner: std::sync::Mutex::new(Some(MediaStreamProducer {
 						import: Box::new(import),

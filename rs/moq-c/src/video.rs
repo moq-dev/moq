@@ -1457,7 +1457,12 @@ mod tests {
 		let moved = tokio::task::spawn_blocking(move || {
 			let reservation = |shared: &Shared<VideoEncoder>| {
 				let guard = shared.lock();
-				guard.as_ref().unwrap().follow.as_ref().map(|follow| follow.reservation.clone())
+				guard
+					.as_ref()
+					.unwrap()
+					.follow
+					.as_ref()
+					.map(|follow| follow.reservation.clone())
 			};
 			let publish = |timestamp: moq_net::Timestamp, data: &[u8]| {
 				let mut guard = shared.lock();

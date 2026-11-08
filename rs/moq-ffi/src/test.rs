@@ -3140,15 +3140,23 @@ async fn a_track_request_reports_its_answer() {
 		tokio::spawn(async move { consumer.subscribe_track(name.into(), None).await })
 	};
 	let _first = subscribe("first");
-	let first = kio::clock::timeout(TIMEOUT, dynamic.requested_track()).await.unwrap().unwrap();
+	let first = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.unwrap()
+		.unwrap();
 	first.accept(None).unwrap();
 	let rejected = first.reject(0);
 
 	let _second = subscribe("second");
-	let second = kio::clock::timeout(TIMEOUT, dynamic.requested_track()).await.unwrap().unwrap();
+	let second = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.unwrap()
+		.unwrap();
 	let failed = MoqMediaTrackProducer::audio(
 		&broadcast,
-		MoqMediaTarget::Requested { request: second.clone() },
+		MoqMediaTarget::Requested {
+			request: second.clone(),
+		},
 		audio_init(MoqAudioFormat::Opus, vec![1, 2, 3]),
 	);
 	let failed = failed.map(|_| ());
@@ -8063,7 +8071,9 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	// A synchronous call fails like the parked asynchronous ones, on a driver shutdown dropped
 	// and on one created after it, which never ran.
 	let late = MoqOriginProducer::new(MoqOriginConfig::default());
-	let routed = server_origin.route("late".into(), MoqRouteOptions::default()).map(|_| ());
+	let routed = server_origin
+		.route("late".into(), MoqRouteOptions::default())
+		.map(|_| ());
 	let unrun = late.route("late".into(), MoqRouteOptions::default()).map(|_| ());
 	assert!(
 		matches!(routed, Err(MoqError::Cancelled)) && matches!(unrun, Err(MoqError::Cancelled)),
