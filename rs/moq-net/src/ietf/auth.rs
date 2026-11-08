@@ -712,15 +712,13 @@ impl Answering {
 					if let Some(default) = self.default.as_mut()
 						&& let Poll::Ready(grant) = default.poll(waiter)
 					{
-						issue.lock().outbox.push_back(Reply::Grant(grant));
+						issue.lock().queue(Reply::Grant(grant));
 					}
-					let mut issue = std::task::ready!(issue.poll(waiter, |issue| {
-						match issue.outbox.is_empty() && !issue.done {
-							true => Poll::Pending,
-							false => Poll::Ready(()),
-						}
+					let mut issue = std::task::ready!(issue.poll(waiter, |issue| match issue.idle() {
+						true => Poll::Pending,
+						false => Poll::Ready(()),
 					}));
-					issue.outbox.pop_front()
+					issue.next()
 				}
 				AnsweringState::Unverified | AnsweringState::UnverifiedClosing { .. } | AnsweringState::Done => {
 					unreachable!("not serving")
@@ -740,7 +738,7 @@ impl Answering {
 					// which revokes whatever this stream granted before.
 					if let Err(err) = ok.encode(&mut Encoder::new(&mut Vec::new(), self.version.into()), self.version) {
 						tracing::debug!(%err, "auth grant cannot be encoded as one AUTH_OK; refusing the token");
-						issue.lock().done = true;
+						issue.lock().refused();
 						let refused = AuthError {
 							code: NOT_SUPPORTED,
 							reason: "grant cannot be encoded as one AUTH_OK".to_string(),

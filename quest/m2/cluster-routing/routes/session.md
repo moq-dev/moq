@@ -27,21 +27,24 @@ node table, and the public API drops what the route layer replaced.
   change and per interest (`Router::advertise`), so a large origin costs
   linear work per update. Do it with the scoping change, which reshapes the
   same per-stream presentation.
-- Public API: remove `Hops`, `RouteInfo::hops`, and the saturating `Cost`
-  from the public API now, keeping a private chain type for lite-06 and the
-  moq-transport cluster extension, which still carry hop chains. Decided
-  2026-11-07 (maintainer, /quest-unblock): ✅ now (rejected: when lite-06
-  retires). It is a breaking change; the PR marks its title with `!`.
-
-Added 2026-11-07 (maintainer, /quest-plan from the API shape audit), for
-the PR that lands this ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)):
-
-- An origin has one identity on both wires, seeded from `Config.hop`, not a
-  hop ID beside a separate random route identity.
-- `Cost::{MAX, DRAIN}` become `pub(crate)`. A drained route is the lowest
-  preference, never a saturated metric ("drain is a preference state", in
-  the [epic](/quest/m2/cluster-routing/README.md)), so sessions stop
-  stamping `Cost::DRAIN` on GOAWAY, including on moq-transport.
+- Public API: the hop chains leave it before the cut. Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests):
+  ✅ now, behind a private chain type that lite-06 and the moq-transport
+  cluster extension keep filling (rejected: when lite-06 retires, which ships
+  them in the cut and breaks them later; only the `Cost` constants now). The
+  sweep found no reader outside this repository, and /quest-unblock confirmed
+  ✅ now the same day. It is a breaking change; the PR marks its title with `!`.
+  - `Hops`, `RouteInfo::hops`, `RouteInfo::is_anonymous`, and
+    `Cost::{MAX, DRAIN}` become `pub(crate)`; `Cost::{new, value}` stay.
+    JS `RouteInfo.hops`, moq-ffi's `MoqRouteInfo` hops, and moq-c's route
+    info drop their mirrors.
+  - A drained route is the lowest preference, never a saturated metric
+    ("drain is a preference state", in the
+    [epic](/quest/m2/cluster-routing/README.md)), so sessions stop stamping
+    `Cost::DRAIN` on GOAWAY, including on moq-transport.
+  - An origin has one identity on both wires, seeded from `Config.hop`. Today
+    the lite-07 route node is `route::Node::random()`
+    (`rs/moq-net/src/model/origin.rs`) and lite-06 derives a different hop
+    from it (`route_hop`).
 
 ## Related
 

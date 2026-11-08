@@ -20,7 +20,7 @@ otherwise dominates the latency budget and would make the demo a measurement of
 somebody's webcam.
 
 The ground station's catalog and delivery-class shapes come from a zod
-schema mirroring the `moq-robot` types, written once and extending the root
+schema mirroring the documented robot conventions, written once and extending the root
 schema through the same seam `js/hang/src/catalog/root.ts` uses (there is no
 `@moq/mux`). Decided 2026-10-08: no separate `@moq/robot` package until a
 second browser consumer needs it; the schema folds in here. A browser
@@ -37,4 +37,4 @@ the maintenance.
 
 ## Related
 
-- [Robot teleoperation primitive](/quest/m5/teleop-robot.md) - the Rust types the zod schema mirrors
+- [Robot teleoperation conventions](/quest/m5/teleop-robot.md) - the conventions the zod schema mirrors

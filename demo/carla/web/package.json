@@ -26,7 +26,7 @@
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.4",
-		"rolldown": "^1.2.15",
+		"rolldown": "^1.2.16",
 		"typescript": "7.0.2",
 		"vite": "^8.3.5"
 	}

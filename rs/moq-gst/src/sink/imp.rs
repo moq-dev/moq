@@ -2245,7 +2245,6 @@ mod tests {
 	// A task outliving its session writes into the handle nobody reads any more. Scoping falls out of
 	// the topology: no id comparison guards the state the pads see.
 	#[test]
-	#[ignore = "flaky under stress; investigation: quest/m0/test-flakes-2/gst-stale-completion.md"]
 	fn a_stale_completion_cannot_end_the_next_publication() {
 		gst::init().unwrap();
 		let sink = sink();

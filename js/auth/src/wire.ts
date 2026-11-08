@@ -30,6 +30,12 @@ export const PatternListSchema = z.array(
 	),
 );
 
+/**
+ * A time in whole unix seconds, from the epoch to the last second the Rust crate's clock
+ * holds. Anything else is refused, `null` included, so both languages read the same times.
+ */
+export const UnixSecondsSchema = z.int().check(z.gte(0), z.lte(18_446_744_073));
+
 // At most 2^53 - 1, so every JSON reader holds the cap exactly.
 const RateSchema = z.number().check(
 	z.refine((bps) => Number.isSafeInteger(bps) && bps > 0, {

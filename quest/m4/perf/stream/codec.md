@@ -57,3 +57,5 @@ Public API: the `tokio_tungstenite` and `tungstenite` re-exports and the
 migrate in `qmux` and `moq-tokio`. The existing qmux interop tests (the `qmux06`
 dev-dependency) and the browser path in `js/qmux` must keep passing
 unchanged.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): qmux's tungstenite exposure is removed before the cut in [api-shape/transport](/quest/m2/api-shape/transport.md), whatever this bench finds; this quest is perf-only.
