@@ -108,9 +108,9 @@ class DatagramRequest:
         """Accept the request with its fixed publisher properties."""
         return DatagramProducer(self._inner.accept(info))
 
-    def abort(self, error_code: int) -> None:
+    def reject(self, error_code: int) -> None:
         """Reject this request with an application error code."""
-        self._inner.abort(error_code)
+        self._inner.reject(error_code)
 
 
 class DatagramRequests(_Stream[DatagramRequest]):

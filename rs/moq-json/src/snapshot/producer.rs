@@ -81,7 +81,7 @@ impl<T: Serialize> Producer<T> {
 				},
 				encoder: Encoder::new(config),
 				at: None,
-				aborted: None,
+				state: crate::state::State::Open,
 			})),
 			_marker: PhantomData,
 		}
@@ -301,17 +301,14 @@ struct Inner<T> {
 	/// older timestamp than its group's first frame, and a new group may not start before that one.
 	at: Option<moq_net::Timestamp>,
 
-	/// Why this producer aborted the track, so [`Producer::modify`] can report the cause rather than
-	/// the closed track it left behind.
-	aborted: Option<Error>,
+	/// Whether this producer still publishes, or how it ended the track.
+	state: crate::state::State,
 }
 
 impl<T> Inner<T> {
 	/// Refuse further edits once the track can't take another group.
 	fn open(&self) -> Result<()> {
-		if let Some(err) = &self.aborted {
-			return Err(err.clone());
-		}
+		self.state.check()?;
 
 		// The same test `append_group` applies: a boundary declared ahead of the live edge still
 		// admits the groups below it. The largest counts every group, even an empty one, so the
@@ -340,7 +337,7 @@ impl<T> Inner<T> {
 		self.track.group = None;
 		// Idempotent: a track that is already closed keeps its first reason.
 		let _ = self.track.inner.clone().abort(reason);
-		self.aborted = Some(err);
+		self.state.abort(err);
 	}
 
 	/// Finish the open group, leaving the next update to open a replacement with a full snapshot.
@@ -358,6 +355,7 @@ impl<T> Inner<T> {
 
 impl<T: Serialize> Inner<T> {
 	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
+		self.open()?;
 		let timestamp = self.track.rescale(payload.at)?;
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
@@ -394,11 +392,22 @@ impl<T: Serialize> Inner<T> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
+		match &self.state {
+			crate::state::State::Open => {}
+			crate::state::State::Finished => return Ok(()),
+			crate::state::State::Aborted(err) => return Err(err.clone()),
+		}
 		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
 		// Any further update fails on the closed track, but it has to fail as an error rather than by
 		// writing a delta with no group to hold it.
 		self.encoder.reset();
-		self.track.finish()
+		if let Err(err) = self.track.finish() {
+			// Half-finished, the track could still take groups, so it ends with the cause instead.
+			self.abort(err.clone());
+			return Err(err);
+		}
+		self.state = crate::state::State::Finished;
+		Ok(())
 	}
 }
 
@@ -493,7 +502,10 @@ impl Track {
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
-		self.inner.finish()?;
+		// Another handle may have declared the end already, which stands.
+		if self.inner.finished().is_none() {
+			self.inner.finish()?;
+		}
 		Ok(())
 	}
 }

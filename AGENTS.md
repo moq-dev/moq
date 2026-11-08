@@ -17,6 +17,7 @@ Trust this checkout's source over published API references, which may describe a
 
 - Impair networks with bufferbloat, queuing until packets drop, instead of random loss.
 - Anything that fans out gets a benchmark swept over both axes.
+- Model a lifecycle as one enum or union whose variants carry their data, mark it terminal only after the work that can fail, and guard each value with one lock (see State in `REVIEW.md`).
 
 # Public API
 
@@ -44,7 +45,7 @@ just check   # Lint, compile, and test what the branch changed
 just fix     # Auto-fix lint/formatting, same scope
 ```
 
-Quests: before any work, run `quest context` and follow it.
+Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.
 The `quest` binary and its skills come from the moq-dev/quest flake input; change them upstream and bump the input.
 `quest init` refuses Claude Code's worktree hooks: drop them from `.claude/settings.json` for its run, then restore them.
 

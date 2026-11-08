@@ -84,6 +84,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	video: BTreeMap<u8, VideoStream>,
 	/// Demuxed audio tracks keyed by RTMP track id.
 	audio: BTreeMap<u8, AudioStream>,
+
+	/// Whether input is still accepted: [`finish`](Self::finish) ends it.
+	input: crate::container::Input,
 }
 
 /// The demuxed video track plus its current catalog config, so a repeated
@@ -114,6 +117,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			dropped_metadata: 0,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
+			input: crate::container::Input::Open,
 		}
 	}
 
@@ -135,7 +139,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Append `buf` to the internal scratch and demux every whole tag it now
 	/// completes. The buffer is fully consumed; a trailing partial tag is retained
 	/// for the next call.
+	///
+	/// Input after [`finish`](Self::finish) is refused with [`Finished`](crate::Error::Finished),
+	/// or with the cause of a finish that failed.
 	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
+		self.input.check()?;
 		self.buffer.extend_from_slice(data);
 
 		match self.drain() {
@@ -598,6 +606,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Close the current group on every track and reopen at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+		self.input.check()?;
 		for stream in self.video.values_mut() {
 			stream.track.seek(sequence)?;
 		}
@@ -608,18 +617,31 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Finish every track, flushing the current group.
+	///
+	/// Every track ends even when one fails to, aborting with the cause, and a finish that failed
+	/// returns the same error to every later call. Calling it again after a success does nothing.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		match &self.input {
+			crate::container::Input::Open => {}
+			crate::container::Input::Finished => return Ok(()),
+			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => return Err(err.clone()),
+		}
 		// No input follows, so the buffer that waited for the rest of a tag is done.
 		self.buffer = BytesMut::new();
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
+		let mut result = Ok(());
 		for stream in self.video.values_mut() {
-			stream.track.finish()?;
+			result = result.and(stream.track.end());
 		}
 		for stream in self.audio.values_mut() {
-			stream.track.finish()?;
+			result = result.and(stream.track.end());
 		}
-		Ok(())
+		self.input = match &result {
+			Ok(()) => crate::container::Input::Finished,
+			Err(err) => crate::container::Input::Failed(err.clone()),
+		};
+		result
 	}
 
 	/// Abort every track with `err`, so consumers see the real cause instead of the

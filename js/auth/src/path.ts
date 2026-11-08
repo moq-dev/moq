@@ -15,7 +15,7 @@
  * @module
  */
 
-/** The most UTF-8 bytes a path may hold, matching `@moq/net`'s `Path.MAX_BYTES`. */
+/** The most UTF-8 bytes a path may hold, matching `@moq/net`'s path limit. */
 const MAX_BYTES = 4096;
 
 const utf8 = new TextEncoder();
