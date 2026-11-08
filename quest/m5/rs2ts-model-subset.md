@@ -22,11 +22,15 @@ reaches the model; none of these changes behavior.
 - The internal `unsafe`: `model/group.rs`'s `MaybeUninit` frame ring, `NonNull` in
   `track.rs` and `track/demand/ranges.rs`, `frame.rs`'s `Segment`, and kio's lock-free
   `log`. Each is either rewritten in safe Rust for both builds, at measured native cost, or
-  left for rust2-ts's [unsafe epic](https://github.com/moq-dev/rust2/blob/main/quest/m3/ts-unsafe/README.md)
-  to translate as is.
+  left for rust2-ts to translate as is where its
+  [unsafe policy](https://github.com/moq-dev/rust2/blob/main/quest/m3/README.md) allows,
+  which refuses any `unsafe` needing a new pointer form.
 - `group.rs`'s `dyn Expiry` becomes an enum of its two implementations.
-- Drop `hashlink`, `slab`, and `smallvec` from the model's path where a std type does the
+- Drop `hashlink` and `slab` from the model's path where a std type does the
   job at measured cost, or bind them to hand-written TS through rust2-ts's config.
+  `smallvec` stays: rust2-ts maps it into its runtime instead
+  ([rust2's smallvec quest](https://github.com/moq-dev/rust2/blob/main/quest/m2/ts-model/smallvec.md),
+  decided with the rust2 maintainer on 2026-11-07).
 
 Decided with the rust2 maintainer on 2026-11-07, in
 [rust2's model epic](https://github.com/moq-dev/rust2/blob/main/quest/m2/ts-model/README.md),

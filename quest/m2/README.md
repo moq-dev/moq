@@ -211,7 +211,6 @@ quests that require them.
 - [Drop moq-auth's iroh transport](/quest/m2/auth-drop-iroh.md) - this breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
 - [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - the catalog's new `warmup` contract is settled before the cut publishes it
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
-- [A recreated or restarted track cannot reuse group sequences](/quest/m2/sequence-reuse.md) - recreating a track or restarting an instance cannot give new content an old group identity unless the app seeds past it, and datagrams are documented as exempt
 - [moq auth serve bounds what a leaked token or public caller can do](/quest/m2/auth-serve-policy.md) - tokens need an `exp` unless the operator opts out, and a public listener authenticates relays
 - [Finishing a producer returns a Finished handle](/quest/m2/finished-handle.md) - `finish(self)` consumes moq-net's and the media crates' producers, so appending after finish doesn't compile
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
