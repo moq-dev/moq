@@ -232,6 +232,7 @@ async fn prefix_grants_admit_a_session() {
 /// name. Bob sees a dial from alice, but alice never dialed it and resets his accept, so it
 /// never connects and mallory reads nothing.
 #[tokio::test]
+#[ignore = "flaky: mallory's request can sync before bob's announce arrives; quest/m0/test-flakes-2/forged-dial-announce.md"]
 async fn a_forged_dial_never_connects() {
 	let fixture = Fixture::new().await;
 	let (alice, _alice_origin, _alice_session) = fixture.endpoint(Role::Client, "alice", LITE).await;

@@ -32,7 +32,6 @@ moves what remains of them once their claims merge.
 ## Required
 
 - [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
-- [Only the relay's own stats publisher uses the stats prefix](/quest/m1/stats-prefix.md) - a broad grant can no longer publish unmetered media or spoof node stats under `.stats`
 - [js/net and moq-net decode the same inputs the same way](/quest/m1/js-net-input-checks.md) - a shared input corpus pins both decoders, and a typed endpoint stops loopback spellings from slipping past GOAWAY checks
 - [Rust and JS run one token and key-set corpus](/quest/m1/token-parse-strict.md) - a shared corpus pins both parsers, so a null `exp` no longer means never-expiring in Rust
 - [Resetting a kio sleep to its deadline does not wake it](/quest/m1/kio-reset-same-deadline.md) - a caller that resets on every poll no longer spins the simulator
@@ -47,12 +46,10 @@ moves what remains of them once their claims merge.
 - [One assets() for every hosted file](/quest/m1/hosted-assets.md) - `@moq/hang` owns `assets()`, which also points the libav polyfill at the hosted wasm
 - [Watch sources default to the decoder's probe](/quest/m1/watch-supported-default.md) - a source built without `in.supported` plays instead of selecting nothing
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
-- [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [moq-mux reads only the base layer's H.265 SPS](/quest/m1/h265-base-layer-sps.md) - a layered MV-HEVC or SHVC stream imports as its base layer instead of misreading an enhancement-layer SPS, which still reaches the track
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
-- [Copies of one group identity must agree beyond their bytes](/quest/m1/copy-identity.md) - copies that differ in timestamp, object fields, or frame count fail as a protocol violation
 - [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
 - [Relay settings parse once into a validated configuration](/quest/m1/relay-config-checks.md) - settings that cannot work together are refused at load instead of accepted and ignored
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
