@@ -10,6 +10,7 @@ mod binary;
 mod clock;
 mod consumer;
 mod container;
+pub mod drm;
 mod echo;
 mod hex;
 mod include;

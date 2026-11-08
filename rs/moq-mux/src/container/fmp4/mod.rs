@@ -25,6 +25,28 @@ pub use muxer::*;
 /// A major version bump of `mp4_atom` is a breaking change for moq-mux.
 pub use mp4_atom;
 
+/// Whether a CMAF init segment holds an encrypted (`encv`/`enca`) sample entry.
+///
+/// An init that fails to parse is not one, since no consumer reads it either way.
+pub(crate) fn encrypted(init: &[u8]) -> bool {
+	use mp4_atom::{Any, Codec, DecodeMaybe, FourCC};
+
+	if metadata::check(init).is_err() {
+		return false;
+	}
+	// This mp4-atom has no Common Encryption boxes, so it keeps either entry as unknown.
+	let protected = [FourCC::new(b"encv"), FourCC::new(b"enca")];
+	let mut cursor = std::io::Cursor::new(init);
+	while let Ok(Some(atom)) = Any::decode_maybe(&mut cursor) {
+		if let Any::Moov(moov) = atom {
+			return (moov.trak.iter())
+				.flat_map(|trak| &trak.mdia.minf.stbl.stsd.codecs)
+				.any(|codec| matches!(codec, Codec::Unknown(kind, _) if protected.contains(kind)));
+		}
+	}
+	false
+}
+
 /// The largest text sample [`Import`] holds whole.
 ///
 /// A text sample is rewritten only once its last byte arrives, so a larger one is refused before

@@ -18,6 +18,14 @@ author:
 
 normative:
   moqmsf: I-D.ietf-moq-msf
+  moqcmsf: I-D.ietf-moq-cmsf
+  cenc:
+    title: "Information technology - MPEG systems technologies - Part 7: Common encryption in ISO base media file format files"
+    author:
+      - org: ISO/IEC
+    seriesinfo:
+      ISO/IEC: 23001-7
+    date: false
   moql: I-D.lcurley-moq-lite
   moqflate:
     title: "DEFLATE Compressed Tracks for MoQ"
@@ -160,6 +168,7 @@ type Catalog = {
     "broadcast": string,
     "instance": string | undefined,
   }> | undefined,
+  "drm": Record<string, DrmSchema> | undefined,
   // ... any custom fields ...
 }
 ~~~
@@ -172,7 +181,7 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, an optional `media` section ({{media}}) holding the clock that maps content time to wall time and the interval a viewer can join on, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), and whole broadcasts listed in `include` ({{include}}).
+This specification defines audio, video, and text media tracks, an optional `media` section ({{media}}) holding the clock that maps content time to wall time and the interval a viewer can join on, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), whole broadcasts listed in `include` ({{include}}), and the DRM systems protecting encrypted renditions ({{drm}}).
 
 ## Version {#catalog-version}
 The root `version` field is the oldest draft of this specification that reads the catalog correctly, by draft number: `4` needs a consumer of moq-hang-04 or later.
@@ -188,7 +197,7 @@ This draft needs `version` 4 for:
 - a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead;
 - a video `warmup` ({{field-warmup}}) above zero, since an older consumer starts decoding a group at a picture that is not a keyframe.
 
-Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `media` ({{media}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
+Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `media` ({{media}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; `drm` ({{drm}}) leaves an older consumer selecting a protected rendition it then fails to decode, which raising `version` would not improve, since that would also refuse it the clear renditions; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
 
 ## Media {#media}
 The catalog's root `media` field holds what applies to every audio and video track:
@@ -257,6 +266,37 @@ An include produced on demand has no stream until it resolves, so a publisher om
 An include's rendition IDs belong to its own catalog and MUST NOT replace IDs in the listing catalog, so the same ID MAY name an include, a rendition in the listing catalog, and a rendition in the include.
 An unavailable include does not invalidate the listing catalog.
 A consumer does not expand an include's own `include`: each needs a selection of its own.
+
+## DRM {#drm}
+The optional root `drm` map describes the DRM systems protecting encrypted renditions.
+Each key is an entry ID, and each entry is one DRM system for one Common Encryption scheme and one key:
+
+~~~
+type DrmSchema = {
+  "system": string,
+  "scheme": string,
+  "kid": string,
+  "pssh": string | undefined,
+  "license": { "url": string, "type": string | undefined } | undefined,
+  "certificate": { "url": string, "type": string | undefined } | undefined,
+}
+~~~
+
+The `system` field is the DRM system ID and `kid` the default key ID, each a hyphenated UUID string, and `scheme` is the Common Encryption scheme {{cenc}}, `cenc` or `cbcs` as CMSF allows {{moqcmsf}}.
+The `pssh` field is the system's whole `pssh` box, base64-encoded ({{!RFC4648, Section 4}}).
+The `license` field names the server a consumer requests a license from, and `certificate` the server certificate a system such as FairPlay needs first; each `type` is the license protocol or the certificate's MIME type.
+Renditions encrypted under the same system, scheme, and key MAY share an entry.
+
+A protected audio or video rendition lists the IDs of the entries that can decrypt it in its `drm` field, an array of strings; absent or empty means the rendition is clear.
+Common Encryption is defined for CMAF, so a protected rendition is in practice a `cmaf` one ({{cmaf}}): its `init` keeps the encrypted sample entry with its `sinf`, and the `pssh` boxes, while its `codec` names the codec the encrypted entry wraps.
+A rendition listing any ID is protected, whether or not the consumer can parse the entries it names.
+A consumer MUST NOT reject a catalog for an entry it cannot parse, such as one with another `scheme` or a malformed UUID or URL: the renditions listing that entry stay protected, and the rest of the catalog stays usable.
+A consumer MUST reject a catalog with a rendition listing an ID the root `drm` lacks, and an entry that is not a JSON object.
+A consumer MUST treat a `cmaf` rendition whose `init` holds an encrypted sample entry (`encv` or `enca`) as protected, even when it lists no entry.
+A consumer that cannot decrypt a protected rendition MUST treat it as one it cannot decode.
+
+Each entry maps onto a CMSF `contentProtections` entry {{moqcmsf}}: the ID is its `refID`, `kid` its single `defaultKID`, `system`, `license`, `certificate`, and `pssh` its `drmSystem`'s `systemID`, `laURL`, `certURL`, and `pssh`, and a rendition's `drm` its `contentProtectionRefIDs`.
+A CMSF entry naming several `defaultKID`s has no single hang entry; a consumer converting it keeps it as an entry it cannot parse, so the renditions listing it stay protected.
 
 ## Track Identity {#identity}
 A track name always means the same content, so a catalog update never redefines an audio or video track.
@@ -1129,6 +1169,7 @@ This document has no IANA actions.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
 - Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
 - Added an optional `instance` beside every rendition and data track `broadcast` reference ({{field-instance}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `instance` fails a rendition that resolves another stream, and is best effort against an Instance a receiver minted.
+- Added the optional root `drm` map ({{drm}}) and the audio and video `drm` field: the DRM systems, scheme, and key protecting a Common Encryption `cmaf` rendition, mapping onto CMSF `contentProtections`. A rendition listing any entry is protected, and an entry a consumer cannot parse hides only the renditions that list it.
 - Added the optional root `include` map ({{include}}): whole broadcasts named by a relative `broadcast` and an optional `instance`, opened only on selection, whose rendition IDs stay their own.
 - Includes share the listing catalog's PTS timeline and root settings, including its clock and join interval.
 - An HLS master selects the includes it lists by reading their catalogs, without demanding media, and segments them on the listing catalog's `media`; an on-demand publisher answers its catalog without starting media production.

@@ -197,10 +197,13 @@ impl EgressSource {
 /// Publish each catalog snapshot until the catalog ends or every pump is gone, failing with the
 /// catalog's failure.
 async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch::Sender<Catalog>) -> Result<()> {
+	let mut clear = moq_mux::catalog::hang::Clear::default();
 	loop {
 		tokio::select! {
 			next = consumer.next() => match next {
-				Ok(Some(catalog)) => {
+				Ok(Some(mut catalog)) => {
+					// WebRTC egress would forward ciphertext as media; it does not decrypt.
+					clear.retain(&mut catalog);
 					tx.send_replace(catalog);
 				}
 				Ok(None) => return Ok(()),

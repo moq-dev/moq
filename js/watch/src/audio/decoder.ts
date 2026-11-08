@@ -1044,6 +1044,12 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		return false;
 	}
 
+	// WebCodecs cannot decrypt, so an encrypted rendition is unplayable here.
+	if (Catalog.isProtected(config)) {
+		console.warn(`audio: ignoring protected rendition ${config.codec}: playback cannot decrypt it`);
+		return false;
+	}
+
 	// Opus only runs at its native rates, so a catalog advertising anything else is wrong and Safari
 	// refuses to decode it. Warn rather than reject: Chrome and Firefox ignore the configured rate and
 	// play these streams fine, so rejecting would silence them for a publisher they handle today.
@@ -1051,24 +1057,30 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		console.warn(`audio: opus advertised at ${config.sampleRate}Hz, which some browsers cannot decode`);
 	}
 
+	let init: { description?: Uint8Array; encrypted: boolean } | undefined;
+	if (config.container.kind === "cmaf") {
+		try {
+			const Cmaf = await import("@moq/hang/cmaf");
+			init = Cmaf.decodeInitSegment(base64ToBytes(config.container.init));
+		} catch (err) {
+			// A malformed init segment means we can't extract the codec
+			// description, so we can't probe support reliably. Reject the
+			// track rather than letting isConfigSupported pass on a
+			// description-less config and then having decode() fail later.
+			console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
+			return false;
+		}
+		// An encrypted sample entry is protected even when the catalog lists no `drm` entry.
+		if (init.encrypted) {
+			console.warn(`audio: ignoring encrypted CMAF rendition ${config.codec}: playback cannot decrypt it`);
+			return false;
+		}
+	}
+
 	// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
 	let description: Uint8Array | undefined;
 	if (config.codec !== "opus") {
-		if (config.description) {
-			description = Util.Hex.toBytes(config.description);
-		} else if (config.container.kind === "cmaf") {
-			try {
-				const Cmaf = await import("@moq/hang/cmaf");
-				description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
-			} catch (err) {
-				// A malformed init segment means we can't extract the codec
-				// description, so we can't probe support reliably. Reject the
-				// track rather than letting isConfigSupported pass on a
-				// description-less config and then having decode() fail later.
-				console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
-				return false;
-			}
-		}
+		description = config.description ? Util.Hex.toBytes(config.description) : init?.description;
 	}
 	// Install the WebCodecs polyfill before probing, since playback would decode through it where
 	// AudioDecoder is missing (Node, Bun, older browsers). Loads nothing where WebCodecs audio is native.

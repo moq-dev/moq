@@ -3,7 +3,7 @@ import type * as Catalog from "@moq/hang/catalog";
 /** The catalog fields that determine the demuxer and WebCodecs decoder instance. */
 export type DecoderConfig = Pick<
 	Catalog.VideoConfig,
-	"codec" | "container" | "description" | "displayAspectWidth" | "displayAspectHeight"
+	"codec" | "container" | "description" | "displayAspectWidth" | "displayAspectHeight" | "drm"
 > & {
 	optimizeForLatency: boolean;
 	interlaced: boolean;
@@ -29,6 +29,7 @@ export function playbackIdentity(config: Catalog.VideoConfig): PlaybackIdentity 
 			description: config.description,
 			displayAspectWidth: config.displayAspectWidth,
 			displayAspectHeight: config.displayAspectHeight,
+			drm: config.drm,
 			optimizeForLatency: config.optimizeForLatency ?? true,
 			interlaced: config.interlaced ?? false,
 		},

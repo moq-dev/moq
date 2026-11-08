@@ -75,6 +75,30 @@ fn decode_init(init: &[u8]) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
 	(ftyp, moov)
 }
 
+/// An init whose sample entry is encrypted (`encv`/`enca`) reads as protected even when the
+/// catalog lists no `drm` entry, so a publisher that encrypts without signalling it is never read
+/// as clear.
+#[test]
+fn an_encrypted_sample_entry_reads_as_protected() {
+	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let mut head = Vec::new();
+	ftyp.encode(&mut head).unwrap();
+	let mut body = Vec::new();
+	moov.encode(&mut body).unwrap();
+	let cmaf = |moov: &[u8]| Container::Cmaf {
+		init: [head.as_slice(), moov].concat().into(),
+	};
+	assert!(!crate::catalog::hang::protected(&[], &cmaf(&body)));
+
+	// Renaming the entry stands in for a real `encv`, which also wraps the clear entry's fields.
+	for (clear, encrypted) in [(b"avc1", b"encv"), (b"mp4a", b"enca")] {
+		let at = body.windows(4).position(|window| window == clear).unwrap();
+		let mut renamed = body.clone();
+		renamed[at..at + 4].copy_from_slice(encrypted);
+		assert!(crate::catalog::hang::protected(&[], &cmaf(&renamed)));
+	}
+}
+
 fn video_config(codec: mp4_atom::Codec) -> hang::catalog::VideoConfig {
 	video_config_result(codec).unwrap()
 }

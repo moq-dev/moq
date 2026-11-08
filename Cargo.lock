@@ -2943,6 +2943,7 @@ name = "hang"
 version = "0.21.11"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "bytes",
  "derive_more 2.1.1",
  "hang",
@@ -2959,6 +2960,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "workspace-hack",
 ]
 

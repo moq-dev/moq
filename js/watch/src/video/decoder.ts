@@ -1335,13 +1335,17 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 		return false;
 	}
 
-	let description: Uint8Array | undefined;
-	if (config.description) {
-		description = Util.Hex.toBytes(config.description);
-	} else if (config.container.kind === "cmaf") {
+	// WebCodecs cannot decrypt, so an encrypted rendition is unplayable here.
+	if (Catalog.isProtected(config)) {
+		console.warn(`video: ignoring protected rendition ${config.codec}: playback cannot decrypt it`);
+		return false;
+	}
+
+	let init: { description?: Uint8Array; encrypted: boolean } | undefined;
+	if (config.container.kind === "cmaf") {
 		try {
 			const Cmaf = await import("@moq/hang/cmaf");
-			description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+			init = Cmaf.decodeInitSegment(base64ToBytes(config.container.init));
 		} catch (err) {
 			// A malformed init segment means we can't extract the codec
 			// description, so we can't probe support reliably. Reject the
@@ -1350,7 +1354,13 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 			console.warn(`video: malformed CMAF init segment for codec ${config.codec}`, err);
 			return false;
 		}
+		// An encrypted sample entry is protected even when the catalog lists no `drm` entry.
+		if (init.encrypted) {
+			console.warn(`video: ignoring encrypted CMAF rendition ${config.codec}: playback cannot decrypt it`);
+			return false;
+		}
 	}
+	const description = config.description ? Util.Hex.toBytes(config.description) : init?.description;
 	const { supported } = await VideoDecoder.isConfigSupported({
 		codec: config.codec,
 		description,

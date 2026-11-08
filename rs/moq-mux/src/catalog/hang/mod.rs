@@ -11,7 +11,7 @@ mod container;
 mod ext;
 
 pub use consumer::Consumer;
-pub use container::Container;
 pub(crate) use container::supported;
+pub use container::{Clear, Container, protected};
 pub use ext::{CatalogExt, Extra};
 pub use hang::Catalog;

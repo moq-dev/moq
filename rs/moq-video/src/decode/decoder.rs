@@ -172,11 +172,17 @@ impl Decoder {
 	/// Build a decoder for the catalog's video config.
 	///
 	/// A codec or description this build cannot decode is
-	/// [`Error::UnsupportedCodec`], and so is a stream every decoder for its codec
-	/// refused because its device cannot decode it. When any of them failed to open
-	/// for another reason, such as a missing driver, the result is
-	/// [`Error::NoDecoder`], a fault rather than a property of the track.
+	/// [`Error::UnsupportedCodec`], as is a protected rendition (see [`moq_mux::catalog::hang::protected`]), whose
+	/// samples are encrypted, and a stream every decoder for its codec refused because its
+	/// device cannot decode it. When any of them failed to open for another reason, such as
+	/// a missing driver, the result is [`Error::NoDecoder`], a fault rather than a property
+	/// of the track.
 	pub fn new(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
+		if moq_mux::catalog::hang::protected(&catalog.drm, &catalog.container) {
+			return Err(Error::UnsupportedCodec(
+				"the rendition is encrypted, and decryption is not supported".into(),
+			));
+		}
 		// CMAF samples are length-prefixed whatever the sample entry; Legacy and LOC
 		// carry Annex-B exactly when the parameter sets are in band.
 		let cmaf = matches!(catalog.container, Container::Cmaf { .. });
@@ -528,6 +534,23 @@ mod tests {
 	/// The size the gray test stream is encoded at.
 	fn gray_size() -> crate::Size {
 		crate::Size::new(320, 240)
+	}
+
+	/// A protected rendition's samples are encrypted, so it is refused like a codec this build
+	/// cannot decode, before any backend opens.
+	#[test]
+	fn a_protected_rendition_is_unsupported() {
+		let mut catalog = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1e,
+		});
+		catalog.drm = vec!["1".into()];
+		assert!(matches!(
+			super::Decoder::new(&catalog, &super::Config::new()),
+			Err(crate::Error::UnsupportedCodec(_))
+		));
 	}
 
 	#[test]

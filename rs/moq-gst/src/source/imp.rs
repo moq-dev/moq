@@ -976,6 +976,7 @@ impl Session {
 		let mut tasks = tokio::task::JoinSet::new();
 		let mut catalog_closed = false;
 		let mut result = Ok(());
+		let mut clear = moq_mux::catalog::hang::Clear::default();
 
 		loop {
 			if catalog_closed && tasks.is_empty() {
@@ -991,7 +992,11 @@ impl Session {
 				// The guard stops us polling a closed catalog track (which would spin the loop
 				// returning None) while the followers drain.
 				next = catalog_consumer.next(), if !catalog_closed => match next {
-					Ok(Some(catalog)) => reconcile(&catalog, &source, &playback, &mut followers, &mut tasks, &emptied, cancel),
+					Ok(Some(mut catalog)) => {
+						// Encrypted samples would reach the decoders as ciphertext; this source does not decrypt.
+						clear.retain(&mut catalog);
+						reconcile(&catalog, &source, &playback, &mut followers, &mut tasks, &emptied, cancel)
+					}
 					// Catalog track closed. Don't stop the followers: let each reader reach its natural
 					// end, and just stop reconciling while they drain.
 					//

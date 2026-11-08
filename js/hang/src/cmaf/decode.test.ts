@@ -62,6 +62,7 @@ const INIT: InitSegment = {
 	timescale: 90_000,
 	trackId: 1,
 	kind: "video",
+	encrypted: false,
 	defaultSampleDuration: 3_000,
 	defaultSampleSize: 1,
 	defaultSampleFlags: 0,
@@ -75,6 +76,27 @@ function fragment(trun: Uint8Array, data: number): Uint8Array {
 	out.set(box("mdat", new Uint8Array(data)), moof.byteLength);
 	return out;
 }
+
+// Renaming the sample entry stands in for a real `encv`/`enca`, which also wraps the clear fields.
+function encrypt(init: Uint8Array, clear: string, encrypted: string): Uint8Array {
+	const out = new Uint8Array(init);
+	const at = Buffer.from(out).indexOf(clear, Buffer.from(out).indexOf("moov"));
+	if (at < 0) throw new Error(`no ${clear} sample entry`);
+	out.set(new TextEncoder().encode(encrypted), at);
+	return out;
+}
+
+describe("CMAF encrypted sample entries", () => {
+	const fixtures = JSON.parse(readFileSync(new URL("./fixtures.json", import.meta.url), "utf8"));
+	const init = (name: string) => new Uint8Array(Buffer.from(fixtures[name], "base64"));
+
+	test("an encv or enca entry reads as encrypted", () => {
+		expect(decodeInitSegment(init("videoInit")).encrypted).toBe(false);
+		expect(decodeInitSegment(encrypt(init("videoInit"), "avc1", "encv")).encrypted).toBe(true);
+		expect(decodeInitSegment(init("audioInit")).encrypted).toBe(false);
+		expect(decodeInitSegment(encrypt(init("audioInit"), "Opus", "enca")).encrypted).toBe(true);
+	});
+});
 
 describe("CMAF untrusted counts and sizes", () => {
 	test("a zero timescale is refused at initialization", () => {

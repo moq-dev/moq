@@ -528,6 +528,9 @@ struct WatchCatalog {
 	source: moq_mux::Source,
 	renditions: renditions::Producer,
 	role: Role,
+	/// Drops protected renditions: their segments would lose the `pssh`, `senc`, `saiz`, and
+	/// `saio` a decrypting player needs.
+	clear: catalog::hang::Clear,
 	/// The source's catalog broadcast, taken on the first poll, so the catalog, the media
 	/// subscriptions, and the closed check all refer to the one broadcast it was built from.
 	broadcast: Option<moq_net::broadcast::Consumer>,
@@ -561,6 +564,7 @@ impl WatchCatalog {
 			source,
 			renditions,
 			role,
+			clear: Default::default(),
 			broadcast: None,
 			delay: CATALOG_RETRY_MIN,
 			state: Watch::Start,
@@ -603,6 +607,7 @@ impl WatchCatalog {
 
 	/// Reconcile the renditions with `catalog`.
 	fn sync(&mut self, mut catalog: catalog::hang::Catalog) {
+		self.clear.retain(&mut catalog);
 		match &self.role {
 			Role::Root(Some(include)) => include.sync(&self.source, &catalog),
 			Role::Root(None) => {}
@@ -903,6 +908,36 @@ mod tests {
 		let renditions = renditions::Producer::spawned(Config::default().window);
 		renditions.sync(&upstream, &catalog);
 		assert!(renditions.get(Kind::Video, "video").is_none());
+	}
+
+	/// A protected rendition is not served: its segments would lose the `pssh`, `senc`, `saiz`,
+	/// and `saio` a decrypting player needs. Its clear sibling is.
+	#[tokio::test(start_paused = true)]
+	async fn protected_rendition_is_not_advertised() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
+		let mut catalog = joined();
+		let mut protected = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		protected.drm = vec!["1".into()];
+		catalog.drm.insert(
+			"1".into(),
+			hang::catalog::drm::System::new(
+				hang::catalog::drm::system::CLEARKEY,
+				hang::catalog::drm::Scheme::Cenc,
+				hang::catalog::drm::Uuid::nil(),
+			)
+			.into(),
+		);
+		catalog.video.renditions.insert("protected".to_string(), protected);
+		catalog.video.renditions.insert(
+			"clear".to_string(),
+			hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8),
+		);
+
+		let renditions = renditions::Producer::spawned(Config::default().window);
+		WatchCatalog::new(source, renditions.clone(), Role::Root(None)).sync(catalog);
+		assert!(renditions.get(Kind::Video, "protected").is_none());
+		assert!(renditions.get(Kind::Video, "clear").is_some());
 	}
 
 	#[tokio::test(start_paused = true)]

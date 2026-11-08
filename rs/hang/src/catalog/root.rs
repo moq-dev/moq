@@ -93,6 +93,15 @@ pub struct Catalog<E = ()> {
 	/// Omitted from the wire when empty. A malformed entry refuses the catalog.
 	pub include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
+	/// The DRM systems protecting the broadcast's CMAF renditions, keyed by entry ID.
+	///
+	/// A protected video or audio rendition lists the IDs of its entries in its own `drm` field,
+	/// and one listing an ID missing here is refused by [`check_renditions`](Self::check_renditions).
+	/// Omitted from the wire when empty. An entry this build cannot read decodes as
+	/// [`Unknown`](crate::catalog::drm::Entry::Unknown) rather than refusing the catalog, and the
+	/// renditions listing it stay protected. See [`drm`](crate::catalog::drm).
+	pub drm: std::collections::BTreeMap<String, crate::catalog::drm::Entry>,
+
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	///
 	/// The root `version` is reserved: serializing computes it from the base sections, and fails if
@@ -170,6 +179,9 @@ struct Wire<E> {
 	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
 	include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
+	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+	drm: std::collections::BTreeMap<String, crate::catalog::drm::Entry>,
+
 	#[serde(flatten, serialize_with = "serialize_ext")]
 	ext: E,
 }
@@ -205,6 +217,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			stats,
 			echo,
 			include,
+			drm,
 			ext,
 		} = wire;
 		Self {
@@ -218,6 +231,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			stats,
 			echo,
 			include,
+			drm,
 			ext,
 		}
 	}
@@ -272,10 +286,11 @@ impl Catalog<()> {
 }
 
 impl<E> Catalog<E> {
-	/// Refuse a catalog with an ID naming both a video and an audio rendition, or with a
-	/// rendition field out of range, such as a zero sample rate or a projection out of bounds.
+	/// Refuse a catalog with an ID naming both a video and an audio rendition, with a rendition
+	/// field out of range, such as a zero sample rate or a projection out of bounds, or with a
+	/// rendition listing a `drm` entry the root lacks.
 	///
-	/// Decoding already refuses an out-of-range rendition, so this catches a catalog built by hand.
+	/// Decoding already refuses an out-of-range rendition, so that catches a catalog built by hand.
 	pub fn check_renditions(&self) -> Result<()> {
 		use crate::catalog::Rendition;
 
@@ -292,6 +307,18 @@ impl<E> Catalog<E> {
 		}
 		for config in self.audio.renditions.values() {
 			config.check()?;
+		}
+
+		// A protected rendition whose entry is missing would read as clear, or name no system.
+		let drm = (self.video.renditions.iter().map(|(id, config)| (id, &config.drm)))
+			.chain(self.audio.renditions.iter().map(|(id, config)| (id, &config.drm)));
+		for (rendition, ids) in drm {
+			if let Some(id) = ids.iter().find(|id| !self.drm.contains_key(*id)) {
+				return Err(crate::Error::MissingDrm {
+					rendition: rendition.clone(),
+					id: id.clone(),
+				});
+			}
 		}
 		Ok(())
 	}
@@ -320,13 +347,14 @@ impl<E> Catalog<E> {
 		(renamed || warmup).then_some(4)
 	}
 
-	/// Copy the media sections into a catalog with no application extension.
+	/// Copy the media sections and the `drm` entries into a catalog with no application extension.
 	pub fn without_ext(&self) -> Catalog<()> {
 		Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
 			media: self.media,
 			text: self.text.clone(),
+			drm: self.drm.clone(),
 			..Default::default()
 		}
 	}
@@ -486,6 +514,44 @@ mod test {
 			}
 		}
 		assert!(failures.is_empty(), "{}", failures.join("\n"));
+	}
+
+	/// A protected rendition references a root `drm` entry, which survives a round trip and the
+	/// media copy; a clear catalog writes no `drm` at all, and a dangling reference is refused.
+	#[test]
+	fn drm_entries_round_trip_and_dangling_references_are_refused() {
+		use crate::catalog::drm;
+
+		let mut catalog = Catalog::<()>::default();
+		assert!(!catalog.to_json().unwrap().contains("drm"));
+
+		let kid = uuid::uuid!("a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90");
+		catalog.drm.insert(
+			"1".into(),
+			drm::System::new(drm::system::CLEARKEY, drm::Scheme::Cbcs, kid).into(),
+		);
+		let mut video = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		video.container = Container::Cmaf {
+			init: bytes::Bytes::from_static(b"init"),
+		};
+		video.drm = vec!["1".into()];
+		catalog.video.renditions.insert("hd".into(), video);
+		catalog.check_renditions().unwrap();
+
+		let decoded = Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert_eq!(decoded, catalog);
+		assert_eq!(catalog.without_ext().drm, catalog.drm);
+
+		catalog.drm.clear();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::MissingDrm { rendition, id }) if rendition == "hd" && id == "1"
+		));
 	}
 
 	/// The rendition count is the publisher's to choose: a catalog listing many is accepted.
@@ -788,6 +854,7 @@ mod test {
 				reorder: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,
+				drm: Vec::new(),
 				warmup: None,
 				jitter: Some(std::time::Duration::from_millis(100)),
 				delay: Some(std::time::Duration::from_millis(200)),
@@ -810,6 +877,7 @@ mod test {
 				enabled: true,
 				description: None,
 				container: Container::Legacy,
+				drm: Vec::new(),
 				warmup: None,
 				jitter: Some(std::time::Duration::from_millis(40)),
 				delay: None,

@@ -19,6 +19,7 @@ const TEST_INIT: InitSegment = {
 	timescale: TIMESCALE,
 	trackId: 1,
 	kind: "video",
+	encrypted: false,
 	defaultSampleDuration: 0,
 	defaultSampleSize: 0,
 	defaultSampleFlags: 0,

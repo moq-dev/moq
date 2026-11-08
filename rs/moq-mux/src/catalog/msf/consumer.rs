@@ -105,10 +105,17 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 /// Fields with no representation in `hang::Catalog` (`generated_at`, `is_complete`, `is_live`,
 /// `render_group`, `alt_group`, `max_grp_sap_starting_type`, `max_obj_sap_starting_type`) are
 /// dropped.
+///
+/// `contentProtections` become the `drm` section, each `refID` an entry ID, and a track's
+/// `contentProtectionRefIDs` its rendition's `drm`. An entry the hang catalog cannot read (a
+/// malformed ID, URL, or `pssh`, or other than one default key) becomes an
+/// [`Unknown`](hang::catalog::drm::Entry::Unknown) entry holding the MSF entry's JSON, so the
+/// tracks it protects stay protected.
 pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net::Path) -> Result<Catalog<E>> {
 	let mut catalog = Catalog::default();
 	catalog.ext = msf.ext.clone();
 	let mut init_cache = InitDataCache::new();
+	catalog.drm = drm_from_msf(msf);
 
 	for track in &msf.tracks {
 		// The track name is the rendition ID, so a later track with the name replaces the earlier
@@ -141,6 +148,7 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			moq_msf::Role::Video => match video_config_from_msf(track, &mut init_cache)? {
 				Some(mut config) => {
 					config.broadcast = broadcast;
+					config.drm = track.content_protection_ref_ids.clone();
 					catalog.video.renditions.insert(track.name.clone(), config);
 				}
 				None => {
@@ -154,6 +162,7 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 			moq_msf::Role::Audio => match audio_config_from_msf(track, &mut init_cache)? {
 				Some(mut config) => {
 					config.broadcast = broadcast;
+					config.drm = track.content_protection_ref_ids.clone();
 					catalog.audio.renditions.insert(track.name.clone(), config);
 				}
 				None => {
@@ -181,6 +190,60 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 	}
 
 	Ok(catalog)
+}
+
+/// An MSF catalog's `contentProtections` as hang `drm` entries, keyed by `refID`.
+///
+/// One the hang catalog cannot read becomes an [`Unknown`](hang::catalog::drm::Entry::Unknown)
+/// entry holding the MSF entry's JSON, so the tracks it protects stay protected and the rest of the
+/// catalog readable. Each entry maps onto at most one, so this is never larger than the MSF catalog.
+fn drm_from_msf<E: CatalogExt>(
+	msf: &moq_msf::Catalog<E>,
+) -> std::collections::BTreeMap<String, hang::catalog::drm::Entry> {
+	let mut drm = std::collections::BTreeMap::new();
+	for cp in &msf.content_protections {
+		let entry = match drm_entry(cp) {
+			Ok(system) => system.into(),
+			Err(reason) => {
+				tracing::debug!(ref_id = %cp.ref_id, reason, "MSF content protection the hang catalog cannot read");
+				let fields = match serde_json::to_value(cp) {
+					Ok(serde_json::Value::Object(fields)) => fields,
+					_ => Default::default(),
+				};
+				hang::catalog::drm::Entry::Unknown(hang::catalog::drm::UnknownEntry::new(fields))
+			}
+		};
+		drm.insert(cp.ref_id.clone(), entry);
+	}
+	drm
+}
+
+/// `cp` as the hang entry it mirrors.
+///
+/// A hang entry names one key, so an entry naming several `defaultKID`s is not read: splitting it
+/// would copy its `pssh` and servers once per key, and which key a track uses is in its init.
+fn drm_entry(cp: &moq_msf::ContentProtection) -> std::result::Result<hang::catalog::drm::System, &'static str> {
+	use hang::catalog::drm;
+
+	let [kid] = cp.default_kid.as_slice() else {
+		return Err("not exactly one defaultKID");
+	};
+	let kid = drm::Uuid::try_parse(kid).map_err(|_| "malformed defaultKID")?;
+	let system = drm::Uuid::try_parse(&cp.drm_system.system_id).map_err(|_| "malformed systemID")?;
+	let server = |url: &moq_msf::ProtectionUrl| -> std::result::Result<drm::Server, &'static str> {
+		let mut server = drm::Server::new(url.url.parse().map_err(|_| "malformed URL")?);
+		server.kind = url.kind.clone();
+		Ok(server)
+	};
+	let mut entry = drm::System::new(system, drm::Scheme::from(cp.scheme.as_str()), kid);
+	entry.license = cp.drm_system.la_url.as_ref().map(server).transpose()?;
+	entry.certificate = cp.drm_system.cert_url.as_ref().map(server).transpose()?;
+	entry.pssh = (cp.drm_system.pssh.as_ref())
+		.map(|pssh| base64::engine::general_purpose::STANDARD.decode(pssh))
+		.transpose()
+		.map_err(|_| "malformed pssh")?
+		.map(Into::into);
+	Ok(entry)
 }
 
 /// Decode the [`Container`] for a track based on its packaging and `init_data`.
@@ -288,6 +351,8 @@ fn video_config_from_msf(track: &moq_msf::Track, init_cache: &mut InitDataCache)
 
 	let mut config = VideoConfig::new(codec);
 	config.description = match &container {
+		// The codec an encrypted entry wraps is out of reach, and nothing decodes the rendition.
+		Container::Cmaf { init } if crate::container::fmp4::encrypted(init) => None,
 		Container::Cmaf { init } => cmaf_video_description(track, init, &config.codec)?,
 		_ => legacy_description(track, init_cache)?,
 	};
@@ -323,6 +388,11 @@ fn audio_config_from_msf(track: &moq_msf::Track, init_cache: &mut InitDataCache)
 	let channel_count_from_field = track.channel_config.as_deref().and_then(|s| s.parse::<u32>().ok());
 	let (sample_rate, channel_count) = match (track.samplerate, channel_count_from_field) {
 		(Some(sr), Some(cc)) => (sr, cc),
+		(_, _) if matches!(&container, Container::Cmaf { init } if crate::container::fmp4::encrypted(init)) => {
+			// The sample entry an encrypted one wraps is out of reach, so its parameters are too.
+			tracing::warn!(track = %track.name, "skipping encrypted MSF audio track without samplerate or channelConfig");
+			return Ok(None);
+		}
 		(sr_opt, cc_opt) => {
 			let derived = derive_audio_params(track, &codec, init_cache)?;
 			(
@@ -494,6 +564,63 @@ fn derive_from_cmaf_moov(track: &moq_msf::Track, init: bytes::Bytes) -> Result<D
 
 #[cfg(test)]
 mod test {
+	fn known(entry: &hang::catalog::drm::Entry) -> &hang::catalog::drm::System {
+		match entry {
+			hang::catalog::drm::Entry::Known(system) => system,
+			other => panic!("expected a known entry: {other:?}"),
+		}
+	}
+
+	/// CMSF content protection maps onto the hang `drm` section, each `refID` an entry ID. An entry
+	/// the hang catalog cannot read, such as one naming two default keys or a malformed system,
+	/// stays as an unknown entry, so the video it protects stays listed and protected.
+	#[test]
+	fn content_protections_become_drm_entries() {
+		use hang::catalog::drm;
+
+		let json = r#"{
+			"version": "draft-01",
+			"contentProtections": [
+				{ "refID": "wv", "defaultKID": ["01234567-89ab-cdef-0123-456789abcdef"], "scheme": "cbcs",
+				  "drmSystem": { "systemID": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",
+				                 "laURL": { "url": "https://wv.example.com/", "type": "EME-1.0" }, "pssh": "AAAA" } },
+				{ "refID": "ck", "defaultKID": ["0123456789ABCDEF0123456789ABCDEF"],
+				  "scheme": "cens", "drmSystem": { "systemID": "{1077EFEC-C0B2-4D02-ACE3-3C1E52E2FB4B}" } },
+				{ "refID": "two", "defaultKID": ["01234567-89ab-cdef-0123-456789abcdef", "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"],
+				  "scheme": "cenc", "drmSystem": { "systemID": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b" } },
+				{ "refID": "bad", "defaultKID": ["01234567-89ab-cdef-0123-456789abcdef"],
+				  "scheme": "cenc", "drmSystem": { "systemID": "clearkey" } }
+			],
+			"tracks": [
+				{ "name": "video", "packaging": "legacy", "isLive": true, "role": "video", "codec": "vp8",
+				  "contentProtectionRefIDs": ["wv", "ck", "two", "bad"] },
+				{ "name": "audio", "packaging": "legacy", "isLive": true, "role": "audio", "codec": "opus",
+				  "samplerate": 48000, "channelConfig": "2" }
+			]
+		}"#;
+		let msf: moq_msf::Catalog = json.parse().unwrap();
+		let catalog = from_msf(&msf, &moq_net::Path::empty()).unwrap();
+		catalog.check_renditions().unwrap();
+
+		assert_eq!(catalog.drm.keys().collect::<Vec<_>>(), ["bad", "ck", "two", "wv"]);
+		let wv = known(&catalog.drm["wv"]);
+		assert_eq!(wv.system, drm::system::WIDEVINE);
+		assert_eq!(wv.scheme, drm::Scheme::Cbcs);
+		assert_eq!(wv.license.as_ref().unwrap().kind.as_deref(), Some("EME-1.0"));
+		assert_eq!(wv.pssh.as_deref(), Some(&[0u8, 0, 0][..]));
+
+		// Any UUID form MSF uses is read; a scheme a later draft adds is kept.
+		let ck = known(&catalog.drm["ck"]);
+		assert_eq!(ck.system, drm::system::CLEARKEY);
+		assert_eq!(ck.kid, drm::Uuid::from_u128(0x01234567_89ab_cdef_0123_456789abcdef));
+		assert_eq!(ck.scheme, drm::Scheme::Other("cens".into()));
+
+		assert!(matches!(catalog.drm["two"], drm::Entry::Unknown(_)));
+		assert!(matches!(catalog.drm["bad"], drm::Entry::Unknown(_)));
+		assert_eq!(catalog.video.renditions["video"].drm, ["wv", "ck", "two", "bad"]);
+		assert!(catalog.audio.renditions["audio"].drm.is_empty());
+	}
+
 	#[test]
 	fn received_metadata_is_bounded() {
 		let track = moq_msf::Track::new("video", moq_msf::Packaging::Cmaf);

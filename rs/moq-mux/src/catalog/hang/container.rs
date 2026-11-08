@@ -73,6 +73,55 @@ pub(crate) fn supported(rendition: &str, container: &hang::catalog::Container) -
 	}
 }
 
+/// Drops the protected video and audio renditions from each catalog snapshot (see [`protected`]).
+///
+/// Their samples are encrypted, and the hang spec has a consumer that cannot decrypt a rendition
+/// treat it as one it cannot decode. Nothing here decrypts, and a re-encoded file would also lose
+/// the `pssh`, `senc`, `saiz`, and `saio` a decrypting player needs, so every player and binding in
+/// this workspace keeps one per catalog stream instead of handing out undecryptable media.
+///
+/// A rendition is logged once each time it becomes protected, not on every snapshot. Only the
+/// previous snapshot's protected renditions are remembered, so the state is bounded by the catalog.
+#[derive(Debug, Default)]
+pub struct Clear {
+	hidden: std::collections::BTreeSet<(&'static str, String)>,
+}
+
+impl Clear {
+	/// Drop the protected renditions from `catalog`, warning about each one newly protected.
+	pub fn retain<E>(&mut self, catalog: &mut hang::Catalog<E>) {
+		let mut hidden = std::collections::BTreeSet::new();
+		let mut keep = |kind: &'static str, name: &String, drm: &[String], container: &hang::catalog::Container| {
+			let clear = !protected(drm, container);
+			if !clear {
+				hidden.insert((kind, name.clone()));
+			}
+			clear
+		};
+		(catalog.video.renditions).retain(|name, config| keep("video", name, &config.drm, &config.container));
+		(catalog.audio.renditions).retain(|name, config| keep("audio", name, &config.drm, &config.container));
+		for (kind, rendition) in hidden.difference(&self.hidden) {
+			tracing::warn!(%rendition, kind, "ignoring encrypted rendition: decryption is not supported");
+		}
+		self.hidden = hidden;
+	}
+}
+
+/// Whether a rendition's samples are encrypted: it lists `drm` entries, or its CMAF init holds an
+/// encrypted (`encv`/`enca`) sample entry.
+///
+/// The init check catches a publisher that encrypts without signalling it, so a consumer never
+/// reads such a rendition as clear and decodes ciphertext.
+pub fn protected(drm: &[String], container: &hang::catalog::Container) -> bool {
+	if !drm.is_empty() {
+		return true;
+	}
+	match container {
+		hang::catalog::Container::Cmaf { init, .. } => fmp4::encrypted(init),
+		_ => false,
+	}
+}
+
 impl ContainerTrait for Container {
 	type Error = crate::Error;
 

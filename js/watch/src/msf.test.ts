@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import * as Catalog from "@moq/hang/catalog";
 import { u53 } from "@moq/hang/catalog";
 import * as Msf from "@moq/msf";
 import { Path } from "@moq/net";
@@ -324,4 +325,60 @@ test("a later MSF track with a name replaces the earlier one, whatever its role"
 	expect(toHang({ tracks: [video, { ...video, codec: "vp09.00.10.08" }] }).video?.renditions.main?.codec).toBe(
 		"vp09.00.10.08",
 	);
+});
+
+// A known hang `drm` entry, or a failed test.
+function known(entry: Catalog.DrmEntry | undefined): Catalog.DrmSystem {
+	return Catalog.DrmSystemSchema.parse(entry);
+}
+
+// A protected MSF track lands as a hang rendition listing its `drm` entries, so `<moq-watch>`
+// knows it cannot play it. Mirrors moq-mux: each refID is an entry ID, any UUID form MSF uses is
+// read as lowercase hyphenated, and an entry the hang catalog cannot read, such as one naming two
+// default keys or a malformed system, is kept as-is so the video it protects stays protected.
+test("maps CMSF content protection onto hang drm entries", () => {
+	const catalog: Msf.Catalog = {
+		contentProtections: [
+			{
+				refID: "ck",
+				defaultKID: ["A1B2C3D4E5F60718293A4B5C6D7E8F90"],
+				scheme: "cens",
+				drmSystem: { systemID: "{1077EFEC-C0B2-4D02-ACE3-3C1E52E2FB4B}", laURL: { url: "https://l.example/" } },
+			},
+			{
+				refID: "two",
+				defaultKID: ["01234567-89ab-cdef-0123-456789abcdef", "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"],
+				scheme: "cbcs",
+				drmSystem: { systemID: "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" },
+			},
+			{
+				refID: "bad",
+				defaultKID: ["01234567-89ab-cdef-0123-456789abcdef"],
+				scheme: "cbcs",
+				drmSystem: { systemID: "widevine" },
+			},
+		],
+		tracks: [
+			{
+				name: "video",
+				packaging: "loc",
+				role: "video",
+				codec: "vp8",
+				contentProtectionRefIDs: ["ck", "two", "bad"],
+			},
+			{ name: "audio", packaging: "loc", role: "audio", codec: "opus" },
+		],
+	};
+	const root = Catalog.checkRenditions(toHang(catalog));
+	expect(Object.keys(root.drm ?? {}).sort()).toEqual(["bad", "ck", "two"]);
+	const ck = known(root.drm?.ck);
+	expect(ck.system).toBe(Catalog.DRM_SYSTEM.clearkey);
+	expect(ck.kid).toBe("a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90");
+	expect(ck.scheme).toBe("cens");
+	expect(ck.license?.url).toBe("https://l.example/");
+	expect(Catalog.DrmSystemSchema.safeParse(root.drm?.two).success).toBe(false);
+	expect(Catalog.DrmSystemSchema.safeParse(root.drm?.bad).success).toBe(false);
+	expect(root.video?.renditions.video?.drm).toEqual(["ck", "two", "bad"]);
+	expect(Catalog.isProtected(root.video?.renditions.video ?? { drm: [] })).toBe(true);
+	expect(root.audio?.renditions.audio?.drm).toBeUndefined();
 });

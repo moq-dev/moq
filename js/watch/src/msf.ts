@@ -1,5 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
-import { u53 } from "@moq/hang/catalog";
+import { DrmSystemSchema, u53 } from "@moq/hang/catalog";
 import * as Util from "@moq/hang/util";
 import type * as Msf from "@moq/msf";
 import { Path } from "@moq/net";
@@ -120,8 +120,74 @@ function namesCatalog(namespace: Path.Valid, base: Path.Valid): boolean {
 	return endsWith(a, b) || endsWith(b, a);
 }
 
+const HYPHENATED = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SIMPLE = /^[0-9a-f]{32}$/i;
+
+/**
+ * A UUID in lowercase hyphenated form, from any form moq-mux's `uuid` parse accepts: simple,
+ * hyphenated, braced, or URN. `undefined` for anything else.
+ */
+function normalizeUuid(text: string): string | undefined {
+	let hyphenated: string;
+	if (text.length === 32) {
+		if (!SIMPLE.test(text)) return undefined;
+		const at = [0, 8, 12, 16, 20, 32];
+		hyphenated = at
+			.slice(1)
+			.map((end, i) => text.slice(at[i], end))
+			.join("-");
+	} else if (text.length === 36) {
+		hyphenated = text;
+	} else if (text.length === 38 && text.startsWith("{") && text.endsWith("}")) {
+		hyphenated = text.slice(1, -1);
+	} else if (text.length === 45 && text.slice(0, 9).toLowerCase() === "urn:uuid:") {
+		hyphenated = text.slice(9);
+	} else {
+		return undefined;
+	}
+	return HYPHENATED.test(hyphenated) ? hyphenated.toLowerCase() : undefined;
+}
+
+/**
+ * The hang `drm` entry one MSF content protection describes, or `undefined` when the hang catalog
+ * cannot read it.
+ *
+ * Mirrors moq-mux: a hang entry names one key, so an entry naming several default keys is not read.
+ */
+function toEntry(cp: Msf.ContentProtection): Catalog.DrmSystem | undefined {
+	if (cp.defaultKID.length !== 1) return undefined;
+	const system = normalizeUuid(cp.drmSystem.systemID);
+	const kid = normalizeUuid(cp.defaultKID[0]);
+	if (system === undefined || kid === undefined) return undefined;
+	// The scheme, the servers' URLs, and the pssh are checked the way the hang catalog reads them.
+	const entry = DrmSystemSchema.safeParse({
+		system,
+		scheme: cp.scheme,
+		kid,
+		pssh: cp.drmSystem.pssh,
+		license: cp.drmSystem.laURL,
+		certificate: cp.drmSystem.certURL,
+	});
+	return entry.success ? entry.data : undefined;
+}
+
+/**
+ * The hang `drm` entries an MSF catalog's `contentProtections` describe, keyed by `refID`.
+ *
+ * An entry the hang catalog cannot read is kept as-is, so the tracks it protects stay protected.
+ */
+function toDrm(msf: Msf.Catalog): Record<string, Catalog.DrmEntry> {
+	const drm: Record<string, Catalog.DrmEntry> = Object.create(null);
+	for (const cp of msf.contentProtections ?? []) drm[cp.refID] = toEntry(cp) ?? { ...cp };
+	return drm;
+}
+
 /** Convert an MSF catalog to a hang catalog Root. */
 export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
+	const drm = toDrm(msf);
+	// A track's refIDs are its entries' IDs; @moq/msf refuses a refID the root lacks.
+	const protection = (track: Msf.Track): { drm?: string[] } =>
+		track.contentProtectionRefIDs?.length ? { drm: track.contentProtectionRefIDs } : {};
 	// Track names are untrusted keys; a null prototype keeps `__proto__` an ordinary rendition.
 	const videoRenditions: Record<string, Catalog.VideoConfig> = Object.create(null);
 	const audioRenditions: Record<string, Catalog.AudioConfig> = Object.create(null);
@@ -152,10 +218,10 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 		}
 		if (track.role === "video") {
 			const config = toVideoConfig(track);
-			if (config) videoRenditions[track.name] = { ...config, broadcast };
+			if (config) videoRenditions[track.name] = { ...config, broadcast, ...protection(track) };
 		} else if (track.role === "audio") {
 			const config = toAudioConfig(track);
-			if (config) audioRenditions[track.name] = { ...config, broadcast };
+			if (config) audioRenditions[track.name] = { ...config, broadcast, ...protection(track) };
 		} else if (
 			track.role === "caption" ||
 			track.role === "subtitle" ||
@@ -192,6 +258,8 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 	}
 
 	if (Object.keys(textRenditions).length > 0) root.text = { renditions: textRenditions };
+
+	if (Object.keys(drm).length > 0) root.drm = drm;
 
 	return root;
 }

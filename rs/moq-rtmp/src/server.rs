@@ -975,11 +975,16 @@ impl<S: Stream> Play<S> {
 /// Narrow a play to what the client can decode, or refuse it.
 ///
 /// A multitrack client receives every enabled rendition, so it must play them all. A
-/// single-track client receives the best enabled rendition of each kind it can play.
+/// single-track client receives the best enabled rendition of each kind it can play. A protected
+/// rendition is never sent (the export drops it), so it is left out here too.
 fn play_selection(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	capabilities: &ClientCapabilities,
 ) -> std::result::Result<select::Broadcast, String> {
+	let mut catalog = catalog.clone();
+	(catalog.video.renditions).retain(|_, config| !moq_mux::catalog::hang::protected(&config.drm, &config.container));
+	(catalog.audio.renditions).retain(|_, config| !moq_mux::catalog::hang::protected(&config.drm, &config.container));
+	let catalog = &catalog;
 	let video_playable = |config: &VideoConfig| plays_video(capabilities, config.codec.kind());
 	let video_refused = if capabilities.multitrack {
 		catalog
@@ -2501,6 +2506,12 @@ mod tests {
 		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
 		assert!(play_selection(&catalog, &h264_only).is_ok());
 		assert_eq!(best(&catalog, &h264_only).as_deref(), Some("a"));
+
+		// A protected rendition is never sent, so one the client can't decode refuses nothing.
+		let b = catalog.video.renditions.get_mut("b").unwrap();
+		b.enabled = true;
+		b.drm = vec!["1".into()];
+		assert!(play_selection(&catalog, &h264_only).is_ok());
 	}
 
 	/// A single-track client gets the best audio rendition it can play, not the first by name.

@@ -266,15 +266,21 @@ impl Source {
 	///
 	/// Every export runs this on each catalog snapshot, so a disabled rendition reads as
 	/// absent: one that is disabled later leaves the snapshot, and one that re-enables
-	/// returns to it. Every section carrying renditions must be listed here; one left out
-	/// silently exempts its renditions from the containment check, exactly as on the
-	/// consumer side.
+	/// returns to it. A protected one reads as absent as well, since no export decrypts it
+	/// (see [`protected`](crate::catalog::hang::protected)). Every section carrying
+	/// renditions must be listed here; one left out silently exempts its renditions from the
+	/// containment check, exactly as on the consumer side.
 	pub(crate) fn retain_selectable<E: crate::catalog::hang::CatalogExt>(
 		&self,
 		catalog: &mut crate::catalog::hang::Catalog<E>,
 	) {
-		catalog.video.renditions.retain(|_, config| config.enabled);
-		catalog.audio.renditions.retain(|_, config| config.enabled);
+		// Nothing exported is decrypted, so a protected rendition reads as absent too. `Select`,
+		// which exports read through, logs it.
+		let selectable = |enabled: bool, drm: &[String], container: &hang::catalog::Container| {
+			enabled && !crate::catalog::hang::protected(drm, container)
+		};
+		(catalog.video.renditions).retain(|_, config| selectable(config.enabled, &config.drm, &config.container));
+		(catalog.audio.renditions).retain(|_, config| selectable(config.enabled, &config.drm, &config.container));
 		self.retain_valid_references("video", &mut catalog.video.renditions);
 		self.retain_valid_references("audio", &mut catalog.audio.renditions);
 		self.retain_valid_references("text", &mut catalog.text.renditions);
@@ -1118,6 +1124,33 @@ mod tests {
 		source.retain_selectable(&mut catalog);
 
 		assert_eq!(catalog.video.renditions.keys().collect::<Vec<_>>(), vec!["enabled"]);
+		assert!(catalog.audio.renditions.is_empty());
+	}
+
+	/// A protected rendition is never exported, since nothing exported is decrypted, while its
+	/// clear sibling is.
+	#[test]
+	fn protected_rendition_is_removed_while_clear_sibling_remains() {
+		let origin = produce_origin();
+		let source = created(&origin);
+		let clear = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1e,
+			inline: false,
+		});
+		let mut protected = clear.clone();
+		protected.drm = vec!["1".into()];
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.drm = vec!["1".into()];
+
+		let mut catalog = hang::Catalog::<()>::default();
+		catalog.video.renditions.insert("protected".to_string(), protected);
+		catalog.video.renditions.insert("clear".to_string(), clear);
+		catalog.audio.renditions.insert("audio".to_string(), audio);
+		source.retain_selectable(&mut catalog);
+
+		assert_eq!(catalog.video.renditions.keys().collect::<Vec<_>>(), vec!["clear"]);
 		assert!(catalog.audio.renditions.is_empty());
 	}
 

@@ -40,6 +40,7 @@ const init: InitSegment = {
 	timescale: 90_000,
 	trackId: 1,
 	kind: "video",
+	encrypted: false,
 	defaultSampleDuration: 3_000,
 	defaultSampleSize: 0,
 	defaultSampleFlags: 0,

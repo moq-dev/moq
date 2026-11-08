@@ -1357,8 +1357,30 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		Some((name.to_string(), namespace))
 	};
 
-	let has_multiple_video = catalog.video.renditions.len() > 1;
+	// CMSF has no form for an entry this build cannot read, so a rendition it protects is left out
+	// rather than advertised with a dangling or missing protection, which would read as clear.
+	let signalled_quietly = |drm: &[String]| {
+		(drm.iter()).all(|entry| matches!(catalog.drm.get(entry), Some(hang::catalog::drm::Entry::Known(_))))
+	};
+	let signalled = |id: &str, drm: &[String]| {
+		let known = signalled_quietly(drm);
+		if !known {
+			tracing::debug!(
+				rendition = id,
+				"MSF cannot carry this rendition's drm entries; leaving it out"
+			);
+		}
+		known
+	};
+
+	let has_multiple_video = (catalog.video.renditions.values())
+		.filter(|config| signalled_quietly(&config.drm))
+		.count()
+		> 1;
 	for (name, config) in &catalog.video.renditions {
+		if !signalled(name, &config.drm) {
+			continue;
+		}
 		let packaging = packaging_of(&config.container);
 
 		let init_data = match &config.container {
@@ -1387,13 +1409,20 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.alt_group = if has_multiple_video { Some(1) } else { None };
 		track.max_grp_sap_starting_type = sap_type;
 		track.max_obj_sap_starting_type = sap_type;
+		track.content_protection_ref_ids = config.drm.clone();
 		track.jitter = config.jitter;
 		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
 	}
 
-	let has_multiple_audio = catalog.audio.renditions.len() > 1;
+	let has_multiple_audio = (catalog.audio.renditions.values())
+		.filter(|config| signalled_quietly(&config.drm))
+		.count()
+		> 1;
 	for (name, config) in &catalog.audio.renditions {
+		if !signalled(name, &config.drm) {
+			continue;
+		}
 		let packaging = packaging_of(&config.container);
 
 		let init_data = match &config.container {
@@ -1420,6 +1449,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.alt_group = if has_multiple_audio { Some(1) } else { None };
 		track.max_grp_sap_starting_type = Some(1);
 		track.max_obj_sap_starting_type = Some(1);
+		track.content_protection_ref_ids = config.drm.clone();
 		track.jitter = config.jitter;
 		track.delay = config.delay.filter(|delay| !delay.is_zero());
 		tracks.push(track);
@@ -1457,7 +1487,31 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 			}
 		}
 	}
-	moq_msf::Catalog::with_ext(unique, E::default())
+	let mut msf = moq_msf::Catalog::with_ext(unique, E::default());
+	msf.content_protections = (catalog.drm.iter())
+		.filter_map(|(id, entry)| match entry {
+			hang::catalog::drm::Entry::Known(system) => Some(content_protection(id, system)),
+			_ => None,
+		})
+		.collect();
+	msf
+}
+
+/// A hang `drm` entry as the CMSF `contentProtections` entry it mirrors (draft-ietf-moq-cmsf
+/// section 4.1.1), its ID becoming the `refID` tracks reference.
+fn content_protection(id: &str, entry: &hang::catalog::drm::System) -> moq_msf::ContentProtection {
+	let server = |server: &hang::catalog::drm::Server| {
+		let mut url = moq_msf::ProtectionUrl::new(server.url.as_str());
+		url.kind = server.kind.clone();
+		url
+	};
+	let mut system = moq_msf::DrmSystem::new(entry.system.hyphenated().to_string());
+	system.la_url = entry.license.as_ref().map(server);
+	system.cert_url = entry.certificate.as_ref().map(server);
+	system.pssh = (entry.pssh.as_ref()).map(|pssh| base64::engine::general_purpose::STANDARD.encode(pssh));
+	let mut msf = moq_msf::ContentProtection::new(id, entry.scheme.as_str(), system);
+	msf.default_kid = vec![entry.kid.hyphenated().to_string()];
+	msf
 }
 
 #[cfg(test)]

@@ -402,11 +402,12 @@ impl Consume {
 		mut catalog: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
+		let mut clear = moq_mux::catalog::hang::Clear::default();
 		loop {
 			// `biased` so a pending close always wins over a ready update: a hot
 			// stream must not be able to starve the close signal, and we must not
 			// deliver another update once close has been requested.
-			let update = tokio::select! {
+			let mut update = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = catalog.next() => match next? {
@@ -414,6 +415,9 @@ impl Consume {
 					None => return Ok(()),
 				},
 			};
+			// A protected rendition's samples are encrypted, and nothing here decrypts them or
+			// exposes the `drm` section, so the bindings treat it as one they cannot decode.
+			clear.retain(&mut update);
 
 			// Unfortunately we need to store the codec information on the heap.
 			let audio_codec = update

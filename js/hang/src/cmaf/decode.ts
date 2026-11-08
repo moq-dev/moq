@@ -135,6 +135,8 @@ export interface InitSegment {
 	trackId: number;
 	/** Whether the track carries audio or video. */
 	kind: "audio" | "video";
+	/** Whether the sample entry is encrypted (`encv`/`enca`), so only a player that decrypts can read it. */
+	encrypted: boolean;
 	/** Default sample duration from moov/mvex/trex, used when not overridden in tfhd/trun. */
 	defaultSampleDuration: number;
 	/** Default sample size from moov/mvex/trex, used when not overridden in tfhd/trun. */
@@ -234,6 +236,7 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 		timescale,
 		trackId,
 		kind,
+		encrypted: entries.some((entry) => entry.type === "encv" || entry.type === "enca"),
 		defaultSampleDuration: trex?.duration ?? 0,
 		defaultSampleSize: trex?.size ?? 0,
 		defaultSampleFlags: trex?.flags ?? 0,
