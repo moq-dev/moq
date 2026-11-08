@@ -706,6 +706,12 @@ mod tests {
 		assert_eq!(shown(&routed), ["live"]);
 		assert_eq!(served(&routed), ["live"]);
 
+		// A narrower limit certifies nothing, so widening it again replays every
+		// committed claim into a fresh view; only the replay filter keeps `.stats` out.
+		routed.limit(&subscriber, &limited("live/**")).unwrap();
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
+
 		routed.limit(&subscriber, &Default::default()).unwrap();
 		assert_eq!(shown(&routed), ["live"]);
 		assert_eq!(served(&routed), ["live"]);
