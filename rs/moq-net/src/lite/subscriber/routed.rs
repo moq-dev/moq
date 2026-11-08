@@ -422,16 +422,15 @@ impl Routed {
 		if !self.permit.within_limit(path.as_str()) {
 			return;
 		}
-		let cost = match self.drained || !served.available {
-			true => crate::origin::Cost::DRAIN,
-			false => crate::origin::Cost::new(served.claim.cost.saturating_add(served.metric)),
-		};
+		// A route held without a path to it serves only as a last resort, like a draining
+		// peer's, at its real cost.
 		let route = crate::origin::RouteInfo::default()
 			.with_instance(served.claim.instance.clone(), served.claim.epoch)
 			.with_hops(hops(id))
-			.with_cost(cost)
+			.with_cost(served.claim.cost.saturating_add(served.metric))
 			.with_via(subscriber.via(None))
-			.with_node(Some(id));
+			.with_node(Some(id))
+			.with_draining(self.drained || !served.available);
 		let key = (id, claim);
 		if let Some(entry) = self.previous.remove(&key) {
 			self.served.insert(key.clone(), entry);

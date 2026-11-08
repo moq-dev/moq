@@ -3009,16 +3009,9 @@ class FfiConverterMoqOriginConfig {
 }
 
 class MoqRouteInfo {
-  final List<int> hops;
   final int cost;
-  final bool anonymous;
   final String instance;
-  MoqRouteInfo({
-    required this.hops,
-    required this.cost,
-    required this.anonymous,
-    required this.instance,
-  });
+  MoqRouteInfo({required this.cost, required this.instance});
 }
 
 class FfiConverterMoqRouteInfo {
@@ -3028,42 +3021,25 @@ class FfiConverterMoqRouteInfo {
 
   static LiftRetVal<MoqRouteInfo> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final hops_lifted = FfiConverterSequenceUInt64.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final hops = hops_lifted.value;
-    new_offset += hops_lifted.bytesRead;
     final cost_lifted = FfiConverterUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final cost = cost_lifted.value;
     new_offset += cost_lifted.bytesRead;
-    final anonymous_lifted = FfiConverterBool.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final anonymous = anonymous_lifted.value;
-    new_offset += anonymous_lifted.bytesRead;
     final instance_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final instance = instance_lifted.value;
     new_offset += instance_lifted.bytesRead;
     return LiftRetVal(
-      MoqRouteInfo(
-        hops: hops,
-        cost: cost,
-        anonymous: anonymous,
-        instance: instance,
-      ),
+      MoqRouteInfo(cost: cost, instance: instance),
       new_offset - buf.offsetInBytes,
     );
   }
 
   static RustBuffer lower(MoqRouteInfo value) {
     final total_length =
-        FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
-        FfiConverterBool.allocationSize(value.anonymous) +
         FfiConverterString.allocationSize(value.instance) +
         0;
     final buf = Uint8List(total_length);
@@ -3073,16 +3049,8 @@ class FfiConverterMoqRouteInfo {
 
   static int write(MoqRouteInfo value, Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterSequenceUInt64.write(
-      value.hops,
-      Uint8List.view(buf.buffer, new_offset),
-    );
     new_offset += FfiConverterUInt64.write(
       value.cost,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    new_offset += FfiConverterBool.write(
-      value.anonymous,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterString.write(
@@ -3093,9 +3061,7 @@ class FfiConverterMoqRouteInfo {
   }
 
   static int allocationSize(MoqRouteInfo value) {
-    return FfiConverterSequenceUInt64.allocationSize(value.hops) +
-        FfiConverterUInt64.allocationSize(value.cost) +
-        FfiConverterBool.allocationSize(value.anonymous) +
+    return FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterString.allocationSize(value.instance) +
         0;
   }
@@ -19469,49 +19435,6 @@ class FfiConverterSequenceString {
   }
 
   static RustBuffer lower(List<String> value) {
-    final buf = Uint8List(allocationSize(value));
-    write(value, buf);
-    return toRustBuffer(buf);
-  }
-}
-
-class FfiConverterSequenceUInt64 {
-  static List<int> lift(RustBuffer buf) {
-    return FfiConverterSequenceUInt64.read(buf.asUint8List()).value;
-  }
-
-  static LiftRetVal<List<int>> read(Uint8List buf) {
-    List<int> res = [];
-    final length = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
-    int offset = buf.offsetInBytes + 4;
-    for (var i = 0; i < length; i++) {
-      final ret = FfiConverterUInt64.read(Uint8List.view(buf.buffer, offset));
-      offset += ret.bytesRead;
-      res.add(ret.value);
-    }
-    return LiftRetVal(res, offset - buf.offsetInBytes);
-  }
-
-  static int write(List<int> value, Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.length);
-    int offset = buf.offsetInBytes + 4;
-    for (var i = 0; i < value.length; i++) {
-      offset += FfiConverterUInt64.write(
-        value[i],
-        Uint8List.view(buf.buffer, offset),
-      );
-    }
-    return offset - buf.offsetInBytes;
-  }
-
-  static int allocationSize(List<int> value) {
-    return value
-            .map((l) => FfiConverterUInt64.allocationSize(l))
-            .fold(0, (a, b) => a + b) +
-        4;
-  }
-
-  static RustBuffer lower(List<int> value) {
     final buf = Uint8List(allocationSize(value));
     write(value, buf);
     return toRustBuffer(buf);

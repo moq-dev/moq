@@ -428,13 +428,11 @@ async fn route_options_reach_the_announced_route() {
 		.unwrap();
 
 	// Reading an advertisement preserves its static production price and the route's
-	// instance; a local route took no hops.
+	// instance.
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let info = next_announced(&announced).await.route;
 	assert_eq!(info.cost, 9);
 	assert_eq!(info.instance, route.instance_id());
-	assert!(info.hops.is_empty());
-	assert!(!info.anonymous);
 
 	// Re-pricing changes the route in place: the listing never reports it, but a fresh
 	// listing reads the new price under the same instance.

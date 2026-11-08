@@ -36,7 +36,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 +	dynamic: std::mem::ManuallyDrop<crate::origin::Route>,
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
- 	/// Whether the GOAWAY drain already re-priced this route.
+ 	/// Queues this route on its prefix's ready set when its request queue wakes.
 @@ -8949,7 +8950,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
  	) -> Self {
  		Self {
@@ -44,8 +44,8 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 -			dynamic,
 +			dynamic: std::mem::ManuallyDrop::new(dynamic),
  			live: Default::default(),
- 			drained: false,
  			waker: std::task::Waker::from(wake.clone()),
+ 			wake,
 diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
 --- a/rs/moq-net/src/lite/subscriber/routed.rs
 +++ b/rs/moq-net/src/lite/subscriber/routed.rs

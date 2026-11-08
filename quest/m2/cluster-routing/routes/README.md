@@ -13,7 +13,7 @@ claim whose withdrawal is already known.
 
 ## Plan
 
-1. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The draft describes the target before the code switches.** A hop-less ANNOUNCE cannot run before the router drives sessions; the quest's own Plan says so. So the draft now specifies the whole lite-07 route wire, while main's lite-07 session keeps sending hop-based ANNOUNCEs until [Route session integration](https://github.com/moq-dev/moq/blob/main/quest/m2/cluster-routing/routes/session.md) lands. lite-07 is unpublished `-wip`, off by default, and the epic lands in one release before the cut. The other option was to put only the new message sections in the draft and leave ANNOUNCE hop-based. I rejected it because ANNOUNCE_FLOOR's "for that route" and the Route ID would then be undefined in the draft.
+1. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The draft describes the target before the code switches.** A hop-less ANNOUNCE cannot run before the router drives sessions; the quest's own Plan says so. So the draft now specifies the whole lite-07 route wire, while main's lite-07 session keeps sending hop-based ANNOUNCEs until route session integration ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)) lands. lite-07 is unpublished `-wip`, off by default, and the epic lands in one release before the cut. The other option was to put only the new message sections in the draft and leave ANNOUNCE hop-based. I rejected it because ANNOUNCE_FLOOR's "for that route" and the Route ID would then be undefined in the draft.
 2. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The request field is `Node ID (i)`, with 0 meaning "the publisher selects".** It is added to every request that resolves a path: TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS. Node ID 0 is reserved everywhere.
 3. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ROUTE_REQUEST names a Node ID, not a Route ID.** A request can then never race a ROUTE_END into a protocol violation.
 4. ~~A held ROUTE_UPDATE carries a seqno and down-only bit of 0.~~ Superseded by item 14: a held route is its own message and carries no seqno or bit.
@@ -27,7 +27,7 @@ claim whose withdrawal is already known.
 12. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **A floor certifies only what its own request shows.** A stream whose request did not set `Hidden` certifies nothing about hidden claims. No new wire field. Rejected: isolating differently filtered views.
 13. ✅ Decided 2026-11-05 (maintainer): **ANNOUNCE_FLOOR encodes `Revision + 1`, with 0 meaning the floor certifies nothing,** the same offset as `Max Age`. Rust decodes it to `Option`. It replaces a Revision of 2^64-1 as the marker: a huge sentinel is a bad pattern and costs 9 bytes as a lite-07 varint. Rejected: a separate message; a boolean field.
 14. ✅ Decided 2026-11-05 (maintainer: "use 0 as a sentinel, or make a new message type"; the agent picked the message): **A held route is ROUTE_HOLD (0xB), `{Route ID}`,** replacing a ROUTE_UPDATE with a Metric of 2^64-1. A metric of 0 is real (the origin's own route), so 0 cannot mark held, and offsetting every metric by one would still leave a held update's seqno and down-only bit meaningless and refused. The message carries only what a hold means, item 4's rule goes away, and a metric is now only bounded by overflow, so the wire refuses no metric. The 2^64-1 Seqno and Revision bounds stay: they are bounds, not markers, leaving room for a ROUTE_REQUEST's successor and for the floor's offset.
-15. ✅ Decided 2026-11-06 (maintainer, /quest-complete on [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)), asked whether to amend the handoff contract's "a sender that certifies anything for a route answers every stream" or keep it: ✅ **send a route on a stream only while it meets the stream's interest**, with a floor certifying the last withdrawal before the route ends. Withdrawals still END, and what a node keeps per stream it answers is bounded by the origins that stream reads, at a ROUTE_END round trip when an origin leaves an interest. Rejected: keep answering every stream and bound only by per-peer caps, which is simpler but carries the whole node table on every stream. [Route session integration](/quest/m2/cluster-routing/routes/session.md) implements it.
+15. ✅ Decided 2026-11-06 (maintainer, /quest-complete on [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)), asked whether to amend the handoff contract's "a sender that certifies anything for a route answers every stream" or keep it: ✅ **send a route on a stream only while it meets the stream's interest**, with a floor certifying the last withdrawal before the route ends. Withdrawals still END, and what a node keeps per stream it answers is bounded by the origins that stream reads, at a ROUTE_END round trip when an origin leaves an interest. Rejected: keep answering every stream and bound only by per-peer caps, which is simpler but carries the whole node table on every stream. [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293) implements it.
 
 
 The route layer's core landed in
@@ -58,7 +58,7 @@ Settled by the core, for review:
   region, or rebuild them all if a lost floor is newer than a kept one, a
   collection whose replay is bounded like any other. The core and the proof
   keep per-region floors internally; the wire carries only item 10's
-  whole-interest marker, which [session integration](/quest/m2/cluster-routing/routes/session.md)
+  whole-interest marker, which session integration ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023))
   projects the view onto.
 - A rotated identity ends the old one with ROUTE_END on every stream rather
   than closing sessions, since the own identity is no longer proven per
@@ -162,7 +162,7 @@ the bullets below are the contract it carries.
   keyed by the route key the peer proves, so relays configured with the same
   key file fail over as one; a scoped peer that proves no key, such as one on
   qmux, gets a per-session key
-  ([session integration](/quest/m2/cluster-routing/routes/session.md)).
+  ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)).
   The router takes the key from the caller (`Scope::qualify`).
 - Decided 2026-10-14: qualified keys carry a marker every relay recognizes,
   and a scoped connection forwarding an already qualified identity has that
@@ -336,9 +336,9 @@ loss never reports an END:
   item 15): it starts the route before its first claim in or covering the
   interest, and when the last such claim goes it sends a floor certifying the
   withdrawal, then ends the route. A peer therefore holds no route, and
-  waits on no certifier, for an origin its interest does not meet. The router
-  still answers every stream until session integration scopes it
-  (`a_disjoint_interest_is_answered_with_nothing`).
+  waits on no certifier, for an origin its interest does not meet
+  (`a_disjoint_interest_is_answered_with_nothing`), and a node presents each
+  stream only the claims that changed.
   A claim is available only through a certifier that is not held; another
   scope's usable route cannot serve it. A certifier that has not answered yet
   counts as serving, as for a new next hop whose announcements trail its
@@ -536,7 +536,6 @@ benchmarks.
 
 ## Required
 
-- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - one router per origin node drives the origin and every lite-07 announce stream
 - [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - announcements report availability, and a let-go is offline rather than END, in Rust and JS
 - [js/net route layer](/quest/m2/cluster-routing/routes/js.md) - `js/net` encodes, decodes, and resolves the route layer
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks

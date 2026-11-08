@@ -1303,9 +1303,16 @@ export class Epochs {
 	}
 }
 
-/** Prefer identified publishers, then lower static cost. */
+/**
+ * Prefer a route that is not draining (a peer that sent GOAWAY ranks below every other), then
+ * identified publishers, then lower static cost.
+ */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
-	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
+	return (
+		Number(a.draining ?? false) - Number(b.draining ?? false) ||
+		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
+		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
+	);
 }
 
 /**

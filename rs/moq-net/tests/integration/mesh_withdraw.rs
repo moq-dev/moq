@@ -452,14 +452,15 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 }
 
 /// A relay that first hears a broadcast over a longer path moves to the shorter
-/// one when it arrives, and a client watching it sees nothing change: lite-07
-/// relays route by the publisher's origin node, so the move is a next hop the
-/// relay picks, under the same claim and instance.
+/// one when it arrives, under the same claim and instance: lite-07 relays route by
+/// the publisher's origin node, so the move is a next hop the relay picks. The route
+/// travels with the claim, so the shorter one arrives late too, and a client of
+/// either version sees the cheaper path as an update in place.
 #[kio::test]
-async fn late_better_path_is_invisible() {
+async fn late_better_path_updates_in_place() {
 	for client in ["moq-lite-06", "moq-lite-07-wip"] {
 		let (published, closed) = late_better_path("moq-lite-07-wip", client).await;
-		assert_eq!(published, [Kind::Start], "{client}");
+		assert_eq!(published, [Kind::Start, Kind::Update], "{client}");
 		assert_eq!(closed, [Kind::End], "{client}");
 	}
 }
