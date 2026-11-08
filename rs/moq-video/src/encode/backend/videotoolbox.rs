@@ -68,6 +68,9 @@ pub(crate) struct VideoToolbox {
 	framerate_numerator: i32,
 	framerate_denominator: i64,
 	frame_index: i64,
+	/// A cut whose frame VideoToolbox dropped, carried to the next frame so the
+	/// group it asked for still opens.
+	keyframe_pending: bool,
 	applied: Applied,
 }
 
@@ -206,6 +209,7 @@ impl VideoToolbox {
 			framerate_numerator,
 			framerate_denominator: i64::from(config.framerate.denominator()),
 			frame_index: 0,
+			keyframe_pending: false,
 			applied,
 		})
 	}
@@ -234,6 +238,7 @@ impl Backend for VideoToolbox {
 		};
 		self.frame_index += 1;
 
+		let cut = cut || self.keyframe_pending;
 		let frame_properties = cut.then_some(&*self.force_keyframe);
 
 		let status = unsafe {
@@ -265,6 +270,8 @@ impl Backend for VideoToolbox {
 				"VideoToolbox encode callback failed: {status}"
 			)));
 		}
+		// A dropped frame comes back with no packet and no error.
+		self.keyframe_pending = cut && self.sink.packets.is_empty();
 		// `complete_frames` above forces this frame out before returning, so every
 		// packet collected here came from it and carries its timestamp.
 		Ok(std::mem::take(&mut self.sink.packets)
