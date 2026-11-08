@@ -232,7 +232,7 @@ class Encoder:
         return self._inner.receive()
 
     def flush(self) -> None:
-        """Mark the end of input, so ``receive`` returns every packet the codec still holds, without closing the encoder."""
+        """Mark the end of input, so ``receive`` returns every packet the codec still holds."""
         self._inner.flush()
 
     def finish(self, pcm: list[float] | None = None) -> EncoderFinish:
