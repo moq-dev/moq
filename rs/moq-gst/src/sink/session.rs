@@ -473,10 +473,13 @@ async fn forward_registered(
 					}
 					notify(&element, &["status", "connected", "moq-version", "connection-stats"]);
 				}
-				// `Session::stop` asked for this. Its abort cannot cancel a poll already in flight, so
-				// the end of the loop can reach the task before the task ends.
-				Err(moq_tokio::Error::Stopped) => return,
-				Err(err) => {
+				Err(_) => {
+					// `closed` tells a stop from a give-up. A stop is what `Session::stop` asked for: its
+					// abort cannot cancel a poll already in flight, so the loop's end can reach the task
+					// before the task ends.
+					let Err(err) = reconnect.closed().await else {
+						return;
+					};
 					// The reconnect loop stopped on a terminal error (a non-retryable auth failure, or a
 					// bounded backoff's give-up). Ending the publication stops the pad threads feeding a
 					// dead session; losing that race means it already ended, so there is nothing to report.
