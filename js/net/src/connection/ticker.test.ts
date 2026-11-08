@@ -28,7 +28,7 @@ test("subscribers share one tick and the loop stops with the last", async () => 
 		const c = tick(period, () => ticks.push("c"));
 		await clock.advance(period);
 		expect(ticks).toEqual(["a", "b", "b", "c"]);
-		// The ticker is page-wide: a leaked subscriber keeps its loop asleep on this test's clock.
+		// Stop the page-wide loop, so a later test file's subscriber starts its own on that file's clock.
 		c();
 	} finally {
 		installed.close();

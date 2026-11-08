@@ -74,6 +74,13 @@ wildcards, a hidden exportable alternative under one selection, epochless Restar
 grant union crossing the scoped boundary each way (a `**` token added, then expiring). Fixtures are
 public and time-mocked, wired into CI alongside Rust/JS interop.
 
+Mounts get the same continuity checks (`rs/moq-net/tests/integration/mount.rs`):
+a claim whose predecessor covers a mount's target arrives beneath the mount
+point exactly as it does unmounted, on lite-06 and lite-07. This replaces
+the deleted mount-takeover quest, whose `Takeover` event
+[moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) removes in
+favor of the claim's instance; if #8063 closes unmerged, restore that quest.
+
 Benchmark origins, broadcasts per origin, neighbors, active tracks/fronts,
 and announce cursors independently. A route update must not expand back into
 per-broadcast table rewrites or poll unrelated fronts. Measure messages, bytes,

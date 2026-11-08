@@ -22,6 +22,8 @@ ones. Behind the decode seam as the first candidate on `target_os =
 - Verification runs on a Windows host; the per-PR CI only compiles the
   platform code (`just rs windows`).
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [audio-codec-seam](/quest/m2/audio-codec-seam.md) makes moq-audio's codecs return zero or more outputs with `flush` before the cut, so this backend adds no break.
+
 ## Related
 
 - [Windows decoded frames](/quest/m5/obs-decode-windows.md) - the OBS Windows line this feeds
