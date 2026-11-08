@@ -71,9 +71,10 @@ pub enum Error {
 	#[error("timestamp overflow")]
 	TimestampOverflow,
 
-	/// Input arrived after `finish()`, so any tracks it declares could never finish.
-	#[error("Tracks after finish")]
-	TracksAfterFinish,
+	/// A TrackEntry ended after the catalog was published, by the first block or by a Tracks
+	/// element declaring none, so its rendition could never join the catalog's first snapshot.
+	#[error("Tracks after the catalog was published")]
+	LateTracks,
 
 	/// The TrackEntry has no TrackNumber.
 	#[error("TrackEntry missing TrackNumber")]

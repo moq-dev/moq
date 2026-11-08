@@ -18,7 +18,7 @@ test("audio downloads only while the tile is active and audible", async () => {
 
 	const connection = new Moq.Connection({ enabled: false });
 	const origin = new Moq.Origin.Producer();
-	const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
+	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
 	const game = new Game({
 		sessionId: "test",
 		connection,
@@ -70,7 +70,7 @@ test("status skips values that fail the schema and ends when the track errors", 
 		group.finish();
 	};
 
-	const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
+	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
 	const game = new Game({
 		sessionId: "test",
 		connection,
@@ -117,8 +117,8 @@ test("input opens a session that carries commands up and latency down until deac
 	// The session waits for a live connection; the endpoints share one origin instead of a relay.
 	Object.defineProperty(connection, "status", { value: new Moq.Signals.Signal("connected") });
 	const origin = new Moq.Origin.Producer();
-	const emulator = new Moq.socket.Endpoint(origin, Moq.Path.from("game"), "test");
-	const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
+	const emulator = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "test");
+	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
 	const game = new Game({
 		sessionId: "test",
 		connection,

@@ -3,7 +3,7 @@
 ## Goal
 
 Once per release cycle, every library vendored into moq-dev/moq, plus
-moq-dev/vaapi and the UniFFI generator forks, is compared against its upstream
+the UniFFI generator forks, is compared against its upstream
 from the last checked commit. Useful fixes and features are ported or planned,
 each library records the newest upstream commit checked, and code vendored
 since the last run gets its own child.
@@ -76,7 +76,7 @@ behavior follows quinn's fixes.
 - [moq-rtmp's rml has every upstream fix it needs](/quest/m3/vendor-sync/rml.md) - rust-media-libs fixes to rml_rtmp and rml_amf0 are ported or ruled out
 - [moq-v4l has every libv4l-rs fix it needs](/quest/m3/vendor-sync/v4l.md) - libv4l-rs fixes are ported or ruled out
 - [moq-nvenc has every upstream fix it needs](/quest/m3/vendor-sync/nvenc.md) - nvidia-video-codec-sdk fixes and NVIDIA SDK releases are ported or ruled out
-- [moq-vaapi has every ChromeOS fix it needs](/quest/m3/vendor-sync/vaapi.md) - cros-libva and cros-codecs fixes are ported, released, and adopted
+- [moq-vaapi has every ChromeOS fix it needs](/quest/m3/vendor-sync/vaapi.md) - cros-libva and cros-codecs fixes are ported or ruled out
 - [UniFFI generator forks are current](/quest/m3/vendor-sync/uniffi.md) - the four `kixelated/uniffi-*` forks carry the upstream fixes moq's bindings need
 
 ## Related
