@@ -268,7 +268,8 @@ class SelectTest(unittest.TestCase):
     def test_a_binary_alone_enables_its_required_features(self):
         # moq-boy's only target is its binary, so without openh264 the build
         # holds nothing and its tests never run.
-        (call,) = [call for call in self.selected("rs/moq-boy/src/main.rs", action="test") if call.startswith("rs test ")]
+        calls = self.selected("rs/moq-boy/src/main.rs", action="test")
+        (call,) = [call for call in calls if call.startswith("rs test ")]
         self.assertIn("moq-boy/openh264", call.split(" --features ", 1)[1].split())
 
 
