@@ -104,11 +104,14 @@ impl State {
 	}
 
 	/// Publish `err` (the first one wins), waking the closed waiters and the driver.
+	///
+	/// Only the first wakes anyone: the driver checks on every poll, and waking itself
+	/// again for an end already published would spin it through the drain.
 	fn publish(&mut self, err: Error) {
 		if let End::Open = self.end {
 			self.end = End::Closed(err);
+			self.ended();
 		}
-		self.ended();
 	}
 
 	/// Fail from outside with `err`, unless a reason was already published, and
@@ -888,5 +891,41 @@ impl Driver {
 			self.publish_close();
 		}
 		Poll::Ready(Ok(()))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::Arc;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+	use std::task::{Wake, Waker};
+
+	use super::{Error, State};
+
+	struct Wakes(AtomicUsize);
+
+	impl Wake for Wakes {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+
+	/// The driver parks on the end and republishes it on every poll, so only the first publish
+	/// may wake it, or a remote close spins it through the drain.
+	#[test]
+	fn an_end_published_again_wakes_nobody() {
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let mut state = State::new();
+
+		let driver = kio::Waiter::new(Waker::from(wakes.clone()));
+		driver.register(&mut state.driver);
+		state.publish(Error::TimedOut);
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+
+		let driver = kio::Waiter::new(Waker::from(wakes.clone()));
+		driver.register(&mut state.driver);
+		state.publish(Error::TimedOut);
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 1, "woke the driver again");
+		assert!(matches!(state.published(), Some(Error::TimedOut)));
 	}
 }

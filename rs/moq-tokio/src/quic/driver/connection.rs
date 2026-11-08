@@ -684,8 +684,9 @@ pub(crate) struct State {
 	/// The endpoint's socket, sent through without keeping it open
 	slot: Arc<Slot>,
 	send_buffer: Vec<u8>,
-	/// We buffer a transmit when the underlying I/O would block
-	buffered_transmit: Option<moq_quic::Transmit>,
+	/// We buffer a transmit when the underlying I/O would block, with whether it carries the
+	/// CONNECTION_CLOSE: a close that came after it leaves it an ordinary packet
+	buffered_transmit: Option<(moq_quic::Transmit, bool)>,
 }
 
 impl State {
@@ -721,8 +722,8 @@ impl State {
 
 		loop {
 			// Retry the last transmit, or get a new one.
-			let t = match self.buffered_transmit.take() {
-				Some(t) => t,
+			let (t, closes) = match self.buffered_transmit.take() {
+				Some(buffered) => buffered,
 				None => {
 					self.send_buffer.clear();
 					self.send_buffer.reserve(self.inner.current_mtu() as usize);
@@ -735,7 +736,8 @@ impl State {
 								None => 1,
 								Some(s) => t.size.div_ceil(s), // round up
 							};
-							t
+							// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
+							(t, self.inner.is_closed())
 						}
 						Poll::Pending => break,
 					}
@@ -745,7 +747,7 @@ impl State {
 			let len = t.size;
 			match self.slot.poll_send(&udp_transmit(&t, &self.send_buffer[..len]), cx) {
 				Poll::Pending => {
-					self.buffered_transmit = Some(t);
+					self.buffered_transmit = Some((t, closes));
 					return Ok(false);
 				}
 				// The datagram is lost, and moq-quic decides whether the connection survives it.
@@ -756,9 +758,8 @@ impl State {
 				Poll::Ready(Err(e)) => return Err(e),
 				Poll::Ready(Ok(())) => {}
 			}
-			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE, which the socket
-			// now has.
-			if let Some(reason) = self.inner.error() {
+			// The socket now has the CONNECTION_CLOSE.
+			if closes && let Some(reason) = self.inner.error() {
 				self.publish(reason.clone());
 			}
 
