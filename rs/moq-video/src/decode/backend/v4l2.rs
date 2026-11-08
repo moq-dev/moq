@@ -129,9 +129,7 @@ enum Phase {
 
 /// The error every call reports once the decoder has failed.
 fn failed() -> Error {
-	Error::Codec(anyhow::anyhow!(
-		"the V4L2 decoder could not be restarted after a drain and takes no more input"
-	))
+	Error::CodecGone("the V4L2 decoder could not be restarted after a drain and takes no more input".into())
 }
 
 /// The CAPTURE queue plus where a picture sits in one of its buffers.

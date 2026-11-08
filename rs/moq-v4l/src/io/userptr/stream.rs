@@ -120,7 +120,11 @@ impl StreamTrait for Stream {
 			)?;
 		}
 
-		self.state = State::Streaming { held: false };
+		// STREAMON on a streaming queue does nothing, and leaves a dequeued
+		// buffer with userspace.
+		if let State::Stopped = self.state {
+			self.state = State::Streaming { held: false };
+		}
 		Ok(())
 	}
 

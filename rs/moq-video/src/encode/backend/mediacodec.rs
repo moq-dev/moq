@@ -425,6 +425,10 @@ impl Backend for MediaCodec {
 		// A flush drops the reference frames, so the next picture has to be an
 		// IDR. Asked for rather than assumed: not every encoder inserts one.
 		self.keyframe_pending = true;
+		// Android does not promise a flush restores an encoder whose drain failed.
+		if tail.is_err() {
+			self.input = Input::Ended;
+		}
 		tail
 	}
 

@@ -304,7 +304,7 @@ impl Backend for Openh264 {
 		// Replaced whatever the drain did, so a failed one does not carry its
 		// state into the next stream. `FlushFrame` also leaks a single-threaded
 		// decoder's picture-pool slots, so a drained decoder is never reused.
-		self.decoder = new_decoder()?;
+		self.decoder = new_decoder().map_err(|err| Error::CodecGone(format!("openh264 decoder replacement: {err}")))?;
 		tail
 	}
 

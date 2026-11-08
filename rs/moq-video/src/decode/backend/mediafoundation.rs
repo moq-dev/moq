@@ -494,7 +494,7 @@ impl Backend for MediaFoundation {
 			// back everything it holds. Flushing discards that instead, and is what
 			// a failure here leaves the decoder ready for the next keyframe with.
 			unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0) }
-				.map_err(|e| mf_err("flush after a failed drain", e))?;
+				.map_err(|e| Error::CodecGone(format!("flush after a failed drain: {e}")))?;
 			return Err(err);
 		}
 		// A synchronous MFT may accept input immediately after NEED_MORE_INPUT.

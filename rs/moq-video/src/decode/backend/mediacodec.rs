@@ -139,9 +139,9 @@ impl Input {
 	/// Fails once the codec can take no more input.
 	fn check(self) -> Result<(), Error> {
 		match self {
-			Input::Failed => Err(Error::Codec(anyhow::anyhow!(
-				"the MediaCodec decoder failed to flush after a drain and takes no more input"
-			))),
+			Input::Failed => Err(Error::CodecGone(
+				"the MediaCodec decoder failed a drain and takes no more input".into(),
+			)),
 			Input::Idle | Input::Fed => Ok(()),
 		}
 	}
@@ -492,7 +492,9 @@ impl Backend for MediaCodec {
 			self.input = Input::Failed;
 			return Err(codec_err("flush", err));
 		}
-		self.input = Input::Idle;
+		// A failed drain may leave a render queued on the reader, which the next
+		// stream would take for its own, so the decoder is not reused.
+		self.input = if tail.is_ok() { Input::Idle } else { Input::Failed };
 		tail
 	}
 
