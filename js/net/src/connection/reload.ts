@@ -16,6 +16,7 @@ import {
 	type WebSocketProps,
 	type WebTransportProps,
 } from "./connect.ts";
+import { parse } from "./endpoint.ts";
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
@@ -628,8 +629,8 @@ export class Reload {
 					if (lived >= Nano.fromMilli(settled)) this.#redirects.reset();
 					// Only a redirect this GOAWAY named is a move. An empty or ignored one reconnects
 					// in place, even when that reruns the race a WebSocket fallback won.
-					const from = endpoint(at);
-					const to = after && after !== before ? endpoint(after) : from;
+					const from = destination(at);
+					const to = after && after !== before ? destination(after) : from;
 					if (to !== from && this.#redirects.move(from, to)) {
 						this.#retry(effect, undefined, new Error("redirect loop"));
 						return;
@@ -964,10 +965,11 @@ class Draining {
 
 /**
  * Where `url` dials, without its userinfo, query, or fragment, where a peer may mint fresh
- * credentials on every redirect. Two URLs that differ only there reach the same endpoint.
+ * credentials on every redirect, and with its host as the dial reads it. Two URLs that differ
+ * only there reach the same place.
  */
-function endpoint(url: URL): string {
-	const bare = new URL(url);
+function destination(url: URL): string {
+	const bare = new URL(parse(url).url);
 	bare.username = "";
 	bare.password = "";
 	bare.search = "";

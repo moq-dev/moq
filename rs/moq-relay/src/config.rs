@@ -26,13 +26,6 @@ pub struct Config {
 	#[usage(flatten)]
 	pub limits: crate::limits::Config,
 
-	#[usage(skip)]
-	#[serde(rename = "session", skip_serializing)]
-	legacy_session: Option<serde::de::IgnoredAny>,
-	#[usage(skip)]
-	#[serde(rename = "peer", skip_serializing)]
-	legacy_peer: Option<serde::de::IgnoredAny>,
-
 	/// The QUIC/TLS configuration for the server.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -306,13 +299,6 @@ impl Config {
 	/// replaced it.
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut deprecated = self.quic.deprecated();
-		deprecated.extend(self.limits.legacy.deprecated());
-		if self.legacy_session.is_some() {
-			deprecated.toml("[session]", "[limits.client]", None);
-		}
-		if self.legacy_peer.is_some() {
-			deprecated.toml("[peer]", "[limits.peer]", None);
-		}
 		deprecated.extend(self.listen.deprecated());
 		deprecated.extend(self.connect.deprecated());
 		deprecated.extend(self.cluster.deprecated());
@@ -445,19 +431,7 @@ mod tests {
 
 	/// Each renamed setting: its old flag, old variable, a value equal to the old default,
 	/// and the replacement its refusal names.
-	const OBSOLETE_ROLE_SOURCES: [(&str, &str, &str, &str); 5] = [
-		(
-			"--session-announces",
-			"MOQ_SESSION_ANNOUNCES",
-			"1000",
-			"--limits-client-announces",
-		),
-		(
-			"--peer-announces",
-			"MOQ_PEER_ANNOUNCES",
-			"100000",
-			"--limits-peer-announces",
-		),
+	const OBSOLETE_ROLE_SOURCES: [(&str, &str, &str, &str); 2] = [
 		(
 			"--cluster-connect-api",
 			"MOQ_CLUSTER_CONNECT_API",
@@ -469,12 +443,6 @@ mod tests {
 			"MOQ_CLUSTER_CONNECT_API_TLS_ROOT",
 			"api.pem",
 			"--cluster-api-tls-root",
-		),
-		(
-			"--auth-verifications",
-			"MOQ_AUTH_VERIFICATIONS",
-			"128",
-			"fixed per-session verification policy",
 		),
 	];
 
@@ -508,11 +476,8 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("obsolete.toml");
 		for (body, replacement) in [
-			("[session]\nannounces = 1000", "[limits.client]"),
-			("[peer]\nannounces = 100000", "[limits.peer]"),
 			("[cluster]\nconnect_api = 'peers.json'", "[cluster.api] url"),
 			("[cluster]\nconnect_api_tls_root = []", "[cluster.api.tls] root"),
-			("[auth]\nverifications = 128", "fixed per-session verification policy"),
 		] {
 			std::fs::write(&path, body).unwrap();
 			let error =
@@ -599,22 +564,6 @@ mod tests {
 		.unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 0);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
-	}
-
-	/// Sizing the removed request window refuses to start rather than run without the
-	/// setting.
-	#[test]
-	fn removed_request_limits_are_refused() {
-		if !test_env::Env::without(&["MOQ_LIMITS_CLIENT_REQUESTS", "MOQ_LIMITS_PEER_REQUESTS"]).isolate() {
-			return;
-		}
-		let error = Config::parse_and_merge(["moq-relay", "--limits-peer-requests=1000"]).unwrap_err();
-		assert!(error.to_string().contains("--limits-peer-requests"), "{error}");
-
-		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("limits.toml");
-		std::fs::write(&path, "[limits.client]\nrequests = 8\n").unwrap();
-		assert!(Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).is_err());
 	}
 
 	/// `[limits.peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.

@@ -29,7 +29,7 @@ prebuilt CLI artifacts for 32-bit boards are not yet available.
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `mp4 --output <file>` | Record a regular MP4 that stays playable if the recording is cut short. |
-| `export` | `hls --listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
+| `export` | `hls --hls-listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
 | `play` | | Decode and play in a native window with sound. |
@@ -365,7 +365,7 @@ over one connection:
 ```bash
 moq --connect https://relay.example.com/anon \
     import --broadcast event.hang srt --listen 0.0.0.0:9000 \
-    -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
+    -- export --broadcast event.hang hls --hls-listen 0.0.0.0:8080 \
     -- export --broadcast event.hang archive file:///recordings
 ```
 

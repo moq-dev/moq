@@ -2224,10 +2224,15 @@ pub extern "C" fn moq_route_broadcast(route: u32) -> i32 {
 	})
 }
 
-/// The stream a route serves, minted at creation unless its options named one.
+/// The stream a route serves now.
 ///
-/// Kept across [moq_route_withdraw] and [moq_route_announce]. The destination borrows the
-/// route's storage until [moq_route_free].
+/// Named options keep one instance. Unnamed, a prefix route moves to a fresh one each time a
+/// job holding its current one ends. A route from [moq_broadcast_request_route] takes its
+/// prefix route's current one when it first announces or when this first reads it. Read first,
+/// the job announces under it, and [moq_route_announce] fails with an unroutable error once the
+/// prefix route has moved past it, so a signer built from it stays valid.
+/// Withdrawing and announcing again keep it. The destination borrows the route's storage
+/// until the next [moq_route_instance] on the route or [moq_route_free].
 ///
 /// Returns zero on success, or a negative code on failure.
 ///
@@ -2326,7 +2331,8 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 /// Serve a held consumer under the prefix route's instance without announcing an exact route.
 ///
 /// Every answer at this path must continue the same sequences and bytes. Start a new
-/// prefix route for different content, or route a job with its own instance.
+/// prefix route for different content, or route a job, whose end moves the prefix route to
+/// another instance.
 /// Consumes the request handle; the consumer remains owned by the caller.
 /// Returns zero on success, or a negative error.
 #[unsafe(no_mangle)]
@@ -2347,8 +2353,11 @@ pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i
 /// Answer a broadcast request with the path's own exact route, owning a new broadcast.
 ///
 /// Consumes the request handle and returns a positive route handle, or a negative error.
-/// The route serves a fresh instance unless `options` names one, so a job that restarts is
-/// a new stream. Created visible, it announces now and answers the waiting requesters;
+/// Unless `options` names an instance, the route takes the one its prefix route lends when
+/// it first announces or [moq_route_instance] first reads it, so readers that resolved the path through the prefix route continue
+/// on it; its end then moves the prefix route to a fresh instance, so a job that restarts is
+/// a new stream. A prefix route that names its instance lends none, and the route mints its
+/// own. Created visible, it announces now and answers the waiting requesters;
 /// created hidden, they wait until [moq_route_announce], so the job can fill its catalog
 /// first, and freeing the route before then refuses them. Ending the route withdraws only
 /// this path. Unreadable `options` fail without consuming the request.

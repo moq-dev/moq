@@ -174,6 +174,8 @@ impl Future for ConnectionDriver {
 		let waiter = this.park.hold(cx);
 		let conn = &mut *this.conn.state.lock();
 		let _guard = this.span.enter();
+		// Every packet this poll opens or seals pays one DIT toggle rather than one per rind call.
+		let _dit = moq_crypto::cpu::Dit::hold();
 
 		if let Err(e) = conn.process_conn_events(cx) {
 			conn.terminate(e);
@@ -498,18 +500,6 @@ impl Connection {
 	#[cfg(feature = "net")]
 	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
 		self.0.state.lock().inner.export_keying_material(label, context)
-	}
-
-	/// The peer's stream credit in `dir`, as this connection last heard it.
-	#[cfg(feature = "net")]
-	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
-		let dir = match dir {
-			moq_net::transport::Dir::Uni => Dir::Uni,
-			moq_net::transport::Dir::Bi => Dir::Bi,
-		};
-		let mut state = self.0.state.lock();
-		let streams = state.inner.streams();
-		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
 	}
 
 	/// How many send streams the connection still holds state for

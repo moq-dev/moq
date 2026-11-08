@@ -361,7 +361,9 @@ mod tests {
 		);
 
 		// A cursor sitting on the separator is typing `--`, not inside a stage.
-		assert!(complete("moq import flv --").await.is_empty());
+		// usage 7.3 prefix-matches it, so only `import flv`'s own `--help` comes back.
+		let sep = complete("moq import flv --").await;
+		assert_eq!(sep, ["--help"], "the separator was answered as a stage");
 	}
 
 	/// Every overlay is scoped to a command that declares the value it answers for.

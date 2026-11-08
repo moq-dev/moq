@@ -302,8 +302,8 @@ mod tests {
 	async fn videotoolbox_reads_the_export_in_place() {
 		let (device, queue) = gpu().await.expect("a Metal device");
 		let size = Size::new(64, 48);
-		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
-		let (mut exporter, _) = Exporter::new(&device, &queue, &mut config).await.unwrap();
+		let config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
+		let (mut exporter, config, _) = Exporter::new(&device, &queue, &config).await.unwrap();
 		assert_eq!(exporter.route(), Route::Gpu, "VideoToolbox reads pixel buffers");
 		let mut encoder = crate::encode::Encoder::new(&config).unwrap();
 		assert_eq!(encoder.name(), "videotoolbox");

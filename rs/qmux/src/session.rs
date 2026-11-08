@@ -416,16 +416,6 @@ impl poll::Session for Session {
 		quic.receive_window = limits.receive_window;
 		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
 	}
-
-	fn stream_credit(&self, dir: net::Dir) -> Option<net::StreamCredit> {
-		let dir = match dir {
-			net::Dir::Uni => Dir::Uni,
-			net::Dir::Bi => Dir::Bi,
-		};
-		let mut state = self.inner.lock();
-		let streams = state.conn.streams();
-		Some(net::StreamCredit::new(streams.credit(dir), streams.blocked(dir)))
-	}
 }
 
 /// A snapshot of the session's metrics; its [`net::Wire`] holds the byte counts.
