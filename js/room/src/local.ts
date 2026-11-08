@@ -22,7 +22,7 @@ export interface LocalProps {
 	cameraEnabled?: GetterInit<boolean>;
 	/** Capture the microphone. Pass a Signal to share it with the app. */
 	microphoneEnabled?: GetterInit<boolean>;
-	/** Prompt for and capture a screen. Pass a Signal to share it with the app. */
+	/** Prompt for and capture a screen; turns off when the share ends. Pass a Signal to share it with the app. */
 	screenEnabled?: GetterInit<boolean>;
 	/** Seed the published user.json fields. */
 	user?: UserProps;
@@ -46,7 +46,7 @@ export class Local {
 	readonly cameraEnabled: Signal<boolean>;
 	/** Capture the microphone. */
 	readonly microphoneEnabled: Signal<boolean>;
-	/** Prompt for and capture a screen. Unannounce when the share ends. */
+	/** Prompt for and capture a screen. Turns off when the share ends, and `share.out.state` says why. */
 	readonly screenEnabled: Signal<boolean>;
 
 	/** True while the local participant is composing a chat message. */
@@ -271,15 +271,14 @@ export class Local {
 		};
 
 		this.#signals.run((effect) => {
-			const source = effect.get(this.share.out.source);
-			effect.set(this.#screenVideo, source?.video);
-			effect.set(this.#screenAudioSource, source?.audio);
-			const live = !!source?.video || !!source?.audio;
-			const wasLive = this.#screenLive.peek();
-			this.#screenLive.set(live);
-			if (!live && wasLive) {
-				this.screenEnabled.set(false);
-			}
+			const state = effect.get(this.share.out.state);
+			const media = state.kind === "live" ? state.media : undefined;
+			effect.set(this.#screenVideo, media?.video);
+			effect.set(this.#screenAudioSource, media?.audio);
+			this.#screenLive.set(media !== undefined);
+			// A share that ended for any reason, including a dismissed picker, turns sharing off, so the
+			// next share takes a new toggle. `share.out.state` keeps the reason.
+			if (state.kind === "ended") this.screenEnabled.set(false);
 		});
 
 		this.#signals.run((effect) => {

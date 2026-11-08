@@ -803,8 +803,7 @@ impl Video {
 			}
 			None => (None, hang::catalog::PRIORITY.video),
 		};
-		// The suffix `moq_video::encode::Producer::new` would derive, built here so the
-		// track can take this rendition's priority.
+		// The track's suffix by codec, the one `moq_video::encode::publish_capture` uses too.
 		let suffix = match &rendition.codec {
 			hang::catalog::VideoCodec::H264(_) => ".avc3",
 			hang::catalog::VideoCodec::H265(_) => ".hev1",
@@ -815,7 +814,7 @@ impl Video {
 			}
 		};
 		let track = target.producer.unique_track(suffix, reserved.track_info(priority))?;
-		let producer = moq_video::encode::Producer::with_track(track, reserved, rendition)?;
+		let producer = moq_video::encode::Producer::new(track, reserved, rendition)?;
 		let encoder = Shared::new(VideoEncoder {
 			encoder: Some(encoder),
 			producer,
@@ -1451,7 +1450,10 @@ mod tests {
 		let encode = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 		let rendition = encode.probe().await.unwrap();
 		let reserved = catalog.reserve().with_interval(encode.effective_join());
-		let producer = moq_video::encode::Producer::new(broadcast, reserved, rendition).unwrap();
+		let track = broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let producer = moq_video::encode::Producer::new(track, reserved, rendition).unwrap();
 
 		let name = producer.demand().name().to_string();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
@@ -1602,7 +1604,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_failed_drain_aborts_the_track() {
 		let (producer, mut track) = track_under_test().await;
-		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail"));
+		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail").into());
 		finalize(
 			producer,
 			Err(err),

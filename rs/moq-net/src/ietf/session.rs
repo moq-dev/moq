@@ -480,7 +480,7 @@ impl Launch {
 				tasks: task_set,
 				session,
 			},
-			ending: None,
+			ended: None,
 			auth,
 			auth_close,
 			setup_token,
@@ -491,8 +491,8 @@ impl Launch {
 /// A running session: its halves race until one fails or the task set drains.
 struct Running {
 	race: Race,
-	/// How the race ended, held while what already arrived drains.
-	ending: Option<Result<(), Error>>,
+	/// How the race ended, once it did: what already arrived drains, then this is the result.
+	ended: Option<Result<(), Error>>,
 	auth: crate::auth::Link,
 	auth_close: AuthClose,
 	/// Held for the life of the session.
@@ -501,17 +501,21 @@ struct Running {
 
 impl Running {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if self.ending.is_none() {
-			let res = ready!(self.race.poll(waiter));
-			close(&mut self.race.session, &res);
-			// Before the Auth serve tasks drop, so each settles with the session's error
-			// rather than a bare cancel.
-			self.auth.close(match &res {
-				Ok(()) => Error::Cancel,
-				Err(err) => err.clone(),
-			});
-			self.ending = Some(res);
-		}
+		let res = match &self.ended {
+			Some(res) => res.clone(),
+			None => {
+				let res = ready!(self.race.poll(waiter));
+				close(&mut self.race.session, &res);
+				// Before the Auth serve tasks drop, so each settles with the session's error
+				// rather than a bare cancel.
+				self.auth.close(match &res {
+					Ok(()) => Error::Cancel,
+					Err(err) => err.clone(),
+				});
+				self.ended = Some(res.clone());
+				res
+			}
+		};
 		// Whichever side closed it, read what already arrived.
 		ready!(self.race.unis.poll_drain(waiter));
 		let _ = self.race.tasks.poll(waiter);
@@ -523,7 +527,6 @@ impl Running {
 		}
 		self.race.subscriber.datagrams_routed();
 		let _ = self.race.tasks.poll(waiter);
-		let res = self.ending.take().expect("draining an ended session");
 		// Closed cleanly by dropping or draining: readers see what the peer's clean
 		// close would have shown them.
 		if self.race.session.closing().is_local() {
@@ -1441,10 +1444,7 @@ struct Dispatch {
 	session: Transport,
 	version: Version,
 	peer_setup: peer::PeerSetup,
-	/// What `bidi` is built from once the peer's SETUP arrives.
-	start: Option<(Publisher, Subscriber, Option<auth::Serve>)>,
-	/// What each request is served with, once the peer's SETUP says how they decode.
-	bidi: Option<Bidi>,
+	state: DispatchState,
 	tasks: TaskSet,
 	fatal: kio::Shared<Option<Error>>,
 	/// MAX_STREAMS credit alone lets the peer keep thousands of streams ready, and the
@@ -1452,12 +1452,19 @@ struct Dispatch {
 	budget: kio::coop::Budget,
 	/// One pass per accepted stream, not per wake.
 	charge: bool,
-	/// Each AUTH serve task settles `Issued::closed` from whatever the auth handle
-	/// holds when it drops, and the first reason wins. So the error that ends the
-	/// session has to reach the handle while `tasks` is still alive, or every grant
-	/// reports a bare cancel instead. `None` when the peer never negotiated AUTH,
-	/// which leaves no serve task to settle.
-	handle: Option<crate::auth::Link>,
+}
+
+/// Where [`Dispatch`] is: requests decode differently by what the peer's SETUP negotiates.
+enum DispatchState {
+	/// Waiting on the peer's SETUP, with what each request will be served by.
+	Setup {
+		publisher: Publisher,
+		subscriber: Subscriber,
+		/// Answers the peer's Auth requests, on the versions that can negotiate them.
+		serve: Option<auth::Serve>,
+	},
+	/// Accepting requests, each served with what the peer's SETUP negotiated.
+	Accepting(Bidi),
 }
 
 impl Dispatch {
@@ -1474,94 +1481,91 @@ impl Dispatch {
 			session,
 			version,
 			peer_setup,
-			start: Some((publisher, subscriber, serve)),
-			bidi: None,
+			state: DispatchState::Setup {
+				publisher,
+				subscriber,
+				serve,
+			},
 			tasks: TaskSet::owned(),
 			fatal: Default::default(),
 			budget: kio::coop::Budget::new(32),
 			charge: true,
-			handle: None,
 		}
-	}
-
-	/// Build what each request is served with, once the peer's SETUP arrives.
-	fn poll_setup(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let (_, subscriber, _) = self.start.as_ref().expect("set up once");
-
-		// PUBLISH_NAMESPACE decodes differently once the MoQ Cluster extension is
-		// negotiated, so dispatch waits for SETUP, which `Unis` reads independently.
-		let peer = ready!(subscriber.poll_peer(waiter));
-
-		// An AUTH without MoQ Auth negotiated, offered by both sides, is an unknown request,
-		// which falls through to the protocol violation in `BidiServe`.
-		let negotiated = ready!(self.peer_setup.poll_get(waiter)).auth;
-
-		// From the same slot, so this costs nothing extra: it decides whether an unsolicited
-		// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
-		let declared = ready!(subscriber.poll_solicit(waiter));
-
-		let (publisher, subscriber, serve) = self.start.take().expect("set up once");
-		let serve = match negotiated {
-			true => serve,
-			false => None,
-		};
-		self.handle = serve.as_ref().map(|serve| serve.handle.clone());
-		self.bidi = Some(Bidi {
-			publisher,
-			subscriber,
-			peer,
-			declared,
-			serve,
-			version: self.version,
-		});
-		Poll::Ready(())
 	}
 
 	/// `Ready` only with the error that ends the session.
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		if self.bidi.is_none() {
-			ready!(self.poll_setup(waiter));
-		}
-		let bidi = self.bidi.as_ref().expect("set up above");
 		loop {
-			let accepted = 'accept: {
-				let broken = self.fatal.poll(waiter, |fatal| match fatal.is_some() {
-					true => Poll::Ready(()),
-					false => Poll::Pending,
-				});
-				if let Poll::Ready(mut fatal) = broken
-					&& let Some(err) = fatal.take()
-				{
-					break 'accept Poll::Ready(Err(err));
+			match &self.state {
+				DispatchState::Setup {
+					publisher,
+					subscriber,
+					serve,
+				} => {
+					// PUBLISH_NAMESPACE decodes differently once the MoQ Cluster extension is
+					// negotiated, so dispatch waits for SETUP, which `Unis` reads independently.
+					let peer = ready!(subscriber.poll_peer(waiter));
+
+					// An AUTH without MoQ Auth negotiated, offered by both sides, is an unknown
+					// request, which falls through to the protocol violation in `BidiServe`.
+					let negotiated = ready!(self.peer_setup.poll_get(waiter)).auth;
+
+					// From the same slot, so this costs nothing extra: it decides whether an
+					// unsolicited advertisement is the peer ignoring our own SETUP (MoQ Solicit).
+					let declared = ready!(subscriber.poll_solicit(waiter));
+
+					let bidi = Bidi {
+						publisher: publisher.clone(),
+						subscriber: subscriber.clone(),
+						peer,
+						declared,
+						serve: serve.clone().filter(|_| negotiated),
+						version: self.version,
+					};
+					self.state = DispatchState::Accepting(bidi);
 				}
-				if std::mem::take(&mut self.charge) && self.budget.poll_yield(waiter).is_pending() {
-					break 'accept Poll::Pending;
-				}
-				Stream::poll_accept(&self.session, self.version, waiter)
-			};
-			match accepted {
-				// QUIC may expose an earlier stream before its bytes arrive. Reading the
-				// header here could block later streams whose unread data holds flow control.
-				Poll::Ready(Ok(stream)) => {
-					self.charge = true;
-					self.tasks
-						.push(BidiServe::new(bidi.clone(), stream, self.fatal.clone()));
-				}
-				Poll::Ready(Err(err)) => {
-					// `tasks` still holds the AUTH serve tasks, so the session's error lands on
-					// the handle before they drop. The driver closes it again with the same
-					// error, which then does nothing.
-					if let Some(handle) = &self.handle {
-						handle.close(err.clone());
+				DispatchState::Accepting(bidi) => loop {
+					let accepted = 'accept: {
+						let broken = self.fatal.poll(waiter, |fatal| match fatal.is_some() {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						});
+						if let Poll::Ready(mut fatal) = broken
+							&& let Some(err) = fatal.take()
+						{
+							break 'accept Poll::Ready(Err(err));
+						}
+						if std::mem::take(&mut self.charge) && self.budget.poll_yield(waiter).is_pending() {
+							break 'accept Poll::Pending;
+						}
+						Stream::poll_accept(&self.session, self.version, waiter)
+					};
+					match accepted {
+						// QUIC may expose an earlier stream before its bytes arrive. Reading the header
+						// here could block later streams whose unread data holds flow control.
+						Poll::Ready(Ok(stream)) => {
+							self.charge = true;
+							self.tasks
+								.push(BidiServe::new(bidi.clone(), stream, self.fatal.clone()));
+						}
+						Poll::Ready(Err(err)) => {
+							// Each AUTH serve task settles `Issued::closed` from the handle as it
+							// drops, and the first reason wins: closing it while `tasks` still holds
+							// them keeps every grant from reporting a bare cancel. The driver closes
+							// it again with the same error, which then does nothing.
+							if let Some(serve) = &bidi.serve {
+								serve.handle.close(err.clone());
+							}
+							return Poll::Ready(err);
+						}
+						Poll::Pending => {
+							// The children never end the loop; a `Ready` here just means they're
+							// drained until the next stream.
+							let _ = self.tasks.poll(waiter);
+							return Poll::Pending;
+						}
 					}
-					return Poll::Ready(err);
-				}
-				Poll::Pending => {
-					// The children never end the loop; a `Ready` here just means they're
-					// drained until the next stream.
-					let _ = self.tasks.poll(waiter);
-					return Poll::Pending;
-				}
+				},
 			}
 		}
 	}

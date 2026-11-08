@@ -11,8 +11,21 @@ or call ordering stands in for a phase. A placeholder such as
 
 The shared decisions are in the [epic](/quest/m1/explicit-state/README.md).
 
-No reachable bug is folded into this child. Check each item below while
+No reachable bug is folded into what remains. Check each item below while
 redesigning it, and reproduce any inconsistent state you find.
+
+[moq-dev/moq#8275](https://github.com/moq-dev/moq/pull/8275) landed the IETF
+publisher's `TrackServe` phase and its reopened-tail fix, the datagram
+forward, the session drivers' terminal result, IETF `Dispatch`, lite
+`PeerSetup`, the listing `Queue`, and the js/net connections' close phase.
+What remains overlapped open PRs when that one started:
+[moq-dev/moq#8220](https://github.com/moq-dev/moq/pull/8220) (lite publisher
+and subscriber, `fills.rs`, js/net lite),
+[moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) (lite announce
+and subscriber, `model/origin.rs`, `model/follow.rs`, js/net `origin.ts`),
+and [moq-dev/moq#8222](https://github.com/moq-dev/moq/pull/8222) (js/net
+`reload.ts` and lite `subscriber.ts`). Start each item once the PR touching
+its file has landed or closed.
 
 Rust:
 
@@ -24,13 +37,6 @@ Rust:
     duplicate one another.
   - `request_id: RequestId(0)` is a placeholder for an id that isn't
     assigned yet.
-- **IETF publisher** (`rs/moq-net/src/ietf/publisher.rs`):
-  - `RunSubscription.served` caches the track's drained state.
-  - An update that reopens `TrackServe` (`draining = false`, a new `tail`)
-    is never polled again. Reproduce this first; it is the audit's plausible
-    finding.
-  - `TrackServe.draining`/`end` and `DatagramForward` should become explicit
-    phases.
 - **Lite subscriber** (`rs/moq-net/src/lite/subscriber.rs`):
   - `ServeLoop.finishing` and `parked` belong inside `SubStream`.
   - `SubStream.served` plus `started` are really `Option<Option<u64>>`.
@@ -40,12 +46,7 @@ Rust:
 - **`Following`** (`rs/moq-net/src/model/follow.rs`): eight fields, of which
   `last`, `moved`, and `absorbed` are always reset together.
 - **Smaller ones**:
-  - `ietf/session.rs` `Dispatch` holds two `Option`s, exactly one of which is
-    set.
   - `model/origin.rs` `TrackIo` keeps `request` and `accepted` side by side.
-  - The driver `ending` field.
-  - The lite `PeerSetupState`.
-  - The listing `Queue`.
   - `fills.rs` `Recovery`.
 
 JS (`js/net`):
@@ -67,8 +68,6 @@ JS (`js/net`):
   encoded by about 40 `?.` guards.
 - **`Join`** (`ietf/join.ts`): a second fetch stream after the track ended
   leaks the first producer.
-- **Connections** (`lite/connection.ts`, `ietf/connection.ts`): lite's
-  `abort()` has no guard.
 
 Keep the lite `TrackRun` start state out of this child. It belongs to
 [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md).

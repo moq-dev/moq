@@ -44,7 +44,7 @@ mod nv12;
 mod vulkan;
 
 fn err(message: impl std::fmt::Display) -> Error {
-	Error::Render(anyhow::anyhow!("{message}"))
+	Error::render(anyhow::anyhow!("{message}"))
 }
 
 /// An encoder [`Exporter::new`] may settle on.
@@ -90,7 +90,7 @@ impl Exporter {
 	pub const DEPTH: usize = Readback::DEPTH;
 
 	/// Export textures drawn on `device` to an encoder `config` allows, and
-	/// return the rendition it produces.
+	/// return the settled encoder config and the rendition it produces.
 	///
 	/// Tries the encoders [`encode::Config::kind`](crate::encode::Config::kind)
 	/// allows in priority order, probing each as
@@ -102,10 +102,10 @@ impl Exporter {
 	/// `device` is not on the NVIDIA GPU and settles on an encoder that reads
 	/// frames back, rather than failing.
 	///
-	/// Textures are `config`'s size. This leaves `config.kind` naming the
-	/// encoder it settled on, and on Linux
+	/// Textures are `config`'s size. The returned config is `config` with its
+	/// `kind` naming the encoder this settled on, and on Linux
 	/// [`encode::Config::input`](crate::encode::Config::input) naming the device
-	/// that encoder reads, so open the encoder with `config` as this leaves it.
+	/// that encoder reads, so open the encoder with it.
 	///
 	/// # Errors
 	///
@@ -119,8 +119,8 @@ impl Exporter {
 	pub async fn new(
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
-		config: &mut crate::encode::Config,
-	) -> Result<(Self, hang::catalog::VideoConfig), Error> {
+		config: &crate::encode::Config,
+	) -> Result<(Self, crate::encode::Config, hang::catalog::VideoConfig), Error> {
 		let candidates = crate::encode::backend::candidates(config.codec, &config.kind);
 		if candidates.is_empty() {
 			return Err(crate::encode::backend::missing(config.codec, &config.kind));
@@ -138,9 +138,9 @@ impl Exporter {
 	async fn settle(
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
-		config: &mut crate::encode::Config,
+		config: &crate::encode::Config,
 		candidates: impl IntoIterator<Item = Candidate>,
-	) -> Result<(Self, hang::catalog::VideoConfig), Error> {
+	) -> Result<(Self, crate::encode::Config, hang::catalog::VideoConfig), Error> {
 		let color = crate::Color::infer(config.size());
 		if let Some(configured) = config.color
 			&& configured != color
@@ -171,8 +171,7 @@ impl Exporter {
 						);
 					}
 					tracing::info!(encoder = name, ?route, "exporting to the encoder");
-					*config = attempt;
-					return Ok((exporter, rendition));
+					return Ok((exporter, attempt, rendition));
 				}
 				Err(e) if candidate.gpu => {
 					tracing::debug!(
@@ -549,8 +548,17 @@ pub(crate) mod tests {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let size = Size::new(64, 64);
 		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
-		let (mut exporter, _) = Exporter::new(&device, &queue, &mut config).await.unwrap();
+		let bitrate = Some(moq_net::bandwidth::Rate::from_kbps(700));
+		let join = std::time::Duration::from_millis(1500);
+		config.bitrate = bitrate;
+		config.join = join;
+		let (mut exporter, config, _) = Exporter::new(&device, &queue, &config).await.unwrap();
 		assert_eq!(exporter.size(), size);
+		assert_eq!(
+			(config.bitrate, config.join),
+			(bitrate, join),
+			"the caller's settings survive"
+		);
 		let mut encoder = crate::encode::Encoder::new(&config).unwrap();
 		let expected = match crate::encode::backend::reads_export(encoder.name()) {
 			true => Route::Gpu,
@@ -591,12 +599,18 @@ pub(crate) mod tests {
 	async fn choosing_passes_over_an_encoder_that_cannot_read_this_device() {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let mut config = crate::encode::Config::new(64, 64, crate::FrameRate::new(30, 1).unwrap());
+		// A caller's stale device must not survive onto the readback encoder.
+		config.input = Some(crate::frame::vulkan::Device {
+			device_uuid: [0xaa; 16],
+			driver_uuid: [0xbb; 16],
+			render_node: None,
+		});
 		let readback = Candidate {
 			name: "openh264",
 			hardware: false,
 			gpu: false,
 		};
-		let (exporter, _) = Exporter::settle(&device, &queue, &mut config, [FOREIGN, readback])
+		let (exporter, config, _) = Exporter::settle(&device, &queue, &config, [FOREIGN, readback])
 			.await
 			.unwrap();
 		assert_eq!(exporter.route(), Route::Readback);
@@ -613,7 +627,7 @@ pub(crate) mod tests {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let mut config = crate::encode::Config::new(64, 64, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(FOREIGN.name.into());
-		let Err(err) = Exporter::settle(&device, &queue, &mut config, [FOREIGN]).await else {
+		let Err(err) = Exporter::settle(&device, &queue, &config, [FOREIGN]).await else {
 			panic!("exported to an encoder that cannot read this device");
 		};
 		let err = err.to_string();
@@ -631,7 +645,7 @@ pub(crate) mod tests {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let mut config = crate::encode::Config::new(640, 480, crate::FrameRate::new(30, 1).unwrap());
 		config.color = Some(crate::Color::BT709);
-		let Err(err) = Exporter::new(&device, &queue, &mut config).await else {
+		let Err(err) = Exporter::new(&device, &queue, &config).await else {
 			panic!("exported BT.601 pixels under a BT.709 label");
 		};
 		assert!(matches!(err, Error::Unsupported(_)), "{err}");
