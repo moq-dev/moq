@@ -519,9 +519,8 @@ impl<'a> Stream<'a> {
 
 	/// Whether the peer acknowledged every byte before `offset`
 	///
-	/// A `false` notes to wake the stream's [`Self::poll_acked`] waiters once the answer changes.
-	/// The stream holds only its lowest waiting offset, so every waiter on it polls again then. Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack
-	/// holds the data, not that its application read it.
+	/// Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack holds the data,
+	/// not that its application read it.
 	///
 	/// Fails with [`Error::Closed`] once the peer will never acknowledge it, or no longer reads
 	/// it: a reset dropped the data before `offset`, the peer sent STOP_SENDING, or the
@@ -551,12 +550,14 @@ impl<'a> Stream<'a> {
 
 	/// Wait for the peer to acknowledge every byte before `offset`, as [`Self::acked`] answers it
 	///
-	/// Pending registers `waiter` until the answer changes. Fails with [`Error::ConnectionLost`]
+	/// Pending registers `waiter` until the answer changes. The stream holds only its lowest
+	/// waiting offset, so every waiter on it polls again then. Fails with [`Error::ConnectionLost`]
 	/// instead of [`Error::Closed`] once the connection is lost.
 	///
 	/// # Panics
 	/// - when `offset` came from another stream
-	pub fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+	#[cfg(test)]
+	pub(crate) fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
 		match self.acked(offset) {
 			Ok(true) => Poll::Ready(Ok(())),
 			Ok(false) => {
@@ -720,7 +721,7 @@ pub enum End {
 ///
 /// A higher priority group preempts every lower one, and groups of equal priority get an
 /// equal share of bytes no matter how many streams each has queued. Streams outside any group
-/// go before all of it. A group's datagrams, from [`Datagrams::send`](crate::Datagrams::send),
+/// go before all of it. A group's datagrams, from [`Datagrams::send`](crate::connection::Datagrams::send),
 /// share its bytes in the same order.
 pub struct Groups<'a> {
 	pub(crate) state: &'a mut StreamsState,

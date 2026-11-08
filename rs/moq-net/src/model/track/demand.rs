@@ -314,7 +314,7 @@ mod tests {
 			let index = rng.random_range(0..slots.len());
 			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
 				0 => Anchor::Relative(rng.random_range(0..3)),
-				1 => Anchor::Relative(u64::MAX),
+				1 => Anchor::Oldest,
 				_ => Anchor::Absolute(rng.random_range(0..8)),
 			};
 			let ranges: Vec<Range> = (0..rng.random_range(0..3))
@@ -370,6 +370,19 @@ mod tests {
 		fn wake_by_ref(self: &Arc<Self>) {
 			self.0.fetch_add(1, Ordering::SeqCst);
 		}
+	}
+
+	/// An oldest end is refused wherever it is read, so it asks nothing upstream, even
+	/// past an absolute start.
+	#[test]
+	fn an_oldest_end_adds_no_demand() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let producer = broadcast.create_track("demand", None).unwrap();
+		let _sub = producer.subscribe(Subscription::default().with_ranges([Range {
+			start: Anchor::Absolute(3),
+			end: Some(Anchor::Oldest),
+		}]));
+		assert_eq!(producer.subscription().map(|sub| sub.ranges), Some(Vec::new()));
 	}
 
 	#[test]

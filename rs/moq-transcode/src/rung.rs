@@ -867,17 +867,20 @@ impl Encoder {
 			&& *signalled != color
 		{
 			let (sink, _) = self.open.take().expect("checked above");
-			encoded = sink.finish().await?;
-			// The new parameter sets only reach a decoder on an IDR.
+			// The new parameter sets only reach a decoder on an IDR. Owed before the old encoder
+			// drains, so a drain that fails still leaves the next encoder owing it.
 			self.pending_cut = true;
+			encoded = sink.finish().await?;
 		}
 		let sink = match &mut self.open {
 			Some((sink, _)) => sink,
 			None => {
 				let mut sink = rung.encode(color).await?;
 				rung.rendition.opened(sink.applied());
-				if std::mem::take(&mut self.pending_cut) {
+				// Cleared only once applied: a cut that fails is still owed to the next encoder.
+				if self.pending_cut {
 					sink.cut().await?;
+					self.pending_cut = false;
 				}
 				&mut self.open.insert((sink, color)).0
 			}
