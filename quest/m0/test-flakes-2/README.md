@@ -209,6 +209,12 @@ Added 2026-11-08 (maintainer, /quest-complete): `js/net`'s widened max-age
 re-drop test, which failed on [moq-dev/moq#8230](https://github.com/moq-dev/moq/pull/8230)
 with the `Cancel` reset [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195) intends for a reply still pending at the stream's end; the test races its finish against that reply.
 
+Added 2026-11-08 (maintainer's standing rule that flakes join this epic): moq-ffi's
+raw media warmup test, which failed in the merge queue for
+[moq-dev/moq#8272](https://github.com/moq-dev/moq/pull/8272) when its reader skipped one of three
+buffered groups on the FFI runtime's real clock. It is quarantined with `#[ignore]` until its
+child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -218,3 +224,4 @@ Public API: none. Wire: none.
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the createWritable queue test waits on the writes it asserts, and its `test.skip` is removed
 - [js/net's lite-06 session-close test keeps the end under load](/quest/m0/test-flakes-2/session-close-end.md) - a session close right after a datagram track's end returns the end, not a `remote error: 0`, and its lite-06 skip is removed
 - [js/net's widened max-age re-drop test ends cleanly, not with a reset](/quest/m0/test-flakes-2/widened-max-age-reset.md) - the test finishes the track only after the re-drop reply arrives, so the end is a FIN, and drops its wall-clock assert
+- [moq-ffi's warmup test keeps every group under load](/quest/m0/test-flakes-2/ffi-warmup-wall-clock.md) - `raw_media_catalog_warmup_reaches_the_subscription` keeps the group between its warmup start and the live edge, and its `#[ignore]` is removed
