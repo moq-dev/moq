@@ -22,8 +22,8 @@ became their own m1, m2, m3, and m4 quests; this epic holds the rest.
 
 This audit ran while [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088),
 the previous API audit's final pass, was open, and none of its children
-repeats an item #8088 changes. A child that starts after #8088 merges
-rechecks each item against `main` and drops what is already done.
+repeats an item #8088 changes. #8088 has since merged, so a child rechecks
+each item against `main` and drops what is already done.
 
 Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests): fences for
 what later quests grow (`#[non_exhaustive]` on structs and enums m3 to m5

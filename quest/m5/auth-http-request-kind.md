@@ -29,7 +29,7 @@ yet.
 
 Public API: additive (HTTP auth contract fields). Wire: none.
 
-Re-planned 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088) removes `auth::Request::{kind, path}`, so this quest starts by re-adding them, additively, only once an auth server asks for per-request decisions. Needs a fresh `/quest-plan` then.
+Re-planned 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088) removed `auth::Request::{kind, path}`, so this quest starts by re-adding them, additively, only once an auth server asks for per-request decisions. Needs a fresh `/quest-plan` then.
 
 ## Related
 
