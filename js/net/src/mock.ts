@@ -4,7 +4,8 @@
  * Creates paired client/server transports connected by in-memory streams.
  */
 
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
+import type { Getter } from "@moq/signals";
 import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";
 import type { Frame } from "./group.ts";
@@ -38,30 +39,11 @@ export async function settlesWithin(
 	return settled;
 }
 
-/**
- * Moves `clock` a millisecond at a time, each step after a host turn, until `until` holds or settles.
- *
- * `Manual.drive` fires the next deadline after one drain, which skips past work waiting on a host
- * task the clock can't see, such as a read through the host's streams or the IETF handshake's
- * dynamic import. A regression fails within ten mocked seconds.
- */
-export async function driveUntil(clock: Manual, until: (() => boolean) | PromiseLike<unknown>): Promise<void> {
-	let done: () => boolean;
-	if (typeof until === "function") {
-		done = until;
-	} else {
-		let settled = false;
-		const stop = () => {
-			settled = true;
-		};
-		Promise.resolve(until).then(stop, stop);
-		done = () => settled;
-	}
-	for (let i = 0; i < 10_000 && !done(); i++) {
-		await yieldNow();
-		await clock.advance(Nano.fromMilli(Milli(1)));
-	}
-	if (!done()) throw new Error("not done within ten mocked seconds");
+/** Resolves with `getter`'s value once `ready` holds for it, for a test awaiting a state change. */
+export async function waitFor<T>(getter: Getter<T>, ready: (value: T) => boolean): Promise<T> {
+	let value = getter.peek();
+	while (!ready(value)) value = await getter.changed();
+	return value;
 }
 
 /**
