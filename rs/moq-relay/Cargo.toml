@@ -88,7 +88,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
 stun-types = { workspace = true, optional = true }
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
