@@ -3,9 +3,9 @@
 ## Goal
 
 `js/net`'s "an update keeping the budget drops the stale groups again on
-lite-07" cannot flake. A reply still pending when the track finishes ends
-the reader's track cleanly, never with a `Cancel` reset, and the re-drop
-check does not depend on wall-clock time.
+lite-07" cannot flake. It finishes the track only after the re-drop reply has
+reached the subscriber, so the end arrives as a FIN, and it detects a missing
+re-drop without a wall-clock deadline.
 
 ## Plan
 
@@ -21,16 +21,15 @@ writable half with `Cancel`. Here the reader's priority-only update sends a
 reply while the producer finishes, so the clean end can lose to the reset.
 The test's 500 ms elapsed assert never ran.
 
-[moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195), which landed
-after that run, changed how lite-07 replies yield on the write budget, so it
-may already have cured this. A clean rerun sample cannot show that. Add a
-deterministic test that holds a reply pending on the write budget while the
-track finishes, and asserts the subscriber sees a clean end, not `Cancel`. If
-it passes on main, it lands as the regression test. If it fails, fix the race
-in the publisher so the end still arrives as a FIN.
-
-Also move the test's 500 ms elapsed assert onto the `Manual` clock, or an
-event-based check, so a CI pause cannot fail it, while a missing re-drop
-(which would wait out the 1.5 s grace) still does.
+The reset is intended:
+[moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195) rejected letting a
+clean FIN override a pending reply write, since that write could block on flow
+control for a peer that has left. So the race is in the test, which finishes
+the producer right after `reader.update()` without waiting for the re-drop
+reply. Fix the test, not the publisher: wait until the subscriber has received
+the re-drop of groups 1 and 2 under the new update, then finish the producer.
+That wait also replaces the 500 ms elapsed assert. Bound it on the `Manual`
+clock, or by event, so a missing re-drop (which would otherwise wait out the
+1.5 s grace) still fails while a CI pause cannot.
 
 Public API: none. Wire: none.
