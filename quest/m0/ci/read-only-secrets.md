@@ -92,10 +92,9 @@ its settings page). pub.dev: the maintainer set the required environment
 cannot view pub.dev admin pages.
 
 Decided 2026-11-06 (maintainer, /quest-unblock): ✅ drop JSR rather than
-create a `JSR_TOKEN`. The m0 quest [jsr-retire](/quest/m0/ci/jsr-retire.md),
-from [moq-dev/moq#8039](https://github.com/moq-dev/moq/pull/8039), owns removing
-JSR publishing and its repository OIDC trust, so this quest no longer
-creates a token or unlinks packages. Not chosen: keeping JSR behind a
+create a `JSR_TOKEN`. JSR publishing is gone from `main` and `release`, and
+every `@moq` JSR package was archived on 2026-11-07, which also ended its
+repository OIDC trust, so this quest creates no token and unlinks no packages. Not chosen: keeping JSR behind a
 `JSR_TOKEN` in the `npm` Environment.
 
 Checked 2026-11-06: 3 of [moq-dev/moq#7936](https://github.com/moq-dev/moq/pull/7936)'s
@@ -145,7 +144,3 @@ fails the check.
 ## Required
 
 - [Retire Cachix](/quest/m0/ci/cachix-retire.md) - deletes `CACHIX_AUTH_TOKEN`, which the throwaway-branch check needs gone
-
-## Related
-
-- [Stop publishing to JSR](/quest/m0/ci/jsr-retire.md) - removes JSR publishing and its repository OIDC trust, so no `JSR_TOKEN` is created

@@ -41,6 +41,7 @@ default-members = [
     "rs/moq-transcode",
     "rs/moq-uring",
     "rs/moq-v4l",
+    "rs/moq-vaapi",
     "rs/moq-video",
     "rs/moq-webrtc",
     "rs/qmux",
@@ -172,9 +173,9 @@ moq-uring = { version = "0.0.12", path = "rs/moq-uring", default-features = fals
 # `capture` and `v4l2` need no libclang or kernel headers. Linux only; an empty
 # stub elsewhere.
 moq-v4l = { version = "0.1.0", path = "rs/moq-v4l" }
-# Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
+# In-tree fork of cros-libva + cros-codecs with the libva bindings checked in.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
-moq-vaapi = "0.2.0"
+moq-vaapi = { version = "0.2.1", path = "rs/moq-vaapi" }
 # `default-features = false` is here for `capture` (V4L2, libclang), which the
 # cross-compiled Python, Swift, Kotlin, and Go builds have no use for: adding
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the

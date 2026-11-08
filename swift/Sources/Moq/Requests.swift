@@ -2,7 +2,7 @@ import Foundation
 import MoqFFI
 
 /// A subscriber-requested track that has not been accepted yet. Accept it to get
-/// a `TrackProducer` for raw writes, or abort it to reject the subscriber.
+/// a `TrackProducer` for raw writes, or reject it to fail the subscriber.
 public final class TrackRequest: Sendable {
     let ffi: MoqTrackRequest
 
@@ -32,8 +32,8 @@ public final class TrackRequest: Sendable {
     }
 
     /// Reject the request with an application error code, failing the subscriber.
-    public func abort(errorCode: UInt16) throws {
-        try ffi.abort(errorCode: errorCode)
+    public func reject(errorCode: UInt16) throws {
+        try ffi.reject(errorCode: errorCode)
     }
 }
 
@@ -52,19 +52,14 @@ public final class Fill: Sendable {
         self.ffi = ffi
     }
 
-    /// The first group to fill.
-    public var startGroup: UInt64 {
-        ffi.startGroup()
-    }
-
-    /// The frame within the first group to start from.
-    public var startFrame: UInt64 {
-        ffi.startFrame()
+    /// The first group to fill, and the frame within it to start from.
+    public var start: Position {
+        ffi.start()
     }
 
     /// The exclusive end group.
-    public var endGroup: UInt64 {
-        ffi.endGroup()
+    public var end: UInt64 {
+        ffi.end()
     }
 
     /// The most urgent delivery priority among the readers waiting on it.
@@ -97,7 +92,7 @@ public final class Fill: Sendable {
     }
 
     /// Insert group `sequence` and return a producer for it. The first group starts at
-    /// `startFrame`, so its frames keep their indices.
+    /// `start`'s frame, so its frames keep their indices.
     public func accept(sequence: UInt64) throws -> GroupProducer {
         GroupProducer(try ffi.accept(sequence: sequence))
     }

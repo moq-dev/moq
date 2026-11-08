@@ -42,7 +42,3 @@ Also settled:
   before driving.
 
 Public API: none beyond `@moq/clock`'s test helpers, if any. Wire: none.
-
-## Required
-
-- [js/net tests run on a mocked clock](/quest/m1/mock-clock-tests/js-net.md) - adds the `driveUntil` callers this replaces

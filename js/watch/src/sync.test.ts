@@ -411,6 +411,32 @@ describe("buffered startup", () => {
 			installed.close();
 		}
 	});
+	// A video track's startup span opens at the first picture of its timeline, which a live stream
+	// played long ago. Turning lookahead on mid-stream must not anchor playback back there.
+	it("keeps playing when lookahead turns on mid-stream", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const lookahead = new Signal(Milli.zero);
+		const sync = new Sync({ delay: Milli(100), lookahead });
+		const span = new Signal<{ start: Milli; end: Milli } | null>({ start: Milli(0), end: Milli(200) });
+		const video = sync.track({ target: new Signal(Milli(100)), startup: span });
+		try {
+			await clock.advance(Nano.zero);
+			video.received(Milli(0));
+			await clock.advance(Nano.fromMilli(Milli(10_000)));
+			video.received(Milli(10_000));
+			expect(sync.now()).toBe(Milli(9900));
+
+			lookahead.set(Milli(1000));
+			await clock.advance(Nano.zero);
+			expect(sync.playing.peek()).toBe(true);
+			expect(sync.now()).toBe(Milli(9900));
+		} finally {
+			video.close();
+			sync.close();
+			installed.close();
+		}
+	});
 	it("removes a disabled track from the floor and leaves live pacing unchanged", async () => {
 		const clock = new Manual();
 		const installed = clock.install();

@@ -13,10 +13,11 @@ current defaults: `packet_threshold`, `time_threshold`,
 `persistent_congestion_threshold`, `allow_spin`, `crypto_buffer_size`,
 `pad_to_mtu`, `send_fairness`, `min_mtu`, `min_reset_interval`,
 `retry_token_lifetime`, `incoming_buffer_size_total`, and `initial_rtt`.
-moq-tokio, moq-uring, and qmux each replace their lists of moq-quic names
-(20 in moq-tokio's `quic::driver`) with one `pub use moq_quic;`, so each
-item has one path and a moq-quic bump changes no list. qmux keeps `Version`,
-its own wire concept. The PR's Impact section says how to
+moq-tokio, moq-uring, and qmux each trim their lists of moq-quic names
+(20 in moq-tokio's `quic::driver`) to the items their own public signatures
+use, and add no `pub use moq_quic;`, since
+[reexports](/quest/m2/api-shape/reexports.md) drops every whole-crate
+re-export. qmux keeps `Version`, its own wire concept. The PR's Impact section says how to
 migrate; the release cut copies that into `MIGRATE.md`.
 
 ## Plan
@@ -29,6 +30,11 @@ Not chosen: folding the list into the post-cut
 
 Added 2026-11-07 (maintainer, /quest-plan from the API shape audit): the
 config knobs and the re-export fan-out, which grows the quest from [XS].
+
+Changed 2026-11-07 (maintainer,
+[moq-dev/moq#8233](https://github.com/moq-dev/moq/pull/8233)): the lists
+name what each crate needs instead of becoming `pub use moq_quic;`, since
+moq re-exports no whole crate.
 
 Confirm each has no caller across the workspace, bindings, and vendored
 crates before removing it.

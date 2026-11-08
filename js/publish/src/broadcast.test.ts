@@ -118,7 +118,7 @@ test("shared Rust stats names survive the publisher's report builder", async () 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer");
 		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
-			track: net.track(Broadcast.STATS_TRACK),
+			track: net.track("stats.json"),
 			schema: Stats.SnapshotSchema,
 		});
 		try {
@@ -936,12 +936,12 @@ test("stats names a track in the catalog and reports each listed rendition while
 
 		stats.set(true);
 		await settle();
-		expect((await readCatalog(broadcast))?.stats).toEqual({ track: Broadcast.STATS_TRACK });
+		expect((await readCatalog(broadcast))?.stats).toEqual({ track: "stats.json" });
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer once connected");
 		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
-			track: net.track(Broadcast.STATS_TRACK),
+			track: net.track("stats.json"),
 			schema: Stats.SnapshotSchema,
 		});
 		await settle();
@@ -980,7 +980,7 @@ test("an unsubscribed stats track writes nothing", async () => {
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer once connected");
-		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		const subscriber = net.track("stats.json").subscribe();
 		await settle();
 		await clock.advance(Nano.fromMilli(Milli(1000)));
 		// Nothing was written while nobody subscribed, so the first report opens the first group.
