@@ -1297,9 +1297,9 @@ fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
 		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
 		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
 		moq_tokio::Transport::WebRtc => moq_auth::Transport::WebRtc,
-		// A transport this build does not know is still a session on the wire; the
-		// server sees the same facts either way.
-		other => unreachable!("unknown transport {other}"),
+		// A transport added to moq-tokio before this mapping learns it still reaches
+		// the decider, named as one it does not recognize.
+		_ => moq_auth::Transport::Unknown,
 	}
 }
 
