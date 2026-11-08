@@ -400,12 +400,9 @@ struct TrackState {
 	/// separate audio rendition publishes video only).
 	select: select::Broadcast,
 	sink: Sink,
-	/// The importer for the current init segment generation, minted by [`Self::ensure_map`].
-	importer: Option<Fmp4>,
+	/// The current init segment's importer, minted by [`Self::ensure_map`].
+	generation: Option<Generation>,
 	next_sequence: Option<u64>,
-	next_discontinuity: Option<u64>,
-	/// The `EXT-X-MAP` resource the current `importer` was initialized from.
-	map: Option<Resource>,
 	media_range: RangeCursor,
 	/// Consecutive failed ingest attempts, reset by any successful one. See
 	/// [`MAX_RENDITION_FAILURES`].
@@ -417,6 +414,15 @@ struct TrackState {
 	followed: bool,
 }
 
+/// One init segment's importer, and where it reached on the media timeline.
+struct Generation {
+	/// The `EXT-X-MAP` resource the importer was initialized from.
+	map: Resource,
+	importer: Fmp4,
+	/// The discontinuity sequence of the last segment imported, `None` before the first.
+	discontinuity: Option<u64>,
+}
+
 impl TrackState {
 	fn new(label: String, playlist: Url, select: select::Broadcast, sink: Sink) -> Self {
 		Self {
@@ -424,10 +430,8 @@ impl TrackState {
 			playlist,
 			select,
 			sink,
-			importer: None,
+			generation: None,
 			next_sequence: None,
-			next_discontinuity: None,
-			map: None,
 			media_range: RangeCursor::default(),
 			failures: 0,
 			ended: false,
@@ -441,8 +445,7 @@ impl TrackState {
 	/// players stop selecting a rendition that no longer advances; a later successful step rebuilds
 	/// it from the init segment.
 	fn evict(&mut self) {
-		self.importer = None;
-		self.map = None;
+		self.generation = None;
 		self.reanchor();
 	}
 
@@ -599,7 +602,11 @@ impl TrackState {
 		let resource = resolve_map(url, map.byte_range.as_ref())?;
 
 		// The resolved resource IS the init segment's identity: same bytes, same generation.
-		if self.map.as_ref() == Some(&resource) {
+		if self
+			.generation
+			.as_ref()
+			.is_some_and(|generation| generation.map == resource)
+		{
 			return Ok(());
 		}
 
@@ -613,12 +620,14 @@ impl TrackState {
 
 		// The old generation must finish before retiring its catalog entries, so a subscriber
 		// draining its final group sees a clean end instead of a dropped producer.
-		if let Some(previous) = self.importer.as_mut() {
-			previous.finish()?;
+		if let Some(previous) = self.generation.as_mut() {
+			previous.importer.finish()?;
 		}
-		self.importer = Some(importer);
-		self.map = Some(resource);
-		self.next_discontinuity = None;
+		self.generation = Some(Generation {
+			map: resource,
+			importer,
+			discontinuity: None,
+		});
 		info!(label = %self.label, "loaded HLS init segment generation");
 		Ok(())
 	}
@@ -647,15 +656,16 @@ impl TrackState {
 		// (and so validate) the sequence on that path so media sequence can't silently
 		// auto-increment into the discontinuity bits.
 		let group_sequence = moq_sequence(discontinuity_sequence, sequence)?;
-		let reanchored =
-			self.next_sequence != Some(sequence) || self.next_discontinuity != Some(discontinuity_sequence);
 
 		// `consume_segments` resolves the effective map before every segment, so a missing
 		// importer means the playlist never carried an `EXT-X-MAP`.
-		let importer = self.importer.as_mut().ok_or(Error::MissingMap)?;
+		let generation = self.generation.as_mut().ok_or(Error::MissingMap)?;
+		let reanchored =
+			self.next_sequence != Some(sequence) || generation.discontinuity != Some(discontinuity_sequence);
+		let importer = &mut generation.importer;
 		// Only a discontinuity starts a new media timeline; a sequence skip must keep advancing.
-		if self
-			.next_discontinuity
+		if generation
+			.discontinuity
 			.is_some_and(|previous| previous != discontinuity_sequence)
 		{
 			importer.discontinuity()?;
@@ -667,7 +677,11 @@ impl TrackState {
 		// carries no styp. Every rendition declares the same ones; the HLS segmenter drops a cut
 		// that would land inside its minimum segment duration, so the duplicates cost nothing.
 		importer.cut()?;
-		importer.decode(&bytes).map_err(|err| match err {
+		let decoded = importer.decode(&bytes);
+		if decoded.is_ok() {
+			generation.discontinuity = Some(discontinuity_sequence);
+		}
+		decoded.map_err(|err| match err {
 			// Timestamp resets are unsupported: the published tracks never rewind, and no later
 			// pass can import this segment, so it is refused rather than retried.
 			moq_mux::Error::TimestampRewind(_)
@@ -685,7 +699,6 @@ impl TrackState {
 
 		self.media_range = range;
 		self.next_sequence = Some(sequence + 1);
-		self.next_discontinuity = Some(discontinuity_sequence);
 
 		Ok(())
 	}
@@ -835,8 +848,8 @@ impl Import {
 	/// broadcast to a [`moq_mux::Linger`] to keep them up for late subscribers.
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
-			if let Some(importer) = &mut track.importer {
-				importer.finish()?;
+			if let Some(generation) = &mut track.generation {
+				generation.importer.finish()?;
 			}
 		}
 		self.sink.catalog.finish()?;
@@ -851,14 +864,14 @@ impl Import {
 	/// the import: every rendition is dead afterwards.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for track in &mut self.video {
-			if let Some(importer) = track.importer.take() {
-				importer.abort(err.clone());
+			if let Some(generation) = track.generation.take() {
+				generation.importer.abort(err.clone());
 			}
 		}
 		if let Some(track) = &mut self.audio
-			&& let Some(importer) = track.importer.take()
+			&& let Some(generation) = track.generation.take()
 		{
-			importer.abort(err.clone());
+			generation.importer.abort(err.clone());
 		}
 		self.sink.catalog.clone().abort(err);
 	}
@@ -915,7 +928,7 @@ impl Import {
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
 						track.failures += 1;
-						if track.failures >= MAX_RENDITION_FAILURES && track.importer.is_some() {
+						if track.failures >= MAX_RENDITION_FAILURES && track.generation.is_some() {
 							warn!(label = %track.label, %err, failures = track.failures, "rendition import keeps failing, dropping it until it recovers");
 							track.evict();
 						} else {
@@ -1987,7 +2000,7 @@ mod tests {
 		let (mut import, catalog) = write_import(&temp_dir(), &resource, &playlist);
 
 		assert!(matches!(import.init().await, Err(Error::PlaylistEnded)));
-		assert!(import.video[0].importer.is_none(), "nothing was imported");
+		assert!(import.video[0].generation.is_none(), "nothing was imported");
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
 		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
@@ -2082,7 +2095,7 @@ mod tests {
 		let (mut import, _catalog) = write_import(&dir, &resource, &playlist);
 
 		import.init().await.unwrap();
-		assert!(import.video[0].importer.is_some(), "the rendition imported once");
+		assert!(import.video[0].generation.is_some(), "the rendition imported once");
 
 		// The source goes away underneath us.
 		std::fs::remove_file(dir.join("media.m3u8")).unwrap();
@@ -2090,13 +2103,13 @@ mod tests {
 		for _ in 0..MAX_RENDITION_FAILURES - 1 {
 			import.step(OnError::Warn).await.unwrap();
 			assert!(
-				import.video[0].importer.is_some(),
+				import.video[0].generation.is_some(),
 				"a transient failure keeps the rendition"
 			);
 		}
 
 		import.step(OnError::Warn).await.unwrap();
-		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
+		assert!(import.video[0].generation.is_none(), "the dead rendition is retired");
 	}
 
 	/// A decode refusal retires its importer at once, rather than after
@@ -2125,7 +2138,7 @@ mod tests {
 			std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
 			let step = import.step(OnError::Warn).await.unwrap();
 			assert!(step.failed.is_some());
-			assert!(import.video[0].importer.is_none());
+			assert!(import.video[0].generation.is_none());
 			std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
 			let step = import.step(OnError::Warn).await.unwrap();
 			assert!(step.failed.is_none());
@@ -2157,7 +2170,7 @@ mod tests {
 		for _ in 0..MAX_RENDITION_FAILURES {
 			assert!(import.step(OnError::Warn).await.unwrap().ended);
 		}
-		assert!(import.video[0].importer.is_some(), "the ended rendition is kept");
+		assert!(import.video[0].generation.is_some(), "the ended rendition is kept");
 	}
 
 	/// A live window longer than `ANCHOR_SEGMENTS` is joined mid-playlist, which means the
@@ -2196,7 +2209,7 @@ mod tests {
 
 		let track = &import.video[0];
 		assert!(
-			track.importer.is_some(),
+			track.generation.is_some(),
 			"the EXT-X-MAP from the skipped prefix must initialize the importer"
 		);
 		// Four segments and a three-segment rewind, so segment 0 is skipped: the one
@@ -2232,7 +2245,7 @@ mod tests {
 		assert_eq!(snapshot.video.renditions.len(), 1);
 		assert_eq!(snapshot.audio.renditions.len(), 1);
 		assert_eq!(
-			import.video[0].map.as_ref().unwrap().range.unwrap().start,
+			import.video[0].generation.as_ref().unwrap().map.range.unwrap().start,
 			second_init as u64
 		);
 	}
