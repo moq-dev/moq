@@ -30,6 +30,7 @@ lite-07; bitrate enforcement is not part of the next release.
 
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - mesh nodes on different networks connect directly through the P2P line's ICE pairs, once a mesh user needs it
 - [Video validation hardware is on hand](/quest/m5/video-hardware-access.md) - the machines the validation runs on, including a Raspberry Pi 4/5 for embedded presenting
+- [Fair share across broadcasts on cluster links](/quest/m5/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's, once a tenant identity exists
 - [Video hardware validation](/quest/m5/video-hardware.md) - run the encode, capture, and zero-copy paths that were never run on real machines, including PipeWire on KDE, the camera portal, and a Pi
 - [An Ada NVIDIA GPU is available](/quest/m5/ada-gpu.md) - the hardware AV1 NVENC is verified on
 - [NVENC AV1](/quest/m5/nvenc-av1.md) - AV1 encode through NVENC, once an Ada-generation GPU is available
@@ -58,7 +59,7 @@ lite-07; bitrate enforcement is not part of the next release.
 - [moq-transport cluster peers](/quest/m5/ietf-cluster-peers.md) - the cluster draft carries the route layer, so moq-transport relays peer again, once a moq-transport relay operator asks
 - [The moq.pro mesh runs lite-07](/quest/m5/lite07-mesh.md) - the deployment that makes the exemption dead code
 - [Drop the hidden cluster exemption](/quest/m5/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
-- [Robot teleoperation primitive](/quest/m5/teleop-robot.md) - a `moq-robot` crate for video down and control up, once a robotics consumer appears
+- [Robot teleoperation conventions](/quest/m5/teleop-robot.md) - documented track shapes for video down and control up, implemented by the MAVLink gateway, once a robotics consumer appears
 - [Operator arbitration](/quest/m5/teleop-arbitration.md) - one operator holds control at a time
 - [MAVLink bridge](/quest/m5/teleop-mavlink.md) - a `moq-mavlink` gateway
   replacing the VPN plus two unmanaged UDP flows, with QGroundControl and
@@ -68,7 +69,7 @@ lite-07; bitrate enforcement is not part of the next release.
   in five minutes
 - [Ladder](/quest/m5/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [fMP4 emsg](/quest/m5/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
-- [ID3 catalog section](/quest/m5/id3.md) - timed ID3 as a first-class container-neutral catalog section
+- [ID3 in the events section](/quest/m5/id3.md) - timed ID3 as a container-neutral scheme in the catalog's `events` section
 - [FLV script tags](/quest/m5/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Half and quarter rate AC-3](/quest/m5/ac3-low-rate.md) - bsid 9 and 10 AC-3 parse through TS and FLV instead of being refused
 - [MSF feedback tracks](/quest/m5/msf-publish-tracks.md) - `--report` and `--echo` work under `--catalog-format msf` through `publishTracks`, once a consumer asks
@@ -106,7 +107,6 @@ lite-07; bitrate enforcement is not part of the next release.
 - [Receive pool](/quest/m5/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Front parking](/quest/m5/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [A route stream's interest is a set of prefixes](/quest/m5/route-interest-prefixes.md) - one Announce Stream covers several subtrees, with floors and certification proved over the set
-- [A socket dial learns its peer is behind an older hop](/quest/m5/socket-old-hop-signal.md) - a relay finds the dialed endpoint behind its older moq-lite session and marks that path, so the dial fails `Unsupported` while one to an absent peer still waits
 - [Fewer allocations in announce fan-out](/quest/m5/announce-fanout-allocs.md) - a deep path costs no more allocations per subscriber than a shallow one
 - [moq-room scales to large rooms](/quest/m5/room-bench.md) - a benchmark measures `Room` with large participant counts, and polling narrows only if it shows a slope
 - [Route health](/quest/m5/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions

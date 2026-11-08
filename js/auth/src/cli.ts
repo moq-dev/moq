@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import { closeSync, fchmodSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { wall } from "@moq/clock";
 import { Command, Option } from "commander";
 import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, ClaimsSchema, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
-import * as Path from "./path.ts";
 import { encodeGrants } from "./wire.ts";
 
 const program = new Command();
@@ -36,8 +36,6 @@ program
 					...(options.publish && { publish: options.publish }),
 					...(options.subscribe && { subscribe: options.subscribe }),
 				});
-				// A scope root `Key.sign` would refuse could never sign anything beneath it.
-				Path.validate(scope.root);
 				key = { ...key, scope };
 			}
 
@@ -73,18 +71,31 @@ program
 	.option("--root <root>", "Root path for the token", "")
 	.option("--publish <pattern...>", "Patterns the holder may publish (foo/** for a subtree)")
 	.option("--subscribe <pattern...>", "Patterns the holder may subscribe to (foo/** for a subtree)")
-	.option("--expires <timestamp>", "Expiration time as unix timestamp", parseUnixTimestamp)
+	.addOption(
+		new Option("--expires <timestamp>", "Expiration time as unix timestamp, instead of --ttl from now")
+			.argParser(parseUnixTimestamp)
+			.conflicts(["ttl", "unbounded"]),
+	)
+	.addOption(
+		new Option("--ttl <duration>", "How long the token lasts from now, such as 30m or 1d")
+			.argParser(parseDuration)
+			.conflicts("unbounded"),
+	)
+	.addOption(new Option("--unbounded", "Write no exp, so the token never expires"))
 	.option("--issued <timestamp>", "Issued time as unix timestamp", parseUnixTimestamp)
 	.action(async (options) => {
 		try {
 			const keyEncoded = readFileSync(options.key, "utf-8");
 			const key = Key.parse(keyEncoded);
 
+			const exp = options.unbounded
+				? undefined
+				: (options.expires ?? Math.floor(wall() / 1000) + (options.ttl ?? 3600));
 			const claims = ClaimsSchema.parse({
 				root: options.root,
 				...(options.publish && { publish: options.publish }),
 				...(options.subscribe && { subscribe: options.subscribe }),
-				...(options.expires && { exp: options.expires }),
+				...(exp !== undefined && { exp }),
 				...(options.issued && { iat: options.issued }),
 			});
 
@@ -148,6 +159,16 @@ function parseUnixTimestamp(value: string): number {
 		throw new Error("Expected unix timestamp");
 	}
 	return timestamp;
+}
+
+/** Seconds in a duration of whole `s`, `m`, `h`, or `d`, such as `90s` or `1d`. */
+function parseDuration(value: string): number {
+	const match = value.match(/^(\d+)(s|m|h|d)$/);
+	if (!match) {
+		throw new Error("Expected a duration such as 30m or 1d");
+	}
+	const unit = { s: 1, m: 60, h: 3600, d: 86400 }[match[2] as "s" | "m" | "h" | "d"];
+	return Number.parseInt(match[1], 10) * unit;
 }
 
 program.parse();

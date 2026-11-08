@@ -1,4 +1,5 @@
-import { type Credential, type Handle, Unsupported } from "../auth.ts";
+import { type Handle, Unsupported } from "../auth.ts";
+import type { Pending } from "../auth_session.ts";
 import type { Established } from "./established.ts";
 
 /** What one dial presents, decided from its URL, the offered versions, and the tokens. @internal */
@@ -56,9 +57,10 @@ export function extra(credential: Presentation, tokens: readonly string[]): stri
 }
 
 interface Entry {
-	auth?: Credential;
+	auth?: Pending;
 	pending: boolean;
-	retired: boolean;
+	/** Withdrawn by us, so its rejected answer is no refusal. */
+	withdrawn: boolean;
 }
 
 /**
@@ -66,8 +68,8 @@ interface Entry {
  * latest dial's connection credential. A handle shared across reconnects keeps them on
  * every session it backs.
  *
- * A change presents the new tokens at once and withdraws the ones they replace only after
- * every new one has its answer, so the grant never narrows in between.
+ * A change presents the new tokens at once and withdraws the granted ones they replace only
+ * after every new one has its answer, so the grant never narrows in between.
  *
  * @internal
  */
@@ -95,41 +97,49 @@ export class Held {
 			next.set(token, this.#entries.get(token) ?? this.#present(token));
 		}
 		for (const [token, entry] of this.#entries) {
-			if (!next.has(token)) this.#retiring.push(entry);
+			if (next.has(token)) continue;
+			// Only a granted token keeps the grant wide; one refused or still unanswered, such as
+			// one retrying while its backend fails, is withdrawn at once so repeated updates never
+			// pile up retrying streams.
+			if (entry.auth?.held) this.#retiring.push(entry);
+			else this.#withdraw(entry);
 		}
 		this.#entries = next;
 		this.#settle();
 	}
 
 	#present(token: string): Entry {
-		const entry: Entry = { pending: true, retired: false };
-		// Registered synchronously, so a request sent right after waits on its answer.
-		this.#handle
-			.add(token)
-			.then(
-				(auth) => {
-					entry.auth = auth;
-					// Replaced while waiting, and every replacement has answered since.
-					if (entry.retired) auth.close();
-				},
-				(err: unknown) => {
-					if (err instanceof Unsupported) console.debug("the peer takes no tokens in band");
-					else console.warn("a configured token was refused:", err);
-				},
-			)
-			.finally(() => {
-				entry.pending = false;
-				this.#settle();
-			});
+		const entry: Entry = { pending: true, withdrawn: false };
+		const refused = (err: unknown) => {
+			if (entry.withdrawn) return;
+			if (err instanceof Unsupported) console.debug("the peer takes no tokens in band");
+			else console.warn("a configured token was refused:", err);
+		};
+		let auth: Pending;
+		try {
+			// Registered synchronously, so a request sent right after waits on its answer.
+			auth = this.#handle.present(token);
+		} catch (err) {
+			refused(err);
+			entry.pending = false;
+			return entry;
+		}
+		entry.auth = auth;
+		auth.answered.catch(refused).finally(() => {
+			entry.pending = false;
+			this.#settle();
+		});
 		return entry;
+	}
+
+	#withdraw(entry: Entry) {
+		entry.withdrawn = true;
+		entry.auth?.close();
 	}
 
 	#settle() {
 		if ([...this.#entries.values()].some((entry) => entry.pending)) return;
-		for (const entry of this.#retiring) {
-			entry.retired = true;
-			entry.auth?.close();
-		}
+		for (const entry of this.#retiring) this.#withdraw(entry);
 		this.#retiring = [];
 	}
 }

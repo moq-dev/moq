@@ -388,7 +388,6 @@ impl Session {
 	/// wait, that dial outlives the state change an application waits on before it exits (`gst-launch`
 	/// right after NULL).
 	pub fn stop(self) {
-		// The status task goes first, so it never reports the loop's end as a failure.
 		self.join.abort();
 		self.connection.abort(moq_net::Error::Cancel);
 		crate::block_on(async {
@@ -474,7 +473,13 @@ async fn forward_registered(
 					}
 					notify(&element, &["status", "connected", "moq-version", "connection-stats"]);
 				}
-				Err(err) => {
+				Err(_) => {
+					// `closed` tells a stop from a give-up. A stop is what `Session::stop` asked for: its
+					// abort cannot cancel a poll already in flight, so the loop's end can reach the task
+					// before the task ends.
+					let Err(err) = reconnect.closed().await else {
+						return;
+					};
 					// The reconnect loop stopped on a terminal error (a non-retryable auth failure, or a
 					// bounded backoff's give-up). Ending the publication stops the pad threads feeding a
 					// dead session; losing that race means it already ended, so there is nothing to report.
@@ -625,6 +630,26 @@ mod tests {
 		let (session, connection) = started();
 		futures::executor::block_on(async move { session.stop() });
 		assert!(is_closed(&connection));
+	}
+
+	// The losing order of a stop: the status task polls only after the loop it follows has ended.
+	#[test]
+	fn a_local_stop_is_not_a_session_failure() {
+		let (session, connection) = started();
+		let completion = session.completion();
+		let status = session.status().clone();
+		connection.abort(moq_net::Error::Cancel);
+		let _ = crate::block_on(connection.closed());
+		crate::block_on(forward_registered(
+			connection,
+			moq_tokio::origin::spawn(),
+			status.clone(),
+			completion.clone(),
+			glib::WeakRef::new(),
+		));
+		assert!(completion.is_open(), "the stopped publication is not failed");
+		assert_ne!(status.status(), ConnectionStatus::Failed);
+		session.stop();
 	}
 
 	#[tokio::test]

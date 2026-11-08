@@ -203,6 +203,8 @@ impl Clock {
 			for bytes in bootstrap.into_iter().chain(nals(&unit.data)?) {
 				let kind = (bytes[0] >> 1) & 63;
 				match kind {
+					// Pictures are timed by their base layer, whose slices only reference its own sets.
+					33 | 34 if !crate::codec::h265::is_base_layer(&bytes) => {}
 					33 => {
 						let sps = crate::codec::h265::Sps::parse(&bytes).map_err(|err| err.to_string())?;
 						Arc::make_mut(&mut ctx)

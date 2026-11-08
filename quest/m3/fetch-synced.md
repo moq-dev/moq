@@ -13,4 +13,4 @@ Decided 2026-10-30 (maintainer, follow-up of [moq-dev/moq#7366](https://github.c
 - The 30 s deadline stays fixed and keeps bounding the group fetch and the response body's frame reads. Making it configurable was not wanted (2026-10-30).
 - Tests: a fetch for an unannounced broadcast on a synced origin returns 404 without advancing the clock to the deadline. A fetch whose broadcast is announced after the request but before sync still serves the group. A fetch for an unannounced broadcast while an upstream session hasn't synced yet waits for that sync; an announced broadcast is served without waiting on it.
 
-Public API: none. Wire: none.
+Public API: adds `Following::poll_synced` to moq-net. Wire: none.

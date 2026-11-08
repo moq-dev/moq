@@ -12,8 +12,13 @@
     `with_instance(instance, epoch)`.
 - `@moq/qmux` exports `Session` by name instead of an anonymous default.
 - `@moq/watch`: the decoder and source plumbing outputs are `@internal`, the
-  renderer's output is a named `Video.RendererOutput`, and `<moq-watch>`'s
-  `player` property goes private, so each component has one path.
+  renderer's output is a named `Video.RendererOutput` with no `frame` (a
+  `VideoFrame` signal cannot cross a worker, so
+  [the watch worker](/quest/m3/watch-worker.md) would break it; the paused
+  poster reads an internal painted flag), and `<moq-watch>`'s `player`
+  property goes private, so each component has one path.
+- `@moq/room` exposes timestamps and stats instead of `Video.Renderer` and
+  `Video.Decoder`, so the worker's break lands in one package.
 - `@moq/publish`: `Rendition.onDemand` becomes an enum, `Broadcast.join`
   becomes a `Getter`, and the five internal source helpers are unexported.
 - `@moq/ui` and `@moq/video` mark their helpers `@internal`; only `Support`,
@@ -26,6 +31,8 @@
 - `@moq/auth`'s `Key.sign` takes one spelling for caps.
 
 ## Plan
+
+Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests): the worker-safe renderer output and room's narrower surface.
 
 Found by the 2026-11-07 API shape audit (JS core and browser media); see
 the [epic](/quest/m2/api-shape/README.md). Durations are

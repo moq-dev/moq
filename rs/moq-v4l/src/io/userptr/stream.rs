@@ -6,6 +6,7 @@ use crate::buffer::{Metadata, Type};
 use crate::device::{Device, Handle};
 use crate::io::traits::{CaptureStream, Stream as StreamTrait};
 use crate::io::userptr::arena::Arena;
+use crate::io::State;
 use crate::memory::Memory;
 use crate::sys::*;
 use crate::v4l2;
@@ -20,11 +21,7 @@ pub struct Stream {
 	buf_type: Type,
 	buf_meta: Vec<Metadata>,
 	timeout: Option<i32>,
-
-	active: bool,
-	/// Whether userspace holds the buffer at `arena_index`, so the next frame
-	/// queues it back first. A dequeue that timed out holds none.
-	held: bool,
+	state: State,
 }
 
 impl Stream {
@@ -63,9 +60,8 @@ impl Stream {
 			arena_index: 0,
 			buf_type,
 			buf_meta,
-			active: false,
 			timeout: None,
-			held: false,
+			state: State::Stopped,
 		})
 	}
 
@@ -124,7 +120,11 @@ impl StreamTrait for Stream {
 			)?;
 		}
 
-		self.active = true;
+		// STREAMON on a streaming queue does nothing, and leaves a dequeued
+		// buffer with userspace.
+		if let State::Stopped = self.state {
+			self.state = State::Streaming { held: false };
+		}
 		Ok(())
 	}
 
@@ -138,7 +138,7 @@ impl StreamTrait for Stream {
 			)?;
 		}
 
-		self.active = false;
+		self.state = State::Stopped;
 		Ok(())
 	}
 }
@@ -183,7 +183,9 @@ impl<'a> CaptureStream<'a> for Stream {
 			)?;
 		}
 		self.arena_index = v4l2_buf.index as usize;
-		self.held = true;
+		if let State::Streaming { held } = &mut self.state {
+			*held = true;
+		}
 
 		self.buf_meta[self.arena_index] = Metadata {
 			bytesused: v4l2_buf.bytesused,
@@ -197,20 +199,27 @@ impl<'a> CaptureStream<'a> for Stream {
 	}
 
 	fn next(&'a mut self) -> io::Result<(&'a Self::Item, &'a Metadata)> {
-		if !self.active {
-			// STREAMOFF handed every buffer back, so none is held over.
-			self.held = false;
-			// Enqueue all buffers once on stream start
-			for index in 0..self.arena.bufs.len() {
-				self.queue(index)?;
+		match self.state {
+			State::Stopped => {
+				// Enqueue all buffers once on stream start. A start that fails
+				// partway hands back what it queued, which STREAMOFF does even on a
+				// queue that never streamed, so the next call starts from the same
+				// place rather than queueing a buffer twice.
+				let started = (0..self.arena.bufs.len())
+					.try_for_each(|index| self.queue(index))
+					.and_then(|()| self.start());
+				if let Err(err) = started {
+					self.stop()?;
+					return Err(err);
+				}
 			}
-
-			self.start()?;
-		} else if self.held {
-			// After a timed-out dequeue the driver already holds every buffer, and
-			// queueing one twice fails with EINVAL.
-			self.queue(self.arena_index)?;
-			self.held = false;
+			State::Streaming { held: true } => {
+				// After a timed-out dequeue the driver already holds every buffer, and
+				// queueing one twice fails with EINVAL.
+				self.queue(self.arena_index)?;
+				self.state = State::Streaming { held: false };
+			}
+			State::Streaming { held: false } => {}
 		}
 
 		self.arena_index = self.dequeue()?;

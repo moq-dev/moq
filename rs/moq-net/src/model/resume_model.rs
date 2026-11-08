@@ -453,7 +453,7 @@ impl Model {
 			.with_hops(hops)
 			// The second instance's routes all undercut the first's.
 			.with_cost(((INSTANCES - instance) * SLOTS - slot) as u64);
-		let requests = self.origin.forward(PATH, route, None).unwrap();
+		let requests = self.origin.forward(PATH, route).unwrap();
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
 		// The route's live feed, received from its publisher: its groups land in any order.

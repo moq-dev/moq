@@ -3,8 +3,8 @@
 ## Goal
 
 The moq-hls server resolves a path once, with one `follow`, instead of a
-`request` for the first answer and a separate follower for takeovers. It
-still reports a path nothing serves once discovery has synced.
+`request` for the first answer and a separate follower for each new instance
+at the path. It still reports a path nothing serves once discovery has synced.
 
 ## Plan
 
@@ -15,8 +15,8 @@ nothing serves this path". Add that report to `Following`, the synced absence
 `request` already answers with `Unroutable`, without making a follower give up.
 Then move the server onto it. After the cut, since the double resolve works.
 
-Tests: an unserved path is reported once discovery syncs, a takeover is
-followed without a second resolution, and the hand-written resolve timeout
-stays only a limit on a handler that never answers.
+Tests: an unserved path is reported once discovery syncs, a new instance at
+the path is followed without a second resolution, and the hand-written
+resolve timeout stays only a limit on a handler that never answers.
 
 Public API: additive in moq-net. Wire: none.

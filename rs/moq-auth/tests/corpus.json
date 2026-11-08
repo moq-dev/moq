@@ -1,0 +1,336 @@
+{
+	"keys": {
+		"hs256": {
+			"alg": "HS256",
+			"key_ops": ["verify", "sign"],
+			"kty": "oct",
+			"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA",
+			"kid": "d55b1f13e6bda281"
+		},
+		"eddsa": {
+			"alg": "EdDSA",
+			"key_ops": ["verify"],
+			"kty": "OKP",
+			"crv": "Ed25519",
+			"x": "S9n3tEG677fSNpa0Ftf46OPBte5y1pTwvm4fPkEw_Z8",
+			"kid": "dfab9113ea85dc27"
+		},
+		"js_hs256": {
+			"kty": "oct",
+			"alg": "HS256",
+			"k": "xm6xsSkfFqzPU3KfcbAcF2_h0OkStxQ_nNqVPYl0ync",
+			"kid": "js-test-key",
+			"key_ops": ["sign", "verify"],
+			"guest": [],
+			"guest_sub": [],
+			"guest_pub": []
+		},
+		"js_eddsa": {
+			"kty": "OKP",
+			"alg": "EdDSA",
+			"crv": "Ed25519",
+			"x": "UiU9fT_SdBBpkFtJPRCY0gX1jK_Dr9syYLFuEz4QUM4",
+			"kid": "js-eddsa-key",
+			"key_ops": ["verify"]
+		},
+		"scoped": {
+			"alg": "HS256",
+			"key_ops": ["verify", "sign"],
+			"kty": "oct",
+			"k": "pLDMYsYrp6vZLQbefVzHXN6P4wc1ADTLn4L7xzi1Qm4",
+			"kid": "e396f70014db9fe9",
+			"scope": { "root": "project", "publish": ["live/**"], "subscribe": ["watch/**"] }
+		}
+	},
+	"tokens": [
+		{
+			"name": "rust_hs256",
+			"key": "hs256",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1Ymxpc2giOlsiYWxpY2UvKioiXSwic3Vic2NyaWJlIjpbImJvYi8qKiJdfQ.OuaQY4hHKpBLvTK-9ZUv2oxiqXTGisng-cg2GcqrgdY",
+			"claims": { "root": "demo", "publish": ["alice/**"], "subscribe": ["bob/**"] }
+		},
+		{
+			"name": "rust_hs256_empty_root",
+			"key": "hs256",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJwdWJsaXNoIjpbImFsaWNlLyoqIl0sInN1YnNjcmliZSI6WyJib2IvKioiXX0.f1uYbrxNNyGg_0TkRWXHRhU0K_HKlOjeiddwHqppK-0",
+			"claims": { "root": "", "publish": ["alice/**"], "subscribe": ["bob/**"] }
+		},
+		{
+			"name": "rust_eddsa",
+			"key": "eddsa",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1Ymxpc2giOlsic3RyZWFtMS8qKiIsInN0cmVhbTIvKioiXSwic3Vic2NyaWJlIjpbImZlZWQxLyoqIl19.dpZ_p-eyKxaw6bRZp7sfKjmao04MwPuPqbu744bucPjiQVNfGZodfeyEk-fsY79fa9YSbjM1m6DPw3Wg7pzRBA",
+			"claims": { "root": "room", "publish": ["stream1/**", "stream2/**"], "subscribe": ["feed1/**"] }
+		},
+		{
+			"name": "rust_scoped",
+			"key": "scoped",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImUzOTZmNzAwMTRkYjlmZTkifQ.eyJyb290IjoicHJvamVjdCIsInB1Ymxpc2giOlsibGl2ZS9yb29tLyoqIl0sInN1YnNjcmliZSI6WyJ3YXRjaC8qKiJdfQ.JHx-OFoj5chiC33R6zVeaeHYUPCTEYKBfCETPLwrwtc",
+			"claims": { "root": "project", "publish": ["live/room/**"], "subscribe": ["watch/**"] }
+		},
+		{
+			"name": "js_hs256",
+			"key": "js_hs256",
+			"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImpzLXRlc3Qta2V5In0.eyJyb290IjoibGl2ZSIsInB1Ymxpc2giOlsiY2FtZXJhMSJdLCJzdWJzY3JpYmUiOlsiY2FtZXJhMSIsImNhbWVyYTIiXSwiaWF0IjoxNzc1MTc2NzU0fQ.DxrRkpYDd7Cc215qstY4RfnB7hRvc8RG61YWO4UwyWg",
+			"claims": { "root": "live", "publish": ["camera1"], "subscribe": ["camera1", "camera2"], "iat": 1775176754 }
+		},
+		{
+			"name": "js_legacy_prefixes",
+			"key": "js_hs256",
+			"token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImpzLXRlc3Qta2V5In0.eyJyb290IjoibGl2ZSIsInB1dCI6WyJjYW1lcmExIl0sImdldCI6WyJjYW1lcmExIiwiY2FtZXJhMiJdLCJpYXQiOjE3NzUxNzY3NTR9.tHNQtHh_HCIKxXOexDCM7AkjqWzbULLZzjEckfOGRfY",
+			"claims": {
+				"root": "live",
+				"publish": ["camera1/**"],
+				"subscribe": ["camera1/**", "camera2/**"],
+				"iat": 1775176754
+			}
+		},
+		{
+			"name": "js_eddsa",
+			"key": "js_eddsa",
+			"token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImpzLWVkZHNhLWtleSJ9.eyJyb290Ijoic3RyZWFtIiwicHVibGlzaCI6WyJ2aWRlby8qKiJdLCJpYXQiOjE3NzUxNzY3NTZ9.Vq00rznemlwxsGLdAR8EJs1J8cgXhaiuEiCysmCxnWbDemIFxS6kTNv3kp6LKnokp-mpHiRpO24Nv7b47jcIAQ",
+			"claims": { "root": "stream", "publish": ["video/**"], "subscribe": [], "iat": 1775176756 }
+		},
+		{
+			"name": "eddsa_token_under_an_hs256_key",
+			"key": "hs256",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6ImRmYWI5MTEzZWE4NWRjMjcifQ.eyJyb290Ijoicm9vbSIsInB1Ymxpc2giOlsic3RyZWFtMS8qKiIsInN0cmVhbTIvKioiXSwic3Vic2NyaWJlIjpbImZlZWQxLyoqIl19.dpZ_p-eyKxaw6bRZp7sfKjmao04MwPuPqbu744bucPjiQVNfGZodfeyEk-fsY79fa9YSbjM1m6DPw3Wg7pzRBA",
+			"claims": null
+		},
+		{
+			"name": "tampered_signature",
+			"key": "hs256",
+			"token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImQ1NWIxZjEzZTZiZGEyODEifQ.eyJyb290IjoiZGVtbyIsInB1Ymxpc2giOlsiYWxpY2UvKioiXSwic3Vic2NyaWJlIjpbImJvYi8qKiJdfQ.OuaQY4hHKpBLvTK-9ZUv2oxiqXTGisng-cg2GcqrgdA",
+			"claims": null
+		},
+		{ "name": "not_a_jwt", "key": "hs256", "token": "not-a-jwt", "claims": null },
+		{
+			"name": "times_at_the_range_bounds",
+			"key": "hs256",
+			"payload": { "root": "demo", "publish": ["**"], "exp": 18446744073, "iat": 0, "nbf": 0 },
+			"claims": { "root": "demo", "publish": ["**"], "subscribe": [], "exp": 18446744073, "iat": 0, "nbf": 0 }
+		},
+		{ "name": "null_exp", "key": "hs256", "payload": { "publish": ["**"], "exp": null }, "claims": null },
+		{ "name": "null_iat", "key": "hs256", "payload": { "publish": ["**"], "iat": null }, "claims": null },
+		{ "name": "null_nbf", "key": "hs256", "payload": { "publish": ["**"], "nbf": null }, "claims": null },
+		{ "name": "negative_iat", "key": "hs256", "payload": { "publish": ["**"], "iat": -1 }, "claims": null },
+		{
+			"name": "fractional_exp",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "exp": 4102444800.5 },
+			"claims": null
+		},
+		{ "name": "string_exp", "key": "hs256", "payload": { "publish": ["**"], "exp": "4102444800" }, "claims": null },
+		{
+			"name": "exp_past_the_clock",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "exp": 18446744074 },
+			"claims": null
+		},
+		{ "name": "expired", "key": "hs256", "payload": { "publish": ["**"], "exp": 1 }, "claims": null },
+		{
+			"name": "not_yet_valid",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "nbf": 4102444800 },
+			"claims": null
+		},
+		{
+			"name": "legacy_prefixes",
+			"key": "hs256",
+			"payload": { "root": "demo", "put": "alice", "get": ["", "bob"] },
+			"claims": { "root": "demo", "publish": ["alice/**"], "subscribe": ["**"] }
+		},
+		{
+			"name": "legacy_prefix_with_a_wildcard",
+			"key": "hs256",
+			"payload": { "put": ["al*"] },
+			"claims": null
+		},
+		{
+			"name": "mixed_encodings",
+			"key": "hs256",
+			"payload": { "put": ["alice"], "subscribe": ["**"] },
+			"claims": null
+		},
+		{
+			"name": "registered_claims_are_ignored",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "iss": "issuer", "sub": 7, "jti": ["x"] },
+			"claims": { "root": "", "publish": ["**"], "subscribe": [] }
+		},
+		{ "name": "unknown_claim", "key": "hs256", "payload": { "publish": ["**"], "aud": "relay" }, "claims": null },
+		{ "name": "grants_nothing", "key": "hs256", "payload": { "publish": [], "subscribe": [] }, "claims": null },
+		{ "name": "null_role", "key": "hs256", "payload": { "publish": null, "subscribe": ["**"] }, "claims": null },
+		{
+			"name": "capped_role",
+			"key": "hs256",
+			"payload": { "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] },
+			"claims": { "root": "", "publish": ["alice/**"], "publish_rate": 1000, "subscribe": ["**"] }
+		},
+		{
+			"name": "misspelled_cap",
+			"key": "hs256",
+			"payload": { "publish": { "path": ["alice/**"], "rat": 1000 } },
+			"claims": null
+		},
+		{
+			"name": "zero_rate",
+			"key": "hs256",
+			"payload": { "publish": { "path": ["**"], "rate": 0 } },
+			"claims": null
+		},
+		{ "name": "invalid_pattern", "key": "hs256", "payload": { "publish": ["**/a/**"] }, "claims": null },
+		{
+			"name": "minted_root_with_boundary_slashes",
+			"key": "hs256",
+			"payload": { "root": "/demo/", "publish": ["**"] },
+			"claims": { "root": "/demo/", "publish": ["**"], "subscribe": [] }
+		},
+		{
+			"name": "outside_the_key_scope",
+			"key": "scoped",
+			"payload": { "root": "project", "publish": ["other/**"] },
+			"claims": null
+		}
+	],
+	"jwk": [
+		{
+			"name": "legacy_prefix_scope",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": "demo", "put": ["room"] }
+			},
+			"valid": true
+		},
+		{
+			"name": "scope_root_with_a_leading_slash",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": "/demo", "publish": ["**"] }
+			},
+			"valid": false
+		},
+		{
+			"name": "scope_root_with_an_empty_segment",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": "a//b", "publish": ["**"] }
+			},
+			"valid": false
+		},
+		{
+			"name": "scope_root_with_a_stray_escape",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": "a\\b", "publish": ["**"] }
+			},
+			"valid": false
+		},
+		{
+			"name": "scope_granting_nothing",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": {}
+			},
+			"valid": false
+		},
+		{
+			"name": "scope_with_a_cap",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "publish": { "path": ["**"], "rate": 1000 } }
+			},
+			"valid": false
+		},
+		{
+			"name": "short_secret",
+			"jwk": { "kty": "oct", "alg": "HS256", "k": "c2hvcnQ" },
+			"valid": false
+		},
+		{
+			"name": "missing_kty",
+			"jwk": { "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68" },
+			"valid": false
+		}
+	],
+	"sets": [
+		{
+			"name": "distinct_kids",
+			"jwks": {
+				"keys": [
+					{
+						"kty": "oct",
+						"alg": "HS256",
+						"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA",
+						"kid": "first"
+					},
+					{
+						"kty": "oct",
+						"alg": "HS256",
+						"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+						"kid": "second"
+					}
+				]
+			},
+			"valid": true
+		},
+		{
+			"name": "keys_without_kids",
+			"jwks": {
+				"keys": [
+					{ "kty": "oct", "alg": "HS256", "k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA" },
+					{ "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68" }
+				]
+			},
+			"valid": true
+		},
+		{
+			"name": "duplicate_kid",
+			"jwks": {
+				"keys": [
+					{ "kty": "oct", "alg": "HS256", "k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA", "kid": "same" },
+					{ "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "kid": "same" }
+				]
+			},
+			"valid": false
+		},
+		{
+			"name": "one_invalid_key",
+			"jwks": {
+				"keys": [
+					{
+						"kty": "oct",
+						"alg": "HS256",
+						"k": "jvS2B_SKkvhtObaiKg9n2vq_Iqdus-nVCVVYBWf0BQA",
+						"kid": "first"
+					},
+					{ "kty": "oct", "alg": "HS256", "k": "c2hvcnQ", "kid": "second" }
+				]
+			},
+			"valid": false
+		}
+	],
+	"grants": [
+		{ "name": "bounded", "grant": { "publish": ["**"], "expires": 4102444800, "revalidate": 60 }, "valid": true },
+		{ "name": "unbounded", "grant": { "subscribe": ["**"] }, "valid": true },
+		{ "name": "null_expires", "grant": { "publish": ["**"], "expires": null }, "valid": false },
+		{ "name": "negative_expires", "grant": { "publish": ["**"], "expires": -1 }, "valid": false },
+		{ "name": "fractional_expires", "grant": { "publish": ["**"], "expires": 4102444800.5 }, "valid": false },
+		{ "name": "expires_past_the_clock", "grant": { "publish": ["**"], "expires": 18446744074 }, "valid": false },
+		{ "name": "revalidate_without_expires", "grant": { "publish": ["**"], "revalidate": 60 }, "valid": false },
+		{ "name": "grants_nothing", "grant": { "expires": 4102444800 }, "valid": false },
+		{ "name": "upstream_without_peer", "grant": { "publish": ["**"], "upstream": true }, "valid": false },
+		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false }
+	]
+}

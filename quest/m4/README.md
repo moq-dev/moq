@@ -53,7 +53,6 @@ deleted.
 - [The relay over QUIC on the sim](/quest/m4/quic-sim.md) - the relay and moq-tokio's `Client` and `Server` run over `moq-quic` on the seeded sim
 - [moq-shaper's own socket never passes for path loss](/quest/m4/shaper-socket.md) - relay-sized buffers and its own socket drops reported beside path drops
 - [Auth session caps cost O(1)](/quest/m4/auth-session-index.md) - per-token and per-remote counts and a time-ordered expiry queue replace the scans, after #7211
-- [Drop moq-auth's iroh transport](/quest/m4/auth-drop-iroh.md) - the next breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
 - [Relays and moq-tokio offer versioned qmux-02 first](/quest/m4/qmux-02-subprotocols.md) - one shared qmux version list prefers 02, so JS clients negotiate it
 - [Smoke tests make their certificates without a system OpenSSL config](/quest/m4/smoke-libressl.md) - moxygen and Cloudflare smoke pass `-config`, as the conformance runner does
 - [ashpd uses maintained D-Bus crates](/quest/m4/ashpd-maintained.md) - upgrade to ashpd 0.14 (zbus 6) and remove the portal dependency exceptions
@@ -69,7 +68,7 @@ deleted.
 - [The API diff reports GStreamer element properties](/quest/m4/api-diff-gst.md) - `just api-diff` lists added, removed, and changed moq-gst properties
 - [Hand-written wrappers reach every FFI item](/quest/m4/binding-export-coverage.md) - Python, Go, and Swift fail a test when an FFI item has no wrapper path, as Kotlin does
 - [The HLS server follows each path once](/quest/m4/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
-- [moq-bench pins the instances it measures](/quest/m4/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
+- [moq-bench pins the instances it measures](/quest/m4/bench-epoch-pin.md) - pooled requests pin their announced instance, so another instance at the path is not counted as the same broadcast
 - [moq-bench reports sub-millisecond latency](/quest/m4/bench-latency-resolution.md) - steady-window latency resolves finer than 1 ms
 - [Benchmark series stay meaningful](/quest/m4/bench-hygiene.md) - a warm `burst` variant, stale series pruned, and slow-group `bytes` kept out of series names
 - [Re-run the SPS fuzzer on h264-reader](/quest/m4/sps-fuzz-h264-reader.md) - the H.264 SPS overflow is rechecked on the new parser

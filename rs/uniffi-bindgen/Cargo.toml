@@ -12,8 +12,10 @@ description = "Generate the Kotlin, Swift, and Python bindings from the moq-ffi 
 name = "uniffi-bindgen"
 path = "src/main.rs"
 # Off by default so a workspace check skips the generator fork. Maturin passes
-# required features along when it runs this bin for the Python wheel.
+# required features along when it runs this bin for the Python wheel. It has no
+# tests, so the test build leaves it out rather than compile the fork.
 required-features = ["cli"]
+test = false
 
 [features]
 cli = ["dep:uniffi"]
