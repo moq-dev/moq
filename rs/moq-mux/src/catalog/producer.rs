@@ -1570,7 +1570,12 @@ mod test {
 			.subscribe(None)
 			.await
 			.unwrap();
-		catalog.outputs.hang.clone().abort(moq_net::Error::Unauthorized).unwrap();
+		catalog
+			.outputs
+			.hang
+			.clone()
+			.abort(moq_net::Error::Unauthorized)
+			.unwrap();
 		let err = catalog.finish().unwrap_err();
 		assert!(!matches!(err, crate::Error::Moq(moq_net::Error::Closed)));
 		loop {
