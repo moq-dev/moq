@@ -214,7 +214,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [moq-uring's qlog accounting test waits on the accounting](/quest/m0/test-flakes-2/qlog-staging-spin.md) - `an_open_trace_accounts_for_staging_and_close` waits for the accounting, not 10,000 spins
 - [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the createWritable queue test waits on the writes it asserts, and its `test.skip` is removed
 - [js/net's lite-06 session-close test keeps the end under load](/quest/m0/test-flakes-2/session-close-end.md) - a session close right after a datagram track's end returns the end, not a `remote error: 0`, and its lite-06 skip is removed
