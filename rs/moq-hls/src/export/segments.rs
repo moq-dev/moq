@@ -285,10 +285,11 @@ impl Producer {
 		state.sequence = state.rows.front().unwrap().segment;
 	}
 
-	/// Clear every retained row after the media timestamps went back, unless no row arrives again.
+	/// Clear every retained row, after the media timestamps went back or a new publisher run
+	/// replaced them. An ended or failed window stays so; a cut window keeps what it listed.
 	pub fn clear(&self) {
 		if let Ok(mut state) = self.state.write()
-			&& state.live()
+			&& !matches!(state.phase, Phase::Cut)
 		{
 			state.rows.clear();
 			state.resets += 1;
@@ -706,11 +707,24 @@ mod tests {
 		live.push(row(0, 0, 0, 2_000), window);
 		live.end();
 		live.push(row(1, 1, 2_000, 2_000), window);
-		live.clear();
 		let snapshot = live.window();
 		assert!(snapshot.ended);
 		let segments: Vec<_> = snapshot.segments.iter().map(|row| row.segment).collect();
 		assert_eq!(segments, [0]);
+	}
+
+	// A restart still drops an ended window's rows, so the new run's generation never lists the
+	// previous run's segments. The window stays ended.
+	#[test]
+	fn an_ended_window_still_clears() {
+		let live = Producer::new(0);
+		let window = Duration::from_secs(30);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.end();
+		live.clear();
+		let snapshot = live.window();
+		assert!(snapshot.ended);
+		assert!(snapshot.segments.is_empty());
 	}
 
 	// A cut freezes the listed rows: later records, trims, resets, and failures are refused, and

@@ -926,10 +926,6 @@ impl<F: Container> Consumer<F> {
 
 		tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
 
-		// The group left behind presented this far, which a later hole is measured from.
-		if let Some(end) = current_end {
-			self.presented_end = Some(end);
-		}
 		self.current = new_current;
 		self.note_group_edge();
 		Ok(())
