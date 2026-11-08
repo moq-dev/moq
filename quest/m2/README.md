@@ -197,6 +197,7 @@ quests that require them.
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
 - [No sentinel values in public API](/quest/m2/no-sentinels.md) - receive windows, cache durations, reconnect timeouts, and the FFI test clock use `Option` instead of a huge value or zero
+- [Connection state carries each phase's data](/quest/m2/connection-state-phases.md) - moq-tokio's `Observation`, moq-ffi's `MoqConnectionState`, and moq-c's `moq_connection_state` each hold one phase per value, so no field is readable in a phase where it means nothing
 - [moq-video takes devices, not environment variables](/quest/m2/video-devices.md) - VA-API and V4L2 device paths are config fields, and `moq_video::ENV` never ships
 - [Gateways share one ingest config and one rate cap](/quest/m2/gateway-ingest.md) - `moq_mux::Ingest` replaces 18 per-gateway setters, and the live rate cap moves to `moq_net::bandwidth`
 - [JS time values are types, not numbers](/quest/m2/js-time-types.md) - every public JS duration and instant is a `Clock.Duration` or `Clock.Instant` object, so a unit mistake fails to compile

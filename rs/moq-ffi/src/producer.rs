@@ -8,7 +8,7 @@ use moq_mux::catalog::hang::Extra;
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubscription, MoqTrackConsumer};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
-use crate::ffi::{Background, Polled};
+use crate::ffi::{Background, OneShot, Polled};
 use crate::media::MoqFrame;
 
 /// A location within a track, mirroring [`moq_net::track::Position`].
@@ -583,22 +583,25 @@ impl MoqFill {
 /// or [`reject`](Self::reject) it to fail the waiting subscriber.
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequest {
-	inner: std::sync::Mutex<Option<moq_net::track::Request>>,
+	inner: OneShot<moq_net::track::Request>,
 	children: Children,
 }
 
 impl MoqTrackRequest {
 	pub(crate) fn new(request: moq_net::track::Request, children: Children) -> Self {
 		Self {
-			inner: std::sync::Mutex::new(Some(request)),
+			inner: OneShot::new(request),
 			children,
 		}
 	}
 
-	/// Take the inner request so an importer can accept it (setting the timescale). Used by
-	/// [`crate::media::MoqMediaTrackProducer::audio`].
-	pub(crate) fn take(&self) -> Result<moq_net::track::Request, MoqError> {
-		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
+	/// Answer with an importer that accepts the request itself (setting the timescale), as
+	/// [`crate::media::MoqMediaTrackProducer::audio`] does.
+	pub(crate) fn answer<R>(
+		&self,
+		f: impl FnOnce(moq_net::track::Request) -> Result<R, MoqError>,
+	) -> Result<R, MoqError> {
+		self.inner.answer(f)
 	}
 }
 
@@ -606,15 +609,12 @@ impl MoqTrackRequest {
 impl MoqTrackRequest {
 	/// The requested track name.
 	pub fn name(&self) -> Result<String, MoqError> {
-		let guard = self.inner.lock().unwrap();
-		let request = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(request.name().to_string())
+		self.inner.peek(|request| request.name().to_string())
 	}
 
 	/// Watch this track's subscribers, including after the request is accepted.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
-		let guard = self.inner.lock().unwrap();
-		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
+		self.inner.peek(|request| MoqTrackDemand::new(request.demand()))
 	}
 
 	/// Create a handler for uncached group fetches before accepting this track.
@@ -624,9 +624,8 @@ impl MoqTrackRequest {
 	/// the transition from request to producer.
 	pub fn requests(&self) -> Result<Arc<MoqTrackRequests>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = self.inner.lock().unwrap();
-		let request = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackRequests::new(request.requests())))
+		self.inner
+			.peek(|request| Arc::new(MoqTrackRequests::new(request.requests())))
 	}
 
 	/// Accept the request as a raw track, fixing its [`MoqTrackInfo`] (timescale, etc.).
@@ -638,22 +637,24 @@ impl MoqTrackRequest {
 	pub fn accept(&self, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let info = raw_track_info(info)?;
-		let request = self.take()?;
-		// Without a handle keeping it open, the broadcast has ended.
-		let Some(_broadcast) = self.children.broadcast() else {
-			request.reject(moq_net::Error::Unroutable);
-			return Err(MoqError::Closed);
-		};
-		let track = request.accept(Some(info));
-		MoqTrackProducer::child(track, &self.children)
+		self.inner.answer(|request| {
+			// Without a handle keeping it open, the broadcast has ended.
+			let Some(_broadcast) = self.children.broadcast() else {
+				request.reject(moq_net::Error::Unroutable);
+				return Err(MoqError::Closed);
+			};
+			let track = request.accept(Some(info));
+			MoqTrackProducer::child(track, &self.children)
+		})
 	}
 
 	/// Reject the request with an application error code, failing the waiting subscriber.
 	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let request = self.take()?;
-		request.reject(moq_net::Error::App(error_code));
-		Ok(())
+		self.inner.answer(|request| {
+			request.reject(moq_net::Error::App(error_code));
+			Ok(())
+		})
 	}
 }
 
