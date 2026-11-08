@@ -345,5 +345,5 @@ export namespace Video {
 	export type Visible = "never" | "always" | string & {};
 }
 
-export function assets(url: string | URL): void;
+export { assets } from "@moq/hang";
 ```

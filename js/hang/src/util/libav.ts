@@ -1,3 +1,4 @@
+import { hostedAssets } from "../assets";
 import { objectType } from "./aac";
 
 let loading: Promise<boolean> | undefined;
@@ -26,7 +27,11 @@ async function load(): Promise<boolean> {
 		import("@moq/libav"),
 		import("@kixelated/libavjs-webcodecs-polyfill"),
 	]);
-	await libav.load({ LibAV, polyfill: true });
+	// libav.js otherwise loads its worker and wasm beside its own module, a path consumer bundlers move.
+	// It joins `base` and the file name with "/", so drop the trailing one.
+	const hosted = hostedAssets();
+	const libavOptions = hosted ? { base: hosted.href.slice(0, -1) } : {};
+	await libav.load({ LibAV, polyfill: true, libavOptions });
 	if (native) return true;
 
 	type Config = Parameters<InstanceType<typeof libav.AudioDecoder>["configure"]>[0];

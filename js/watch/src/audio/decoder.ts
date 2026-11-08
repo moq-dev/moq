@@ -1,4 +1,5 @@
 import { Micro, Milli, type Second, type Wall } from "@moq/clock";
+import { hostedAssets } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -15,7 +16,6 @@ import {
 	Signal,
 } from "@moq/signals";
 import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
-import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";

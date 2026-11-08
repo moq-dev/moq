@@ -1,4 +1,5 @@
 import { type Micro, Nano, now } from "@moq/clock";
+import { hostedAssets } from "@moq/hang";
 import * as Util from "@moq/hang/util";
 import {
 	type Computed,
@@ -10,7 +11,6 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-import { hostedAssets } from "../assets";
 import { Fanout } from "../fanout";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";

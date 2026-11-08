@@ -227,3 +227,8 @@ Publish.assets("/moq/");
 The URL must end with `/`. Copy the files again on every upgrade: they change
 with the package. `@moq/room` publishes through `@moq/publish`, so this one
 call covers it.
+
+A browser without `AudioEncoder` encodes Opus through the libav polyfill, which
+loads its worker and WebAssembly from the same directory: copy
+`node_modules/@moq/libav/*.wasm.*` there too, and allow `'wasm-unsafe-eval'` in
+`script-src`.

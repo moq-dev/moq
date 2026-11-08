@@ -10,6 +10,7 @@
 export * as Clock from "@moq/clock";
 /** Re-export of {@link https://www.npmjs.com/package/@moq/hang | @moq/hang}, the media layer. */
 export * as Hang from "@moq/hang";
+export { assets } from "@moq/hang";
 // Re-exported from @moq/hang so watch consumers can name the decoders' buffered output.
 export type { BufferedRange, BufferedRanges } from "@moq/hang/container";
 /** Re-export of {@link https://www.npmjs.com/package/@moq/net | @moq/net}, the transport. */
@@ -17,7 +18,6 @@ export * as Net from "@moq/net";
 /** Re-export of {@link https://www.npmjs.com/package/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
 export type { Arrival, Arrivals } from "./arrivals";
-export { assets } from "./assets";
 /** Audio rendition selection, decoding, and playback. */
 export * as Audio from "./audio";
 export * from "./broadcast";

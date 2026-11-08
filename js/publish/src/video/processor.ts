@@ -1,5 +1,5 @@
 import { Micro, type Milli, Nano, now } from "@moq/clock";
-import { hostedAssets } from "../assets";
+import { hostedAssets } from "@moq/hang";
 import type { FromWorker, ToWorker } from "./capture-worker";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorker from "./capture-worker.ts?worklet";
