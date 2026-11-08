@@ -177,9 +177,6 @@ export class Decoder {
 
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Milli | undefined>(undefined);
-	// How late the consumer's slowest recent arrival was against its fastest, which widens the band
-	// the ring's stretch holds above its floor.
-	#lateness = new Signal<Milli>(Milli.zero);
 
 	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
 	#subscribeMaxDelay = new Signal<Milli>(Milli.zero);
@@ -261,7 +258,6 @@ export class Decoder {
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
-		this.#signals.run(this.#runLateness.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
 		this.#signals.run(this.#runStalls.bind(this));
 	}
@@ -477,16 +473,6 @@ export class Decoder {
 		// audio in step with video. The measured target moves a bucket at a time, and a rise the
 		// buffered slack already covers costs no silence at all.
 		ring.setLatency(effect.get(this.sync.out.delay));
-	}
-
-	#runLateness(effect: Effect): void {
-		const ring = effect.get(this.#ring);
-		if (!ring) return;
-
-		// NetEq's band above the target, from the arrivals the target was measured from. An explicit
-		// delay ignores the arrivals entirely, so it keeps the bare 20 ms band.
-		const auto = effect.get(this.sync.in.delay) === "auto";
-		ring.setLateness(auto ? effect.get(this.#lateness) : Milli.zero);
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -872,10 +858,8 @@ export class Decoder {
 		});
 
 		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target
-		// holds until the replacement takes over; see #retire. The stretch's band follows this
-		// consumer's own arrivals.
+		// holds until the replacement takes over; see #retire.
 		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
-		effect.run((inner) => this.#lateness.set(inner.get(consumer.lateness)));
 		return { consumer, read };
 	}
 
@@ -885,7 +869,6 @@ export class Decoder {
 		if (failure) this.#phase.set({ kind: "failed", failure });
 		else if (this.#phase.peek().kind === "running") this.#phase.set({ kind: "stopped" });
 		this.#measured.set(undefined);
-		this.#lateness.set(Milli.zero);
 		// Its arrivals stop holding the clock's reference.
 		this.#track.reset();
 	}

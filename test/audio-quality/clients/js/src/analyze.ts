@@ -229,6 +229,8 @@ export function analyze(input: Input): Summary {
 		s.timestamp === undefined || s.stalled ? undefined : s.at - s.timestamp - (mediaRate ?? 0) * (s.at - base),
 	);
 	const skips = skipAheads(lags);
+	// Both on the media clock, read at one instant, so no reduction to the viewer's is needed.
+	const behind = playing.flatMap((s) => (s.clock === undefined ? [] : [s.clock - (s.timestamp as Ms)]));
 	const stalledShare = window.length > 0 ? window.filter((s) => s.stalled).length / window.length : null;
 
 	// ── the target ──────────────────────────────────────────────────────────
@@ -269,6 +271,8 @@ export function analyze(input: Input): Summary {
 		discarded_ms_per_min: perMin(skips.ms),
 		stalled_share: round(stalledShare, 3),
 		silence_share: round(silence, 3),
+		av_lag_ms_p50: round(percentile(behind, 50)),
+		av_lag_ms_p95: round(percentile(behind, 95)),
 		target_ms_p50: round(percentile(targets, 50)),
 		target_ms_p95: round(percentile(targets, 95)),
 		target_ms_max: round(percentile(targets, 100)),

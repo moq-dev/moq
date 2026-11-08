@@ -1,15 +1,16 @@
 /*!
- * Received-PCM adaptation of WebRTC NetEq's accelerate and preemptive expand, the shared algorithm
- * doc/concept/audio-jitter.md specifies for this player and moq-audio's.
+ * Received-PCM adaptation of WebRTC NetEq's accelerate, the shared seams and pitch search
+ * doc/concept/audio-jitter.md specifies for this player and moq-audio's. This player never expands:
+ * its ring starts on its target, so slowing down only ever settles audio behind the shared clock.
  *
  * Copyright (c) 2012 The WebRTC project authors. All Rights Reserved.
- * Ported from modules/audio_coding/neteq/{time_stretch,accelerate,preemptive_expand,dsp_helper,
+ * Ported from modules/audio_coding/neteq/{time_stretch,accelerate,dsp_helper,
  * audio_vector,decision_logic}.
  * @license BSD-3-Clause, with WebRTC's patent grant: see WEBRTC-LICENSE and WEBRTC-PATENTS in this package.
  */
 
 /** What a window boundary decides, named as the shared corpus names it. */
-export type Decision = "Hold" | "Accelerate" | "Fast" | "Expand";
+export type Decision = "Hold" | "Accelerate" | "Fast";
 
 // NetEq's 48 kHz Q12 FIR. Sampling its taps at fractional positions also admits other device rates
 // without altering the search domain.
@@ -38,7 +39,7 @@ export class Stretch {
 	readonly #rate: number;
 	// 15 ms: the seam's position, and the longest pitch period.
 	readonly #middle: number;
-	// 20 ms: NetEq's adjustment granularity, which the band above the target adds to the lateness.
+	// 20 ms: NetEq's adjustment granularity. An excess this large fast-accelerates.
 	readonly #band: number;
 	// 50 ms: NetEq's five 10 ms ticks between stretches.
 	readonly #rest: number;
@@ -60,7 +61,7 @@ export class Stretch {
 		this.#rest = Math.floor((rate * 50) / 1000);
 		this.cooldown = Math.floor((rate * 60) / 1000);
 		this.input = Array.from({ length: channels }, () => new Float32Array(this.window));
-		this.#output = Array.from({ length: channels }, () => new Float32Array(this.window + this.#middle));
+		this.#output = Array.from({ length: channels }, () => new Float32Array(this.window));
 	}
 
 	/** Output frames staged and not yet read. */
@@ -94,16 +95,15 @@ export class Stretch {
 	}
 
 	/**
-	 * Stage the first `frames` of {@link input}, stretched toward `target` given `buffered` frames
-	 * queued including them and the arrivals' `lateness`. Only a full window of received PCM can
-	 * stretch, so a short block, or one that is not `enabled`, passes unchanged and a finite input
-	 * never becomes concealment.
+	 * Stage the first `frames` of {@link input}, accelerated by at most `excess` frames: how far the ring
+	 * sits behind its target. Only a full window of received PCM can stretch, so a short block, or one
+	 * that is not `enabled`, passes unchanged and a finite input never becomes concealment.
 	 */
-	process(frames: number, buffered: number, target: number, lateness: number, enabled: boolean): void {
-		const decision = enabled && frames === this.window ? this.decide(buffered, target, lateness) : "Hold";
-		const lag = decision === "Hold" ? 0 : this.#pitch(decision === "Fast");
+	process(frames: number, excess: number, enabled: boolean): void {
+		const decision = enabled && frames === this.window ? this.decide(excess) : "Hold";
+		const lag = decision === "Hold" ? 0 : this.#pitch(decision === "Fast", excess);
 		this.#position = 0;
-		this.#length = frames;
+		this.#length = frames - lag;
 		if (lag === 0) {
 			for (let channel = 0; channel < this.input.length; channel++) {
 				const input = this.input[channel];
@@ -113,14 +113,9 @@ export class Stretch {
 			return;
 		}
 
-		// Expand repeats one period after the seam; accelerate removes one, or fast as many as fit.
+		// Remove `lag` frames after the seam, crossfading the period before the middle into the one after.
 		const middle = this.#middle;
-		const expand = decision === "Expand";
-		const seam = expand ? middle : middle - lag;
-		const first = expand ? middle : middle - lag;
-		const second = expand ? middle - lag : middle;
-		const tail = expand ? middle : middle + lag;
-		this.#length += expand ? lag : -lag;
+		const seam = middle - lag;
 		for (let channel = 0; channel < this.input.length; channel++) {
 			const input = this.input[channel];
 			const output = this.#output[channel];
@@ -129,29 +124,32 @@ export class Stretch {
 			// rather than duplicating either neighbour.
 			for (let i = 0; i < lag; i++) {
 				const weight = (i + 1) / (lag + 1);
-				output[seam + i] = input[first + i] * (1 - weight) + input[second + i] * weight;
+				output[seam + i] = input[seam + i] * (1 - weight) + input[middle + i] * weight;
 			}
-			for (let i = tail; i < frames; i++) output[seam + lag + i - tail] = input[i];
+			for (let i = middle + lag; i < frames; i++) output[i - lag] = input[i];
 		}
 		this.cooldown = this.#rest;
 	}
 
 	/**
-	 * What a full window with `buffered` frames queued decides against `target`, all in frames. The
-	 * band above the target is NetEq's: its 20 ms granularity plus the arrivals' `lateness`.
+	 * What a full window decides given the ring's `excess` frames above its target, measured where a
+	 * frame has just arrived. Any excess accelerates, so the ring rests on its target rather than
+	 * anywhere in a band above it, and one past NetEq's 20 ms granularity fast-accelerates, which
+	 * catches up after a refill about as fast as dropping the backlog would. A ring at or below its
+	 * target holds: that is either audio on the clock or arrivals running late, and slowing down for
+	 * either adds latency.
 	 */
-	decide(buffered: number, target: number, lateness: number): Decision {
-		const high = target + lateness + this.#band;
-		if (buffered >= high * 4) return "Fast";
-		if (this.cooldown > 0) return "Hold";
-		if (buffered >= high) return "Accelerate";
-		if (buffered < target) return "Expand";
-		return "Hold";
+	decide(excess: number): Decision {
+		if (excess >= this.#band) return "Fast";
+		if (this.cooldown > 0 || excess <= 0) return "Hold";
+		return "Accelerate";
 	}
 
 	// Search the first channel at 4 kHz, then admit the full-rate seam, returning its length or zero.
-	// Fast mode admits a weaker match and takes every whole period that fits before the middle.
-	#pitch(fast: boolean): number {
+	// Fast mode admits a weaker match and takes every whole period that fits before the middle. An
+	// ordinary accelerate removes one period, and only one that fits in the `excess`, so the ring never
+	// lands ahead of its target.
+	#pitch(fast: boolean, excess: number): number {
 		const middle = this.#middle;
 		if (middle === 0) return 0;
 
@@ -202,7 +200,8 @@ export class Stretch {
 		const passive = (energy1 + energy2) / (2 * lag) <= PASSIVE;
 		const threshold = (fast ? 8192 : 14746) / 16384;
 		if (!passive && cross <= threshold * Math.sqrt(energy1 * energy2)) return 0;
-		return fast ? Math.floor(middle / lag) * lag : lag;
+		if (fast) return Math.floor(middle / lag) * lag;
+		return lag <= excess ? lag : 0;
 	}
 
 	// The first channel at a fractional frame, linearly interpolated and clamped to the window.

@@ -28,8 +28,6 @@ export interface Case {
 	ends?: number[];
 	/** `[frame index, target]` wherever the target differs from the previous frame's. */
 	target: [number, number][];
-	/** `[frame index, lateness]` wherever the lateness differs from the previous frame's. */
-	lateness: [number, number][];
 }
 
 type Trace = { arrival: number[]; media: number[] };
@@ -90,32 +88,32 @@ function paced(frames: number, frame: number, base: number): Trace {
 	return flushed(frames, frame, 1, base);
 }
 
-/** Replay a trace through the reference and keep only the frames where the target or lateness moved. */
+/** Replay a trace through the reference and keep only the frames where the target moved. */
 function run(
 	trace: Trace & { ends?: number[] },
 	config: { frame: number; advertised?: number; delay?: number },
-): Pick<Case, "target" | "lateness"> {
-	// A fixed target ignores the arrivals, so its band is not widened either.
-	if (config.delay !== undefined) return { target: [[0, config.delay]], lateness: [[0, 0]] };
+): [number, number][] {
+	if (config.delay !== undefined) return [[0, config.delay]];
 
 	const estimator = new Estimator({ frame: config.frame, advertised: config.advertised });
 	const target: [number, number][] = [];
-	const lateness: [number, number][] = [];
+	let previous: number | undefined;
 
 	const ends = new Set(trace.ends);
 	for (let i = 0; i < trace.arrival.length; i++) {
 		if (ends.has(i)) estimator.end();
 		estimator.observe({ arrival: trace.arrival[i], media: trace.media[i] });
-		if (estimator.target !== target.at(-1)?.[1]) target.push([i, estimator.target]);
-		if (estimator.lateness !== lateness.at(-1)?.[1]) lateness.push([i, estimator.lateness]);
+		const value = estimator.target;
+		if (value !== previous) target.push([i, value]);
+		previous = value;
 	}
 
-	return { target, lateness };
+	return target;
 }
 
 const FRAME = 20;
 
-const traces: Omit<Case, "target" | "lateness">[] = [
+const traces: Omit<Case, "target">[] = [
 	{
 		name: "paced",
 		about: "A perfectly even sender for 60 s, long enough to leave the cold-start ramp. The target settles on one bucket plus one frame, which is the floor the estimator can report.",
@@ -239,7 +237,7 @@ const traces: Omit<Case, "target" | "lateness">[] = [
 	},
 ];
 
-export const cases: Case[] = traces.map((trace) => ({ ...trace, ...run(trace, trace) }));
+export const cases: Case[] = traces.map((trace) => ({ ...trace, target: run(trace, trace) }));
 
 if (import.meta.main) {
 	const here = dirname(fileURLToPath(import.meta.url));

@@ -34,9 +34,13 @@ The port retains WebRTC's BSD notice and patent grant, 4 kHz analysis,
 8192/16384 fast admission thresholds, passive-speech VAD, 20 ms decision
 band, 4x fast threshold, and 60 ms startup / 50 ms successful-stretch
 cooldowns.
-[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) widens that band
-by NetEq's maximum delay in both players, from the decode consumer's new
-`lateness`, and drains a declared end's tail unstretched, as finishing does.
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) drains a declared
+end's tail unstretched, as finishing does. Its browser half decides on the
+ring's depth right after each arrival and never expands, since expanding on
+the depth between arrivals settled audio a burst behind the shared clock
+(decided 2026-11-08). Native playback still decides on `buffered`, so
+whether it settles behind its clock the same way is worth measuring once its
+rows report A/V lag.
 Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
 device rates and uses floating-point peak refinement and fades. Those
 arithmetic adaptations are documented, not claimed bit-identical to int16

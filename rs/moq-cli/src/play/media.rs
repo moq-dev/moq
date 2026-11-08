@@ -618,7 +618,6 @@ async fn play_audio<O: Output>(
 			};
 			let ended = matches!(event, Ok(None));
 			let delay = consumer.delay();
-			let lateness = consumer.lateness();
 			let crossing = match &event {
 				Ok(Some(moq_audio::decode::Read::End { end })) => {
 					ends.push_back((Duration::from(*end), role.declare()));
@@ -657,7 +656,7 @@ async fn play_audio<O: Output>(
 			received
 				.lock()
 				.unwrap()
-				.push_back((event, (delay, lateness), crossing, Instant::now()));
+				.push_back((event, delay, crossing, Instant::now()));
 			arrived.notify_one();
 			if ended {
 				return Ok::<_, anyhow::Error>(());
@@ -679,7 +678,7 @@ async fn play_audio<O: Output>(
 		// The frame being written starts the utterance after a declared silence.
 		let mut utterance = false;
 		loop {
-			let (event, (delay, lateness), crossing, _) = loop {
+			let (event, delay, crossing, _) = loop {
 				if let Some(event) = received.lock().unwrap().pop_front() {
 					popped.notify_one();
 					break event;
@@ -810,18 +809,10 @@ async fn play_audio<O: Output>(
 			let held = input.latency;
 			let target = samples(held);
 			sink.set_latency(held)?;
-			sink.set_lateness(lateness);
 			// Leave normal convergence to the callback. Only an excess at NetEq's
-			// fast threshold (four times target + lateness + granularity) is an
-			// emergency re-anchor; a 20 ms trim would compete with every pitch
-			// correction.
-			let fit = fit(
-				buffered,
-				target,
-				slack + samples(lateness),
-				timing.silence,
-				length as u64,
-			);
+			// fast threshold (four times target + granularity) is an emergency
+			// re-anchor; a 20 ms trim would compete with every pitch correction.
+			let fit = fit(buffered, target, slack, timing.silence, length as u64);
 
 			// The packet pays for the channel count; the catalog cannot allocate
 			// a duration's worth of silence before any samples arrive.

@@ -589,12 +589,13 @@ describe("declared end", () => {
 		expect(read(buffer, 20, 1)[0].length).toBe(20);
 
 		buffer.next();
-		write(buffer, 50 as Milli, 40, { channels: 1, value: 2 });
+		// One 20 ms frame, so the ring stays within a frame of its floor and plays it as received.
+		write(buffer, 50 as Milli, 20, { channels: 1, value: 2 });
 		// The rest of the tail, the short gap to the next utterance, then the utterance itself.
-		const [played] = read(buffer, 70, 1);
+		const [played] = read(buffer, 50, 1);
 		expect([...played.slice(0, 20)]).toEqual(Array(20).fill(1));
 		expect([...played.slice(20, 30)]).toEqual(Array(10).fill(0));
-		expect([...played.slice(30)]).toEqual(Array(40).fill(2));
+		expect([...played.slice(30)]).toEqual(Array(20).fill(2));
 		// The gap is the declared silence, for the reader to fill with comfort noise.
 		expect(buffer.quiet).toEqual([20, 30]);
 		expect(buffer.underruns).toBe(0);
@@ -844,7 +845,9 @@ describe("time stretch", () => {
 	const live = (latency: number) => new AudioRingBuffer({ rate: RATE, channels: 1, latency: latency as Milli });
 	const frames = (ms: number) => (RATE * ms) / 1000;
 
-	it("expands a ring short of its floor, so it plays longer than it holds before running dry", () => {
+	// Slowing down only ever settles audio behind the shared clock, so a ring short of its floor plays
+	// what it holds at its own pace and runs dry: the underrun is the cost of arrivals running late.
+	it("never expands a ring short of its floor, so it plays only what it holds before running dry", () => {
 		const buffer = live(100);
 		write(buffer, 0 as Milli, frames(100), { value: 0.5 });
 		let played = 0;
@@ -853,7 +856,7 @@ describe("time stretch", () => {
 			played += output.length;
 			if (output.length < QUANTUM) break;
 		}
-		expect(played).toBeGreaterThan(frames(100));
+		expect(played).toBe(frames(100));
 		expect(buffer.underruns).toBe(1);
 	});
 
@@ -872,31 +875,44 @@ describe("time stretch", () => {
 		expect(buffer.silent).toBe(true);
 	});
 
-	// Fed at the real-time rate, so only the stretch can move the ring's depth.
-	async function converge(buffer: AudioRingBuffer, start: number, seconds: number) {
+	// Fed `burst` ms of 20 ms frames at a time, at the real-time rate, so only the stretch can move the
+	// ring's depth. Returns the depth right after each burst lands, where it reads the clock.
+	async function converge(buffer: AudioRingBuffer, start: number, seconds: number, burst = 20) {
 		const timestamps: number[] = [];
+		const peaks: number[] = [];
 		let written = start;
 		for (let rendered = 0; rendered < frames(seconds * 1000); rendered += QUANTUM) {
-			while (written < start + rendered + QUANTUM) {
-				write(buffer, ((written * 1000) / RATE) as Milli, frames(20), { value: 0.5 });
-				written += frames(20);
+			if (written < start + rendered + QUANTUM) {
+				for (const end = written + frames(burst); written < end; written += frames(20)) {
+					write(buffer, ((written * 1000) / RATE) as Milli, frames(20), { value: 0.5 });
+				}
+				peaks.push(buffer.length);
 			}
 			const [output] = read(buffer, QUANTUM, 1);
-			expect(output.length).toBe(QUANTUM);
+			if (burst === 20) expect(output.length).toBe(QUANTUM);
 			timestamps.push(Milli.fromMicro(buffer.timestamp));
 		}
-		return { timestamps, written };
+		return { timestamps, peaks, written };
 	}
+
+	// A constant signal accelerates by one 2.5 ms pitch period at a time, and only by a period that fits
+	// in the excess, so the ring rests within one period of its floor and never under it.
+	const PERIOD = frames(2.5);
+	const settled = (peaks: number[], floor: number) => {
+		for (const peak of peaks.slice(-20)) {
+			expect(peak).toBeGreaterThanOrEqual(frames(floor));
+			expect(peak).toBeLessThan(frames(floor) + PERIOD);
+		}
+	};
 
 	it("accelerates a ring above its floor back onto it, dropping nothing", async () => {
 		const buffer = live(100);
 		write(buffer, 0 as Milli, frames(300), { value: 0.5 });
-		const { timestamps, written } = await converge(buffer, frames(300), 8);
+		const { timestamps, peaks, written } = await converge(buffer, frames(300), 8);
 
-		// Within the band above the floor, give or take the 20 ms frame just written.
-		expect(buffer.length).toBeGreaterThanOrEqual(frames(100) - frames(20));
-		expect(buffer.length).toBeLessThan(frames(120) + frames(20));
+		settled(peaks, 100);
 		// Every sample written either played or is still buffered, so nothing was skipped.
+		expect(buffer.skips).toBe(0);
 		expect(Math.round((Milli.fromMicro(buffer.timestamp) * RATE) / 1000) + buffer.length).toBeGreaterThan(
 			written - frames(30),
 		);
@@ -908,17 +924,26 @@ describe("time stretch", () => {
 		expect(buffer.underruns).toBe(0);
 	});
 
-	it("holds a ring inside the band its arrivals' lateness widens, accelerating only past it", async () => {
-		const buffer = live(100);
-		buffer.setLateness(100 as Milli);
-		write(buffer, 0 as Milli, frames(300), { value: 0.5 });
-		await converge(buffer, frames(300), 8);
-
-		// Above the 100 ms floor but inside 100 ms of lateness plus the 20 ms band, give or take the
-		// 20 ms frame just written, where without the lateness it accelerates down to the floor.
-		expect(buffer.length).toBeGreaterThanOrEqual(frames(200) - frames(20));
-		expect(buffer.length).toBeLessThan(frames(220) + frames(20));
+	// Five 20 ms frames flushed at once, every 100 ms. Between bursts the ring drains a whole burst
+	// below its floor, which is arrivals running late rather than audio ahead of the clock, so steering
+	// on that depth would settle a burst behind it.
+	it("rests on its floor right after each burst, never a burst above it", async () => {
+		const buffer = live(120);
+		write(buffer, 0 as Milli, frames(120), { value: 0.5 });
+		const { peaks } = await converge(buffer, frames(120), 8, 100);
+		settled(peaks, 120);
 		expect(buffer.underruns).toBe(0);
+	});
+
+	// A floor short of the arrival spread underruns, and that is the cost of the floor: the ring must
+	// not grow its depth to stop underrunning, which only plays everything later.
+	it("underruns every burst that outruns its floor rather than settling later", async () => {
+		const buffer = live(60);
+		write(buffer, 0 as Milli, frames(60), { value: 0.5 });
+		const { peaks } = await converge(buffer, frames(60), 8, 100);
+		// Each burst lands on an empty ring, never on audio left from the one before.
+		for (const peak of peaks.slice(-20)) expect(peak).toBe(frames(100));
+		expect(buffer.underruns).toBeGreaterThanOrEqual(70);
 	});
 
 	it("fast-accelerates a ring four times past the band, even straight after a stretch", async () => {
@@ -987,16 +1012,13 @@ describe("time stretch", () => {
 	// Past NetEq's fast threshold, four times the floor plus its band, or three quarters of the
 	// headroom above the floor, whichever is lower, stretching back would take seconds, so the ring
 	// re-anchors on its floor as moq-audio does. With 1000 ms of capacity, a 100 ms floor reaches the
-	// first at 480 ms, or 560 ms with 20 ms of lateness widening its band, and a 300 ms floor the
-	// second at 825 ms.
-	for (const [floor, lateness, threshold] of [
-		[100, 0, 480],
-		[100, 20, 560],
-		[300, 0, 825],
+	// first at 480 ms, and a 300 ms floor the second at 825 ms.
+	for (const [floor, threshold] of [
+		[100, 480],
+		[300, 825],
 	]) {
-		it(`re-anchors a ${floor} ms floor ${lateness} ms late only once the ring holds ${threshold} ms`, () => {
+		it(`re-anchors a ${floor} ms floor only once the ring holds ${threshold} ms`, () => {
 			const buffer = live(floor);
-			buffer.setLateness(lateness as Milli);
 			write(buffer, 0 as Milli, frames(floor), { value: 0.5 });
 			read(buffer, QUANTUM, 1);
 			const playhead = buffer.timestamp;

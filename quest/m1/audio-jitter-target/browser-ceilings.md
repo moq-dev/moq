@@ -5,7 +5,7 @@
 `test/audio-quality/budgets.json` carries every chromium row's ceilings
 re-measured, by the rule in its note, from seven scheduled Nightly runs on
 `main` that all ran with the browser's NetEq time stretch, and budgets
-`player_skips_per_min` on those rows beside the tap metrics. No chromium row
+`player_skips_per_min` and `av_lag_ms` on those rows beside the tap metrics. No chromium row
 skips buffered audio in steady state: its `player_skips_per_min` stays at the
 startup re-anchors the estimator's hold releases, as on the replay rows. What
 still runs dry is what NetEq would conceal, a receive stall longer than the
@@ -31,14 +31,17 @@ rows alone, with no maintainer listening run (decided 2026-11-07,
 /quest-unblock).
 
 [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) budgeted every
-replay row exactly as measured, `relay-mic-rtt40` at 1.4
-`player_underruns_per_min` (7.9 without the stretch), and left the browser
-ceilings unchanged. Expect them to move both ways: stalled time and player
-re-stalls should fall, while `skip_aheads` and `discarded_ms`, which infer a
-skip from a step in the playhead's lag, read a sustained accelerate as a skip
-and can rise on rows whose target moves. `player_skips` counts the ring's real
+replay row exactly as measured, A/V lag included, and left the browser
+ceilings unchanged. The browser's stretch never slows down, so underruns stay
+where the trim had them (`relay-mic-rtt40` 10.6 `player_underruns_per_min`
+against 8.2) while the audio the trim dropped plays faster instead, and the
+A/V lag rests about one frame ahead of the clock. Expect the chromium rows
+alike: re-stalls about as before, `player_skips` near zero, and
+`skip_aheads` and `discarded_ms`, which infer a skip from a step in the
+playhead's lag, reading a fast accelerate after a receive stall as a skip. `player_skips` counts the ring's real
 re-anchors, so a rise there is a regression worth reporting before budgeting
-it. Rewrite the note's browser sentences to the new nights and say the stretch
+it, as is an `av_lag_ms` p50 above zero, which is audio settling behind the
+clock. Rewrite the note's browser sentences to the new nights and say the stretch
 is in them.
 
 ## Related

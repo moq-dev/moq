@@ -11,10 +11,12 @@ at once got a target far too shallow to play through the next flush. One
 written algorithm, cited by both implementations, produces the same target from
 the same arrival trace.
 
-Boundaries: both players converge on the target by playing slightly faster
-or slower, NetEq's time stretch. No packet loss concealment. Video keeps its
-own target; the shared clock stays on local time, and the audio ring's stretch
-converges on it.
+Boundaries: both players converge on the target with NetEq's time stretch:
+native playback by playing slightly faster or slower, and the browser only
+faster, since its ring starts on the target and slowing down only settles audio
+behind the shared clock. Underruns past the target are accepted, not covered
+with latency. No packet loss concealment. Video keeps its own target; the
+shared clock stays on local time, and the audio ring's stretch converges on it.
 
 ## Plan
 
@@ -33,6 +35,15 @@ target, in both players from one algorithm and its vectors:
 [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856) natively and
 [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) in the browser's ring.
 
+Decided 2026-11-08 (maintainer, on
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058)): never add
+latency to chase zero underruns. Audio and video keep separate clocks, which
+align at steady state once the delay is right, so the browser's stretch only
+steers audio back onto the clock and never settles it later to absorb jitter.
+Some underruns during congestion are expected. The replay rows budget
+`av_lag_ms`, how far audio trails the shared clock, exactly as measured, so a
+change that buys underruns with latency fails them.
+
 Decided 2026-11-04 (maintainer), for push-to-talk's silence suppression
 ([moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942)): a silence the publisher declares
 with an end marker is not idle, so the estimator folds no idle intervals for
@@ -47,7 +58,7 @@ native playback against its budgets.
 ## Required
 
 - [Browser ceilings](/quest/m1/audio-jitter-target/browser-ceilings.md) - the chromium rows' ceilings re-measured from seven Nightlies with the browser's time stretch, budgeting `player_skips_per_min`
-- [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - `moq play` copies NetEq's accelerate and preemptive expand, sharing the browser's algorithm and vectors, so its native rows reach zero steady-state underruns
+- [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - `moq play` copies NetEq's accelerate and preemptive expand, sharing the browser's seams and vectors, so its native rows play with no audible glitch once the target settles
 - [Buffered converge](/quest/m1/audio-jitter-target/buffered-converge.md) - a buffered `<moq-watch>` time-stretches its audio back onto the shared clock after a stall or drift, so lip sync returns and no audio group is dropped
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - the AAC browser budgets are re-measured from nightlies after the TS importer groups each PES
 

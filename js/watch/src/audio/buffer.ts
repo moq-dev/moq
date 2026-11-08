@@ -1,7 +1,7 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
-import type { Data, End, Init, Latency, Lateness, Playing, Reset, State, Truncate } from "./render";
+import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
 
 /**
  * Decides when the decode loop may decode a frame, which is how the target delay is split between
@@ -16,7 +16,8 @@ import type { Data, End, Init, Latency, Lateness, Playing, Reset, State, Truncat
  *     stops once the PCM in the ring plus the frames still decoding reach the floor, since the ring
  *     plays through and cannot shed what overflows it;
  *   - while playing, once the playhead is within the floor of where its output lands, keeping the
- *     ring on its floor;
+ *     ring on its floor. Live, that is where the output ends: the ring's time stretch measures its
+ *     depth right after each write, and reads a tail past the floor as audio behind the clock;
  *   - while playing live, also once the media queued behind it covers the hold, so media past the
  *     target reaches the ring, whose skip band catches up to the live edge. Buffered mode plays
  *     through instead.
@@ -63,6 +64,10 @@ export class Backpressure {
 	// ring compares a frame to its playhead where the output lands, or an offset past the floor would
 	// drain it.
 	#offset = 0;
+	// The duration of the latest output, which the next frame's is taken to match. A live frame released
+	// by where its output starts would land with its tail past the floor, and the stretch accelerating
+	// that away would only draw the next frame out sooner, playing through the hold.
+	#frame = 0 as Micro;
 
 	#waiters: Array<{ timestamp: Micro; resolve: () => void }> = [];
 
@@ -141,6 +146,7 @@ export class Backpressure {
 
 	/** Note that PCM from `start` to `end` reached the ring. */
 	inserted(start: Micro, end: Micro): void {
+		this.#frame = (end - start) as Micro;
 		const inserted = this.#inserted;
 		this.#inserted = { start: inserted?.start ?? start, end: inserted && inserted.end > end ? inserted.end : end };
 		this.#release();
@@ -229,7 +235,8 @@ export class Backpressure {
 	#due(timestamp: Micro): boolean {
 		const playhead = this.#playhead;
 		if (!this.#stalled && playhead !== undefined) {
-			if (timestamp - this.#offset - this.#headroom <= playhead) return true;
+			const tail = this.#buffered ? 0 : this.#frame;
+			if (timestamp + tail - this.#offset - this.#headroom <= playhead) return true;
 			return !this.#buffered && this.#covered(timestamp);
 		}
 
@@ -383,15 +390,6 @@ export class AudioBuffer {
 		const msg: Latency = { type: "latency", latency: this.#latency() };
 		// One message, so the worklet never plays a quantum between the new floor and the park.
 		if (park) msg.park = ++this.#epoch;
-		this.#worklet.port.postMessage(msg);
-	}
-
-	/**
-	 * Widen the band the worklet's stretch holds above the floor by how late the slowest recent
-	 * arrival was against the fastest, as NetEq does. See doc/concept/audio-jitter.md.
-	 */
-	setLateness(lateness: Milli): void {
-		const msg: Lateness = { type: "lateness", lateness };
 		this.#worklet.port.postMessage(msg);
 	}
 

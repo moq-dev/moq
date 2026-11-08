@@ -127,12 +127,6 @@ fold(bucket):                           # prior starts at 1
 target():
     measured = upper edge of the first bucket whose cumulative weight exceeds QUANTILE
     return max(measured, advertised) + frame
-
-lateness():                             # widens the time stretch's band, not the target
-    if history is empty: return 0
-    fast = entry in history minimising (entry.arrival - entry.media), the oldest on a tie
-    slow = entry in history maximising (entry.arrival - entry.media), the oldest on a tie
-    return max(0, (slow.arrival - fast.arrival) - (slow.media - fast.media))
 ```
 
 ### Relative arrival delay
@@ -166,8 +160,7 @@ shorter than `WINDOW` instead of growing without bound.
 The reference is a minimum over a prefix of the history, and the publisher
 chooses the prefix by reordering, so scanning for it lets every frame cost
 `MAX_HISTORY` comparisons. Keep the history in a structure that answers any
-prefix's minimum in logarithmic time, such as a segment tree over a ring, and
-the whole history's maximum for `lateness`, such as a monotonic queue.
+prefix's minimum in logarithmic time, such as a segment tree over a ring.
 Keep the oldest entry on a tie: tied entries with a different `arrival` and
 `media` round `delay` differently.
 
@@ -273,18 +266,6 @@ quantile.
 A quantile of an empirical distribution, rather than a mean plus k deviations,
 because network delay is heavy-tailed and one-sided. A Gaussian assumption
 sizes that tail wrong in both directions.
-
-### Lateness
-
-`lateness` is how late the slowest frame in the history arrived against the
-fastest: NetEq's `PacketArrivalHistory::GetMaxDelayMs`, over the same
-two-second window and the same in-order frames, since a reordered frame never
-joins the history. It is not part of the target. The
-[time stretch](#received-audio-time-stretch) adds it to the band above the
-target, as NetEq's `DecisionLogic` does, so a ring the last two seconds
-refilled after a late burst keeps that cushion instead of accelerating it away
-before the next one. It reads the window as it is now rather than a quantile
-of its history, so it falls back as soon as the late frame leaves the window.
 
 ## The frame duration
 
@@ -522,11 +503,10 @@ marker in its group, and they belong to the speech before the silence, not after
 ## Fixed targets
 
 An explicit delay **fixes the target and disables adaptation**. It is taken
-literally: no advertised floor, no frame term, no estimate, and no lateness.
+literally: no advertised floor, no frame term, no estimate.
 
 ```
 target = delay
-lateness = 0
 ```
 
 An impossible fixed target is refused, not silently adjusted. A negative delay,
@@ -591,8 +571,7 @@ directly, so neither is graded against the other.
   "frame": 20,
   "arrival": [0, 10, 30],
   "media": [0, 14500, 14520],
-  "target": [[0, 120], [26, 80]],
-  "lateness": [[0, 0]]
+  "target": [[0, 120], [26, 80]]
 }
 ```
 
@@ -603,8 +582,7 @@ them, as is `ends`: the indices, ascending, of the frames observed right after a
 [declared end](#declared-silence), each of which calls `end()` before it is observed. `target` lists `[frame index, target]` at every frame where the target
 differs from the previous frame's, starting at frame 0, so an implementation
 folds the trace one frame at a time and compares its target at each listed
-index. `lateness` lists the lateness the same way, zero throughout for the
-`fixed` case. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
+index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 
 | Case | Holds the implementation to |
 | --- | --- |
@@ -636,12 +614,14 @@ the `bun doc/concept/audio-jitter/corpus.ts` command above. It runs in
 
 ## Received-audio time stretch
 
-Both players adapt received PCM to the target with WebRTC NetEq's accelerate
-and preemptive expand: native playback in `rs/moq-audio`, and the browser in the
-AudioWorklet's ring in `js/watch`. Neither generates replacement audio for a
-missing packet, so a hole in the media plays as a hole. The estimator above is
-unchanged. Both conform to this same algorithm and
-[PCM corpus](audio-jitter/stretch/corpus.json). The browser stretches only live
+Both players adapt received PCM to the target with the seams of WebRTC
+NetEq's time stretch: native playback in `rs/moq-audio` with its accelerate and
+preemptive expand, and the browser in the AudioWorklet's ring in `js/watch`
+with its accelerate alone. Neither generates replacement audio for a missing
+packet, so a hole in the media plays as a hole. The estimator above is
+unchanged. Both share the pitch search, admission, seams, and
+[PCM corpus](audio-jitter/stretch/corpus.json) below; they differ only in
+[what they decide on](#browser-decision). The browser stretches only live
 playback: buffered playback plays every sample it holds, as it always has.
 
 The source is WebRTC's
@@ -667,12 +647,10 @@ is silence rather than an underrun, so nothing expands toward a target that no
 arrival will refill.
 
 `buffered` counts unread frames in the ring plus staged output. `target` is
-the current playout target, and `lateness` the estimator's
-[lateness](#lateness), NetEq's `GetMaxDelayMs`, which is zero for a
-[fixed target](#fixed-targets). The state is `cooldown`, initially 60 ms
+the current playout target. The state is `cooldown`, initially 60 ms
 (NetEq's six startup ticks), reduced
-by each frame rendered, saturating at zero. At a window boundary, with
-`high = target + lateness + 20 ms`, choose in this order:
+by each frame rendered, saturating at zero. At a window boundary, native
+playback chooses in this order, with `high = target + 20 ms`:
 
 1. `buffered >= 4 * high`: fast accelerate, even during cooldown.
 2. `cooldown > 0`: hold.
@@ -682,19 +660,31 @@ by each frame rendered, saturating at zero. At a window boundary, with
 
 A successful stretch sets cooldown to 50 ms (NetEq's five 10 ms ticks).
 A rejected seam leaves it unchanged. This preserves NetEq's 20 ms adjustment
-granularity, its maximum-delay term, its 4x fast threshold, and its minimum
-interval. There is no concealment state.
+granularity, 4x fast threshold, and minimum interval. NetEq's extra
+packet-history maximum-delay term is not added again: this controller sees the
+already decoded PCM queue and its jitter target rather than an RTP playout
+timestamp and packet-arrival history. There is no concealment state.
 
-One difference from NetEq's `DecisionLogic` remains. NetEq compares its
-playout delay, how far the playhead trails the fastest arrival in its packet
-history, where this compares `buffered`. The two agree while frames arrive on
-time. During a receive stall `buffered` drains while the playout delay holds,
-so this expands into the stall, and once the stall's frames land together
-`buffered` jumps while the playout delay holds, so this can accelerate away the
-cushion they bring. Deciding on the playout delay instead cut the
-`relay-mic-rtt40` replay's player underruns by about a third in a prototype,
-but the browser's worklet would need the arrival clock mapped onto its render
-clock to do it, so neither player does yet.
+### Browser decision
+
+The browser's ring starts on its target and plays at the shared clock video
+plays from, so slowing it down only ever settles audio behind that clock. It
+never expands. It decides on `peak`, the ring's length right after the latest
+write less what the stretch has removed since: how far the playhead trails the
+newest arrival, which is the playout delay NetEq's `DecisionLogic` compares.
+`buffered` drains between arrivals because the next one has not landed, not
+because audio is ahead of the clock, so deciding on it expands into every gap
+and settles a burst behind. With `excess = peak - target`, choose in this order:
+
+1. `excess >= 20 ms`: fast accelerate, even during cooldown.
+2. `cooldown > 0` or `excess <= 0`: hold.
+3. Otherwise: accelerate, admitting only a lag `L <= excess`.
+
+So the ring rests within one pitch period of its target right after each
+arrival, where dropping back to the target used to leave it, and a fast
+accelerate after a refill catches up about as fast as that drop did. Arrivals that
+outrun the target underrun instead: that is the cost of a target short of the
+spread, and the estimator's to fix, not the stretch's.
 
 ### Pitch search and admission
 
@@ -758,24 +748,24 @@ ring and staged output hold the target again. Padding never enters the pitch
 search. Finishing bypasses that wait so a short tail can drain. Trimming is
 emergency recovery at the ring's capacity watermark. The
 CLI's incoming-media trim is reserved for a distance at the fast threshold,
-`4 * high`, not ordinary 20 ms drift. The browser's ring receives each decoded
-frame as a write, so it re-anchors on its floor there, at the lower of the fast
-threshold and three quarters of its headroom above the floor, and counts each
-re-anchor as a skip in its stats. These bounds do not promise concealment of missing
+not ordinary 20 ms drift. The browser's ring receives each decoded frame as a
+write, so it re-anchors on its target there, at the lower of `4 * high` and
+three quarters of its headroom above the target, and counts each re-anchor as
+a skip in its stats. These bounds do not promise concealment of missing
 media or convergence of a signal whose seams continually fail admission.
 
 ### Stretch corpus
 
 `audio-jitter/stretch/corpus.json` holds literal interleaved input and expected
-output PCM, device rate and channels, buffered, target, and lateness frame
-counts (lateness is zero where a vector leaves it out), incoming cooldown,
-requested decision, and admitted lag (zero means hold). Compare output within
-1e-6 absolute sample amplitude. It includes hold, cooldown, fast-mode bypass,
-linked stereo, passive noise, rejected active noise, 8/44.1/48 kHz seams, and
-a lateness that holds a ring accelerate would otherwise shorten, accelerates
-one above the widened band, and raises the fast threshold with it. Both
-implementations consume these exact vectors; generating expected output from
-the implementation under test is not conformance.
+output PCM, device rate and channels, buffered and target frame counts,
+incoming cooldown, requested decision, and admitted lag (zero means hold).
+Compare output within 1e-6 absolute sample amplitude. It includes hold,
+cooldown, fast-mode bypass, linked stereo, passive noise, rejected active
+noise, and 8/44.1/48 kHz seams. Both implementations consume these exact
+vectors; generating expected output from the implementation under test is
+not conformance. The vectors decide as native playback does, so the browser
+grades its accelerate and fast seams against them, at an excess inside and
+past the 20 ms band, and holds wherever native expands.
 
 ## Comfort noise
 

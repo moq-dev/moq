@@ -41,10 +41,15 @@ export class AudioRingBuffer {
 	// decode would otherwise widen the band for the life of the ring.
 	#chunk = 0;
 
-	// Live playback converges on the floor by time-stretching each window of received PCM on its way
-	// out. The read index is past the staged window, which spans `#window` samples of the ring.
+	// Live playback converges on the floor by accelerating each window of received PCM on its way out.
+	// The read index is past the staged window, which spans `#window` samples of the ring.
 	readonly #stretch: Stretch;
 	#window = 0;
+	// The ring's length right after the latest write, less what the stretch has removed since. That
+	// is where depth reads the clock: a frame has just arrived. Between arrivals the ring drains
+	// toward the next one, which says nothing about how far behind the playhead is, so steering on
+	// the current length would expand into every gap and settle behind the shared clock.
+	#peak = 0;
 	// Whether the staged window lies in a declared silence, which plays unstretched as comfort noise.
 	#windowQuiet = false;
 
@@ -52,9 +57,6 @@ export class AudioRingBuffer {
 	readonly #buffered: boolean;
 	// Un-stall threshold in samples (how much to buffer before playback starts).
 	#latencySamples: number;
-	// How late the slowest recent arrival was against the fastest, in samples, which widens the band
-	// the stretch holds above the floor.
-	#latenessSamples = 0;
 	// Whether the read/write indices have been anchored to the first inserted sample.
 	#anchored = false;
 
@@ -156,11 +158,6 @@ export class AudioRingBuffer {
 		if (this.length >= latencySamples) this.#stalled = false;
 	}
 
-	/** Widen the band above the floor by how late the slowest recent arrival was, as NetEq does. */
-	setLateness(lateness: Milli): void {
-		this.#latenessSamples = Math.max(0, Math.floor(this.rate * Second.fromMilli(lateness)));
-	}
-
 	/**
 	 * Hold playback until the next floor update, keeping what is buffered.
 	 *
@@ -214,10 +211,10 @@ export class AudioRingBuffer {
 			if (start > this.#writeIndex) this.#pauses.push({ start: this.#writeIndex, end: start });
 		}
 
-		// Bound the ring. While playing live, the read path stretches the ring back onto its floor, so
+		// Bound the ring. While playing live, the read path accelerates the ring back onto its floor, so
 		// dropping the oldest audio and landing on the floor is an emergency re-anchor, as moq-audio
-		// does: at NetEq's fast threshold, four times the floor plus its band, or once the ring holds
-		// three quarters of its headroom above the floor, whichever comes first. While stalled the
+		// does: at NetEq's fast threshold, four times the floor plus 20 ms, or once the ring holds three
+		// quarters of its headroom above the floor, whichever comes first. While stalled the
 		// reader is not consuming, so only the hard capacity applies; dropping would throw away the very
 		// audio the refill is accumulating. Buffered mode plays through everything, so it is
 		// capacity-bound too.
@@ -240,7 +237,7 @@ export class AudioRingBuffer {
 			band &&
 			queued >=
 				Math.min(
-					4 * (latency + this.#latenessSamples + Math.floor((this.rate * 20) / 1000)),
+					4 * (latency + Math.floor((this.rate * 20) / 1000)),
 					latency + Math.floor(((this.capacity - latency) * 3) / 4),
 				)
 		) {
@@ -281,6 +278,7 @@ export class AudioRingBuffer {
 		if (end > this.#writeIndex) {
 			this.#writeIndex = end;
 		}
+		this.#peak = this.length;
 
 		// Start playback once we've buffered the latency target. This is the only way out of a
 		// stall but a park, so an underrun mid-playback refills to the target before resuming rather
@@ -299,6 +297,7 @@ export class AudioRingBuffer {
 	truncate(timestamp: Micro): void {
 		const target = Math.round(Second.fromMicro(timestamp) * this.rate);
 		if (target >= this.#writeIndex) return;
+		const length = this.length;
 		// A staged window runs the read index ahead of the playhead. Unstage it so the successor
 		// replaces whatever of it is still unplayed, resuming the ring at the sample now playing.
 		const stretch = this.#stretch;
@@ -314,6 +313,7 @@ export class AudioRingBuffer {
 		this.#pauses = this.#pauses.filter((pause) => pause.start < this.#writeIndex);
 		const last = this.#pauses.at(-1);
 		if (last) last.end = Math.min(last.end, this.#writeIndex);
+		this.#peak = Math.max(0, this.#peak - (length - this.length));
 	}
 
 	/**
@@ -333,11 +333,13 @@ export class AudioRingBuffer {
 		if (index > this.#readIndex && this.length > 0) this.#skips++;
 		// The staged window lies behind the new index, so it is dropped with the rest, as moq-audio's
 		// trim discards staged output first.
+		const length = this.length;
 		if (index > this.#readIndex) {
 			this.#stretch.clear();
 			this.#window = 0;
 		}
 		this.#readIndex = index;
+		this.#peak = Math.max(0, this.#peak - (length - this.length));
 		this.#prune();
 	}
 
@@ -388,6 +390,7 @@ export class AudioRingBuffer {
 		this.#pauses = [];
 		this.#stretch.clear();
 		this.#window = 0;
+		this.#peak = 0;
 	}
 
 	read(output: Float32Array[]): number {
@@ -432,7 +435,7 @@ export class AudioRingBuffer {
 		return samples;
 	}
 
-	// Move the next window off the ring into the stretch, which converges a live ring on its floor.
+	// Move the next window off the ring into the stretch, which accelerates a live ring onto its floor.
 	// A window stops at the edge of a declared silence, which plays unstretched, so the stretch never
 	// moves where one starts or ends. Whatever cannot stretch stages only the `need` this quantum
 	// reads, so a write still lands anywhere past the playhead. Returns false once the ring is empty.
@@ -443,8 +446,8 @@ export class AudioRingBuffer {
 		this.#prune();
 		const pause = this.#pauses[0];
 		const quiet = pause !== undefined && pause.start <= this.#readIndex;
-		// Audio before a declared end is a finite tail: running dry after it is silence, not an
-		// underrun, so it drains as received rather than expanding toward a target nothing will refill.
+		// Audio before a declared end is a finite tail: it drains as received, since the next utterance
+		// re-anchors the ring anyway.
 		const end = this.#previous ?? this.#end;
 		const ending = end !== undefined && this.#readIndex < end;
 		const enabled = !quiet && !ending && !this.#buffered;
@@ -456,7 +459,9 @@ export class AudioRingBuffer {
 			const dst = this.#stretch.input[channel];
 			for (let i = 0; i < frames; i++) dst[i] = src[(this.#readIndex + i) % src.length];
 		}
-		this.#stretch.process(frames, buffered, this.#latencySamples, this.#latenessSamples, enabled);
+		const stretch = this.#stretch;
+		stretch.process(frames, this.#peak - this.#latencySamples, enabled);
+		this.#peak -= frames - stretch.length;
 		this.#readIndex += frames;
 		this.#window = frames;
 		this.#windowQuiet = quiet;

@@ -205,9 +205,9 @@ describe("ring replay", () => {
 	it("still underruns when the target ignores the arrival spread, but drops nothing", () => {
 		// 46ms is what the round-trip formula produced on the connection this was measured on: it
 		// describes the network and says nothing about a sender that flushes five frames at once.
-		// Every flush's trough falls below it. Preemptive expand lengthens the ring by one pitch period
-		// a window at most, as NetEq's does, which cannot cover a 100 ms trough, so the ring runs dry
-		// on most flushes; accelerate brings each peak back down rather than skipping it.
+		// Every flush's trough falls below it, and the ring never slows down to cover one, since that
+		// would only settle audio behind the clock, so it runs dry on most flushes; accelerate brings
+		// each peak back down rather than skipping it.
 		const t = trace(600, 5, 5);
 		const result = replay(build(46), t, 2000);
 		const flushes = (t.length - 2000 / CHUNK_MS) / 5;

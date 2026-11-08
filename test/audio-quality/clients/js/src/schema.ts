@@ -139,6 +139,13 @@ export const METRICS = {
 		description:
 			"Share of rendered quanta under the silence floor at the player's output, whatever the cause. The published tone is never quiet, so any of it is a gap or a stall.",
 	},
+	av_lag_ms: {
+		unit: "ms",
+		clock: "media",
+		aggregations: ["p50", "p95"],
+		description:
+			"How far the audio playhead trails the shared clock video plays from (`sync.now()`), sampled while playing: latency audio adds beyond the resolved target. Negative is audio ahead. Unset natively.",
+	},
 	target_ms: {
 		unit: "ms",
 		clock: "viewer",
@@ -390,6 +397,8 @@ export type Sample = {
 	 * is only a sink with nothing written yet, or none at all.
 	 */
 	stalled?: boolean;
+	/** `sync.now()`: where the shared clock puts video, on the `media` clock. Unset natively. */
+	clock?: Ms;
 	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;
 	/**

@@ -301,16 +301,6 @@ impl Consumer {
 		Duration::from_secs_f64(self.target.millis() / 1000.0)
 	}
 
-	/// How late the slowest frame of the last two seconds of media arrived
-	/// against the fastest, from the same reads as [`delay`](Self::delay). Zero
-	/// for a fixed [`Delay::min`], which ignores the arrivals.
-	///
-	/// NetEq's maximum delay: it widens the band a playback sink's `set_lateness`
-	/// holds above the target rather than the target itself.
-	pub fn lateness(&self) -> Duration {
-		Duration::from_secs_f64(self.target.lateness() / 1000.0)
-	}
-
 	/// Sample rate samples are actually delivered at, which is
 	/// [`Output::sample_rate`] resolved against the catalog.
 	pub fn sample_rate(&self) -> u32 {

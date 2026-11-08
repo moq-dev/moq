@@ -74,6 +74,8 @@ const COLUMNS: [string, string][] = [
 	["discarded ms/min", "discarded_ms_per_min"],
 	["stalled", "stalled_share"],
 	["silence", "silence_share"],
+	["A/V lag p50", "av_lag_ms_p50"],
+	["A/V lag p95", "av_lag_ms_p95"],
 	["target p95", "target_ms_p95"],
 	["converge ms", "converge_ms_last"],
 ];

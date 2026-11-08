@@ -62,11 +62,9 @@ impl Stretch {
 
 	/// All input is new, received PCM. Short blocks and finished sinks cannot
 	/// stretch, so a finite input never becomes concealment of an absent frame.
-	/// `lateness` widens the band above `target`, as `buffered` and `target` all
-	/// in frames.
-	pub fn process(&mut self, frames: usize, buffered: usize, target: usize, lateness: usize, enabled: bool) {
+	pub fn process(&mut self, frames: usize, buffered: usize, target: usize, enabled: bool) {
 		let operation = if enabled && frames == self.window {
-			self.decide(buffered, target, lateness)
+			self.decide(buffered, target)
 		} else {
 			Operation::Hold
 		};
@@ -111,10 +109,8 @@ impl Stretch {
 		self.cooldown = self.rate as usize * 50 / 1000;
 	}
 
-	/// NetEq's band above the target: its 20 ms granularity plus the arrivals'
-	/// lateness.
-	fn decide(&self, buffered: usize, target: usize, lateness: usize) -> Operation {
-		let high = target + lateness + self.rate as usize * 20 / 1000;
+	fn decide(&self, buffered: usize, target: usize) -> Operation {
+		let high = target + self.rate as usize * 20 / 1000;
 		if buffered >= high * 4 {
 			Operation::Fast
 		} else if self.cooldown > 0 {
@@ -211,9 +207,6 @@ mod tests {
 		input: Vec<f32>,
 		buffered: usize,
 		target: usize,
-		/// The arrivals' lateness in frames, zero when the vector leaves it out.
-		#[serde(default)]
-		lateness: usize,
 		cooldown: usize,
 		decision: String,
 		lag: usize,
@@ -229,12 +222,12 @@ mod tests {
 			stretch.input.copy_from_slice(&vector.input);
 			stretch.cooldown = vector.cooldown;
 			assert_eq!(
-				format!("{:?}", stretch.decide(vector.buffered, vector.target, vector.lateness)),
+				format!("{:?}", stretch.decide(vector.buffered, vector.target)),
 				vector.decision,
 				"{}",
 				vector.name
 			);
-			stretch.process(stretch.window, vector.buffered, vector.target, vector.lateness, true);
+			stretch.process(stretch.window, vector.buffered, vector.target, true);
 			assert_eq!(stretch.length.abs_diff(stretch.window), vector.lag, "{}", vector.name);
 			assert_eq!(stretch.length * vector.channels, vector.output.len(), "{}", vector.name);
 			for (index, (&actual, &expected)) in stretch.output[..vector.output.len()]
@@ -257,7 +250,7 @@ mod tests {
 			let mut stretch = Stretch::new(rate, 2);
 			stretch.input.fill(0.25);
 			stretch.cooldown = 0;
-			stretch.process(stretch.window, stretch.window, rate as usize, 0, true);
+			stretch.process(stretch.window, stretch.window, rate as usize, true);
 			assert!(stretch.length > stretch.window);
 			let mut output = vec![0.0; 2 * rate as usize];
 			let (_, allocations) = crate::allocation::measure(|| {
@@ -265,9 +258,9 @@ mod tests {
 				assert_eq!(stretch.read(&mut output), 0);
 			});
 			assert_eq!(allocations.operations, 0);
-			stretch.process(stretch.window, stretch.window, rate as usize, 0, false);
+			stretch.process(stretch.window, stretch.window, rate as usize, false);
 			assert_eq!(stretch.length, stretch.window, "a finished sink drains unchanged");
-			stretch.process(stretch.window / 2, stretch.window, rate as usize, 0, true);
+			stretch.process(stretch.window / 2, stretch.window, rate as usize, true);
 			assert_eq!(stretch.length, stretch.window / 2, "a short block drains unchanged");
 		}
 	}

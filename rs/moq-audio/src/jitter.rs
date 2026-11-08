@@ -9,7 +9,6 @@
 //! Every value is `f64` milliseconds, evaluated in the order the page writes it,
 //! so both languages produce bit-identical targets from the same trace.
 
-use std::collections::VecDeque;
 use std::time::Duration;
 
 /// Milliseconds of media time the reference search looks back over.
@@ -85,15 +84,6 @@ impl Target {
 		}
 	}
 
-	/// How late the slowest recent arrival was against the fastest, in milliseconds.
-	/// A fixed target ignores the arrivals, so it reports zero.
-	pub(crate) fn lateness(&self) -> f64 {
-		match self {
-			Self::Fixed(_) => 0.0,
-			Self::Auto(estimator) => estimator.lateness(),
-		}
-	}
-
 	/// The target in milliseconds.
 	pub(crate) fn millis(&self) -> f64 {
 		match self {
@@ -129,17 +119,14 @@ impl Entry {
 }
 
 /// The arrivals inside the reference window, in media order, answering any
-/// prefix's fastest arrival in logarithmic time and the whole window's slowest in
-/// constant time.
+/// prefix's fastest arrival in logarithmic time.
 ///
 /// A reordered frame is measured against the prefix at or before its timestamp,
 /// so a peer that sends only reordered frames would otherwise force a scan per
 /// frame. Entries live in a ring indexed from `head`, and a segment tree over the
 /// ring's slots holds each node's fastest slot, the older on a tie, as the scan
 /// would pick. A query never spans the ring's wrap point within one node, so a
-/// node fully inside it is in arrival order. The slowest is the front of a
-/// monotonic queue of entries, each slower than every later one, named by how
-/// many entries were pushed before it.
+/// node fully inside it is in arrival order.
 #[derive(Default)]
 struct History {
 	/// The ring, its length a power of two that grows up to `MAX_HISTORY`.
@@ -150,10 +137,6 @@ struct History {
 	len: usize,
 	/// Leaf `ring.len() + slot` holds `slot`; each parent holds the faster of its children.
 	tree: Vec<usize>,
-	/// Entries ever pushed, so `pushed - len` names the oldest one held.
-	pushed: usize,
-	/// The entries no later entry is as slow as, oldest first.
-	slow: VecDeque<usize>,
 }
 
 impl History {
@@ -181,37 +164,6 @@ impl History {
 			self.tree[node] = self.faster(self.tree[2 * node], self.tree[2 * node + 1]);
 			node /= 2;
 		}
-
-		// Drop the queue's evicted front, then every entry this one is slower than,
-		// keeping the older on a tie the way the reference does.
-		let oldest = self.pushed + 1 - self.len;
-		while self.slow.front().is_some_and(|&index| index < oldest) {
-			self.slow.pop_front();
-		}
-		let key = arrival - media;
-		while let Some(&back) = self.slow.back() {
-			if self.at(back - oldest).key() >= key {
-				break;
-			}
-			self.slow.pop_back();
-		}
-		self.slow.push_back(self.pushed);
-		self.pushed += 1;
-	}
-
-	/// The entry `index` places after the oldest.
-	fn at(&self, index: usize) -> Entry {
-		self.ring[(self.head + index) & (self.ring.len() - 1)]
-	}
-
-	/// How late the slowest entry arrived against the fastest, zero for an empty
-	/// window: NetEq's `GetMaxDelayMs`, in the same arithmetic as a frame's delay.
-	fn lateness(&self) -> f64 {
-		let (Some(fast), Some(&slow)) = (self.reference(f64::INFINITY), self.slow.front()) else {
-			return 0.0;
-		};
-		let slow = self.at(slow - (self.pushed - self.len));
-		f64::max(0.0, slow.arrival - fast.arrival - (slow.media - fast.media))
 	}
 
 	fn pop(&mut self) {
@@ -402,13 +354,6 @@ impl Estimator {
 		}
 	}
 
-	/// How late the slowest frame in the reference window arrived against the
-	/// fastest: NetEq's maximum delay, which widens the time stretch's band rather
-	/// than the target.
-	fn lateness(&self) -> f64 {
-		self.history.lateness()
-	}
-
 	fn target(&self) -> f64 {
 		let mut cumulative = 0.0;
 		let mut measured = BUCKETS as f64 * BUCKET;
@@ -464,22 +409,12 @@ pub(crate) mod tests {
 		#[serde(default)]
 		pub ends: Vec<usize>,
 		pub target: Vec<(usize, f64)>,
-		pub lateness: Vec<(usize, f64)>,
 	}
 
 	impl Case {
 		/// The expected target after each frame, expanded from the change list.
 		pub fn series(&self) -> Vec<f64> {
-			self.expand(&self.target)
-		}
-
-		/// The expected lateness after each frame, expanded from the change list.
-		pub fn lateness(&self) -> Vec<f64> {
-			self.expand(&self.lateness)
-		}
-
-		fn expand(&self, changes: &[(usize, f64)]) -> Vec<f64> {
-			let mut changes = changes.iter().peekable();
+			let mut changes = self.target.iter().peekable();
 			let mut current = f64::NAN;
 			(0..self.arrival.len())
 				.map(|index| {
@@ -538,7 +473,6 @@ pub(crate) mod tests {
 			target.set_frame(case.frame);
 
 			let series = case.series();
-			let lateness = case.lateness();
 			for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
 				if case.ends.contains(&index) {
 					target.end();
@@ -549,12 +483,6 @@ pub(crate) mod tests {
 					(actual - series[index]).abs() <= 1e-6,
 					"{name}: frame {index} targets {actual}, expected {}",
 					series[index]
-				);
-				let actual = target.lateness();
-				assert!(
-					(actual - lateness[index]).abs() <= 1e-6,
-					"{name}: frame {index} is {actual} late, expected {}",
-					lateness[index]
 				);
 			}
 		}
@@ -622,25 +550,6 @@ pub(crate) mod tests {
 		reference.map(|entry| (entry.arrival, entry.media))
 	}
 
-	/// The documented lateness: the slowest entry against the fastest, each the
-	/// first on a tie.
-	fn slowest(history: &History) -> f64 {
-		let entries: Vec<Entry> = (0..history.len).map(|index| history.at(index)).collect();
-		let Some(&first) = entries.first() else {
-			return 0.0;
-		};
-		let (mut fast, mut slow) = (first, first);
-		for &entry in &entries[1..] {
-			if entry.key() < fast.key() {
-				fast = entry;
-			}
-			if entry.key() > slow.key() {
-				slow = entry;
-			}
-		}
-		f64::max(0.0, slow.arrival - fast.arrival - (slow.media - fast.media))
-	}
-
 	/// The tree must pick exactly the entry the documented scan would, ties included,
 	/// since a tied entry with a different `(arrival, media)` rounds the delay differently.
 	#[test]
@@ -670,7 +579,6 @@ pub(crate) mod tests {
 				let actual = history.reference(query).map(|entry| (entry.arrival, entry.media));
 				assert_eq!(actual, scan(history, query), "frame {index}, query {query}");
 			}
-			assert_eq!(history.lateness(), slowest(history), "frame {index}");
 		}
 	}
 
@@ -688,10 +596,8 @@ pub(crate) mod tests {
 					let actual = history.reference(query).map(|entry| (entry.arrival, entry.media));
 					assert_eq!(actual, scan(history, query), "frame {index}, query {query}");
 				}
-				assert_eq!(history.lateness(), slowest(history), "frame {index}");
 			}
 		}
-		assert_eq!(estimator.history.lateness(), slowest(&estimator.history));
 		assert_eq!(estimator.history.len, MAX_HISTORY);
 		assert_eq!(estimator.history.ring.len(), MAX_HISTORY);
 		assert!(estimator.target().is_finite());

@@ -126,6 +126,7 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			render: context ? context.currentTime * 1000 : undefined,
 			timestamp: audio.out.timestamp.peek(),
 			stalled: audio.out.stalled.peek(),
+			clock: sync.now(),
 			delay: sync.out.delay.peek(),
 			playerUnderruns: audio.out.stats.peek()?.underruns,
 			playerSkips: audio.out.stats.peek()?.skips,

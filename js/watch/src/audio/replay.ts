@@ -81,6 +81,8 @@ export interface Quantum {
 	stalled: boolean;
 	/** The playhead after this quantum, on the media clock, in ms. */
 	timestamp: number;
+	/** Where the shared clock puts video as of this quantum (`Sync.now()`), on the media clock, in ms. */
+	clock?: number;
 	/** The delay `Sync` resolved as of this quantum, in ms: what the ring and the decode gate hold. */
 	delay: number;
 	/** The ring's cumulative underruns, as the player's stats count them: each run-dry and each short quantum. */
@@ -160,12 +162,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const gate = new Backpressure(rate, false, delay);
 	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, gate.floor) });
 	const observe = () => gate.observe(ring.anchored ? ring.timestamp : undefined, ring.stalled);
-
-	// The decoder widens the stretch's band by the consumer's lateness, unless the delay is explicit.
-	signals.run((effect) => {
-		const auto = effect.get(sync.in.delay) === "auto";
-		ring.setLateness(auto ? effect.get(consumer.lateness) : Milli.zero);
-	});
 
 	// Arrived but not yet decoded media, read or still in the consumer, is what covers the part of the
 	// target held encoded, and what resumes a parked ring.
@@ -285,6 +281,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				output,
 				stalled: ring.stalled,
 				timestamp: Milli.fromMicro(ring.timestamp),
+				clock: sync.now(),
 				delay,
 				underruns: ring.underruns,
 				skips: ring.skips,

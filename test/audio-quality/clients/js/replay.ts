@@ -88,6 +88,7 @@ const { replay } = await import("../../../../js/watch/src/audio/replay.ts");
 interface Reading {
 	at: number;
 	timestamp: number;
+	clock?: number;
 	stalled: boolean;
 	delay: number;
 	underruns: number;
@@ -119,6 +120,7 @@ for (const { row, trace } of rows) {
 			at: quantum.at,
 			render: quantum.at,
 			timestamp: quantum.timestamp,
+			clock: quantum.clock,
 			stalled: quantum.stalled,
 			delay: quantum.delay,
 			playerUnderruns: quantum.underruns,
@@ -149,6 +151,7 @@ for (const { row, trace } of rows) {
 		last = {
 			at: quantum.at,
 			timestamp: quantum.timestamp,
+			clock: quantum.clock,
 			stalled: quantum.stalled,
 			delay: quantum.delay,
 			underruns: quantum.underruns,

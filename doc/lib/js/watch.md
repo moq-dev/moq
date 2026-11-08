@@ -242,8 +242,8 @@ them; nothing is retained without an open handle.
 ## Buffered playback
 
 By default the player minimizes latency: it time-stretches received audio
-back onto the delay, playing it slightly faster or slower, and skips ahead only
-when media piles up far past it. Content produced faster than real time, such as a TTS
+that falls behind the delay back onto it, playing it slightly faster, and skips
+ahead only when media piles up far past it. Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
 `lookahead` to how far ahead it may run and it plays through at the encoded pace:
 

@@ -158,9 +158,6 @@ impl Sink for FakeSink {
 		Ok(())
 	}
 
-	// The fake plays at its target and never stretches, so there is no band to widen.
-	fn set_lateness(&mut self, _lateness: Duration) {}
-
 	async fn finish(mut self) {
 		// A finite short tail drains even when it cannot refill the target.
 		if self.prime.take().is_some() {

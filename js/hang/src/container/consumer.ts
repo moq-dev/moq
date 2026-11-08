@@ -231,15 +231,6 @@ export class Consumer {
 	 * floor. Starts at the predecessor's estimate, or the cold-start estimate without one.
 	 */
 	readonly spread: Getter<Milli>;
-	#lateness = new Signal<Milli>(Milli.zero);
-	/**
-	 * How late the slowest frame of the last two seconds of media arrived against the fastest.
-	 *
-	 * NetEq's maximum delay, which widens the time stretch's band in doc/concept/audio-jitter.md
-	 * rather than the target. Starts at zero, even after a predecessor: it measures this track's own
-	 * arrivals.
-	 */
-	readonly lateness: Getter<Milli> = this.#lateness;
 	// The newest group opened by a declared end, until a later group's first frame tells the jitter
 	// estimator the silence is over. Not at the marker itself: the stopped encoder's final packets may
 	// follow it in its own group, and they belong to the speech before the silence.
@@ -470,7 +461,6 @@ export class Consumer {
 				}
 				this.#jitter.observe(arrival, Milli.fromMicro(sample.timestamp));
 				this.#spread.set(this.#jitter.measured);
-				this.#lateness.set(this.#jitter.lateness);
 			} else if (!group.media) {
 				// Only a marker ahead of any media declares an end; one after it is a frame's endpoint.
 				this.#declare(group);

@@ -36,10 +36,6 @@ describe("audio jitter corpus", () => {
 				expect(actual.target[0]?.[0]).toBe(0);
 			});
 
-			test("names a lateness for the first frame", () => {
-				expect(actual.lateness[0]?.[0]).toBe(0);
-			});
-
 			test("reports every target as a change", () => {
 				let previous: number | undefined;
 				let last = -1;
