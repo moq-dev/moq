@@ -388,13 +388,16 @@ class Reader implements ResumeSource {
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
 	#closed = false;
-	/** A copy declared another end: reads fail with this. */
-	#refused?: Error;
-	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
-	#ended = false;
-	/** The serving copy's largest when the track ended, kept once that copy goes. */
-	#last?: { largest?: track.Position; object?: track.Position; ended: true };
-	/** The first end any copy declared: the logical track's, whichever copy serves. */
+	/**
+	 * Set once the logical track ended cleanly: the reader drains what its copies hold and follows
+	 * no route. Holds the serving copy's largest then, kept once that copy goes.
+	 */
+	#ended?: { largest?: track.Position; object?: track.Position; ended: true };
+	/**
+	 * The first end any copy declared: the logical track's, whichever copy serves. A copy declaring
+	 * another breaks the track's identity, which hurts only its own broadcast, so nothing checks that
+	 * copies agree.
+	 */
 	#declared?: track.Position;
 	// The error a copy's end carried, kept with the boundary so releasing that copy keeps it.
 	#declaredError?: Error;
@@ -786,9 +789,8 @@ class Reader implements ResumeSource {
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
 		this.#delivered = delivered;
 		this.sync();
-		// Before anything is handed out, so a copy claiming other content hands out none of it.
 		this.#learnEnd();
-		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
+		if (this.#closed) return { kind: "done" };
 		this.#groupsRead = true;
 		this.#backfillGaps(delivered);
 		if (dispositions) {
@@ -1071,8 +1073,7 @@ class Reader implements ResumeSource {
 		const serving = this.#serving();
 		if (serving) this.#boundAtEnd(serving);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
-		this.#ended = true;
-		this.#last = {
+		this.#ended = {
 			largest: serving && hooks.peekLargest(serving.sub).largest,
 			object: serving && hooks.objectLargest(serving.sub),
 			ended: true,
@@ -1246,7 +1247,7 @@ class Reader implements ResumeSource {
 
 	/** The logical track ended cleanly, so no route continues it. */
 	get ended(): boolean {
-		return this.#ended;
+		return this.#ended !== undefined;
 	}
 
 	/** A group handed out ended or moved copies: let go of what nothing needs any more. */
@@ -1293,9 +1294,7 @@ class Reader implements ResumeSource {
 		return last?.generation === this.#generation ? last : undefined;
 	}
 
-	// The logical track's end, learning it from any copy that declared one. A group
-	// at or past it, on any copy or already handed out, claims other content: a direct track
-	// refuses an end below what it received.
+	// The logical track's end, learning it from any copy that declared one.
 	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
 			const end = hooks.subscriberEnd(copy.sub);
@@ -1303,45 +1302,20 @@ class Reader implements ResumeSource {
 			this.#declare(end);
 			this.#declaredError ??= hooks.subscriberEndError(copy.sub);
 		}
-		const declared = this.#declared;
-		if (declared && !this.#closed) {
-			const final = finalSequence(declared);
-			const seen = (sequence: bigint | undefined) => sequence !== undefined && sequence >= final;
-			if (
-				seen(this.#newest) ||
-				this.#copies.some(
-					(copy) => seen(hooks.latestSequence(copy.sub)) || seen(hooks.peekLargest(copy.sub).largest?.group),
-				)
-			)
-				this.#refuse();
-		}
 		return this.#declared;
 	}
 
-	// Record `end` as the logical track's end. One logical track has one end, as it has one set
-	// of properties: a copy declaring another is refused. A mid-group end refines the group
-	// boundary it falls just before, as a wire end may.
+	// Record `end` as the logical track's end, unless a copy declared one first. A mid-group end
+	// refines the group boundary it falls just before, as a wire end may.
 	#declare(end: track.Position): void {
 		if (this.#closed) return;
 		const declared = this.#declared;
 		if (!declared) {
 			this.#declared = end;
 			this.wake();
-		} else if (declared.group === end.group && declared.frame === end.frame) {
-			return;
-		} else if (finalSequence(declared) === finalSequence(end) && (declared.frame === 0 || end.frame === 0)) {
-			if (declared.frame === 0) this.#declared = end;
-		} else {
-			this.#refuse();
+		} else if (declared.frame === 0 && end.frame !== 0 && finalSequence(declared) === finalSequence(end)) {
+			this.#declared = end;
 		}
-	}
-
-	// Stop reading the copies, which claim other content. `closed` settles with the refusal,
-	// unless it already settled cleanly.
-	#refuse(): void {
-		this.#refused = new Incompatible(this.route.name);
-		this.#shell.close(this.#refused);
-		this.close(this.#refused);
 	}
 
 	start(): bigint | "pending" | undefined {
@@ -1445,20 +1419,20 @@ class Reader implements ResumeSource {
 	objectLargest(): track.Position | undefined {
 		this.sync();
 		const serving = this.#serving();
-		return serving ? hooks.objectLargest(serving.sub) : this.#last?.object;
+		return serving ? hooks.objectLargest(serving.sub) : this.#ended?.object;
 	}
 
 	peekLargest(): { largest?: track.Position; ended: boolean } {
 		this.sync();
 		const serving = this.#serving();
-		return serving ? hooks.peekLargest(serving.sub) : (this.#last ?? { ended: false });
+		return serving ? hooks.peekLargest(serving.sub) : (this.#ended ?? { ended: false });
 	}
 
 	async largest(seen: track.Position | undefined): Promise<track.Position | undefined> {
 		for (;;) {
 			this.sync();
 			const serving = this.#serving();
-			const view = serving ? hooks.peekLargest(serving.sub) : this.#last;
+			const view = serving ? hooks.peekLargest(serving.sub) : this.#ended;
 			const largest = view?.largest;
 			const { start, end } = this.#shell.cursor.peek();
 			// A replacement copy can start below what an earlier one reported.

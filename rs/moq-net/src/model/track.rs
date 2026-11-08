@@ -617,7 +617,7 @@ pub(crate) struct TrackState {
 	evicted: Option<(u64, Timestamp)>,
 
 	// The sequence of the newest cached group: the live edge, protected from
-	// eviction by never entering the eviction order until the track is `closed`.
+	// eviction by never entering the eviction order until no producer remains.
 	// Tracked separately from `max_sequence`, which a reserved sequence can push past
 	// any cached group.
 	latest_group: Option<u64>,
@@ -644,7 +644,7 @@ pub(crate) struct TrackState {
 	// Whether this is a copy received from a remote publisher, and what its readers'
 	// relative and time anchors resolve against there.
 	anchors: Anchors,
-	// Whether readers ask no fills below `start_sequence`: its publisher resolved it from the
+	// Whether readers ask no fills below `start`: its publisher resolved it from the
 	// budget, but neither this copy's timestamps nor a fill can judge an older group against
 	// a reader's budget. A widened budget reaches lower groups through the feed's re-offer.
 	fills_from_start: bool,
@@ -15260,7 +15260,7 @@ mod test {
 
 	#[test]
 	fn drop_after_abort_does_not_warn() {
-		// abort() closes the channel after recording `abort`. Drop must treat the
+		// abort() closes the channel after recording the abort. Drop must treat the
 		// read-only guard returned by write() as clean or it emits a false WARN.
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let producer = track_producer("test", Info::timed());

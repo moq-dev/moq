@@ -2895,14 +2895,11 @@ test("an end a replaced copy declared holds across a swap", async () => {
 	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2n, frame: 0 });
 	expect(await sub.finished()).toEqual({ group: 2n, frame: 0 });
 
-	// A copy declaring another end claims different content.
+	// A copy declaring another end leaves the first one.
 	tb.producer.finishAt({ group: 3n, frame: 0 });
 	await settle();
-	expect(sub.closed.peek()).toBeInstanceOf(Error);
+	expect(sub.closed.peek()).not.toBeInstanceOf(Error);
 	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2n, frame: 0 });
-	// Refused, the reader holds no copy.
-	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
-	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
 
 	sub.close();
 	front.consumer.close();
@@ -3154,7 +3151,9 @@ test("a clean end keeps the serving copy while a group read from a replaced one 
 	}
 });
 
-test("a retained copy declaring another end after a clean end fails the reads", async () => {
+// Once the track ended cleanly, a copy kept for a group it may still deliver can claim another
+// end without failing the reader: `closed` and the reads agree.
+test("a retained copy declaring another end after a clean end fails nothing", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -3178,11 +3177,14 @@ test("a retained copy declaring another end after a clean end fails the reads", 
 		await settle();
 		expect(sub.closed.peek()).toBeNull();
 
-		// The copy still holding group 1 claims another end: its content is refused.
+		// The copy still holding group 1 claims another end.
 		ta.producer.finishAt({ group: 5n, frame: 0 });
+		ta.write(4n);
 		await settle();
 		expect(hooks.subscriberEnd(sub)).toEqual({ group: 3n, frame: 0 });
-		await expect(sub.recvGroup()).rejects.toThrow("changed its properties");
+		expect((await sub.recvGroup())?.sequence).toBe(1n);
+		expect(await sub.recvGroup()).toBeUndefined();
+		expect(sub.closed.peek()).toBeNull();
 	} finally {
 		sub.close();
 		front.consumer.close();
@@ -3228,7 +3230,9 @@ test("a clean end keeps the serving copy while a group handed out before the swa
 	}
 });
 
-test.each(["handed out", "buffered"])("an end below a group another copy %s is refused", async (seen) => {
+// A copy contradicting another's end breaks the track's identity, which hurts only this track:
+// the first end stands and the reader never fails over it.
+test.each(["handed out", "buffered"])("an end below a group another copy %s leaves the first end", async (seen) => {
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -3238,6 +3242,7 @@ test.each(["handed out", "buffered"])("an end below a group another copy %s is r
 	const sub = front.consumer.track("seq").subscribe();
 	try {
 		ta.write(5n);
+		ta.producer.finishAt({ group: 6n, frame: 0 });
 		if (seen === "handed out") expect(drain(sub)).toEqual([5n]);
 		front.serve(b.consume());
 		await settle();
@@ -3245,36 +3250,9 @@ test.each(["handed out", "buffered"])("an end below a group another copy %s is r
 		// The new route ends the track before a group the old one has.
 		tb.producer.finishAt({ group: 3n, frame: 0 });
 		await settle();
-		expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
-		expect(sub.closed.peek()).toBeInstanceOf(Error);
-	} finally {
-		sub.close();
-		front.consumer.close();
-		a.close();
-		b.close();
-	}
-});
-
-test("a group past the declared end on another copy is refused", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	const ta = copy(a);
-	const tb = copy(b);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe();
-	try {
-		ta.write(0n);
-		ta.producer.finishAt({ group: 2n, frame: 0 });
-		expect(drain(sub)).toEqual([0n]);
-		front.serve(b.consume());
-		await settle();
-
-		// The new route has a group the end says never exists.
-		tb.write(3n);
-		await settle();
-		expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
-		expect(sub.closed.peek()).toBeInstanceOf(Error);
+		expect(drain(sub)).toEqual(seen === "handed out" ? [] : [5n]);
+		expect(await sub.finished()).toEqual({ group: 6n, frame: 0 });
+		expect(sub.closed.peek()).not.toBeInstanceOf(Error);
 	} finally {
 		sub.close();
 		front.consumer.close();
