@@ -46,7 +46,7 @@ import {
 import { CACHE_EXPIRY, grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
-import { checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
+import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
 	bounded,
 	type Holdings,
@@ -1861,7 +1861,7 @@ export class Producer {
 	 */
 	skipGroups(start: bigint, end: bigint): void {
 		checkSequence(start);
-		checkSequence(end);
+		checkEnd(end);
 		this.#skipReceived(start, end);
 	}
 

@@ -25,3 +25,11 @@ export function checkSequence(sequence: bigint): bigint {
 	if (sequence >= UNBOUNDED) throw new RangeError(`group sequence exceeds 2^64-1: ${sequence}`);
 	return sequence;
 }
+
+/** Refuse an exclusive end of a run of group sequences that is not a bigint in `[0, 2^64]`, so a run may end past group 2^64-1. */
+export function checkEnd(end: bigint): bigint {
+	if (typeof end !== "bigint") throw new TypeError(`group end must be a bigint: ${String(end)}`);
+	if (end < 0n) throw new RangeError(`group end must be non-negative: ${end}`);
+	if (end > UNBOUNDED) throw new RangeError(`group end exceeds 2^64: ${end}`);
+	return end;
+}

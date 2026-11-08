@@ -4668,4 +4668,7 @@ test("group sequences stop at 2^64-1, as a u64 does", () => {
 	expect(() => producer.createGroup(1n << 64n)).toThrow(RangeError);
 	producer.createGroup((1n << 64n) - 1n).finish();
 	expect(() => producer.appendGroup()).toThrow(RangeError);
+	// A run's exclusive end may sit just past the last group.
+	producer.skipGroups(1n << 63n, 1n << 64n);
+	expect(() => producer.skipGroups(0n, (1n << 64n) + 1n)).toThrow(RangeError);
 });
