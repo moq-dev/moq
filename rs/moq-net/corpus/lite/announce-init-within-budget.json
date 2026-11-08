@@ -1,0 +1,7 @@
+{
+	"version": "moq-lite-02",
+	"message": "announce_init",
+	"budget": 2,
+	"hex": "050201610162",
+	"expect": "decoded"
+}

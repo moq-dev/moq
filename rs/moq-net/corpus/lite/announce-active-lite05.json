@@ -1,0 +1,6 @@
+{
+	"version": "moq-lite-05",
+	"message": "announce",
+	"hex": "0d010a726f6f6d2f616c69636500",
+	"expect": "decoded"
+}

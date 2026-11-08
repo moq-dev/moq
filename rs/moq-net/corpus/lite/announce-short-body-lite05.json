@@ -1,0 +1,6 @@
+{
+	"version": "moq-lite-05",
+	"message": "announce",
+	"hex": "0101",
+	"expect": "refused"
+}

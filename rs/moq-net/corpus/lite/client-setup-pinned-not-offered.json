@@ -1,0 +1,7 @@
+{
+	"version": "moq-lite-02",
+	"message": "client_setup",
+	"server": "moq-lite-05",
+	"hex": "20001202c0000000ff0dad07c0000000ff0dad0600",
+	"expect": "refused"
+}

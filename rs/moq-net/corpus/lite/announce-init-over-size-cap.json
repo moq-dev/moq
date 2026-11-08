@@ -1,0 +1,6 @@
+{
+	"version": "moq-lite-02",
+	"message": "announce_init",
+	"hex": "800ffff1",
+	"expect": "refused"
+}
