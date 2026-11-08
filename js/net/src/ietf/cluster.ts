@@ -108,7 +108,7 @@ export function fromSetup(params: SetupOptions, version: IetfVersion): Hop | und
 	// 0 is legal: the peer speaks the extension but withholds its identity.
 	const value = params.getVarint(SetupOption.HopId);
 	if (value === undefined) return undefined;
-	return HopSchema.parse(value);
+	return fromWire(value);
 }
 
 /**
@@ -267,6 +267,15 @@ export function apply(held: Advert, update: Update): Advert {
 	return { hops: update.hops ?? held.hops, cost: update.cost ?? held.cost };
 }
 
+/**
+ * Read a Hop ID off the wire. The draft gives it the full 64-bit varint range, but a
+ * {@link Hop} on this release line is 62 bits, so a wider id reads as {@link UNKNOWN_HOP}:
+ * it identifies nothing, which costs loop detection through that hop instead of the session.
+ */
+function fromWire(value: bigint): Hop {
+	return value >= 1n << 62n ? UNKNOWN_HOP : HopSchema.parse(value);
+}
+
 /** Read a HOP_PATH value: bare varints filling the parameter, with no count of their own. */
 function decodeHops(value: Uint8Array): Hop[] {
 	const hops: Hop[] = [];
@@ -274,7 +283,7 @@ function decodeHops(value: Uint8Array): Hop[] {
 	while (rest.length > 0) {
 		// A short read here means the entries did not exactly fill the length.
 		const [hop, remain] = Varint.decodeLeadingOnes(rest);
-		hops.push(HopSchema.parse(hop));
+		hops.push(fromWire(hop));
 		rest = remain;
 
 		// Bail before the buffer does: a hostile length would otherwise cost us one

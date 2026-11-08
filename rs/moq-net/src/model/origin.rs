@@ -79,11 +79,15 @@ impl Hop {
 	}
 
 	/// Build a hop from an id read off the wire, where 0 is legal.
-	pub(crate) fn from_wire(id: u64) -> Result<Self, DecodeError> {
+	///
+	/// A peer may pick its id anywhere in 64 bits (draft-lcurley-moq-cluster), but a hop
+	/// holds 62, so a wider id reads as [`Self::UNKNOWN`]: the session survives, losing
+	/// loop detection through that hop.
+	pub(crate) const fn from_wire(id: u64) -> Self {
 		if id >= 1u64 << 62 {
-			return Err(DecodeError::InvalidValue);
+			return Self::UNKNOWN;
 		}
-		Ok(Self { id })
+		Self { id }
 	}
 }
 
@@ -220,7 +224,7 @@ where
 	u64: Decode<V>,
 {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		Self::from_wire(u64::decode(r, version)?)
+		Ok(Self::from_wire(u64::decode(r, version)?))
 	}
 }
 
