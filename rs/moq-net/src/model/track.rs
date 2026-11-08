@@ -667,7 +667,21 @@ pub(crate) struct TrackState {
 	// Bumped on every insert into `drops`, and when `judged` changes, so a cursor rescans
 	// it only after a change.
 	drops_revision: u64,
+	// Bumped when `judged` changes, which settles received stale runs differently, so a
+	// wire cursor scans the whole drop set again.
+	judged_revision: u64,
 	drops_changes: ledger::Changes,
+	// The pool tick past which each run of `drops` outlives the pool's expiry window, as of
+	// when it was last given up, rounded up to a quarter of the window so runs given up
+	// together stay one entry. Empty when the pool has no expiry.
+	drops_born: RangeMap<u64, u64>,
+	// At most the lowest tick in `drops_born`, so an expiry scan finds nothing to forget
+	// without walking it.
+	drops_oldest: Option<u64>,
+	// What `drops` and `drops_born` bill to the pool: [`RUN_OVERHEAD`] per entry. Paying
+	// eviction debt sheds the lowest runs, and the expiry scan forgets those older than the
+	// pool's window; either leaves their sequences unknown again.
+	drops_bill: cache::Extra,
 	// How many copies the cache took in that the live feed didn't deliver: fetched backfill,
 	// and fetched heads joining a live group, which may give it a start. Neither is in the
 	// arrival ledger, so a time end parked on a gap looks again.
@@ -947,6 +961,16 @@ impl Slot {
 /// derived rather than measured.
 pub(super) const CACHE_OVERHEAD: u64 =
 	2 * (2 * size_of::<u64>() + size_of::<Slot>() + size_of::<(u64, Timestamp)>() + 2 * size_of::<(u64, u32)>()) as u64;
+
+/// Heap the track keeps per run of its drop set: the run and its reason in `drops`, its two
+/// entries in `drops_changes`, and its expiry in `drops_born`, billed per entry of either map.
+/// Doubled for half-full `BTreeMap` nodes, as [`CACHE_OVERHEAD`] is. Billed to the pool, so a peer fragmenting its drops into runs costs
+/// what the cache would hold, never more.
+pub(super) const RUN_OVERHEAD: u64 = 2
+	* (size_of::<(ops::Range<u64>, Hole)>()
+		+ size_of::<(u64, (u64, u64))>()
+		+ size_of::<(u64, u64)>()
+		+ size_of::<(ops::Range<u64>, u64)>()) as u64;
 
 /// Where the groups this hop holds start, for resolving time anchors: ordered lookups in
 /// the starts index and the cache, so no query walks more than the run it answers.
@@ -1372,19 +1396,86 @@ impl TrackState {
 	fn change_drops(&mut self, groups: ops::Range<u64>, hole: Option<Hole>) {
 		let mut affected = groups.start.saturating_sub(1)..groups.end.saturating_add(1);
 		let old: Vec<_> = self.drops.overlapping(&affected).map(|(run, _)| run.clone()).collect();
-		for run in old {
+		for run in &old {
 			self.drops_changes.remove(run.start);
 			affected.start = affected.start.min(run.start);
 			affected.end = affected.end.max(run.end);
 		}
+		let entries = |state: &Self, affected: &ops::Range<u64>| {
+			(state.drops.overlapping(affected).count() + state.drops_born.overlapping(affected).count()) as u64
+		};
+		let before = entries(self, &affected);
 		match hole {
-			Some(hole) => self.drops.insert(groups, hole),
-			None => self.drops.remove(groups),
+			Some(hole) => {
+				self.drops.insert(groups.clone(), hole);
+				let max_ticks = self.cache.pool().expiry_ticks();
+				if max_ticks != u64::MAX {
+					// Rounded up to a quarter of the window, so a run is forgotten no sooner
+					// than the window after it was given up.
+					let quarter = (max_ticks / 4).max(1);
+					let now = self.cache.pool().now();
+					let expires = (now / quarter).saturating_add(1).saturating_mul(quarter).saturating_add(max_ticks);
+					self.drops_born.insert(groups, expires);
+					self.drops_oldest = Some(self.drops_oldest.map_or(expires, |oldest| oldest.min(expires)));
+				}
+			}
+			None => {
+				self.drops.remove(groups.clone());
+				self.drops_born.remove(groups);
+			}
 		}
 		for (run, _) in self.drops.overlapping(&affected) {
 			self.drops_changes.insert(run.clone());
 		}
+		let after = entries(self, &affected);
+		if after > before {
+			self.drops_bill.add((after - before) * RUN_OVERHEAD);
+		} else {
+			self.drops_bill.sub((before - after) * RUN_OVERHEAD);
+		}
 		self.drops_revision += 1;
+	}
+
+	/// Whether a run of the drop set may have outlived the pool's expiry window by `now`.
+	fn drops_expired(&self, now: u64) -> bool {
+		self.drops_oldest.is_some_and(|expires| now >= expires)
+	}
+
+	/// Forget the runs of the drop set given up longer than the pool's expiry window before
+	/// `now`: their sequences are unknown again, as a shed run's are. Walks the set only once
+	/// its oldest run is due, which a quarter of the window separates from the next.
+	fn expire_drops(&mut self, now: u64) {
+		if !self.drops_expired(now) {
+			return;
+		}
+		let expired: Vec<_> = self
+			.drops_born
+			.iter()
+			.filter(|(_, expires)| now >= **expires)
+			.map(|(run, _)| run.clone())
+			.collect();
+		for run in expired {
+			self.change_drops(run, None);
+		}
+		self.drops_oldest = self.drops_born.iter().map(|(_, expires)| *expires).min();
+	}
+
+	/// Forget the lowest runs of the drop set until the debt is paid or `cap` bytes are
+	/// freed, returning the bytes freed. Their sequences are unknown again: a reader judges
+	/// them by its budget, or fills them by range.
+	fn shed_drops(&mut self, cap: u64) -> u64 {
+		let mut paid = 0u64;
+		while self.debt > 0 && paid < cap {
+			let Some(run) = self.drops.first_range_value().map(|(run, _)| run.clone()) else {
+				break;
+			};
+			let billed = self.drops_bill.size();
+			self.change_drops(run, None);
+			let freed = billed.saturating_sub(self.drops_bill.size());
+			self.debt -= freed.min(self.debt);
+			paid = paid.saturating_add(freed);
+		}
+		paid
 	}
 
 	/// Remove an aborted slot, keeping a cut as a drop: reclaiming it must not erase a
@@ -2115,9 +2206,11 @@ impl TrackState {
 			}
 		}
 
-		self.arrival
-			.front()
-			.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
+		self.drops_expired(scan.now)
+			|| self
+				.arrival
+				.front()
+				.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
 			|| self
 				.evict
 				.front()
@@ -2186,6 +2279,8 @@ impl TrackState {
 				self.evict_group(sequence, Error::Old);
 			}
 		}
+
+		self.expire_drops(scan.now);
 
 		// Trim dead leading arrival entries to advance the subscriber offset. An
 		// entry is dead once its slot is gone or re-stamped by a newer incarnation.
@@ -2366,7 +2461,10 @@ impl TrackState {
 			..Default::default()
 		});
 		let cache = cache::Track::new(broadcast.pool.clone(), broadcast.frames.clone(), state.downgrade());
-		state.write().ok().expect("a new track is open").cache = cache;
+		let mut new = state.write().ok().expect("a new track is open");
+		new.drops_bill = cache.extra();
+		new.cache = cache;
+		drop(new);
 		state
 	}
 
@@ -2681,6 +2779,11 @@ impl TrackState {
 			self.debt -= size;
 			paid = paid.saturating_add(size);
 			self.evict_group(sequence, Error::Evicted);
+		}
+		// Then the drop set, oldest sequences first: losing a run costs a reader a judgment or
+		// a fill, never content being read.
+		if self.debt > 0 && paid < cap {
+			paid = paid.saturating_add(self.shed_drops(cap - paid));
 		}
 		// No cold group left to pay with: shed the front of the groups that could not go
 		// whole, the ones being read and then the live edge, so neither grows without bound.
@@ -4124,6 +4227,7 @@ impl Producer {
 			return RangeSet::new();
 		};
 		let cached = state.skip_groups(groups);
+		state.charge_debt();
 		let deferred = state.deferred();
 		drop(state);
 		deferred.wake();
@@ -4143,6 +4247,7 @@ impl Producer {
 		if state.judged != judged {
 			state.judged = judged;
 			state.drops_revision += 1;
+			state.judged_revision += 1;
 		}
 		state.supersede_stale()
 	}
@@ -4176,7 +4281,7 @@ impl Producer {
 					.filter(|(_, slot)| slot.visible && !slot.group.is_aborted())
 					.map(|(&sequence, slot)| (sequence, slot.group.clone()))
 					.collect();
-				match hole.stale_budget() {
+				let recorded = match hole.stale_budget() {
 					// A lite-07 publisher may serve a group after its stale drop, and the group's
 					// stream may land first: the group wins, still arriving or not.
 					Some(_) => {
@@ -4197,7 +4302,9 @@ impl Producer {
 						state.drop_groups(groups, hole),
 						open.into_iter().map(|(_, group)| group).collect(),
 					),
-				}
+				};
+				state.charge_debt();
+				recorded
 			}
 			Err(_) => return RangeSet::new(),
 		};
@@ -7368,8 +7475,9 @@ impl Pending {
 	}
 }
 
-/// The [`TrackState::drops_revision`], span, window revision, and the budget and coverage
-/// that settle received stale runs (see [`Drift::settles`]) a [`DropCursor`] folded in.
+/// The [`TrackState::judged_revision`], span, window revision, and the budget and coverage
+/// that settle received stale runs (see [`Drift::settles`]) a [`DropCursor`] last scanned
+/// the whole span under; between them it folds in only the runs that changed.
 type Scan = (u64, ops::Range<u64>, u64, Option<(Duration, Coverage)>);
 
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
@@ -7384,6 +7492,9 @@ struct DropCursor {
 	/// What `pending` last folded in; see [`Scan`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	scanned: Option<Scan>,
+	/// The [`TrackState::drops_changes`] revision `pending` folded in.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	seen: u64,
 	/// The budget and coverage of the last drift judged, which settle received stale runs
 	/// until the next: a queue-only poll judges none, and must not unsettle them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -7413,6 +7524,7 @@ impl DropCursor {
 			cuts: state.cache.watch_cuts(),
 			pending: RangeMap::new(),
 			scanned: None,
+			seen: 0,
 			drift: None,
 			reported: RangeSet::new(),
 			reported_stale: RangeSet::new(),
@@ -7489,25 +7601,47 @@ impl DropCursor {
 				self.cut(sequence, slot);
 			}
 		}
-		// Rescan only after the drops change, the window moves, or what settles a stale run
-		// does; out-of-window and unsettling runs were skipped and may be owed now.
+		// Rescan the span only after the window moves or what settles a stale run does, since
+		// out-of-window and unsettling runs were skipped and may be owed now; otherwise fold in
+		// only the runs that changed, so a drop costs each cursor the runs it touches.
 		if let Some(drift) = within.drift {
 			self.drift = Some((drift.budget, drift.coverage.clone()));
 		}
-		let scan = (state.drops_revision, span.clone(), within.revision, self.drift.clone());
-		if self.scanned.as_ref() != Some(&scan) {
-			self.scanned = Some(scan);
-			let stale: Vec<_> = self
+		let scan = (state.judged_revision, span.clone(), within.revision, self.drift.clone());
+		let full = self.scanned.as_ref() != Some(&scan);
+		let changed: Vec<ops::Range<u64>> = match full {
+			false => state.drops_changes.since(self.seen).collect(),
+			true => {
+				self.scanned = Some(scan);
+				let received: Vec<_> = self
+					.pending
+					.iter()
+					.filter(|(_, pending)| pending.received)
+					.map(|(run, _)| run.clone())
+					.collect();
+				for run in received {
+					self.pending.remove(run);
+				}
+				vec![span.clone()]
+			}
+		};
+		self.seen = state.drops_changes.revision();
+		for changed in changed {
+			let changed = changed.start.max(span.start)..changed.end.min(span.end);
+			if changed.is_empty() {
+				continue;
+			}
+			let received: Vec<_> = self
 				.pending
-				.iter()
+				.overlapping(&changed)
 				.filter(|(_, pending)| pending.received)
-				.map(|(run, _)| run.clone())
+				.map(|(run, _)| run.start.max(changed.start)..run.end.min(changed.end))
 				.collect();
-			for run in stale {
+			for run in received {
 				self.pending.remove(run);
 			}
-			for (dropped, hole) in state.drops.overlapping(span.clone()) {
-				let run = dropped.start.max(span.start)..dropped.end.min(span.end);
+			for (dropped, hole) in state.drops.overlapping(&changed) {
+				let run = dropped.start.max(changed.start)..dropped.end.min(changed.end);
 				// A received stale run that does not settle this reader is unknown to it.
 				let settled = match &self.drift {
 					Some((budget, coverage)) => settles(*budget, coverage, run.start, hole, state.judged.as_ref()),
@@ -7523,6 +7657,8 @@ impl DropCursor {
 					);
 				}
 			}
+		}
+		if full {
 			for (&sequence, slot) in state.lookup.range(span.clone()) {
 				self.cut(sequence, slot);
 			}
@@ -7534,6 +7670,25 @@ impl DropCursor {
 			.map(|(range, pending)| (range.clone(), pending.clone()))
 		{
 			self.pending.remove(range.clone());
+			// A received run the track has since forgotten, shed or superseded, is unknown
+			// again: only the part the track still holds as it was folded in is owed.
+			let range = match pending.received {
+				true => {
+					let Some((held, _)) = state
+						.drops
+						.overlapping(&range)
+						.find(|(_, hole)| **hole == pending.hole)
+					else {
+						continue;
+					};
+					let held = range.start.max(held.start)..range.end.min(held.end);
+					if held.end < range.end {
+						self.pending.insert(held.end..range.end, pending.clone());
+					}
+					held
+				}
+				false => range,
+			};
 			// Only what this subscriber asked for is owed: the first run of its ranges in it,
 			// the rest of the range waiting its turn.
 			let Some(clipped) = window.clip(range.start.max(span.start)..range.end.min(span.end)) else {
@@ -19709,8 +19864,10 @@ mod test {
 		let settling = producer.state.downgrade().upgrade().expect("open");
 		drop(producer);
 
-		assert_eq!(pool.used(), 0, "the abrupt teardown still released the cache");
+		// What remains is the drop the teardown recorded for the open group, held by the state.
+		assert_eq!(pool.used(), RUN_OVERHEAD, "the abrupt teardown still released the cache");
 		drop(settling);
+		assert_eq!(pool.used(), 0, "the state's drop set goes with it");
 	}
 
 	/// A subscriber holding one cached group must not pin the whole track: a group
@@ -23519,6 +23676,74 @@ mod test {
 
 	/// Skips are kept and reported as runs: a huge `skip_groups` or append gap costs one
 	/// entry and one report, whatever its length.
+	/// A run given up longer than the pool's expiry window ago is forgotten by the sweep, even
+	/// on a track that caches nothing, so a pool with no byte target still bounds the drop set;
+	/// a run given up since stays.
+	#[test]
+	fn the_sweep_forgets_runs_past_the_expiry_window() {
+		let producer = track_producer("test", Info::timed());
+		let pool = producer.broadcast.pool.clone();
+		let used = pool.used();
+		producer.drop_groups(0..1, StreamError::Old);
+		producer.drop_groups(2..3, StreamError::Old);
+		elapse(&producer, cache::DEFAULT_EXPIRY / 2);
+		producer.drop_groups(4..5, StreamError::Old);
+		assert_eq!(pool.used(), used + 6 * RUN_OVERHEAD, "each run and its expiry are billed");
+
+		elapse(&producer, cache::DEFAULT_EXPIRY);
+		pool.sweep();
+		let held: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.clone()).collect();
+		assert_eq!(held, [4..5], "only the run given up within the window stays");
+		assert_eq!(pool.used(), used + 2 * RUN_OVERHEAD);
+		assert!(producer.state.read().given_up(0).is_none(), "a forgotten run is unknown again");
+
+		elapse(&producer, cache::DEFAULT_EXPIRY);
+		pool.sweep();
+		assert!(producer.state.read().drops.is_empty());
+		assert_eq!(pool.used(), used);
+	}
+
+	/// A drop-only flood of disjoint runs bills the pool and sheds its lowest runs to stay
+	/// within it, with no cached group to evict; a shed run is unknown again, so a wire cursor
+	/// reports only the runs the track still holds.
+	#[test]
+	fn a_drop_flood_stays_within_the_pool() {
+		const RUNS: u64 = 1000;
+		let capacity = 64 * RUN_OVERHEAD;
+		let (producer, pool) = pooled_producer(capacity);
+		let waiter = kio::Waiter::noop();
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		let mut reported = Vec::new();
+		for run in 0..RUNS {
+			producer.drop_groups(2 * run..2 * run + 1, StreamError::Old);
+			assert!(
+				pool.used() <= capacity + 2 * RUN_OVERHEAD,
+				"run {run} took the pool to {}",
+				pool.used()
+			);
+			// Midway, the cursor takes in every run held then, and reports the lowest; the
+			// rest are shed before it reports them.
+			if run == RUNS / 2 {
+				let Poll::Ready((first, _)) = subscriber.poll_drop(&waiter) else {
+					panic!("a run is owed");
+				};
+				reported.push(first);
+			}
+		}
+		let held: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.clone()).collect();
+		assert_eq!(pool.used(), held.len() as u64 * RUN_OVERHEAD);
+		let lowest = held.first().expect("the newest runs stay").start;
+		assert!(lowest > 0, "the lowest runs were shed first");
+		assert!(held.windows(2).all(|pair| pair[1].start == pair[0].start + 2), "only a prefix was shed");
+		assert_eq!(held.last().map(|run| run.start), Some(2 * (RUNS - 1)));
+		assert!(producer.state.read().given_up(0).is_none(), "a shed run is unknown again");
+
+		while let Poll::Ready((run, _)) = subscriber.poll_drop(&waiter) {
+			reported.push(run);
+		}
+		assert_eq!(reported[1..], held[..]);
+	}
+
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_huge_skip_costs_one_run() {

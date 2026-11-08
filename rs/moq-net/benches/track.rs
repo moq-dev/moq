@@ -16,6 +16,13 @@
 //! `track_subscriber_churn_after_peak` runs the same churn after a departed audience,
 //! so entries walked in proportion to the old peak show up as a slope over it.
 //!
+//! `track_subscriber_churn_drops` drops one more run into a fragmented drop set read by wire
+//! cursors, each reporting it, swept over the readers, the runs the track shares, the runs
+//! each reader's range holds and already reported, and the span of each run (built with the
+//! `fuzz` feature, which reaches the crate-private drop cursor). A drop must cost each reader
+//! the runs it touches, so a slope over the runs, what each reader reported, or the span
+//! means a cursor walks the set.
+//!
 //! `track_subscriber_join` measures a burst of viewers joining one track: each join
 //! registers in the subscription list, so any per-join walk of it shows up as a slope.
 //!
@@ -904,6 +911,37 @@ fn bench_subscriber_churn_after_peak(c: &mut Criterion) {
 	}
 	group.finish();
 }
+
+/// Readers of a fragmented drop set, its runs, the runs each reader reported, and each run's span.
+#[cfg(feature = "fuzz")]
+const DROP_READERS: [usize; 3] = [1, 16, 256];
+#[cfg(feature = "fuzz")]
+const DROP_RUNS: [u64; 3] = [16, 1024, 65_536];
+#[cfg(feature = "fuzz")]
+const DROP_SPAN: [u64; 2] = [1, 1 << 32];
+
+#[cfg(feature = "fuzz")]
+fn bench_subscriber_churn_drops(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_subscriber_churn_drops");
+	group.throughput(Throughput::Elements(1));
+	for readers in DROP_READERS {
+		for runs in DROP_RUNS {
+			for reported in [1, runs] {
+				for span in DROP_SPAN {
+					let id = format!("{readers}r/{runs}n/{reported}k/span_{span}");
+					group.bench_function(BenchmarkId::from_parameter(id), |b| {
+						let mut set = moq_net::fuzz::DropSet::new(readers, runs, reported, span);
+						b.iter(|| set.drop_one());
+					});
+				}
+			}
+		}
+	}
+	group.finish();
+}
+
+#[cfg(not(feature = "fuzz"))]
+fn bench_subscriber_churn_drops(_: &mut Criterion) {}
 
 /// One join and its aggregate poll, excluding the departure between iterations.
 fn bench_subscriber_join(c: &mut Criterion) {
@@ -2134,6 +2172,7 @@ criterion_group!(
 	bench_gc,
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
+	bench_subscriber_churn_drops,
 	bench_subscriber_join,
 	bench_range_demand,
 	bench_subscription_ranges,

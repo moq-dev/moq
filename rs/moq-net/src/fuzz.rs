@@ -33,6 +33,57 @@ use crate::{
 /// [`seeds`] is checked against.
 pub type Target = fn(&[u8]) -> bool;
 
+/// A track holding a fragmented drop set, read by wire cursors, for the drop-set bench.
+pub struct DropSet {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	readers: Vec<track::Subscriber>,
+	next: u64,
+	span: u64,
+	waiter: kio::Waiter,
+}
+
+impl DropSet {
+	/// `runs` disjoint dropped runs of `span` sequences each, read by `readers` wire cursors
+	/// whose ranges hold the newest `reported` of them, each already reported.
+	pub fn new(readers: usize, runs: u64, reported: u64, span: u64) -> Self {
+		let broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let track = broadcast.create_track("drops", track::Info::default()).unwrap();
+		let stride = span + 1;
+		let from = runs.saturating_sub(reported) * stride;
+		let mut readers: Vec<_> = (0..readers)
+			.map(|_| track.subscribe(None).with_range(from..))
+			.collect();
+		for run in 0..runs {
+			track.drop_groups(run * stride..run * stride + span, crate::StreamError::Old);
+		}
+		let waiter = kio::Waiter::noop();
+		for reader in &mut readers {
+			while reader.poll_drop(&waiter).is_ready() {}
+		}
+		Self {
+			_broadcast: broadcast,
+			track,
+			readers,
+			next: runs * stride,
+			span,
+			waiter,
+		}
+	}
+
+	/// Drop one more run above the rest, and have every reader report it.
+	pub fn drop_one(&mut self) {
+		let start = self.next;
+		self.next += self.span + 1;
+		self.track
+			.drop_groups(start..start + self.span, crate::StreamError::Old);
+		for reader in &mut self.readers {
+			assert!(reader.poll_drop(&self.waiter).is_ready(), "the new run is owed");
+			assert!(reader.poll_drop(&self.waiter).is_pending(), "nothing else is");
+		}
+	}
+}
+
 /// Build a cached group with optional private object fields for model benchmarks.
 pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
