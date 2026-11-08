@@ -1494,7 +1494,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_failed_drain_aborts_the_track() {
 		let (producer, mut track) = track_under_test().await;
-		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail"));
+		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail").into());
 		finalize(
 			producer,
 			Err(err),

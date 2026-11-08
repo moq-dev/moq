@@ -11,9 +11,6 @@
 //! is sure to honor a cut, and forces a keyframe whenever a joining subscriber asks for a group
 //! past the largest. The encoder's GOP stays the upper bound between keyframes.
 
-#[cfg(feature = "capture")]
-use std::sync::Arc;
-
 use moq_mux::catalog::hang::CatalogExt;
 #[cfg(feature = "capture")]
 use moq_mux::rate;
@@ -127,7 +124,7 @@ impl Producer {
 			},
 			// Unreachable via `Config::probe`, which only encodes what `Codec` covers.
 			other => {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"{other} is not a codec this producer can publish"
 				)));
 			}
@@ -329,23 +326,12 @@ pub enum Status {
 	/// Frames are being captured, encoded, and published.
 	Live,
 	/// The capture, encoder, or track failed with this error, which [`Driver::run`] returns.
-	Failed(Arc<Error>),
+	Failed(Error),
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
 	/// The [`Driver`] or its [`run`](Driver::run) future was dropped before it
 	/// finished, cancelling the capture.
 	Cancelled,
-}
-
-#[cfg(feature = "capture")]
-impl Status {
-	/// Whether publishing `self` over `other` changes nothing an observer can see.
-	fn same(&self, other: &Self) -> bool {
-		match (self, other) {
-			(Self::Failed(a), Self::Failed(b)) => Arc::ptr_eq(a, b),
-			_ => std::mem::discriminant(self) == std::mem::discriminant(other),
-		}
-	}
 }
 
 /// A snapshot of a capture publication's lifecycle.
@@ -385,7 +371,10 @@ fn starting() -> kio::Producer<Published> {
 #[cfg(feature = "capture")]
 fn publish_status(state: &kio::Producer<Published>, status: Status) {
 	let Ok(mut published) = state.write() else { return };
-	if !published.state.status.same(&status) {
+	// A repeated status changes nothing an observer can see; a failure always carries news.
+	if matches!(status, Status::Failed(_))
+		|| std::mem::discriminant(&published.state.status) != std::mem::discriminant(&status)
+	{
 		published.state.status = status;
 		published.revision = published.revision.wrapping_add(1);
 	}
@@ -549,20 +538,20 @@ impl<E: CatalogExt> Drop for Driver<E> {
 
 #[cfg(feature = "capture")]
 impl<E: CatalogExt> Driver<E> {
-	/// Capture until the broadcast is dropped (the track stops being announced) or the
-	/// capture fails.
+	/// Capture until the capture fails or its track ends. Closing or dropping the broadcast
+	/// leaves the track running; drop the [`Driver`] or this future to stop it.
 	///
 	/// Frames are stamped on the catalog's clock, so a concurrent audio publish into the
 	/// same catalog stays aligned. Off macOS and iOS the future is `Send` and can be
 	/// spawned; on macOS the capture session is `!Send`, so await it on a local task there.
-	pub async fn run(self) -> Result<(), Arc<Error>> {
+	pub async fn run(self) -> Result<(), Error> {
 		self.run_from(DeviceSource).await
 	}
 
 	/// [`run`](Self::run) from `source`, so the fixtures can drive it from a synthetic or
 	/// stalled one.
-	async fn run_from<S: CaptureSource>(mut self, source: S) -> Result<(), Arc<Error>> {
-		let result = self.capture(source).await.map_err(Arc::new);
+	async fn run_from<S: CaptureSource>(mut self, source: S) -> Result<(), Error> {
+		let result = self.capture(source).await;
 		// This runs only when the capture ends on its own; dropping the future leaves the
 		// track to `Drop` instead, since async `Drop` can't finalize it.
 		let owned = std::mem::replace(&mut self.owned, Owned::Done);
@@ -635,7 +624,7 @@ impl<E: CatalogExt> Driver<E> {
 
 /// Register the capture's video track, before anything about its source is known.
 ///
-/// Consumes `broadcast`, so the publish ends once the caller drops theirs.
+/// Takes `broadcast` only to mint the track, which outlives it.
 #[cfg(feature = "capture")]
 fn capture_track<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
@@ -1871,7 +1860,7 @@ mod tests {
 			catalog: moq_mux::catalog::Producer,
 			options: Capture,
 			source: impl CaptureSource,
-		) -> Result<(), Arc<Error>> {
+		) -> Result<(), Error> {
 			let (_, driver) = publish_capture(broadcast, catalog, options)?;
 			driver.run_from(source).await
 		}

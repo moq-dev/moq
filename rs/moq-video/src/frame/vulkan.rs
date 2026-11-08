@@ -71,8 +71,8 @@ impl Handles {
 	)]
 	fn try_clone(&self) -> Result<Self, Error> {
 		Ok(Self {
-			memory: self.memory.try_clone().map_err(|e| Error::Codec(e.into()))?,
-			timeline: self.timeline.try_clone().map_err(|e| Error::Codec(e.into()))?,
+			memory: self.memory.try_clone().map_err(|e| Error::codec(e.into()))?,
+			timeline: self.timeline.try_clone().map_err(|e| Error::codec(e.into()))?,
 		})
 	}
 }

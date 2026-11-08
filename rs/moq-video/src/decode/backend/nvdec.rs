@@ -44,7 +44,7 @@ use crate::{Error, Frame};
 pub(crate) const NAME: &str = "nvdec";
 
 fn codec_err(msg: String) -> Error {
-	Error::Codec(anyhow::anyhow!(msg))
+	Error::codec(anyhow::anyhow!(msg))
 }
 
 pub(crate) struct Nvdec {

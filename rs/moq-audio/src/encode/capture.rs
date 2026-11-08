@@ -64,22 +64,12 @@ pub enum Status {
 	///
 	/// After a source failure the driver keeps serving retained history on demand
 	/// until it is served or expires, then returns the failure.
-	Failed(Arc<Error>),
+	Failed(Error),
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
 	/// The [`Driver`] or its [`run`](Driver::run) future was dropped before it
 	/// finished, cancelling the track.
 	Cancelled,
-}
-
-impl Status {
-	/// Whether publishing `self` over `other` changes nothing an observer can see.
-	fn same(&self, other: &Self) -> bool {
-		match (self, other) {
-			(Self::Failed(a), Self::Failed(b)) => Arc::ptr_eq(a, b),
-			_ => std::mem::discriminant(self) == std::mem::discriminant(other),
-		}
-	}
 }
 
 /// A snapshot of a capture publication's lifecycle.
@@ -282,7 +272,7 @@ enum End {
 	/// The track closed.
 	Closed,
 	/// The source failed, and every retained frame since was served or expired.
-	Failed(Arc<Error>),
+	Failed(Error),
 }
 
 impl Driver {
@@ -295,42 +285,34 @@ impl Driver {
 		let end = self.drive().await;
 		let mut producer = self.producer.take().unwrap();
 		let now = self.clock.now();
-		let ended = end.map_err(Arc::new).and_then(|end| match end {
-			End::Closed => producer
-				.set_active(false, now)
-				.and_then(|()| producer.finish())
-				.map(|()| None)
-				.map_err(Arc::new),
-			End::Failed(failure) => {
+		let result = match end {
+			Ok(End::Failed(failure)) => {
+				// Retention already reports the failure. It stays the cause even when the track
+				// can no longer end cleanly, such as one aborted while it still retained audio.
 				let ended = producer
 					.set_active(false, now)
 					.and_then(|()| producer.fail(moq_net::Error::Transport(failure.to_string())));
-				// The source failure stays the cause, even when its track can no longer end
-				// cleanly, such as one aborted while it still retained audio.
-				match ended {
-					Ok(()) => Ok(Some(failure)),
-					Err(_) => Err(failure),
+				if ended.is_err() {
+					producer.abort(moq_net::Error::Transport(failure.to_string()));
 				}
-			}
-		});
-		let result = match ended {
-			Ok(None) => {
-				self.update(Status::Ended);
-				Ok(())
-			}
-			Ok(Some(failure)) => {
-				self.update(Status::Failed(failure.clone()));
 				Err(failure)
 			}
-			Err(failure) => {
-				self.update(Status::Failed(failure.clone()));
-				producer.abort(moq_net::Error::Transport(failure.to_string()));
-				Err(failure)
-			}
+			// The track closed, or encoding or publishing failed.
+			end => match end.and_then(|_| producer.set_active(false, now).and_then(|()| producer.finish())) {
+				Ok(()) => {
+					self.update(Status::Ended);
+					Ok(())
+				}
+				Err(err) => {
+					self.update(Status::Failed(err.clone()));
+					producer.abort(moq_net::Error::Transport(err.to_string()));
+					Err(err)
+				}
+			},
 		};
 		self.publish_level(Level::default());
 		let _ = self.state.close();
-		result.map_err(Arc::unwrap_or_clone)
+		result
 	}
 
 	async fn drive(&mut self) -> Result<End, Error> {
@@ -342,7 +324,7 @@ impl Driver {
 			clock: self.clock.clone(),
 			state: &self.state,
 			level: &self.level,
-			failure: None,
+			failed: false,
 		};
 		let reader = &mut self.capture;
 		retention.refresh(producer)?;
@@ -368,9 +350,7 @@ impl Driver {
 
 		// The source failed, yet retained history stays reachable: subscribers still encode
 		// it on demand until none is left or nothing can want it any more.
-		// One shared copy, so repeated failed refreshes publish nothing new.
-		let failure = Arc::new(failure);
-		retention.failed(failure.clone());
+		retention.failed(&failure);
 		retention.refresh(producer)?;
 		while producer.retains() {
 			tokio::select! {
@@ -396,7 +376,10 @@ impl Driver {
 /// Levels and repeated capture states must not wake lifecycle-only observers.
 fn publish_state(state: &kio::Producer<Published>, status: Status) {
 	let Ok(mut published) = state.write() else { return };
-	if published.state.status.same(&status) {
+	// A repeated status changes nothing an observer can see; a failure always carries news.
+	if !matches!(status, Status::Failed(_))
+		&& std::mem::discriminant(&published.state.status) == std::mem::discriminant(&status)
+	{
 		return;
 	}
 	published.state.status = status;
@@ -443,8 +426,8 @@ struct Retention<'a> {
 	clock: moq_mux::Clock,
 	state: &'a kio::Producer<Published>,
 	level: &'a kio::Producer<Level>,
-	/// The source failure, after which the status stays failed.
-	failure: Option<Arc<Error>>,
+	/// The source failed, so the status stays failed.
+	failed: bool,
 }
 
 impl Retention<'_> {
@@ -452,9 +435,8 @@ impl Retention<'_> {
 	fn refresh(&self, producer: &mut Producer) -> Result<(), Error> {
 		let active = !self.retain || self.demand.wanted().is_some();
 		producer.set_active(active, self.clock.now())?;
-		match &self.failure {
-			Some(failure) => publish_state(self.state, Status::Failed(failure.clone())),
-			None => publish_state(self.state, if active { Status::Live } else { Status::Waiting }),
+		if !self.failed {
+			publish_state(self.state, if active { Status::Live } else { Status::Waiting });
 		}
 		Ok(())
 	}
@@ -484,9 +466,10 @@ impl Retention<'_> {
 	}
 
 	/// The source failed: the level goes quiet and the status stays failed.
-	fn failed(&mut self, failure: Arc<Error>) {
+	fn failed(&mut self, failure: &Error) {
 		publish_level(self.level, Level::default());
-		self.failure = Some(failure);
+		publish_state(self.state, Status::Failed(failure.clone()));
+		self.failed = true;
 	}
 }
 

@@ -30,7 +30,9 @@ decode in software through the opt-in `vpx` feature.
 `Publication` that reports its status, plus the `Driver` that captures. Running
 the driver keeps the camera open and encoding whether or not anyone subscribes,
 so a late viewer can fetch the recent past. Set `encode::Capture::on_demand` to
-open the camera only while someone subscribes, at the cost of that past. A viewer who joins
+open the camera only while someone subscribes, at the cost of that past. Either
+way the driver first opens the camera once to learn its mode, which can raise a
+permission prompt before anyone subscribes. A viewer who joins
 once the current group's deltas outweigh twice its keyframe gets a fresh
 keyframe, so `encode::Config::join` is only the longest a group runs. Through a moq-lite
 relay, only the join that opens the relay's upstream subscription counts. A

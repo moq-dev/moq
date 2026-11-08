@@ -293,7 +293,7 @@ impl Config {
 			Codec::H265 => moq_mux::codec::h265::config(&annexb),
 		};
 		let mut rendition = parsed.map_err(|err| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"{} emitted no usable parameter sets: {err}",
 				sink.name()
 			))
@@ -527,7 +527,7 @@ impl Encoder {
 		};
 		let size = frame.size();
 		if !external && size != self.size {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size
 			)));
@@ -1393,7 +1393,7 @@ mod tests {
 
 	impl Backend for Failing {
 		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
-			Err(Error::Codec(anyhow::anyhow!("no")))
+			Err(Error::codec(anyhow::anyhow!("no")))
 		}
 
 		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {

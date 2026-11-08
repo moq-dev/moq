@@ -4,26 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Capture publishes through `publish_capture`, returning a `Publication` and a `Driver`
+### `Bus::channel` is `Bus::live`
 
-`encode::Control::new(broadcast, catalog, options)` is
-`let (publication, driver) = encode::publish_capture(broadcast, catalog, options)?;`,
-then `driver.run().await`. `encode::Publication` keeps the state accessors:
-`track_name`, `state`, `changed`, `level`, and `is_finished`.
-`Control::{start, stop, replace}` have no replacement: drop the `Driver` to stop,
-and publish a new consumer to switch sources. `Status::Stopped` is gone, and
-`Status::Cancelled` reports a `Driver` or `run` future dropped before it finished.
-
-`Status::Failed` carries its error as `Failed(Arc<Error>)`, and `State::failure()`
-is gone: match `Status::Failed(error)` instead. `State::status()` returns
-`&Status`, and `Status` is no longer `Copy` or `PartialEq`, so compare with
-`matches!`.
-
-`encode::Capture::on_demand` is `retain`, with the same default and meaning.
-
-### Playback `Sink` volume moves to its `Control`
-
-`Sink::{set_volume, volume, peak}` are gone. Call them on `sink.control()`.
+The bus has two kinds of source: a live one on its own clock, whose ring
+absorbs jitter and drift, and a positioned one on the bus's clock, whose every
+write names its bus position. `Bus::channel` and `bus::Channel` are renamed
+`Bus::live` and `bus::Live` to pair with `Bus::positioned` and
+`bus::Positioned`. Their behavior is unchanged: rename the calls and the type.
 
 ### Playback fills a declared silence with comfort noise
 
@@ -89,13 +76,15 @@ A libopus allocation, internal, or state failure is the new `Error::Codec` inste
 Open `capture::Producer::open(config).await?` once and create a consumer with
 `capture.consume()` for each destination. Pass one to `bus.capture(consumer, strip)?`
 and another to `encode::Capture::new(consumer)`, then set its `encode` and
-`retain` fields. Drive `capture.run()` alongside the bus and encoder futures.
+`on_demand` fields. Drive `capture.run()` alongside the bus and encoder futures.
 This replaces both device-opening entry points; `encode::Capture::default()`
 and its `capture: Config` field are gone. The audio rendition is registered
 only after the capture has opened and its actual input format is known.
 
-Dropping an encoder's `Driver` stops only that encoder; it never opens or
-releases the device. A capture
+`encode::Control::start` and `stop` control only that encoder, and `replace`
+takes another capture consumer and returns an error, keeping the current one, when
+its layout cannot be converted into the track's input. They never open or release
+the device. A capture
 failure sets `Status::Failed` at once; the driver keeps serving retained
 on-demand audio until it is served or expires, then returns the failure.
 Recovery requires a new capture and publication. There is no automatic device reopen. Dropping the capture
@@ -107,8 +96,8 @@ Device channel counts above stereo are now consistently `Layout::Discrete`:
 a microphone array does not declare surround-speaker positions. A stereo bus
 refuses those inputs instead of guessing a surround downmix. Request mono or
 stereo through `capture::Config::channels` when the device supports it, or map
-the known channels explicitly before writing a `Bus::channel`. The encoder refuses
-them too: `encode::publish_capture` fails for such a consumer, since its default
+the known channels explicitly before writing a `Bus::live`. The encoder refuses
+them too: `encode::Control::new` fails for such a consumer, since its default
 stereo config (and Opus in any config) cannot take a discrete layout. Publish a
 microphone array only when it delivers mono or stereo, or with an
 `encode.config.layout` set to that same `Layout::Discrete` for a codec that carries it.

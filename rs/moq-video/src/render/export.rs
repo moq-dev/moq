@@ -44,7 +44,7 @@ mod nv12;
 mod vulkan;
 
 fn err(message: impl std::fmt::Display) -> Error {
-	Error::Render(anyhow::anyhow!("{message}"))
+	Error::render(anyhow::anyhow!("{message}"))
 }
 
 /// An encoder [`Exporter::new`] may settle on.
