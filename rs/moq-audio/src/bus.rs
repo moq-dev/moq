@@ -723,7 +723,11 @@ impl Mix {
 				let mut mixer = bus.mixer.lock().unwrap();
 				let (output, history, level) = Output::new(mixer.closed);
 				let mut seen = HashSet::new();
-				let excluded = strips.into_iter().filter(|strip| seen.insert(key(strip))).cloned().collect();
+				let excluded = strips
+					.into_iter()
+					.filter(|strip| seen.insert(key(strip)))
+					.cloned()
+					.collect();
 				mixer.minuses.push(MinusState {
 					id,
 					parent: self.shared.slot,
