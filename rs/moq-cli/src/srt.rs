@@ -189,7 +189,7 @@ pub async fn connect_import(
 	notify_ready();
 
 	let client = moq_srt::Client::new(addr, resource)
-		.with_max_delay(latency)
+		.with_latency(latency)
 		.with_max_age(target.max_age)
 		.with_bandwidth(target.bandwidth)
 		.with_program(program)
@@ -210,7 +210,7 @@ pub async fn connect_export(
 	notify_ready();
 
 	let client = moq_srt::Client::new(addr, resource)
-		.with_max_delay(args.endpoint.latency.into())
+		.with_latency(args.endpoint.latency.into())
 		.with_follow(args.follow.into())
 		.with_stitch(args.stitch);
 	Ok(client.publish(&origin, &name).await?)

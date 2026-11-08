@@ -41,7 +41,7 @@ pub struct Client {
 
 	/// SRT receive latency, negotiated at handshake time: the buffer that trades delay
 	/// for loss recovery. It doubles as [`publish`]'s egress skip threshold.
-	max_delay: Duration,
+	latency: Duration,
 
 	/// How long a superseded group of an ingested media track stays fresh, or `None` for
 	/// no publisher limit. Defaults to [`MAX_AGE`](hang::container::MAX_AGE).
@@ -79,7 +79,7 @@ impl Client {
 		Self {
 			addr,
 			resource: resource.into(),
-			max_delay: DEFAULT_LATENCY,
+			latency: DEFAULT_LATENCY,
 			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			program: None,
@@ -94,8 +94,8 @@ impl Client {
 	///
 	/// Both directions; [`publish`](Self::publish) also uses it as the MPEG-TS release
 	/// delay, but no less than a second.
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
+	pub fn with_latency(mut self, latency: Duration) -> Self {
+		self.latency = latency;
 		self
 	}
 
@@ -154,7 +154,7 @@ impl Client {
 		let path: moq_net::Path = path.into();
 		let socket = self.call(Mode::Publish).await?;
 		let options = crate::ts::Options {
-			latency: self.max_delay,
+			latency: self.latency,
 			follow: self.follow,
 			stitch: self.stitch,
 		};
@@ -184,7 +184,7 @@ impl Client {
 		}
 		let stream_id = format!("#!::r={},m={}", self.resource, mode.as_str());
 		let socket = SrtSocket::builder()
-			.latency(self.max_delay)
+			.latency(self.latency)
 			.set(configure_buffers)
 			.call(self.addr, Some(&stream_id))
 			.await?;

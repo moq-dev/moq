@@ -10,8 +10,8 @@ import type * as z from "zod/mini";
 /** How often a reporter writes, in milliseconds: about once a second, as the hang draft asks. */
 export const INTERVAL = 1000;
 
-/** The report track's priority: below every media track, so a report never delays the media it describes. */
-export const PRIORITY = -128;
+// Below every media track, so a report never delays the media it describes.
+const PRIORITY = -128;
 
 // Deltas compress against the snapshot in their group, and a joiner asks for a fresh group once
 // they outweigh eight snapshots. Matches the Rust CLI's report tracks.
@@ -35,17 +35,13 @@ export class Writer<T> {
 		this.#producer = new Json.Snapshot.Producer<T>({ track: this.track, schema });
 	}
 
-	/** Whether anyone subscribes now, which is when {@link update} writes. Observe `track.demand().wanted` to follow it. */
-	get wanted(): boolean {
-		return this.track.demand().wanted.peek() !== undefined;
-	}
-
 	/**
-	 * Publish `value` when someone subscribes; an unchanged value writes nothing. A track that refuses
-	 * a write would refuse every later one, so it is aborted with the cause, which its subscribers read.
+	 * Publish `value` when someone subscribes (observe `track.demand().wanted` to follow that); an
+	 * unchanged value writes nothing. A track that refuses a write would refuse every later one, so it
+	 * is aborted with the cause, which its subscribers read.
 	 */
 	update(value: T): void {
-		if (this.#closed || !this.wanted) return;
+		if (this.#closed || this.track.demand().wanted.peek() === undefined) return;
 		try {
 			this.#producer.update({ value });
 		} catch (err) {

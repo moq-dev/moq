@@ -80,6 +80,8 @@ pub struct Programs {
 	due: health::Due,
 	/// The packets on PIDs no program reads.
 	unclaimed: Unclaimed,
+	/// Whether input is still accepted: [`finish`](Self::finish) ends it.
+	input: crate::container::Input,
 }
 
 /// `PMT_error_2`: a PMT recurs at least every 0.5 s of program clock.
@@ -324,11 +326,16 @@ impl Programs {
 			deadline: None,
 			due: health::Due::default(),
 			unclaimed: Unclaimed::default(),
+			input: crate::container::Input::Open,
 		}
 	}
 
 	/// Demux a chunk of the multiplex. A trailing partial packet is retained for the next call.
+	///
+	/// Input after [`finish`](Self::finish) is refused with [`Finished`](crate::Error::Finished),
+	/// or with the cause of a finish that failed.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		self.input.check()?;
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
 		self.demux = demux;
@@ -879,7 +886,33 @@ impl Programs {
 	/// tracks stay servable while this importer is held, so hand both to a
 	/// [`Linger`](crate::Linger) to keep them up for late subscribers. Fails when the input
 	/// ended before its PAT listed a program or any program declared a track.
+	///
+	/// A finish that fails aborts every program with the cause, and later calls return it again.
+	/// A finish that succeeded is final: calling it again returns the same broadcasts.
 	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Producer>> {
+		match &self.input {
+			crate::container::Input::Open => {}
+			crate::container::Input::Finished => return Ok(self.broadcasts()),
+			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => {
+				return Err(err.clone().into());
+			}
+		}
+		match self.end() {
+			Ok(()) => {
+				self.input = crate::container::Input::Finished;
+				Ok(self.broadcasts())
+			}
+			Err(err) => {
+				// The copy keeps the whole chain in its message, since only the first report can move
+				// the original.
+				self.fail(crate::Error::from(anyhow::anyhow!("{err:#}")));
+				Err(err)
+			}
+		}
+	}
+
+	/// Finish every program, stopping at the first failure.
+	fn end(&mut self) -> anyhow::Result<()> {
 		self.demux.finish();
 		anyhow::ensure!(self.pat.is_some(), "input ended before its PAT listed a program");
 		let mut announced = self.announced;
@@ -889,19 +922,29 @@ impl Programs {
 			program.catalog.finish()?;
 		}
 		anyhow::ensure!(announced, "input ended before any program declared a track");
-		Ok(self
-			.programs
+		Ok(())
+	}
+
+	/// Each running program's broadcast.
+	fn broadcasts(&self) -> Vec<moq_net::broadcast::Producer> {
+		self.programs
 			.iter()
 			.map(|program| program.route.broadcast().clone())
-			.collect())
+			.collect()
 	}
 
 	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.
-	pub fn abort(self, err: moq_net::Error) {
-		for program in self.programs {
-			program.catalog.abort(err.clone());
-			program.import.abort(err.clone());
+	pub fn abort(mut self, err: moq_net::Error) {
+		self.fail(err.into());
+	}
+
+	/// Abort every program's catalog and media tracks with `cause`, which later calls report.
+	fn fail(&mut self, cause: crate::Error) {
+		for program in &mut self.programs {
+			program.catalog.clone().abort(cause.reason());
+			program.import.fail(cause.clone());
 		}
+		self.input = crate::container::Input::Failed(cause);
 	}
 }
 
