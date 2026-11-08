@@ -142,11 +142,11 @@ module biome '' \
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3 uv' lane=bun fix
 # The recorded-trace replays play through the player's container consumer and
-# ring on a simulated clock: deterministic, seconds long, and only Bun, so they
-# gate every diff that can move a row. It shares the bun lane so it reads the
-# dependencies js installs.
+# ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
+# for the install step), so they gate every diff that can move a row. It shares
+# the bun lane so it reads the dependencies js installs.
 module audio_quality '^(js/(hang|watch|net|signals|clock)/|test/audio-quality/|test/lib/|test/justfile$)' \
-    tools='bun' lane=bun
+    tools='bun uv' lane=bun
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
