@@ -23,29 +23,43 @@ impl From<&auth::Error> for RefusalKind {
 	}
 }
 
-/// Refusal-only collection when publishing is disabled, otherwise the shared registry.
+/// The shared registry when publishing is enabled, otherwise a private one that
+/// keeps only the totals.
 #[derive(Clone)]
-pub(crate) struct Refusals(Registry);
+pub(crate) struct Refusals {
+	registry: Registry,
+	/// Whether refusals keep the tier and root a decider named. Only a published
+	/// registry prunes those entries, so a private one would grow with every name.
+	attributed: bool,
+}
 
 impl Default for Refusals {
 	fn default() -> Self {
-		Self(Registry::new(Default::default()))
+		Self {
+			registry: Registry::new(Default::default()),
+			attributed: false,
+		}
 	}
 }
 
 impl Refusals {
 	pub(crate) fn new(registry: &Registry) -> Self {
 		if registry.is_enabled() {
-			Self(registry.clone())
+			Self {
+				registry: registry.clone(),
+				attributed: true,
+			}
 		} else {
 			Self::default()
 		}
 	}
 	pub(crate) fn record(&self, reason: RefusalKind) {
-		self.0.tier(Tier::default()).refuse(Path::empty(), reason);
+		self.registry.tier(Tier::default()).refuse(Path::empty(), reason);
 	}
 	pub(crate) fn record_auth(&self, err: &auth::Error) {
-		if let auth::Error::Refused(refusal) = err {
+		if let auth::Error::Refused(refusal) = err
+			&& self.attributed
+		{
 			// A refusal only counts: one naming a tier or root too long for a path counts
 			// under the default instead.
 			let tier = crate::configured_tier(refusal.tier.clone()).unwrap_or_default();
@@ -54,14 +68,14 @@ impl Refusals {
 				.as_deref()
 				.and_then(|root| Path::new(root).ok())
 				.unwrap_or_default();
-			self.0.tier(tier).refuse(root, err.into());
+			self.registry.tier(tier).refuse(root, err.into());
 		} else {
 			self.record(err.into());
 		}
 	}
 	pub(crate) fn snapshot(&self) -> moq_net::stats::Refusals {
 		let mut counts = moq_net::stats::Refusals::default();
-		for (_, presence) in self.0.snapshot().sessions() {
+		for (_, presence) in self.registry.snapshot().sessions() {
 			counts.add(presence.sessions_refused);
 		}
 		counts
@@ -109,5 +123,20 @@ mod tests {
 			assert_eq!(presence.sessions_refused.expired, 1);
 		}
 		assert_eq!(refusals.count(RefusalKind::Expired), 4);
+	}
+
+	/// Nothing prunes a private registry, so it keeps one entry whatever names
+	/// the deciders send.
+	#[test]
+	fn private_refusals_stay_bounded() {
+		let refusals = Refusals::default();
+		for index in 0..64 {
+			let mut refusal = moq_auth::Refusal::default();
+			refusal.root = Some(format!("tenant-{index}"));
+			refusal.tier = Some(format!("tier-{index}"));
+			refusals.record_auth(&auth::Error::Refused(refusal));
+		}
+		assert_eq!(refusals.registry.snapshot().sessions().len(), 1);
+		assert_eq!(refusals.count(RefusalKind::Refused), 64);
 	}
 }

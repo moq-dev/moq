@@ -875,19 +875,22 @@ impl Queue {
 		Ok(())
 	}
 
-	/// Stop and restart a queue, taking every buffer back from the driver.
-	pub(crate) fn restart(&mut self, device: &Device) -> Result<(), Error> {
-		if self.streaming {
-			device.stream(self.dir, false)?;
-			self.streaming = false;
-		}
+	/// Stop the queue, taking every buffer back from the driver.
+	///
+	/// Issued even on a queue that never streamed: buffers queued ahead of a
+	/// `STREAMON` that failed are still the driver's, and `STREAMOFF` is what
+	/// hands them back.
+	pub(crate) fn stop(&mut self, device: &Device) -> Result<(), Error> {
+		device.stream(self.dir, false)?;
+		self.streaming = false;
 		self.free = (0..self.buffers.len() as u32).collect();
-		self.stream_on(device)
+		Ok(())
 	}
 
-	/// Whether the queue has been started.
-	pub(crate) fn streaming(&self) -> bool {
-		self.streaming
+	/// Stop and restart a queue, taking every buffer back from the driver.
+	pub(crate) fn restart(&mut self, device: &Device) -> Result<(), Error> {
+		self.stop(device)?;
+		self.stream_on(device)
 	}
 
 	/// Buffers currently owned by the driver.

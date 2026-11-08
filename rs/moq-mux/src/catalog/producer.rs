@@ -1059,20 +1059,39 @@ impl<E: CatalogExt> Producer<E> {
 		self.outputs.abort(&reason);
 	}
 
+	/// The terminal outcome once the catalog tracks are closed.
+	pub(crate) fn closed(&self) -> Option<crate::Error> {
+		take(&self.current).closed.clone()
+	}
+
 	/// Finish publishing to this catalog.
 	///
 	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
+	///
+	/// A failure is final: both catalog tracks end (the other one aborted with that error), and every
+	/// later call reports it.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		{
-			let mut state = take(&self.current);
-			if let Some(err) = &state.closed {
-				return Err(err.clone());
-			}
-			state.closed = Some(moq_net::Error::Closed.into());
+		let mut state = take(&self.current);
+		if let Some(err) = &state.closed {
+			return Err(err.clone());
 		}
-		self.outputs.hang.finish()?;
-		self.outputs.msf_track.finish()?;
-		Ok(())
+		let result = self
+			.outputs
+			.hang
+			.finish()
+			.map_err(crate::Error::from)
+			.and_then(|_| self.outputs.msf_track.finish().map_err(crate::Error::from));
+		match result {
+			Ok(()) => {
+				state.closed = Some(moq_net::Error::Closed.into());
+				Ok(())
+			}
+			Err(err) => {
+				self.outputs.abort(&err);
+				state.closed = Some(err.clone());
+				Err(err)
+			}
+		}
 	}
 }
 
@@ -1543,6 +1562,49 @@ mod test {
 			catalog.modify().err(),
 			Some(crate::Error::Moq(moq_net::Error::Closed))
 		));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_finish_is_final_and_ends_both_tracks() {
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let mut catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
+		let mut msf = broadcast
+			.consume()
+			.track(moq_msf::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		catalog
+			.outputs
+			.hang
+			.clone()
+			.abort(moq_net::Error::Unauthorized)
+			.unwrap();
+		let err = catalog.finish().unwrap_err();
+		loop {
+			match msf.recv_group().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("the MSF track ended cleanly after a failed finish"),
+				Err(moq_net::Error::Unauthorized) => break,
+				Err(other) => panic!("the MSF track ended with {other} instead of the finish cause"),
+			}
+		}
+		assert_eq!(catalog.finish().unwrap_err().to_string(), err.to_string());
+		assert_eq!(catalog.modify().err().unwrap().to_string(), err.to_string());
+
+		// A handle made after the failure reports it too, not `NotPublished`.
+		let net = broadcast
+			.create_track("late", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut late = catalog
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				None,
+			)
+			.unwrap();
+		assert_eq!(late.modify().err().unwrap().to_string(), err.to_string());
 	}
 
 	/// The catalog and its MSF twin both rank above media. They're the index a player reads

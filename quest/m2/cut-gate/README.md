@@ -26,7 +26,3 @@ run re-created in m3. Only `/quest-delete` ends the recurrence.
 
 The completed [release performance comparison](/.github/release-perf.md)
 records the accepted costs and final relay pairing for this cut.
-
-## Required
-
-- [moq-c at parity](/quest/m2/cut-gate/c/README.md) - the hand-written `moq-c` ships at the cut with every binding feature moq-ffi gains

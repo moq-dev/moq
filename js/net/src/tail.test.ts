@@ -5,7 +5,7 @@ import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import { GRACE as TAIL_GRACE_MS } from "./ledger.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair, driveUntil, manual, textFrame } from "./mock.ts";
+import { createMockTransportPair, manual, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Tail } from "./tail.ts";
@@ -101,7 +101,7 @@ test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", asy
 		video.close();
 
 		const read = readAll(reader);
-		await driveUntil(clock, reader.closed);
+		await clock.drive(reader.closed);
 		// Every counted stream arrived, so nothing waited out the grace.
 		expect(Nano.toMilli(Instant.durationSince(clock.now(), ended))).toBeLessThan(TAIL_GRACE_MS);
 		expect(await read).toEqual(["1", "2"]);

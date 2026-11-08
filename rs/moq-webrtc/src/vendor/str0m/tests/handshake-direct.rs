@@ -44,7 +44,7 @@ pub fn handshake_direct_api_snap() -> Result<(), RtcError> {
 /// Returns the name of the default crypto provider, matching
 /// `crate::vendor::str0m::crypto::from_feature_flags()`.
 fn default_crypto_name() -> &'static str {
-	"aws-lc-rs"
+	"rind"
 }
 
 /// Shared implementation for both standard and SNAP direct API handshake tests.
