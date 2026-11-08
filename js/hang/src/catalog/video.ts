@@ -136,7 +136,8 @@ export const VideoConfigSchema = z.object({
 	container: ContainerSchema,
 
 	// The IDs of the root `drm` entries protecting this rendition, one per DRM system that can
-	// decrypt it. Absent or empty means clear. Common Encryption is defined for CMAF, so in practice
+	// decrypt it. Absent or empty lists none, and the rendition is still protected when its CMAF init
+	// holds an encrypted sample entry (see `isProtected`). Common Encryption is defined for CMAF, so in practice
 	// it is a CMAF rendition, and `codec` names the codec its encrypted sample entry wraps. A consumer
 	// that can't decrypt skips it.
 	drm: z.optional(z.array(z.string())),

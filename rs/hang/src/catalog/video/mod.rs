@@ -317,7 +317,8 @@ pub struct VideoConfig {
 	pub container: Container,
 
 	/// The IDs of the root `drm` entries protecting this rendition, one per DRM system that can
-	/// decrypt it. Empty means the rendition is clear, and is left off the wire.
+	/// decrypt it. Empty lists none and is left off the wire; the rendition is still protected
+	/// when its CMAF init holds an encrypted sample entry.
 	///
 	/// Common Encryption is defined for CMAF, so a protected rendition is a [`Cmaf`](Container::Cmaf)
 	/// one in practice: its init segment carries the encrypted sample entry (`encv`/`enca`), while
