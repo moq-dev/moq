@@ -111,7 +111,7 @@ Then, only where the profile shows a cost:
   | 400 / 200 | on | 27 / 110 ms, 150,424 | 0.596 / 0.695 | 79 ms |
   | 400 / 200 | off | 27 / 212 ms, 325,694 | 0.688 / 0.779 | 31 ms |
 
-  - **Below the server's ceiling, batching saved no CPU and raised p99.** The
+  - **At 300, batching saved no CPU and raised p99.** The
     loopback harness's 8–22% saving did not carry over, and why hasn't been
     measured. Both arms lost groups at this point, batching more (9,781 against
     6,090), so the p99 rise is measured under unequal loss, not drop-free.
@@ -130,8 +130,8 @@ Then, only where the profile shows a cost:
     and what accounts for its extra lost groups on fewer proxy drops hasn't been
     measured.
 
-  So on this path, below the ceiling p99 rose with no CPU saving; past it, CPU
-  fell and audio p99 halved but video p99 rose. That leans toward keeping batching
+  So on this path, at 300 p99 rose with no CPU saving; at 400 CPU fell and
+  audio p99 halved but video p99 rose. That leans toward keeping batching
   opt-in and off by default, if it ships, on single runs.
 
   Its shape:
