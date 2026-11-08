@@ -136,6 +136,31 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	return normalized !== "false" && normalized !== "0";
 }
 
+/**
+ * The element's `connection.enabled`, which the page may also write. The page's writes set what it
+ * wants and the element sets whether it can run (connected to a document, every attribute valid); it
+ * reads as on only while both hold. Kept apart, a page's disable survives the element suspending and
+ * resuming, whenever the page writes it: an explicit page choice wins.
+ */
+class Enabled extends Signal<boolean> {
+	#wanted = true;
+	#running = false;
+
+	constructor() {
+		super(false);
+	}
+
+	override set(value: boolean, notify?: boolean): void {
+		this.#wanted = value;
+		super.set(value && this.#running, notify);
+	}
+
+	run(running: boolean): void {
+		this.#running = running;
+		super.set(this.#wanted && running);
+	}
+}
+
 /** The `<moq-watch>` element: plays a broadcast into a nested <canvas>. */
 export default class MoqWatch extends HTMLElement {
 	/** The attributes the browser reports changes to. */
@@ -227,12 +252,8 @@ export default class MoqWatch extends HTMLElement {
 	#connected = false;
 	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether to connect and play: on while connected with every attribute valid, unless the page turned
-	// it off. Written by `#update` and by the page through `connection.enabled`.
-	#enabled = new Signal(false);
-	// Set while the element holds the connection off, recording whether to turn it back on: false when
-	// the page had already turned it off, so neither a corrected attribute nor a move overrides the page.
-	#suspended: { resume: boolean } | undefined = { resume: true };
+	// Whether to connect and play: `#update` gates it on the element's state, and the page may turn it off.
+	#enabled = new Enabled();
 	#reflecting = false;
 
 	/**
@@ -454,19 +475,8 @@ export default class MoqWatch extends HTMLElement {
 		this.#update();
 	}
 
-	// Turns the connection off while disconnected or holding an invalid attribute, and back on once
-	// neither holds, but only if it was this that turned it off: an explicit page choice wins. Run
-	// synchronously at each change, so a refusal takes effect before its setter throws and a page's
-	// write right after a change is not overwritten later.
 	#update() {
-		const running = this.#connected && this.#invalid.peek().size === 0;
-		if (!running) {
-			this.#suspended ??= { resume: this.#enabled.peek() };
-			this.#enabled.set(false);
-		} else if (this.#suspended) {
-			if (this.#suspended.resume) this.#enabled.set(true);
-			this.#suspended = undefined;
-		}
+		this.#enabled.run(this.#connected && this.#invalid.peek().size === 0);
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {

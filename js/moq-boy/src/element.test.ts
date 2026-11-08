@@ -78,3 +78,22 @@ test("an explicit disable survives an invalid path being corrected", async () =>
 		el.disconnectedCallback();
 	}
 });
+
+// The element is already off while a path is refused, so the page's disable there must still count.
+test("an explicit disable while a path is refused survives the fix", async () => {
+	const el = new MoqBoy();
+	try {
+		el.connectedCallback();
+		expect(() => el.attributeChangedCallback("prefix", null, "/boy")).toThrow();
+		el.connection.enabled.set(false);
+		el.attributeChangedCallback("prefix", "/boy", "boy");
+		await settle();
+		expect(el.connection.enabled.peek()).toBe(false);
+
+		el.connection.enabled.set(true);
+		await settle();
+		expect(el.connection.enabled.peek()).toBe(true);
+	} finally {
+		el.disconnectedCallback();
+	}
+});

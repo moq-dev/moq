@@ -87,6 +87,27 @@ test("an explicit disable survives an invalid attribute being corrected", async 
 		el.connectedCallback();
 		await settle();
 		expect(el.connection.enabled.peek()).toBe(false);
+
+		// The page turning it back on resumes it.
+		el.connection.enabled.set(true);
+		await settle();
+		expect(el.connection.enabled.peek()).toBe(true);
+	} finally {
+		el.signals.close();
+	}
+});
+
+// The element is already off while detached, so the page's disable there must still count.
+test("an explicit disable while detached survives reattaching", async () => {
+	const el = new MoqPublish();
+	try {
+		el.connectedCallback();
+		await settle();
+		el.disconnectedCallback();
+		el.connection.enabled.set(false);
+		el.connectedCallback();
+		await settle();
+		expect(el.connection.enabled.peek()).toBe(false);
 	} finally {
 		el.signals.close();
 	}

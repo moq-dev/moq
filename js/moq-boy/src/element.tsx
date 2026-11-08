@@ -31,6 +31,31 @@ function viewerId(): string {
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
 /**
+ * The element's `connection.enabled`, which the page may also write. The page's writes set what it
+ * wants and the element sets whether it can run (connected to a document, every path valid); it
+ * reads as on only while both hold. Kept apart, a page's disable survives the element suspending and
+ * resuming, whenever the page writes it: an explicit page choice wins.
+ */
+class Enabled extends Moq.Signals.Signal<boolean> {
+	#wanted = true;
+	#running = false;
+
+	constructor() {
+		super(false);
+	}
+
+	override set(value: boolean, notify?: boolean): void {
+		this.#wanted = value;
+		super.set(value && this.#running, notify);
+	}
+
+	run(running: boolean): void {
+		this.#running = running;
+		super.set(this.#wanted && running);
+	}
+}
+
+/**
  * `<moq-boy>` web component - discovers and manages Game Boy streaming sessions,
  * and renders the interactive UI in a Shadow DOM.
  *
@@ -61,12 +86,8 @@ export default class MoqBoy extends HTMLElement {
 	#connected = false;
 	// The path attributes holding an invalid path, which idle the element until each is fixed.
 	readonly #refused = new Set<Observed>();
-	// Whether to run: on while connected with nothing refused, unless the page turned it off. Written by
-	// `#update` and by the page through `connection.enabled`.
-	readonly #enabled = new Moq.Signals.Signal(false);
-	// Set while the element holds the connection off, recording whether to turn it back on: false when
-	// the page had already turned it off, so neither a corrected path nor a move overrides the page.
-	#suspended: { resume: boolean } | undefined = { resume: true };
+	// Whether to run: `#update` gates it on the element's state, and the page may turn it off.
+	readonly #enabled = new Enabled();
 	readonly #prefix = new Moq.Signals.Signal<Moq.Path.Valid>(DEFAULT_PREFIX);
 	readonly #gamePrefixOverride = new Moq.Signals.Signal<Moq.Path.Valid | undefined>(undefined);
 	readonly #sessions = new Map<string, Game>();
@@ -140,17 +161,8 @@ export default class MoqBoy extends HTMLElement {
 		this.#update();
 	}
 
-	// Turns the connection off while disconnected or holding an invalid path, and back on once neither
-	// holds, but only if it was this that turned it off: an explicit page choice wins.
 	#update() {
-		const running = this.#connected && this.#refused.size === 0;
-		if (!running) {
-			this.#suspended ??= { resume: this.#enabled.peek() };
-			this.#enabled.set(false);
-		} else if (this.#suspended) {
-			if (this.#suspended.resume) this.#enabled.set(true);
-			this.#suspended = undefined;
-		}
+		this.#enabled.run(this.#connected && this.#refused.size === 0);
 	}
 
 	/** The relay URL, mirrored by the `url` attribute. */
