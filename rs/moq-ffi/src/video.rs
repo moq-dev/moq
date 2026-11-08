@@ -782,8 +782,7 @@ impl MoqVideoProducer {
 				),
 			});
 		}
-		// The suffix `moq_video::encode::Producer::new` would derive, built here so the
-		// track can take this rendition's priority.
+		// The track's suffix by codec, the one `moq_video::encode::publish_capture` uses too.
 		let suffix = match &rendition.codec {
 			hang::catalog::VideoCodec::H264(_) => ".avc3",
 			hang::catalog::VideoCodec::H265(_) => ".hev1",
@@ -800,7 +799,7 @@ impl MoqVideoProducer {
 				Some(name) => state.broadcast.create_track(name, info)?,
 				None => state.broadcast.unique_track(suffix, info)?,
 			};
-			Ok(moq_video::encode::Producer::with_track(
+			Ok(moq_video::encode::Producer::new(
 				track,
 				state.catalog.reserve().with_interval(join),
 				rendition,

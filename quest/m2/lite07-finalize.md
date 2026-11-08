@@ -121,7 +121,6 @@ whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) c
 - [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
-- [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - the job's route inherits the claim's instance, with no new wire message
 - [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 - [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07

@@ -12,8 +12,7 @@ pub(super) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> V
 		let (update, active) = match event {
 			origin::RouteEvent::Start(update)
 			| origin::RouteEvent::Update(update)
-			| origin::RouteEvent::Restart(update)
-			| origin::RouteEvent::Takeover { announce: update, .. } => (update, true),
+			| origin::RouteEvent::Restart(update) => (update, true),
 			origin::RouteEvent::End(update) => (update, false),
 		};
 		if let Some(index) = positions.remove(&update.prefix) {

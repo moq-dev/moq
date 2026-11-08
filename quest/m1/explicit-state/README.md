@@ -69,13 +69,9 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 
 ## Required
 
-- [moq-boy pause state](/quest/m1/explicit-state/boy-pause.md) - a new viewer always wakes a paused emulator
-- [Publish capture phases](/quest/m1/explicit-state/publish-capture.md) - dismissing the screen-share picker turns sharing off
 - [FFI handle state](/quest/m1/explicit-state/ffi-state.md) - FFI handles hold one state each: video follow under one lock, requests answered once, drivers Cancelled after shutdown
-- [Track and group end-of-life](/quest/m1/explicit-state/track-end.md) - moq-net's track and group outcomes are one enum each, in Rust and JS
 - [moq-net phase data](/quest/m1/explicit-state/net-phases.md) - moq-net's session and subscription state machines keep each phase's data in its variant
-- [moq-mux and moq-gst lifecycles](/quest/m1/explicit-state/mux-gst.md) - export sources, TS and fMP4 export tracks, and gst pads are explicit state
-- [Video's declared-end freeze is not a stall](/quest/m1/explicit-state/video-declared-end.md) - video holding its last picture through a declared end counts no stall, like audio's declared silence
+- [TS and fMP4 export lifecycles](/quest/m1/explicit-state/mux-gst.md) - the TS export program and tracks and the fMP4 export track are explicit state
 
 ## Related
 

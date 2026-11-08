@@ -160,11 +160,11 @@ for (const [id, job] of calls) {
 		`${id} must be named after its workflow`,
 	);
 }
-// Every workflow that used to run on release PRs blocks a release now.
+// Every workflow that used to run on release PRs blocks a release now; the audio
+// replays moved into `just ci`, which the release ruleset requires as Check.
 assert.deepEqual(calls.map(([id]) => id).sort(), [
 	"android",
 	"api-diff",
-	"audio-quality",
 	"c",
 	"cpp",
 	"features",

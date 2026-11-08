@@ -672,6 +672,7 @@ pub struct Server {
 	policy: Arc<std::sync::RwLock<Arc<Policy>>>,
 	sessions: Arc<Mutex<Sessions>>,
 	mesh: Option<crate::mesh::Coordinator>,
+	secret: Option<Arc<str>>,
 }
 
 impl Server {
@@ -683,6 +684,7 @@ impl Server {
 			policy: Arc::new(std::sync::RwLock::new(Arc::new(Self::validate(policy)?))),
 			sessions: Default::default(),
 			mesh: None,
+			secret: None,
 		})
 	}
 
@@ -723,8 +725,16 @@ impl Server {
 		Ok(policy)
 	}
 
-	/// Also answer the mesh owner's API under `/mesh` with `coordinator`. Like `POST /`,
-	/// it has no authentication of its own.
+	/// Refuse with 401 every request whose HTTP Basic password is not `secret`, so only
+	/// the relays can drive the session table. A relay sends it from its URL's userinfo,
+	/// as in `https://relay:<secret>@auth.example/`.
+	pub fn with_secret(mut self, secret: impl Into<Arc<str>>) -> Self {
+		self.secret = Some(secret.into());
+		self
+	}
+
+	/// Also answer the mesh owner's API under `/mesh` with `coordinator`, behind the same
+	/// [`secret`](Self::with_secret) as `POST /`.
 	pub fn with_mesh(mut self, coordinator: crate::mesh::Coordinator) -> Self {
 		self.mesh = Some(coordinator);
 		self
@@ -771,11 +781,15 @@ impl Server {
 	}
 
 	/// The router: `POST /` reading a [`Request`] and writing a [`Grant`], plus the mesh
-	/// owner's API when [`with_mesh`](Self::with_mesh) set one.
+	/// owner's API when [`with_mesh`](Self::with_mesh) set one, all behind the
+	/// [`secret`](Self::with_secret) when there is one.
 	pub fn router(&self) -> Router {
-		let router = Router::new().route("/", post(handle)).with_state(self.clone());
-		match &self.mesh {
-			Some(mesh) => router.merge(mesh.admin_router()),
+		let mut router = Router::new().route("/", post(handle)).with_state(self.clone());
+		if let Some(mesh) = &self.mesh {
+			router = router.merge(mesh.admin_router());
+		}
+		match &self.secret {
+			Some(secret) => router.layer(axum::middleware::from_fn_with_state(secret.clone(), guard)),
 			None => router,
 		}
 	}
@@ -789,6 +803,42 @@ impl Server {
 	#[cfg(unix)]
 	pub async fn serve_unix(&self, listener: tokio::net::UnixListener) -> std::io::Result<()> {
 		axum::serve(listener, self.router()).await
+	}
+}
+
+/// Pass only a request whose HTTP Basic password is `secret`; the user name is ignored.
+async fn guard(
+	State(secret): State<Arc<str>>,
+	request: axum::extract::Request,
+	next: axum::middleware::Next,
+) -> Response {
+	use base64::Engine;
+	let password = request
+		.headers()
+		.get(axum::http::header::AUTHORIZATION)
+		.and_then(|value| value.to_str().ok())
+		// RFC 7235 auth schemes are case-insensitive.
+		.and_then(|value| value.split_once(' '))
+		.filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Basic"))
+		.map(|(_, encoded)| encoded)
+		.and_then(|encoded| base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok())
+		.and_then(|decoded| {
+			let colon = decoded.iter().position(|&byte| byte == b':')?;
+			Some(decoded[colon + 1..].to_vec())
+		});
+	// Compare digests so the comparison does not end early on a length mismatch.
+	let digest = |bytes: &[u8]| rind::digest::digest(&rind::digest::SHA256, bytes);
+	match password {
+		Some(password)
+			if rind::constant_time::verify(digest(&password).as_ref(), digest(secret.as_bytes()).as_ref()).is_ok() =>
+		{
+			next.run(request).await
+		}
+		_ => {
+			// A relay reads this 401 as a refusal, so its log alone cannot tell a wrong secret from a denied token.
+			tracing::debug!(path = %request.uri().path(), presented = password.is_some(), "listen secret mismatch");
+			StatusCode::UNAUTHORIZED.into_response()
+		}
 	}
 }
 
@@ -1010,6 +1060,71 @@ mod tests {
 		assert_eq!(grant.revalidate, None);
 		assert_eq!(grant.tier.as_deref(), Some("gold"));
 		assert_eq!(grant.root, None);
+	}
+
+	#[tokio::test]
+	async fn the_secret_guards_every_route() {
+		let key = Key::generate(Algorithm::HS256, None).unwrap();
+		let config = crate::mesh::Config::new("https://mesh.example".parse().unwrap(), key);
+		let server = Server::new(Policy {
+			public: rules(&["**"], &[]),
+			..Default::default()
+		})
+		.unwrap()
+		.with_mesh(crate::mesh::Coordinator::new(config).unwrap())
+		.with_secret("hunter2:x");
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		tokio::spawn(async move { server.serve(listener).await });
+
+		let http = reqwest::Client::new();
+		for (userinfo, admitted) in [
+			("", false),
+			("relay:wrong@", false),
+			("hunter2:x@", false),
+			("relay:hunter2%3Ax@", true),
+			(":hunter2%3Ax@", true),
+		] {
+			let status = |path: &'static str| {
+				let url = format!("http://{userinfo}{addr}{path}");
+				let http = http.clone();
+				async move {
+					match path {
+						"/" => http.post(url).json(&request("/demo")).send().await,
+						_ => http.get(url).send().await,
+					}
+					.unwrap()
+					.status()
+				}
+			};
+			for path in ["/", "/mesh/keys"] {
+				assert_eq!(
+					status(path).await == StatusCode::UNAUTHORIZED,
+					!admitted,
+					"{userinfo}{path}"
+				);
+			}
+		}
+
+		// The relay's client sends the secret from its URL's userinfo.
+		let client = Client::new(format!("http://relay:hunter2%3Ax@{addr}/").parse().unwrap(), None).unwrap();
+		client.connect(request("/demo")).await.unwrap();
+		let client = Client::new(format!("http://{addr}/").parse().unwrap(), None).unwrap();
+		client.connect(request("/demo")).await.unwrap_err();
+
+		// The scheme matches case-insensitively.
+		use base64::Engine;
+		let credentials = base64::engine::general_purpose::STANDARD.encode("relay:hunter2:x");
+		for scheme in ["basic", "BASIC", "Basic", "Bearer"] {
+			let status = http
+				.get(format!("http://{addr}/mesh/keys"))
+				.header(reqwest::header::AUTHORIZATION, format!("{scheme} {credentials}"))
+				.send()
+				.await
+				.unwrap()
+				.status();
+			assert_eq!(status == StatusCode::UNAUTHORIZED, scheme == "Bearer", "{scheme}");
+		}
 	}
 
 	#[tokio::test]
