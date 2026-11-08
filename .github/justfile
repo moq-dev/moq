@@ -66,8 +66,10 @@ check:
     python3 sh/gh/test-inventory.py
     python3 bench/relay.test.py
 
-# Fast repository tooling tests for every `just check` and `just ci`.
+# Repository tooling tests; every class runs unless explicitly excluded as a slow fixture.
 test:
+    python3 sh/version.test.py
+    python3 sh/gh/tooling-test.test.py
     python3 sh/local.test.py
     python3 test/smoke/runner.test.py
     python3 sh/coverage.test.py
@@ -75,6 +77,7 @@ test:
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
+    python3 sh/gh/tooling-test.py bench/build.test.py --exclude Builds
     python3 bench/summary.test.py
     python3 bench/profile.test.py
     python3 bench/fanout.test.py
@@ -97,10 +100,12 @@ test:
     python3 sh/kt/gradle.test.py
     python3 sh/rs/select.test.py
     python3 sh/rs/config.test.py
+    python3 sh/rs/hakari.test.py
+    python3 sh/rs/test-lints.test.py
     python3 sh/js/install.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
-    python3 sh/gh/nightly.test.py NightlyTest
+    python3 sh/gh/nightly.test.py
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
     python3 sh/gh/ts-paths.test.py
@@ -109,11 +114,7 @@ test:
 
 # Tooling integration tests and selector timing, run nightly outside the merge gate.
 test-integration:
-    python3 sh/version.test.py
-    bash sh/local.sh python3 bench/build.test.py
-    python3 sh/rs/hakari.test.py
-    python3 sh/rs/test-lints.test.py
-    python3 sh/gh/nightly.test.py
+    bash sh/local.sh python3 bench/build.test.py Builds
     python3 sh/dispatch-query.test.py --bench
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
