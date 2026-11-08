@@ -16,7 +16,7 @@ LINUX = os.uname().sysname == "Linux"
 
 
 def target_features():
-    """Every bench and example `required-features`, as `crate/feature`, for the workspace."""
+    """Every `required-features` of a bench, example, or tested target, as `crate/feature`, for the workspace."""
     metadata = json.loads(
         subprocess.run(
             ["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"],
@@ -32,7 +32,7 @@ def target_features():
             for package in metadata["packages"]
             if not package["name"].endswith("-fuzz")
             for target in package["targets"]
-            if {"bench", "example"} & set(target["kind"])
+            if {"bench", "example"} & set(target["kind"]) or target["test"]
             for feature in target.get("required-features", [])
         }
     )
@@ -264,6 +264,13 @@ class SelectTest(unittest.TestCase):
                 (call,) = [call for call in self.selected(bench, action="test") if call.startswith("rs test ")]
                 self.assertIn(" --benches --examples ", call)
                 self.assertIn(feature, call.split(" --features ", 1)[1].split())
+
+    def test_a_binary_alone_enables_its_required_features(self):
+        # moq-boy's only target is its binary, so without openh264 the build
+        # holds nothing and its tests never run.
+        calls = self.selected("rs/moq-boy/src/main.rs", action="test")
+        (call,) = [call for call in calls if call.startswith("rs test ")]
+        self.assertIn("moq-boy/openh264", call.split(" --features ", 1)[1].split())
 
 
 class MetadataTest(unittest.TestCase):
