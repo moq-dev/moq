@@ -164,15 +164,22 @@ closed, left no finished record, so the final catalog snapshot started the
 rendition again and replayed a group on its held pad. A failure now counts as
 the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160).
 
+Added 2026-11-07 (maintainer, /quest-complete): moq-gst's stale-completion
+sink test, which failed once in 30 stress iterations in
+[moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160)'s validation.
+It is quarantined with `#[ignore]` until its child fixes it.
+
+`js/net`'s lite-07 relative-start integration test, which failed once on main in
+[moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run,
+read a start of 0 when the newest group landed before the reader asked: its
+window had yet to settle the relative anchor, so it asked a fill from group 0.
+`start()` now settles the window first, as the Rust `poll_start` does, fixed by
+[moq-dev/moq#8197](https://github.com/moq-dev/moq/pull/8197).
+
 Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s
 http:// fingerprint tests, whose slow real fetch lets the WebTransport hedge
 timer fire on the host clock, seen in
 [moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163)'s CI.
-
-Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s lite-07
-relative-start integration test, which failed once on main in
-[moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run.
-It is quarantined with `test.skip` until its child fixes it.
 
 Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
 `js/net`'s lite-07 empty-window reply test, which fails on main 12/200 under
@@ -185,8 +192,8 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
+- [moq-gst's stale-completion sink test survives load](/quest/m0/test-flakes-2/gst-stale-completion.md) - `a_stale_completion_cannot_end_the_next_publication` passes under stress, and its `#[ignore]` is removed
 - [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
 - [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
-- [A lite-07 relative start resolves to the publisher's start every time](/quest/m0/test-flakes-2/lite07-relative-start.md) - `js/net`'s frameless-newest-group integration test stops reading a start of 0, and its `test.skip` is removed
 - [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
 - [moq-tokio's stream-stopped tests survive a loaded host](/quest/m0/test-flakes-2/quic-stream-stopped.md) - `stream_stopped` awaits its stop event instead of a 100 ms wall-clock deadline, and its `#[ignore]` is removed
