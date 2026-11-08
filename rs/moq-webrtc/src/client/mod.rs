@@ -60,11 +60,17 @@ impl Client {
 	/// [`reqwest::Client`] (with its connection pool and rustls config) is created
 	/// once here and reused across every [`subscribe`](Self::subscribe) /
 	/// [`publish`](Self::publish) call.
-	pub fn new(config: Config) -> Self {
-		Self {
+	///
+	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU
+	/// rind can't run on.
+	pub fn new(config: Config) -> crate::Result<Self> {
+		// reqwest reads rustls's process default and panics without one, so install rind's
+		// unless the host already chose a provider.
+		moq_crypto::provider::install_default()?;
+		Ok(Self {
 			config,
-			http: reqwest::Client::new(),
-		}
+			http: reqwest::Client::builder().build()?,
+		})
 	}
 
 	pub(crate) fn config(&self) -> &Config {
@@ -111,6 +117,7 @@ mod tests {
 			.parse()
 			.expect("WHEP URL");
 		let err = Client::new(Config::default())
+			.unwrap()
 			.subscribe(url, broadcast.broadcast().clone())
 			.await
 			.expect_err("dial a closed port");
