@@ -346,6 +346,19 @@ fn an_open_waits_only_for_stream_credit() {
 			let Poll::Ready(Ok(mut second)) = session.poll_open_uni(&kio::Waiter::noop(), Default::default()) else {
 				panic!("the open waited on more than stream credit");
 			};
+			// A stream finished before its header fits could never deliver its FIN.
+			let Poll::Ready(Ok(mut empty)) = session.poll_open_uni(&kio::Waiter::noop(), Default::default()) else {
+				panic!("the open waited on more than stream credit");
+			};
+			assert!(matches!(
+				moq_net::transport::poll::SendStream::finish(&mut empty),
+				Err(quic::web::send::Error::Unsent)
+			));
+			assert!(matches!(
+				empty.poll_closed(&kio::Waiter::noop()),
+				Poll::Ready(Err(quic::web::send::Error::Unsent))
+			));
+			drop(empty);
 			opened.send(()).expect("the client waits");
 			first.write_all(rest).await.expect("write");
 			second.write_all(&b"second"[..]).await.expect("write");

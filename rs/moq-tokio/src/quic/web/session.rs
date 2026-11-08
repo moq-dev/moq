@@ -1288,6 +1288,21 @@ mod tests {
 			let Poll::Ready(Ok(mut second)) = client.poll_open_uni(&Waiter::noop(), Default::default()) else {
 				panic!("framed: {framed}: the open waited on more than stream credit");
 			};
+			// A stream finished before its header fits could never deliver its FIN.
+			let Poll::Ready(Ok(mut empty)) = client.poll_open_uni(&Waiter::noop(), Default::default()) else {
+				panic!("framed: {framed}: the open waited on more than stream credit");
+			};
+			if framed {
+				assert!(matches!(
+					moq_net::transport::poll::SendStream::finish(&mut empty),
+					Err(crate::quic::web::send::Error::Unsent)
+				));
+				assert!(matches!(
+					empty.poll_closed(&Waiter::noop()),
+					Poll::Ready(Err(crate::quic::web::send::Error::Unsent))
+				));
+			}
+			drop(empty);
 
 			let send = async {
 				first.write_all(rest).await.unwrap();

@@ -30,6 +30,8 @@ pub struct Stream {
 	unwritten: Bytes,
 	/// The end of the WebTransport header once written, which a reset must still deliver.
 	header: Option<send::Offset>,
+	/// Finished before its header fit, so it was reset with nothing sent.
+	unsent: bool,
 	id: crate::quic::driver::stream::Id,
 	/// Holds the waiter of an [`AsyncWrite`](tokio::io::AsyncWrite) write across polls.
 	park: kio::Park,
@@ -55,6 +57,7 @@ impl Stream {
 			close,
 			unwritten: header,
 			header: None,
+			unsent: false,
 			park: Default::default(),
 		};
 		// Write the header now when it fits, so the peer can accept the stream before its
@@ -156,6 +159,9 @@ impl Stream {
 	/// session closed.
 	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<Option<u32>, Error>> {
+		if self.unsent {
+			return Poll::Ready(Err(Error::Unsent));
+		}
 		let result = match &self.state {
 			State::Open(stream) => stream.poll_closed(waiter),
 			State::Finished(stream) => stream.poll_closed(waiter),
@@ -172,8 +178,11 @@ impl Stream {
 	}
 
 	/// Finish sending, retaining a handle to acknowledgements and peer cancellation.
+	///
+	/// A stream whose WebTransport header never fit is reset instead, and the handle fails
+	/// with [`Error::Unsent`].
 	pub fn finish(mut self) -> Finished {
-		self.finish_mut();
+		let _ = self.finish_mut();
 		Finished {
 			stream: self,
 			park: Default::default(),
@@ -201,12 +210,13 @@ impl Stream {
 	/// Mark the stream as finished, such that no more data can be written. See
 	/// [`send::Stream::finish`]. Does nothing if it was already finished or reset.
 	///
-	/// A stream whose header still does not fit carried nothing the peer could attribute to
-	/// its session, so it is reset instead, as dropping it would.
-	fn finish_mut(&mut self) {
+	/// A stream whose header still does not fit could never deliver its FIN, so it is reset
+	/// instead, failing with [`Error::Unsent`] here and from `poll_closed`.
+	fn finish_mut(&mut self) -> Result<(), Error> {
 		if self.poll_header(&kio::Waiter::noop()).is_pending() {
 			self.reset_mut(0);
-			return;
+			self.unsent = true;
+			return Err(Error::Unsent);
 		}
 		if matches!(self.state, State::Open(_)) {
 			let State::Open(stream) = std::mem::replace(&mut self.state, State::Reset(Ok(None))) else {
@@ -214,6 +224,7 @@ impl Stream {
 			};
 			self.state = State::Finished(stream.finish());
 		}
+		Ok(())
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
@@ -272,8 +283,7 @@ impl tokio::io::AsyncWrite for Stream {
 
 	fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
 		// Already finished or reset, so there is nothing left to shut.
-		self.finish_mut();
-		Poll::Ready(Ok(()))
+		Poll::Ready(self.finish_mut().map_err(io::Error::other))
 	}
 }
 
@@ -294,8 +304,7 @@ impl moq_net::transport::poll::SendStream for Stream {
 		Self::set_group(self, Some(group));
 	}
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		Self::finish_mut(self);
-		Ok(())
+		Self::finish_mut(self)
 	}
 	fn reset(&mut self, code: u32) {
 		Self::reset_mut(self, code);
@@ -385,6 +394,11 @@ pub enum Error {
 	/// The stream was already finished or reset.
 	#[error("stream closed")]
 	ClosedStream,
+
+	/// The stream was finished before its WebTransport header fit the peer's flow control, so
+	/// it was reset with nothing sent.
+	#[error("finished before the stream header could be sent")]
+	Unsent,
 }
 
 impl From<crate::quic::driver::send::Error> for Error {
