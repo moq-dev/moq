@@ -1932,6 +1932,41 @@ describe("Session integration (scripted peer)", () => {
 		});
 	});
 
+	// The application will never take a stream once its acceptor is cancelled, so the
+	// slot returns as soon as both halves are done on the wire.
+	describe("a refused peer stream returns its stream-count credit", () => {
+		test("uni, once the peer finishes it", async () => {
+			const { session, peer } = connect({ maxStreamsUni: 1n });
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+			await session.incomingUnidirectionalStreams.cancel();
+
+			const id = Stream.Id.create(0n, Stream.Dir.Uni, true);
+			peer.send({ type: "stream", id, data: new Uint8Array([1]), fin: true });
+			await waitFor(() => peer.count("max_streams_uni") === 1);
+			session.close();
+		});
+
+		test("bidi, resetting our send half, once the peer finishes its own", async () => {
+			const { session, peer } = connect({ maxStreamsBidi: 1n });
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+			await session.incomingBidirectionalStreams.cancel();
+
+			const id = Stream.Id.create(0n, Stream.Dir.Bi, true);
+			peer.send({ type: "stream", id, data: new Uint8Array([1]), fin: false });
+			// Our send half ends at once; the peer's is still open, so the slot waits.
+			await waitFor(() => peer.has("reset_stream"));
+			peer.send({ type: "ping_request", sequence: 1n });
+			await waitFor(() => peer.has("ping_response"));
+			expect(peer.count("max_streams_bidi")).toBe(0);
+
+			peer.send({ type: "stream", id, offset: 1n, data: new Uint8Array(), fin: true });
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
+	});
+
 	// Ported from Rust's `credit_returns_for_unread_and_stopped_streams`: every byte the
 	// peer spends returns its connection credit, whether read, discarded on arrival after
 	// STOP_SENDING, or only declared by a RESET_STREAM's final size.

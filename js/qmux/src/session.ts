@@ -1373,8 +1373,15 @@ export default class Session implements WebTransport {
 		// Taking the stream is the slot's other hold, counted by the same closure as onClose.
 		const accept = stream.onClose as () => void;
 		// A refused stream stays registered until its FIN or RESET, so in-flight frames
-		// cannot reopen it, and discards what they carry.
-		const drop = (err: Error) => stream.recv.refuse(err);
+		// cannot reopen it, and discards what they carry. The application will never
+		// take it, so it releases that hold and resets a bidi stream's send half, and
+		// the slot returns once the peer's half is done too.
+		const drop = (err: Error) => {
+			stream.recv.refuse(err);
+			accept();
+			if (stream.send) this.#resetSend(id, stream, err, VarInt.from(resetCode(err)));
+			else this.#reap(id.value.value);
+		};
 		const refused = () => drop(new Error("incoming stream acceptor cancelled"));
 		if (stream.send) {
 			const writable = this.#sendWritable(id, stream, stream.send, DEFAULT_SEND_ORDER);
