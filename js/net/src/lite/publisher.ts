@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { Duration, Instant, now, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -162,7 +162,7 @@ function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage 
 		refresh: info.refresh,
 		// Publisher Max Age: the publisher's staleness bound, advertised so relays re-serve
 		// with the same bound.
-		maxAge: info.maxAge,
+		maxAge: info.maxAge?.asMillis(),
 		// `#serveGroup` emits each frame converted to it.
 		timescale: info.timescale ?? undefined,
 		// An older peer is served the frames inflated.
@@ -480,8 +480,8 @@ function waitForControl(controls: SubscriptionControls): Promise<void> {
  * a legacy subscriber never declined, so fall back to the publisher's max age alone
  * and leave enforcement to the receiver, as the IETF path does for the same reason.
  */
-function servingMaxDelay(version: Version, requested: number): Milli | null {
-	return carriesMaxDelay(version) ? Milli(requested) : null;
+function servingMaxDelay(version: Version, requested: number): Duration | null {
+	return carriesMaxDelay(version) ? Duration.millis(requested) : null;
 }
 
 /** Whether this version's SUBSCRIBE carries Subscriber Max Age at all. */
@@ -990,7 +990,7 @@ export class Publisher {
 			order: msg.order,
 			delay: {
 				max: servingMaxDelay(this.version, msg.maxDelay),
-				min: msg.minDelay === undefined ? null : Milli(msg.minDelay),
+				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
 			},
 			ranges,
 		});
@@ -1154,7 +1154,7 @@ export class Publisher {
 						order: update.order,
 						delay: {
 							max: servingMaxDelay(this.version, update.maxDelay),
-							min: update.minDelay === undefined ? null : Milli(update.minDelay),
+							min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
 						},
 						ranges: requestedRanges(update, info.timescale ?? undefined),
 					});
@@ -1282,7 +1282,7 @@ export class Publisher {
 				// FETCH's slot until the requester leaves.
 				group = await front.track(msg.track).fetchGroup(msg.group, {
 					priority: msg.priority,
-					maxDelay: msg.maxDelay,
+					maxDelay: msg.maxDelay === undefined ? undefined : Duration.millis(msg.maxDelay),
 					signal: left.signal,
 				});
 				serving(group);
@@ -2531,7 +2531,7 @@ export class Publisher {
 		try {
 			for (;;) {
 				const timer = new AbortController();
-				const timeout = sleep(Nano.fromMilli(Milli(PROBE_INTERVAL)), { signal: timer.signal }).then(
+				const timeout = sleep(Duration.millis(PROBE_INTERVAL), { signal: timer.signal }).then(
 					() => "timeout" as const,
 					() => "timeout" as const,
 				);
@@ -2571,7 +2571,7 @@ export class Publisher {
 				if (lastSent === undefined || lastSentTime === undefined) {
 					shouldSend = true;
 				} else {
-					const elapsed = Nano.toMilli(Instant.durationSince(now(), lastSentTime));
+					const elapsed = now().since(lastSentTime).asMillis();
 					// The bitrate threshold decays to zero as the last report ages: a
 					// stale estimate is worth refreshing for a smaller move.
 					const t = Math.max(PROBE_INTERVAL, Math.min(PROBE_MAX_AGE, elapsed));

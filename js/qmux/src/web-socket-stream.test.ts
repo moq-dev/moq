@@ -1,5 +1,5 @@
 import { describe, expect, onTestFinished, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import {
 	openWebSocketStream,
 	type WebSocketConstructor,
@@ -69,7 +69,7 @@ function manual(): Manual {
 }
 
 /** Long enough for the ponyfill to poll `bufferedAmount` many times. */
-const POLLS = Nano.fromMilli(Milli(1000));
+const POLLS = Duration.millis(1000);
 
 describe("WebSocketStream ponyfill", () => {
 	test("opened resolves with streams and negotiated protocol", async () => {

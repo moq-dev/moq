@@ -1,4 +1,4 @@
-import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
+import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
 import Session, { type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
 import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
@@ -22,19 +22,19 @@ import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
-const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
+const DEFAULT_WEBSOCKET_DELAY = Duration.millis(500);
 
 // How long the first WebTransport dial may stay unopened before a second one dials alongside
 // it. The same moment as the WebSocket's default head start, so a fresh WebTransport flow
 // races the fallback rather than losing to it, which would leave the session on WebSocket for
 // good. A healthy open is about two round trips, so this spares round trips up to about
 // 250 ms, and it is inside the 2 s ceiling RFC 8305 recommends for staggered attempts.
-const WEBTRANSPORT_HEDGE = DEFAULT_WEBSOCKET_DELAY_MS;
+const WEBTRANSPORT_HEDGE = DEFAULT_WEBSOCKET_DELAY;
 
 // How long a WebSocket dial may stay unopened before it is closed and dialed again. Generous,
 // since script cannot tell a silent connect from a slow one; Firefox and socket.io give a
 // WebSocket 20 s to open.
-const WEBSOCKET_REDIAL = Milli(10_000);
+const WEBSOCKET_REDIAL = Duration.millis(10_000);
 
 // MoQ holds a stream open per subscription and per live group, far past qmux's default of
 // 100 each way, where the peer's opens are refused or wait on credit forever. Matches
@@ -47,7 +47,7 @@ const DEFAULT_STREAM_RECEIVE_WINDOW = 1 << 20;
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
-const SETUP_CLOSE_GRACE = Nano.fromMilli(Milli(100));
+const SETUP_CLOSE_GRACE = Duration.millis(100);
 
 /** Tuning for the WebSocket fallback used when WebTransport is unavailable or loses the connect race. */
 export interface WebSocketProps {
@@ -62,7 +62,7 @@ export interface WebSocketProps {
 	 * It is 0 while WebSocket holds the last win against the host and port the fallback dials,
 	 * until WebTransport wins a race there again.
 	 */
-	delay?: Milli;
+	delay?: Duration;
 
 	/**
 	 * How many streams the server may hold open at once, applied to bidirectional and
@@ -295,7 +295,7 @@ export interface ConnectProps {
 	 * deadline of its own (default: 30000ms). `0` waits forever. Past it, the connect rejects
 	 * with {@link ConnectTimeout} and closes whatever it had opened.
 	 */
-	timeout?: Milli;
+	timeout?: Duration;
 
 	/**
 	 * Aborts the connection attempt with the signal's reason. An already-aborted
@@ -353,8 +353,6 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	// Fail before dialing; the session checks again when it attaches.
 	if (props.auth) vacant(props.auth);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
-	// Checked before anything is armed, so an invalid value throws here, in the caller's unit.
-	const deadline = Nano.fromMilli(Milli(limit));
 
 	// Resolves on abort or timeout so every in-flight transport tears itself down.
 	const { promise: abort, resolve } = Promise.withResolvers<void>();
@@ -362,13 +360,12 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	signal.addEventListener("abort", onAbort, { once: true });
 
 	let expired: ConnectTimeout | undefined;
-	const disarm =
-		limit > 0
-			? after(deadline, () => {
-					expired = new ConnectTimeout(limit);
-					resolve();
-				})
-			: () => {};
+	const disarm = !limit.isZero()
+		? after(limit, () => {
+				expired = new ConnectTimeout(limit);
+				resolve();
+			})
+		: () => {};
 
 	const tokens = props.tokens ?? [];
 	const pending = connectInner(url, tokens, props, abort);
@@ -433,7 +430,7 @@ async function connectInner(
 	const websocketUrl = fallbackDial?.url ?? url;
 	const server = websocketKey(websocketUrl);
 	const headstart =
-		!webtransport || websocketWon.has(server) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
+		!webtransport || websocketWon.has(server) ? Duration.ZERO : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY);
 	const maxStreams = BigInt(props.websocket?.maxStreams ?? DEFAULT_MAX_STREAMS);
 	const websocket =
 		props.websocket?.enabled !== false
@@ -708,7 +705,7 @@ async function hedgeWebTransport(
 	const first = dialWebTransport(target, cancel);
 
 	// The first dial opening, failing, or being cancelled settles this before the delay does.
-	const hedge = await timeout(Nano.fromMilli(WEBTRANSPORT_HEDGE), first).then(
+	const hedge = await timeout(WEBTRANSPORT_HEDGE, first).then(
 		() => false,
 		(err: unknown) => err instanceof Elapsed,
 	);
@@ -863,16 +860,16 @@ async function fetchFingerprint(url: URL, cancel: Promise<void>): Promise<Uint8A
  */
 async function connectWebSocket(
 	url: URL,
-	delay: number,
+	delay: Duration,
 	cancel: Promise<void>,
 	options: QmuxOptions,
 ): Promise<Session | undefined> {
-	const timer = sleep(Nano.fromMilli(Milli(delay)));
+	const timer = sleep(delay);
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
 
-	for (let wait = WEBSOCKET_REDIAL; ; wait = Milli(wait * 2)) {
+	for (let wait = WEBSOCKET_REDIAL; ; wait = wait.mul(2)) {
 		const quic = new Session(url, options);
 
 		// Wait for the WebSocket to connect, for the cancel promise to resolve, or for the
@@ -885,12 +882,12 @@ async function connectWebSocket(
 			const outcome = await race([
 				quic.ready.then(() => "open" as const),
 				cancel,
-				sleep(Nano.fromMilli(wait), { signal: disarm.signal }).then(() => "redial" as const),
+				sleep(wait, { signal: disarm.signal }).then(() => "redial" as const),
 			]);
 			if (outcome === "open") return quic;
 			quic.close();
 			if (outcome !== "redial") return undefined;
-			console.debug(show(parse(url)), `WebSocket not open after ${wait}ms; dialing again`);
+			console.debug(show(parse(url)), `WebSocket not open after ${wait}; dialing again`);
 		} finally {
 			disarm.abort();
 		}

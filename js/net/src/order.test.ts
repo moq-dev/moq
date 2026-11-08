@@ -6,7 +6,7 @@
 // streams stay in flight and ranked against each other.
 
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { accept, connect, type Established } from "./connection/index.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { FetchHeader } from "./ietf/fetch.ts";
@@ -24,7 +24,7 @@ import { wireOf } from "./wire.ts";
 const url = new URL("https://localhost:4443/test");
 
 // A budget covering every group these tests write, so expiry never decides what is sent.
-const MAX_DELAY = Milli(30_000);
+const MAX_DELAY = Duration.millis(30_000);
 
 // The send orders a subscription at priority 0 gives its streams, in the order they opened,
 // when stream `i` carries group `i` of `count` all still in flight.

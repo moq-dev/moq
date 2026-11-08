@@ -1,5 +1,6 @@
 /** Sweep observers against routes for one route update, and against tracks for one listing change. */
 
+import { Duration, Wall } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
@@ -215,7 +216,7 @@ for (const patternCount of [8, 32, 128]) {
 		);
 		const start = performance.now();
 		for (let i = 0; i < 1024; i++) {
-			grant.set({ publish: new Path.Patterns(), subscribe, expires: i });
+			grant.set({ publish: new Path.Patterns(), subscribe, expires: Wall.UNIX_EPOCH.add(Duration.millis(i)) });
 			await Promise.resolve();
 		}
 		console.log(`fetch,${patternCount},${fetchCount},${(((performance.now() - start) * 1000) / 1024).toFixed(2)}`);

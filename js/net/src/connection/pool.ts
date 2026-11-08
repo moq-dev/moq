@@ -4,7 +4,7 @@
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Announce from "../announce.ts";
 import { Producer as AnnounceProducer, list, type Routes } from "../announced.ts";
@@ -36,7 +36,7 @@ import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
-const LINGER_MS = Milli(2000);
+const LINGER = Duration.millis(2000);
 
 /** Options for {@link Connection}. */
 export interface ConnectionProps {
@@ -85,7 +85,7 @@ export interface ConnectionProps {
 	 * 30000ms; `0` waits forever). An attempt that outlives it is retried like any other
 	 * failure. The same bound as the `timeout` option of {@link Connection.connect}.
 	 */
-	timeout?: Milli;
+	timeout?: Duration;
 
 	/**
 	 * How to react to the relay's GOAWAY; an unset field uses its default. Every connection
@@ -249,8 +249,6 @@ export class Connection {
 		// A plain list is checked and copied now, so a bad name throws here and mutating the array
 		// later changes nothing. A live list is checked as it changes, failing on `error`.
 		const fixed = normalizeVersions({ ...props, versions: Array.isArray(given) ? given : undefined });
-		// Likewise a bad timeout, before anything below exists to leak.
-		if (props?.timeout !== undefined) Milli(props.timeout);
 		refuse(props);
 		this.#signals = new Effect();
 
@@ -589,7 +587,7 @@ function acquire(url: string, versions?: readonly string[]): Entry & { release: 
 
 			// Don't hold a Node process open for a connection nobody is using.
 			taken.timer = after(
-				Nano.fromMilli(LINGER_MS),
+				LINGER,
 				() => {
 					if (pool.get(taken.key) === taken) pool.delete(taken.key);
 					taken.connection.close();

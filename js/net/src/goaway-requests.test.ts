@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { Duration, Manual, now, yieldNow } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
@@ -29,10 +29,10 @@ async function settle() {
 }
 
 async function waitUntil(pred: () => boolean): Promise<void> {
-	const deadline = Instant.add(now(), Nano.fromMilli(Milli(2000)));
+	const deadline = now().add(Duration.millis(2000));
 	for (;;) {
 		if (pred()) return;
-		if (now() > deadline) throw new Error("timed out waiting for condition");
+		if (now().gt(deadline)) throw new Error("timed out waiting for condition");
 		await settle();
 	}
 }
@@ -357,7 +357,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 		// A draining close of a session still serving a live track gives up after its drain.
 		const closing = server.close().catch(() => {});
-		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Duration.millis(1000));
 		await closing;
 		await expect(
 			(async () => {

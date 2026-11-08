@@ -1,4 +1,4 @@
-import { type Milli, Nano, sleep } from "@moq/clock";
+import { Duration, sleep } from "@moq/clock";
 import { race } from "@moq/signals";
 import { controlTimeout, error } from "../error.ts";
 import type { Stream } from "../stream.ts";
@@ -26,9 +26,9 @@ export class Deadline {
 	#owners: Abortable[] = [];
 	#failure?: Error;
 
-	#budget?: Milli;
+	#budget?: Duration;
 
-	constructor(budget?: Milli) {
+	constructor(budget?: Duration) {
 		this.#budget = budget;
 		this.#rearm();
 	}
@@ -99,8 +99,8 @@ export class Deadline {
 	}
 
 	/** Reject once the request goes the whole budget with none of its streams waiting to open. */
-	async #expire(limit: Milli, done: AbortSignal): Promise<never> {
-		const budget = Nano.fromMilli(limit);
+	async #expire(limit: Duration, done: AbortSignal): Promise<never> {
+		const budget = limit;
 		const answered = new Promise<void>((resolve) =>
 			done.addEventListener("abort", () => resolve(), { once: true }),
 		);

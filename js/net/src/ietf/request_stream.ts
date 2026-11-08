@@ -45,7 +45,7 @@ async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, 
 	const err = new RequestError({
 		errorCode,
 		reasonPhrase: refusal.reasonPhrase,
-		retryInterval: refusal.retryInterval ?? (refusal.retryable && open ? BigInt(RETRY_INITIAL) : 0n),
+		retryInterval: refusal.retryInterval ?? (refusal.retryable && open ? BigInt(RETRY_INITIAL.asMillis()) : 0n),
 	});
 	await Message.write(w, RequestError.id, err, version);
 }

@@ -439,7 +439,11 @@ for (const driver of ["advance", "fire", "drive"] as const) {
 			release = resolve;
 		});
 		const pending =
-			driver === "advance" ? clock.advance(Duration.nanos(10)) : driver === "fire" ? clock.fire() : clock.drive(work);
+			driver === "advance"
+				? clock.advance(Duration.nanos(10))
+				: driver === "fire"
+					? clock.fire()
+					: clock.drive(work);
 		try {
 			await expect(clock.advance(Duration.nanos(100))).rejects.toThrow("already pending");
 			expect(() => clock.jump(Duration.nanos(100))).toThrow("already pending");

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano } from "@moq/clock";
+import { Duration, type Installed, Manual } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
@@ -27,10 +27,10 @@ let clock: Manual;
 let installed: Installed;
 
 function advance(ms = 0): Promise<void> {
-	return clock.advance(Nano.fromMilli(Milli(ms)));
+	return clock.advance(Duration.millis(ms));
 }
 
-const linger = Milli(2000);
+const linger = 2000;
 
 const original = globalThis.WebTransport;
 const originalWebSocket = globalThis.WebSocket;
@@ -301,8 +301,8 @@ test("connection-specific options infer a private loop and origin", async () => 
 		const options = [
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
-			{ delay: { timeout: Milli(0) } },
-			{ timeout: Milli(10_000) },
+			{ delay: { timeout: Duration.millis(0) } },
+			{ timeout: Duration.millis(10_000) },
 			{ publish: origin.consume() },
 			{ consume: origin },
 		];
@@ -336,8 +336,8 @@ test("explicit share: true refuses connection-specific options", () => {
 			/share: false/,
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, delay: { timeout: Milli(0) } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, timeout: Milli(10_000) })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, delay: { timeout: Duration.millis(0) } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, timeout: Duration.millis(10_000) })).toThrow(/share: false/);
 	} finally {
 		origin.close();
 	}
@@ -438,7 +438,7 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(1) },
+		delay: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: Duration.millis(1) },
 	});
 	try {
 		await advance(2);
@@ -467,7 +467,7 @@ test("a private partial delay keeps the unlimited retry timeout", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1000), multiplier: 1, max: Milli(1000) },
+		delay: { initial: Duration.millis(1000), multiplier: 1, max: Duration.millis(1000) },
 	});
 	try {
 		await advance(60_000);
@@ -845,8 +845,8 @@ test("a private handle's timeout bounds each attempt", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		timeout: Milli(50),
-		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+		timeout: Duration.millis(50),
+		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 	});
 	try {
 		// Each hung dial is cut at 50 ms and redialed after the backoff; the default 30 s
@@ -856,8 +856,4 @@ test("a private handle's timeout bounds each attempt", async () => {
 	} finally {
 		handle.close();
 	}
-});
-
-test("an invalid timeout is refused when a private handle is built", () => {
-	expect(() => new Connection({ url, share: false, timeout: Number.NaN as Milli })).toThrow(RangeError);
 });

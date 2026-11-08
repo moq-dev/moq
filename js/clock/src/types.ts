@@ -7,6 +7,11 @@ function refuse(what: string): never {
 	throw new TypeError(`a ${what} is not a number; read it with an explicit unit`);
 }
 
+// Values live under a symbol rather than a `#private` field so test matchers such as `toEqual`
+// compare them by value; a private field is invisible to them, so every pair would match.
+/** @internal */
+export const VALUE: unique symbol = Symbol("clock value");
+
 // Package-private bridges for backends that count in plain numbers.
 /** @internal */
 export let instantOf: (nanos: number) => Instant;
@@ -27,10 +32,12 @@ export class Duration {
 	/** No time at all. */
 	static readonly ZERO: Duration = new Duration(0);
 
-	readonly #nanos: number;
+	/** @internal Nanoseconds. */
+	readonly [VALUE]: number;
+	declare private readonly kind: "duration";
 
 	private constructor(nanos: number) {
-		this.#nanos = nanos;
+		this[VALUE] = nanos;
 	}
 
 	/** A duration of `value` nanoseconds; throws a `RangeError` unless finite and nonnegative. */
@@ -55,99 +62,104 @@ export class Duration {
 
 	/** The duration in nanoseconds, possibly fractional. */
 	asNanos(): number {
-		return this.#nanos;
+		return this[VALUE];
 	}
 
 	/** The duration in microseconds, possibly fractional. */
 	asMicros(): number {
-		return this.#nanos / 1_000;
+		return this[VALUE] / 1_000;
 	}
 
 	/** The duration in milliseconds, possibly fractional. */
 	asMillis(): number {
-		return this.#nanos / 1_000_000;
+		return this[VALUE] / 1_000_000;
 	}
 
 	/** The duration in seconds, possibly fractional. */
 	asSecs(): number {
-		return this.#nanos / 1_000_000_000;
+		return this[VALUE] / 1_000_000_000;
 	}
 
 	/** Whether this is no time at all. */
 	isZero(): boolean {
-		return this.#nanos === 0;
+		return this[VALUE] === 0;
 	}
 
 	/** The sum of both durations. */
 	add(other: Duration): Duration {
-		return new Duration(checked(this.#nanos + other.#nanos, "duration"));
+		return new Duration(checked(this[VALUE] + other[VALUE], "duration"));
 	}
 
 	/** This duration minus `other`; throws a `RangeError` if `other` is longer. */
 	sub(other: Duration): Duration {
-		return new Duration(checked(this.#nanos - other.#nanos, "duration"));
+		return new Duration(checked(this[VALUE] - other[VALUE], "duration"));
 	}
 
 	/** This duration minus `other`, or zero if `other` is longer. */
 	saturatingSub(other: Duration): Duration {
-		return this.#nanos > other.#nanos ? new Duration(this.#nanos - other.#nanos) : Duration.ZERO;
+		return this[VALUE] > other[VALUE] ? new Duration(this[VALUE] - other[VALUE]) : Duration.ZERO;
 	}
 
 	/** This duration scaled by a finite, nonnegative factor. */
 	mul(factor: number): Duration {
-		return new Duration(checked(this.#nanos * factor, "duration"));
+		return new Duration(checked(this[VALUE] * factor, "duration"));
 	}
 
 	/** This duration divided by a finite, positive divisor. */
 	div(divisor: number): Duration {
 		if (!(divisor > 0)) throw new RangeError(`invalid divisor: ${divisor}`);
-		return new Duration(checked(this.#nanos / divisor, "duration"));
+		return new Duration(checked(this[VALUE] / divisor, "duration"));
 	}
 
 	/** How many times `other` fits in this duration, possibly fractional; throws a `RangeError` if `other` is zero. */
 	divDuration(other: Duration): number {
-		if (other.#nanos === 0) throw new RangeError("division by a zero duration");
-		return this.#nanos / other.#nanos;
+		if (other[VALUE] === 0) throw new RangeError("division by a zero duration");
+		return this[VALUE] / other[VALUE];
 	}
 
 	/** The distance between both durations, whichever is longer. */
 	absDiff(other: Duration): Duration {
-		return new Duration(Math.abs(this.#nanos - other.#nanos));
+		return new Duration(Math.abs(this[VALUE] - other[VALUE]));
 	}
 
 	/** Whether both durations are the same length. */
 	eq(other: Duration): boolean {
-		return this.#nanos === other.#nanos;
+		return this[VALUE] === other[VALUE];
+	}
+
+	/** -1, 0, or 1 as this is less than, equal to, or greater than `other`, for sorting. */
+	cmp(other: Duration): -1 | 0 | 1 {
+		return this[VALUE] < other[VALUE] ? -1 : this[VALUE] > other[VALUE] ? 1 : 0;
 	}
 
 	/** Whether this duration is shorter than `other`. */
 	lt(other: Duration): boolean {
-		return this.#nanos < other.#nanos;
+		return this[VALUE] < other[VALUE];
 	}
 
 	/** Whether this duration is at most `other`. */
 	le(other: Duration): boolean {
-		return this.#nanos <= other.#nanos;
+		return this[VALUE] <= other[VALUE];
 	}
 
 	/** Whether this duration is longer than `other`. */
 	gt(other: Duration): boolean {
-		return this.#nanos > other.#nanos;
+		return this[VALUE] > other[VALUE];
 	}
 
 	/** Whether this duration is at least `other`. */
 	ge(other: Duration): boolean {
-		return this.#nanos >= other.#nanos;
+		return this[VALUE] >= other[VALUE];
 	}
 
 	/** The shorter of both durations. */
 	min(other: Duration): Duration {
-		return other.#nanos < this.#nanos ? other : this;
+		return other[VALUE] < this[VALUE] ? other : this;
 	}
 
 	/** The longer of both durations. */
 	max(other: Duration): Duration {
-		return other.#nanos > this.#nanos ? other : this;
+		return other[VALUE] > this[VALUE] ? other : this;
 	}
 
 	/** This duration limited to `[lo, hi]`. */
@@ -186,70 +198,77 @@ export class Instant {
 	/** The clock's origin. */
 	static readonly ZERO: Instant = new Instant(0);
 
-	readonly #nanos: number;
+	/** @internal Nanoseconds since the origin. */
+	readonly [VALUE]: number;
+	declare private readonly kind: "instant";
 
 	private constructor(nanos: number) {
-		this.#nanos = nanos;
+		this[VALUE] = nanos;
 	}
 
 	static {
 		instantOf = (nanos) => new Instant(checked(nanos, "instant"));
-		instantNanos = (at) => at.#nanos;
+		instantNanos = (at) => at[VALUE];
 	}
 
 	/** This instant moved forward by `duration`. */
 	add(duration: Duration): Instant {
-		return new Instant(checked(this.#nanos + duration.asNanos(), "instant"));
+		return new Instant(checked(this[VALUE] + duration.asNanos(), "instant"));
 	}
 
 	/** This instant moved back by `duration`; throws a `RangeError` before the clock's origin. */
 	sub(duration: Duration): Instant {
-		return new Instant(checked(this.#nanos - duration.asNanos(), "instant"));
+		return new Instant(checked(this[VALUE] - duration.asNanos(), "instant"));
 	}
 
 	/** The time from `earlier` to this instant, zero if `earlier` is later. */
 	since(earlier: Instant): Duration {
-		return this.#nanos > earlier.#nanos ? Duration.nanos(this.#nanos - earlier.#nanos) : Duration.ZERO;
+		return this[VALUE] > earlier[VALUE] ? Duration.nanos(this[VALUE] - earlier[VALUE]) : Duration.ZERO;
 	}
 
 	/** Whether both are the same instant. */
 	eq(other: Instant): boolean {
-		return this.#nanos === other.#nanos;
+		return this[VALUE] === other[VALUE];
+	}
+
+	/** -1, 0, or 1 as this is less than, equal to, or greater than `other`, for sorting. */
+	cmp(other: Instant): -1 | 0 | 1 {
+		return this[VALUE] < other[VALUE] ? -1 : this[VALUE] > other[VALUE] ? 1 : 0;
 	}
 
 	/** Whether this instant is before `other`. */
 	lt(other: Instant): boolean {
-		return this.#nanos < other.#nanos;
+		return this[VALUE] < other[VALUE];
 	}
 
 	/** Whether this instant is at or before `other`. */
 	le(other: Instant): boolean {
-		return this.#nanos <= other.#nanos;
+		return this[VALUE] <= other[VALUE];
 	}
 
 	/** Whether this instant is after `other`. */
 	gt(other: Instant): boolean {
-		return this.#nanos > other.#nanos;
+		return this[VALUE] > other[VALUE];
 	}
 
 	/** Whether this instant is at or after `other`. */
 	ge(other: Instant): boolean {
-		return this.#nanos >= other.#nanos;
+		return this[VALUE] >= other[VALUE];
 	}
 
 	/** The earlier of both instants. */
 	min(other: Instant): Instant {
-		return other.#nanos < this.#nanos ? other : this;
+		return other[VALUE] < this[VALUE] ? other : this;
 	}
 
 	/** The later of both instants. */
 	max(other: Instant): Instant {
-		return other.#nanos > this.#nanos ? other : this;
+		return other[VALUE] > this[VALUE] ? other : this;
 	}
 
 	/** The time since the origin with a unit, such as `Instant(1.5ms)`. */
 	toString(): string {
-		return `Instant(${this.#nanos / 1_000_000}ms)`;
+		return `Instant(${this[VALUE] / 1_000_000}ms)`;
 	}
 
 	/** Refuses: an instant has no unitless number. */
@@ -278,61 +297,67 @@ export class Wall {
 	/** 1970-01-01T00:00:00Z. */
 	static readonly UNIX_EPOCH: Wall = new Wall(0);
 
-	// Milliseconds, since Unix nanoseconds pass 2^53.
-	readonly #millis: number;
+	/** @internal Unix milliseconds, since Unix nanoseconds pass 2^53. */
+	readonly [VALUE]: number;
+	declare private readonly kind: "wall";
 
 	private constructor(millis: number) {
-		this.#millis = millis;
+		this[VALUE] = millis;
 	}
 
 	static {
 		wallOf = (millis) => new Wall(checked(millis, "wall time"));
-		wallMillis = (at) => at.#millis;
+		wallMillis = (at) => at[VALUE];
 	}
 
 	/** This time moved forward by `duration`. */
 	add(duration: Duration): Wall {
-		return new Wall(checked(this.#millis + duration.asMillis(), "wall time"));
+		return new Wall(checked(this[VALUE] + duration.asMillis(), "wall time"));
 	}
 
 	/** This time moved back by `duration`; throws a `RangeError` before the Unix epoch. */
 	sub(duration: Duration): Wall {
-		return new Wall(checked(this.#millis - duration.asMillis(), "wall time"));
+		return new Wall(checked(this[VALUE] - duration.asMillis(), "wall time"));
 	}
 
 	/** The time from `earlier` to this one, zero if `earlier` is later. */
 	since(earlier: Wall): Duration {
-		return this.#millis > earlier.#millis ? Duration.millis(this.#millis - earlier.#millis) : Duration.ZERO;
+		return this[VALUE] > earlier[VALUE] ? Duration.millis(this[VALUE] - earlier[VALUE]) : Duration.ZERO;
 	}
 
 	/** Whether both are the same time. */
 	eq(other: Wall): boolean {
-		return this.#millis === other.#millis;
+		return this[VALUE] === other[VALUE];
+	}
+
+	/** -1, 0, or 1 as this is less than, equal to, or greater than `other`, for sorting. */
+	cmp(other: Wall): -1 | 0 | 1 {
+		return this[VALUE] < other[VALUE] ? -1 : this[VALUE] > other[VALUE] ? 1 : 0;
 	}
 
 	/** Whether this time is before `other`. */
 	lt(other: Wall): boolean {
-		return this.#millis < other.#millis;
+		return this[VALUE] < other[VALUE];
 	}
 
 	/** Whether this time is at or before `other`. */
 	le(other: Wall): boolean {
-		return this.#millis <= other.#millis;
+		return this[VALUE] <= other[VALUE];
 	}
 
 	/** Whether this time is after `other`. */
 	gt(other: Wall): boolean {
-		return this.#millis > other.#millis;
+		return this[VALUE] > other[VALUE];
 	}
 
 	/** Whether this time is at or after `other`. */
 	ge(other: Wall): boolean {
-		return this.#millis >= other.#millis;
+		return this[VALUE] >= other[VALUE];
 	}
 
 	/** The time as an ISO 8601 string, or Unix milliseconds past `Date`'s range. */
 	toString(): string {
-		return this.#millis <= 8.64e15 ? new Date(this.#millis).toISOString() : `Wall(${this.#millis}ms)`;
+		return this[VALUE] <= 8.64e15 ? new Date(this[VALUE]).toISOString() : `Wall(${this[VALUE]}ms)`;
 	}
 
 	/** Refuses: a wall time has no unitless number. */

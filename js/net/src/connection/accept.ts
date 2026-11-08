@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { race } from "@moq/signals";
 import { ConnectTimeout, error, fromClose, ProtocolViolation } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -21,7 +21,7 @@ export interface AcceptProps {
 	url: URL;
 
 	/** Bound SETUP in milliseconds (default: 30000; zero waits until aborted). Throws ConnectTimeout. */
-	timeout?: Milli;
+	timeout?: Duration;
 	/** Abort the handshake and release the transport; ignored after acceptance completes. */
 	signal?: AbortSignal;
 
@@ -71,10 +71,9 @@ export async function accept({ transport, url, ...props }: AcceptProps): Promise
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.signal?.throwIfAborted();
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
-	const duration = Nano.fromMilli(Milli(limit));
 	const deadline = new AbortController();
 	const signal = props.signal ? AbortSignal.any([props.signal, deadline.signal]) : deadline.signal;
-	const disarm = limit > 0 ? after(duration, () => deadline.abort(new ConnectTimeout(limit))) : () => {};
+	const disarm = limit.isZero() ? () => {} : after(limit, () => deadline.abort(new ConnectTimeout(limit)));
 	const pending = acceptInner(transport, url, props);
 	// As on connect, a dead transport must end a SETUP whose peer sends nothing more.
 	const terminal = transport.closed.then(fromClose, error).then((cause) => {

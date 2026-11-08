@@ -1,4 +1,4 @@
-import { type Milli, Nano, now, sleep } from "@moq/clock";
+import { Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, Signal } from "@moq/signals";
 import { insertRun, type Run, runGaps } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
@@ -6,7 +6,7 @@ import { GRACE, Ledger } from "./ledger.ts";
 /** How a {@link Tail} measures its grace. */
 export interface TailOptions {
 	/** How long to wait for a group that cannot be accounted for. Read each time it is needed. */
-	grace?: () => Milli;
+	grace?: () => Duration;
 }
 
 /**
@@ -29,7 +29,7 @@ export class Tail {
 	#streams = 0;
 	#active = 0;
 	#changed = new Signal(0);
-	#grace: () => Milli;
+	#grace: () => Duration;
 	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under that
 	// update names one only if it was sent before the publisher served the group, so the group won
 	// over it, even once the cache evicted it.
@@ -151,7 +151,7 @@ export class Tail {
 
 		let expired = false;
 		const timer = new AbortController();
-		void sleep(Nano.fromMilli(this.#grace()), { signal: timer.signal }).then(
+		void sleep(this.#grace(), { signal: timer.signal }).then(
 			() => {
 				expired = true;
 				this.#bump();

@@ -4,7 +4,7 @@
  * @module
  */
 
-import type { Milli } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
@@ -314,10 +314,10 @@ export class RefusedRedirect extends Error {
  */
 export class ConnectTimeout extends Error {
 	/** The timeout that elapsed. */
-	readonly timeout: Milli;
+	readonly timeout: Duration;
 
-	constructor(timeout: Milli) {
-		super(`connect timed out after ${timeout}ms`);
+	constructor(timeout: Duration) {
+		super(`connect timed out after ${timeout}`);
 		this.name = "ConnectTimeout";
 		this.timeout = timeout;
 	}

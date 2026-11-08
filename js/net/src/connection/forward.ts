@@ -4,7 +4,7 @@
  * @module
  */
 
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { routesEqual, type WireRoute } from "../hop.ts";
@@ -20,7 +20,7 @@ export const DISCOVERY_REMOVED =
 	"the discovery option is removed: a session asks only about watched prefixes and turns blind if the relay refuses";
 
 /** How long an announce request outlives its last watcher, so a watcher torn down and rebuilt reuses it. */
-const LINGER = Milli(2000);
+const LINGER = Duration.millis(2000);
 
 /** One announce request open on the session, and the routes it currently reports. */
 interface Interest {
@@ -240,7 +240,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			return;
 		}
 		interest.linger?.();
-		interest.linger = after(Nano.fromMilli(LINGER), () => {
+		interest.linger = after(LINGER, () => {
 			// Forgotten now rather than once its stream winds down, so a watch arriving
 			// meanwhile opens a fresh request instead of reviving this one.
 			interests.delete(prefix);
