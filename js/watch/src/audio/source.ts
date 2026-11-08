@@ -41,7 +41,11 @@ export type SourceOutput = {
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.AudioConfig | undefined>;
 
-	// The jitter the selected rendition advertises (ms): a floor on the decoder's playout target.
+	/**
+	 * The jitter the selected rendition advertises: a floor on the decoder's playout target.
+	 *
+	 * @internal Feeds the decoder.
+	 */
 	jitter: Signal<Milli | undefined>;
 };
 

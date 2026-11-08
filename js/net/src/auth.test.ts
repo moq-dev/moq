@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
-import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
+import { accept as acceptSession, connect as connectSession, type Session } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -51,8 +51,8 @@ async function settles(done: () => boolean): Promise<void> {
 }
 
 interface Pair {
-	client: Established;
-	server: Established;
+	client: Session;
+	server: Session;
 	transport: MockTransport;
 }
 

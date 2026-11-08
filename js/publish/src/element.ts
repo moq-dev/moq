@@ -14,6 +14,7 @@ import * as Preview from "./preview";
 import * as Source from "./source";
 import { clearSourceState } from "./source-state";
 import * as Video from "./video";
+import { normalizeSource } from "./video/types";
 
 function invalidAttribute(name: string, value: unknown, expected: string): Error {
 	return new Error(`moq-publish: invalid ${name}="${value}", expected ${expected}`);
@@ -404,7 +405,7 @@ export default class MoqPublish extends HTMLElement {
 			};
 			effect.event(preview, "loadedmetadata", resize);
 			effect.event(preview, "resize", resize);
-			preview.srcObject = new MediaStream([Video.normalizeSource(source).track]);
+			preview.srcObject = new MediaStream([normalizeSource(source).track]);
 
 			effect.cleanup(() => {
 				preview.srcObject = null;

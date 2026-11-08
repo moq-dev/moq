@@ -15,6 +15,6 @@ test("trackInfo declares the media max age, null is unlimited, and a value is ke
 	const committed = async (maxAge?: Milli | null) =>
 		(await new Track.Producer("media").accept(trackInfo({ priority: 1, maxAge })).info()).maxAge;
 	expect(await committed()).toBe(Milli(30_000));
-	expect(await committed(null)).toBeUndefined();
+	expect(await committed(null)).toBeNull();
 	expect(await committed(Milli(5000))).toBe(Milli(5000));
 });

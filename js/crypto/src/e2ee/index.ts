@@ -18,7 +18,7 @@
  * const generation = credential.produce();
  * const route = origin.route(await credential.path("meeting.hang"), {
  *   hidden: true,
- *   instance: Epoch.instance(generation.epoch),
+ *   instance: { id: Epoch.instance(generation.epoch), epoch: 0n },
  * });
  * const video = await new Broadcast.Producer(route.broadcast, generation).createTrack("video", { timescale });
  * route.announce();

@@ -17,9 +17,9 @@ import {
 	type WebTransportProps,
 } from "./connect.ts";
 import { parse } from "./endpoint.ts";
-import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
+import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
 import { heldOf } from "./tokens.ts";
@@ -207,14 +207,14 @@ export class Reload {
 	readonly error: Getter<Error | undefined>;
 
 	/** The currently established session, or undefined while disconnected. */
-	established = new Signal<Established | undefined>(undefined);
+	established = new Signal<Session | undefined>(undefined);
 
 	/**
 	 * The current connection's PROBE estimates, spanning reconnects.
 	 *
 	 * Undefined while disconnected: the estimates belong to a single connection.
 	 * Observation requests updates; `peek()` alone is passive.
-	 * See {@link Established.probe}.
+	 * See {@link Session.probe}.
 	 */
 	readonly probe: Getter<Probe | undefined>;
 	#probeSource = new Signal<Getter<Probe> | undefined>(undefined);
@@ -322,7 +322,7 @@ export class Reload {
 	#draining: Draining | undefined;
 
 	// Sessions this loop ended that are still draining, each until its close settles.
-	#ending = new Map<Established, Promise<void>>();
+	#ending = new Map<Session, Promise<void>>();
 
 	// The current run of migrations. A redirect back to an endpoint that already sent us away is
 	// a loop, however healthy each session looked. Reset when a session ends without a GOAWAY,
@@ -532,7 +532,7 @@ export class Reload {
 
 		// The session this run serves, ended with the run. A drained one leaves this slot
 		// for #draining, which outlives the run.
-		let current: Established | undefined;
+		let current: Session | undefined;
 		effect.cleanup(() => {
 			if (current) {
 				this.#end(current);
@@ -558,7 +558,7 @@ export class Reload {
 
 					this.#dialing = true;
 					this.#dialedTokens = this.tokens.peek();
-					let connection: Established;
+					let connection: Session;
 					try {
 						connection = await connect({
 							url: dialing,
@@ -668,7 +668,7 @@ export class Reload {
 	 * to go next and leave the old session serving until it drains. Returns false when the
 	 * redirect is refused, which ends the sequence rather than redialing.
 	 */
-	#migrate(connection: Established, dialing: URL, drain: Drain): boolean {
+	#migrate(connection: Session, dialing: URL, drain: Drain): boolean {
 		const hashes = this.webtransport?.serverCertificateHashes?.length ?? 0;
 		const configured = hashes > 0 || this.webtransport?.serverCertificate !== undefined;
 		// The pin is a WebTransport option. A WebSocket that won the race never used it.
@@ -714,7 +714,7 @@ export class Reload {
 	 * deadline, unless the page is going away: nothing would run to finish them, and an abort
 	 * closes the transport now rather than leaving the browser to sever it.
 	 */
-	#end(connection: Established): void {
+	#end(connection: Session): void {
 		if (this.#suspended.peek()) {
 			connection.abort();
 			return;
@@ -931,12 +931,12 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Routes, produce
  * aborted at the window's end if still open.
  */
 class Draining {
-	#connection: Established;
+	#connection: Session;
 	#timer = new AbortController();
 	#onRetire: () => void;
 	#retired = false;
 
-	constructor(connection: Established, handover: Milli, onRetire: () => void) {
+	constructor(connection: Session, handover: Milli, onRetire: () => void) {
 		this.#connection = connection;
 		this.#onRetire = onRetire;
 		void sleep(Nano.fromMilli(handover), { signal: this.#timer.signal }).then(
@@ -953,7 +953,7 @@ class Draining {
 	}
 
 	/** Stop serving from the old session, returning it the first time for the caller to end. */
-	retire(): Established | undefined {
+	retire(): Session | undefined {
 		if (this.#retired) return undefined;
 		this.#retired = true;
 		this.#onRetire();

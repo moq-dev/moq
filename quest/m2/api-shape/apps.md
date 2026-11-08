@@ -23,8 +23,8 @@
 - `moq export hls`'s listener flags become `--hls-listen` and
   `--hls-tls-{cert,key,generate,root}`, matching the `MOQ_HLS_*`
   environment, with named refusals for the old flags, which shipped.
-- moq-boy's Rust crate stops exporting its internals (the JS half is in
-  [the JS child](/quest/m2/api-shape/js.md)).
+- moq-boy's Rust crate stops exporting its internals (the JS half landed in
+  [moq-dev/moq#8296](https://github.com/moq-dev/moq/pull/8296)).
 - moq-relay's `cluster::Options.network`, a `moq_tokio::sim::Network` test
   hook added by [moq-dev/moq#8139](https://github.com/moq-dev/moq/pull/8139),
   is `#[doc(hidden)]` test support, so the published config names no

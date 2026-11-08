@@ -343,7 +343,7 @@ export function ended(handle: Handle): Error | undefined {
 /**
  * The tokens this side presents and the grant they earn, across every session built on it.
  *
- * A session made without one creates its own, returned by `Established.auth`, which ends with
+ * A session made without one creates its own, returned by `Session.auth`, which ends with
  * that session. Pass one to `connect` as `auth` instead and it outlives its sessions: each
  * presents every token the handle holds, so a {@link Credential} it returned keeps riding a route's
  * announcements across a reconnect. It backs one active session at a time, plus the ones

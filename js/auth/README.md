@@ -9,7 +9,8 @@ contract, the relay flags, and worked examples, see the
 Grants and claims name paths with patterns from `@moq/pattern`: `foo` is one
 broadcast, `foo/**` is a subtree, `**` is everything. A role may also carry a
 bitrate cap, written `{"path": [...], "rate": bps}` and parsed into
-`publish_rate` or `subscribe_rate` beside the patterns.
+`publish_rate` or `subscribe_rate` beside the patterns. `Key.sign` takes that
+parsed form.
 
 ## Installation
 

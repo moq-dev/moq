@@ -136,7 +136,7 @@ export type EncoderOutput = {
 	// source that isn't a track.
 	root: Signal<AudioNode | undefined>;
 	// True while encoding capture: enabled and unmuted with a captured format and a track, which also
-	// takes a subscriber unless the broadcast's `onDemand` is false. Retained audio encoded for a
+	// takes a subscriber unless the broadcast's `onDemand` is `"off"`. Retained audio encoded for a
 	// subscriber while paused does not count.
 	active: Signal<boolean>;
 	// Cumulative output totals (frames, bytes) measured while serving, and the target bitrate.
@@ -156,7 +156,7 @@ type Pipeline = {
  *
  * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.audio(name)`), pumps PCM
  * off the source via a {@link Capture}, and retains raw PCM while enabled. A subscriber triggers encoding of that history followed by
- * live audio; leaving resumes buffering without ending the epoch. The broadcast's `onDemand: false`
+ * live audio; leaving resumes buffering without ending the epoch. The broadcast's `onDemand: "off"`
  * keeps encoding continuously instead. Rename by constructing a new encoder; the name is not a signal.
  */
 export class Encoder {
@@ -486,7 +486,7 @@ export class Encoder {
 			// the current subscriber and every later one get it rather than a track that stays silent.
 			const fatal = effect.get(this.#out.error);
 
-			const onDemand = effect.get(broadcast.in.onDemand) ?? true;
+			const onDemand = effect.get(broadcast.in.onDemand) !== "off";
 			const demanded = !!track && effect.get(track.demand().wanted) !== undefined;
 			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
 			const max = track && effect.get(track.subscription)?.delay?.max;

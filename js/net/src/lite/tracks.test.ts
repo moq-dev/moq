@@ -495,7 +495,7 @@ test("an instance-pinned front lists its serving route's tracks", async () => {
 	]);
 	const broadcastRoute = serverOrigin.route(Path.from("room"), {
 		hidden: true,
-		instance: Instance.parse("01900000-0000-7000-8000-000000000001"),
+		instance: { id: Instance.parse("01900000-0000-7000-8000-000000000001"), epoch: 0n },
 	});
 	const broadcast = broadcastRoute.broadcast;
 	broadcast.createTrack("a");
@@ -524,7 +524,7 @@ test("an instance-pinned front lists its serving route's tracks", async () => {
 
 test("a front pinned to a named instance served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.routePrefix(Path.from("room"), { instance: Instance.parse("named") });
+	const dynamic = origin.routePrefix(Path.from("room"), { instance: { id: Instance.parse("named"), epoch: 0n } });
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();

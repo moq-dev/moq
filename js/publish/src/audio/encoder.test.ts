@@ -339,7 +339,7 @@ async function setup(order = new Order(), codec?: Codec, join?: Milli) {
 		broadcast: {
 			audio: () => rendition,
 			order,
-			in: { maxAge: new Signal(undefined), onDemand: new Signal(false) },
+			in: { maxAge: new Signal(undefined), onDemand: new Signal("off") },
 		} as never,
 		capture: capture as never,
 		enabled,
@@ -1012,7 +1012,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 	const broadcast = new Broadcast({
 		origin: new Moq.Origin.Producer(),
 		name: Moq.Path.from("failure.hang"),
-		onDemand: false,
+		onDemand: "off",
 	});
 	const feed = new Feed();
 	const capture = fakeCapture(feed);
@@ -1158,7 +1158,7 @@ test.each(["failure first", "config first"])(
 		using _now = manualAt(0);
 		const broadcast = new Broadcast({
 			origin: new Moq.Origin.Producer(),
-			onDemand: false,
+			onDemand: "off",
 			name: Moq.Path.from("coalesced.hang"),
 		});
 		const configuring = configured();
@@ -1194,7 +1194,7 @@ test.each(["failure first", "config first"])(
 );
 
 // Both policies preserve the past; only always-on spends encode work while idle.
-test.each([undefined, false, true])(
+test.each([undefined, "off", "all"] as const)(
 	"a late subscriber reaches captured audio with either encoding policy (%p)",
 	async (onDemand) => {
 		using _webcodecs = installFakeWebCodecs();
@@ -1213,7 +1213,7 @@ test.each([undefined, false, true])(
 			await settle();
 			const net = broadcast.net.peek();
 			if (!net) throw new Error("expected network broadcast");
-			expect(encoder.out.active.peek()).toBe(onDemand === false);
+			expect(encoder.out.active.peek()).toBe(onDemand === "off");
 
 			// One 20ms Opus frame per push, each its own group.
 			let index = 0;
@@ -1225,7 +1225,7 @@ test.each([undefined, false, true])(
 			};
 
 			await push(4);
-			expect(encoder.out.stats.peek().frames).toBe(onDemand === false ? 4 : 0);
+			expect(encoder.out.stats.peek().frames).toBe(onDemand === "off" ? 4 : 0);
 			late = net.track("audio").subscribe({ delay: { max: Milli(10_000) } });
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
@@ -1245,7 +1245,7 @@ test.each([undefined, false, true])(
 			late = undefined;
 			await settle();
 			expect(discontinuity).not.toHaveBeenCalled();
-			expect(encoder.out.active.peek()).toBe(onDemand === false);
+			expect(encoder.out.active.peek()).toBe(onDemand === "off");
 		} finally {
 			discontinuity.mockRestore();
 			late?.close();

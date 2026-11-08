@@ -53,7 +53,7 @@ export default class MoqBoy extends HTMLElement {
 	/** The session currently expanded, or undefined for the grid. */
 	readonly expanded = new Moq.Signals.Signal<string | undefined>(undefined);
 
-	/** Reactive map of active game sessions. Emits on add/remove. */
+	/** Reactive map of active game sessions, read by the overlay. Emits on add/remove. @internal */
 	readonly games = new Moq.Signals.Signal<ReadonlyMap<string, Game>>(new Map());
 
 	readonly #signals = new Moq.Signals.Effect();

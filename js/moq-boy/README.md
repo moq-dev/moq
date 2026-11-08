@@ -39,20 +39,7 @@ Shows a grid of all active Game Boy sessions. Click a game to expand and play.
 
 ## JavaScript API
 
-For programmatic use:
-
-```typescript
-import { GameCard } from "@moq/boy";
-
-const card = new GameCard({
-    sessionId: "opossum",
-    connection,
-    expanded,
-    root: document.body,
-});
-
-document.body.appendChild(card.el);
-```
+`@moq/boy` exports the element's type, `MoqBoy`, and the zod schemas for the status a game publishes (`GameStatusSchema`, `GameStatsSchema`).
 
 ## License
 

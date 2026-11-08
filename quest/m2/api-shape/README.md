@@ -60,5 +60,4 @@ Rejected in planning:
 - [Media crates' small surface fixes](/quest/m2/api-shape/media.md) - exporters, the container consumer, catalog color range, rate grant, moq-stats, JSON, and MSF each have one path and one name
 - [Native media's small surface fixes](/quest/m2/api-shape/native.md) - audio encode internals go private, `on_demand` has one meaning, and video and render setters fold into their constructors
 - [Apps' small surface fixes](/quest/m2/api-shape/apps.md) - the relay, gateways, moq-hls, moq-cli, and moq-boy drop dead or unreachable surface and gain role names
-- [JS packages' small surface fixes](/quest/m2/api-shape/js.md) - track info, connection, qmux, watch, publish, ui, video, boy, and auth exports each have one path and one name
 - [Bindings' small surface fixes](/quest/m2/api-shape/bindings.md) - Go's read cancel, JSON producer construction, and the Python wheel's test module

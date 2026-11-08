@@ -90,10 +90,18 @@ const EMPTY: Stats = { frameCount: 0, bytesReceived: 0, late: 0, errors: 0, stal
 export type DecoderOutput = {
 	/** Fatal decode failure, cleared when another source is selected. */
 	error: Signal<Error | undefined>;
-	// The current frame to render.
+	/**
+	 * The current frame to render.
+	 *
+	 * @internal Feeds the renderer; a `VideoFrame` cannot leave the decoding thread.
+	 */
 	frame: Signal<VideoFrame | undefined>;
 
-	// Whether the current frame weaves two fields, per the rendition that decoded it.
+	/**
+	 * Whether the current frame weaves two fields, per the rendition that decoded it.
+	 *
+	 * @internal Feeds the renderer.
+	 */
 	interlaced: Signal<boolean>;
 
 	// The timestamp of the current frame.
@@ -105,7 +113,11 @@ export type DecoderOutput = {
 	stalled: Signal<boolean>;
 	stats: Signal<Stats | undefined>;
 
-	// The rendition delay Sync must cover while switching tracks.
+	/**
+	 * The rendition delay Sync must cover while switching tracks.
+	 *
+	 * @internal Feeds the decoder's playout target.
+	 */
 	jitter: Signal<Milli | undefined>;
 
 	// Combined buffered ranges (network jitter + decode buffer)

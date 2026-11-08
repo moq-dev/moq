@@ -1,10 +1,10 @@
 import * as DOM from "@moq/signals/dom";
 import { icon } from "./button";
 
-/** Which accent a {@link statCard} takes. */
+/** Which accent a {@link statCard} takes. @internal */
 export type StatKind = "network" | "video" | "audio";
 
-/** A stats card created by {@link statCard}. */
+/** A stats card created by {@link statCard}. @internal */
 export interface StatCard {
 	/** The root element to mount. */
 	el: HTMLElement;

@@ -3,7 +3,10 @@ import { yieldNow } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import type { Tracks } from "./listing.ts";
+import type { Info } from "./track.ts";
 import { wireOf } from "./wire.ts";
+
+const INFO: Info = { compress: false, timescale: null, maxAge: null, priority: 0, refresh: null };
 
 /** Lets queued microtasks and the listing's signal notifications run. */
 function settle(): Promise<void> {
@@ -110,8 +113,8 @@ test("a lister finishes or removes a track", async () => {
 	const broadcast = new BroadcastProducer();
 	const lister = wireOf(broadcast).lister();
 	const tracks = list(broadcast);
-	lister.add("up", { priority: 0 });
-	lister.add("gone", { priority: 0 });
+	lister.add("up", INFO);
+	lister.add("gone", INFO);
 	lister.synced();
 	expect(await tracks.drain()).toEqual(["+up", "+gone", "synced"]);
 	lister.finish("up");
@@ -234,7 +237,7 @@ test("a clean end follows the removals before it", async () => {
 	// The producer's finished track is what a handler's answer of its name served.
 	const both = new BroadcastProducer();
 	const handler = wireOf(both).lister();
-	handler.add("a", { priority: 0 });
+	handler.add("a", INFO);
 	handler.synced();
 	const own = both.createTrack("a");
 	const served = list(both);
@@ -260,7 +263,7 @@ test("a clean end follows the removals before it", async () => {
 		const answered = new BroadcastProducer();
 		const lister = wireOf(answered).lister();
 		const reader = list(answered);
-		lister.add("up", { priority: 0 });
+		lister.add("up", INFO);
 		lister.synced();
 		expect(await reader.drain()).toEqual(["+up", "synced"]);
 		lister.finish("up");
@@ -295,8 +298,8 @@ test("readers wait for the lister to sync", async () => {
 	const tracks = list(broadcast);
 	expect(lister.wanted.peek()).toBe(true);
 	expect(await tracks.drain()).toEqual(["+own"]);
-	lister.add("up", { priority: 0 });
-	expect(() => lister.add("up", { priority: 0 })).toThrow("duplicate");
+	lister.add("up", INFO);
+	expect(() => lister.add("up", INFO)).toThrow("duplicate");
 	lister.synced();
 	expect(await tracks.drain()).toEqual(["+up", "synced"]);
 
@@ -312,7 +315,7 @@ test("a name listed by both is reported once", async () => {
 	const broadcast = new BroadcastProducer();
 	broadcast.createTrack("a");
 	const lister = wireOf(broadcast).lister();
-	lister.add("a", { priority: 0 });
+	lister.add("a", INFO);
 	lister.synced();
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+a", "synced"]);
@@ -326,7 +329,7 @@ test("an aborted answer fails its readers and a later reader asks again", async 
 	const broadcast = new BroadcastProducer();
 	const lister = wireOf(broadcast).lister();
 	const tracks = list(broadcast);
-	lister.add("up", { priority: 0 });
+	lister.add("up", INFO);
 	lister.abort(new NotFound("broadcast"));
 	expect(await tracks.drain()).toEqual([`error: ${StreamCode.NotFound}`]);
 	expect(lister.wanted.peek()).toBe(false);
@@ -344,7 +347,7 @@ test("an aborted answer fails its readers and a later reader asks again", async 
 test("a closed lister withdraws its answer and syncs", async () => {
 	const broadcast = new BroadcastProducer();
 	const lister = wireOf(broadcast).lister();
-	lister.add("up", { priority: 0 });
+	lister.add("up", INFO);
 	const tracks = list(broadcast);
 	expect(await tracks.drain()).toEqual(["+up"]);
 	lister.close();
@@ -386,7 +389,7 @@ test("an ended answer ends its readers and a later reader asks again", async () 
 	const broadcast = new BroadcastProducer();
 	const lister = wireOf(broadcast).lister();
 	const tracks = list(broadcast);
-	lister.add("up", { priority: 0 });
+	lister.add("up", INFO);
 	lister.synced();
 	expect(await tracks.drain()).toEqual(["+up", "synced"]);
 	lister.end();
