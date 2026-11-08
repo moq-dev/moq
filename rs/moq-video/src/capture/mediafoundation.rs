@@ -176,7 +176,7 @@ impl Camera {
 		let (width, height) = unpack_2x32(frame_size);
 		// I420 chroma is 2x2 subsampled, so the encoder needs even dimensions.
 		if width % 2 != 0 || height % 2 != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"camera resolution {width}x{height} must be even for H.264 encoding"
 			)));
 		}
@@ -324,7 +324,7 @@ fn create_attributes(capacity: u32) -> Result<IMFAttributes, Error> {
 	unsafe {
 		MFCreateAttributes(&mut attrs, capacity).map_err(|e| mf_err("create attributes", e))?;
 	}
-	attrs.ok_or_else(|| Error::Codec(anyhow::anyhow!("MFCreateAttributes returned null")))
+	attrs.ok_or_else(|| Error::codec(anyhow::anyhow!("MFCreateAttributes returned null")))
 }
 
 /// Which device to open.

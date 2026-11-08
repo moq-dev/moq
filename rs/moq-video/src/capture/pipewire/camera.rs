@@ -216,7 +216,7 @@ pub(super) fn choose(
 	let node = resolve(&nodes, name)?;
 	let formats = formats(mainloop, core, &registry, node)?;
 	let selected = select(&formats, want).ok_or_else(|| {
-		Error::Codec(anyhow::anyhow!(
+		Error::codec(anyhow::anyhow!(
 			"PipeWire camera {} offers no YUY2, NV12, RGB, or MJPEG mode",
 			node.name
 		))
@@ -317,7 +317,7 @@ fn roundtrip(mainloop: &pw::main_loop::MainLoopRc, core: &pw::core::CoreRc) -> R
 	mainloop.run();
 	let outcome = outcome.borrow_mut().take();
 	outcome.unwrap_or_else(|| {
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"PipeWire did not answer within {QUERY_TIMEOUT:?}"
 		)))
 	})
@@ -646,7 +646,7 @@ fn formats_each(
 			let Query { formats, failure } = query.take();
 			match failure {
 				// Formats that were read still describe the node.
-				Some(failure) if formats.is_empty() => Err(Error::Codec(anyhow::anyhow!(
+				Some(failure) if formats.is_empty() => Err(Error::codec(anyhow::anyhow!(
 					"PipeWire camera {} formats: {failure}",
 					node.name
 				))),

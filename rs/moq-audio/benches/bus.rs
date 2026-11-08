@@ -6,15 +6,16 @@
 //!   source into every mix; `sparse` routes one source into each, which should
 //!   cost little more than the sources alone.
 //! - `bus_minus`: a program of every source plus a mix-minus per source, the
-//!   per-guest return feed, which should grow with the source count rather
-//!   than its square.
+//!   per-guest return feed, swept over the source count and how many sources
+//!   each minus removes. It should grow with the source count rather than its
+//!   square, and with the removed count only once a minus removes most sources.
 //!
 //! Run with `cargo bench -p moq-audio --bench bus`.
 
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_audio::bus::{Bus, Channel, Config, Driver, Strip};
+use moq_audio::bus::{Bus, Config, Driver, Live, Strip};
 use moq_audio::encode::Input;
 use moq_audio::{Format, Layout};
 
@@ -23,7 +24,7 @@ const BLOCK: usize = 480;
 
 /// A bus with `count` stereo sources at `rate`, opened by a first advance, and
 /// one block of PCM for each.
-fn sources(count: usize, rate: u32) -> (Bus, Driver, Vec<(Channel, Strip)>, Vec<u8>) {
+fn sources(count: usize, rate: u32) -> (Bus, Driver, Vec<(Live, Strip)>, Vec<u8>) {
 	let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 	let frames = BLOCK * rate as usize / 48_000;
 	let block: Vec<u8> = std::iter::repeat_n(0.25f32, frames * 2)
@@ -34,7 +35,7 @@ fn sources(count: usize, rate: u32) -> (Bus, Driver, Vec<(Channel, Strip)>, Vec<
 			let mut input = Input::new(rate, Layout::Stereo);
 			input.format = Format::F32;
 			let strip = Strip::default();
-			(bus.channel(input, strip.clone()).unwrap(), strip)
+			(bus.live(input, strip.clone()).unwrap(), strip)
 		})
 		.collect();
 	// Writes before the first advance are dropped, so open the channels first.
@@ -42,7 +43,7 @@ fn sources(count: usize, rate: u32) -> (Bus, Driver, Vec<(Channel, Strip)>, Vec<
 	(bus, driver, sources, block)
 }
 
-fn run(driver: &mut Driver, sources: &mut [(Channel, Strip)], block: &[u8]) {
+fn run(driver: &mut Driver, sources: &mut [(Live, Strip)], block: &[u8]) {
 	for (channel, _) in sources.iter_mut() {
 		channel.write(black_box(block)).unwrap();
 	}
@@ -100,18 +101,23 @@ fn bench_minus(c: &mut Criterion) {
 	let mut group = c.benchmark_group("bus_minus");
 	group.throughput(Throughput::Elements(BLOCK as u64));
 
-	for count in [1usize, 4, 16, 64] {
-		let (bus, mut driver, mut sources, block) = sources(count, 48_000);
-		let program = bus.mix();
-		for (_, strip) in &sources {
-			program.route(strip);
-		}
-		let minuses: Vec<_> = sources.iter().map(|(_, strip)| program.minus(strip)).collect();
+	for removed in [1usize, 4, 16] {
+		for count in [16usize, 64] {
+			let (bus, mut driver, mut sources, block) = sources(count, 48_000);
+			let program = bus.mix();
+			for (_, strip) in &sources {
+				program.route(strip);
+			}
+			// Each guest's minus removes itself and the next `removed - 1` sources.
+			let minuses: Vec<_> = (0..count)
+				.map(|guest| program.minus((0..removed).map(|offset| &sources[(guest + offset) % count].1)))
+				.collect();
 
-		group.bench_function(BenchmarkId::from_parameter(count), |b| {
-			b.iter(|| run(&mut driver, &mut sources, &block));
-		});
-		drop(minuses);
+			group.bench_function(BenchmarkId::new(format!("remove{removed}"), count), |b| {
+				b.iter(|| run(&mut driver, &mut sources, &block));
+			});
+			drop(minuses);
+		}
 	}
 	group.finish();
 }

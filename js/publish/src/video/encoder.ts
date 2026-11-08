@@ -1,4 +1,5 @@
 import { Micro, Milli, type Second } from "@moq/clock";
+import type { Stats as Report } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import type * as Moq from "@moq/net";
@@ -17,7 +18,6 @@ import type { Broadcast } from "../broadcast";
 import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
-import type { RenditionStats } from "../rendition";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -25,23 +25,13 @@ import { normalizeSource, type Source } from "./types";
 // The keyframe interval when the config sets none.
 const DEFAULT_JOIN = Milli.fromSecond(2 as Second);
 
-/** Cumulative encoder output totals, measured from the chunks the encoder produces. */
-export interface Stats {
-	/** Total frames encoded while serving. Monotonic; diff over an interval for a frame rate. */
-	frames: number;
-
-	/** Total bytes encoded while serving. Monotonic; diff over an interval for an upload bitrate. */
-	bytes: number;
-
-	/** Total keyframes encoded while serving. Divide frames by this for the average GOP length. */
-	keyframes: number;
-
-	/** Total captured frames skipped while serving because the encoder still had a frame queued. */
-	skipped: number;
-
-	/** The bitrate the encoder targets now, in bits per second, or undefined while none is resolved. */
-	bitrate?: number;
-}
+/**
+ * Cumulative encoder output totals, measured from the chunks the encoder produces: the counters
+ * it keeps, always present, plus the bitrate it targets, absent while none is resolved.
+ */
+export type Stats = Required<Pick<Report.RenditionInput, "frames" | "bytes" | "keyframes" | "skipped">> & {
+	bitrate?: NonNullable<Report.RenditionInput["bitrate"]>;
+};
 
 // TODO support signals?
 /** Encoder tuning knobs. All optional; the encoder auto-sizes anything left unset. */
@@ -364,7 +354,7 @@ export class Encoder {
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
-		effect.proxy<RenditionStats | undefined>(rendition.stats, this.out.stats);
+		effect.proxy<Report.RenditionInput | undefined>(rendition.stats, this.out.stats);
 
 		// Encode while enabled and the broadcast hands over the track (with `onDemand`, a subscriber is attached).
 		effect.run((effect) => {

@@ -41,13 +41,16 @@ function handed(task: Promise<void>): Promise<void> {
 	return task.catch((err: unknown) => console.error("error processing bidi stream", err));
 }
 
+/** Where a session is: open, delivering what it owes before it closes, or closed. */
+type Phase = { kind: "open" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
  *
  * @internal
  */
 export class Connection implements Established {
-	#closing?: Promise<void>;
+	#phase: Phase = { kind: "open" };
 	// The URL of the connection.
 	readonly url: URL;
 
@@ -94,9 +97,6 @@ export class Connection implements Established {
 
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
-
-	// Just to avoid logging when `close()` is called.
-	#closed = false;
 
 	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
@@ -189,7 +189,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
+			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -245,25 +245,32 @@ export class Connection implements Established {
 
 	/** Withdraw announcements and wait up to one second for delivery before closing. */
 	close(): Promise<void> {
-		this.#closing ??= withTimeout(
-			this.#publisher.withdraw(),
-			Nano.fromSecond(Second(1)),
-			"session close timed out",
-		).finally(() => this.abort());
-		return this.#closing;
+		switch (this.#phase.kind) {
+			case "open": {
+				const done = withTimeout(
+					this.#publisher.withdraw(),
+					Nano.fromSecond(Second(1)),
+					"session close timed out",
+				).finally(() => this.abort());
+				this.#phase = { kind: "closing", done };
+				return done;
+			}
+			case "closing":
+				return this.#phase.done;
+			case "closed":
+				return Promise.resolve();
+		}
 	}
 
 	/** End the session immediately without waiting for delivery. */
 	abort(): void {
-		if (this.#closed) return;
 		this.#close();
 	}
 
 	// Close with the session code the peer should see, a clean close by default.
 	#close(info?: WebTransportCloseInfo) {
-		if (this.#closed) return;
-
-		this.#closed = true;
+		if (this.#phase.kind === "closed") return;
+		this.#phase = { kind: "closed" };
 
 		this.#publisher.close();
 		this.#auth.close();
@@ -301,7 +308,7 @@ export class Connection implements Established {
 			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered(), this.#auth));
 			await Promise.all(tasks);
 		} catch (err) {
-			if (!this.#closed) {
+			if (this.#phase.kind !== "closed") {
 				console.error("fatal error running connection", err);
 			}
 		} finally {
@@ -309,7 +316,7 @@ export class Connection implements Established {
 			// a tracked withdrawal, so a failure in it ends this driver while close() is
 			// still waiting on the sibling loops; closing here would drop their
 			// withdrawals. close() aborts once its barrier settles or the deadline hits.
-			if (!this.#closing) this.#close();
+			if (this.#phase.kind !== "closing") this.#close();
 		}
 	}
 
@@ -573,7 +580,7 @@ export class Connection implements Established {
 			});
 			await race([read(), stopped]);
 		} catch (err) {
-			if (!this.#closed && !sessionClosed(err))
+			if (this.#phase.kind !== "closed" && !sessionClosed(err))
 				this.#violated(
 					err instanceof ProtocolViolation
 						? err

@@ -28,7 +28,7 @@ use crate::frame::apple::PixelBuffer;
 use crate::{Color, Error, Size};
 
 fn err(message: impl std::fmt::Display) -> Error {
-	Error::Render(anyhow::anyhow!("{message}"))
+	Error::render(anyhow::anyhow!("{message}"))
 }
 
 /// Holds the CoreVideo wrapper for as long as wgpu keeps the texture made from

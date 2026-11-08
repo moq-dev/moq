@@ -28,7 +28,7 @@ impl Size {
 		usize::try_from(self.pixels())
 			.ok()
 			.and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("{what} {self}: byte length is too large to represent")))
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("{what} {self}: byte length is too large to represent")))
 	}
 
 	/// Reject anything the I420 pipeline can't represent.
@@ -39,7 +39,7 @@ impl Size {
 	pub(crate) fn validate(&self, what: &str) -> Result<(), Error> {
 		self.validate_nonzero(what)?;
 		if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
-			return Err(Error::Codec(anyhow::anyhow!("{what} {self}: dimensions must be even")));
+			return Err(Error::codec(anyhow::anyhow!("{what} {self}: dimensions must be even")));
 		}
 		Ok(())
 	}
@@ -63,7 +63,7 @@ impl Size {
 			&& usize::try_from(pixels).is_ok_and(|pixels| pixels.checked_mul(4).is_some());
 
 		if !representable {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"{what} {self} at {framerate}fps: dimensions too large to represent"
 			)));
 		}
@@ -75,7 +75,7 @@ impl Size {
 	/// window).
 	pub(crate) fn validate_nonzero(&self, what: &str) -> Result<(), Error> {
 		if self.width == 0 || self.height == 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"{what} {self}: dimensions must be non-zero"
 			)));
 		}
