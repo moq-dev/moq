@@ -457,6 +457,13 @@ export class Decoder {
 			return;
 		}
 
+		// After the publisher's declared end no picture is coming, whether one shows or not.
+		const active = effect.get(this.#active);
+		if (active && effect.get(active.ended) !== undefined) {
+			this.#out.stalled.set(false);
+			return;
+		}
+
 		const frame = effect.get(this.#out.frame);
 		if (!frame) {
 			this.#out.stalled.set(true);
@@ -464,10 +471,6 @@ export class Decoder {
 		}
 
 		this.#out.stalled.set(false);
-		// A picture held through the publisher's declared end is not waiting for anything.
-		const active = effect.get(this.#active);
-		if (active && effect.get(active.ended) !== undefined) return;
-
 		effect.timer(() => {
 			this.#out.stalled.set(true);
 		}, Nano.fromMilli(BUFFERING));

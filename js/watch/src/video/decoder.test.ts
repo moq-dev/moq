@@ -1247,6 +1247,52 @@ describe("Decoder stalls", () => {
 		}
 	});
 
+	it("a declared end clears a stall already raised and stops its stalled time", async () => {
+		const { clock, feeds, playback, stalls, feedback, close } = await cold();
+		const stalled = () => playback.decoder.out.stats.peek()?.stalled ?? 0;
+		try {
+			feeds.push(0, sample(0n, 0));
+			for (let ms = 100; ms <= 2000; ms += 100) {
+				await clock.advance(100);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+			}
+			// The frames stop, and the last picture freezes into a stall.
+			for (let i = 0; i < 16; i++) await clock.advance(100);
+			expect(playback.decoder.out.stalled.peek()).toBe(true);
+			expect(stalls()).toBe(1);
+			expect(stalled()).toBe(0);
+
+			// The publisher then declares the end: the stall closes and its time stops growing.
+			feeds.push(0, marker(0n, 2_100_000));
+			await microtasks();
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			const closed = stalled();
+			expect(closed).toBeGreaterThan(0);
+			for (let i = 0; i < 30; i++) await clock.advance(100);
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			expect(stalled()).toBe(closed);
+			expect(stalls()).toBe(1);
+			expect(feedback()).toBe(1);
+		} finally {
+			await close();
+		}
+	});
+
+	it("a declared end before the first picture ends startup buffering", async () => {
+		const { feeds, playback, stalls, close } = await cold();
+		try {
+			expect(playback.decoder.out.stalled.peek()).toBe(true);
+			feeds.push(0, marker(0n, 0));
+			await microtasks();
+			expect(playback.decoder.out.frame.peek()).toBeUndefined();
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			expect(stalls()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
 	it("clears the buffering state while disabled", async () => {
 		const { playback, close } = await cold();
 		try {
