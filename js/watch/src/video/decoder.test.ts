@@ -1226,6 +1226,27 @@ describe("Decoder stalls", () => {
 		}
 	});
 
+	it("holds the last picture through a declared end without a stall", async () => {
+		const { clock, feeds, playback, stalls, feedback, close } = await cold();
+		try {
+			feeds.push(0, sample(0n, 0));
+			for (let ms = 100; ms <= 2000; ms += 100) {
+				await clock.advance(100);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+			}
+			// The publisher ends the media, and the last picture holds well past the buffering timeout.
+			feeds.push(0, marker(0n, 2_100_000));
+			for (let i = 0; i < 30; i++) await clock.advance(100);
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(2_000_000);
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			expect(stalls()).toBe(0);
+			expect(feedback()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
 	it("clears the buffering state while disabled", async () => {
 		const { playback, close } = await cold();
 		try {
