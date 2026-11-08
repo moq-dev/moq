@@ -57,6 +57,11 @@ export class Slots {
 		return true;
 	}
 
+	/** How many slots are left to take. */
+	available(): number {
+		return this.#max - this.#live;
+	}
+
 	/** Give back `count` slots. */
 	release(count = 1) {
 		this.#live -= count;

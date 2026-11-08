@@ -15,6 +15,9 @@
 	clippy::all,
 	reason = "vendored from discord/cros-libva and discord/cros-codecs; kept close to upstream so fixes port cleanly"
 )]
+// VA-API and DMA-BUF are Linux-only, so elsewhere the crate is an empty stub and
+// moq-video only depends on it there.
+#![cfg(target_os = "linux")]
 
 mod bindings;
 pub mod buffer;

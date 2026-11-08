@@ -85,6 +85,8 @@ Open, to settle before starting (moved from the
   like the token rights, or carry the catalog's broadcast in the snapshot
   and ignore reports for another.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): encoders take pressure, not echo. `moq_mux::rate::Control` accepts a generic pressure input beside the bandwidth estimate; a hang or moq-stats aggregator turns announced echoes into it, moq-cli wires the two, and the encode producers drop their `echo` option.
+
 ## Required
 
 - [Rust reporters](/quest/m3/stats/rust.md) - the viewers that report and

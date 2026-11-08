@@ -20,7 +20,6 @@ use std::time::Duration;
 
 /// The wire form of [`Claims`](crate::Claims).
 #[serde_with::skip_serializing_none]
-#[serde_as]
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Claims {
@@ -34,11 +33,15 @@ pub(crate) struct Claims {
 	publish: Option<Role>,
 	#[serde(deserialize_with = "present")]
 	subscribe: Option<Role>,
-	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	#[serde(with = "seconds", skip_serializing_if = "Option::is_none")]
 	exp: Option<kio::clock::Wall>,
-	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	#[serde(with = "seconds", skip_serializing_if = "Option::is_none")]
 	iat: Option<kio::clock::Wall>,
-	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	#[serde(
+		serialize_with = "seconds::serialize_ceil",
+		deserialize_with = "seconds::deserialize",
+		skip_serializing_if = "Option::is_none"
+	)]
 	nbf: Option<kio::clock::Wall>,
 	// Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
 	// Every other claim is refused, since an unknown one may narrow the grant, and a
@@ -169,6 +172,44 @@ impl Prefixes {
 /// so a `null` can't hide one encoding from the mixed-encoding check.
 fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
 	T::deserialize(deserializer).map(Some)
+}
+
+/// A present time in whole unix seconds, from the epoch to the clock's last second, which
+/// `@moq/auth` holds exactly too. Anything else is refused rather than saturated, and an
+/// explicit `null` rather than read as absent, which for `exp` would mean never.
+mod seconds {
+	use kio::clock::Wall;
+	use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+	/// Truncated, so the clock's last time writes as a second this reads back, and an
+	/// expiry never moves later.
+	pub(super) fn serialize<S: Serializer>(wall: &Option<Wall>, serializer: S) -> Result<S::Ok, S::Error> {
+		match wall {
+			Some(wall) => serializer.serialize_u64(wall.saturating_duration_since(Wall::UNIX_EPOCH).as_secs()),
+			None => serializer.serialize_none(),
+		}
+	}
+
+	/// Rounded up, so a not-before never moves earlier; past the clock's last second it
+	/// writes a time this refuses to read.
+	pub(super) fn serialize_ceil<S: Serializer>(wall: &Option<Wall>, serializer: S) -> Result<S::Ok, S::Error> {
+		match wall {
+			Some(wall) => {
+				let since = wall.saturating_duration_since(Wall::UNIX_EPOCH);
+				let seconds = since.as_secs() + u64::from(since.subsec_nanos() > 0);
+				serializer.serialize_u64(seconds)
+			}
+			None => serializer.serialize_none(),
+		}
+	}
+
+	pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Wall>, D::Error> {
+		let seconds = u64::deserialize(deserializer)?;
+		Wall::UNIX_EPOCH
+			.checked_add(std::time::Duration::from_secs(seconds))
+			.map(Some)
+			.ok_or_else(|| D::Error::custom(format!("{seconds} is past the last representable time")))
+	}
 }
 
 /// The grant fields shared by both documents, in whichever encoding they arrived.
@@ -307,7 +348,7 @@ pub(crate) struct Grant {
 	root: Option<String>,
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
 	mounts: BTreeMap<String, String>,
-	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	#[serde(with = "seconds", skip_serializing_if = "Option::is_none")]
 	expires: Option<kio::clock::Wall>,
 	#[serde_as(as = "Option<DurationSeconds<u64>>")]
 	revalidate: Option<Duration>,

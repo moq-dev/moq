@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { type Installed, Manual, type Micro, Milli, Nano } from "@moq/clock";
-import { Time, Track, Varint } from "@moq/net";
+import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
@@ -91,4 +91,45 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	expect(await poll(pending)).toBe("pending");
 
 	consumer.close();
+});
+
+// A skip past a group already begun records where it ended, as Rust's `skip_to` does, so a later group
+// continuing its timeline reads on without a gap. Sparse sequence numbers leave only the timeline to
+// prove nothing is missing, and the empty group in between says nothing of it.
+test("Consumer reads on without a gap past a group it skipped", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), {
+		format: new LegacyFormat("audio"),
+		delay: { max: 500 as Milli },
+	});
+	const write = (group: Group.Producer, timestamps: number[]) => {
+		for (const timestamp of timestamps) {
+			group.writeFrame({
+				payload: encodeLegacyFrame(timestamp as Micro, new Uint8Array([0x01])),
+				timestamp: Time.Timestamp.now(),
+			});
+		}
+	};
+
+	const first = track.createGroup(0n);
+	write(first, [0, 100_000, 200_000, 300_000, 400_000]);
+	for (let i = 0; i < 5; i++) expect((await nextFrame(consumer))?.group).toBe(0n);
+	// The first group finishes, read to its end but not yet passed, followed by an adjacent empty group
+	// and a group continuing its timeline. That group's start falls past the age bound behind the newest
+	// frame, so the age skip passes the first group cleanly, then the empty one, which ends without a
+	// frame and leaves only the skipped group's end to show the timeline goes on.
+	first.finish();
+	const empty = track.createGroup(1n);
+	await clock.advance(Nano.zero);
+	const last = track.createGroup(20n);
+	write(last, [400_000, 1_000_000]);
+	last.finish();
+	empty.finish();
+	await clock.advance(Nano.zero);
+	const next = await poll(consumer.next());
+	expect(next).toMatchObject({ kind: "frame", group: 20n });
+
+	consumer.close();
+	track.finish();
+	track.close();
 });

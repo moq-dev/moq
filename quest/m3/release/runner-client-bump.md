@@ -27,9 +27,9 @@ refuses timestamped frames, `Subscription` takes `max_delay` instead of a
 max age, announcement events are `Start`, `Update`, `Restart`, and `End`,
 and `track::Producer::used` is gone. Through moq-relay, the first
 subscription under `data-subgroup-basic`'s dynamic claim then fails
-`unroutable`: the accepted cold-start reset that
-[announce takeover](/quest/m2/announce-takeover.md) removes, so check
-whether that has landed before calling it a client bug. The JS client's
+`unroutable`: the accepted cold-start reset, which moq-transport keeps
+([moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) removes it on
+lite-07 only), so it is no client bug. The JS client's
 announcement check also moves from `"retracted"` to `"end"` when it takes
 the cut. Its `data-subgroup-basic` subscriber also stalls there: on `main`,
 `follow(path)` asks SUBSCRIBE_NAMESPACE for the

@@ -34,11 +34,7 @@ impl AnnounceConsumer {
 		match event {
 			RouteEvent::Start(announce) => Some(AnnounceEvent::Present(announce)),
 			RouteEvent::End(announce) => Some(AnnounceEvent::Absent(announce)),
-			// A takeover elsewhere starts its own prefix; at its predecessor's it replaces it.
-			RouteEvent::Takeover { announce, predecessor } if predecessor != announce.prefix => {
-				Some(AnnounceEvent::Present(announce))
-			}
-			RouteEvent::Update(_) | RouteEvent::Restart(_) | RouteEvent::Takeover { .. } => None,
+			RouteEvent::Update(_) | RouteEvent::Restart(_) => None,
 		}
 	}
 

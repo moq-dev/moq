@@ -36,7 +36,6 @@ ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m5
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m5/video-hardware.md
 
 # Quarantined flakes, re-enabled by the quest that fixes them.
-ignore moq-gst::sink::imp::tests::a_stale_completion_cannot_end_the_next_publication /quest/m0/test-flakes-2/gst-stale-completion.md
 
 # Flaky, disabled until its quest fixes the cause.
 

@@ -59,4 +59,4 @@ before and after.
 ## Related
 
 - [A regrant re-checks only the routes it can change](/quest/m4/regrant-route-recheck.md) - the route fan-out after a regrant, which this leaves alone; whichever lands second adapts to the other
-- [Fair share across broadcasts](/quest/m3/broadcast-fairness.md) - the other per-session CPU and bandwidth fairness concern
+- [Fair share across broadcasts](/quest/m5/broadcast-fairness.md) - the other per-session CPU and bandwidth fairness concern

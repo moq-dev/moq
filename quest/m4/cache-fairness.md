@@ -43,7 +43,7 @@ share, before building.
 
 Open, for the design: what keys a tenant, such as the grant root, which
 exists today. Pick the same key as
-[broadcast fairness](/quest/m3/broadcast-fairness.md)'s tenant keying.
+[broadcast fairness](/quest/m5/broadcast-fairness.md)'s tenant keying.
 
 Public API: likely a relay cache setting if per-tenant shares need a knob.
 Wire: none.
@@ -54,5 +54,5 @@ Wire: none.
 
 ## Related
 
-- [Broadcast fairness](/quest/m3/broadcast-fairness.md) - the same tenant fair share on cluster links
+- [Broadcast fairness](/quest/m5/broadcast-fairness.md) - the same tenant fair share on cluster links
 - [Receive pool](/quest/m5/receive-pool.md) - one per-worker budget covering receive credit and the cache

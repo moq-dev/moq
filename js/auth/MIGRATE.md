@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Times and key sets parse strictly, as `moq-auth` does
+
+`ClaimsSchema` refuses an `exp`, `iat`, or `nbf`, and `GrantSchema` an `expires`, below 0
+or above 18446744073. `KeySet.parse` refuses two keys sharing a `kid`, and `ScopeSchema`
+a root `Key.sign` would refuse, such as `/demo`; give each key its own `kid` and spell
+scope roots without boundary slashes.
+
 ### Multi-prime RSA JWKs are refused (#6898)
 
 `Key.parse` rejects an RSA JWK containing `oth` instead of discarding it.

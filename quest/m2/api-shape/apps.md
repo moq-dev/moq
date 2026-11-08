@@ -25,6 +25,12 @@
   environment, with named refusals for the old flags, which shipped.
 - moq-boy's Rust crate stops exporting its internals (the JS half is in
   [the JS child](/quest/m2/api-shape/js.md)).
+- moq-relay's `cluster::Options.network`, a `moq_tokio::sim::Network` test
+  hook added by [moq-dev/moq#8139](https://github.com/moq-dev/moq/pull/8139),
+  is `#[doc(hidden)]` test support, so the published config names no
+  simulator type. If an embedder needs injected dials, the shape is a
+  take-once `Cluster::dials()` handle, not a config field (added
+  2026-11-07, maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests).
 
 ## Plan
 
