@@ -18,3 +18,5 @@ only figure a caller sees is the target reported through the catalog stats.
 Consumer: the studio's encode-control rungs and Health panel
 ([moq-dev/studio#25](https://github.com/moq-dev/studio/pull/25)). Recommendation: return a handle from the publish
 call that carries the grant, rather than a callback.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/native](/quest/m2/api-shape/native.md) makes `publish_capture` return a handle in both crates before the cut, so `grant()` is an additive method on it.

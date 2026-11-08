@@ -28,7 +28,7 @@ test("subscribers share one tick and the loop stops with the last", async () => 
 		const c = tick(period, () => ticks.push("c"));
 		await clock.advance(period);
 		expect(ticks).toEqual(["a", "b", "b", "c"]);
-		// Stop it, or the shared loop outlives this clock and a later file's ticker joins it.
+		// Stop the page-wide loop, so a later test file's subscriber starts its own on that file's clock.
 		c();
 	} finally {
 		installed.close();

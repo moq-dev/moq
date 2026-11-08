@@ -59,6 +59,8 @@ way until a measurement justifies the flip.
 
 Update `doc/bin/relay/` for the default change.
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [no-sentinels](/quest/m2/no-sentinels.md) makes `runtime.workers` `"shared" | "auto" | <n>` before the cut, so flipping the default changes only the default.
+
 ## Related
 
 - [kio channel contention](/quest/m4/perf/kio-channel-contention/README.md) - its per-thread spikes run on the workers

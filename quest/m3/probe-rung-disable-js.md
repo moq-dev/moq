@@ -32,7 +32,9 @@ it only past the hysteresis and after its viewers left; a jittering grant near
 the boundary does not flap the catalog. The epic's shaped-uplink browser test
 proves recovery end to end.
 
-Public API: whatever knob `@moq/publish` exposes for the rule. Wire: none.
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): no new knob. Mirror `moq_mux::rate::Policy`'s rule and constants, and let `enabled` combine with them.
+
+Public API: none. Wire: none.
 
 ## Required
 

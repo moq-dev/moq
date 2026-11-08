@@ -269,18 +269,15 @@ mod tests {
 		);
 	}
 
+	/// The clock's last time round-trips, and the furthest expiry the wire carries does
+	/// not overflow the instant.
 	#[kio::test]
-	async fn expiry_saturates_to_the_wall_range() {
-		let parse = |expires: i64| {
-			serde_json::from_value::<Grant>(serde_json::json!({"publish":["**"],"expires":expires})).unwrap()
-		};
-		let past = parse(-1);
-		assert_eq!(past.expires, Some(Wall::UNIX_EPOCH));
-		assert!(matches!(past.validate(), Err(crate::Error::GrantExpired)));
-
-		// The furthest expiry the wire carries must not overflow the instant.
-		let far = parse(i64::MAX);
-		assert_eq!(far.expires, Some(Wall::UNIX_EPOCH.saturating_add(Duration::MAX)));
+	async fn the_last_expiry_fits_the_clock() {
+		let mut last = Grant::new(patterns(&["**"]), Patterns::default());
+		last.expires = Some(Wall::UNIX_EPOCH.saturating_add(Duration::MAX));
+		let json = serde_json::to_value(&last).unwrap();
+		assert_eq!(json["expires"], 18_446_744_073u64);
+		let far: Grant = serde_json::from_value(json).unwrap();
 		far.validate().unwrap();
 		far.deadline();
 	}

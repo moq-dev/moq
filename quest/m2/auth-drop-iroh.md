@@ -22,6 +22,8 @@ an older relay: an unrecognized name deserializes to `Unknown`
 (`#[serde(other)]` in Rust, `z.catch` in JS). Update the auth contract docs
 and any test or fixture naming `iroh`.
 
+Moved from m4 to m2: Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests). This cut already breaks moq-auth (for example [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088) removes the peer grants), so it is that release.
+
 Public API: breaking in moq-auth and `@moq/auth` (one enum variant). Wire:
 the auth JSON contract loses the `iroh` transport value.
 

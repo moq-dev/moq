@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Times and key sets parse strictly, as `@moq/auth` does
+
+A token's `exp`, `iat`, and `nbf`, and a grant's `expires`, refuse `null` and anything
+but whole seconds from 0 to 18446744073: `"exp": null` no longer reads as never
+expiring, and a negative or later time is refused rather than clamped. Omit a field to
+leave it unset. A `KeySet` refuses two keys sharing a `kid`, and a JWK refuses a scope
+whose root `path::validate` refuses, such as `/demo`; give each key its own `kid` and
+spell scope roots without boundary slashes.
+
 ### Shared unsupported CPU error
 
 `Error::UnsupportedCpu` now carries `moq_crypto::cpu::UnsupportedCpu` instead of a `String`. Use its `Display` implementation for the missing feature message. Core builds still need no rustls.
