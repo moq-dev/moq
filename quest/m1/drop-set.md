@@ -36,9 +36,9 @@ setting. Reason: the 2026-11-02 audit found the existing 32 MiB limit in
 `js/net/src/group.ts` bounds only one group's frame tail, and a mock-time
 probe retained 64, 256, and 1,024 disjoint OLD runs with zero cached groups;
 a shared pool bounds drop-only tracks the same way in both languages. Not
-chosen: a per-track run cap; upstream backpressure. The pool port itself is
-[JS cache pool](/quest/m1/js-cache-pool.md), split out on 2026-11-03 since it
-lands on its own; this quest bills the runs to it.
+chosen: a per-track run cap; upstream backpressure. The pool port itself
+landed on its own as `js/net/src/cache.ts` (split out on 2026-11-03), billing
+cached groups; this quest bills the runs to it.
 
 Decided 2026-11-03 (maintainer, /quest-unblock), renamed and narrowed by the
 `/quest-complete` decisions below: range terms carry an
@@ -280,7 +280,7 @@ starts.
   sequence order.
 - **Billed to the pool, never guessed.** Each track run and each cursor run
   is billed through a `Charge` at a fixed per-run cost (in JS, through the
-  [JS cache pool](/quest/m1/js-cache-pool.md)). Under pressure the pool
+  pool in `js/net/src/cache.ts`). Under pressure the pool
   evicts the oldest track runs as it evicts groups, and a run older than the
   cache's retention window is forgotten. An evicted track run's sequences are
   unknown again: a reader judges them by `drifted` or fills them by range.
@@ -350,10 +350,6 @@ Tests, on mock time through a relay, in Rust and mirrored in `js/net`:
   again.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [JS cache pool](/quest/m1/js-cache-pool.md) - the byte account the JS runs bill
 
 ## Related
 

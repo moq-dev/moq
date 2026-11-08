@@ -128,6 +128,9 @@ pub struct moq_audio_decoder_output {
 	/// holds groups. 0 = the oldest, decoding everything cached; a live player
 	/// sets `MOQ_DECODE_START_LATEST`.
 	pub start: u32,
+	/// Hold exactly `delay.min_us` as the playout delay. False measures it from arrival
+	/// timing, never below `delay.min_us`, and reports it in each read's `delay_us`.
+	pub fixed: bool,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -161,6 +164,11 @@ pub struct moq_audio_read {
 	/// are the stopped encoder's remaining media; the first at or past it comes from a fresh
 	/// encoder.
 	pub end: moq_timestamp,
+	/// The playout delay in microseconds to hold ahead of the playhead when this read was
+	/// delivered: `delay.min`, or unless `fixed`, the estimate from every frame read so far.
+	/// The estimate measures when each read is delivered, so handle reads promptly and let
+	/// the playback buffer absorb the jitter, rather than pacing them to the speaker.
+	pub delay_us: u64,
 }
 
 // ---- State extensions (used internally by lib.rs) ----
@@ -188,7 +196,8 @@ impl crate::publish::Abort for AudioProducer {
 pub struct Audio {
 	producers: NonZeroSlab<AudioProducer>,
 	consumer_tasks: NonZeroSlab<Task>,
-	reads: NonZeroSlab<Read<moq_audio::Frame>>,
+	/// Each read with the playout delay when it was delivered.
+	reads: NonZeroSlab<(Read<moq_audio::Frame>, std::time::Duration)>,
 }
 
 impl Audio {
@@ -257,6 +266,7 @@ impl Audio {
 	) -> Result<Id, Error> {
 		let crate::consume::Rendition {
 			broadcast,
+			origin,
 			config: catalog,
 			name,
 			driver,
@@ -267,10 +277,18 @@ impl Audio {
 		self.consumer_tasks.spawn(
 			on_frame,
 			|state| &mut state.audio.consumer_tasks,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
+						// The rendition may live in a sibling broadcast that is never announced, and
+						// SUBSCRIBE_OK may never come, so the close races both steps.
+						let setup = async {
+							let broadcast = crate::consume::Rendition::resolve(broadcast, origin, &catalog).await?;
+							Ok(moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?)
+						};
+						let Some(consumer) = crate::consume::Consume::until_closed(&mut close, setup).await? else {
+							return Ok(());
+						};
 						Self::run(on_frame, consumer, close).await
 					})
 					.await
@@ -305,7 +323,7 @@ impl Audio {
 			};
 
 			// Hold the lock only to buffer the read; release it before the callback.
-			let read_id = State::lock().audio.reads.insert(read)?;
+			let read_id = State::lock().audio.reads.insert((read, consumer.delay()))?;
 			callback.call(Ok(read_id));
 		}
 	}
@@ -317,7 +335,7 @@ impl Audio {
 
 	/// Borrow a delivered read, and a frame's samples, until its handle is freed.
 	pub fn read_info(&self, id: Id, dst: &mut moq_audio_read) -> Result<(), Error> {
-		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
+		let (read, delay) = self.reads.get(id).ok_or(Error::FrameNotFound)?;
 		let (kind, gap, end) = read.info();
 		let frame = match read {
 			Read::Frame(frame) => moq_audio_frame {
@@ -331,7 +349,13 @@ impl Audio {
 				data_size: 0,
 			},
 		};
-		*dst = moq_audio_read { kind, frame, gap, end };
+		*dst = moq_audio_read {
+			kind,
+			frame,
+			gap,
+			end,
+			delay_us: delay.as_micros().try_into().unwrap_or(u64::MAX),
+		};
 		Ok(())
 	}
 
@@ -483,6 +507,25 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 	})
 }
 
+/// Re-anchor an audio producer's timeline to the next frame's timestamp.
+///
+/// Call this before writing after an idle gap, so the gap stays visible in the audio PTS
+/// instead of being compressed out by the running sample count.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_encode_audio_reanchor(producer: u32) -> i32 {
+	ffi::enter(move || {
+		let producer = ffi::parse_id(producer)?;
+		let producer = State::lock().audio.producer(producer)?;
+		producer
+			.lock()
+			.as_mut()
+			.ok_or(Error::MediaNotFound)?
+			.producer
+			.reanchor();
+		Ok(())
+	})
+}
+
 /// Flush any pending samples and finalize an audio producer.
 ///
 /// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
@@ -568,6 +611,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 			.transpose()
 			.map_err(|err| Error::UnsupportedConfig(err.to_string()))?;
 		config.delay = raw.delay.into();
+		config.estimate = !raw.fixed;
 
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 

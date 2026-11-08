@@ -3953,6 +3953,54 @@ fn a_peer_heard_on_a_new_path_brings_no_probe_forward() {
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), moved);
 }
 
+/// A closing endpoint sends only CONNECTION_CLOSE (RFC 9000 §10.2.1), so the PATH_CHALLENGE a
+/// migration queued for the previous path never goes out after a close, and the close is the
+/// first transmit, as drivers that publish a local close once it is sent rely on.
+#[test]
+fn a_close_drops_a_pending_path_challenge() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	pair.drive();
+
+	let moved = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	pair.client.addr = moved;
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let (arrival, ecn, datagram) = pair.server.inbound.pop_front().unwrap();
+	pair.time = arrival;
+	let mut buf = Vec::new();
+	let Some(DatagramEvent::ConnectionEvent(ch, event)) = pair.server.endpoint.handle(
+		arrival,
+		Received {
+			remote: moved,
+			local_ip: None,
+			ecn,
+			data: datagram,
+			arrival: None,
+		},
+		&mut buf,
+	) else {
+		panic!("the PING did not reach the connection");
+	};
+	assert_eq!(ch, server_ch);
+	let conn = pair.server_conn_mut(server_ch);
+	conn.handle_event(event);
+	assert_eq!(conn.remote_address(), moved);
+
+	let challenges = conn.stats().frame_tx.path_challenge;
+	conn.close(arrival, 7u32.into(), String::new());
+	let mut buf = Vec::new();
+	let close = conn.transmit(arrival, 1, &mut buf).expect("the close goes out");
+	assert_eq!(close.remote, moved, "the challenge to the previous path went out");
+	assert_eq!(conn.stats().frame_tx.path_challenge, challenges);
+	buf.clear();
+	assert!(
+		conn.transmit(arrival, 1, &mut buf).is_none(),
+		"more than the close went out"
+	);
+}
+
 /// A Version Negotiation packet carries no packet protection, so anyone on the path can send
 /// one: it is not the peer heard again, and brings no probe forward.
 #[test]
