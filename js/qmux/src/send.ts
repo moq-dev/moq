@@ -15,7 +15,8 @@ export type SendState = "ready" | "dataSent" | "dataRecvd" | "resetSent";
 export class SendHalf {
 	#state: SendState = "ready";
 	#offset = 0n;
-	#reason?: Error;
+	// Aborted by a reset, ending a write parked on either credit.
+	#reset = new AbortController();
 	/** The peer's MAX_STREAM_DATA for this stream. */
 	readonly credit: Credit;
 
@@ -42,11 +43,11 @@ export class SendHalf {
 	 *  the peer to grant some, and count them as sent. Rejects once the half is reset,
 	 *  the session closes, or `signal` aborts. */
 	async claim(desired: bigint, conn: Credit, signal: AbortSignal): Promise<bigint> {
+		const ended = AbortSignal.any([signal, this.#reset.signal]);
 		for (;;) {
-			await this.credit.wait(signal);
-			await conn.wait(signal);
-			// A reset while this waited on the connection credit.
-			if (this.#reason) throw this.#reason;
+			await this.credit.wait(ended);
+			await conn.wait(ended);
+			ended.throwIfAborted();
 			// Another stream may have spent the connection credit while this waited.
 			const stream = this.credit.available;
 			const shared = conn.available;
@@ -77,8 +78,7 @@ export class SendHalf {
 	reset(reason: Error): bigint | undefined {
 		if (this.terminal) return undefined;
 		this.#state = "resetSent";
-		this.#reason = reason;
-		this.credit.close(reason);
+		this.#reset.abort(reason);
 		return this.#offset;
 	}
 }

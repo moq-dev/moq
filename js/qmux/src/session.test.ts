@@ -2071,6 +2071,38 @@ describe("Session integration (scripted peer)", () => {
 		session.close();
 	});
 
+	test("STOP_SENDING fails a write parked on connection credit", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams({ initialMaxData: 0n }) });
+		await session.ready;
+
+		const writer = (await session.createUnidirectionalStream()).getWriter();
+		const write = settleTo(writer.write(new Uint8Array(10)));
+		await settle();
+
+		peer.send({ type: "stop_sending", id: Stream.Id.create(0n, Stream.Dir.Uni, false), code: VarInt.from(5) });
+		const err = await Promise.race([write, sleep(Nano.fromMilli(Milli(500))).then(() => "pending" as const)]);
+		expect(err).toBeInstanceOf(StreamError);
+		session.close();
+	});
+
+	test("a finished receive half stays drainable after the session closes", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+
+		// Our send half stays open, so the stream outlives the peer's FIN.
+		const bidi = await session.createBidirectionalStream();
+		const id = Stream.Id.create(0n, Stream.Dir.Bi, false);
+		peer.send({ type: "stream", id, offset: 0n, data: new Uint8Array([1, 2, 3]), fin: true });
+		await peer.barrier();
+		session.close();
+
+		const reader = bidi.readable.getReader();
+		expect((await reader.read()).value).toEqual(new Uint8Array([1, 2, 3]));
+		expect((await reader.read()).done).toBe(true);
+	});
+
 	for (const protocol of ["qmux-00", "qmux-01"]) {
 		test(`an empty WebSocket message is a no-op on ${protocol}`, async () => {
 			const { session, peer } = accept({ protocol });

@@ -1770,7 +1770,9 @@ export default class Session implements WebTransport {
 				stream.writable?.error(this.#closed);
 			} catch {}
 			stream.send?.credit.close(closeErr);
-			stream.recv?.refuse(closeErr);
+			// A receive half whose final size is known keeps what it still owes the reader,
+			// as it would once forgotten.
+			if (stream.recv && !stream.recv.sizeKnown) stream.recv.refuse(closeErr);
 		}
 		this.#streams.clear();
 		this.#updates.clear();
