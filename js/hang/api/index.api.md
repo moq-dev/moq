@@ -14,6 +14,7 @@ import { ZodMiniPipe } from "zod/mini";
 import { ZodMiniTransform } from "zod/mini";
 import { ZodMiniType } from "zod/mini";
 import { infer } from "zod/mini";
+import { input } from "zod/mini";
 
 export * as Catalog from "@moq/hang/catalog";
 
@@ -49,6 +50,7 @@ export namespace Echo {
 	}, $strip>;
 	export const SUFFIX: ".echo";
 	export type Snapshot = infer<typeof Echo.SnapshotSchema>;
+	export type SnapshotInput = input<typeof Echo.SnapshotSchema>;
 	export const SnapshotSchema: ZodMiniObject<{
 		renditions: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			arrival?: {
@@ -154,11 +156,11 @@ export * as Net from "@moq/net";
 
 export namespace Report {
 	export const INTERVAL: 1000;
-	export class Writer<T> {
-		constructor(broadcast: Net.Broadcast.Producer, name: string, schema?: ZodMiniType<T>);
+	export class Writer<T, I = T> {
+		constructor(broadcast: Net.Broadcast.Producer, name: string, schema: ZodMiniType<T, I>);
 		finish(): void;
 		readonly track: Net.Track.Producer;
-		update(value: T): void;
+		update(value: I): void;
 	}
 }
 
@@ -166,6 +168,7 @@ export * as Signals from "@moq/signals";
 
 export namespace Stats {
 	export type Rendition = infer<typeof Stats.RenditionSchema>;
+	export type RenditionInput = input<typeof Stats.RenditionSchema>;
 	export const RenditionSchema: ZodMiniObject<{
 		bitrate: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 		bytes: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
@@ -174,6 +177,7 @@ export namespace Stats {
 		skipped: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 	}, $strip>;
 	export type Snapshot = infer<typeof Stats.SnapshotSchema>;
+	export type SnapshotInput = input<typeof Stats.SnapshotSchema>;
 	export const SnapshotSchema: ZodMiniObject<{
 		renditions: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, {
 			bitrate?: number & $brand<"u53"> | undefined;

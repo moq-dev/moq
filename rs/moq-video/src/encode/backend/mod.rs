@@ -51,10 +51,13 @@ mod vaapi;
 /// whether forced by `cut` or placed by the backend's own GOP cadence.
 pub(crate) trait Backend {
 	/// Encode one frame, opening a group at it (an IDR) when `cut` is set.
-	/// Backends place group boundaries on their own per [`Config::join`], so this
-	/// is only the caller's extra request, arriving via
-	/// [`Encoder::cut`](super::Encoder::cut), and only on a backend whose
-	/// [`can_cut`](Self::can_cut) said yes.
+	/// Backends place group boundaries on their own every
+	/// [`Config::keyframe_interval`] frames, so this is only the encoder's extra
+	/// request: a caller's [`Encoder::cut`](super::Encoder::cut), or a
+	/// [`Config::join`] that a source slower than its frame rate reached first. It
+	/// arrives only on a backend whose [`can_cut`](Self::can_cut) said yes. A
+	/// backend that drops the frame carries the cut to the next one it encodes,
+	/// or the group waits a whole join for its keyframe.
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error>;
 
 	/// Return every access unit the codec is still holding, leaving the encoder
