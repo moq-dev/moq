@@ -113,7 +113,7 @@ async fn declared_reorder_starts_before_zero_and_resets_each_group() {
 	audio.finish().unwrap();
 	live.catalog.finish().unwrap();
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(std::time::Duration::from_secs(5))
+		.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::from_secs(5)).with_max(std::time::Duration::from_secs(5)))
 		.with_fragment_duration(std::time::Duration::ZERO)
 		.with_replay();
 	export.next().await.unwrap().unwrap();
@@ -538,7 +538,7 @@ async fn export_emits_blocks_for_each_frame() {
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
 		.with_fragment_duration(std::time::Duration::ZERO)
-		.with_delay(RECORDING_MAX_DELAY)
+		.with_delay(moq_net::track::Delay::default().with_min(RECORDING_MAX_DELAY).with_max(RECORDING_MAX_DELAY))
 		.with_replay();
 	let mut exported: Vec<u8> = Vec::new();
 
@@ -781,7 +781,7 @@ async fn export_fragment_duration_batches_blocks() {
 		.expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2))
-		.with_delay(RECORDING_MAX_DELAY)
+		.with_delay(moq_net::track::Delay::default().with_min(RECORDING_MAX_DELAY).with_max(RECORDING_MAX_DELAY))
 		.with_replay();
 	let mut exported: Vec<u8> = Vec::new();
 
@@ -1122,7 +1122,7 @@ async fn configured_delay_holds_live_frames() {
 	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 	let mut live = Live::audio(config);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(std::time::Duration::from_millis(100))
+		.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::from_millis(100)).with_max(std::time::Duration::from_millis(100)))
 		.with_fragment_duration(Some(std::time::Duration::ZERO));
 	assert!(export.next().await.unwrap().is_some(), "container header");
 	live.track.write(raw_frame(0, &[0xde, 0xad], true)).unwrap();
@@ -1144,7 +1144,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	let mut live = Live::audio(config);
 	let delay = std::time::Duration::from_millis(100);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(delay)
+		.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
 		.with_fragment_duration(std::time::Duration::ZERO);
 	export.next().await.unwrap().unwrap();
 	let start = kio::clock::now();
@@ -1181,7 +1181,7 @@ async fn decode_order_is_independent_of_cross_track_arrival_order() {
 			catalog.modify().unwrap().audio.renditions.insert(name, config);
 		});
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-			.with_delay(std::time::Duration::from_millis(100))
+			.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::from_millis(100)).with_max(std::time::Duration::from_millis(100)))
 			.with_fragment_duration(std::time::Duration::ZERO);
 		export.next().await.unwrap().unwrap();
 		live.track.write(raw_frame(0, b"initial-a", true)).unwrap();
@@ -1229,7 +1229,7 @@ async fn reordered_video_uses_decode_deadlines_but_keeps_block_pts() {
 	audio.finish().unwrap();
 	live.catalog.finish().unwrap();
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(std::time::Duration::from_secs(5))
+		.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::from_secs(5)).with_max(std::time::Duration::from_secs(5)))
 		.with_fragment_duration(std::time::Duration::ZERO)
 		.with_replay();
 	export.next().await.unwrap().unwrap();
@@ -1262,7 +1262,7 @@ async fn a_backlog_stays_in_the_source_until_due() {
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		let mut live = Live::audio(config);
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-			.with_delay(delay)
+			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
 			.with_fragment_duration(std::time::Duration::ZERO);
 		export.next().await.unwrap().unwrap();
 		live.track.write(raw_frame(0, b"first", true)).unwrap();
@@ -1300,7 +1300,7 @@ async fn a_retained_group_trims_to_the_delay() {
 	}
 	let delay = std::time::Duration::from_millis(100);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(delay)
+		.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
 		.with_fragment_duration(std::time::Duration::ZERO);
 	export.next().await.unwrap().unwrap();
 	export.next().await.unwrap().unwrap();
@@ -1374,7 +1374,7 @@ async fn stalled_presentation_time_keeps_the_export_bounded() {
 			config.jitter = Some(jitter);
 		}
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-			.with_delay(delay)
+			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
 			.with_fragment_duration(Duration::ZERO);
 		live.track.write(video_frame(pts(0), true)).unwrap();
 		export.next().await.unwrap().unwrap();
@@ -1404,7 +1404,7 @@ async fn live_reordered_video_keeps_every_frame() {
 		config.jitter = Some(Duration::from_millis(120));
 	}
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(Duration::from_millis(500))
+		.with_delay(moq_net::track::Delay::default().with_min(Duration::from_millis(500)).with_max(Duration::from_millis(500)))
 		.with_fragment_duration(Duration::ZERO);
 	// A B-pyramid in decode order, a group of nine 40 ms frames at a time.
 	let pyramid = [0, 4, 2, 1, 3, 8, 6, 5, 7];

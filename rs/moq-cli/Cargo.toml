@@ -155,6 +155,8 @@ moq-relay = { path = "../moq-relay", default-features = false, features = ["test
 moq-rtsp = { path = "../moq-rtsp", features = ["test-support"] }
 # Applies the finite bufferbloat queue to redundant-ingest acceptance tests.
 moq-shaper = { path = "../moq-shaper" }
+# Reads back the boxes of an exported MP4.
+mp4-atom = { workspace = true }
 # Writes the PAT and PMTs, CRCs included, of the two-program input `import ts --program all` splits.
 mpeg2ts = "0.6.0"
 tempfile = { workspace = true }

@@ -25,13 +25,11 @@ test("missing rendition counters mean zero while parsing preserves omission", ()
 	expect(stats.renditions?.reset.frames ?? 0).toBe(0);
 	expect(echo.renditions?.reset.stalled ?? 0).toBe(0);
 	expect(stats.renditions?.reset.bitrate).toBeUndefined();
-	expect(echo.renditions?.reset.latency).toBeUndefined();
 	expect(stats.transport).toBeUndefined();
 	expect(Object.hasOwn(stats, "transport")).toBe(false);
 	expect(Object.hasOwn(stats.renditions?.reset ?? {}, "frames")).toBe(false);
 	expect(Object.hasOwn(stats.renditions?.reset ?? {}, "bitrate")).toBe(false);
 	expect(Object.hasOwn(echo.renditions?.reset ?? {}, "arrival")).toBe(false);
-	expect(Object.hasOwn(echo.renditions?.reset ?? {}, "latency")).toBe(false);
 	expect(Stats.SnapshotSchema.parse({})).toEqual({});
 	expect(Echo.SnapshotSchema.parse({})).toEqual({});
 });
@@ -57,7 +55,7 @@ test("optional null measurements mean unavailable rather than measured zero", ()
 			),
 		),
 	).toEqual({ transport: {}, renditions: { hd: {} } });
-	expect(JSON.parse(JSON.stringify(Echo.RenditionSchema.parse({ latency: null, arrival: null })))).toEqual({});
+	expect(JSON.parse(JSON.stringify(Echo.RenditionSchema.parse({ arrival: null })))).toEqual({});
 });
 
 test("unknown track fields are ignored and flattened snapshot extensions survive", () => {
@@ -77,7 +75,6 @@ test("shared invalid counters refuse instead of rounding", async () => {
 	for (const value of cases) expect(() => Stats.RenditionSchema.parse(value)).toThrow();
 	for (const value of [
 		{ stalled: -1 },
-		{ latency: 0.5 },
 		{ arrival: { timestamp: Number.MAX_SAFE_INTEGER + 1, wall: 0 } },
 		{ arrival: { timestamp: 0, wall: -1 } },
 		{ arrival: {} },

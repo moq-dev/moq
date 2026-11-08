@@ -2,7 +2,7 @@
 //!
 //! [`Control`] turns each grant from a [`bandwidth::Consumer`] into the target
 //! rate a sender should produce, so audio, video, and transcode back off the
-//! same way. [`Follower`] drives it from a live grant. A rendition encoded beside
+//! same way. [`Grant`] drives it from a live grant. A rendition encoded beside
 //! lower ones of the same source sets [`Policy::lower`], and stops once its grant
 //! can no longer fund it, so the lower renditions keep their share.
 
@@ -138,7 +138,7 @@ pub enum Target {
 ///
 /// A raise climbs over several updates, and a grant that has settled sends no
 /// further estimate to climb on, so a sender following a live grant uses
-/// [`Follower`], which also wakes when the ramp allows the next step.
+/// [`Grant`], which also wakes when the ramp allows the next step.
 ///
 /// The time source is a parameter rather than an [`Instant::now`] call so the
 /// policy stays pure and testable. Pass the time the estimate was observed.
@@ -207,7 +207,7 @@ impl Control {
 	}
 
 	/// Follow `policy` from the next [`update`](Self::update), returning whether it changed;
-	/// see [`Follower::set_policy`].
+	/// see [`Grant::set_policy`].
 	fn set_policy(&mut self, policy: Policy) -> bool {
 		if policy == self.policy {
 			return false;
@@ -424,7 +424,7 @@ impl Control {
 /// Follow a [`Reservation`](bandwidth::Reservation)'s consumer: it reports whether a
 /// session probes for it, which a rendition needs before it disables, and the slice it
 /// would get back while unwatched, which it needs to resume after its viewers left.
-pub struct Follower {
+pub struct Grant {
 	grant: bandwidth::Consumer,
 	control: Control,
 	/// Armed at the control's deadline, created on first use.
@@ -434,7 +434,7 @@ pub struct Follower {
 	refeed: bool,
 }
 
-impl Follower {
+impl Grant {
 	/// Follow `grant` under `policy`, starting at [`Policy::max`].
 	pub fn new(grant: bandwidth::Consumer, policy: Policy) -> Self {
 		Self {
@@ -452,7 +452,7 @@ impl Follower {
 
 	/// Follow under `policy` from now on, feeding it the current grant on the next poll.
 	///
-	/// A new ceiling or floor starts over at its [`Policy::max`], as a fresh [`Follower`]
+	/// A new ceiling or floor starts over at its [`Policy::max`], as a fresh [`Grant`]
 	/// would, since the sender applied that ceiling itself. A new
 	/// [`lower`](Policy::lower) alone keeps the target and ramp, since nothing retuned
 	/// the sender. Either way a disabled sender stays disabled until that grant resumes
@@ -916,7 +916,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_follower_recovers_a_quiet_grant() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 
 		grant.set(Some(bps(1_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), on(bps(1_000_000)));
@@ -948,7 +948,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_new_policy_feeds_the_current_grant() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 		grant.set(Some(bps(3_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), on(bps(3_000_000)));
 
@@ -978,7 +978,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_raised_policy_follows_the_next_grant() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(2_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(2_000_000)));
 		grant.set(Some(bps(2_000_000))).unwrap();
 		assert!(
 			kio::clock::timeout(Duration::from_secs(60), follower.next())
@@ -997,7 +997,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_new_lower_keeps_the_applied_target() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 		grant.set(Some(bps(2_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), on(bps(2_000_000)));
 
@@ -1021,7 +1021,7 @@ mod tests {
 		let grant = bandwidth::Producer::new();
 		let mut policy = Policy::new(bps(4_000_000));
 		policy.lower = Some(bps(2_000_000));
-		let mut follower = Follower::new(grant.consume(), policy);
+		let mut follower = Grant::new(grant.consume(), policy);
 		grant.set(Some(bps(1_000_000))).unwrap();
 		assert_eq!(follower.next().await.unwrap(), on(bps(1_000_000)));
 	}
@@ -1030,7 +1030,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_closed_grant_ends_the_follower() {
 		let grant = bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 		drop(grant);
 		assert!(follower.next().await.is_err());
 	}
@@ -1339,7 +1339,7 @@ mod tests {
 	}
 
 	/// Random walks of grants, probing, policy changes, refused changes, and time,
-	/// replayed through [`Control`] the way [`Follower`] drives it, checking the rung's
+	/// replayed through [`Control`] the way [`Grant`] drives it, checking the rung's
 	/// invariants after every wake.
 	mod model {
 		use proptest::prelude::*;

@@ -840,9 +840,17 @@ mod tests {
 
 	/// The average bitrate encoded in a synthesized AAC init segment.
 	fn aac_avg_bitrate(init: &bytes::Bytes) -> u32 {
-		let wire = moq_mux::container::fmp4::Wire::from_init(init).unwrap();
-		let codec = &wire.trak().mdia.minf.stbl.stsd.codecs[0];
-		let moq_mux::container::fmp4::mp4_atom::Codec::Mp4a(mp4a) = codec else {
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(init.as_ref());
+		let moov = std::iter::from_fn(|| mp4_atom::Any::decode_maybe(&mut cursor).unwrap())
+			.find_map(|atom| match atom {
+				mp4_atom::Any::Moov(moov) => Some(moov),
+				_ => None,
+			})
+			.expect("no moov in init");
+		let codec = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0];
+		let mp4_atom::Codec::Mp4a(mp4a) = codec else {
 			panic!("expected mp4a, got {codec:?}");
 		};
 		mp4a.esds.es_desc.dec_config.avg_bitrate
@@ -850,7 +858,7 @@ mod tests {
 
 	/// The `trun` sample durations of a fragment.
 	fn sample_durations(fragment: &bytes::Bytes) -> Vec<Option<u32>> {
-		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+		use mp4_atom::DecodeMaybe;
 
 		let mut cursor = std::io::Cursor::new(fragment.as_ref());
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
@@ -2381,7 +2389,7 @@ mod tests {
 		settle().await;
 
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = kio::clock::Wall::MOQ_EPOCH;
 		let config = catalog_config()
 			.with_clock(moq_mux::Clock::at(moq_net::time::Instant::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
@@ -2553,7 +2561,7 @@ mod tests {
 	}
 
 	async fn live_fmp4_segments(version: Option<&str>, late: bool) {
-		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe, Encode};
+		use mp4_atom::{DecodeMaybe, Encode};
 		// Reuse the A/V descriptors; opaque samples exercise segment discovery and FETCH,
 		// without involving a codec decoder.
 		let mut fixture =

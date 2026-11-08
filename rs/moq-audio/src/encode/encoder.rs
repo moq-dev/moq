@@ -277,11 +277,7 @@ fn aac_config(config: &Config) -> Result<moq_mux::codec::aac::Config, Error> {
 		)));
 	}
 
-	Ok(moq_mux::codec::aac::Config {
-		profile: AAC_LC,
-		sample_rate,
-		channel_count: layout.channels(),
-	})
+	Ok(moq_mux::codec::aac::Config::new(AAC_LC, sample_rate, layout.channels()))
 }
 
 /// Audio encoder over codec-sized interleaved `f32` PCM.

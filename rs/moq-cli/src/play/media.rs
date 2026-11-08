@@ -285,7 +285,7 @@ impl<O: Output> Media<O> {
 						}
 						let format = catalog::hang::Container::try_from(config)?;
 						// The playout delay is the target latency, and the max how late a group may be.
-						let track = moq_mux::container::Consumer::new(subscriber, format).with_delay(delay);
+						let track = moq_mux::container::Playout::new(delay, Duration::ZERO).consumer(subscriber, format);
 						Ok::<_, anyhow::Error>((track, decoder))
 					};
 					let opened = async {

@@ -17,7 +17,6 @@ use std::time::Duration;
 use kio::clock::Instant;
 
 use hang::moq_net;
-use moq_mux::container::fmp4::mp4_atom;
 use moq_mux::container::ts;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};

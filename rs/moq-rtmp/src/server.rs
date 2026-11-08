@@ -890,7 +890,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.delay)
+			.with_delay(moq_net::track::Delay::default().with_min(self.delay).with_max(self.delay))
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a

@@ -50,20 +50,17 @@ impl<'de> DeserializeAs<'de, moq_net::Timestamp> for Millis {
 }
 
 pub(crate) struct Wall;
-fn epoch() -> kio::clock::Wall {
-	kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS)
-}
 impl SerializeAs<kio::clock::Wall> for Wall {
 	fn serialize_as<S: serde::Serializer>(value: &kio::clock::Wall, serializer: S) -> Result<S::Ok, S::Error> {
 		let duration = value
-			.checked_duration_since(epoch())
+			.checked_duration_since(kio::clock::Wall::MOQ_EPOCH)
 			.ok_or_else(|| serde::ser::Error::custom("snapshot wall is before the MoQ epoch"))?;
 		Millis::serialize_as(&duration, serializer)
 	}
 }
 impl<'de> DeserializeAs<'de, kio::clock::Wall> for Wall {
 	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<kio::clock::Wall, D::Error> {
-		epoch()
+		kio::clock::Wall::MOQ_EPOCH
 			.checked_add(Millis::deserialize_as(deserializer)?)
 			.ok_or_else(|| serde::de::Error::custom("snapshot wall clock overflow"))
 	}
@@ -92,14 +89,15 @@ mod tests {
 			#[serde_as(as = "Wall")]
 			wall: kio::clock::Wall,
 		}
-		let last_millis = (u64::MAX / 1_000_000) - crate::catalog::MOQ_EPOCH_UNIX_MILLIS;
+		let epoch_millis = kio::clock::Wall::MOQ_EPOCH.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH).as_millis() as u64;
+		let last_millis = (u64::MAX / 1_000_000) - epoch_millis;
 		let last = format!(r#"{{"wall":{last_millis}}}"#);
 		let value: Value = serde_json::from_str(&last).unwrap();
 		assert_eq!(serde_json::to_string(&value).unwrap(), last);
 		assert!(serde_json::from_str::<Value>(&format!(r#"{{"wall":{}}}"#, last_millis + 1)).is_err());
 		assert!(
 			serde_json::to_string(&Value {
-				wall: epoch() - Duration::from_nanos(1)
+				wall: kio::clock::Wall::MOQ_EPOCH - Duration::from_nanos(1)
 			})
 			.is_err()
 		);
@@ -141,7 +139,7 @@ mod tests {
 		assert_eq!(stats.transport.lost_packets, None);
 		let echo: echo::Snapshot = serde_json::from_str(r#"{"renditions":{"reset":{}}}"#).unwrap();
 		assert_eq!(echo.renditions["reset"].stalled, Duration::ZERO);
-		assert_eq!(echo.renditions["reset"].latency, None);
+		assert_eq!(echo.renditions["reset"].arrival, None);
 	}
 
 	#[test]
@@ -152,8 +150,7 @@ mod tests {
 		assert_eq!(stats.transport.rtt, None);
 		assert_eq!(stats.renditions["hd"].bitrate, None);
 		let echo: echo::Snapshot =
-			serde_json::from_str(r#"{"renditions":{"hd":{"latency":null,"arrival":null}}}"#).unwrap();
-		assert_eq!(echo.renditions["hd"].latency, None);
+			serde_json::from_str(r#"{"renditions":{"hd":{"arrival":null}}}"#).unwrap();
 		assert_eq!(echo.renditions["hd"].arrival, None);
 	}
 
@@ -182,7 +179,6 @@ mod tests {
 		}
 		for input in [
 			r#"{"stalled":-1}"#,
-			r#"{"latency":0.5}"#,
 			r#"{"arrival":{"timestamp":9007199254740992,"wall":0}}"#,
 			r#"{"arrival":{"timestamp":0,"wall":-1}}"#,
 			r#"{"arrival":{}}"#,
@@ -211,7 +207,7 @@ mod tests {
 		let arrival = report.renditions["hd"].arrival.as_ref().unwrap();
 		assert_eq!(arrival.timestamp, moq_net::Timestamp::from_millis(30_000).unwrap());
 		assert_eq!(
-			arrival.wall.checked_duration_since(epoch()).unwrap(),
+			arrival.wall.checked_duration_since(kio::clock::Wall::MOQ_EPOCH).unwrap(),
 			Duration::from_millis(175_184_640_000)
 		);
 		assert_eq!(report.renditions["hd"].stalled, Duration::from_millis(120));

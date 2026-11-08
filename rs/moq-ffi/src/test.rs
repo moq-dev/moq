@@ -3244,11 +3244,7 @@ async fn media_track_activity_and_name() {
 #[tokio::test]
 async fn publish_media_aac_populates_description() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let config = moq_mux::codec::aac::Config {
-		profile: 2,
-		sample_rate: 44_100,
-		channel_count: 2,
-	};
+	let config = moq_mux::codec::aac::Config::new(2, 44_100, 2);
 	let init = config.encode().unwrap();
 	let _media = MoqMediaTrackProducer::audio(
 		&broadcast,

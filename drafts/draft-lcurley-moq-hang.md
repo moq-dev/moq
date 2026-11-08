@@ -875,7 +875,7 @@ type PublisherRendition = {
 type ViewerRendition = {
   frames?: number, bytes?: number, decoded?: number, late?: number,
   errors?: number, stalls?: number, stalled?: number, underruns?: number,
-  arrival?: { timestamp: number, wall: number }, latency?: number,
+  arrival?: { timestamp: number, wall: number },
 }
 type Transport = {
   rtt?: number, rate?: number, lostBytes?: number, lostPackets?: number, age?: number,
@@ -896,7 +896,7 @@ An empty rendition entry is valid and represents zero cumulative counters; its I
 Publisher `keyframes` counts sent keyframes; `skipped` counts frames skipped before sending.
 Viewer `decoded`, `late`, and `errors` count decoded frames, frames too late for playout, and decode errors.
 `stalls` counts playout stalls, `stalled` is cumulative stalled duration, and `underruns` counts audio buffer underruns.
-`bitrate` is the latest target encoder bitrate, `latency` the latest playout latency, and `arrival` pairs the newest received media timestamp with its arrival wall time.
+`bitrate` is the latest target encoder bitrate, and `arrival` pairs the newest received media timestamp with its arrival wall time.
 Durations and media timestamps are milliseconds; `arrival.wall` is milliseconds since the MoQ epoch (2020-01-01T00:00:00Z).
 Sub-millisecond durations and timestamps are floored when encoded.
 Rates are bits per second.

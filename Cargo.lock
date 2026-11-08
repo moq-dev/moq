@@ -4497,6 +4497,7 @@ dependencies = [
  "moq-transcode",
  "moq-video",
  "moq-webrtc",
+ "mp4-atom",
  "mpeg2ts",
  "object_store",
  "percent-encoding",

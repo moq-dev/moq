@@ -447,13 +447,13 @@ fn cmaf_video_description(track: &moq_msf::Track, init: &[u8], codec: &VideoCode
 			(
 				VideoCodec::H264(codec),
 				Codec::Avc1(mp4_atom::Avc1 { avcc, .. }) | Codec::Avc3(mp4_atom::Avc3 { avcc, .. }),
-			) if codec.inline == matches!(sample, Codec::Avc3(_)) => avcc.encode_body(&mut description)?,
+			) if codec.inline == matches!(sample, Codec::Avc3(_)) => avcc.encode_body(&mut description).map_err(crate::Error::mp4)?,
 			(
 				VideoCodec::H265(codec),
 				Codec::Hvc1(mp4_atom::Hvc1 { hvcc, .. }) | Codec::Hev1(mp4_atom::Hev1 { hvcc, .. }),
-			) if codec.in_band == matches!(sample, Codec::Hev1(_)) => hvcc.encode_body(&mut description)?,
-			(VideoCodec::AV1(_), Codec::Av01(av01)) => av01.av1c.encode_body(&mut description)?,
-			(VideoCodec::VP9(_), Codec::Vp09(vp09)) => vp09.vpcc.encode_body(&mut description)?,
+			) if codec.in_band == matches!(sample, Codec::Hev1(_)) => hvcc.encode_body(&mut description).map_err(crate::Error::mp4)?,
+			(VideoCodec::AV1(_), Codec::Av01(av01)) => av01.av1c.encode_body(&mut description).map_err(crate::Error::mp4)?,
+			(VideoCodec::VP9(_), Codec::Vp09(vp09)) => vp09.vpcc.encode_body(&mut description).map_err(crate::Error::mp4)?,
 			(VideoCodec::VP8, Codec::Vp08(_)) => return Ok(None),
 			_ => continue,
 		}

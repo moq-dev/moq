@@ -84,6 +84,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed AAC configuration mirroring the relevant fields of an
 /// AudioSpecificConfig.
+///
+/// Marked `#[non_exhaustive]`: build one with [`new`](Self::new) or [`parse`](Self::parse).
+#[non_exhaustive]
 pub struct Config {
 	/// The leading audioObjectType: 2 for AAC-LC, 5 for HE-AAC (SBR), 29 for HE-AACv2 (PS).
 	pub profile: u8,
@@ -94,6 +97,15 @@ pub struct Config {
 }
 
 impl Config {
+	/// A config for `profile` (the audioObjectType) at the decoded `sample_rate` and `channel_count`.
+	pub fn new(profile: u8, sample_rate: u32, channel_count: u32) -> Self {
+		Self {
+			profile,
+			sample_rate,
+			channel_count,
+		}
+	}
+
 	/// Parse an AudioSpecificConfig buffer.
 	///
 	/// Handles basic formats (object_type < 31), extended formats

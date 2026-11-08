@@ -72,11 +72,7 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 				));
 			}
 
-			let config = moq_mux::codec::aac::Config {
-				profile,
-				sample_rate: catalog.sample_rate,
-				channel_count: catalog.channel_count,
-			};
+			let config = moq_mux::codec::aac::Config::new(profile, catalog.sample_rate, catalog.channel_count);
 
 			// Synthesis still drops bits the config cannot hold: the object type is
 			// masked to five bits, and the sample rate to 24. Encode refuses a channel

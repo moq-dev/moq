@@ -286,7 +286,7 @@ impl VideoHint {
 
 	/// Build a config from these fields alone, or `None` if the codec is missing. Used to publish
 	/// the catalog before the stream is parsed.
-	pub fn to_config(&self) -> Option<hang::catalog::VideoConfig> {
+	pub(crate) fn to_config(&self) -> Option<hang::catalog::VideoConfig> {
 		let codec = self.codec.clone()?;
 		let mut config = hang::catalog::VideoConfig::new(codec);
 		self.apply(&mut config);

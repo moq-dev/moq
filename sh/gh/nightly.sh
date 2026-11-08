@@ -141,7 +141,7 @@ case "$1" in
         # The allocation/window/play-buffer/batch/receive-bursts tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
-            -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls --features moq-quic/fuzz \
+            -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls --features moq-json/bench,moq-quic/fuzz \
             --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench timeline --bench decode_clock --bench ts_programs --bench ts_video \
             --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include

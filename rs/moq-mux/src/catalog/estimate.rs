@@ -100,25 +100,11 @@ impl Estimate {
 /// # }
 /// ```
 ///
-/// Drive one directly only when you write to a raw
-/// [`track::Producer`](moq_net::track::Producer) instead. The methods mirror the ones on
-/// [`container::Producer`](crate::container::Producer), so call them at the same points:
-///
-/// ```
-/// # use moq_mux::catalog::Estimator;
-/// # use moq_net::Timestamp;
-/// let mut estimator = Estimator::new();
-/// estimator.write(Timestamp::from_micros(0).unwrap(), 1200);
-/// estimator.cut(Some(Timestamp::from_micros(33_000).unwrap()));
-///
-/// let estimate = estimator.estimate();
-/// ```
-///
 /// A standalone estimator has no other tracks to order against, so it never measures a delay.
 ///
 /// Move-only (not `Clone`): it owns the running measurement for exactly one track.
 #[derive(Default)]
-pub struct Estimator {
+pub(crate) struct Estimator {
 	jitter: Jitter,
 	bitrate: Bitrate,
 	/// The framerate and delay, measured over the same windows.
