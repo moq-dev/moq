@@ -131,11 +131,12 @@ extracts a program, so it refuses `--program`. To carry programs separately,
 import each as its own SPTS into its own broadcast. 192- and 204-byte packets
 are refused rather than reframed. `--pcr-pid` paces on another PID's PCR.
 
-Each frame is the run of packets from one PCR on the clock PID to the next,
-stamped with the PCR time of its first byte. A group starts at a
-`random_access_indicator` on the video PID (or the clock PID with no video), at
-a flagged PCR jump forward, or after a second without either. Any step back
-ends the import.
+Each frame is a run of packets that ends at the next PCR on the clock PID or at
+the next group start, stamped with the PCR time of its first byte. A group
+starts at a `random_access_indicator` on the video PID (or the clock PID with
+no video), at a flagged PCR jump forward, after a second without either, or
+where the next frame would take the group past the relay's cache bound. Any
+step back ends the import.
 
 `export ts --passthrough` writes each run `--delay` after its time on the
 source clock, so two exporters emit the same bytes. It takes neither
