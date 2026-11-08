@@ -11,7 +11,7 @@ use bytes::Buf;
 use futures::FutureExt;
 
 use crate::quic::driver::send;
-use crate::quic::web::{CloseReason, SessionError};
+use crate::quic::web::CloseReason;
 
 /// A stream that can be used to send bytes. See [`crate::quic::driver::send::Stream`].
 ///
@@ -56,12 +56,12 @@ impl Stream {
 			send::Error::Stopped(code) => match self.close.decode_stream_code(code) {
 				Some(code) => Error::Stopped(code),
 				None => match self.close.session_gone(code) {
-					Some(err) => Error::SessionError(err),
+					Some(err) => Error::Session(err),
 					None => Error::InvalidStopped(code),
 				},
 			},
 			e => match Error::from(e) {
-				Error::SessionError(e) => Error::SessionError(self.close.map(e)),
+				Error::Session(e) => Error::Session(self.close.map(e)),
 				e => e,
 			},
 		}
@@ -328,7 +328,7 @@ pub enum Error {
 
 	/// The session carrying the stream failed.
 	#[error("session error: {0}")]
-	SessionError(#[from] SessionError),
+	Session(#[from] super::Error),
 
 	/// The stream was already finished or reset.
 	#[error("stream closed")]
@@ -344,9 +344,9 @@ impl From<crate::quic::driver::send::Error> for Error {
 					None => Error::InvalidStopped(code),
 				}
 			}
-			crate::quic::driver::send::Error::Connection(e) => Error::SessionError(e.into()),
+			crate::quic::driver::send::Error::Connection(e) => Error::Session(e.into()),
 			// Only datagrams fail otherwise, and they report a session error.
-			e => Error::SessionError(e.into()),
+			e => Error::Session(e.into()),
 		}
 	}
 }
@@ -354,12 +354,12 @@ impl From<crate::quic::driver::send::Error> for Error {
 impl moq_net::transport::Error for Error {
 	fn close_kind(&self) -> moq_net::transport::CloseKind {
 		match self {
-			Self::SessionError(e) => e.close_kind(),
+			Self::Session(e) => e.close_kind(),
 			_ => moq_net::transport::CloseKind::Transport,
 		}
 	}
 	fn session_error(&self) -> Option<(u32, String)> {
-		if let Error::SessionError(e) = self {
+		if let Error::Session(e) = self {
 			return e.session_error();
 		}
 

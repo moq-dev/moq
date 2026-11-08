@@ -20,13 +20,14 @@ claim whose withdrawal is already known.
 5. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Floor regions have no order, and a repeated region is a violation.** A sorted order would need Rust's `Path` ordering reproduced exactly in JS. Decoding into a map rejects duplicates at the same cost. Superseded the same day by item 10, which removes regions.
 6. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **The Hop setup parameter and ANNOUNCE_OK's Hop ID are dropped from lite-07.** Their only roles were path-vector exclusion and the implicit trailing hop. ANNOUNCE_OK reserves no body for a route-key proof: [moq-dev/moq#7937](https://github.com/moq-dev/moq/pull/7937), accepted the same day, proves the route key once per session in SETUP. The live hop-based codec still switches in session integration, as choice 1 requires.
 7. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **An echo naming a Route ID that was never ended, or was already echoed, is a violation at the publisher.** The publisher can check this from its live and unacknowledged ids alone, with no growing state.
-8. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_TAKEOVER keeps its shape, with a Route ID in place of hops, and its predecessor must be under the same route.** [quest/m2/announce-takeover.md](https://github.com/moq-dev/moq/blob/main/quest/m2/announce-takeover.md) deletes the message, so this keeps the change minimal.
+8. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_TAKEOVER keeps its shape, with a Route ID in place of hops, and its predecessor must be under the same route.** [moq-dev/moq#8063](https://github.com/moq-dev/moq/pull/8063) deletes the message, so this keeps the change minimal. Decided 2026-11-06 (maintainer, /quest-complete on [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)), asked whether session integration ports the message or lets lite-07 answer a claim as a restart or start until announce-takeover lands: ✅ **port it**, so a job answering a claim stays a takeover across relays. Rejected: accepting the restart and start.
 9. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Unknown announce types stay skipped by length on lite-06+**, as before. An unknown reply type is refused.
 10. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **ANNOUNCE_FLOOR is a marker, not a region list:** `{Route ID, Revision}`. It closes a batch and certifies the stream's claims for that route across the whole requested prefix as the origin's at that Revision. A publisher that cannot vouch for the whole requested prefix at one Revision still closes the batch, with a floor that certifies nothing, encoded per item 13. Regions, the replacing list, and the 65,535-byte overflow go away. Accepted cost: a relay with partial knowledge of an origin certifies nothing for that route, so a receiver lets its stale claims go only on ROUTE_END. Rejected: one region per message; a multipart atomic list.
 11. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **Clamped claims collapse to the best one.** When several of a route's claims cover a request's prefix (`live` at cost 10 and `live/a` at cost 1, request `live/a/x`), the publisher presents only the most specific, and when it is withdrawn moves the presented claim to the next covering one with ANNOUNCE_UPDATE or ANNOUNCE_RESTART instead of ending it. No wire change; one live claim per prefix per route holds, and a receiver merges claims at the prefix each stream presents them. Rejected: carrying each claim's ancestor depth.
 12. ✅ Decided 2026-11-05 (maintainer, /quest-plan): **A floor certifies only what its own request shows.** A stream whose request did not set `Hidden` certifies nothing about hidden claims. No new wire field. Rejected: isolating differently filtered views.
 13. ✅ Decided 2026-11-05 (maintainer): **ANNOUNCE_FLOOR encodes `Revision + 1`, with 0 meaning the floor certifies nothing,** the same offset as `Max Age`. Rust decodes it to `Option`. It replaces a Revision of 2^64-1 as the marker: a huge sentinel is a bad pattern and costs 9 bytes as a lite-07 varint. Rejected: a separate message; a boolean field.
 14. ✅ Decided 2026-11-05 (maintainer: "use 0 as a sentinel, or make a new message type"; the agent picked the message): **A held route is ROUTE_HOLD (0xB), `{Route ID}`,** replacing a ROUTE_UPDATE with a Metric of 2^64-1. A metric of 0 is real (the origin's own route), so 0 cannot mark held, and offsetting every metric by one would still leave a held update's seqno and down-only bit meaningless and refused. The message carries only what a hold means, item 4's rule goes away, and a metric is now only bounded by overflow, so the wire refuses no metric. The 2^64-1 Seqno and Revision bounds stay: they are bounds, not markers, leaving room for a ROUTE_REQUEST's successor and for the floor's offset.
+15. ✅ Decided 2026-11-06 (maintainer, /quest-complete on [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)), asked whether to amend the handoff contract's "a sender that certifies anything for a route answers every stream" or keep it: ✅ **send a route on a stream only while it meets the stream's interest**, with a floor certifying the last withdrawal before the route ends. Withdrawals still END, and what a node keeps per stream it answers is bounded by the origins that stream reads, at a ROUTE_END round trip when an origin leaves an interest. Rejected: keep answering every stream and bound only by per-peer caps, which is simpler but carries the whole node table on every stream. [Route session integration](/quest/m2/cluster-routing/routes/session.md) implements it.
 
 
 The route layer's core landed in
@@ -330,10 +331,14 @@ loss never reports an END:
   delivered (`a_lost_scope_keeps_newer_knowledge_where_still_certified`).
   Otherwise a wildcard above both was last learned through the lost floor and
   is unknown at the kept floors' revision, so the view is rebuilt from the
-  neighbours' last views, a collection of that region. A sender that
-  certifies anything for a route answers every stream, even one whose
-  interest none of its regions meets, so its peer learns it certifies nothing
-  there rather than waiting (`a_disjoint_interest_is_answered_with_nothing`).
+  neighbours' last views, a collection of that region. A sender sends a
+  route on a stream only while the route meets the stream's interest (Plan
+  item 15): it starts the route before its first claim in or covering the
+  interest, and when the last such claim goes it sends a floor certifying the
+  withdrawal, then ends the route. A peer therefore holds no route, and
+  waits on no certifier, for an origin its interest does not meet. The router
+  still answers every stream until session integration scopes it
+  (`a_disjoint_interest_is_answered_with_nothing`).
   A claim is available only through a certifier that is not held; another
   scope's usable route cannot serve it. A certifier that has not answered yet
   counts as serving, as for a new next hop whose announcements trail its
@@ -537,8 +542,6 @@ benchmarks.
 - [Route layer acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - forwarding fixtures ported and the model deleted, incident fixtures, end-to-end checks, and benchmarks
 - [Firefox tabs prove their route key](/quest/m2/cluster-routing/routes/browser-proof.md) - a current Firefox tab opens a lite-07 session with a route-key proof the relay verifies, once neqo's exporter follows the draft
 - [Playwright bundles Chromium's spec exporter](/quest/m2/cluster-routing/routes/playwright-pin.md) - the toolchain's Playwright bundles Chromium 158+, so the route key lane proves the Chromium tab
-- [A declined lite-06 route is reconsidered when the lite-07 path fails](/quest/m2/cluster-routing/routes/lite06-failover.md) - a mixed-version relay fails over to the lite-06 route it declined
-- [A covering predecessor's takeover shows under a mount](/quest/m2/cluster-routing/routes/mount-takeover.md) - lite-07 presents a takeover beneath a mount as lite-06 does
 
 ## Related
 

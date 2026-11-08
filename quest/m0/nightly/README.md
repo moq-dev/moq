@@ -42,5 +42,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Nightly's Miri job stays inside its time budget](/quest/m0/nightly/miri.md) - both Miri passes go green, with ARM timings inside the 60-minute job and 15-minute-per-test budgets
 - [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs

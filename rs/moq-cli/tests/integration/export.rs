@@ -114,6 +114,8 @@ const LITE_07: &str = "moq-lite-07-wip";
 
 fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	// The guard on host timers is for tests, not the binaries they run.
+	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
 	for (name, _) in std::env::vars_os() {
 		if name.to_string_lossy().starts_with("MOQ_") {
@@ -1064,9 +1066,7 @@ async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Inst
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
-				moq_net::origin::RouteEvent::Start(announce)
-				| moq_net::origin::RouteEvent::Restart(announce)
-				| moq_net::origin::RouteEvent::Takeover { announce, .. } => {
+				moq_net::origin::RouteEvent::Start(announce) | moq_net::origin::RouteEvent::Restart(announce) => {
 					return announce.route.instance().clone();
 				}
 				_ => continue,
@@ -1146,6 +1146,7 @@ async fn a_killed_mp4_recording_is_repaired() {
 
 	let repair = || async {
 		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
+			.env_remove("KIO_DENY_HOST_TIMERS")
 			.args(["repair", "mp4"])
 			.arg(&path)
 			.output();

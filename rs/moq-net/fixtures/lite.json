@@ -1,0 +1,97 @@
+[
+	{
+		"name": "an active announce with no hops",
+		"version": "moq-lite-05",
+		"message": "announce",
+		"hex": "0d010a726f6f6d2f616c69636500",
+		"expect": "decoded"
+	},
+	{
+		"name": "an ANNOUNCE_START carries its cost and the retired second field at the ceiling",
+		"version": "moq-lite-06",
+		"message": "announce",
+		"hex": "00150a726f6f6d2f616c6963650000ffffffffffffffff",
+		"expect": "decoded"
+	},
+	{
+		"name": "an ANNOUNCE_END retracts by id",
+		"version": "moq-lite-06",
+		"message": "announce",
+		"hex": "010103",
+		"expect": "decoded"
+	},
+	{
+		"name": "a body too short for its fields is malformed, not a wait for more (fuzz regression)",
+		"version": "moq-lite-05",
+		"message": "announce",
+		"hex": "0101",
+		"expect": "refused"
+	},
+	{
+		"name": "a lite-06 body too short for its path is malformed, not a wait for more (fuzz regression)",
+		"version": "moq-lite-06",
+		"message": "announce",
+		"hex": "000105",
+		"expect": "refused"
+	},
+	{
+		"name": "a lite-07 body too short for its path base is malformed, not a wait for more (fuzz regression)",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000105",
+		"expect": "refused"
+	},
+	{
+		"name": "an ANNOUNCE_INIT within the announce budget",
+		"version": "moq-lite-02",
+		"message": "announce_init",
+		"budget": 2,
+		"hex": "050201610162",
+		"expect": "decoded"
+	},
+	{
+		"name": "an ANNOUNCE_INIT listing more broadcasts than the budget is refused before its paths decode",
+		"version": "moq-lite-02",
+		"message": "announce_init",
+		"budget": 1,
+		"hex": "050201610162",
+		"expect": "refused"
+	},
+	{
+		"name": "an ANNOUNCE_INIT one byte past one storage segment is refused at its length prefix",
+		"version": "moq-lite-02",
+		"message": "announce_init",
+		"hex": "800ffff1",
+		"expect": "refused"
+	},
+	{
+		"name": "a group sequence at 2^62-1, the largest a QUIC varint holds",
+		"version": "moq-lite-06",
+		"message": "group",
+		"hex": "0a00ffffffffffffffff00",
+		"expect": "decoded"
+	},
+	{
+		"name": "a group sequence at 2^64-1, the largest a u64 holds",
+		"version": "moq-lite-07-wip",
+		"message": "group",
+		"hex": "0b00ffffffffffffffffff00",
+		"expect": "decoded"
+	},
+	{
+		"name": "a server pinned to a version the client offered selects it",
+		"version": "moq-lite-02",
+		"message": "client_setup",
+		"server": "moq-lite-05",
+		"hex": "20001202c0000000ff0dad06c0000000ff0dad0500",
+		"expect": "decoded"
+	},
+	{
+		"name": "a server pinned to a version the client did not offer refuses",
+		"version": "moq-lite-02",
+		"message": "client_setup",
+		"server": "moq-lite-05",
+		"hex": "20001202c0000000ff0dad07c0000000ff0dad0600",
+		"expect": "refused"
+	}
+]

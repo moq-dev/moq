@@ -11,9 +11,9 @@ import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
-import { redact } from "../util/log.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
+import { parse, show } from "./endpoint.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
@@ -278,8 +278,8 @@ export interface ConnectProps {
 	auth?: Auth.Handle;
 
 	/**
-	 * The implementation this side advertises in SETUP. Defaults to {@link IMPLEMENTATION};
-	 * a wrapper prepends its own token, like `my-app/1.0 moq-net-js/0.4.2`. Empty sends nothing.
+	 * The implementation this side advertises in SETUP, a User-Agent style product token such as
+	 * `my-app/1.0`. Defaults to this library's, like `moq-net-js/0.4.2`. Empty sends nothing.
 	 */
 	implementation?: string;
 
@@ -332,8 +332,8 @@ const websocketWon = new Set<string>();
 
 /** The {@link websocketWon} key for the URL the WebSocket fallback dials. */
 function websocketKey(url: URL): string {
-	const port = url.port || (url.protocol === "http:" || url.protocol === "ws:" ? "80" : "443");
-	return `${url.hostname}:${port}`;
+	const endpoint = parse(url);
+	return `${endpoint.url.hostname}:${endpoint.port}`;
 }
 
 /** The default connect signal: never aborts. */
@@ -393,17 +393,6 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	}
 }
 
-/**
- * The URL a browser transport dials. A raw QUIC `moqt:` or `moql:` URL is reached over
- * WebTransport with its scheme swapped for https (draft-ietf-moq-transport-18 §3.1.3); the
- * CONNECT carries the scheme, so a server refuses the raw one. Rebuilt rather than assigned,
- * since the URL setter refuses a change from a non-special scheme to a special one.
- */
-function dialable(url: URL): URL {
-	if (url.protocol !== "moqt:" && url.protocol !== "moql:") return url;
-	return new URL(`https:${url.href.slice(url.protocol.length)}`);
-}
-
 /** Dial `raw`, resolving with the session and the credential the winning transport presented. */
 async function connectInner(
 	raw: URL,
@@ -413,7 +402,7 @@ async function connectInner(
 ): Promise<[Established, Presentation]> {
 	const offered = offer(props.versions);
 	const dial = credential(raw, tokens, offered.setupToken);
-	const url = dialable(dial.url);
+	const url = parse(dial.url).url;
 	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
 	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
@@ -493,10 +482,10 @@ async function connectInner(
 
 	// Record who won the race to this server, so QUIC's next head start follows the last result.
 	if (session instanceof Session) {
-		console.debug(redact(url), "connected via WebSocket");
+		console.debug(show(parse(url)), "connected via WebSocket");
 		websocketWon.add(server);
 	} else {
-		console.debug(redact(url), "connected via WebTransport");
+		console.debug(show(parse(url)), "connected via WebTransport");
 		websocketWon.delete(server);
 	}
 
@@ -561,7 +550,7 @@ async function negotiate(
 	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
 	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
-	console.debug(redact(url), "negotiated ALPN:", protocol ?? "(none)");
+	console.debug(show(parse(url)), "negotiated ALPN:", protocol ?? "(none)");
 
 	const ietf =
 		protocol === Ietf.ALPN.DRAFT_22
@@ -711,7 +700,12 @@ async function hedgeWebTransport(
 	alpns: string[],
 	options?: WebTransportProps,
 ): Promise<WebTransport | undefined> {
-	const first = connectWebTransport(url, cancel, alpns, options);
+	// Resolve pins (and fetch an http:// fingerprint) once, before the hedge delay starts, so a slow
+	// fingerprint fetch can't start a second dial and both dials share the one fetch.
+	const target = await resolveWebTransport(url, cancel, alpns, options);
+	if (!target) return undefined;
+
+	const first = dialWebTransport(target, cancel);
 
 	// The first dial opening, failing, or being cancelled settles this before the delay does.
 	const hedge = await timeout(Nano.fromMilli(WEBTRANSPORT_HEDGE), first).then(
@@ -719,9 +713,9 @@ async function hedgeWebTransport(
 		(err: unknown) => err instanceof Elapsed,
 	);
 	if (!hedge) return first;
-	console.debug(redact(url), `WebTransport not open after ${WEBTRANSPORT_HEDGE}ms; dialing a second`);
+	console.debug(show(parse(url)), `WebTransport not open after ${WEBTRANSPORT_HEDGE}ms; dialing a second`);
 
-	const dials = [first, connectWebTransport(url, cancel, alpns, options)];
+	const dials = [first, dialWebTransport(target, cancel)];
 	try {
 		const winner = await Promise.any(dials);
 		closeLosers(dials, winner);
@@ -733,12 +727,18 @@ async function hedgeWebTransport(
 	}
 }
 
-async function connectWebTransport(
+interface WebTransportTarget {
+	url: URL;
+	options: WebTransportOptions;
+}
+
+/** Resolve the URL and options to dial, or `undefined` once `cancel` resolves. */
+async function resolveWebTransport(
 	url: URL,
 	cancel: Promise<void>,
 	alpns: string[],
 	options?: WebTransportProps,
-): Promise<WebTransport | undefined> {
+): Promise<WebTransportTarget | undefined> {
 	let finalUrl = url;
 
 	// Our custom pinning fields are normalized separately; the rest are DOM options.
@@ -766,7 +766,10 @@ async function connectWebTransport(
 		// Dev-only path: http:// can't be a real WebTransport origin, so we fetch the
 		// self-signed cert's hash over plain HTTP and pin it. Production uses https://
 		// and never reaches here. Keep this at debug so it doesn't read as a problem.
-		console.debug(redact(fingerprintUrl), "performing an insecure fingerprint fetch; use https:// in production");
+		console.debug(
+			show(parse(fingerprintUrl)),
+			"performing an insecure fingerprint fetch; use https:// in production",
+		);
 
 		const fingerprint = await fetchFingerprint(fingerprintUrl, cancel);
 		if (!fingerprint) return undefined;
@@ -781,7 +784,11 @@ async function connectWebTransport(
 		finalOptions.serverCertificateHashes = hashes;
 	}
 
-	const quic = new WebTransport(finalUrl, finalOptions);
+	return { url: finalUrl, options: finalOptions };
+}
+
+async function dialWebTransport(target: WebTransportTarget, cancel: Promise<void>): Promise<WebTransport | undefined> {
+	const quic = new WebTransport(target.url, target.options);
 
 	// Both .ready and .closed reject on failure; catch .closed to avoid an unhandled rejection.
 	quic.closed.catch(() => {});
@@ -883,7 +890,7 @@ async function connectWebSocket(
 			if (outcome === "open") return quic;
 			quic.close();
 			if (outcome !== "redial") return undefined;
-			console.debug(redact(url), `WebSocket not open after ${wait}ms; dialing again`);
+			console.debug(show(parse(url)), `WebSocket not open after ${wait}ms; dialing again`);
 		} finally {
 			disarm.abort();
 		}

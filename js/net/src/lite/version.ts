@@ -435,12 +435,6 @@ export function hasAnnounceRestart(version: Version): boolean {
 	}
 }
 
-/** Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement continuing what a
- * live one served beneath its path. Added in lite-07. Older versions send an ANNOUNCE_START. */
-export function hasAnnounceTakeover(version: Version): boolean {
-	return hasAnnounceRestart(version);
-}
-
 /** Whether announcements carry their instance and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
  * the instance they pin. Added in lite-07. Older versions carry nothing, so the receiving session
  * mints an instance for each announcement. */
@@ -589,6 +583,27 @@ export function hasLargest(version: Version): boolean {
  * application-specific code there.
  */
 export function hasDropCode(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
+ * SUBSCRIBE_DROP, which names the `Update` in effect when it was given up; SUBSCRIBE and
+ * SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07; earlier versions name every
+ * hole in SUBSCRIBE_DROP.
+ */
+export function hasSkip(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

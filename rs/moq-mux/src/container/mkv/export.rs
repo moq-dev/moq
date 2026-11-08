@@ -208,9 +208,9 @@ impl MkvTrack {
 				VideoCodec::H264(_) => {
 					crate::codec::h264::sps_reorder(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
 				}
-				VideoCodec::H265(_) => {
-					crate::codec::h265::sps_reorder(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
-				}
+				VideoCodec::H265(_) => crate::codec::h265::sps_reorder(
+					crate::codec::h265::base_sps(&crate::codec::h265::Hvcc::parse(description).ok()?.sps).ok()??,
+				),
 				_ => None,
 			});
 			let (floor, lookahead) = declared.map_or((0, 0), |reorder| reorder.timing(config.framerate));
@@ -380,7 +380,7 @@ impl<S: Stream> Export<S> {
 		// 1. Drain catalog updates.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(snapshot.media())?,
+				Poll::Ready(Some(snapshot)) => self.update_catalog(snapshot.without_ext())?,
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;

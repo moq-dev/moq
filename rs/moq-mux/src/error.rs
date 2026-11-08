@@ -294,6 +294,10 @@ pub enum Error {
 		/// The latest media the export read from the rendition's previous track.
 		read: std::time::Duration,
 	},
+
+	/// An importer was given input after it finished.
+	#[error("input after finish")]
+	Finished,
 }
 
 impl Error {

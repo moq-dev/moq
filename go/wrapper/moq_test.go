@@ -98,8 +98,8 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.KeepAlive(served)
-	if served.Instance() == dynamic.Instance() {
-		t.Fatal("a job's route serves a fresh instance")
+	if served.Instance() != dynamic.Instance() {
+		t.Fatal("a job's route continues the instance its prefix route lends")
 	}
 	broadcast, err := served.Broadcast()
 	if err != nil {
@@ -738,8 +738,8 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fill.StartGroup() != 7 || fill.EndGroup() != 8 || fill.Priority() != 11 {
-		t.Fatalf("unexpected fill: start=%d end=%d priority=%d", fill.StartGroup(), fill.EndGroup(), fill.Priority())
+	if fill.Start() != (moq.Position{Group: 7, Frame: 0}) || fill.End() != 8 || fill.Priority() != 11 {
+		t.Fatalf("unexpected fill: start=%+v end=%d priority=%d", fill.Start(), fill.End(), fill.Priority())
 	}
 	if wanted := fill.Wanted(); wanted == nil || *wanted != 7 {
 		t.Fatalf("unexpected fill: wanted=%v", wanted)
@@ -1429,7 +1429,7 @@ func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
 	case <-waitCtx.Done():
 		t.Fatal("SubscribeTrack did not return after its context was cancelled")
 	}
-	_ = pending.Abort(0)
+	_ = pending.Reject(0)
 
 	resolved := make(chan error, 1)
 	go func() {
@@ -1568,7 +1568,7 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 
 	runtime.KeepAlive(pending)
 	for _, request := range pending {
-		_ = request.Abort(0)
+		_ = request.Reject(0)
 	}
 }
 

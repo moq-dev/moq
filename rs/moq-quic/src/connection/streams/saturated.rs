@@ -10,7 +10,7 @@ use super::state::StreamsState;
 use super::{Streams, send};
 use crate::{
 	Dir, Side, StreamId, VarInt,
-	connection::{State as ConnState, spaces::Retransmits},
+	connection::spaces::Retransmits,
 	frame::{self, Frame, StreamMeta},
 	transport_parameters::TransportParameters,
 };
@@ -36,7 +36,6 @@ const PING: u8 = 0x01;
 struct Sender {
 	state: StreamsState,
 	pending: Retransmits,
-	conn: ConnState,
 	/// Payload bytes each stream got out.
 	sent: HashMap<StreamId, u64>,
 	/// Bytes each stream's frames took on the wire, headers included, which is what
@@ -74,7 +73,6 @@ impl Sender {
 		Self {
 			state,
 			pending: Retransmits::default(),
-			conn: ConnState::Established,
 			sent: HashMap::new(),
 			wire: HashMap::new(),
 			datagram_wire: HashMap::new(),
@@ -96,7 +94,7 @@ impl Sender {
 			id,
 			state: &mut self.state,
 			pending: &mut self.pending,
-			conn_state: &self.conn,
+			closed: false,
 		}
 	}
 
@@ -104,7 +102,7 @@ impl Sender {
 	fn open(&mut self, group: Option<&send::Group>, priority: i64, bytes: usize) -> StreamId {
 		let id = Streams {
 			state: &mut self.state,
-			conn_state: &self.conn,
+			closed: false,
 		}
 		.open(Dir::Uni, send::Options { group, priority })
 		.unwrap();

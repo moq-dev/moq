@@ -2000,7 +2000,7 @@ async fn track_request_demand_ends_on_rejection() {
 	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
 	let request = dynamic.requested_track().await.unwrap();
 	let demand = request.demand().unwrap();
-	request.abort(404).unwrap();
+	request.reject(404).unwrap();
 	assert!(subscribe.await.unwrap().is_err());
 	assert!(demand.until_wanted().await.is_err());
 	assert!(matches!(request.demand(), Err(MoqError::Closed)));
@@ -2225,6 +2225,20 @@ fn raw_track_supports_sparse_groups_and_known_end() {
 	track.finish().unwrap();
 }
 
+#[test]
+fn raw_track_skips_are_final() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("skipped".into(), None).unwrap();
+
+	track.create_group(0).unwrap().finish().unwrap();
+	track.skip_groups(0, 3).unwrap();
+	// The written group keeps what it is; the rest of the range is final.
+	assert!(track.create_group(2).is_err());
+	track.create_group(3).unwrap().finish().unwrap();
+	track.abort(1).unwrap();
+	assert!(matches!(track.skip_groups(4, 5), Err(MoqError::Closed)));
+}
+
 #[tokio::test]
 async fn abort_after_finish_keeps_the_track_handle() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -2290,7 +2304,7 @@ async fn dynamic_track_request_can_abort() {
 		.expect("timed out waiting for requested track")
 		.unwrap();
 
-	track.abort(404).unwrap();
+	track.reject(404).unwrap();
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
 
 	let result = kio::clock::timeout(TIMEOUT, subscribe)
@@ -2656,10 +2670,8 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(
-		(request.start_group(), request.start_frame(), request.end_group()),
-		(5, 0, 6)
-	);
+	assert_eq!(request.start(), MoqPosition { group: 5, frame: 0 });
+	assert_eq!(request.end(), 6);
 	assert_eq!(request.priority(), 11);
 	assert_eq!(request.wanted(), Some(5));
 
@@ -2808,7 +2820,7 @@ async fn requested_track_dynamic_survives_accept() {
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(fill.start_group(), 9);
+	assert_eq!(fill.start().group, 9);
 	let group = fill.accept(9).unwrap();
 	group
 		.write_frame(MoqFrame {
@@ -3285,6 +3297,7 @@ fn audio_rejects_bad_init_bytes() {
 /// the announcement.
 #[tokio::test]
 async fn a_hidden_route_is_invisible_until_announced() {
+	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let route = origin.route("live".into(), hidden()).unwrap();
@@ -5027,7 +5040,7 @@ async fn dynamic_broadcast_request() {
 	let job = request.route(hidden()).unwrap();
 	let served = job.broadcast().unwrap();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	// Only announce answers the requester, under a fresh instance and after admission.
+	// Only announce answers the requester, under the claim's instance and after admission.
 	let instance = job.instance_id();
 	job.announce().unwrap();
 	// A re-price keeps the instance the answer was announced under.
@@ -5058,8 +5071,12 @@ async fn dynamic_broadcast_request() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp.map(micros), Some(20_000));
 
+	// The job carried the claim's instance, and its end moves the claim on.
+	assert_eq!(dynamic.instance_id(), instance);
 	track.finish().unwrap();
 	served.close().unwrap();
+	job.cancel();
+	assert_ne!(dynamic.instance_id(), instance);
 }
 
 /// A prefix serves requests beneath it; cancelling the handle
@@ -6226,11 +6243,13 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 
 #[tokio::test]
 async fn follow_hands_out_a_takeover_once_while_resolving() {
+	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("").await;
 }
 
 #[tokio::test]
 async fn follow_hands_out_a_held_takeover_once() {
+	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("live").await;
 }
 
@@ -6362,6 +6381,7 @@ async fn an_instance_pins_request_and_follow() {
 /// clock that nothing comes past the origin's update hold either.
 #[tokio::test]
 async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
+	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "live");
 	let followed = origin.consume().follow("live".into(), None).unwrap();
@@ -7480,6 +7500,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
+	kio::clock::host_time();
 	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 

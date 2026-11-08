@@ -93,68 +93,9 @@ moq --connect https://relay.example.com/rooms/1 --connect-token "$TOKEN" --broad
 The `ts`, `fmp4`, and `flv` imports publish the input's own timestamps, mapped
 to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
-an error; run it again to publish anew. `import ts` and `import srt` republish
-instead when an MPEG-TS clock steps onto another timeline: the PCR and every
-stream stepping back, flagged or not, or more than 10 s forward without a
-`discontinuity_indicator`, and when a PAT names another `transport_stream_id`
-or program number. The broadcast finishes there, and the rest of the
-input publishes as a new stream under a new
-[instance](/concept/moq-lite#publisher-instances), on the same SRT connection, which
-`export ts --stitch --follow` carries on into. The new stream carries nothing
-over from the old one's PAT and PMT: it waits for the source to repeat them and
-for its next keyframe, so a switch whose tables went out just before its clock
-stepped announces up to one GOP later. The new stream keeps the mux
-rate the old one measured, so its catalog goes out with its first media rather
-than after a fresh two-second measurement. An unflagged step usually means
-redundant encoders behind a changeover switch: time-lock their clocks, or have
-the switch set `discontinuity_indicator`. `--program all` and `--passthrough`
-still end at a rewind, and `--program all` at a changed identity. A flagged MPEG-TS discontinuity that
-jumps forward continues the broadcast and is declared on the exported clock.
-MPEG-TS timestamps follow their source history across the 33-bit wrap
-(every 26.5 hours), including files imported faster than real time and flagged
-jumps, so a jump of more than half a wrap (13.25 hours) can read as a rewind.
-
-For a source already in MPEG-TS, `ffmpeg -c copy -f mpegts` re-muxes and drops PIDs
-(NIT, TDT/TOT, extra audio, teletext, SCTE-35), so pipe its bytes instead, for example
-`tsp -I ip 239.1.2.3:1234 -O file - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts`,
-or use [`import srt`](/bin/srt).
-
-MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
-SCTE-35, DSM-CC sections, and every other stream it does not decode (MPEG-2
-video, LATM AAC, KLV, subtitles, DVB AC-3) through as tracks. MPEG-2 video still
-paces the program by its timestamps, and a subscriber joins it at a sequence
-header. H.264/H.265 AUs can span PES, and a PES can contain several. Supply
-a PTS for each AU or declare a proportional POC clock: AVC needs
-`fixed_frame_rate_flag` and `temporal_poc_flag` in the TS timing descriptor plus
-fixed-rate SPS VUI; HEVC needs VUI's `vui_poc_proportional_to_timing_flag`. Missing timing
-ends the import instead of repeating a timestamp. Private and undecoded PES go through whole, at their place on the program clock
-(PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
-is refused with a warning: any in a program with no PCR, and one whose PES carry
-an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
-or have a malformed header, as is `0x86` without a SCTE-35 registration, which
-may be DTS audio. A PID no table claims, such as conditional access or ATSC
-PSIP, is dropped with one warning and counted in the
-[stats](/concept/stats#mpeg-ts-sections); `--passthrough` keeps them.
-SCTE-35 cues and private PES share the media clock, or anchor on the first PCR
-when the PMT declares only data. Audio-only and data-only programs round-trip
-without video; a data-only program still requires PCR. A program declaring
-media waits for its timestamp and is refused if input ends or declares a clock
-break before one arrives.
-PES and untimed section staging share a bounded budget, so a source that never
-supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
-It takes one program: a multi-program
-stream is refused until `--program` picks one, or `--program all` publishes
-each as its own broadcast (`event.hang` becomes `event/1.hang`,
-`event/2.hang`), following the PAT: a program it adds publishes, one it drops
-ends, and one that returns publishes as a new instance. A listed program whose
-PMT does not arrive within 0.5 s of program clock ends the import. A damaged packet is
-dropped on its own PID, so video freezes until its next keyframe while the
-other tracks carry on. The importer also
-logs feed health (stalled streams, TR 101 290 errors) without changing what it
-publishes. `--passthrough` publishes the multiplex whole instead, every packet
-in order on one [`m2ts`](/concept/hang#transport-streams) track with every
-program aboard, for what demultiplexing cannot carry, such as a scrambled
-service; `export ts --passthrough` writes it back out. FLV accepts the same
+an error; run it again to publish anew. `import ts` instead republishes when an
+MPEG-TS clock steps onto another timeline. The [MPEG-TS guide](/bin/ts) covers
+what it carries, `--program`, `--passthrough`, acquisition, and loss. FLV accepts the same
 legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 fMP4 import splits each fragment into one frame per sample, so players need no
@@ -224,18 +165,7 @@ moq ... export mp4 --output recording.mp4
 moq repair mp4 recording.mp4
 ```
 
-MPEG-TS export pads to the source's constant mux rate when the catalog
-recorded one, or to `--mux-rate`, on a constant-rate schedule an IRD or groomer
-can lock to. Each frame goes out as early as the receiver's buffers admit, up
-to `--delay` ahead of its decode time and no further than its decoder buffer
-holds. That send-ahead comes out of the delay, so the output trails a TS source
-by `--delay`. A frame that cannot arrive in time at the rate fails the export,
-as does video whose HRD declares a longer buffer delay than `--delay`; the
-error names the `--delay` it needs. A clock jump flags its first PCR without
-changing the PMT version. Padding keeps PCR values on a continuous grid; after
-an outage exhausts the buffered media, overdue padding can arrive in a catch-up
-burst when media resumes. Raw
-`--passthrough` keeps surviving packets unchanged, including across loss.
+MPEG-TS export is covered in the [MPEG-TS guide](/bin/ts#export).
 
 ## Play
 
@@ -554,14 +484,8 @@ A timeline that steps further than the delay absorbs with no restart marker, as
 a changeover between two encoders whose clocks disagree, re-acquires the clock
 as at startup rather than read the step as drift.
 
-`export ts --passthrough` reads the track an `import ts --passthrough` published
-and writes its packets back out unchanged, from its first group on, each run
-between two PCRs `--delay` after the first one's time on the source clock. The
-output is exactly as conformant as the source, and two exporters emit the same
-bytes. A run that arrives after its deadline is dropped and counted, leaving a
-continuity error, and the rest carry on. It takes neither `--follow`,
-`--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
-`.msf` broadcast needs `--catalog-format hang`.
+`export ts --passthrough` writes the source's packets back out unchanged; see
+[passthrough](/bin/ts#passthrough-mode).
 
 A stdout export ends when its catalog ends and its media has drained, so
 finishing only the media tracks leaves it waiting for catalog updates.

@@ -39,8 +39,9 @@
  * The logical track ends cleanly once its serving copy does and no group the reader lacks may
  * still land below that end on a copy it replaced. Its `closed` settles and the reader leaves the
  * route, keeping each copy only while it holds something left to read, as a direct reader keeps
- * its buffer. Its end is the first one any copy declared, which every later copy has to match, and
- * no copy may hold a group at or past it.
+ * its buffer. Its end is the first one any copy declared, which a later mid-group end may refine;
+ * a copy declaring another breaks the track's identity, which hurts only its own broadcast, so
+ * nothing checks that copies agree.
  *
  * @module
  */
@@ -388,13 +389,16 @@ class Reader implements ResumeSource {
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
 	#closed = false;
-	/** A copy declared another end: reads fail with this. */
-	#refused?: Error;
-	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
-	#ended = false;
-	/** The serving copy's largest when the track ended, kept once that copy goes. */
-	#last?: { largest?: track.Position; object?: track.Position; ended: true };
-	/** The first end any copy declared: the logical track's, whichever copy serves. */
+	/**
+	 * Set once the logical track ended cleanly: the reader drains what its copies hold and follows
+	 * no route. Holds the serving copy's largest then, kept once that copy goes.
+	 */
+	#ended?: { largest?: track.Position; object?: track.Position; ended: true };
+	/**
+	 * The first end any copy declared: the logical track's, whichever copy serves. A copy declaring
+	 * another breaks the track's identity, which hurts only its own broadcast, so nothing checks that
+	 * copies agree.
+	 */
 	#declared?: track.Position;
 	// The error a copy's end carried, kept with the boundary so releasing that copy keeps it.
 	#declaredError?: Error;
@@ -402,6 +406,11 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
 	#drops: DropRun[] = [];
+	/**
+	 * The stale runs reported since the last {@link reofferStale}, whichever copy gave them up: an
+	 * update reopens each, and the copy that reported it may no longer serve.
+	 */
+	#reportedStale: Run[] = [];
 	/** A copy that declared the track's end ran out cleanly at it, even if since let go. */
 	#settled = false;
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
@@ -713,6 +722,36 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
+	/**
+	 * Fresh reads of the groups in `[start, end)` the serving copy still caches and judges fresh,
+	 * handed out as any group of that copy is, and the runs still given up: all of them while no
+	 * copy serves. Mirrors the Rust `Reader::reoffer_groups`.
+	 */
+	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] } {
+		const serving = this.#serving();
+		if (!serving) return { groups: [], givenUp: [{ start, end }] };
+		const { groups, givenUp } = hooks.reofferGroups(serving.sub, start, end);
+		return { groups: groups.map((group) => this.#handOut(serving, group)), givenUp };
+	}
+
+	/**
+	 * Take back every stale run: those queued here, those this reader reported, and those the
+	 * serving copy reported, which its cursor owes again. What this reader reported counts
+	 * whichever copy gave it up, since a route change since leaves the serving copy knowing
+	 * nothing of it, though the update reopened it. Only the serving copy is judged again: a
+	 * replaced copy may no longer deliver, so what it gave up is the new route's to deliver or
+	 * give up. Mirrors the Rust `Reader::reoffer_stale`.
+	 */
+	reofferStale(): Run[] {
+		const taken = this.#reportedStale;
+		this.#reportedStale = [];
+		for (const run of this.#drops) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
+		this.#drops = this.#drops.filter((run) => run.stale === undefined);
+		const serving = this.#serving();
+		if (serving) for (const run of hooks.reofferStale(serving.sub)) insertRun(taken, run.start, run.end);
+		return taken;
+	}
+
 	cachedGroup(sequence: bigint, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -751,9 +790,8 @@ class Reader implements ResumeSource {
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
 		this.#delivered = delivered;
 		this.sync();
-		// Before anything is handed out, so a copy claiming other content hands out none of it.
 		this.#learnEnd();
-		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
+		if (this.#closed) return { kind: "done" };
 		this.#groupsRead = true;
 		this.#backfillGaps(delivered);
 		if (dispositions) {
@@ -853,11 +891,22 @@ class Reader implements ResumeSource {
 		if (this.#closed) return undefined;
 		const serving = this.#serving();
 		if (serving) {
+			// A received stale run queued here that new terms superseded since is unknown again: the
+			// copy no longer holds it, and its upstream re-offers or drops it again.
+			for (const run of this.#drops) {
+				if (!run.received) continue;
+				const held = hooks.staleHeld(serving.sub, run.start, run.end);
+				for (const gap of runGaps(held, run.start, run.end))
+					this.#drops = removeRun(this.#drops, gap.start, gap.end);
+			}
 			for (let dropped = hooks.tryDrop(serving.sub); dropped; dropped = hooks.tryDrop(serving.sub)) {
 				// A route failing is no verdict: another route may still deliver the group, and
 				// one it failed while buffered is handed out to continue through its recovery.
 				if (routeFailed(dropped.error)) continue;
-				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, dropped.error);
+				// A stale run the copy holds came from its upstream, which new terms may supersede.
+				const received =
+					dropped.stale !== undefined && hooks.staleHeld(serving.sub, dropped.start, dropped.end).length > 0;
+				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, { ...dropped, received });
 			}
 		}
 		this.#drops = this.#drops.filter((run) => !delivered.covers(run.start, run.end));
@@ -875,7 +924,10 @@ class Reader implements ResumeSource {
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);
-					return { kind: "drop", ...open, error: run.error };
+					if (run.stale !== undefined) insertRun(this.#reportedStale, open.start, open.end);
+					// A skip or final drop is final, so no update reopens a stale report it replaced.
+					else this.#reportedStale = removeRun(this.#reportedStale, open.start, open.end);
+					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 				}
 			}
 		}
@@ -1022,8 +1074,7 @@ class Reader implements ResumeSource {
 		const serving = this.#serving();
 		if (serving) this.#boundAtEnd(serving);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
-		this.#ended = true;
-		this.#last = {
+		this.#ended = {
 			largest: serving && hooks.peekLargest(serving.sub).largest,
 			object: serving && hooks.objectLargest(serving.sub),
 			ended: true,
@@ -1178,6 +1229,11 @@ class Reader implements ResumeSource {
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
 		this.#newest = max(this.#newest ?? 0n, group.sequence);
+		// The group won over any stale report on it, whichever copy made it, so no update reopens
+		// it.
+		if (this.#reportedStale.length > 0) {
+			this.#reportedStale = removeRun(this.#reportedStale, group.sequence, group.sequence + 1n);
+		}
 		// Another copy holding the group, now or once it lands there, is where a failure continues
 		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a
 		// later route's copy may come to hold it.
@@ -1192,7 +1248,7 @@ class Reader implements ResumeSource {
 
 	/** The logical track ended cleanly, so no route continues it. */
 	get ended(): boolean {
-		return this.#ended;
+		return this.#ended !== undefined;
 	}
 
 	/** A group handed out ended or moved copies: let go of what nothing needs any more. */
@@ -1239,55 +1295,34 @@ class Reader implements ResumeSource {
 		return last?.generation === this.#generation ? last : undefined;
 	}
 
-	// The logical track's end, learning it from any copy that declared one. A group
-	// at or past it, on any copy or already handed out, claims other content: a direct track
-	// refuses an end below what it received.
+	// The logical track's end, learning it from any copy that declared one.
 	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
 			const end = hooks.subscriberEnd(copy.sub);
 			if (!end) continue;
 			this.#declare(end);
-			this.#declaredError ??= hooks.subscriberEndError(copy.sub);
-		}
-		const declared = this.#declared;
-		if (declared && !this.#closed) {
-			const final = finalSequence(declared);
-			const seen = (sequence: bigint | undefined) => sequence !== undefined && sequence >= final;
-			if (
-				seen(this.#newest) ||
-				this.#copies.some(
-					(copy) => seen(hooks.latestSequence(copy.sub)) || seen(hooks.peekLargest(copy.sub).largest?.group),
-				)
-			)
-				this.#refuse();
+			// Only a copy at the end that stands says how the track ended there.
+			const declared = this.#declared;
+			const same =
+				declared !== undefined &&
+				((declared.group === end.group && declared.frame === end.frame) ||
+					(end.frame === 0 && finalSequence(end) === finalSequence(declared)));
+			if (same) this.#declaredError ??= hooks.subscriberEndError(copy.sub);
 		}
 		return this.#declared;
 	}
 
-	// Record `end` as the logical track's end. One logical track has one end, as it has one set
-	// of properties: a copy declaring another is refused. A mid-group end refines the group
-	// boundary it falls just before, as a wire end may.
+	// Record `end` as the logical track's end, unless a copy declared one first. A mid-group end
+	// refines the group boundary it falls just before, as a wire end may.
 	#declare(end: track.Position): void {
 		if (this.#closed) return;
 		const declared = this.#declared;
 		if (!declared) {
 			this.#declared = end;
 			this.wake();
-		} else if (declared.group === end.group && declared.frame === end.frame) {
-			return;
-		} else if (finalSequence(declared) === finalSequence(end) && (declared.frame === 0 || end.frame === 0)) {
-			if (declared.frame === 0) this.#declared = end;
-		} else {
-			this.#refuse();
+		} else if (declared.frame === 0 && end.frame !== 0 && finalSequence(declared) === finalSequence(end)) {
+			this.#declared = end;
 		}
-	}
-
-	// Stop reading the copies, which claim other content. `closed` settles with the refusal,
-	// unless it already settled cleanly.
-	#refuse(): void {
-		this.#refused = new Incompatible(this.route.name);
-		this.#shell.close(this.#refused);
-		this.close(this.#refused);
 	}
 
 	start(): bigint | "pending" | undefined {
@@ -1391,20 +1426,20 @@ class Reader implements ResumeSource {
 	objectLargest(): track.Position | undefined {
 		this.sync();
 		const serving = this.#serving();
-		return serving ? hooks.objectLargest(serving.sub) : this.#last?.object;
+		return serving ? hooks.objectLargest(serving.sub) : this.#ended?.object;
 	}
 
 	peekLargest(): { largest?: track.Position; ended: boolean } {
 		this.sync();
 		const serving = this.#serving();
-		return serving ? hooks.peekLargest(serving.sub) : (this.#last ?? { ended: false });
+		return serving ? hooks.peekLargest(serving.sub) : (this.#ended ?? { ended: false });
 	}
 
 	async largest(seen: track.Position | undefined): Promise<track.Position | undefined> {
 		for (;;) {
 			this.sync();
 			const serving = this.#serving();
-			const view = serving ? hooks.peekLargest(serving.sub) : this.#last;
+			const view = serving ? hooks.peekLargest(serving.sub) : this.#ended;
 			const largest = view?.largest;
 			const { start, end } = this.#shell.cursor.peek();
 			// A replacement copy can start below what an earlier one reported.

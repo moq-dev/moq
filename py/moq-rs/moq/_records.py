@@ -142,19 +142,28 @@ class Datagram:
 class Anchor:
     """Where one end of a :class:`Range` falls, mirroring moq-net's ``track::Anchor``.
 
-    Build one with ``Anchor.ABSOLUTE(group=...)``, ``Anchor.RELATIVE(groups=...)``, or
-    ``Anchor.TIME(timestamp=...)``.
+    Build one with ``Anchor.OLDEST()``, ``Anchor.ABSOLUTE(group=...)``,
+    ``Anchor.RELATIVE(groups=...)``, or ``Anchor.TIME(timestamp=...)``.
     """
 
+    OLDEST: ClassVar[type[_AnchorOldest]]
     ABSOLUTE: ClassVar[type[_AnchorAbsolute]]
     RELATIVE: ClassVar[type[_AnchorRelative]]
     TIME: ClassVar[type[_AnchorTime]]
 
     def _ffi(self) -> MoqAnchor:
-        raise TypeError("build an Anchor with Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
+        raise TypeError("build an Anchor with Anchor.OLDEST, Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
 
 
 # The generated variants subclass MoqAnchor only at runtime, so each _ffi casts for pyright.
+@dataclass(frozen=True)
+class _AnchorOldest(Anchor):
+    """The oldest group still around, as far back as the max delay allows. A start only."""
+
+    def _ffi(self) -> MoqAnchor:
+        return cast(MoqAnchor, MoqAnchor.OLDEST())
+
+
 @dataclass(frozen=True)
 class _AnchorAbsolute(Anchor):
     """This group, delivered from its first frame."""
@@ -185,6 +194,7 @@ class _AnchorTime(Anchor):
         return cast(MoqAnchor, MoqAnchor.TIME(timestamp=self.timestamp._ffi()))
 
 
+Anchor.OLDEST = _AnchorOldest
 Anchor.ABSOLUTE = _AnchorAbsolute
 Anchor.RELATIVE = _AnchorRelative
 Anchor.TIME = _AnchorTime

@@ -364,6 +364,9 @@ fn hop_chain(ids: impl IntoIterator<Item = u64>) -> Hops {
 }
 
 /// One announcement on an announce stream, resolved: what the application sees.
+///
+/// The hop chain travels only on lite-06: lite-07 names the claim's route instead, so
+/// its writer drops the chain and its reader decodes an empty one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
 	/// ANNOUNCE_START: a route's suffix and wire hop ids, taking the next id.
@@ -402,19 +405,20 @@ impl AnnounceWriter {
 	pub fn write(&mut self, announced: &Announced, data: &mut Vec<u8>) {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
-				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hop_chain(hops.iter().copied()));
+				let (_, suffix) = self.encoder.start(suffix.clone());
 				// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
 				lite::AnnounceBroadcast::Active {
+					route: 0,
 					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
 					epoch: 0,
 					suffix,
-					hops,
+					hops: self.chain(hops),
 					cost: Default::default(),
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
-				hops: self.encoder.update(*id, hop_chain(hops.iter().copied())),
+				hops: self.chain(hops),
 				cost: Default::default(),
 			},
 			Announced::End(id) => {
@@ -424,6 +428,14 @@ impl AnnounceWriter {
 		};
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
+	}
+
+	/// The hop chain as this version carries it: none on lite-07.
+	fn chain(&self, hops: &[u64]) -> Hops {
+		match self.version.has_routes() {
+			true => Hops::default(),
+			false => hop_chain(hops.iter().copied()),
+		}
 	}
 }
 
@@ -464,18 +476,7 @@ pub fn requests_route(
 	prefix: impl Into<crate::Path>,
 	route: crate::origin::RouteInfo,
 ) -> Result<crate::origin::Route, crate::Error> {
-	origin.forward(prefix, route, None)
-}
-
-/// Land a claim taking over the peer's `predecessor` claim, as a session lands an
-/// ANNOUNCE_TAKEOVER, for the origin bench.
-pub fn takeover_route(
-	origin: &crate::origin::Producer,
-	prefix: impl Into<crate::Path>,
-	route: crate::origin::RouteInfo,
-	predecessor: &crate::origin::Route,
-) -> Result<crate::origin::Route, crate::Error> {
-	origin.forward(prefix, route, Some(predecessor))
+	origin.forward(prefix, route)
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
@@ -590,11 +591,11 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	while let Ok(msg) = lite::AnnounceBroadcast::decode(&mut data, version) {
 		let announced = match msg {
 			lite::AnnounceBroadcast::Active { suffix, hops, .. } => decoder
-				.start(suffix, hops)
-				.map(|(suffix, hops)| Announced::Start(suffix, hops.into_ids())),
-			lite::AnnounceBroadcast::Update { id, hops, .. } => decoder
-				.update(id, hops)
-				.map(|(_, hops)| Announced::Update(id, hops.into_ids())),
+				.start(suffix)
+				.map(|suffix| Announced::Start(suffix, hops.into_ids())),
+			lite::AnnounceBroadcast::Update { id, hops, .. } => {
+				decoder.get(id).map(|_| Announced::Update(id, hops.into_ids()))
+			}
 			lite::AnnounceBroadcast::EndedId { id } => decoder.end(id).map(|_| Announced::End(id)),
 			_ => continue,
 		};
@@ -697,6 +698,7 @@ impl LiteSample {
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -704,6 +706,7 @@ impl LiteSample {
 				max_delay: std::time::Duration::from_secs(10),
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
+				update: 0,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -895,6 +898,7 @@ impl Default for Messages {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
+				node: 0,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -905,6 +909,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
 				}],
+				update: 0,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
@@ -917,6 +922,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
+				update: 0,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1077,12 +1083,14 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			id: 0,
 			broadcast: broadcast.clone(),
 			instance: None,
+			node: 0,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,
 			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
+			update: 0,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),

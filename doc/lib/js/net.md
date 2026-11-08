@@ -39,9 +39,9 @@ route.announce();
 ```
 
 - **The origin holds the routes, not the connection.** `origin.route(path)` creates a route that owns a new broadcast; fill its tracks through `route.broadcast`. Closing a session withdraws its announcements and leaves the routes for the next one. A route is visible at once unless created `{ hidden: true }`, which keeps it invisible, locally and remotely, until `announce()`. `withdraw()` hides it again and `announce()` brings the same stream back. `close()` retracts it and closes its broadcast, as closing the broadcast does.
-- **Answer claimed paths with a route.** `origin.routePrefix(prefix)` claims a prefix, and `route.requested()` yields each requested path. Answer with `request.route()`, a new exact route under a fresh instance, or `request.route({ hidden: true })` to fill its broadcast before `announce()` answers the requesters; closing it or its broadcast before then refuses them as unroutable, so `using job = request.route({ hidden: true })` refuses on a throw. Serve a broadcast you already hold with `request.serve(broadcast)`, or refuse with `request.reject(err)`.
+- **Answer claimed paths with a route.** `origin.routePrefix(prefix)` claims a prefix, and `route.requested()` yields each requested path. Answer with `request.route()`, a new exact route under the claim's instance (a fresh one if the claim names its own), so on `moq-lite-07-wip` readers resolved through the claim continue (older wires mint another instance for it, restarting their subscription), or `request.route({ hidden: true })` to fill its broadcast before `announce()` answers the requesters; closing it or its broadcast before then refuses them as unroutable, so `using job = request.route({ hidden: true })` refuses on a throw. Serve a broadcast you already hold with `request.serve(broadcast)`, or refuse with `request.reject(err)`.
 - **End content by finishing tracks.** A broadcast has no finished state. When the input ends, `finish()` each track, then `close()` it; closing a track without finishing aborts it. The broadcast stays announced and keeps serving them until you `close()` it. How long to keep it up for late readers is yours to decide.
-- **Requests can pin an instance.** `consumer.request(path, { instance })` resolves only through a route announcing that [publisher instance](/concept/moq-lite#publisher-instances). The resolved broadcast's `instance` names the stream it came through, pinned or not. A route mints a random instance when it is created and keeps it across `withdraw()` and `announce()`; pass `origin.route(path, { instance, epoch })` only for a publisher that continues its group sequences across restarts and raises the epoch each time.
+- **Requests can pin an instance.** `consumer.request(path, { instance })` resolves only through a route announcing that [publisher instance](/concept/moq-lite#publisher-instances). The resolved broadcast's `instance` names the stream it came through, pinned or not. `origin.route(path)` mints a random instance when it is created and keeps it across `withdraw()` and `announce()`. Unless one is named, a claim moves to a fresh instance each time a job holding its current one ends, and a job takes the claim's. Pass `origin.route(path, { instance, epoch })` only for a publisher that continues its group sequences across restarts and raises the epoch each time.
 - **Follow restarts.** `origin.follow(path)` follows whichever publisher instance serves the path: its `active` changes to a fresh broadcast on a restart, clears on an end, and resolves again on the next start, so read it reactively and close it when done. Instances are never stitched, so subscribe again to each new broadcast. Another route of the same instance taking over (instances travel only on `moq-lite-07-wip`; older wires mint one per announcement) keeps `active` as is, and each track subscription resumes there from the first group it lacks. A refusal ends it. Pass `{ instance }` to pin one stream, which it waits for again after an end. `request(path)` instead keeps its accepted instance and ends once that instance stops serving; while pending, it fails `Unroutable` once discovery of its path has synced without a route for it. To list what is live, iterate `announced(scope)`. See [identity and recovery](/concept/identity) to choose between following and holding one instance.
 - **Discovery follows what you watch.** A `consume` origin asks the relay for announcements only under the prefixes its readers watch with `announced(scope)`, `request(path)`, or `follow(path)`, stops asking about a prefix 2s after nothing at or beneath it is watched, and asks again on reconnect. Every request and follower watches its path from creation until closed, so it outlives the listing that found it. A relay that refuses an announce request downgrades that session: requests subscribe blind through it, and followers keep waiting for a session that can discover.
 - **Connections share by URL and versions.** `new Connection({ url })` pools and reconnects with backoff, which the elements use. An ordered `versions` list, spelled like `moq-lite-06` as in Rust, applies to both WebTransport and WebSocket; equivalent lists share, while a different order or an omitted list gets its own pool entry. Supplying your own transport options or origin selects a private loop. Receive estimates are on demand: observe `connection.probe` reactively or subscribe while you need them; `peek()` alone opens no PROBE stream.
@@ -72,8 +72,9 @@ Readers that fall behind the shed front receive `Evicted`; tracks with a
 `refresh` ratio also request a fresh group. A join never starts at an arbitrary
 frame in the retained tail.
 
-Frames have no size cap either. `group.createFrame({ size })` writes one in
-pieces, and `group.nextFrame()` reads it as it arrives with `readChunk()`, so a
+Frames have no size cap either. `group.createFrame({ size })` returns a
+`Moq.Frame.Producer` that writes one in pieces, and `group.nextFrame()` returns a
+`Moq.Frame.Consumer` that reads it as it arrives with `readChunk()`, so a
 file-sized frame passes through holding only the tail. The tail sheds a large
 frame's oldest 1 MiB segments while it is written, so a chunk reader more than
 the tail behind gets `Evicted`. `readFrame()` still works for any size, but it
@@ -92,9 +93,10 @@ for (let chunk = await reader?.readChunk(); chunk; chunk = await reader?.readChu
 
 ## Sockets
 
-Use `Moq.socket.Endpoint` for [point-to-point sessions](/concept/socket), with the same
-origin publishing and consuming through the relay. Each endpoint announces one hidden
-broadcast; accepting verifies that the named peer actually dialed this session.
+Use `Moq.Socket.Endpoint` for [point-to-point sessions](/concept/socket), with the same
+origin publishing and consuming through the relay. An endpoint's first dial announces its
+hidden client broadcast and its first accept its hidden server broadcast, so grants decide
+which roles it may take; accepting verifies that the named peer actually dialed this session.
 Every hop needs moq-lite-07 or moq-transport. Lite-07 currently requires explicitly
 offering `moq-lite-07-wip`; older moq-lite hops do not carry these hidden endpoints. While
 the endpoint's own client connection is moq-lite before 07, its dials and accepts fail as
@@ -106,7 +108,7 @@ const connection = await Moq.Connection.connect({
     url, versions: ["moq-lite-07-wip"],
     publish: origin.consume(), consume: origin,
 });
-const endpoint = new Moq.socket.Endpoint(origin, Moq.Path.from("game"), "viewer");
+const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer");
 const session = await endpoint.dialTcp("server", { signal: abort.signal });
 session.producer.writeFrame({ payload: new TextEncoder().encode("hello") });
 session.producer.finish(); // FIN in this direction; the peer may still reply.

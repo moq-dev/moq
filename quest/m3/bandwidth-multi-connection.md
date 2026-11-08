@@ -22,3 +22,5 @@ Recommendation, not settled: one reservation per connection, with the encoder
 following the lowest grant among connections that still have readers, rather
 than merging estimates into one allocator. Benchmark the fan-out over both
 connection and track count.
+
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the combination is an `Allocator` (for example `bandwidth::Allocator::lowest(impl IntoIterator<Item = Allocator>)`), so no encoder or gateway signature changes. Local readers are told apart inside `track::Demand`, not through a new `reserve` parameter.

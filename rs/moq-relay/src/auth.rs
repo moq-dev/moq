@@ -29,7 +29,7 @@ const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
-#[derive(usage_rs::Args, Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(usage_rs::Args, Clone, Default, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
@@ -114,6 +114,20 @@ pub struct Config {
 	#[usage(skip)]
 	#[serde(skip_serializing)]
 	pub(crate) tls: Option<serde::de::IgnoredAny>,
+}
+
+impl std::fmt::Debug for Config {
+	/// Redact the URL: `Config::load` traces the whole resolved config, and its
+	/// userinfo carries the auth server's `--listen-secret`.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Config")
+			.field("url", &self.url.as_ref().map(moq_tokio::RedactedUrl::new))
+			.field("root", &self.root)
+			.field("public", &self.public)
+			.field("public_subscribe", &self.public_subscribe)
+			.field("public_publish", &self.public_publish)
+			.finish_non_exhaustive()
+	}
 }
 
 /// Maximum in-band token verifications one session, or requests one HTTP/2
@@ -376,6 +390,11 @@ impl From<moq_auth::Error> for Error {
 		match err {
 			moq_auth::Error::Refused(refusal) => Self::Refused(refusal),
 			moq_auth::Error::UselessGrant => Self::Refused(Default::default()),
+			moq_auth::Error::GrantExpired => {
+				let mut refusal = moq_auth::Refusal::default();
+				refusal.reason = moq_auth::refusal::Reason::Expired;
+				Self::Refused(refusal)
+			}
 			other => Self::Unavailable(other.to_string()),
 		}
 	}
@@ -549,10 +568,11 @@ impl Lease {
 	/// Hold `consumer` for a session that dialed `path`, reducing its grant to
 	/// what the origin scopes by.
 	///
-	/// Fails if the grant's paths are too long; see [`Token::new`]. Fails too if the
-	/// grant caps a bitrate, which nothing here enforces.
+	/// Fails on a grant [`Grant::validate`] refuses, or whose paths are too long; see
+	/// [`Token::new`]. Fails too if the grant caps a bitrate, which nothing here enforces.
 	pub fn new(path: &str, consumer: lease::Consumer) -> Result<Self, Error> {
 		let grant = consumer.grant();
+		grant.validate()?;
 		Self::granted(path, &grant, consumer, None)
 	}
 
@@ -879,13 +899,12 @@ impl Decider {
 }
 
 /// Whether `request` carries a token: a SETUP token of any type, or a non-empty
-/// `jwt` query parameter, the convention `moq auth serve` reads.
+/// `jwt` query parameter, form-decoded as `moq auth serve` reads it, so an escaped
+/// key such as `%6Awt` counts too.
 fn presents_token(request: &Request) -> bool {
 	request.token.is_some()
 		|| request.query.as_deref().is_some_and(|query| {
-			query
-				.split('&')
-				.any(|pair| pair.strip_prefix("jwt=").is_some_and(|jwt| !jwt.is_empty()))
+			url::form_urlencoded::parse(query.as_bytes()).any(|(key, jwt)| key == "jwt" && !jwt.is_empty())
 		})
 }
 
@@ -1297,9 +1316,9 @@ fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
 		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
 		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
 		moq_tokio::Transport::WebRtc => moq_auth::Transport::WebRtc,
-		// A transport this build does not know is still a session on the wire; the
-		// server sees the same facts either way.
-		other => unreachable!("unknown transport {other}"),
+		// A transport added to moq-tokio before this mapping learns it still reaches
+		// the decider, named as one it does not recognize.
+		_ => moq_auth::Transport::Unknown,
 	}
 }
 
@@ -1488,6 +1507,18 @@ mod tests {
 			url: url.map(|url| url.parse().unwrap()),
 			public: public.iter().map(|p| p.parse().unwrap()).collect(),
 			..Default::default()
+		}
+	}
+
+	/// An embedder's grant meets the contract an auth server's does.
+	#[test]
+	fn a_lease_refuses_a_grant_the_contract_refuses() {
+		let mut tier = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		tier.tier = Some("a b".into());
+		let mut upstream = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		upstream.upstream = true;
+		for grant in [tier, upstream] {
+			assert!(Lease::new("/room", lease::Consumer::fixed(grant)).is_err());
 		}
 	}
 
@@ -1718,7 +1749,10 @@ mod tests {
 		});
 		let mut http = auth.request(moq_auth::Transport::Http, "/");
 		http.query = Some("jwt=eyJ".into());
-		for request in [query, setup, http] {
+		// `moq auth serve` form-decodes the key, so an escaped one is a token too.
+		let mut escaped = auth.request(moq_auth::Transport::WebSocket, "/");
+		escaped.query = Some("%6Awt=eyJ".into());
+		for request in [query, setup, http, escaped] {
 			let Err(err) = auth.admit(request).await else {
 				panic!("a token was admitted on the public grant");
 			};
@@ -1778,14 +1812,14 @@ mod tests {
 	fn a_peer_reports_its_lineage_to_the_listener_root() {
 		let root_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut root_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		root_params.serial_number = Some(1u64.into());
 		root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let root = root_params.self_signed(&root_key).unwrap();
 		let issuer = rcgen::Issuer::new(root_params, root_key);
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-		let leaf = rcgen::CertificateParams::new(vec!["edge0.invalid".to_string()])
-			.unwrap()
-			.signed_by(&key, &issuer)
-			.unwrap();
+		let mut leaf = rcgen::CertificateParams::new(vec!["edge0.invalid".to_string()]).unwrap();
+		leaf.serial_number = Some(2u64.into());
+		let leaf = leaf.signed_by(&key, &issuer).unwrap();
 
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("root.pem");
@@ -1903,13 +1937,21 @@ mod tests {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
-		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(1));
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/room", consumer).unwrap();
 
+		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
 		let start = kio::clock::now();
-		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant)).unwrap();
+		producer.update(grant.clone());
 		assert_eq!(lease.ended().await, lease::Reason::Expired);
 		assert_eq!(kio::clock::now(), start, "no grace after expiry");
+
+		// Nor is a lease taken on one already past.
+		let Err(err) = Lease::new("/room", lease::Consumer::fixed(grant)) else {
+			panic!("an expired grant was leased");
+		};
+		assert_eq!(moq_net::SessionError::from(&err), moq_net::SessionError::Expired);
 	}
 
 	#[test]

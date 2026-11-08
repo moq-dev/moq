@@ -134,9 +134,9 @@ func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
 	return &TrackProducer{inner: inner}, nil
 }
 
-// Abort rejects the request with an application error code.
-func (r *TrackRequest) Abort(errorCode uint16) error {
-	return r.inner.Abort(errorCode)
+// Reject rejects the request with an application error code.
+func (r *TrackRequest) Reject(errorCode uint16) error {
+	return r.inner.Reject(errorCode)
 }
 
 // TrackDemand watches the group a published track's subscribers want next.
@@ -203,6 +203,12 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 		return nil, err
 	}
 	return &GroupProducer{inner: inner}, nil
+}
+
+// SkipGroups declares that groups start up to the exclusive end will never be
+// produced, so readers move past them. Creating a group there then fails.
+func (t *TrackProducer) SkipGroups(start, end uint64) error {
+	return t.inner.SkipGroups(start, end)
 }
 
 // WriteFrame writes frame as a single-frame group.
@@ -328,19 +334,14 @@ type Fill struct {
 	inner *ffi.MoqFill
 }
 
-// StartGroup is the first group to fill.
-func (f *Fill) StartGroup() uint64 {
-	return f.inner.StartGroup()
+// Start is the first group to fill, and the frame within it to start from.
+func (f *Fill) Start() Position {
+	return f.inner.Start()
 }
 
-// StartFrame is the frame within the first group to start from.
-func (f *Fill) StartFrame() uint64 {
-	return f.inner.StartFrame()
-}
-
-// EndGroup is the exclusive end group.
-func (f *Fill) EndGroup() uint64 {
-	return f.inner.EndGroup()
+// End is the exclusive end group.
+func (f *Fill) End() uint64 {
+	return f.inner.End()
 }
 
 // Priority is the most urgent delivery priority among the readers waiting on it.
@@ -375,7 +376,7 @@ func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
 }
 
 // Accept inserts group sequence and returns a producer for it. The first group
-// starts at StartFrame, so its frames keep their indices.
+// starts at Start's frame, so its frames keep their indices.
 func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
 	inner, err := f.inner.Accept(sequence)
 	if err != nil {

@@ -186,6 +186,12 @@ pub struct moq_video_decoder_output {
 	/// holds groups. 0 = the oldest, decoding everything cached; a live player
 	/// sets `MOQ_DECODE_START_LATEST`.
 	pub start: u32,
+	/// Decode to the platform's own surface and hand it out as each frame's `surface`,
+	/// skipping the CPU conversion: `format`, `width`, and `height` are then ignored and
+	/// `data` is NULL. Only Apple platforms have one, an IOSurface-backed NV12
+	/// `CVPixelBufferRef` from VideoToolbox, with no software fallback; elsewhere
+	/// [`moq_decode_video`] fails with `MOQ_ERROR_UNSUPPORTED`.
+	pub surface: bool,
 }
 
 /// One decoded video frame from [`moq_decode_video`]: pixels plus a
@@ -210,10 +216,14 @@ pub struct moq_video_frame {
 	pub width: u32,
 	/// The decoded height in pixels.
 	pub height: u32,
-	/// The raw frame bytes in the configured layout.
+	/// The raw frame bytes in the configured layout, or NULL for a `surface` decode.
 	pub data: *const u8,
 	/// The length in bytes of `data`.
 	pub data_size: usize,
+	/// The decoder's `CVPixelBufferRef` for a `surface` decode, otherwise NULL. Borrowed: it
+	/// belongs to the decoder's pool, valid until the read is freed, so keep the read until
+	/// every GPU command reading the surface has completed.
+	pub surface: *const c_void,
 }
 
 /// One read from [`moq_decode_video`]: a decoded picture, or a break between them.
@@ -253,7 +263,7 @@ pub struct Video {
 ///
 /// `pollster` rather than a tokio helper because those panic when the calling
 /// thread is driving a runtime, which the one dispatching a callback is.
-fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+pub(crate) fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 	pollster::block_on(future)
 }
 
@@ -480,6 +490,25 @@ impl VideoFrame {
 pub struct DecoderOutput {
 	format: moq_video_pixel_format,
 	size: Option<moq_video::Size>,
+	/// Hand out the decoder's surface instead of converting to `format`.
+	surface: bool,
+}
+
+/// Whether this platform has a surface [`moq_video_frame::surface`] can expose.
+const HAS_SURFACE: bool = cfg!(any(target_os = "macos", target_os = "ios"));
+
+/// The `CVPixelBufferRef` a frame decoded into, or NULL when it is in CPU memory.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn surface(frame: &moq_video::Frame) -> *const c_void {
+	match &frame.surface {
+		moq_video::Surface::PixelBuffer(pixels) => std::ptr::from_ref(pixels.buffer()).cast(),
+		_ => std::ptr::null(),
+	}
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn surface(_frame: &moq_video::Frame) -> *const c_void {
+	std::ptr::null()
 }
 
 /// End a video track, given the result of draining its encoder into it.
@@ -796,6 +825,7 @@ impl Video {
 	) -> Result<Id, Error> {
 		let crate::consume::Rendition {
 			broadcast,
+			origin,
 			config: catalog,
 			name,
 			driver,
@@ -806,10 +836,18 @@ impl Video {
 		self.consumer_tasks.spawn(
 			on_frame,
 			|state| &mut state.video.consumer_tasks,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let consumer = moq_video::decode::Consumer::new(&broadcast, &catalog, name, options).await?;
+						// The rendition may live in a sibling broadcast that is never announced, and
+						// SUBSCRIBE_OK may never come, so the close races both steps.
+						let setup = async {
+							let broadcast = crate::consume::Rendition::resolve(broadcast, origin, &catalog).await?;
+							Ok(moq_video::decode::Consumer::new(&broadcast, &catalog, name, options).await?)
+						};
+						let Some(consumer) = crate::consume::Consume::until_closed(&mut close, setup).await? else {
+							return Ok(());
+						};
 						Self::run(on_frame, consumer, close, output).await
 					})
 					.await
@@ -927,6 +965,29 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 	})
 }
 
+/// The pixel layout and encoder configuration `input` and `output` describe.
+///
+/// # Safety
+/// - As [encoder_kind], for `output`.
+pub(crate) unsafe fn encoder_config(
+	input: &moq_video_encoder_input,
+	output: &moq_video_encoder_output,
+) -> Result<(moq_video_pixel_format, moq_video::encode::Config), Error> {
+	let format = pixel_format_from_u32(input.format)?;
+	let framerate = moq_video::FrameRate::new(input.framerate.numerator, input.framerate.denominator)
+		.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
+	let mut config = moq_video::encode::Config::new(input.width, input.height, framerate);
+	config.codec = codec_from_u32(output.codec)?;
+	config.kind = unsafe { encoder_kind(output)? };
+	// The C ABI spells an unset knob as 0, which neither field accepts as a real
+	// value: a zero bitrate or join is the default, not a request.
+	config.bitrate = (output.bitrate != 0).then(|| moq_net::bandwidth::Rate::from_bps(output.bitrate));
+	if output.join_us != 0 {
+		config.join = std::time::Duration::from_micros(output.join_us);
+	}
+	Ok((format, config))
+}
+
 /// Open a video track on a broadcast, encoding the raw frames you publish to it.
 ///
 /// The encoder is opened here, so an unsupported codec, resolution, or backend
@@ -962,19 +1023,7 @@ pub unsafe extern "C" fn moq_encode_video(
 			));
 		}
 
-		let format = pixel_format_from_u32(raw_input.format)?;
-
-		let framerate = moq_video::FrameRate::new(raw_input.framerate.numerator, raw_input.framerate.denominator)
-			.map_err(|err| Error::InvalidConfig(format!("invalid framerate: {err}")))?;
-		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, framerate);
-		config.codec = codec_from_u32(raw_output.codec)?;
-		config.kind = unsafe { encoder_kind(raw_output)? };
-		// The C ABI spells an unset knob as 0, which neither field accepts as a real
-		// value: a zero bitrate or join is the default, not a request.
-		config.bitrate = (raw_output.bitrate != 0).then(|| moq_net::bandwidth::Rate::from_bps(raw_output.bitrate));
-		if raw_output.join_us != 0 {
-			config.join = std::time::Duration::from_micros(raw_output.join_us);
-		}
+		let (format, config) = unsafe { encoder_config(raw_input, raw_output)? };
 
 		// Both before the global lock is taken: bringing up a hardware encoder is slow
 		// enough that every other call would wait behind it. The probe runs first and
@@ -1193,8 +1242,14 @@ pub unsafe extern "C" fn moq_decode_video(
 		// Validate the request before resolving anything: a C caller can probe
 		// support without a live track, and a bad request never opens a
 		// subscription it would immediately drop.
-		let format = pixel_format_from_u32(raw.format)?;
-		let size = decoder_size(raw.width, raw.height)?;
+		if raw.surface && !HAS_SURFACE {
+			return Err(Error::Unsupported("no decoder surface on this platform".into()));
+		}
+		// A surface decode converts nothing, so its CPU layout and size go unread.
+		let (format, size) = match raw.surface {
+			true => (moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420, None),
+			false => (pixel_format_from_u32(raw.format)?, decoder_size(raw.width, raw.height)?),
+		};
 		let start = match moq_decode_start::from_u32(raw.start)? {
 			moq_decode_start::MOQ_DECODE_START_OLDEST => moq_video::decode::Start::Oldest,
 			moq_decode_start::MOQ_DECODE_START_LATEST => moq_video::decode::Start::Latest,
@@ -1204,13 +1259,25 @@ pub unsafe extern "C" fn moq_decode_video(
 		let mut options = moq_video::decode::Options::new();
 		options.start = start;
 		options.delay = raw.delay.into();
-		// The C caller takes packed pixels, so let a backend that can decode
-		// straight to the CPU do that rather than downloading afterwards.
-		options.decoder.output = moq_video::Output::Cpu;
+		// A caller taking packed pixels lets a backend that can decode straight to the CPU do
+		// that rather than downloading afterwards.
+		options.decoder.output = match raw.surface {
+			false => moq_video::Output::Cpu,
+			true => moq_video::Output::Native,
+		};
+		// Only VideoToolbox decodes into a `CVPixelBuffer`: a software fallback would hand out
+		// CPU pixels with neither `data` nor `surface` to read them by, so fail instead.
+		if raw.surface {
+			options.decoder.kind = moq_video::decode::Kind::Named("videotoolbox".into());
+		}
 		// A backend with a hardware scaler (NVDEC) honors this for free; the
 		// delivery loop still enforces it, since other backends ignore it.
 		options.decoder.scale_hint = size;
-		let output = DecoderOutput { format, size };
+		let output = DecoderOutput {
+			format,
+			size,
+			surface: raw.surface,
+		};
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 
 		let mut state = State::lock();
@@ -1259,6 +1326,18 @@ pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read
 		let read = State::lock().video.read(id)?;
 		let (kind, gap, end) = read.info();
 		let frame = match &read {
+			Read::Frame(frame) if frame.output.surface => {
+				let size = frame.frame.size();
+				moq_video_frame {
+					timestamp: frame.frame.timestamp.into(),
+					width: size.width,
+					height: size.height,
+					data: std::ptr::null(),
+					data_size: 0,
+					// The slab keeps the frame, and with it the surface, until the id is freed.
+					surface: surface(&frame.frame),
+				}
+			}
 			Read::Frame(frame) => {
 				let pixels = frame.pixels()?;
 				moq_video_frame {
@@ -1269,6 +1348,7 @@ pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read
 					// never replaced once set, so the pointer outlives this call.
 					data: pixels.data.as_ptr(),
 					data_size: pixels.data.len(),
+					surface: std::ptr::null(),
 				}
 			}
 			_ => moq_video_frame {
@@ -1277,6 +1357,7 @@ pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read
 				height: 0,
 				data: std::ptr::null(),
 				data_size: 0,
+				surface: std::ptr::null(),
 			},
 		};
 		*dst = moq_video_read { kind, frame, gap, end };

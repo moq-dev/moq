@@ -161,13 +161,6 @@ pub struct Config {
 	/// How to construct each connection's congestion controller, BBRv3 by default
 	pub congestion: Arc<dyn congestion::Factory + Send + Sync>,
 
-	/// An outbound rate limit for each connection, in bytes per second, or `None` (the default)
-	/// for none
-	///
-	/// The congestion controller's pacer enforces it, so a controller that does not pace, such as
-	/// `Unlimited`, ignores it.
-	pub max_outgoing_bytes_per_second: Option<u64>,
-
 	/// How unreliable datagrams are buffered
 	pub datagram: datagram::Config,
 
@@ -309,7 +302,6 @@ impl Default for Config {
 			receive_timestamps: None,
 
 			congestion: Arc::new(congestion::bbr3::Config::default()),
-			max_outgoing_bytes_per_second: None,
 
 			datagram: datagram::Config {
 				receive_buffer: Some(STREAM_RWND as usize),
@@ -347,7 +339,6 @@ impl fmt::Debug for Config {
 			ack_frequency,
 			receive_timestamps,
 			congestion: _,
-			max_outgoing_bytes_per_second,
 			datagram,
 			crypto_buffer_size,
 			allow_spin,
@@ -375,7 +366,6 @@ impl fmt::Debug for Config {
 			.field("ack_frequency", ack_frequency)
 			.field("receive_timestamps", receive_timestamps)
 			// congestion not debug
-			.field("max_outgoing_bytes_per_second", max_outgoing_bytes_per_second)
 			.field("datagram", datagram)
 			.field("crypto_buffer_size", crypto_buffer_size)
 			.field("allow_spin", allow_spin)

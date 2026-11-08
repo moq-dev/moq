@@ -1,4 +1,4 @@
-# MoQ on rind
+# [M] MoQ on rind
 
 ## Goal
 
@@ -49,8 +49,8 @@ instead, so every crate drops C, not just the relay.
   CPUs without the crypto extensions (e2ee, which no binary links, switched
   on 0.1.0). Relay ACME, the one area that waited on `rind-instant-acme`, is
   removed for now instead (maintainer, 2026-11-03), and returns on rind in m5.
-  aws-lc-rs stays in the workspace until
-  the last area lands, which is when this epic removes it.
+  Every area has landed, and the workspace declares no aws-lc-rs dependency;
+  the epic's own work below removes what still reaches it.
 - Split per area, each landing once rind covers it. Docs a change makes stale
   (CPU requirements, removed features) are edited inline in that area's PR; no
   separate docs page.
@@ -62,7 +62,3 @@ The epic's own work, once every child has merged:
   crate.
 - Add an `armv7-unknown-linux-gnueabihf` moq-cli release with v4l2, and point
   `doc/bin/cli.md`'s board note at it for boards running a 32-bit OS.
-
-## Required
-
-- [moq-webrtc on rind](/quest/m1/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
