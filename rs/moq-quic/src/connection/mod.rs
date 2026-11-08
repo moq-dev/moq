@@ -68,7 +68,7 @@ mod packet_crypto;
 use packet_crypto::PrevCrypto;
 
 mod paths;
-use paths::{PathData, PathResponses};
+use paths::{Challenge, PathData, PathResponses};
 
 pub(crate) mod qlog;
 use qlog::QlogSink;
@@ -1225,13 +1225,9 @@ impl Connection {
 	/// Send PATH_CHALLENGE for a previous path if necessary
 	fn send_path_challenge(&mut self, now: Instant, buf: &mut Vec<u8>) -> Option<Transmit> {
 		let (prev_cid, prev_path) = self.prev_path.as_mut()?;
-		if !prev_path.challenge_pending {
-			return None;
-		}
-		prev_path.challenge_pending = false;
-		let token = prev_path
-			.challenge
-			.expect("previous path challenge pending without token");
+		let challenge = prev_path.challenge.as_mut().filter(|challenge| challenge.pending)?;
+		challenge.pending = false;
+		let token = challenge.token;
 		let remote = prev_path.remote;
 		debug_assert_eq!(
 			self.highest_space,
@@ -1429,7 +1425,6 @@ impl Connection {
 						self.events.push_back(Event::PathUpdated);
 					}
 					self.path.challenge = None;
-					self.path.challenge_pending = false;
 				}
 				Timer::Pacing => trace!("pacing timer expired"),
 				Timer::PushNewCid => {
@@ -3172,14 +3167,15 @@ impl Connection {
 					}
 				}
 				Frame::PathResponse(token) => {
-					if self.path.challenge == Some(token) && remote == self.path.remote {
+					if self.path.challenge.is_some_and(|challenge| challenge.token == token)
+						&& remote == self.path.remote
+					{
 						trace!("new path validated");
 						self.timers.stop(Timer::PathValidation);
 						self.path.challenge = None;
 						self.path.validated = true;
 						if let Some((_, prev_path)) = &mut self.prev_path {
 							prev_path.challenge = None;
-							prev_path.challenge_pending = false;
 						}
 					} else {
 						debug!(token, "ignoring invalid PATH_RESPONSE");
@@ -3425,8 +3421,7 @@ impl Connection {
 			)
 		};
 		new_path.congestion.on_probe_target(self.bandwidth_probe.target());
-		new_path.challenge = Some(self.rng.random());
-		new_path.challenge_pending = true;
+		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
 		let mut prev = mem::replace(&mut self.path, new_path);
@@ -3435,8 +3430,7 @@ impl Connection {
 
 		// Don't clobber the original path if the previous one hasn't been validated yet
 		if prev.challenge.is_none() {
-			prev.challenge = Some(self.rng.random());
-			prev.challenge_pending = true;
+			prev.challenge = Some(Challenge::new(self.rng.random()));
 			// We haven't updated the remote CID yet, this captures the remote CID we were using on
 			// the previous path.
 			self.prev_path = Some((self.rem_cids.active(), prev));
@@ -3581,9 +3575,10 @@ impl Connection {
 		// PATH_CHALLENGE
 		if buf.len() + 9 < max_size && space_id == SpaceId::Data {
 			// Transmit challenges with every outgoing frame on an unvalidated path
-			if let Some(token) = self.path.challenge {
+			if let Some(challenge) = &mut self.path.challenge {
 				// But only send a packet solely for that purpose at most once
-				self.path.challenge_pending = false;
+				challenge.pending = false;
+				let token = challenge.token;
 				sent.non_retransmits = true;
 				sent.requires_padding = true;
 				trace!("PATH_CHALLENGE {:08x}", token);
@@ -4094,8 +4089,11 @@ impl Connection {
 	/// See also `self.space(SpaceId::Data).can_send()`
 	fn can_send_1rtt(&self, max_size: usize) -> bool {
 		self.streams.can_send_frames(max_size)
-			|| self.path.challenge_pending
-			|| self.prev_path.as_ref().is_some_and(|(_, x)| x.challenge_pending)
+			|| self.path.challenge.is_some_and(|challenge| challenge.pending)
+			|| self
+				.prev_path
+				.as_ref()
+				.is_some_and(|(_, prev)| prev.challenge.is_some_and(|challenge| challenge.pending))
 			|| !self.path_responses.is_empty()
 	}
 
