@@ -50,8 +50,7 @@ Call sites (`git grep -n 'is_minted\|isMinted\|MINTED'` over `rs/` and
   `~` paragraph near "A version before this one carries no Instance", and
   the lite-07 changelog line on minting), and the lite corpus fixtures.
 - Readers of the flag: `rs/moq-net/src/model/origin.rs`,
-  `rs/moq-net/src/model/broadcast.rs` / `model/track.rs` (`minted()`
-  state), `rs/moq-crypto/src/sign/broadcast.rs`,
+  `rs/moq-crypto/src/sign/broadcast.rs`,
   `js/crypto/src/sign/broadcast.ts`, `rs/moq-mux/src/source.rs`,
   `rs/moq-mux/src/follow.rs`, `rs/moq-gst/src/source/imp.rs`,
   `js/net/src/consume.ts`, `js/net/src/origin.ts`, `js/watch/src/broadcast.ts`.
@@ -76,5 +75,5 @@ whichever lands second adds its changelog line beside the other's.
 
 ## Related
 
-- [moq-net's remaining surface fixes](/quest/m2/api-shape/net.md) - the
+- [moq-net's route stream goes public](/quest/m2/api-shape/net.md) - the
   audit item this replaces
