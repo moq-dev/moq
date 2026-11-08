@@ -12,7 +12,7 @@ use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthPro
 use moq_net::kio;
 use moq_net::reconnect::{Action, Verdict};
 
-use crate::abort::AbortOnDrop;
+use crate::abort::Detached;
 use crate::connect::Endpoint;
 use crate::{Addrs, Client, Error};
 
@@ -93,14 +93,9 @@ pub struct Backoff {
 	///
 	/// A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	/// failed attempt, so a peer that accepts and then drops every session still escalates
-	/// the delay and exhausts the timeout.
-	#[usage(
-		name = "connect-backoff-healthy",
-		long,
-		env = "MOQ_CONNECT_BACKOFF_HEALTHY",
-		setting = "connect.backoff.healthy"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// the delay and exhausts the timeout. Set by the embedding binary, not configured.
+	#[usage(skip)]
+	#[serde(skip)]
 	pub healthy: Option<crate::cli::Duration>,
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s; zero retries forever.
@@ -382,41 +377,109 @@ impl Goaway {
 		goaway
 	}
 }
+
 /// Shared reconnect state, observed by consumers through a [`kio`] channel.
 ///
-/// The channel closing (all producers dropped) is the terminal signal; `error`
-/// distinguishes a permanent give-up from a graceful close.
+/// The channel closing (all producers dropped) follows [`Lifecycle::Closed`], which
+/// every reader checks first.
 #[derive(Default)]
 struct State {
 	/// Advances on every lifecycle update, including identical failed dials.
 	revision: u64,
-	/// The loop has finished and cannot publish another state.
-	ended: bool,
-	/// Current connection status, or `None` before the first connect.
-	status: Option<Status>,
+	/// Where the loop is. Every status, observation, and live-session read derives from it.
+	lifecycle: Lifecycle,
 	/// How many sessions have been live on this handle, counting the current one.
-	/// Advanced by `Shared::connected` with the same write that publishes `status`,
+	/// Advanced by `Shared::connected` with the same write that publishes the session,
 	/// so a reader can't see `Connected` without its count.
 	connects: u64,
 	last_connected: Option<kio::clock::Instant>,
 	/// Cumulative connects and disconnects, bumped by the reconnect loop itself so a session that
 	/// connects and drops before a consumer polls still counts.
 	presence: moq_net::stats::Presence,
-	/// The negotiated MoQ version of the live session, or `None` when disconnected.
-	version: Option<Version>,
-	/// What the live session runs on, or `None` when disconnected.
-	transport: Option<crate::Transport>,
-	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
-	error: Option<Error>,
-	/// Why nothing is live while the loop retries: the last session's close reason or
-	/// the latest failed dial. Cleared by the next connect.
+}
+
+/// The reconnect loop's lifecycle, as one value so a stopped loop can't also report a session or
+/// a redial.
+enum Lifecycle {
+	/// No session has connected yet. `failure` is the latest failed dial.
+	Connecting { failure: Option<Error> },
+	/// A session serves.
+	Live(Box<Live>),
+	/// The last session ended and the loop redials. `failure` is why nothing serves: the last
+	/// session's close reason or the latest failed dial.
+	Offline {
+		failure: Option<Error>,
+		predecessor: Option<Predecessor>,
+	},
+	/// The loop stopped: the error it gave up with, or `None` when stopped locally.
+	Closed(Option<Error>),
+}
+
+impl Default for Lifecycle {
+	fn default() -> Self {
+		Self::Connecting { failure: None }
+	}
+}
+
+/// The session a [`Lifecycle::Live`] loop serves on.
+struct Live {
+	/// Read by [`Monitor`] to snapshot live connection stats.
+	session: moq_net::Session,
+	transport: crate::Transport,
+	/// Set by a GOAWAY until the replacement connects: this session drains but still serves.
+	migrating: Option<Migrating>,
+	predecessor: Option<Predecessor>,
+}
+
+/// A GOAWAY handover in progress, from the old session's side.
+#[derive(Default)]
+struct Migrating {
+	/// The latest failed dial of the replacement.
 	failure: Option<Error>,
-	/// The currently-connected session, or `None` while reconnecting. Read by
-	/// [`Monitor`] to snapshot live connection stats.
-	session: Option<moq_net::Session>,
-	/// The policy's draining predecessor and its handover deadline, so
-	/// [`Connection::close`] drains it too without overstaying that window.
-	predecessor: Option<(moq_net::Session, kio::clock::Instant)>,
+}
+
+/// The policy's draining predecessor and its handover deadline, so [`Connection::close`] drains it
+/// too without overstaying that window. Boxed: only a migration holds one, and only briefly.
+type Predecessor = Box<(moq_net::Session, kio::clock::Instant)>;
+
+impl Lifecycle {
+	/// What [`Connection::status`] reports: `None` before the first connect and once closed.
+	fn status(&self) -> Option<Status> {
+		match self {
+			Self::Live(live) if live.migrating.is_some() => Some(Status::Migrating),
+			Self::Live(_) => Some(Status::Connected),
+			Self::Offline { .. } => Some(Status::Disconnected),
+			Self::Connecting { .. } | Self::Closed(_) => None,
+		}
+	}
+
+	fn live(&self) -> Option<&Live> {
+		match self {
+			Self::Live(live) => Some(live),
+			_ => None,
+		}
+	}
+
+	fn is_closed(&self) -> bool {
+		matches!(self, Self::Closed(_))
+	}
+
+	/// Why the loop is retrying, while it is.
+	fn failure(&self) -> Option<&Error> {
+		match self {
+			Self::Connecting { failure } | Self::Offline { failure, .. } => failure.as_ref(),
+			Self::Live(live) => live.migrating.as_ref()?.failure.as_ref(),
+			Self::Closed(_) => None,
+		}
+	}
+
+	fn predecessor(&self) -> Option<&Predecessor> {
+		match self {
+			Self::Live(live) => live.predecessor.as_ref(),
+			Self::Offline { predecessor, .. } => predecessor.as_ref(),
+			Self::Connecting { .. } | Self::Closed(_) => None,
+		}
+	}
 }
 
 /// The producer side of everything a [`Connection`] handle can observe.
@@ -451,55 +514,88 @@ impl Shared {
 		// reads its estimate, and the grants that divide it.
 		let _ = self.send_bw.set(session.send_bandwidth().and_then(|bw| bw.peek()));
 		if let Ok(mut state) = self.state.write() {
-			// A migration replaces a live session without a disconnect in between, so
-			// its end is counted here, keeping `started - ended` at 1 while connected.
-			if state.session.is_some() {
-				state.presence.sessions_ended += 1;
-			}
+			let state = &mut *state;
+			let predecessor = match &mut state.lifecycle {
+				Lifecycle::Connecting { .. } => None,
+				// A migration replaces a live session without a disconnect in between, so
+				// its end is counted here, keeping `started - ended` at 1 while connected.
+				Lifecycle::Live(live) => {
+					state.presence.sessions_ended += 1;
+					live.predecessor.take()
+				}
+				Lifecycle::Offline { predecessor, .. } => predecessor.take(),
+				Lifecycle::Closed(_) => unreachable!("the loop publishes nothing once it ends"),
+			};
 			state.revision += 1;
-			state.status = Some(Status::Connected);
 			state.connects += 1;
 			state.last_connected = Some(kio::clock::now());
 			state.presence.sessions_started += 1;
-			state.failure = None;
-			state.version = Some(session.version());
-			state.transport = Some(transport);
-			state.session = Some(session.clone());
+			state.lifecycle = Lifecycle::Live(Box::new(Live {
+				session: session.clone(),
+				transport,
+				migrating: None,
+				predecessor,
+			}));
 		}
 	}
 
 	/// The session in [`State`] keeps serving while its replacement comes up, so
 	/// only the status moves.
 	fn migrating(&self) {
-		self.status(Status::Migrating);
-	}
-
-	fn status(&self, status: Status) {
 		if let Ok(mut state) = self.state.write() {
 			state.revision += 1;
-			state.status = Some(status);
+			if let Lifecycle::Live(live) = &mut state.lifecycle {
+				live.migrating = Some(Migrating::default());
+			}
 		}
 	}
 
 	/// Mirror the policy's draining predecessor, for [`Connection::close`].
 	fn predecessor(&self, predecessor: Option<(&moq_net::Session, kio::clock::Instant)>) {
 		// A write wakes every watcher, so skip one that changes nothing.
-		if predecessor.is_none() && self.state.read().predecessor.is_none() {
+		if predecessor.is_none() && self.state.read().lifecycle.predecessor().is_none() {
 			return;
 		}
+		let predecessor = predecessor.map(|(session, deadline)| Box::new((session.clone(), deadline)));
 		if let Ok(mut state) = self.state.write() {
-			state.predecessor = predecessor.map(|(session, deadline)| (session.clone(), deadline));
+			match &mut state.lifecycle {
+				Lifecycle::Live(live) => live.predecessor = predecessor,
+				Lifecycle::Offline { predecessor: slot, .. } => *slot = predecessor,
+				// Only a session that connected can drain, and nothing drains once the loop ends.
+				Lifecycle::Connecting { .. } | Lifecycle::Closed(_) => {}
+			}
 		}
 	}
 
 	/// Nothing is live. Clears the session so a handle can't be handed a closed one,
-	/// and drops the estimates that belonged to it.
+	/// and drops the estimates that belonged to it. Without a `failure`, the reason
+	/// already recorded stands.
 	fn offline(&self, failure: Option<&Error>) {
 		if let Ok(mut state) = self.state.write() {
-			state.offline();
-			if let Some(failure) = failure {
-				state.failure = Some(failure.clone());
-			}
+			let state = &mut *state;
+			let failure = failure.cloned();
+			state.lifecycle = match std::mem::take(&mut state.lifecycle) {
+				Lifecycle::Live(live) => {
+					state.presence.sessions_ended += 1;
+					Lifecycle::Offline {
+						failure: failure.or(live.migrating.and_then(|migrating| migrating.failure)),
+						predecessor: live.predecessor,
+					}
+				}
+				Lifecycle::Offline {
+					failure: kept,
+					predecessor,
+				} => Lifecycle::Offline {
+					failure: failure.or(kept),
+					predecessor,
+				},
+				// Only a session that connected can go offline.
+				Lifecycle::Connecting { failure: kept } => Lifecycle::Connecting {
+					failure: failure.or(kept),
+				},
+				closed @ Lifecycle::Closed(_) => closed,
+			};
+			state.revision += 1;
 		}
 		let _ = self.send_bw.set(None);
 		let _ = self.recv_bw.set(None);
@@ -509,7 +605,16 @@ impl Shared {
 	fn retrying(&self, err: &Error) {
 		if let Ok(mut state) = self.state.write() {
 			state.revision += 1;
-			state.failure = Some(err.clone());
+			match &mut state.lifecycle {
+				Lifecycle::Connecting { failure } | Lifecycle::Offline { failure, .. } => *failure = Some(err.clone()),
+				// A live session retries only for its replacement.
+				Lifecycle::Live(live) => {
+					if let Some(migrating) = &mut live.migrating {
+						migrating.failure = Some(err.clone());
+					}
+				}
+				Lifecycle::Closed(_) => {}
+			}
 		}
 	}
 
@@ -528,17 +633,17 @@ impl Shared {
 			(None, None) => moq_net::Error::Closed,
 		};
 		if let Ok(mut state) = self.state.write() {
-			if state.ended {
-				return;
+			let state = &mut *state;
+			match state.lifecycle {
+				Lifecycle::Closed(_) => return,
+				Lifecycle::Live(_) => state.presence.sessions_ended += 1,
+				Lifecycle::Connecting { .. } | Lifecycle::Offline { .. } => {}
 			}
-			state.offline();
-			// Including when the task was aborted mid-handover: nothing enforces the
-			// predecessor's deadline anymore, so a parked clone would hold its transport open.
-			// A graceful close took its own clone before aborting.
-			state.predecessor = None;
-			state.ended = true;
-			state.failure = None;
-			state.error = err;
+			state.revision += 1;
+			// Drops the predecessor too, including when the task was aborted mid-handover:
+			// nothing enforces its deadline anymore, so a parked clone would hold its
+			// transport open. A graceful close took its own clones before aborting.
+			state.lifecycle = Lifecycle::Closed(err);
 		}
 		let _ = self.send_bw.set(None);
 		let _ = self.recv_bw.set(None);
@@ -607,39 +712,25 @@ pub struct Observation {
 }
 
 impl State {
-	/// Nothing is live: one lifecycle revision that drops the session and its version.
-	fn offline(&mut self) {
-		// Count one close per live session; a second call without an intervening
-		// connect (e.g. Drop after the loop already reported the close) must not
-		// move the counter again.
-		if self.session.is_some() {
-			self.presence.sessions_ended += 1;
-		}
-		self.revision += 1;
-		self.status = Some(Status::Disconnected);
-		self.version = None;
-		self.transport = None;
-		self.session = None;
-	}
-
 	fn observation(&self) -> Observation {
+		let live = self.lifecycle.live();
 		Observation {
 			revision: self.revision,
-			phase: if self.ended {
-				Phase::Closed
-			} else {
-				match self.status {
-					None => Phase::Connecting,
-					Some(Status::Connected) => Phase::Connected,
-					Some(Status::Disconnected) => Phase::Disconnected,
-					Some(Status::Migrating) => Phase::Migrating,
-				}
+			phase: match &self.lifecycle {
+				Lifecycle::Connecting { .. } => Phase::Connecting,
+				Lifecycle::Live(live) if live.migrating.is_some() => Phase::Migrating,
+				Lifecycle::Live(_) => Phase::Connected,
+				Lifecycle::Offline { .. } => Phase::Disconnected,
+				Lifecycle::Closed(_) => Phase::Closed,
 			},
 			connects: self.connects,
 			last_connected: self.last_connected,
-			transport: self.transport,
-			failure: self.error.clone().or_else(|| self.failure.clone()),
-			version: self.version,
+			transport: live.map(|live| live.transport),
+			failure: match &self.lifecycle {
+				Lifecycle::Closed(err) => err.clone(),
+				lifecycle => lifecycle.failure().cloned(),
+			},
+			version: live.map(|live| live.session.version()),
 		}
 	}
 }
@@ -655,7 +746,7 @@ impl Monitor {
 		match self.state.poll(waiter, |state| {
 			if state.revision != after {
 				Poll::Ready(Ok(state.observation()))
-			} else if state.ended {
+			} else if state.lifecycle.is_closed() {
 				Poll::Ready(Err(terminal(state)))
 			} else {
 				Poll::Pending
@@ -703,7 +794,7 @@ impl Monitor {
 
 	/// Snapshot the current connection's stats, or `None` if not currently connected.
 	pub fn stats(&self) -> Option<moq_net::session::Stats> {
-		self.state.read().session.as_ref().map(moq_net::Session::stats)
+		self.state.read().lifecycle.live().map(|live| live.session.stats())
 	}
 
 	/// Why the loop is retrying: the error that ended the last session or failed the
@@ -713,13 +804,13 @@ impl Monitor {
 	/// that keeps failing never changes the status, so this is where its reason shows.
 	/// The loop giving up reports through [`Connection::closed`] instead.
 	pub fn failure(&self) -> Option<Error> {
-		self.state.read().failure.clone()
+		self.state.read().lifecycle.failure().cloned()
 	}
 
 	/// Snapshot statistics and protocol together, or `None` while disconnected.
 	pub fn snapshot(&self) -> Option<Snapshot> {
 		let state = self.state.read();
-		let session = state.session.as_ref()?;
+		let session = &state.lifecycle.live()?.session;
 		Some(Snapshot {
 			stats: session.stats(),
 			version: session.version(),
@@ -774,7 +865,7 @@ pub struct Connection {
 /// The connection loop, shared by every [`Connection`] clone and aborted when the
 /// last one drops.
 struct Task {
-	handle: AbortOnDrop,
+	handle: Detached,
 	/// A graceful close retains the loop's resources while its sessions drain.
 	running: std::sync::Weak<Running>,
 	closed: CloseGuard,
@@ -787,7 +878,7 @@ struct Running {
 
 /// Serializes [`Connection::abort`] and [`Connection::close`] against the loop publishing a fresh session.
 ///
-/// Aborting a tokio task doesn't interrupt it before its next yield, so a redial
+/// Aborting the task doesn't interrupt it before its next yield, so a redial
 /// completing in that window would otherwise hand [`Shared::connected`] a session
 /// that `abort` had already looked for and missed, and it would be closed by the
 /// refcount drop instead of carrying the caller's error code to the peer. Both
@@ -828,7 +919,7 @@ impl Connection {
 
 		let running = std::sync::Arc::new(Running { shared });
 		let task_running = std::sync::Arc::downgrade(&running);
-		let task = crate::runtime::spawn(async move {
+		let task = Detached::spawn(async move {
 			let shared = &running.shared;
 			let reconnect = !client.policy.once;
 			// Isolated inside `shared`, so a panic still records a terminal error
@@ -849,7 +940,7 @@ impl Connection {
 		});
 		Self {
 			task: std::sync::Arc::new(Task {
-				handle: AbortOnDrop::new(task),
+				handle: task,
 				running: task_running,
 				closed,
 			}),
@@ -881,7 +972,7 @@ impl Connection {
 		let session = {
 			let mut closed = self.task.closed.lock().unwrap();
 			*closed = Some(err.clone());
-			self.state.read().session.clone()
+			self.state.read().lifecycle.live().map(|live| live.session.clone())
 		};
 		if let Some(session) = session {
 			session.abort(err);
@@ -908,7 +999,8 @@ impl Connection {
 			let mut closed = self.task.closed.lock().unwrap();
 			*closed = Some(moq_net::Error::Cancel);
 			let state = self.state.read();
-			(state.session.clone(), state.predecessor.clone())
+			let session = state.lifecycle.live().map(|live| live.session.clone());
+			(session, state.lifecycle.predecessor().cloned())
 		};
 		self.task.handle.abort();
 		let session = async move {
@@ -918,7 +1010,7 @@ impl Connection {
 			}
 		};
 		let predecessor = async move {
-			let Some((session, deadline)) = predecessor else {
+			let Some((session, deadline)) = predecessor.map(|predecessor| *predecessor) else {
 				return Ok(());
 			};
 			let abort = session.clone();
@@ -1072,11 +1164,12 @@ impl Connection {
 	/// old session, which still serves), `Ready(Err)` once the loop has stopped, `Pending`
 	/// otherwise.
 	pub fn poll_established(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
-		match ready!(self.state.poll(waiter, |state| match (state.status, &state.session) {
-			(Some(Status::Connected | Status::Migrating), Some(_)) => Poll::Ready(()),
-			_ => Poll::Pending,
+		match ready!(self.state.poll(waiter, |state| match &state.lifecycle {
+			Lifecycle::Live(_) => Poll::Ready(Ok(())),
+			Lifecycle::Closed(_) => Poll::Ready(Err(terminal(state))),
+			Lifecycle::Connecting { .. } | Lifecycle::Offline { .. } => Poll::Pending,
 		})) {
-			Ok(()) => Poll::Ready(Ok(())),
+			Ok(res) => Poll::Ready(res),
 			Err(state) => Poll::Ready(Err(terminal(&state))),
 		}
 	}
@@ -1099,6 +1192,7 @@ impl Connection {
 
 	/// The connection status, once it changes from what this handle last reported, or the error
 	/// once the loop has stopped (the give-up error, or a generic one when the handle is dropped).
+	/// The error comes next once the loop stops, even if a status change went unreported.
 	///
 	/// The loop moves between `Connected`, `Disconnected`, and `Migrating` (a GOAWAY handover, where
 	/// the old session is still serving), so successive calls report changes rather than a fixed
@@ -1107,11 +1201,12 @@ impl Connection {
 	#[kio::wrapper]
 	pub fn poll_status(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Status>> {
 		let last = self.last_reported;
-		let status = match ready!(self.state.poll(waiter, |state| match state.status {
-			Some(status) if Some(status) != last => Poll::Ready(status),
+		let status = match ready!(self.state.poll(waiter, |state| match state.lifecycle.status() {
+			_ if state.lifecycle.is_closed() => Poll::Ready(Err(terminal(state))),
+			Some(status) if Some(status) != last => Poll::Ready(Ok(status)),
 			_ => Poll::Pending,
 		})) {
-			Ok(status) => status,
+			Ok(res) => res?,
 			Err(state) => return Poll::Ready(Err(terminal(&state))),
 		};
 
@@ -1124,7 +1219,7 @@ impl Connection {
 	/// The synchronous read behind [`status`](Self::status), for callers that just want the current
 	/// state rather than the next change.
 	pub fn connected(&self) -> bool {
-		self.state.read().status == Some(Status::Connected)
+		self.state.read().lifecycle.status() == Some(Status::Connected)
 	}
 
 	/// How many sessions have been live on this handle: 1 after the first connect,
@@ -1142,14 +1237,14 @@ impl Connection {
 	/// The [`moq_net::Session::version`] counterpart; `Option` because a reconnecting handle can be
 	/// between sessions.
 	pub fn version(&self) -> Option<Version> {
-		self.state.read().version
+		self.state.read().lifecycle.live().map(|live| live.session.version())
 	}
 
 	/// What the live session runs on, or `None` while disconnected.
 	///
 	/// Fixed for a session's lifetime; a reconnect may land on a different one.
 	pub fn transport(&self) -> Option<crate::Transport> {
-		self.state.read().transport
+		self.state.read().lifecycle.live().map(|live| live.transport)
 	}
 
 	/// Observe a GOAWAY from the peer, or `None` while between sessions.
@@ -1163,7 +1258,7 @@ impl Connection {
 	/// Scoped to the current session, since that's what a GOAWAY is about; a redial
 	/// starts a fresh one.
 	pub fn draining(&self) -> Option<moq_net::goaway::Consumer> {
-		self.state.read().session.as_ref().map(moq_net::Session::draining)
+		self.state.read().lifecycle.live().map(|live| live.session.draining())
 	}
 
 	/// A consumer for the live session's estimated send bitrate, mirroring
@@ -1207,11 +1302,17 @@ impl Connection {
 	/// stopped by dropping the handle.
 	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
-		ready!(self.state.poll_closed(waiter));
-		Poll::Ready(match &self.state.read().error {
-			Some(err) => Err(err.clone()),
-			None => Ok(()),
-		})
+		let err = match ready!(self.state.poll(waiter, |state| match &state.lifecycle {
+			Lifecycle::Closed(err) => Poll::Ready(err.clone()),
+			_ => Poll::Pending,
+		})) {
+			Ok(err) => err,
+			Err(state) => match &state.lifecycle {
+				Lifecycle::Closed(err) => err.clone(),
+				_ => unreachable!("the loop closes its lifecycle before its channel"),
+			},
+		};
+		Poll::Ready(err.map_or(Ok(()), Err))
 	}
 
 	/// The auth handle every session of this connection is built on: its tokens are
@@ -1351,9 +1452,9 @@ fn poll_forward(bw: &mut Option<BandwidthConsumer>, out: &BandwidthProducer, wai
 /// it is, and a watcher that only has an error to go on can still tell it apart
 /// from a connection that failed.
 fn terminal(state: &State) -> Error {
-	match &state.error {
-		Some(err) => err.clone(),
-		None => Error::Stopped,
+	match &state.lifecycle {
+		Lifecycle::Closed(Some(err)) => err.clone(),
+		_ => Error::Stopped,
 	}
 }
 
@@ -1383,14 +1484,12 @@ mod tests {
 		parsed.backoff.initial = Some((Duration::from_secs(7)).into());
 		parsed.backoff.multiplier = 5;
 		parsed.backoff.max = Some((Duration::from_secs(11)).into());
-		parsed.backoff.healthy = Some((Duration::from_secs(2)).into());
 		parsed.backoff.timeout = Some((Duration::ZERO).into());
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Some((Duration::from_secs(7)).into()));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Some((Duration::from_secs(11)).into()));
-		assert_eq!(parsed.backoff.healthy, Some((Duration::from_secs(2)).into()));
 		assert_eq!(parsed.backoff.timeout(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the policy's defaults.
@@ -1964,7 +2063,7 @@ mod tests {
 		let monitor = connection.monitor();
 
 		let failure = kio::wait(|waiter| {
-			monitor.state.poll(waiter, |state| match &state.failure {
+			monitor.state.poll(waiter, |state| match state.lifecycle.failure() {
 				Some(err) => Poll::Ready(err.clone()),
 				None => Poll::Pending,
 			})
@@ -2006,7 +2105,7 @@ mod tests {
 		let mut monitor = connection.monitor();
 
 		kio::wait(|waiter| {
-			monitor.state.poll(waiter, |state| match state.failure {
+			monitor.state.poll(waiter, |state| match state.lifecycle.failure() {
 				Some(_) => Poll::Ready(()),
 				None => Poll::Pending,
 			})
@@ -2071,7 +2170,7 @@ mod tests {
 				break;
 			}
 			if let Some(added) = added.take() {
-				token = Some(added.await.unwrap().expect("granted").0);
+				token = Some(added.await.unwrap().expect("granted"));
 			}
 			let mut grant = token.as_ref().unwrap().grant();
 			while grant.peek() != Some(moq_net::auth::Grant::all()) {
@@ -2144,6 +2243,35 @@ mod tests {
 		assert!(closed.is_err(), "the abort ends the loop with an error");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
 		assert_eq!(woken.phases(), [Phase::Closed], "the loop is not redialing");
+	}
+
+	/// A loop that gives up reports its error next, never a `Disconnected` it will not redial
+	/// from, whether or not a session ever connected.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_stopped_loop_reports_its_error_next() {
+		const WAIT: Duration = Duration::from_secs(10);
+		let once = || {
+			crate::connect::Config::default()
+				.init(Default::default())
+				.unwrap()
+				.with_reconnect(false)
+		};
+
+		// The only dial fails, which ends the loop before anything connected.
+		let mut connection = once().connect(dead().await);
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert!(status.is_err(), "{status:?}");
+
+		// The session ending in one-shot mode ends the loop.
+		let (addr, mut accepted, _task) = serve(crate::origin::spawn()).await;
+		let mut connection = once().connect(url(&format!("tcp://{addr}/")));
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		session.abort(moq_net::Error::App(7));
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert!(status.is_err(), "{status:?}");
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.
@@ -2640,14 +2768,6 @@ mod duration_tests {
 		max,
 		"--connect-backoff-max",
 		|c: &Backoff| c.max(),
-		|d| d
-	);
-	crate::cli::duration::test_config_duration!(
-		healthy_set_in_code_beats_parser_default,
-		Backoff,
-		healthy,
-		"--connect-backoff-healthy",
-		|c: &Backoff| c.resolve().healthy,
 		|d| d
 	);
 	crate::cli::duration::test_config_duration!(

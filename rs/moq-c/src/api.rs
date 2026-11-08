@@ -830,6 +830,8 @@ pub enum moq_anchor_kind {
 	MOQ_ANCHOR_RELATIVE = 1,
 	/// The group containing a presentation time. An untimed track refuses it.
 	MOQ_ANCHOR_TIME = 2,
+	/// The oldest group still around, as far back as `delay.max_us` allows. A start only.
+	MOQ_ANCHOR_OLDEST = 3,
 }
 
 /// Which of a subscription's pending groups the publisher sends first. Zero is the default.
@@ -848,6 +850,7 @@ fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Absolute(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => moq_net::track::Anchor::Time(anchor.timestamp.try_into()?),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_OLDEST as u32 => moq_net::track::Anchor::Oldest,
 		_ => return Err(Error::InvalidCode),
 	})
 }

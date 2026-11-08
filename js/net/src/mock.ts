@@ -4,6 +4,7 @@
  * Creates paired client/server transports connected by in-memory streams.
  */
 
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";
 import type { Frame } from "./group.ts";
@@ -13,6 +14,54 @@ import { Timestamp } from "./time.ts";
 /** A UTF-8 text frame stamped `timestamp` (now by default), for a test writing to a timed track. */
 export function textFrame(text: string, timestamp = Timestamp.now()): Frame {
 	return { payload: new TextEncoder().encode(text), timestamp };
+}
+
+/** A Manual clock installed in this realm until disposed, for a test that moves time itself. */
+export function manual(): Manual & Disposable {
+	const clock = new Manual();
+	const installed = clock.install();
+	return Object.assign(clock, { [Symbol.dispose]: () => installed.close() });
+}
+
+/** Whether `work` settles once everything pending has run and `clock` has advanced `duration`. */
+export async function settlesWithin(
+	work: PromiseLike<unknown>,
+	clock: Manual,
+	duration = Milli.zero,
+): Promise<boolean> {
+	let settled = false;
+	const done = () => {
+		settled = true;
+	};
+	Promise.resolve(work).then(done, done);
+	await clock.advance(Nano.fromMilli(duration));
+	return settled;
+}
+
+/**
+ * Moves `clock` a millisecond at a time, each step after a host turn, until `until` holds or settles.
+ *
+ * `Manual.drive` fires the next deadline after one drain, which skips past work waiting on a host
+ * task the clock can't see, such as a read through the host's streams or the IETF handshake's
+ * dynamic import. A regression fails within ten mocked seconds.
+ */
+export async function driveUntil(clock: Manual, until: (() => boolean) | PromiseLike<unknown>): Promise<void> {
+	let done: () => boolean;
+	if (typeof until === "function") {
+		done = until;
+	} else {
+		let settled = false;
+		const stop = () => {
+			settled = true;
+		};
+		Promise.resolve(until).then(stop, stop);
+		done = () => settled;
+	}
+	for (let i = 0; i < 10_000 && !done(); i++) {
+		await yieldNow();
+		await clock.advance(Nano.fromMilli(Milli(1)));
+	}
+	if (!done()) throw new Error("not done within ten mocked seconds");
 }
 
 /**

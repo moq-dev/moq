@@ -83,7 +83,7 @@ impl Fixture {
 			producers.push(receive.recv().await.unwrap().1);
 			let auth = connection.auth();
 			let added = futures::future::join_all((0..tokens).map(|index| auth.add(format!("token{index}")))).await;
-			let added: Vec<_> = added.into_iter().map(|added| added.unwrap().0).collect();
+			let added: Vec<_> = added.into_iter().map(|added| added.unwrap()).collect();
 			if session == 0 {
 				// `add` resolves once the peer grants the token, so its grant is already current.
 				let observed = added.last().unwrap().grant();

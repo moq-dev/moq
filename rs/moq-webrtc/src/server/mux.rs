@@ -19,6 +19,7 @@
 //! (session ended) evicts the address-cache entry; the ufrag entry is removed by
 //! the [`Registration`] guard the accept path holds for the session's lifetime.
 
+use crate::vendor::str0m;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -212,9 +213,9 @@ mod tests {
 
 	/// SHA1-HMAC for a STUN MESSAGE-INTEGRITY, matching what str0m signs with.
 	fn sha1_hmac(key: &[u8], payloads: &[&[u8]]) -> [u8; 20] {
-		use aws_lc_rs::hmac;
+		use rind::hmac;
 
-		let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
+		let key = hmac::Key::new(&hmac::legacy::HMAC_SHA1, key);
 		let mut ctx = hmac::Context::with_key(&key);
 		for payload in payloads {
 			ctx.update(payload);

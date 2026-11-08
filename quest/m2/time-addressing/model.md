@@ -128,6 +128,12 @@ recorded only sequencing.
   stamps the catalog from the broadcast clock and refuses to list a track off
   that clock's timescale, or a scale-less track beside timed ones. moq-net
   tracks stay independent.
+- **No local clock in the model.** Added 2026-11-07 (maintainer,
+  /quest-plan from the API shape audit): `Timestamp::now()`, the only model
+  API that reads the local clock, is removed, and its caller (moq-boy)
+  stamps from its own clock. `Timed<P>` moves from moq-net's root to
+  moq-json, whose producers and readers are its only users, and its `at`
+  becomes required under the rule above.
 - **Open, for whoever starts this, with the maintainer:** how lite-05/06,
   which carry both a sequence and frame timestamps, map on the way out.
 
@@ -174,7 +180,8 @@ The PR's Impact section says how to migrate.
 Public API: breaking. `group::Info`, `create_group`, `append_group`,
 `Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, and group consumers
 address by start timestamp, every producer write takes a required
-timestamp, and untimed tracks become scale-less.
+timestamp, untimed tracks become scale-less, `Timestamp::now` is gone, and
+`Timed` is moq-json's.
 Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required

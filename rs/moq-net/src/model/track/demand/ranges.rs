@@ -41,7 +41,7 @@ impl Shape {
 	fn of(range: &Range) -> Self {
 		match (range.start, range.end) {
 			_ if range.is_empty() => Self::Empty,
-			(Anchor::Relative(u64::MAX), None) => Self::Oldest,
+			(Anchor::Oldest, None) => Self::Oldest,
 			(Anchor::Absolute(start), None) => Self::Absolute(start, None),
 			(Anchor::Absolute(start), Some(Anchor::Absolute(end))) => Self::Absolute(start, Some(end)),
 			(Anchor::Relative(back), None) => Self::Relative(back),
@@ -140,6 +140,8 @@ impl Ranges {
 		match range.start {
 			Anchor::Absolute(start) => self.absolute.tail().is_some_and(|tail| tail <= start),
 			Anchor::Relative(back) => self.farthest().is_some_and(|farthest| back <= farthest),
+			// Only the open oldest range, which hides every other, covers the oldest group.
+			Anchor::Oldest => false,
 			// Where a time falls among the groups is the serving hop's to say.
 			Anchor::Time(_) => false,
 		}
@@ -354,7 +356,7 @@ mod tests {
 		let mut rng = rand::rngs::StdRng::seed_from_u64(0x72616e676573);
 		let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..6) {
 			0 => Anchor::Relative(rng.random_range(0..4)),
-			1 => Anchor::Relative(u64::MAX),
+			1 => Anchor::Oldest,
 			_ => Anchor::Absolute(rng.random_range(0..12)),
 		};
 		let mut ranges = Ranges::default();

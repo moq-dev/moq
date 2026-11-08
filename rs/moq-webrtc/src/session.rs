@@ -8,6 +8,7 @@
 //! to a remote URL (client side), or whether the media flow is RTP-in
 //! ([`MediaSink`]) or RTP-out ([`crate::egress::EgressSource`]).
 
+use crate::vendor::str0m;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -647,19 +648,19 @@ impl Bridges {
 /// can't fulfil (WHEP server). For both, the negotiated SDP intersects with
 /// what we can actually deliver, so `MediaAdded` only fires for codecs that
 /// [`crate::egress::EgressSource`] can match to a rendition.
-pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConfig {
+pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> Result<str0m::RtcConfig> {
 	use str0m::format::Codec;
 	// str0m fulfils NACK resends from the video send buffer (default 1000
 	// packets). MoQ has no PLI path back to the publisher, so a late joiner's
 	// recovery is whatever the peer can NACK out of this buffer while the current
 	// group is still in flight. Widen it so a large keyframe plus the rest of the
 	// group stays recoverable instead of aging out after ~1000 packets.
-	let mut config = str0m::RtcConfig::new()
+	let mut config = rtc_config()?
 		.clear_codecs()
 		.set_send_buffer_video(EGRESS_SEND_BUFFER_VIDEO);
 	for c in codecs {
 		config = match c {
-			Codec::Opus => config.enable_opus(true, false),
+			Codec::Opus => config.enable_opus(true),
 			Codec::H264 => config.enable_h264(true),
 			Codec::H265 => config.enable_h265(true),
 			Codec::Vp8 => config.enable_vp8(true),
@@ -669,15 +670,23 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConf
 			_ => config,
 		};
 	}
-	config
+	Ok(config)
+}
+
+/// A str0m config, refusing a CPU that rind, the stack's crypto, cannot run on.
+///
+/// str0m falls back on rind's provider, which panics on such a CPU instead.
+pub(crate) fn rtc_config() -> std::result::Result<str0m::RtcConfig, moq_crypto::cpu::UnsupportedCpu> {
+	moq_crypto::cpu::check()?;
+	Ok(str0m::RtcConfig::new())
 }
 
 /// Build a codec-restricted [`Rtc`] for the client egress path (which lets
 /// str0m mint its own ICE credentials). The server egress path uses
 /// [`rtc_config_with_codecs`] directly so it can inject the mux's known
 /// credentials before building.
-pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
-	rtc_config_with_codecs(codecs).build(kio::clock::now().into_std())
+pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Result<Rtc> {
+	Ok(rtc_config_with_codecs(codecs)?.build(kio::clock::now().into_std()))
 }
 
 /// Bind an ephemeral UDP socket for a single client session, read by its own

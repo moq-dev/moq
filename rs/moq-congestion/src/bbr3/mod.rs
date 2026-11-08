@@ -206,7 +206,7 @@ enum AckPhase {
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.5>
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.2>
 #[derive(Debug, Clone)]
-pub struct Bbr3 {
+pub(crate) struct Bbr3 {
     /// equivalent to C.SMSS The Sender Maximum Send Size in bytes. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.2>
     /// <https://www.rfc-editor.org/rfc/rfc9000#name-datagram-size>
     smss: u64,
@@ -586,13 +586,7 @@ impl Bbr3 {
             cycle_count_stamp: None,
             cwnd: initial_cwnd,
             pacing_rate,
-            pacer: Pacer::new(
-                init.rtt,
-                initial_cwnd,
-                init.mtu,
-                init.max_pacing_rate,
-                init.now,
-            ),
+            pacer: Pacer::new(init.rtt, initial_cwnd, init.mtu, init.now),
             // Keep the first flight conservative until an ACK measures the path's RTT.
             send_quantum: smss,
             pacing_gain: startup_pacing_gain,
@@ -2115,7 +2109,7 @@ impl Controller for Bbr3 {
     }
 }
 
-/// Configuration for the `Bbr3` congestion controller
+/// Configuration for the BBRv3 congestion controller
 /// Different pacing_gains can be set to modify the multiplier used to
 /// increase the sending rates.
 /// Different cwnd_gains can be set to modify the multiplier used to increase
@@ -2219,7 +2213,6 @@ mod test {
                 now: Instant::now(),
                 mtu,
                 rtt: Duration::from_millis(333),
-                max_pacing_rate: None,
                 seed: 0,
             };
             Self {
@@ -2587,7 +2580,6 @@ mod test {
             now: Instant::now(),
             mtu: 2500,
             rtt: Duration::from_millis(333),
-            max_pacing_rate: None,
             seed: 17,
         };
         let mut bbr3 = Bbr3::new(Arc::new(Config::default()), init);

@@ -12,7 +12,14 @@ then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Right after merging release into main, set
 every eligible package with `just version 0.22.0` for this cut, then one
 minor up per cut, following [Versions](/CONTRIBUTING.md#versions), including
-packages that did not change. Rust
+packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
+exempt from that version (`version.json`), so check each against its
+registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
+from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
+fails, and `workspace:^` would resolve `@moq/net`'s dependency to
+web-transport's 0.3.4, a different API. `js/qmux` must publish above 0.3.4;
+the maintainer picks the version (found 2026-11-07 by the API shape audit).
+Rust
 publication remains owned by release-plz. This supersedes keeping `moq-rs` at
 its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify

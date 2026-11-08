@@ -25,10 +25,10 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
-aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-rs = { version = "1" }
 base64-2b5c6dc72f624058 = { package = "base64", version = "0.23" }
 base64-3c51e837cfc5589a = { package = "base64", version = "0.22" }
+base64ct = { version = "1", default-features = false, features = ["alloc"] }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
@@ -36,13 +36,13 @@ camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive"] }
 clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "help", "std", "suggestions", "usage"] }
-const-oid = { version = "0.9", default-features = false, features = ["db"] }
+const-oid = { version = "0.10", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
-der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["oid", "pem", "std"] }
-der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["oid", "pem", "std"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "oid", "std"] }
 digest-a6292c17cd707f01 = { package = "digest", version = "0.11", features = ["alloc", "mac", "oid"] }
@@ -87,10 +87,9 @@ pkcs8-a6292c17cd707f01 = { package = "pkcs8", version = "0.11", default-features
 portable-atomic = { version = "1" }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
-rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
-rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
+rand = { version = "0.8" }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
-rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls", "rustls-no-provider", "stream"] }
@@ -134,10 +133,10 @@ zeroize = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
-aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-rs = { version = "1" }
 base64-2b5c6dc72f624058 = { package = "base64", version = "0.23" }
 base64-3c51e837cfc5589a = { package = "base64", version = "0.22" }
+base64ct = { version = "1", default-features = false, features = ["alloc"] }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
@@ -146,13 +145,13 @@ cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive"] }
 clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "help", "std", "suggestions", "usage"] }
-const-oid = { version = "0.9", default-features = false, features = ["db"] }
+const-oid = { version = "0.10", default-features = false, features = ["db"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
-der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["oid", "pem", "std"] }
-der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["oid", "pem", "std"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 derive_more-impl = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "oid", "std"] }
@@ -201,10 +200,9 @@ ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "s
 proc-macro2 = { version = "1" }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
 quote = { version = "1" }
-rand-274715c4dabd11b0 = { package = "rand", version = "0.9" }
-rand-c38e5c1d305a1b54 = { package = "rand", version = "0.8" }
+rand = { version = "0.8" }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
-rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls", "rustls-no-provider", "stream"] }
@@ -250,6 +248,8 @@ winnow-dff4ba8e3ae991db = { package = "winnow", version = "1", features = ["simd
 zeroize = { version = "1", features = ["derive"] }
 
 [target.aarch64-apple-darwin.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 block2 = { version = "0.6" }
 crossbeam-epoch = { version = "0.9" }
@@ -282,6 +282,8 @@ tower-http = { version = "0.6", default-features = false, features = ["decompres
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 block2 = { version = "0.6" }
 crossbeam-epoch = { version = "0.9" }
@@ -314,6 +316,8 @@ tower-http = { version = "0.6", default-features = false, features = ["decompres
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
@@ -347,6 +351,8 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.aarch64-unknown-linux-gnu.build-dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
@@ -377,6 +383,8 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-pc-windows-msvc.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
@@ -397,6 +405,8 @@ windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", feat
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-pc-windows-msvc.build-dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
@@ -417,6 +427,8 @@ windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", feat
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }
@@ -450,6 +462,8 @@ uuid = { version = "1", default-features = false, features = ["serde"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["prebuilt-nasm"] }
+aws-lc-sys = { version = "0.47", default-features = false, features = ["prebuilt-nasm"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"] }
 crossbeam-epoch = { version = "0.9" }

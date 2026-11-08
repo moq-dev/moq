@@ -20,6 +20,7 @@
 //! the peer's SCTP message limit. Ordered delivery means one lost chunk stalls
 //! every stream until SCTP retransmits it.
 
+use crate::vendor::str0m;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -86,6 +87,10 @@ pub enum Error {
 	/// The WebRTC stack failed (DTLS, SCTP, or ICE state).
 	#[error("rtc error: {0}")]
 	Rtc(String),
+
+	/// This CPU lacks a feature rind, the stack's crypto, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 
 	/// A session description failed to parse or apply.
 	#[error("invalid session description: {0}")]
@@ -897,7 +902,7 @@ async fn next_write(writes: Option<&mut channel::Outbox>) -> Option<Bytes> {
 
 /// A str0m connection with this socket's host candidates.
 fn rtc(locals: &[SocketAddr]) -> Result<Rtc, Error> {
-	let mut rtc = Rtc::builder().build(kio::clock::now().into_std());
+	let mut rtc = crate::session::rtc_config()?.build(kio::clock::now().into_std());
 	for &addr in locals {
 		let candidate = str0m::Candidate::host(addr, "udp").map_err(|err| Error::Candidate(err.to_string()))?;
 		rtc.add_local_candidate(candidate);
