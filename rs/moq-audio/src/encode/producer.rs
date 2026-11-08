@@ -510,7 +510,11 @@ impl Producer {
 				)));
 			};
 			self.activity = packet.activity;
-			self.publish(packet, timestamp)?;
+			// The codec and its timestamp queue already advanced past this packet, so no later
+			// write could stamp what follows: end the producer with the cause.
+			if let Err(err) = self.publish(packet, timestamp) {
+				return self.close(Err(err));
+			}
 			self.decoder_boundary = false;
 		}
 		Ok(())
@@ -681,6 +685,14 @@ impl Producer {
 			Codec::Failed(cause) => return Err(cause.clone()),
 		}
 		let result = self.drain(err);
+		self.close(result)
+	}
+
+	/// Settle the codec as finished or failed with `result`, releasing encoding resources.
+	fn close(&mut self, result: Result<(), Error>) -> Result<(), Error> {
+		if !matches!(self.codec, Codec::Live(_)) {
+			return result;
+		}
 		self.codec = match &result {
 			Ok(()) => Codec::Finished,
 			Err(cause) => {
@@ -691,6 +703,7 @@ impl Producer {
 			}
 		};
 		self.pending = Vec::new();
+		self.in_flight = VecDeque::new();
 		self.remix = None;
 		self.resampler = None;
 		result
@@ -1244,6 +1257,7 @@ mod tests {
 			producer.finish().unwrap();
 			assert_eq!(backend.resources(), 0, "retired {index} codecs");
 			assert_eq!(producer.pending.capacity(), 0);
+			assert_eq!(producer.in_flight.capacity(), 0);
 			assert!(producer.remix.is_none());
 			assert!(producer.resampler.is_none());
 			assert_eq!(producer.bitrate(), bitrate);

@@ -410,7 +410,7 @@ impl Consumer {
 			// Each packet is placed by its own samples, which a decoder that holds or splits
 			// its output would hand back somewhere else.
 			let [decoded] = <[_; 1]>::try_from(decoded).map_err(|outputs: Vec<_>| {
-				Error::Unsupported(format!(
+				Error::Codec(format!(
 					"{} returned {} outputs for one packet, and playback places exactly one",
 					self.decoder.name(),
 					outputs.len()
