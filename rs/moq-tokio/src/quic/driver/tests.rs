@@ -1645,7 +1645,6 @@ async fn multiple_conns_with_zero_length_cids() {
 }
 
 #[tokio::test]
-#[ignore = "flaky: its 100ms wall-clock budget runs out under a loaded CI host"]
 async fn stream_stopped() {
 	let _guard = subscribe();
 	let factory = EndpointFactory::new();
@@ -1680,7 +1679,7 @@ async fn stream_stopped() {
 		let stopped3 = stopped3.await;
 		assert_eq!(stopped3, Ok(Some(42u32.into())));
 	};
-	let client = timeout(Duration::from_millis(100), client).instrument(error_span!("client"));
+	let client = client.instrument(error_span!("client"));
 	let server = async move {
 		let conn = server.accept().await.unwrap().accept().unwrap().await.unwrap();
 		let mut stream = conn.accept_uni().await.unwrap();
@@ -1690,8 +1689,7 @@ async fn stream_stopped() {
 		conn
 	}
 	.instrument(error_span!("server"));
-	let (client, conn) = tokio::join!(client, server);
-	client.expect("timeout");
+	let ((), conn) = tokio::join!(client, server);
 	drop(conn);
 }
 
@@ -1705,7 +1703,7 @@ async fn stream_stopped_2() {
 	})
 	.unwrap();
 	let send_stream = conn.open_uni(Default::default()).await.unwrap();
-	let stopped = timeout(Duration::from_millis(100), send_stream.closed()).instrument(error_span!("stopped"));
+	let stopped = send_stream.closed().instrument(error_span!("stopped"));
 	tokio::pin!(stopped);
 	// poll the future once so that the waker is registered.
 	tokio::select! {
@@ -1718,7 +1716,7 @@ async fn stream_stopped_2() {
 	drop(send_stream);
 	// make sure the stopped future still resolves
 	let res = stopped.await;
-	assert_eq!(res, Ok(Ok(None)));
+	assert_eq!(res, Ok(None));
 }
 
 /// A send stream dropped before `finish` is reset, so the peer can't mistake the truncated data
