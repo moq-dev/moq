@@ -977,9 +977,12 @@ root = ["ca.pem"]
 			"needs a QUIC listener",
 		);
 		refuse("[cluster.lan]\nenabled = true\n", "--cluster-node");
-		let workers = format!("{node}[listen.unix]\nbind = \"relay.sock\"\n[runtime]\nworkers = 1\n");
-		let config: Config = toml::from_str(&workers).expect("parse");
-		config.resolve().expect("workers serve QUIC on the default address");
+		#[cfg(feature = "_quic")]
+		{
+			let workers = format!("{node}[listen.unix]\nbind = \"relay.sock\"\n[runtime]\nworkers = 1\n");
+			let config: Config = toml::from_str(&workers).expect("parse");
+			config.resolve().expect("workers serve QUIC on the default address");
+		}
 		let config: Config = toml::from_str(node).expect("parse");
 		config.resolve().expect("a node URL and the default QUIC listener");
 	}
