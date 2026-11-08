@@ -8,13 +8,13 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, Version, origin, track};
+use moq_net::{Error, Version, origin, track};
 use support::harness::{MockConnectOptions, connect_mock, peer};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
