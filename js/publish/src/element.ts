@@ -72,8 +72,8 @@ export type AnnounceMode = "always" | "source";
  * What a muted or invisible track does with its capture.
  *
  * `hold` keeps the device open, so resuming is instant but the browser's capture indicator stays lit.
- * `release` closes it, so the indicator goes dark and resuming reopens it. A screen share or file
- * stops only once both tracks are off. Defaults to `hold`.
+ * `release` closes it, so the indicator goes dark and resuming reopens it; the track reads as disabled
+ * in the catalog until it has. A screen share or file stops only once both tracks are off. Defaults to `hold`.
  */
 export type CaptureMode = "hold" | "release";
 
@@ -197,7 +197,8 @@ export default class MoqPublish extends HTMLElement {
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
 	// Whether each track publishes: connected and allowed by `muted` and `invisible`. Video encodes only
-	// while it does; muted audio stays served and sends nothing, so an unmute needs no catalog update.
+	// while it does; muted audio stays served and sends nothing, so an unmute with its capture held needs
+	// no catalog update.
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
 

@@ -690,10 +690,11 @@ export class Encoder {
 	// place meanwhile, so a re-probe swaps the catalog entry in one update, or not at all when nothing
 	// changed.
 	#runCodec(effect: Effect): void {
-		if (effect.get(this.#out.error)) return;
-		const enabled = effect.get(this.in.enabled);
-		const dimensions = effect.get(this.#coded);
-		const target = effect.get(this.#target);
+		// A failure drops the probe too, since it may be what failed, so a recovery waits on a new one.
+		const failed = effect.get(this.#out.error) !== undefined;
+		const enabled = !failed && effect.get(this.in.enabled);
+		const dimensions = enabled ? effect.get(this.#coded) : undefined;
+		const target = enabled ? effect.get(this.#target) : undefined;
 		if (!enabled || !dimensions || !target) {
 			this.#codec.set(undefined);
 			return;
