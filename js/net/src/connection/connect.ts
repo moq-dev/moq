@@ -711,7 +711,12 @@ async function hedgeWebTransport(
 	alpns: string[],
 	options?: WebTransportProps,
 ): Promise<WebTransport | undefined> {
-	const first = connectWebTransport(url, cancel, alpns, options);
+	// Resolve pins (and fetch an http:// fingerprint) once, before the hedge delay starts, so a slow
+	// fingerprint fetch can't start a second dial and both dials share the one fetch.
+	const target = await resolveWebTransport(url, cancel, alpns, options);
+	if (!target) return undefined;
+
+	const first = dialWebTransport(target, cancel);
 
 	// The first dial opening, failing, or being cancelled settles this before the delay does.
 	const hedge = await timeout(Nano.fromMilli(WEBTRANSPORT_HEDGE), first).then(
@@ -721,7 +726,7 @@ async function hedgeWebTransport(
 	if (!hedge) return first;
 	console.debug(redact(url), `WebTransport not open after ${WEBTRANSPORT_HEDGE}ms; dialing a second`);
 
-	const dials = [first, connectWebTransport(url, cancel, alpns, options)];
+	const dials = [first, dialWebTransport(target, cancel)];
 	try {
 		const winner = await Promise.any(dials);
 		closeLosers(dials, winner);
@@ -733,12 +738,18 @@ async function hedgeWebTransport(
 	}
 }
 
-async function connectWebTransport(
+interface WebTransportTarget {
+	url: URL;
+	options: WebTransportOptions;
+}
+
+/** Resolve the URL and options to dial, or `undefined` once `cancel` resolves. */
+async function resolveWebTransport(
 	url: URL,
 	cancel: Promise<void>,
 	alpns: string[],
 	options?: WebTransportProps,
-): Promise<WebTransport | undefined> {
+): Promise<WebTransportTarget | undefined> {
 	let finalUrl = url;
 
 	// Our custom pinning fields are normalized separately; the rest are DOM options.
@@ -781,7 +792,11 @@ async function connectWebTransport(
 		finalOptions.serverCertificateHashes = hashes;
 	}
 
-	const quic = new WebTransport(finalUrl, finalOptions);
+	return { url: finalUrl, options: finalOptions };
+}
+
+async function dialWebTransport(target: WebTransportTarget, cancel: Promise<void>): Promise<WebTransport | undefined> {
+	const quic = new WebTransport(target.url, target.options);
 
 	// Both .ready and .closed reject on failure; catch .closed to avoid an unhandled rejection.
 	quic.closed.catch(() => {});
