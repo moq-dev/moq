@@ -111,7 +111,8 @@ async fn export(format: &str, source: moq_mux::Source, stream: impl Stream, coll
 			}
 		}
 	} else {
-		let mut export = h264::Export::new(source, stream).with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)));
+		let mut export = h264::Export::new(source, stream)
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)));
 		while let Some(chunk) = export.next().await.unwrap() {
 			if collect {
 				data.extend_from_slice(&chunk);

@@ -185,7 +185,8 @@ impl<S: Stream> Export<S> {
 				kind: b"free".into(),
 				size: Some(fragment.len()),
 			}
-			.encode(&mut data).map_err(crate::Error::mp4)?;
+			.encode(&mut data)
+			.map_err(crate::Error::mp4)?;
 		}
 		index.fragment(self.written + data.len() as u64, &moof)?;
 		data.put_slice(&fragment);
@@ -318,7 +319,7 @@ impl Atom {
 		let mut data = vec![0u8; (self.end - self.start) as usize];
 		file.seek(SeekFrom::Start(self.start))?;
 		file.read_exact(&mut data)?;
-		Ok(T::decode(&mut std::io::Cursor::new(data.as_slice())).map_err(crate::Error::mp4)?)
+		T::decode(&mut std::io::Cursor::new(data.as_slice())).map_err(crate::Error::mp4)
 	}
 }
 
@@ -374,9 +375,10 @@ impl Description {
 			kind: b"free".into(),
 			size: Some(buf.len()),
 		}
-		.encode(data).map_err(crate::Error::mp4)?;
+		.encode(data)
+		.map_err(crate::Error::mp4)?;
 		data.put_slice(&buf);
-		Ok(mp4_atom::Moov::decode(&mut std::io::Cursor::new(buf.as_slice())).map_err(crate::Error::mp4)?)
+		mp4_atom::Moov::decode(&mut std::io::Cursor::new(buf.as_slice())).map_err(crate::Error::mp4)
 	}
 }
 

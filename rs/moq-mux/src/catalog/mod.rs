@@ -42,9 +42,9 @@ pub(crate) use consumer::Subscribing;
 pub use data::IntoRendition;
 pub(crate) use data::Listing;
 pub use entry::Entry;
-pub(crate) use estimate::Reading;
 pub use estimate::Estimate;
 pub(crate) use estimate::Estimator;
+pub(crate) use estimate::Reading;
 pub use format::*;
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) use producer::to_msf;

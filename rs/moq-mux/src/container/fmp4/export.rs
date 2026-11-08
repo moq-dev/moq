@@ -1,7 +1,7 @@
+use moq_net::track::Delay;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::task::Poll;
 use std::time::Duration;
-use moq_net::track::Delay;
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, Catalog, Container, VideoConfig};

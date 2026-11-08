@@ -89,7 +89,9 @@ mod tests {
 			#[serde_as(as = "Wall")]
 			wall: kio::clock::Wall,
 		}
-		let epoch_millis = kio::clock::Wall::MOQ_EPOCH.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH).as_millis() as u64;
+		let epoch_millis = kio::clock::Wall::MOQ_EPOCH
+			.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
+			.as_millis() as u64;
 		let last_millis = (u64::MAX / 1_000_000) - epoch_millis;
 		let last = format!(r#"{{"wall":{last_millis}}}"#);
 		let value: Value = serde_json::from_str(&last).unwrap();
@@ -149,8 +151,7 @@ mod tests {
 			serde_json::from_str(r#"{"transport":{"rtt":null},"renditions":{"hd":{"bitrate":null}}}"#).unwrap();
 		assert_eq!(stats.transport.rtt, None);
 		assert_eq!(stats.renditions["hd"].bitrate, None);
-		let echo: echo::Snapshot =
-			serde_json::from_str(r#"{"renditions":{"hd":{"arrival":null}}}"#).unwrap();
+		let echo: echo::Snapshot = serde_json::from_str(r#"{"renditions":{"hd":{"arrival":null}}}"#).unwrap();
 		assert_eq!(echo.renditions["hd"].arrival, None);
 	}
 
@@ -207,7 +208,10 @@ mod tests {
 		let arrival = report.renditions["hd"].arrival.as_ref().unwrap();
 		assert_eq!(arrival.timestamp, moq_net::Timestamp::from_millis(30_000).unwrap());
 		assert_eq!(
-			arrival.wall.checked_duration_since(kio::clock::Wall::MOQ_EPOCH).unwrap(),
+			arrival
+				.wall
+				.checked_duration_since(kio::clock::Wall::MOQ_EPOCH)
+				.unwrap(),
 			Duration::from_millis(175_184_640_000)
 		);
 		assert_eq!(report.renditions["hd"].stalled, Duration::from_millis(120));

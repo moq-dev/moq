@@ -814,12 +814,16 @@ pub(super) fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> 
 
 	// First pass to learn the moof size.
 	let mut buf = Vec::new();
-	build_moof(0).encode(&mut buf).map_err(crate::container::fmp4::Error::mp4)?;
+	build_moof(0)
+		.encode(&mut buf)
+		.map_err(crate::container::fmp4::Error::mp4)?;
 	let moof_size = buf.len();
 
 	// Second pass with data_offset = moof_size + 8 (mdat header).
 	buf.clear();
-	build_moof((moof_size + 8) as i32).encode(&mut buf).map_err(crate::container::fmp4::Error::mp4)?;
+	build_moof((moof_size + 8) as i32)
+		.encode(&mut buf)
+		.map_err(crate::container::fmp4::Error::mp4)?;
 
 	let mdat = mp4_atom::Mdat { data: mdat_data };
 	mdat.encode(&mut buf).map_err(crate::container::fmp4::Error::mp4)?;
@@ -1161,7 +1165,8 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 				.as_ref()
 				.ok_or_else(|| Error::MissingAudioDescription(config.codec.to_string()))?;
 			let mut cursor = std::io::Cursor::new(description.as_ref());
-			let dec_specific = mp4_atom::esds::DecoderSpecific::decode(&mut cursor).map_err(crate::container::fmp4::Error::mp4)?;
+			let dec_specific =
+				mp4_atom::esds::DecoderSpecific::decode(&mut cursor).map_err(crate::container::fmp4::Error::mp4)?;
 
 			// Safari and AVFoundation reject an AAC track whose DecoderConfigDescriptor is all
 			// zeros: they endOfStream("decode") on the *init* append, which leaves the

@@ -2507,9 +2507,7 @@ mod test {
 		use std::time::Duration;
 
 		let now = Duration::from_secs(86_400);
-		crate::clock::fake_host_wall(
-			kio::clock::Wall::MOQ_EPOCH + now,
-		);
+		crate::clock::fake_host_wall(kio::clock::Wall::MOQ_EPOCH + now);
 		let zero = moq_net::Timestamp::from_secs(now.as_secs() - 3600).unwrap();
 		hang::catalog::Clock::new(zero.convert(scale).unwrap()).unwrap()
 	}
@@ -2561,8 +2559,7 @@ mod test {
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
 		// clock, which may be unset.
-		let zero = kio::clock::Wall::MOQ_EPOCH
-			+ Duration::from_micros(input.wall.as_micros() as u64);
+		let zero = kio::clock::Wall::MOQ_EPOCH + Duration::from_micros(input.wall.as_micros() as u64);
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
 		seed.media.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));

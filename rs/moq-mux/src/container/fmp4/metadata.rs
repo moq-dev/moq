@@ -172,7 +172,9 @@ impl Scan {
 			_ => return Ok(()),
 		};
 		if self.parents.contains(&kind) {
-			return Err(Error::mp4(mp4_atom::Error::InvalidCombination("recursive metadata boxes")));
+			return Err(Error::mp4(mp4_atom::Error::InvalidCombination(
+				"recursive metadata boxes",
+			)));
 		}
 		self.parents.push(kind);
 		self.boxes(data, namespace)?;
@@ -214,19 +216,35 @@ fn next<'a>(data: &mut &'a [u8]) -> Result<(Header, &'a [u8])> {
 	let kind = FourCC::decode(data).map_err(crate::container::fmp4::Error::mp4)?;
 	let size = match size {
 		0 => data.len(),
-		1 => usize::try_from(u64::decode(data).map_err(crate::container::fmp4::Error::mp4)?.checked_sub(16).ok_or(mp4_atom::Error::InvalidSize).map_err(crate::container::fmp4::Error::mp4)?)
-			.map_err(|_| mp4_atom::Error::InvalidSize).map_err(crate::container::fmp4::Error::mp4)?,
-		_ => size.checked_sub(8).ok_or(mp4_atom::Error::InvalidSize).map_err(crate::container::fmp4::Error::mp4)? as usize,
+		1 => usize::try_from(
+			u64::decode(data)
+				.map_err(crate::container::fmp4::Error::mp4)?
+				.checked_sub(16)
+				.ok_or(mp4_atom::Error::InvalidSize)
+				.map_err(crate::container::fmp4::Error::mp4)?,
+		)
+		.map_err(|_| mp4_atom::Error::InvalidSize)
+		.map_err(crate::container::fmp4::Error::mp4)?,
+		_ => size
+			.checked_sub(8)
+			.ok_or(mp4_atom::Error::InvalidSize)
+			.map_err(crate::container::fmp4::Error::mp4)? as usize,
 	};
 	// Media has a transport-owned payload bound and is never expanded as metadata.
 	if kind.as_ref() != b"mdat" && size > MAX_METADATA_BYTES {
-		return Err(Error::MetadataTooLarge { kind: kind.to_string(), size });
+		return Err(Error::MetadataTooLarge {
+			kind: kind.to_string(),
+			size,
+		});
 	}
 	Ok((Header { kind, size: Some(size) }, take(data, size)?))
 }
 
 fn take<'a>(data: &mut &'a [u8], size: usize) -> Result<&'a [u8]> {
-	let (body, rest) = data.split_at_checked(size).ok_or(mp4_atom::Error::OutOfBounds).map_err(crate::container::fmp4::Error::mp4)?;
+	let (body, rest) = data
+		.split_at_checked(size)
+		.ok_or(mp4_atom::Error::OutOfBounds)
+		.map_err(crate::container::fmp4::Error::mp4)?;
 	*data = rest;
 	Ok(body)
 }
@@ -435,7 +453,9 @@ pub(crate) mod tests {
 		] {
 			let (decoded, checked) = entry(&nested);
 			assert!(decoded);
-			assert!(matches!(checked, Err(Error::Mp4(err)) if matches!(err.downcast_ref(), Some(mp4_atom::Error::TooLarge(_)))));
+			assert!(
+				matches!(checked, Err(Error::Mp4(err)) if matches!(err.downcast_ref(), Some(mp4_atom::Error::TooLarge(_))))
+			);
 		}
 		// A few are accepted, as are children that do not frame: the dependency keeps those whole.
 		let mut truncated = 100u32.to_be_bytes().to_vec();

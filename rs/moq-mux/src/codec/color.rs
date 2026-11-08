@@ -6,7 +6,7 @@
 //! travels with the elementary stream, while a muxer adds the box and may get it wrong. So an
 //! importer resolves the bitstream's colour first and [`fill`]s only its gaps from the container.
 
-use hang::catalog::{Chromaticity, Color, ContentLight, Mastering, ColorRange};
+use hang::catalog::{Chromaticity, Color, ColorRange, ContentLight, Mastering};
 
 /// The colour a set of H.273 code points signals, leaving each unspecified or reserved one absent.
 ///

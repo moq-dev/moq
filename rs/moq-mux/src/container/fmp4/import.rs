@@ -392,7 +392,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				let count = (needed - self.buffer.len()).min(data.len());
 				self.buffer.extend_from_slice(&data[..count]);
 				data = &data[count..];
-				let Some(header) = mp4_atom::Header::decode_maybe(&mut self.buffer.as_ref()).map_err(crate::Error::mp4)? else {
+				let Some(header) =
+					mp4_atom::Header::decode_maybe(&mut self.buffer.as_ref()).map_err(crate::Error::mp4)?
+				else {
 					if data.is_empty() {
 						return Ok(());
 					}
@@ -495,7 +497,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		let size = size.ok_or(mp4_atom::Error::InvalidSize).map_err(crate::Error::mp4)?;
 		if size > super::MAX_METADATA_BYTES {
-			return Err(Error::MetadataTooLarge { kind: kind.to_string(), size }.into());
+			return Err(Error::MetadataTooLarge {
+				kind: kind.to_string(),
+				size,
+			}
+			.into());
 		}
 		Ok(Body::Metadata {
 			kind,
@@ -1505,7 +1511,8 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 		kind: (*b"mdat").into(),
 		size: Some(run.samples.iter().map(|sample| sample.range.len()).sum()),
 	}
-	.encode(&mut mdat).map_err(crate::Error::mp4)?;
+	.encode(&mut mdat)
+	.map_err(crate::Error::mp4)?;
 
 	// Re-encode moof with corrected per-trun data_offset for the per-track fragment.
 	// Each trun's data_offset points to the start of that run's data within the new mdat.

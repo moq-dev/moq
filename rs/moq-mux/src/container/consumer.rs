@@ -3747,12 +3747,14 @@ mod tests {
 					.with_delay(Delay::default().with_max(Duration::from_millis(500))),
 			)
 			.with_range(5..);
-		let mut consumer =
-			Playout::new(Delay {
+		let mut consumer = Playout::new(
+			Delay {
 				min: Some(Duration::from_millis(500)),
 				max: Some(Duration::from_millis(500)),
-			}, Duration::ZERO)
-				.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
+			},
+			Duration::ZERO,
+		)
+		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		assert!(
 			matches!(consumer.startup, Startup::Earliest { .. }),
 			"a local range names no start, so the start still reaches back"
@@ -3855,12 +3857,14 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track =
 			track.subscribe(moq_net::track::Subscription::default().with_delay(Delay::default().with_max(None)));
-		let mut consumer =
-			Playout::new(Delay {
+		let mut consumer = Playout::new(
+			Delay {
 				min: Some(Duration::from_millis(500)),
 				max: None,
-			}, Duration::ZERO)
-				.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
+			},
+			Duration::ZERO,
+		)
+		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		assert_eq!(subscribed(&consumer).subscription().delay.max, None);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);

@@ -283,11 +283,7 @@ impl ExportSource {
 	///
 	/// Such a rendition has no catalog `broadcast` field, so it always lives on the
 	/// catalog broadcast and can never carry an escaping reference.
-	pub fn for_stream(
-		source: &crate::Source,
-		name: &str,
-		delay: moq_net::track::Delay,
-	) -> Result<Self, crate::Error> {
+	pub fn for_stream(source: &crate::Source, name: &str, delay: moq_net::track::Delay) -> Result<Self, crate::Error> {
 		let target = Target {
 			path: source.path().clone(),
 			instance: None,
@@ -540,8 +536,7 @@ impl ExportSource {
 		if let SourceState::Requesting { binding, start } = &self.state {
 			let broadcast = ready!(binding.poll_broadcast(waiter))?;
 			let instance = binding.sibling().then(|| broadcast.clone());
-			let mut subscription = moq_net::track::Subscription::default()
-				.with_delay(self.delay);
+			let mut subscription = moq_net::track::Subscription::default().with_delay(self.delay);
 			if let Some(after) = start.after {
 				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
@@ -910,10 +905,7 @@ mod tests {
 		for reference in ["..", "../source", "../../elsewhere"] {
 			let config = video(Some(reference));
 			escaping(ExportSource::for_video(&source, "video", &config, delay), reference);
-			escaping(
-				ExportSource::for_video_raw(&source, "video", &config, delay),
-				reference,
-			);
+			escaping(ExportSource::for_video_raw(&source, "video", &config, delay), reference);
 			escaping(
 				ExportSource::for_audio(&source, "audio", &audio(Some(reference)), delay),
 				reference,
@@ -953,9 +945,14 @@ mod tests {
 		tokio::task::yield_now().await;
 		let source = crate::source::resolved(&origin, "a/pub").await;
 		let config = audio(Some("./source"));
-		let mut export = ExportSource::for_audio(&source, "audio", &config, moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-			.unwrap()
-			.unwrap();
+		let mut export = ExportSource::for_audio(
+			&source,
+			"audio",
+			&config,
+			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+		)
+		.unwrap()
+		.unwrap();
 		let mut read = async || {
 			kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
@@ -982,9 +979,14 @@ mod tests {
 		assert_eq!(read().await, Some(None), "its end ends the rendition");
 
 		// A rendition still subscribing when its instance goes ends too.
-		let mut late = ExportSource::for_audio(&source, "late", &config, moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-			.unwrap()
-			.unwrap();
+		let mut late = ExportSource::for_audio(
+			&source,
+			"late",
+			&config,
+			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+		)
+		.unwrap()
+		.unwrap();
 		let ended = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| late.poll_read(waiter))).await;
 		assert!(
 			matches!(ended, Ok(Ok(None))),
@@ -1007,9 +1009,14 @@ mod tests {
 			tokio::task::yield_now().await;
 			let source = crate::source::resolved(&origin, "a/pub").await;
 			let config = audio(Some("./source"));
-			let mut export = ExportSource::for_audio(&source, "audio", &config, moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-				.unwrap()
-				.unwrap();
+			let mut export = ExportSource::for_audio(
+				&source,
+				"audio",
+				&config,
+				moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			)
+			.unwrap()
+			.unwrap();
 
 			let sibling = origin.route("a/source", Default::default()).unwrap();
 			let track = sibling
@@ -1077,9 +1084,14 @@ mod tests {
 			HangContainer::Legacy(crate::container::Kind::Audio),
 		);
 		track.write(raw_frame(0, b"x", true)).unwrap();
-		let mut export = ExportSource::for_audio(&source, "audio", &audio(Some("./source")), moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-			.unwrap()
-			.unwrap();
+		let mut export = ExportSource::for_audio(
+			&source,
+			"audio",
+			&audio(Some("./source")),
+			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+		)
+		.unwrap()
+		.unwrap();
 		let mut read = async || {
 			kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
@@ -1180,10 +1192,15 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let source = crate::Source::new(consumer, remote);
-		let mut export = ExportSource::for_audio(&source, "audio", &audio(None), moq_net::track::Delay::default().with_max(Duration::from_secs(1)))
-			.unwrap()
-			.unwrap()
-			.live();
+		let mut export = ExportSource::for_audio(
+			&source,
+			"audio",
+			&audio(None),
+			moq_net::track::Delay::default().with_max(Duration::from_secs(1)),
+		)
+		.unwrap()
+		.unwrap()
+		.live();
 
 		// One 24 ms frame per group, as the TS import publishes MPEG-1 audio.
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
@@ -1283,10 +1300,15 @@ mod tests {
 				kio::clock::sleep(Duration::from_millis(120)).await;
 			}
 
-			let mut export = ExportSource::for_audio(&source, "audio", &audio(None), moq_net::track::Delay::default().with_max(Duration::from_millis(450)))
-				.unwrap()
-				.unwrap()
-				.live();
+			let mut export = ExportSource::for_audio(
+				&source,
+				"audio",
+				&audio(None),
+				moq_net::track::Delay::default().with_max(Duration::from_millis(450)),
+			)
+			.unwrap()
+			.unwrap()
+			.live();
 			let mut read = async || {
 				kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 					.await
@@ -1335,11 +1357,10 @@ mod tests {
 					.unwrap();
 			previous.skips = 2;
 			previous.latest = Some(Duration::from_millis(read));
-			let mut next =
-				ExportSource::for_video(&source, Moving::RENDITION, &Moving::config("b", None, SPS), delay)
-					.unwrap()
-					.unwrap()
-					.continuing(&previous);
+			let mut next = ExportSource::for_video(&source, Moving::RENDITION, &Moving::config("b", None, SPS), delay)
+				.unwrap()
+				.unwrap()
+				.continuing(&previous);
 			let mut poll = async || {
 				kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| next.poll_read(waiter))).await
 			};

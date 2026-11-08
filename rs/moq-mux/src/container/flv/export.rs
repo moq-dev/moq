@@ -257,8 +257,7 @@ impl FlvTrack {
 				if let Some(settled) = settled {
 					arrival.arrived = arrival.arrived.max(settled);
 				}
-				let timestamp = u32::try_from(dts + i128::from(shift))
-					.map_err(|_| Error::TimestampRange)?;
+				let timestamp = u32::try_from(dts + i128::from(shift)).map_err(|_| Error::TimestampRange)?;
 				self.queue(key, arrival, record, timestamp, shift, jitter)?;
 			}
 			Ok::<_, crate::Error>(())

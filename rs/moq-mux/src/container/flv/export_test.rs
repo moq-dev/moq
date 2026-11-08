@@ -202,7 +202,11 @@ async fn export_emits_sequence_headers_and_frames() {
 
 	let exporter = open_export(crate::source::announced(&consumer).await)
 		.await
-		.with_delay(moq_net::track::Delay::default().with_min(RECORDING_MAX_DELAY).with_max(RECORDING_MAX_DELAY))
+		.with_delay(
+			moq_net::track::Delay::default()
+				.with_min(RECORDING_MAX_DELAY)
+				.with_max(RECORDING_MAX_DELAY),
+		)
 		.with_replay();
 	let exported = drain_export(exporter, importer).await;
 
@@ -1415,7 +1419,11 @@ async fn export_declared(reorder: u8, groups: &[&[u64]], open: bool) -> anyhow::
 
 	let mut exporter = open_export(crate::source::announced(&consumer).await)
 		.await
-		.with_delay(moq_net::track::Delay::default().with_min(RECORDING_MAX_DELAY).with_max(RECORDING_MAX_DELAY))
+		.with_delay(
+			moq_net::track::Delay::default()
+				.with_min(RECORDING_MAX_DELAY)
+				.with_max(RECORDING_MAX_DELAY),
+		)
 		.with_replay();
 	let mut exported = Vec::new();
 	if let Some(Err(err)) = drain_until_idle(&mut exporter, &mut exported).await {
@@ -1519,7 +1527,11 @@ async fn a_reorder_declared_after_the_header_raises_the_shift() {
 
 	let mut exporter = open_export(crate::source::announced(&consumer).await)
 		.await
-		.with_delay(moq_net::track::Delay::default().with_min(RECORDING_MAX_DELAY).with_max(RECORDING_MAX_DELAY))
+		.with_delay(
+			moq_net::track::Delay::default()
+				.with_min(RECORDING_MAX_DELAY)
+				.with_max(RECORDING_MAX_DELAY),
+		)
 		.with_replay();
 	let mut exported = exporter.next().await.unwrap().expect("the header").to_vec();
 
@@ -1672,7 +1684,11 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 
 	let mut exporter = open_export(crate::source::announced(&consumer).await)
 		.await
-		.with_delay(moq_net::track::Delay::default().with_min(RECORDING_MAX_DELAY).with_max(RECORDING_MAX_DELAY))
+		.with_delay(
+			moq_net::track::Delay::default()
+				.with_min(RECORDING_MAX_DELAY)
+				.with_max(RECORDING_MAX_DELAY),
+		)
 		.with_replay();
 	let mut exported = Vec::new();
 	// Consume the header and the two initial frames without advancing past
@@ -1723,8 +1739,11 @@ async fn configured_delay_holds_live_frames() {
 	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 	let mut live = Live::audio(config);
-	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::from_millis(100)).with_max(std::time::Duration::from_millis(100)));
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(
+		moq_net::track::Delay::default()
+			.with_min(std::time::Duration::from_millis(100))
+			.with_max(std::time::Duration::from_millis(100)),
+	);
 	assert!(export.next().await.unwrap().is_some(), "container header");
 	live.track.write(raw_frame(0, &[0xde, 0xad], true)).unwrap();
 	assert!(
@@ -1744,7 +1763,8 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 	let mut live = Live::audio(config);
 	let delay = std::time::Duration::from_millis(100);
-	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
 	export.next().await.unwrap().unwrap();
 	let start = kio::clock::now();
 	live.track.write(raw_frame(0, b"first", true)).unwrap();
@@ -1780,7 +1800,11 @@ async fn decode_order_is_independent_of_cross_track_arrival_order() {
 			catalog.modify().unwrap().audio.renditions.insert(name, config);
 		});
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-			.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::from_millis(100)).with_max(std::time::Duration::from_millis(100)))
+			.with_delay(
+				moq_net::track::Delay::default()
+					.with_min(std::time::Duration::from_millis(100))
+					.with_max(std::time::Duration::from_millis(100)),
+			)
 			.with_multitrack(true);
 		export.next().await.unwrap().unwrap();
 		live.track.write(raw_frame(0, b"initial-a", true)).unwrap();
@@ -1816,7 +1840,8 @@ async fn a_backlog_stays_in_the_source_until_due() {
 		let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		let mut live = Live::audio(config);
-		let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
+		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
 		export.next().await.unwrap().unwrap();
 		live.track.write(raw_frame(0, b"first", true)).unwrap();
 		export.next().await.unwrap().unwrap();
@@ -1852,7 +1877,8 @@ async fn a_retained_group_trims_to_the_delay() {
 		tokio::time::advance(std::time::Duration::from_millis(20)).await;
 	}
 	let delay = std::time::Duration::from_millis(100);
-	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
 	export.next().await.unwrap().unwrap();
 	export.next().await.unwrap().unwrap();
 	// What is left spans no more than the delay: five 20 ms frames.
