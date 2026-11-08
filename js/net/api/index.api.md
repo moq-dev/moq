@@ -708,7 +708,7 @@ export namespace Track {
 	}
 	export class Fill {
 		[Symbol.dispose](): void;
-		accept(sequence: bigint, info?: Partial<Track.Info>): Group.Producer;
+		accept(sequence: bigint, info?: Track.Info): Group.Producer;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
