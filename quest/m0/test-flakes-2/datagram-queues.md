@@ -8,9 +8,10 @@ independent createWritable datagram queues" passes under load and runs again.
 ## Plan
 
 Planned 2026-11-08 (maintainer). The test, from
-[moq-dev/moq#8276](https://github.com/moq-dev/moq/pull/8276), failed under load.
-It is quarantined with `test.skip` until this quest fixes it; #8276 must land
-it skipped or fixed.
+[moq-dev/moq#7846](https://github.com/moq-dev/moq/pull/7846), failed under load
+in the merge queue, dropping
+[moq-dev/moq#8280](https://github.com/moq-dev/moq/pull/8280).
+It is quarantined with `test.skip` until this quest fixes it.
 
 Suspects: the test asserts `sendStreams.datagrams` has two queues right after
 the first `recv`, and that the oversized appends leave sequence 1 as the next
