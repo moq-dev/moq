@@ -964,11 +964,11 @@ export class Publisher {
 					const framed = await request.next();
 					// The requester sent its last message, which ends the request only where FIN cancels.
 					if (framed === undefined) return request.ended;
-					const { params, requestId: ownRequestId } = await this.#decodeUpdate(request, framed);
-					// A drained track waits this out, since the update may reopen its range.
+					// A drained track waits this out, decode included, since the update may reopen its range.
 					const applied = Promise.withResolvers<void>();
 					updating = applied.promise;
 					try {
+						const { params, requestId: ownRequestId } = await this.#decodeUpdate(request, framed);
 						// update() replaces every option, so carry the rest over as Rust does.
 						if (params.subscriberPriority !== undefined) {
 							const priority = fromWire(params.subscriberPriority);

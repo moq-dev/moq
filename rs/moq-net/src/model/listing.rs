@@ -380,7 +380,13 @@ impl Queue {
 	fn add(&mut self, name: Arc<str>, info: track::Info) {
 		match self.pending.get_mut(&name) {
 			Some(pending) => match *pending {
-				Pending::Remove { finished } => *pending = Pending::Readd { finished, info },
+				Pending::Remove { finished } => {
+					*pending = Pending::Readd { finished, info };
+					// The readd's extra event must not use up the count owed to changes queued behind it.
+					if let SyncPhase::Counting(left) = &mut self.sync {
+						*left += 1;
+					}
+				}
 				// A name is listed once at a time, so only its removal can be pending.
 				_ => debug_assert!(false, "a listed track was listed again"),
 			},
@@ -712,6 +718,26 @@ mod tests {
 	}
 
 	const NONE: [&str; 0] = [];
+
+	/// A removal re-added after SYNCED was owed still lets the changes queued behind it out first.
+	#[test]
+	fn a_readd_after_sync_keeps_synced_behind_queued_changes() {
+		let mut queue = Queue::default();
+		queue.remove(&"a".into(), false);
+		queue.add("b".into(), track::Info::default());
+		queue.sync();
+		queue.add("a".into(), track::Info::default());
+		let mut events = Vec::new();
+		while queue.is_ready() {
+			events.push(match queue.next().unwrap().unwrap() {
+				TracksEvent::Added { name, .. } => format!("+{name}"),
+				TracksEvent::Removed { name } => format!("-{name}"),
+				TracksEvent::Finished { name } => format!("~{name}"),
+				TracksEvent::Synced => "synced".into(),
+			});
+		}
+		assert_eq!(events, ["-a", "+a", "+b", "synced"]);
+	}
 
 	#[test]
 	fn tracks_present_arrive_before_synced() {
