@@ -326,8 +326,7 @@ pub fn record(mut announced: moq_net::origin::Routes) -> std::sync::Arc<std::syn
 				moq_net::origin::RouteEvent::End(route) => (route, false),
 				moq_net::origin::RouteEvent::Start(route)
 				| moq_net::origin::RouteEvent::Update(route)
-				| moq_net::origin::RouteEvent::Restart(route)
-				| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => (route, true),
+				| moq_net::origin::RouteEvent::Restart(route) => (route, true),
 			};
 			recorded
 				.lock()
