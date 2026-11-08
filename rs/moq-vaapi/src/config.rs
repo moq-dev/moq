@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use tracing::error;
 use thiserror::Error;
+use tracing::error;
 
 use crate::bindings;
 use crate::display::Display;

@@ -46,7 +46,7 @@ It lived in [moq-dev/vaapi](https://github.com/moq-dev/vaapi) through 0.2.1.
 - **H.264 and H.265 decode** over VA-API: one Annex-B access unit in,
   tightly-packed NV12 out, with in-stream parameter sets, a conformant DPB, and
   mid-stream resolution changes. H.264 covers reference marking, reordering,
-  and frame_num gaps; H.265 covers reference picture sets, long-term
+  and frame\_num gaps; H.265 covers reference picture sets, long-term
   references, open-GOP CRA pictures, and dependent slice segments, and puts a
   picture out as soon as the SPS's reorder limit allows, so a stream without
   B-frames comes out with no delay. H.265 is the Main profile, plus Main 10 and
