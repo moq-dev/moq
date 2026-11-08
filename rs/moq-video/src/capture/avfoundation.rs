@@ -2,8 +2,11 @@
 //!
 //! `AVCaptureVideoDataOutput` delivers IOSurface-backed `CVPixelBuffer`s on a
 //! dispatch queue; the delegate wraps each as a [`Surface::PixelBuffer`] and pushes it
-//! into the shared [`FrameChannel`], which the encode loop awaits. Frames reach
-//! VideoToolbox with no copy and no color conversion.
+//! into the shared [`FrameChannel`], which the encode loop awaits. The output
+//! requests NV12, the one layout the encoder, the Metal import, and the CPU
+//! download all read, so a camera whose native format differs (a MacBook Air's
+//! `2vuy`) is converted by AVFoundation before the frame reaches us. Frames then
+//! reach VideoToolbox with no copy.
 //!
 //! Sample delivery is the only callback AVFoundation makes on the happy path, so
 //! the same delegate also observes the notifications that say the session died:
@@ -27,7 +30,10 @@ use objc2_av_foundation::{
 	AVError, AVFoundationErrorDomain, AVMediaType, AVMediaTypeVideo,
 };
 use objc2_core_media::CMSampleBuffer;
-use objc2_foundation::{NSError, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSString};
+use objc2_core_video::{kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange};
+use objc2_foundation::{
+	NSDictionary, NSError, NSNotification, NSNotificationCenter, NSNumber, NSObject, NSObjectProtocol, NSString,
+};
 
 use super::surface::surface_frame;
 use super::{Camera, Config, FrameChannel, Stream};
@@ -93,10 +99,8 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 	let delegate = Delegate::new(chan.clone(), device_id.clone());
 	let dispatch = DispatchQueue::new("dev.moq.video.capture", None);
 
-	let output = unsafe { AVCaptureVideoDataOutput::new() };
+	let output = video_output();
 	unsafe {
-		// Drop late frames instead of queuing them; we want the newest.
-		output.setAlwaysDiscardsLateVideoFrames(true);
 		let proto = ProtocolObject::from_ref(&*delegate);
 		output.setSampleBufferDelegate_queue(Some(proto), Some(&dispatch));
 	}
@@ -149,6 +153,24 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 		Some(first),
 		Box::new(guard),
 	))
+}
+
+/// The camera's sample output, before its delegate is attached.
+fn video_output() -> Retained<AVCaptureVideoDataOutput> {
+	let output = unsafe { AVCaptureVideoDataOutput::new() };
+
+	// Without a pixel format AVFoundation passes the device's native one through.
+	let key: &NSString = unsafe { kCVPixelBufferPixelFormatTypeKey }.as_ref();
+	let format = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+	let format: &AnyObject = &format;
+	let settings = NSDictionary::from_slices(&[key], &[format]);
+
+	unsafe {
+		output.setVideoSettings(Some(&settings));
+		// Drop late frames instead of queuing them; we want the newest.
+		output.setAlwaysDiscardsLateVideoFrames(true);
+	}
+	output
 }
 
 /// Ensure the process is authorized to use the camera, prompting once if the
@@ -436,7 +458,7 @@ impl Delegate {
 /// grant, or a test-only hook in the capture path.
 #[cfg(test)]
 mod tests {
-	use objc2_foundation::{NSDictionary, NSInteger};
+	use objc2_foundation::NSInteger;
 
 	use super::*;
 
@@ -449,6 +471,18 @@ mod tests {
 		let dispatch = DispatchQueue::new("dev.moq.video.capture.test", None);
 		let guard = SessionGuard::new(session.clone(), delegate, dispatch);
 		(chan, session, guard)
+	}
+
+	/// CI has no camera, so check the request itself: the output `open` uses
+	/// asks AVFoundation for NV12.
+	#[test]
+	fn the_output_requests_nv12() {
+		let output = video_output();
+		let settings = unsafe { output.videoSettings() };
+		let key: &NSString = unsafe { kCVPixelBufferPixelFormatTypeKey }.as_ref();
+		let format = settings.objectForKey(key).expect("pixel format requested");
+		let format = format.downcast::<NSNumber>().expect("pixel format is a number");
+		assert_eq!(format.as_u32(), kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
 	}
 
 	/// Teardown must never call `stopRunning` while configuration is open. This
