@@ -787,8 +787,10 @@ async fn a_target_without_the_preferred_transport_probes_no_faster_than_the_boun
 /// A probe that outlasts the connect timeout is abandoned and counts as a failed one.
 #[kio::test]
 async fn a_hung_probe_is_abandoned_at_the_connect_timeout() {
-	let mut config = Config::default();
-	config.timeout = Duration::from_secs(3);
+	let config = Config {
+		timeout: Duration::from_secs(3),
+		..Default::default()
+	};
 	let (mut machine, _fallback) = on_fallback(config).await;
 	let asked = probe(&mut machine).await;
 	assert!(matches!(next(&mut machine).await, Action::Abandon));
@@ -816,8 +818,10 @@ async fn a_probe_ends_with_its_fallback_session() {
 /// Connecting once never probes: moving to another session is a second one.
 #[kio::test]
 async fn connecting_once_never_probes() {
-	let mut config = Config::default();
-	config.once = true;
+	let config = Config {
+		once: true,
+		..Default::default()
+	};
 	let (mut machine, _fallback) = on_fallback(config).await;
 	kio::clock::sleep(PROBE_MAX * 2).await;
 	assert!(matches!(

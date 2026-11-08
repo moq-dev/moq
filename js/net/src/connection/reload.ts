@@ -9,6 +9,7 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
+import { isWebTransportSupported } from "./browser.ts";
 import {
 	type ConnectProps,
 	connect,
@@ -17,7 +18,6 @@ import {
 	type WebSocketProps,
 	type WebTransportProps,
 } from "./connect.ts";
-import { isWebTransportSupported } from "./browser.ts";
 import { parse } from "./endpoint.ts";
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";

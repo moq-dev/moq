@@ -1041,7 +1041,7 @@ impl Connection {
 		// The QUIC probe in flight while the live session runs on the WebSocket fallback, and
 		// the address whose race that fallback won, which its end makes QUIC's again.
 		#[cfg(all(feature = "websocket", feature = "quic"))]
-		let (mut probe, mut fallback): (Option<(url::Url, std::pin::Pin<Box<Probe>>)>, Option<url::Url>) = (None, None);
+		let (mut probe, mut fallback): (Option<Probing>, Option<url::Url>) = (None, None);
 		// Mirrors the live session's estimates while it serves.
 		let mut forward: Option<Forward> = None;
 		let mut timer: Option<kio::clock::Sleep> = None;
@@ -1397,10 +1397,14 @@ pub(crate) type Dial = dyn Future<Output = crate::Result<crate::client::Dialed>>
 #[cfg(all(feature = "websocket", feature = "quic"))]
 type Probe = dyn Future<Output = crate::Result<std::pin::Pin<Box<Dial>>>> + Send;
 
+/// The address a probe dials, and the probe in flight.
+#[cfg(all(feature = "websocket", feature = "quic"))]
+type Probing = (url::Url, std::pin::Pin<Box<Probe>>);
+
 /// The live session left the WebSocket fallback: stop probing, and give QUIC its head start
 /// on the next race, since the outage that lost the last one may be over.
 #[cfg(all(feature = "websocket", feature = "quic"))]
-fn left_fallback(probe: &mut Option<(url::Url, std::pin::Pin<Box<Probe>>)>, fallback: &mut Option<url::Url>) {
+fn left_fallback(probe: &mut Option<Probing>, fallback: &mut Option<url::Url>) {
 	*probe = None;
 	if let Some(url) = fallback.take() {
 		crate::websocket::forget(&url);

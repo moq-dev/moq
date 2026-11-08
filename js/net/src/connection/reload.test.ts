@@ -1547,3 +1547,49 @@ test("a WebSocket fallback returns to WebTransport once it is reachable", async 
 		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = originalStream;
 	}
 });
+
+// A WebSocket win is provisional: once the session it carried ends, the redial gives
+// WebTransport its head start again, since the outage that lost the race may be over.
+test("a WebSocket session ending restores WebTransport's head start", async () => {
+	using clock = manual();
+	const originalWebTransport = globalThis.WebTransport;
+	const originalStream = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
+	const url = new URL("https://fallback-ends.example.com/");
+
+	const dials: Instant[] = [];
+	const servers: Promise<Established>[] = [];
+	globalThis.WebTransport = function BlockedWebTransport() {
+		const refused = Promise.reject(new Error("UDP blocked"));
+		refused.catch(() => {});
+		return { ready: refused, closed: refused, close() {} };
+	} as unknown as typeof WebTransport;
+	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = linkedWebSocketStream((socket, protocol) => {
+		dials.push(now());
+		const transport = Session.accept(socket, { protocol }) as unknown as WebTransport;
+		servers.push(transport.ready.then(() => accept(transport, url)));
+	});
+
+	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Milli(0) } });
+	try {
+		for (let i = 0; i < 10 && reload.established.peek()?.transport !== "websocket"; i++) {
+			await clock.advance(Nano.fromMilli(Milli(100)));
+		}
+		const first = servers[0];
+		if (!first) throw new Error("no fallback session");
+		// Let the server's half of the handshake finish before ending it.
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		(await first).abort();
+		const ended = now();
+		for (let i = 0; i < 20 && dials.length < 2; i++) {
+			await clock.advance(Nano.fromMilli(Milli(100)));
+		}
+		const redial = dials[1];
+		if (redial === undefined) throw new Error("never redialed the fallback");
+		expect(Instant.durationSince(redial, ended)).toBeGreaterThanOrEqual(Nano.fromMilli(Milli(500)));
+	} finally {
+		reload.close();
+		for (const server of servers) (await server.catch(() => undefined))?.abort();
+		globalThis.WebTransport = originalWebTransport;
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = originalStream;
+	}
+});

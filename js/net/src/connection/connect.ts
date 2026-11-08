@@ -326,7 +326,7 @@ type SessionProps = {
  * Servers (host and port) the WebSocket fallback dials where WebSocket won the last race, so the
  * next dial there skips QUIC's head start. Both transports still race. The entry is provisional:
  * a WebTransport win or {@link reachable} probe deletes it, since UDP gets through again, and so
- * does the end of the WebSocket session that won, so a redial after an outage gives WebTransport
+ * does the end of the MoQ session the winning WebSocket carried, so a redial after an outage gives WebTransport
  * its head start. Keyed like moq-tokio's: whether UDP reaches a server does not depend on the
  * path or query, which may hold a rotating credential.
  */
@@ -523,8 +523,6 @@ async function connectInner(
 	if (session instanceof Session) {
 		console.debug(show(parse(url)), "connected via WebSocket");
 		websocketWon.add(server);
-		const forget = () => websocketWon.delete(server);
-		void session.closed.then(forget, forget);
 	} else {
 		console.debug(show(parse(url)), "connected via WebTransport");
 		websocketWon.delete(server);
@@ -541,7 +539,12 @@ async function connectInner(
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
 	const won = session instanceof Session && fallbackDial ? fallbackDial : dial;
-	return [await connectTransport(url, session as WebTransport, wiring(won), offered.setup), won];
+	const connection = await connectTransport(url, session as WebTransport, wiring(won), offered.setup);
+	if (session instanceof Session) {
+		const forget = () => websocketWon.delete(server);
+		void connection.closed.then(forget, forget);
+	}
+	return [connection, won];
 }
 
 async function connectTransport(
