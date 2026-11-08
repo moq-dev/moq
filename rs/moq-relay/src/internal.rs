@@ -1673,7 +1673,7 @@ mod tests {
 	#[tokio::test]
 	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
 		let nodes = crate::nodes::Nodes::default();
-		let _connection = nodes.dial("https://relay-b.example/");
+		let _connection = nodes.dial(&crate::cluster::PeerKey::canonicalize("https://relay-b.example/"));
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),

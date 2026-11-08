@@ -21,7 +21,16 @@ use serde_with::serde_as;
 /// internal listener.
 #[derive(Clone, Default)]
 pub struct Registry {
-	inner: Arc<Mutex<HashMap<String, Entry>>>,
+	inner: Arc<Mutex<Sessions>>,
+}
+
+/// Keyed by registration rather than [`Request::id`], so two live sessions that
+/// share an id (reused by a client or a buggy auth path) stay apart and each
+/// guard removes only its own.
+#[derive(Default)]
+struct Sessions {
+	entries: HashMap<u64, Entry>,
+	next: u64,
 }
 
 struct Entry {
@@ -61,7 +70,7 @@ impl Handle {
 /// resolves when a push matches it.
 pub struct Registration {
 	registry: Registry,
-	id: String,
+	key: u64,
 	handle: Handle,
 	seen: AtomicU64,
 	closed: Arc<OnceLock<Wall>>,
@@ -86,7 +95,8 @@ impl Drop for Registration {
 			.inner
 			.lock()
 			.unwrap_or_else(PoisonError::into_inner)
-			.remove(&self.id);
+			.entries
+			.remove(&self.key);
 	}
 }
 
@@ -99,10 +109,12 @@ impl Registry {
 	/// Track an admitted session until the returned guard is dropped.
 	pub fn register(&self, request: Request) -> Registration {
 		let handle = Handle::default();
-		let id = request.id.clone();
 		let closed = Arc::new(OnceLock::new());
-		self.inner.lock().unwrap_or_else(PoisonError::into_inner).insert(
-			id.clone(),
+		let mut sessions = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+		let key = sessions.next;
+		sessions.next += 1;
+		sessions.entries.insert(
+			key,
 			Entry {
 				request,
 				started: kio::clock::wall(),
@@ -110,9 +122,10 @@ impl Registry {
 				handle: handle.clone(),
 			},
 		);
+		drop(sessions);
 		Registration {
 			registry: self.clone(),
-			id,
+			key,
 			handle,
 			seen: AtomicU64::new(0),
 			closed,
@@ -124,6 +137,7 @@ impl Registry {
 		self.inner
 			.lock()
 			.unwrap_or_else(PoisonError::into_inner)
+			.entries
 			.values()
 			.filter(|entry| filter.matches(&entry.request))
 			.map(|entry| View::from_session(&entry.request, entry.started, entry.closed.get().copied()))
@@ -134,10 +148,16 @@ impl Registry {
 	/// currently sit in the table.
 	pub fn revalidate(&self, filter: &Filter) -> Vec<String> {
 		let mut ids = Vec::new();
-		for (id, entry) in self.inner.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+		for entry in self
+			.inner
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.entries
+			.values()
+		{
 			if filter.matches(&entry.request) {
 				entry.handle.wake();
-				ids.push(id.clone());
+				ids.push(entry.request.id.clone());
 			}
 		}
 		ids
@@ -586,6 +606,24 @@ mod tests {
 		let json = serde_json::to_value(&list[0]).unwrap();
 		assert!(json.get("query").is_none());
 		assert!(json.get("token").is_none());
+	}
+
+	/// Two live sessions sharing an id are both listed and nudged, and ending one
+	/// leaves the other registered.
+	#[test]
+	fn a_shared_id_keeps_each_registration_apart() {
+		let registry = Registry::new();
+		let first = registry.register(request("abc", "/one", "127.0.0.1:1"));
+		let second = registry.register(request("abc", "/two", "127.0.0.1:2"));
+		assert_eq!(registry.list(&Filter::default()).len(), 2);
+		assert_eq!(registry.revalidate(&Filter::default()), ["abc", "abc"]);
+
+		drop(first);
+		let list = registry.list(&Filter::default());
+		assert_eq!(list.len(), 1);
+		assert_eq!(list[0].path, "/two");
+		drop(second);
+		assert!(registry.list(&Filter::default()).is_empty());
 	}
 
 	#[tokio::test]
