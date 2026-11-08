@@ -69,7 +69,6 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 
 ## Required
 
-- [moq-boy pause state](/quest/m1/explicit-state/boy-pause.md) - a new viewer always wakes a paused emulator
 - [Publish capture phases](/quest/m1/explicit-state/publish-capture.md) - dismissing the screen-share picker turns sharing off
 - [js/qmux close](/quest/m1/explicit-state/qmux-close.md) - a graceful remote close ends qmux streams cleanly
 - [FFI handle state](/quest/m1/explicit-state/ffi-state.md) - FFI handles hold one state each: video follow under one lock, requests answered once, drivers Cancelled after shutdown
