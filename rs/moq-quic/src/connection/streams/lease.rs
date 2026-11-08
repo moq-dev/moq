@@ -277,7 +277,7 @@ impl Stream<'_> {
 	/// Nothing is evicted while the peer has connection credit left, so while the leased and
 	/// unread bytes of every stream together stay below the connection receive window. A receiver
 	/// whose window exceeds the most its incomplete units can hold never sees an eviction;
-	/// [`CreditStats::evicted`](crate::CreditStats::evicted) counts any that happen.
+	/// [`CreditStats::evicted`](crate::connection::CreditStats::evicted) counts any that happen.
 	///
 	/// Eviction also waits for every stream with data its reader has not leased yet, since that
 	/// reader may be about to free the window, for every reader waiting behind a gap, which a

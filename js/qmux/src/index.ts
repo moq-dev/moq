@@ -11,7 +11,6 @@ export type {
 	SendStreamOptions,
 	SendStreamStats,
 	SessionOptions,
-	StreamCredit,
 	Version,
 } from "./session.ts";
 export { selectSubprotocol } from "./session.ts";

@@ -22,7 +22,11 @@ use tracing::{debug_span, trace};
 use super::crypto::rustls::QuicServerConfig;
 use super::*;
 pub(super) use crate::sim::{Bottleneck, Link, QueueStats};
-use crate::{Duration, Instant, entropy};
+use crate::{
+	Duration, Instant,
+	connection::{Datagrams, Streams},
+	entropy,
+};
 
 pub(super) const DEFAULT_MTU: usize = 1452;
 

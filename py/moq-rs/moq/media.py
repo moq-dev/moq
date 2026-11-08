@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -39,15 +38,13 @@ from moq_ffi import (
     MoqMediaTrackProducer,
     MoqMediaTrackStreamProducer,
     MoqRendition,
+    MoqVideoInit,
 )
 from moq_ffi import MoqDecodeStart as DecodeStart
 from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
 from moq_ffi import MoqVideoHint as VideoHint
-from moq_ffi import (
-    MoqVideoInit as VideoInit,
-)
 from moq_ffi import (
     MoqVideoProperties as VideoProperties,
 )
@@ -80,6 +77,30 @@ class ContainerInit:
         return MoqContainerInit(
             format=self.format, data=self.data, timebase=self.timebase._inner if self.timebase else None
         )
+
+
+@dataclass(frozen=True)
+class VideoInit:
+    """A video codec, its initialization bytes, a label, and hints.
+
+    ``data`` may be empty for a format that resolves in band. ``lower`` is the next lower
+    rendition of the same source, of either producer kind: this track then sits one priority
+    below it, so a bandwidth allocator funds that one first.
+    """
+
+    format: VideoFormat
+    data: bytes
+    label: str | None = None
+    hint: VideoHint | None = None
+    lower: TrackProducer | TrackStreamProducer | None = None
+
+    def _ffi(self) -> MoqVideoInit:
+        lower: MoqMediaProducer | None = None
+        if isinstance(self.lower, TrackProducer):
+            lower = cast(MoqMediaProducer, MoqMediaProducer.TRACK(producer=self.lower._inner))
+        elif isinstance(self.lower, TrackStreamProducer):
+            lower = cast(MoqMediaProducer, MoqMediaProducer.STREAM(producer=self.lower._inner))
+        return MoqVideoInit(format=self.format, data=self.data, label=self.label, hint=self.hint, lower=lower)
 
 
 @dataclass(frozen=True)
@@ -168,21 +189,9 @@ class TrackProducer:
         return cls(MoqMediaTrackProducer.audio(broadcast._inner, target._ffi(), init))
 
     @classmethod
-    def video(
-        cls,
-        broadcast: BroadcastProducer,
-        init: VideoInit,
-        *,
-        target: Target = Named(),
-        lower: TrackProducer | TrackStreamProducer | None = None,
-    ) -> TrackProducer:
-        """Import complete encoded video frames on a named or requested track.
-
-        Pass ``lower``, the next lower rendition of the same source and of either
-        producer kind, to publish this track one priority below it, so a bandwidth
-        allocator funds that one first.
-        """
-        return cls(MoqMediaTrackProducer.video(broadcast._inner, target._ffi(), _lower(init, lower)))
+    def video(cls, broadcast: BroadcastProducer, init: VideoInit, *, target: Target = Named()) -> TrackProducer:
+        """Import complete encoded video frames on a named or requested track."""
+        return cls(MoqMediaTrackProducer.video(broadcast._inner, target._ffi(), init._ffi()))
 
     def __init__(self, inner: MoqMediaTrackProducer) -> None:
         self._inner = inner
@@ -275,19 +284,9 @@ class TrackStreamProducer:
     """
 
     @classmethod
-    def video(
-        cls,
-        broadcast: BroadcastProducer,
-        init: VideoInit,
-        *,
-        target: Target = Named(),
-        lower: TrackProducer | TrackStreamProducer | None = None,
-    ) -> TrackStreamProducer:
-        """Import a video byte stream, inferring frame boundaries.
-
-        ``lower`` is as for :meth:`TrackProducer.video`.
-        """
-        return cls(MoqMediaTrackStreamProducer.video(broadcast._inner, target._ffi(), _lower(init, lower)))
+    def video(cls, broadcast: BroadcastProducer, init: VideoInit, *, target: Target = Named()) -> TrackStreamProducer:
+        """Import a video byte stream, inferring frame boundaries."""
+        return cls(MoqMediaTrackStreamProducer.video(broadcast._inner, target._ffi(), init._ffi()))
 
     def __init__(self, inner: MoqMediaTrackStreamProducer) -> None:
         self._inner = inner
@@ -313,17 +312,6 @@ class TrackStreamProducer:
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
-
-
-def _lower(init: VideoInit, lower: TrackProducer | TrackStreamProducer | None) -> VideoInit:
-    if lower is None:
-        return init
-    init = copy.copy(init)
-    if isinstance(lower, TrackProducer):
-        init.lower = cast(MoqMediaProducer, MoqMediaProducer.TRACK(producer=lower._inner))
-    else:
-        init.lower = cast(MoqMediaProducer, MoqMediaProducer.STREAM(producer=lower._inner))
-    return init
 
 
 def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
