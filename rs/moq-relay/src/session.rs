@@ -243,13 +243,14 @@ impl std::str::FromStr for Remote {
 }
 
 impl Filter {
-	/// Parse the query string both routes take. An unknown field is an error
-	/// naming it, never ignored; `query` is refused the same way.
+	/// Parse the query string both routes take. An unknown or repeated field is
+	/// an error naming it, never ignored; `query` is refused the same way.
 	pub fn from_query(query: Option<&str>) -> Result<Self, Error> {
 		let mut filter = Self::default();
 		let Some(query) = query.filter(|query| !query.is_empty()) else {
 			return Ok(filter);
 		};
+		let mut seen = std::collections::HashSet::new();
 		for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
 			match key.as_ref() {
 				"id" => filter.id = Some(value.into_owned()),
@@ -290,6 +291,9 @@ impl Filter {
 				"tls.fingerprint" => filter.tls_fingerprint = Some(value.into_owned()),
 				"tls.issuer" => filter.tls_issuer = Some(value.into_owned()),
 				other => return Err(Error::Unknown(other.to_string())),
+			}
+			if !seen.insert(key.clone()) {
+				return Err(Error::Repeated(key.into_owned()));
 			}
 		}
 		Ok(filter)
@@ -422,6 +426,8 @@ pub enum Error {
 		/// The value that did not parse.
 		value: String,
 	},
+	/// A field given more than once, which would otherwise keep only the last.
+	Repeated(String),
 }
 
 impl std::fmt::Display for Error {
@@ -429,6 +435,7 @@ impl std::fmt::Display for Error {
 		match self {
 			Self::Unknown(field) => write!(f, "unknown filter field: {field}"),
 			Self::Invalid { field, value } => write!(f, "invalid {field}: {value}"),
+			Self::Repeated(field) => write!(f, "repeated filter field: {field}"),
 		}
 	}
 }
@@ -531,6 +538,10 @@ mod tests {
 	fn query_and_unknown_fields_are_refused() {
 		assert!(matches!(Filter::from_query(Some("query=jwt")), Err(Error::Unknown(field)) if field == "query"));
 		assert!(matches!(Filter::from_query(Some("foo=bar")), Err(Error::Unknown(field)) if field == "foo"));
+		assert!(matches!(Filter::from_query(Some("id=a&id=a")), Err(Error::Repeated(field)) if field == "id"));
+		assert!(
+			matches!(Filter::from_query(Some("tls.name=a&node=b&tls.name=c")), Err(Error::Repeated(field)) if field == "tls.name")
+		);
 	}
 
 	#[test]

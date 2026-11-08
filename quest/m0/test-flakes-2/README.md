@@ -145,10 +145,11 @@ SUBSCRIBE_FINISH arrived before its FIN aborted with the session's error. Its
 datagrams now finish whenever the stream track's settled end survives the abort,
 fixed by [moq-dev/moq#8157](https://github.com/moq-dev/moq/pull/8157).
 
-Added 2026-11-07 (maintainer, /quest-complete): moq-relay's
-`embed::worker_tokio_custom_route_and_quic`, which failed
-[moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138)'s Check with "the
-owner's sockets outlived `run`". It is `#[ignore]`d until its child fixes it.
+moq-relay's `embed::worker_tokio_custom_route_and_quic` was never load-bound
+either. Its socket-ownership check matched the HTTP and QUIC ports without
+their protocol, so the test's own QUIC client, still draining, counted as the
+relay's whenever its UDP port shared the HTTP listener's TCP port number.
+Fixed by [moq-dev/moq#8236](https://github.com/moq-dev/moq/pull/8236).
 
 `sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
 landing just after the dispatcher's `wait -n` returned left Bash marking the
@@ -187,12 +188,23 @@ Added 2026-11-07 (maintainer's standing rule that flakes join this epic):
 A subscriber FIN during the reply write's budget yield resets the stream. It is
 quarantined with `test.skip` until its child fixes it.
 
+Added 2026-11-07 (maintainer, /quest-complete): moq-relay's
+`socket_auth::a_forged_dial_never_connects`, which failed
+[moq-dev/moq#8204](https://github.com/moq-dev/moq/pull/8204)'s Check when
+mallory's request for bob's endpoint synced before his announce arrived. It is
+quarantined with `#[ignore]` until its child fixes it.
+
+Added 2026-11-07 (maintainer, /quest-complete): moq-uring's qlog accounting
+test, which spins a fixed count waiting on a background thread, from
+[moq-dev/moq#8208](https://github.com/moq-dev/moq/pull/8208)'s follow-ups.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [moq-gst's stale-completion sink test survives load](/quest/m0/test-flakes-2/gst-stale-completion.md) - `a_stale_completion_cannot_end_the_next_publication` passes under stress, and its `#[ignore]` is removed
-- [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
 - [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
 - [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
+- [moq-relay's forged-dial test waits for bob's endpoint](/quest/m0/test-flakes-2/forged-dial-announce.md) - `a_forged_dial_never_connects` requests bob's endpoint only after its announce reaches mallory, and its `#[ignore]` is removed
+- [moq-uring's qlog accounting test waits on the accounting](/quest/m0/test-flakes-2/qlog-staging-spin.md) - `an_open_trace_accounts_for_staging_and_close` waits for the accounting, not 10,000 spins

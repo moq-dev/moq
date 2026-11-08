@@ -1320,6 +1320,9 @@ struct RouteEntry {
 	/// The absolute patterns the announcing producer may serve. The prefix is
 	/// only the wire-visible covering claim; this scope remains authoritative.
 	scope: Patterns,
+	/// The absolute subtrees the announcing producer may not serve, even beneath
+	/// a covering prefix.
+	excluded: Arc<[Path]>,
 	hops: Hops,
 	cost: Cost,
 	/// The auth the request advertising the route carries; see [`RouteInfo::auth`].
@@ -1385,6 +1388,11 @@ struct Takeover {
 }
 
 impl RouteEntry {
+	/// Whether the announcing producer may serve the absolute `path`.
+	fn authorizes(&self, path: &Path) -> bool {
+		self.scope.matches(path.as_str()) && !self.excluded.iter().any(|excluded| path.has_prefix(excluded))
+	}
+
 	/// Whether cursors see the entry and requests resolve through it.
 	fn live(&self) -> bool {
 		self.advertised && !self.stale
@@ -2024,9 +2032,9 @@ impl OriginScope {
 	}
 
 	/// Whether this view may publish at the absolute `prefix`: a mount is read-only,
-	/// so nothing is published at or beneath one.
+	/// so nothing is published at or beneath one, nor in an excluded subtree.
 	fn publishes(&self, prefix: &Path) -> bool {
-		self.mount(prefix).is_none()
+		self.mount(prefix).is_none() && !self.excluded.iter().any(|excluded| prefix.has_prefix(excluded))
 	}
 
 	/// Whether this view reaches the absolute `path`.
@@ -2497,6 +2505,15 @@ impl Producer {
 		self.exact(full, options, None)
 	}
 
+	/// Whether this handle could publish a route at the absolute `full` prefix: its
+	/// scope overlaps the subtree (as a forwarded claim is admitted, a covering prefix
+	/// serving the permitted descendants), and no mount or excluded subtree covers it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn publishable(&self, full: &Path) -> bool {
+		Pattern::subtree(full.as_str()).is_ok_and(|subtree| self.scope.allowed.overlaps(&subtree))
+			&& self.scope.publishes(full)
+	}
+
 	/// An exact route at the absolute `full` path, answering `request` on its first
 	/// announce when it is a job's.
 	fn exact(&self, full: Path, options: RouteOptions, request: Option<Request>) -> Result<Route, Error> {
@@ -2526,6 +2543,7 @@ impl Producer {
 			requested: full.clone(),
 			prefixes: vec![(full.clone(), claim)],
 			scope: self.scope.allowed.clone(),
+			excluded: self.scope.excluded.clone(),
 			local: true,
 			link: self.link,
 			preference: Preference::default(),
@@ -2813,6 +2831,16 @@ impl Producer {
 		})
 	}
 
+	/// A clone that never reaches the subtree at `prefix`, relative to this root:
+	/// nothing is published or announced at or beneath it, and a consumer derived
+	/// from the result does not see it. [`allowed`](Self::allowed) is unchanged.
+	pub fn exclude(&self, prefix: impl TryInto<Path, Error: Into<Error>>) -> Result<Self, Error> {
+		let prefix = self.root.join(&path::convert(prefix)?)?;
+		let mut producer = self.clone();
+		producer.scope.excluded = self.scope.excluded.iter().cloned().chain([prefix]).collect();
+		Ok(producer)
+	}
+
 	/// Returns a producer that reads the subtree at `at` from `target` instead.
 	///
 	/// Both are relative to this producer's root. A consumer derived from the
@@ -2919,6 +2947,8 @@ struct Announcing {
 	prefixes: Vec<(Path, Pattern)>,
 	/// The absolute paths the producer is authorized to serve.
 	scope: Patterns,
+	/// The absolute subtrees the producer may not serve.
+	excluded: Arc<[Path]>,
 	local: bool,
 	/// The link the producer's routes arrive on.
 	link: Link,
@@ -2945,6 +2975,7 @@ impl Announcing {
 			requested: requested.clone(),
 			prefixes: vec![(requested, claim)],
 			scope: producer.scope.allowed.clone(),
+			excluded: producer.scope.excluded.clone(),
 			local: false,
 			link: producer.link,
 			preference: producer.preference,
@@ -2987,6 +3018,7 @@ impl Announcing {
 				epoch: route.epoch,
 				prefix: prefix.clone(),
 				scope: self.scope.clone(),
+				excluded: self.excluded.clone(),
 				hops: route.hops.clone(),
 				cost: route.cost,
 				auth: route.auth.clone(),
@@ -5746,7 +5778,7 @@ impl RouteTable {
 				.entries
 				.iter()
 				.filter(|entry| entry.live())
-				.filter(|entry| entry.scope.matches(path.as_str()))
+				.filter(|entry| entry.authorizes(path))
 				.filter(|entry| horizon.admits(entry))
 				.filter(|entry| !excluded.contains(&entry.id))
 				.filter(|entry| only(entry))
@@ -6450,7 +6482,7 @@ impl OriginState {
 			.routes
 			.covering(prefix)
 			.find(|entry| entry.live() && entry.server.as_ref().is_some_and(|other| other.same_channel(server)))?;
-		if !entry.scope.matches(prefix.as_str()) {
+		if !entry.authorizes(prefix) {
 			return None;
 		}
 		Some(Takeover {
@@ -11808,6 +11840,30 @@ mod tests {
 		// A repeat request shares the served broadcast instead of re-asking.
 		let again = consumer.request("room/alice", None).await.expect("resolves");
 		assert!(again.is_clone(&resolved));
+	}
+
+	/// An excluded producer can neither publish into the excluded subtree nor serve
+	/// a request there through a covering prefix route.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn excluded_subtree_is_never_published_or_served() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let excluded = producer.exclude(".stats").unwrap();
+		assert!(excluded.route(".stats/node", RouteOptions::default()).is_err());
+		assert!(excluded.route_prefix(".stats", RouteOptions::default()).is_err());
+
+		let server = excluded.route_prefix("", RouteOptions::default()).unwrap();
+		let Err(err) = consumer.request(".stats/evil", None).await else {
+			panic!("excluded path served")
+		};
+		assert!(matches!(err, Error::Unroutable), "got {err:?}");
+
+		let pending = consumer.request("room/alice", None);
+		let request = queued(&server).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		request.serve(broadcast::Info::new().produce());
+		pending.await.expect("resolves outside the excluded subtree");
 	}
 
 	#[kio::test]
