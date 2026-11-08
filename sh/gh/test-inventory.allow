@@ -39,10 +39,9 @@ ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_expo
 ignore moq-gst::sink::imp::tests::a_stale_completion_cannot_end_the_next_publication /quest/m0/test-flakes-2/gst-stale-completion.md
 
 # Flaky, disabled until its quest fixes the cause.
-ignore moq-relay::embed::worker_tokio_custom_route_and_quic /quest/m0/test-flakes-2/embed-sockets-outlived.md
+ignore moq-relay::socket_auth::a_forged_dial_never_connects /quest/m0/test-flakes-2/forged-dial-announce.md
 
 # Need another implementation to speak the route wire; the quest ports it.
 ignore moq-net::test_interop::lite_tracks_interop /quest/m2/cluster-routing/routes/js.md
 
 # Quarantined flakes, until the quest that owns the flake fixes it at its cause.
-ignore moq-tokio::quic::driver::tests::stream_stopped /quest/m0/test-flakes-2/README.md

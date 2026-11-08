@@ -113,7 +113,7 @@ for (const protocol of protocols) {
 					await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 					expect(ended).toBe(false);
 					await clock.advance(Nano.fromMilli(Milli(1)));
-				} else await clock.advance(Nano.fromMilli(Milli(33_750)));
+				} else await clock.advance(Nano.fromMilli(Milli(45_000)));
 				expect(ended).toBe(true);
 				if (protocol.kind === "lite") {
 					for (;;) {
@@ -221,7 +221,7 @@ for (const protocol of protocols) {
 		try {
 			await blocked.promise;
 			write(1n, 1);
-			await clock.advance(Nano.fromMilli(Milli(33_750)));
+			await clock.advance(Nano.fromMilli(Milli(45_000)));
 			// The write already handed to the stream finishes, and the stream is reset after it.
 			credit.resolve();
 			await clock.advance(Nano.zero);

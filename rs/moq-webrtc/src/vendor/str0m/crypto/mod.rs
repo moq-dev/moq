@@ -26,9 +26,11 @@ pub(crate) fn test_default_provider() -> &'static CryptoProvider {
 	TEST_PROVIDER.get_or_init(from_feature_flags)
 }
 
-/// The default crypto provider: aws-lc-rs, the only backend kept in the vendored copy.
+/// The default crypto provider: rind, the only backend kept in the vendored copy.
+///
+/// Panics on a CPU rind refuses, so moq-webrtc checks the CPU before building an `Rtc`.
 pub fn from_feature_flags() -> CryptoProvider {
-	crate::vendor::str0m_aws_lc_rs::default_provider()
+	crate::vendor::str0m_rind::default_provider().expect("rind refuses this CPU")
 }
 
 mod finger;

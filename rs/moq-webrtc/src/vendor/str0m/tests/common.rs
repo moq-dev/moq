@@ -444,11 +444,11 @@ pub fn init_crypto_default() {
 	crate::vendor::str0m::crypto::from_feature_flags().install_process_default();
 }
 
-/// Create a crypto provider from a string name. Only "aws-lc-rs" is vendored.
+/// Create a crypto provider from a string name. Only "rind" is vendored.
 fn get_crypto_provider_by_name(name: &str) -> CryptoProvider {
 	match name {
-		"aws-lc-rs" | "aws" => crate::vendor::str0m_aws_lc_rs::default_provider(),
-		_ => panic!("Unknown or unavailable crypto provider '{name}'. Available providers: [aws-lc-rs]"),
+		"rind" => crate::vendor::str0m_rind::default_provider().unwrap(),
+		_ => panic!("Unknown or unavailable crypto provider '{name}'. Available providers: [rind]"),
 	}
 }
 
