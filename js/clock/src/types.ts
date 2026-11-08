@@ -63,7 +63,13 @@ export class Duration {
 			secs += 1;
 			rest -= perSec;
 		}
-		return Duration.#carry(secs, rest * (NANOS_PER_SEC / perSec));
+		let nanos = Math.round(rest * (NANOS_PER_SEC / perSec));
+		if (nanos >= NANOS_PER_SEC) {
+			secs += 1;
+			nanos -= NANOS_PER_SEC;
+		}
+		if (!Number.isFinite(secs)) throw new RangeError(`invalid duration: ${value}`);
+		return new Duration(secs, nanos);
 	}
 
 	// Whole seconds plus any nanoseconds, possibly out of range or fractional seconds, rounded to

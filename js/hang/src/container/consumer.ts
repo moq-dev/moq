@@ -1096,24 +1096,27 @@ export class Consumer {
 		const ranges: BufferedRanges = [];
 
 		let prev: Group | undefined;
+		// The open range, its end in microseconds: only the merged ranges become Durations, not
+		// every group on every update.
+		let start: Duration | undefined;
+		let end = 0;
 
 		for (const group of this.#groups) {
 			const first = group.frames.at(0);
 			if (!first || group.latest === undefined) continue;
 
-			const start = first.timestamp;
-			const end = Duration.micros(group.latest);
-
-			const last = ranges.at(-1);
 			const contiguous = prev?.consumer.done && prev.consumer.sequence + 1n === group.consumer.sequence;
-			if (last && (last.end.ge(start) || contiguous)) {
-				last.end = last.end.max(end);
+			if (start !== undefined && (end >= first.timestamp.asMicros() || contiguous)) {
+				end = Math.max(end, group.latest);
 			} else {
-				ranges.push({ start, end });
+				if (start !== undefined) ranges.push({ start, end: Duration.micros(end) });
+				start = first.timestamp;
+				end = group.latest;
 			}
 
 			prev = group;
 		}
+		if (start !== undefined) ranges.push({ start, end: Duration.micros(end) });
 
 		this.#buffered.set(ranges);
 	}
