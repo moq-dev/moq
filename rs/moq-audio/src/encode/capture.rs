@@ -781,7 +781,7 @@ mod tests {
 					assert!(matches!(result, Err(Error::Capture(message)) if message == "device lost"));
 				}
 				assert!(
-					matches!(publication.state().status(), Status::Failed(error) if matches!(&**error, Error::Capture(message) if message == "device lost"))
+					matches!(publication.state().status(), Status::Failed(error) if matches!(error, Error::Capture(message) if message == "device lost"))
 				);
 				assert!(publication.is_finished());
 			})
@@ -860,7 +860,7 @@ mod tests {
 					samples.try_push(Err(Error::Capture("device lost".into()))).unwrap();
 					status(&mut publication, |status| matches!(status, Status::Failed(_))).await;
 					assert!(
-						matches!(publication.state().status(), Status::Failed(error) if matches!(&**error, Error::Capture(message) if message == "device lost"))
+						matches!(publication.state().status(), Status::Failed(error) if matches!(error, Error::Capture(message) if message == "device lost"))
 					);
 					// Failure is terminal, but the publication still serves what it retained.
 					assert!(!publication.is_finished());
