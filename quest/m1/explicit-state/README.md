@@ -71,7 +71,6 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 - [moq-boy pause state](/quest/m1/explicit-state/boy-pause.md) - a new viewer always wakes a paused emulator
 - [Transport close](/quest/m1/explicit-state/transport-close.md) - connection status ends with its error, and every Rust QUIC backend agrees when a connection is closed
 - [Video codec drains](/quest/m1/explicit-state/video-drain.md) - a hardware codec whose drain fails is ready for input again or terminally failed, never left stuck
-- [Watch playback phases](/quest/m1/explicit-state/watch-playback.md) - watch counts a stall only while a rendition plays
 - [Publish capture phases](/quest/m1/explicit-state/publish-capture.md) - dismissing the screen-share picker turns sharing off
 - [js/qmux close](/quest/m1/explicit-state/qmux-close.md) - a graceful remote close ends qmux streams cleanly
 - [FFI handle state](/quest/m1/explicit-state/ffi-state.md) - FFI handles hold one state each: video follow under one lock, requests answered once, drivers Cancelled after shutdown
