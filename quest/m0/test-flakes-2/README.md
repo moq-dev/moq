@@ -192,7 +192,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [moq-gst's stale-completion sink test survives load](/quest/m0/test-flakes-2/gst-stale-completion.md) - `a_stale_completion_cannot_end_the_next_publication` passes under stress, and its `#[ignore]` is removed
 - [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
 - [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
 - [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
