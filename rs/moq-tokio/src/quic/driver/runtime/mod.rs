@@ -122,6 +122,7 @@ impl Slot {
 	}
 
 	/// Send through `socket` from now on, returning the one it replaces
+	#[cfg(test)]
 	pub(crate) fn replace(&self, socket: Box<dyn AsyncUdpSocket>) -> Option<Box<dyn AsyncUdpSocket>> {
 		let previous = self.socket.write().unwrap().replace(socket);
 		// A sender blocked on the old socket would otherwise wait on it forever.

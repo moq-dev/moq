@@ -1825,9 +1825,12 @@ export class Producer {
 	 * sequences are then final: creating one throws {@link Skipped}. Appending alone never leaves
 	 * such a gap; one left by out-of-order {@link createGroup} calls is what it names.
 	 *
-	 * The broadcast remembers nothing of an earlier producer of the name, so a replacement
-	 * starts at 0. Since a name always means the same content, a replacement continues past
-	 * its predecessor's groups with {@link createGroup}.
+	 * The same broadcast, track, and group sequence always name the same content, and nothing
+	 * checks it: the broadcast remembers nothing of an earlier producer of the name, so a
+	 * replacement starts at 0. A recreated track, or a restarted publisher keeping its instance,
+	 * continues past its predecessor's groups with {@link createGroup}, or uses a new track name
+	 * or instance. Reusing a sequence only corrupts this broadcast for its readers. Datagram
+	 * sequences name no cached content and are exempt.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
 	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
