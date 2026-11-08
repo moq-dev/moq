@@ -351,9 +351,10 @@ impl Buffer {
 
 	/// End the open run, so its fragment can go out.
 	fn close(&mut self) {
-		if let Buffer::Open(batch) = std::mem::take(self) {
-			*self = Buffer::Closed(batch);
-		}
+		*self = match std::mem::take(self) {
+			Buffer::Open(batch) => Buffer::Closed(batch),
+			buffer => buffer,
+		};
 	}
 
 	fn take(&mut self) -> Option<Batch> {
@@ -476,9 +477,10 @@ impl Fmp4Track {
 
 	/// The source signalled end-of-track.
 	fn end(&mut self) {
-		if let Phase::Reading(subscription) = std::mem::replace(&mut self.phase, Phase::Stopped) {
-			self.phase = Phase::Ended(subscription);
-		}
+		self.phase = match std::mem::replace(&mut self.phase, Phase::Stopped) {
+			Phase::Reading(subscription) => Phase::Ended(subscription),
+			phase => phase,
+		};
 	}
 
 	/// The rendition left the catalog after the init: end the subscription, keeping where
@@ -1579,6 +1581,17 @@ mod tests {
 
 	/// A frame that opens a group. Every group starts with a keyframe, so this is what
 	/// the far side of a group boundary looks like to `infer_missing_durations`.
+	// A rendition moving off a track whose group already closed keeps that fragment.
+	#[test]
+	fn closing_a_closed_buffer_keeps_its_frames() {
+		let mut buffer = Buffer::Empty;
+		buffer.push(group_start(0));
+		buffer.close();
+		buffer.close();
+		assert!(buffer.is_closed());
+		assert_eq!(buffer.take().map(|batch| batch.frames.len()), Some(1));
+	}
+
 	fn group_start(timestamp_us: u64) -> Frame {
 		Frame {
 			keyframe: true,
