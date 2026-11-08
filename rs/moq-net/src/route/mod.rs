@@ -276,39 +276,22 @@ impl Peer {
 	/// claim lies within what this node asked it for and within its scope. A route
 	/// reaches an origin node, not each of its claims.
 	fn carries(&self, claim: &Path) -> bool {
-		carries(
-			self.asked.as_ref(),
-			self.link.scope.as_ref().map(|scope| &scope.regions[..]),
-			claim,
-		)
-	}
-
-	fn carried(&self) -> Carried {
-		Carried {
-			asked: self.asked.clone(),
-			regions: self.link.scope.as_ref().map(|scope| scope.regions.clone()),
-		}
+		self.asked.as_ref().is_none_or(|asked| within(claim, asked))
+			&& (self.link.scope.as_ref()).is_none_or(|scope| scope.regions.iter().any(|region| within(claim, region)))
 	}
 }
 
-/// Whether `claim` lies within the prefix `asked` of a neighbor and within its scope's
-/// `regions`, either unbounded when `None`.
-fn carries(asked: Option<&Path>, regions: Option<&[Path]>, claim: &Path) -> bool {
-	asked.is_none_or(|asked| within(claim, asked))
-		&& regions.is_none_or(|regions| regions.iter().any(|region| within(claim, region)))
-}
-
-/// Which claims one route can carry; see [`Router::carried`].
+/// Which claims one unscoped route can carry: those within the prefix this node asked
+/// its neighbor for, or every claim when unset. See [`Router::carried`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Carried {
 	asked: Option<Path>,
-	regions: Option<Vec<Path>>,
 }
 
 impl Carried {
 	/// Whether a claim at `claim` goes through this route.
 	pub fn carries(&self, claim: &Path) -> bool {
-		carries(self.asked.as_ref(), self.regions.as_deref(), claim)
+		self.asked.as_ref().is_none_or(|asked| within(claim, asked))
 	}
 }
 
@@ -901,17 +884,21 @@ impl<N: Key, A: Clone + Eq> Router<N, A> {
 			.collect()
 	}
 
-	/// What each usable feasible route to `id` can carry, as [`Self::routes`] filters
-	/// it per claim. Empty for an identity this node serves itself or has no usable
-	/// route to.
+	/// What each usable feasible route to `id` through an unscoped neighbor can carry,
+	/// as [`Self::routes`] filters it per claim. A scoped neighbor is left out: the
+	/// session serves only what its permit's limit admits, which its regions only
+	/// bound. Empty for an identity this node serves itself or has no such route to.
 	pub fn carried(&self, id: Id) -> Vec<Carried> {
 		if self.origins.contains_key(&id) {
 			return Vec::new();
 		}
 		(self.rx.get(&id).into_iter().flatten())
 			.filter(|(_, entry)| !entry.held && self.feasible(id, entry.advert))
-			.filter(|(next, entry)| add(entry.advert.metric, self.neighbors[*next].link.cost).is_some())
-			.map(|(next, _)| self.neighbors[next].carried())
+			.map(|(next, entry)| (&self.neighbors[next], entry))
+			.filter(|(peer, entry)| peer.link.scope.is_none() && add(entry.advert.metric, peer.link.cost).is_some())
+			.map(|(peer, _)| Carried {
+				asked: peer.asked.clone(),
+			})
 			.collect()
 	}
 

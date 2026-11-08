@@ -843,6 +843,33 @@ mod tests {
 		assert!(known.read().epoch() > epoch);
 	}
 
+	/// A scoped neighbor serves only what its permit admits, which its regions only
+	/// bound, so its routes name nothing, even by the qualified identity's own hop.
+	#[test]
+	fn known_leaves_out_a_scoped_route() {
+		let known = kio::Shared::<Known>::default();
+		let (origin, relay) = (Node::new(1, 1), Node::publishing(2, 2, known.clone()));
+		let qualify = super::super::qualifier([7; 32]);
+		let scoped = Link {
+			scope: Some(super::super::Scope {
+				regions: vec![p("live")],
+				qualify: qualify.clone(),
+			}),
+			..Link::default()
+		};
+		let answer = origin.answer(Link::default(), p("live")).unwrap();
+		let receive = relay.receive(scoped, p("live")).unwrap();
+		origin.own(p("live/x"), Some(claim(&Instance::random(), 5)), None);
+		pump(&answer, &receive);
+		assert!(
+			!served(outputs(&receive)).is_empty(),
+			"the scoped route serves the claim"
+		);
+		let mut chain = crate::Hops::new();
+		chain.push(hop(qualify(1) | QUALIFIED)).unwrap();
+		assert!(!known.read().names(&chain, &p("live/x")));
+	}
+
 	#[test]
 	fn a_claim_is_served_through_the_stream_its_route_arrived_on() {
 		let instance = Instance::random();
