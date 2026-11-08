@@ -208,7 +208,6 @@ quests that require them.
 - [Bus writes land at a bus position](/quest/m2/bus-positioned-write.md) - callers sync audio to video without copying the bus's private latency, before the cut first publishes `bus`
 - [A mix-minus removes several sources](/quest/m2/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
 - [Drop moq-auth's iroh transport](/quest/m2/auth-drop-iroh.md) - this breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
-- [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - the catalog's new `warmup` contract is settled before the cut publishes it
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [Finishing a producer returns a Finished handle](/quest/m2/finished-handle.md) - `finish(self)` consumes moq-net's and the media crates' producers, so appending after finish doesn't compile
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
