@@ -199,6 +199,10 @@ Added 2026-11-07 (maintainer, /quest-complete): moq-uring's qlog accounting
 test, which spins a fixed count waiting on a background thread, from
 [moq-dev/moq#8208](https://github.com/moq-dev/moq/pull/8208)'s follow-ups.
 
+Added 2026-11-08 (maintainer, /quest-complete): `js/net`'s widened max-age
+re-drop test, which asserts on a 500 ms wall-clock deadline, from
+[moq-dev/moq#8230](https://github.com/moq-dev/moq/pull/8230).
+
 Public API: none. Wire: none.
 
 ## Required
@@ -206,3 +210,4 @@ Public API: none. Wire: none.
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [moq-relay's forged-dial test waits for bob's endpoint](/quest/m0/test-flakes-2/forged-dial-announce.md) - `a_forged_dial_never_connects` requests bob's endpoint only after its announce reaches mallory, and its `#[ignore]` is removed
 - [moq-uring's qlog accounting test waits on the accounting](/quest/m0/test-flakes-2/qlog-staging-spin.md) - `an_open_trace_accounts_for_staging_and_close` waits for the accounting, not 10,000 spins
+- [js/net's widened max-age re-drop test runs on a mocked clock](/quest/m0/test-flakes-2/widened-max-age-wall.md) - the lite-07 re-drop case proves itself on a `Manual` clock, not a 500 ms wall-clock deadline
