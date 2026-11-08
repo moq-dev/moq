@@ -12,16 +12,16 @@ describe("Timeline", () => {
 	test("offsets file timestamps onto the wall clock", () => {
 		const timeline = new Timeline(ZERO, 10);
 
-		expect(timeline.at(micro(0), 0)).toEqual(ZERO);
-		expect(timeline.at(micro(2_500_000), 0)).toEqual(at(3_500_000));
+		expect(timeline.at(0, 0)).toEqual(ZERO);
+		expect(timeline.at(2_500_000, 0)).toEqual(at(3_500_000));
 	});
 
 	test("shifts each loop by the file duration", () => {
 		const timeline = new Timeline(ZERO, 10);
 
-		expect(timeline.at(micro(0), 1)).toEqual(at(11_000_000));
-		expect(timeline.at(micro(0), 3)).toEqual(at(31_000_000));
-		expect(timeline.at(micro(4_000_000), 2)).toEqual(at(25_000_000));
+		expect(timeline.at(0, 1)).toEqual(at(11_000_000));
+		expect(timeline.at(0, 3)).toEqual(at(31_000_000));
+		expect(timeline.at(4_000_000, 2)).toEqual(at(25_000_000));
 	});
 
 	// The encoder rejects a timestamp that goes backwards, so the wrap has to stay monotonic even
@@ -29,8 +29,8 @@ describe("Timeline", () => {
 	test("stays monotonic across a wrap", () => {
 		const timeline = new Timeline(ZERO, 10);
 
-		const endOfLoop = timeline.at(micro(9_900_000), 0);
-		const startOfNext = timeline.at(micro(0), 1);
+		const endOfLoop = timeline.at(9_900_000, 0);
+		const startOfNext = timeline.at(0, 1);
 
 		expect(startOfNext.gt(endOfLoop)).toBe(true);
 	});
@@ -45,7 +45,17 @@ describe("Timeline", () => {
 		const timeline = new Timeline(ZERO, duration);
 
 		expect(timeline.loops).toBe(false);
-		expect(timeline.at(micro(5_000_000), 0)).toEqual(at(6_000_000));
+		expect(timeline.at(5_000_000, 0)).toEqual(at(6_000_000));
+	});
+
+	test("keeps a negative file timestamp signed until it lands on the clock", () => {
+		const timeline = new Timeline(ZERO, 10);
+
+		// Audio priming an edit list shifts before zero lands before the anchor, not at an error.
+		expect(timeline.at(-20_000, 0)).toEqual(at(980_000));
+		expect(timeline.at(-20_000, 1)).toEqual(at(10_980_000));
+		// Past the clock's origin it saturates there.
+		expect(timeline.at(-2_000_000, 0)).toEqual(Instant.ZERO);
 	});
 
 	test("loops on a usable duration", () => {
@@ -58,7 +68,7 @@ describe("Timeline", () => {
 		expect(timeline.position(at(500_000))).toEqual({ timestamp: micro(0), loop: 0 });
 		expect(timeline.position(at(3_500_000))).toEqual({ timestamp: micro(2_500_000), loop: 0 });
 		expect(timeline.position(at(26_000_000))).toEqual({ timestamp: micro(5_000_000), loop: 2 });
-		expect(timeline.position(timeline.at(micro(4_000_000), 3))).toEqual({ timestamp: micro(4_000_000), loop: 3 });
+		expect(timeline.position(timeline.at(4_000_000, 3))).toEqual({ timestamp: micro(4_000_000), loop: 3 });
 		expect(new Timeline(ZERO, 0).position(at(26_000_000))).toEqual({ timestamp: micro(25_000_000), loop: 0 });
 	});
 });

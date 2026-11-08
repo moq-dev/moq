@@ -11,6 +11,8 @@ function refuse(what: string): never {
 // compare them by value; a private field is invisible to them, so every pair would match.
 /** @internal */
 export const VALUE: unique symbol = Symbol("clock value");
+/** @internal */
+export const NANOS: unique symbol = Symbol("clock nanos");
 
 // Package-private bridges for backends that count in plain numbers.
 /** @internal */
@@ -22,144 +24,190 @@ export let wallOf: (unixMillis: number) => Wall;
 /** @internal */
 export let wallMillis: (at: Wall) => number;
 
+const NANOS_PER_SEC = 1_000_000_000;
+
 /**
  * A nonnegative span of time, mirroring Rust's `std::time::Duration`.
  *
  * Build one with a unit (`Duration.millis(5)`) and read it with one (`asMillis()`). It never
  * converts to a number implicitly: arithmetic, `<`, and `JSON.stringify` throw.
+ *
+ * Whole seconds and the nanoseconds past them are held apart, as Rust holds them, so a whole
+ * number of any unit converts back exactly, such as microseconds since the Unix epoch.
  */
 export class Duration {
 	/** No time at all. */
-	static readonly ZERO: Duration = new Duration(0);
+	static readonly ZERO: Duration = new Duration(0, 0);
 
-	/** @internal Nanoseconds. */
+	/** @internal Whole seconds. */
 	readonly [VALUE]: number;
+	/** @internal Nanoseconds past the whole seconds, in `[0, 1e9)`. */
+	readonly [NANOS]: number;
 	declare private readonly kind: "duration";
 
-	private constructor(nanos: number) {
-		this[VALUE] = nanos;
+	private constructor(secs: number, nanos: number) {
+		this[VALUE] = secs;
+		this[NANOS] = nanos;
+	}
+
+	// `value` units of which `perSec` make a second, split without rounding a whole count.
+	static #unit(value: number, perSec: number): Duration {
+		checked(value, "duration");
+		let secs = Math.floor(value / perSec);
+		let rest = value - secs * perSec;
+		if (rest < 0) {
+			secs -= 1;
+			rest += perSec;
+		} else if (rest >= perSec) {
+			secs += 1;
+			rest -= perSec;
+		}
+		return Duration.#carry(secs, rest * (NANOS_PER_SEC / perSec));
+	}
+
+	// Whole seconds plus any nanoseconds, possibly out of range or fractional seconds.
+	static #carry(secs: number, nanos: number): Duration {
+		let whole = Math.floor(secs);
+		let rest = (secs - whole) * NANOS_PER_SEC + nanos;
+		const carry = Math.floor(rest / NANOS_PER_SEC);
+		whole += carry;
+		rest -= carry * NANOS_PER_SEC;
+		if (rest >= NANOS_PER_SEC) {
+			whole += 1;
+			rest -= NANOS_PER_SEC;
+		} else if (rest < 0) {
+			whole -= 1;
+			rest += NANOS_PER_SEC;
+		}
+		if (!Number.isFinite(whole) || !Number.isFinite(rest) || whole < 0) {
+			throw new RangeError(`invalid duration: ${secs}s + ${nanos}ns`);
+		}
+		return new Duration(whole, rest);
 	}
 
 	/** A duration of `value` nanoseconds; throws a `RangeError` unless finite and nonnegative. */
 	static nanos(value: number): Duration {
-		return new Duration(checked(value, "duration"));
+		return Duration.#unit(value, NANOS_PER_SEC);
 	}
 
 	/** A duration of `value` microseconds; throws a `RangeError` unless finite and nonnegative. */
 	static micros(value: number): Duration {
-		return new Duration(checked(value * 1_000, "duration"));
+		return Duration.#unit(value, 1_000_000);
 	}
 
 	/** A duration of `value` milliseconds; throws a `RangeError` unless finite and nonnegative. */
 	static millis(value: number): Duration {
-		return new Duration(checked(value * 1_000_000, "duration"));
+		return Duration.#unit(value, 1_000);
 	}
 
 	/** A duration of `value` seconds; throws a `RangeError` unless finite and nonnegative. */
 	static secs(value: number): Duration {
-		return new Duration(checked(value * 1_000_000_000, "duration"));
+		return Duration.#unit(value, 1);
 	}
 
-	/** The duration in nanoseconds, possibly fractional. */
+	/** The duration in nanoseconds, possibly fractional; past 2^53 ns (about 104 days) it rounds. */
 	asNanos(): number {
-		return this[VALUE];
+		return this[VALUE] * NANOS_PER_SEC + this[NANOS];
 	}
 
 	/** The duration in microseconds, possibly fractional. */
 	asMicros(): number {
-		return this[VALUE] / 1_000;
+		return this[VALUE] * 1_000_000 + this[NANOS] / 1_000;
 	}
 
 	/** The duration in milliseconds, possibly fractional. */
 	asMillis(): number {
-		return this[VALUE] / 1_000_000;
+		return this[VALUE] * 1_000 + this[NANOS] / 1_000_000;
 	}
 
 	/** The duration in seconds, possibly fractional. */
 	asSecs(): number {
-		return this[VALUE] / 1_000_000_000;
+		return this[VALUE] + this[NANOS] / NANOS_PER_SEC;
 	}
 
 	/** Whether this is no time at all. */
 	isZero(): boolean {
-		return this[VALUE] === 0;
+		return this[VALUE] === 0 && this[NANOS] === 0;
 	}
 
 	/** The sum of both durations. */
 	add(other: Duration): Duration {
-		return new Duration(checked(this[VALUE] + other[VALUE], "duration"));
+		return Duration.#carry(this[VALUE] + other[VALUE], this[NANOS] + other[NANOS]);
 	}
 
 	/** This duration minus `other`; throws a `RangeError` if `other` is longer. */
 	sub(other: Duration): Duration {
-		return new Duration(checked(this[VALUE] - other[VALUE], "duration"));
+		if (this.lt(other)) throw new RangeError(`invalid duration: ${this} - ${other}`);
+		return Duration.#carry(this[VALUE] - other[VALUE], this[NANOS] - other[NANOS]);
 	}
 
 	/** This duration minus `other`, or zero if `other` is longer. */
 	saturatingSub(other: Duration): Duration {
-		return this[VALUE] > other[VALUE] ? new Duration(this[VALUE] - other[VALUE]) : Duration.ZERO;
+		return this.gt(other) ? this.sub(other) : Duration.ZERO;
 	}
 
 	/** This duration scaled by a finite, nonnegative factor. */
 	mul(factor: number): Duration {
-		return new Duration(checked(this[VALUE] * factor, "duration"));
+		checked(factor, "factor");
+		return Duration.#carry(this[VALUE] * factor, this[NANOS] * factor);
 	}
 
 	/** This duration divided by a finite, positive divisor. */
 	div(divisor: number): Duration {
-		if (!(divisor > 0)) throw new RangeError(`invalid divisor: ${divisor}`);
-		return new Duration(checked(this[VALUE] / divisor, "duration"));
+		if (!(divisor > 0) || !Number.isFinite(divisor)) throw new RangeError(`invalid divisor: ${divisor}`);
+		return Duration.#carry(this[VALUE] / divisor, this[NANOS] / divisor);
 	}
 
 	/** How many times `other` fits in this duration, possibly fractional; throws a `RangeError` if `other` is zero. */
 	divDuration(other: Duration): number {
-		if (other[VALUE] === 0) throw new RangeError("division by a zero duration");
-		return this[VALUE] / other[VALUE];
+		if (other.isZero()) throw new RangeError("division by a zero duration");
+		return this.asNanos() / other.asNanos();
 	}
 
 	/** The distance between both durations, whichever is longer. */
 	absDiff(other: Duration): Duration {
-		return new Duration(Math.abs(this[VALUE] - other[VALUE]));
+		return this.ge(other) ? this.sub(other) : other.sub(this);
 	}
 
 	/** Whether both durations are the same length. */
 	eq(other: Duration): boolean {
-		return this[VALUE] === other[VALUE];
+		return this[VALUE] === other[VALUE] && this[NANOS] === other[NANOS];
 	}
 
 	/** -1, 0, or 1 as this is less than, equal to, or greater than `other`, for sorting. */
 	cmp(other: Duration): -1 | 0 | 1 {
-		return this[VALUE] < other[VALUE] ? -1 : this[VALUE] > other[VALUE] ? 1 : 0;
+		if (this[VALUE] !== other[VALUE]) return this[VALUE] < other[VALUE] ? -1 : 1;
+		return this[NANOS] < other[NANOS] ? -1 : this[NANOS] > other[NANOS] ? 1 : 0;
 	}
 
 	/** Whether this duration is shorter than `other`. */
 	lt(other: Duration): boolean {
-		return this[VALUE] < other[VALUE];
+		return this.cmp(other) < 0;
 	}
 
 	/** Whether this duration is at most `other`. */
 	le(other: Duration): boolean {
-		return this[VALUE] <= other[VALUE];
+		return this.cmp(other) <= 0;
 	}
 
 	/** Whether this duration is longer than `other`. */
 	gt(other: Duration): boolean {
-		return this[VALUE] > other[VALUE];
+		return this.cmp(other) > 0;
 	}
 
 	/** Whether this duration is at least `other`. */
 	ge(other: Duration): boolean {
-		return this[VALUE] >= other[VALUE];
+		return this.cmp(other) >= 0;
 	}
 
 	/** The shorter of both durations. */
 	min(other: Duration): Duration {
-		return other[VALUE] < this[VALUE] ? other : this;
+		return other.lt(this) ? other : this;
 	}
 
 	/** The longer of both durations. */
 	max(other: Duration): Duration {
-		return other[VALUE] > this[VALUE] ? other : this;
+		return other.gt(this) ? other : this;
 	}
 
 	/** This duration limited to `[lo, hi]`. */

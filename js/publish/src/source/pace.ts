@@ -74,7 +74,7 @@ export function pace<S extends Sample, T>(
 					}
 
 					const sample = next.value;
-					const timestamp = timeline.at(Duration.micros(sample.microsecondTimestamp), loop);
+					const timestamp = timeline.at(sample.microsecondTimestamp, loop);
 
 					const present = now();
 					if (!sought && present.since(timestamp).gt(SEEK_BEHIND)) {

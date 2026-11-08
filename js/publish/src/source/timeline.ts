@@ -1,4 +1,4 @@
-import { Duration, type Instant } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
 
 /**
  * Maps a file's presentation timeline onto our clock, repeating it forever.
@@ -27,9 +27,15 @@ export class Timeline {
 		return !this.#duration.isZero();
 	}
 
-	/** When a file timestamp on the given pass should be published, on our clock. */
-	at(timestamp: Duration, loop: number): Instant {
-		return this.#zero.add(timestamp).add(this.#duration.mul(loop));
+	/**
+	 * When a file timestamp, in signed microseconds, on the given pass should be published, on our
+	 * clock. A source timestamp can be negative, such as audio priming an edit list shifts before
+	 * zero, so it stays signed until it lands on the clock, which saturates at the clock's origin.
+	 */
+	at(micros: number, loop: number): Instant {
+		const start = this.#zero.add(this.#duration.mul(loop));
+		if (micros >= 0) return start.add(Duration.micros(micros));
+		return Instant.ZERO.add(start.since(Instant.ZERO).saturatingSub(Duration.micros(-micros)));
 	}
 
 	/** The file timestamp and pass due at the given clock time, the inverse of {@link at}. */

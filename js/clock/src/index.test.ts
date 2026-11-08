@@ -67,6 +67,25 @@ test("durations convert units and refuse to become numbers", () => {
 	}
 });
 
+test("durations keep a whole count of any unit exact past 2^53 ns", () => {
+	// Microseconds since the Unix epoch, as a legacy container timestamp carries them.
+	for (const micros of [1_735_689_600_000_016, 4_102_444_800_123_457, Number.MAX_SAFE_INTEGER]) {
+		expect(Duration.micros(micros).asMicros()).toBe(micros);
+	}
+	for (const millis of [1_735_689_600_017, Number.MAX_SAFE_INTEGER]) {
+		expect(Duration.millis(millis).asMillis()).toBe(millis);
+	}
+	const epoch = Duration.micros(1_735_689_600_000_016);
+	expect(epoch.add(Duration.micros(1)).asMicros()).toBe(1_735_689_600_000_017);
+	expect(epoch.sub(Duration.micros(17)).asMicros()).toBe(1_735_689_599_999_999);
+	expect(epoch.add(Duration.nanos(1)).gt(epoch)).toBe(true);
+	expect(Duration.micros(1500)).toEqual(Duration.millis(1.5));
+	expect(Duration.secs(1).sub(Duration.nanos(1)).asNanos()).toBe(999_999_999);
+	expect(Duration.millis(250).mul(4)).toEqual(Duration.secs(1));
+	expect(Duration.secs(1).div(4)).toEqual(Duration.millis(250));
+	expect(() => Duration.micros(1).sub(Duration.micros(2))).toThrow(RangeError);
+});
+
 test("wall time round-trips Unix milliseconds exactly", () => {
 	// Past 2^53 ns, a detour through a Duration since the epoch would round.
 	for (const millis of [0, 1_735_689_600_001, 4_102_444_800_123, Number.MAX_SAFE_INTEGER]) {
