@@ -137,7 +137,11 @@ in
       tokenFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "Path to cluster token file (will be generated if null)";
+        description = ''
+          Path to the cluster token file. If null, a leaf with `auth.enable` signs one
+          without `exp` using its own auth key, so the root's auth server must trust
+          that key.
+        '';
       };
 
       disableTlsVerify = lib.mkOption {
@@ -256,7 +260,7 @@ in
               keyPath = authKey;
             in
             ''
-              ${pkgs.moq-cli}/bin/moq auth sign --key "${keyPath}" \
+              ${pkgs.moq-cli}/bin/moq auth sign --key "${keyPath}" --unbounded \
                 --subscribe '**' --publish '**' \
                 > "${cfg.stateDir}/cluster.jwt"
               chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/cluster.jwt"

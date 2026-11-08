@@ -639,7 +639,8 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 }
 
 /// A worker claiming `pool` through the public API: each request is answered with its own
-/// exact route under a fresh instance, and `outputs[path]` holds the latest.
+/// exact route, which carries the claim's instance until it ends, and `outputs[path]`
+/// holds the latest.
 struct Pool {
 	_claim: Rc<origin::Route>,
 	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Route, track::Producer)>>>,
@@ -679,14 +680,17 @@ impl Pool {
 	}
 }
 
-/// Wake the worker for `path` through the claim and subscribe. Wake the worker first and
-/// subscribe through the exact route, so the test reads the same on every wire, whether
-/// it carries the answer as a takeover or as an ordinary announcement that resets the
-/// first subscription through the claim.
-async fn claimed(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
-	let cold = origin.consume().request(path, None).await.unwrap();
-	drop(cold.track("video").unwrap().subscribe(None).await);
-	settle().await;
+/// Subscribe to `path` through the claim. On moq-lite-07 the answer's exact route carries
+/// the claim's instance, so the first subscription continues on it. Older wires and
+/// moq-transport mint an instance per announcement, so the answer is another broadcast that
+/// resets the first subscription: wake the worker first and subscribe through the exact
+/// route.
+async fn claimed(version: Version, origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
+	if version != "moq-lite-07-wip".parse().unwrap() {
+		let cold = origin.consume().request(path, None).await.unwrap();
+		drop(cold.track("video").unwrap().subscribe(None).await);
+		settle().await;
+	}
 	subscribe(origin, path).await
 }
 
@@ -703,11 +707,11 @@ async fn claim_restart(version: &str) {
 	let pool = Pool::new(&worker);
 	settle().await;
 
-	let (_sibling, mut sibling) = claimed(&edge, "pool/q").await;
+	let (_sibling, mut sibling) = claimed(version, &edge, "pool/q").await;
 	pool.write("pool/q", "q:0");
 	assert_eq!(read(&mut sibling).await, "q:0", "{version}");
 
-	let (old, mut first) = claimed(&edge, "pool/p").await;
+	let (old, mut first) = claimed(version, &edge, "pool/p").await;
 	for group in 0..3 {
 		pool.write("pool/p", &format!("old:{group}"));
 		assert_eq!(read(&mut first).await, format!("old:{group}"), "{version}");
@@ -716,7 +720,7 @@ async fn claim_restart(version: &str) {
 	pool.close("pool/p");
 	settle().await;
 
-	let (fresh, mut returning) = claimed(&edge, "pool/p").await;
+	let (fresh, mut returning) = claimed(version, &edge, "pool/p").await;
 	assert!(!fresh.is_clone(&old), "{version}: joined the old output");
 	assert_eq!(*pool.answered.borrow(), 3, "{version}: the worker was not asked again");
 	pool.write("pool/p", "new:0");
