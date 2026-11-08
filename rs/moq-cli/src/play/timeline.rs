@@ -9,8 +9,24 @@ use kio::clock::Instant;
 ///
 /// The speaker converges on the shared clock rather than owning it, so where it
 /// actually is stays its own: it runs dry in a stall and skips ahead to catch up.
-#[derive(Clone, Default)]
-pub(super) struct Playhead(Arc<Mutex<Written>>);
+///
+/// Clones write one broadcast's speaker; [`reset`](Self::reset) starts the next
+/// broadcast's, which readers follow while the old one's late writes go nowhere.
+#[derive(Clone)]
+pub(super) struct Playhead {
+	own: Arc<Mutex<Written>>,
+	current: Arc<Mutex<Arc<Mutex<Written>>>>,
+}
+
+impl Default for Playhead {
+	fn default() -> Self {
+		let own = Arc::new(Mutex::new(Written::default()));
+		Self {
+			current: Arc::new(Mutex::new(own.clone())),
+			own,
+		}
+	}
+}
 
 #[derive(Default)]
 struct Written {
@@ -22,9 +38,20 @@ struct Written {
 }
 
 impl Playhead {
+	/// Start the next broadcast's playhead and switch readers to it.
+	#[must_use = "use the returned playhead for the replacement broadcast"]
+	pub(super) fn reset(self) -> Self {
+		let own = Arc::new(Mutex::new(Written::default()));
+		*self.current.lock().unwrap() = own.clone();
+		Self {
+			own,
+			current: self.current,
+		}
+	}
+
 	/// Record a write ending at media `end`, of which `buffered` is still queued at `now`.
 	pub(super) fn wrote(&self, end: Duration, buffered: Duration, now: Instant) {
-		let mut written = self.0.lock().unwrap();
+		let mut written = self.own.lock().unwrap();
 		// Silence padded ahead of the frame to refill the speaker is not media: the
 		// playhead holds where it was until the padding has played, rather than
 		// projecting back over media already heard. A new timeline starts afresh.
@@ -38,17 +65,17 @@ impl Playhead {
 
 	/// The speaker moved onto an unrelated timeline: a fresh sink or rendition.
 	pub(super) fn restart(&self) {
-		self.0.lock().unwrap().restart = true;
+		self.own.lock().unwrap().restart = true;
 	}
 
 	/// The speaker went quiet.
 	pub(super) fn clear(&self) {
-		*self.0.lock().unwrap() = Written::default();
+		*self.own.lock().unwrap() = Written::default();
 	}
 
 	/// The media time sounding at `now`, or `None` with no speaker.
 	pub(super) fn at(&self, now: Instant) -> Option<Duration> {
-		self.0.lock().unwrap().playhead(now)
+		self.current.lock().unwrap().lock().unwrap().playhead(now)
 	}
 }
 
@@ -165,6 +192,19 @@ mod tests {
 
 		playhead.clear();
 		assert_eq!(playhead.at(dry), None);
+	}
+
+	/// A replaced broadcast's late writes never reach the reader.
+	#[test]
+	fn a_reset_playhead_isolates_the_old_broadcast() {
+		let now = Instant::ZERO + Duration::from_secs(1);
+		let reader = Playhead::default();
+		let old = reader.clone();
+		let new = reader.clone().reset();
+		old.wrote(Duration::from_secs(10), DELAY, now);
+		assert_eq!(reader.at(now), None);
+		new.wrote(Duration::from_secs(2), DELAY, now);
+		assert_eq!(reader.at(now), Some(Duration::from_millis(1_900)));
 	}
 
 	/// Silence padded ahead of a frame after the speaker ran dry plays no media,

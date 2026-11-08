@@ -101,6 +101,7 @@ impl<O: Output> Media<O> {
 					// Another instance's timeline is its own, so nothing of the old one carries over.
 					drop(playing.take());
 					self.presentation = self.presentation.reset(self.args.video_delay());
+					self.playhead = self.playhead.clone().reset();
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
@@ -164,6 +165,10 @@ impl<O: Output> Media<O> {
 								// A replacement is a track boundary whose timestamps need not
 								// continue this one.
 								self.playhead.restart();
+								// The track released its target, which can lower the delay that
+								// video's decoder and window are asleep on.
+								self.drained.notify_one();
+								self.output.send(Event::Wake);
 							}
 							// The retired sink still holds a delay of audio, and a replacement
 							// holds its own before its first sample sounds. Played one after
