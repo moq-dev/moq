@@ -232,9 +232,10 @@ impl Backend for Nvdec {
 			payload: ptr::null(),
 			timestamp: 0,
 		};
-		let frames = self.parse(&mut packet)?;
+		// Set ahead of the parse: whatever it did, the next access unit opens a
+		// new stream.
 		self.discontinuity = true;
-		Ok(frames)
+		self.parse(&mut packet)
 	}
 
 	fn name(&self) -> &str {
