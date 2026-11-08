@@ -247,7 +247,7 @@ ts-controls:
 
 # Relay drain migration, end to end.
 drain *args:
-    @echo 'SKIP drain: JS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md'
+    ./drain/run.sh {{ args }}
 
 # The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
 video:
@@ -262,7 +262,8 @@ max-age:
 
 # Datagram tracks between Rust and JavaScript on lite-07, direct and through a Rust relay.
 datagram-tracks:
-    @echo 'SKIP datagram-tracks: JS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md'
+    uv run --no-project python ../sh/js/install.py frozen
+    bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^datagram_tracks::/)' --run-ignored only
 
 # JavaScript publisher and reader over WebSocket, through a Rust relay, past qmux's default stream limit.
 stream-limits:

@@ -18,8 +18,10 @@ let
   filterCargoSources =
     path: type:
     (final.lib.hasSuffix ".ptx" path)
-    || (final.lib.hasSuffix ".der" path)
-    || (final.lib.hasSuffix ".bin" path)
+    || (
+      (final.lib.hasInfix "/rs/moq-webrtc/src/vendor/dimpl/crypto/validation/" path)
+      && ((final.lib.hasSuffix ".der" path) || (final.lib.hasSuffix ".bin" path))
+    )
     || (craneLib.filterCargoSources path type);
   cleanCargoSource = final.lib.cleanSourceWith {
     src = ../.;

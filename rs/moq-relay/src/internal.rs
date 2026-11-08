@@ -1606,6 +1606,7 @@ mod tests {
 	/// and forking both the socket options and the disabled-listener contract.
 	#[tokio::test]
 	async fn serve_hosts_merged_routes_alongside_the_defaults() {
+		moq_tokio::crypto::install_default().unwrap();
 		let listen = Some("127.0.0.1:0".parse().unwrap());
 		let internal = Internal::new(Config { listen }, moq_net::stats::Registry::disabled())
 			.bind()
@@ -1616,10 +1617,7 @@ mod tests {
 			.merge(Router::new().route("/embedder", get(async || "embedded\n")));
 		let server = tokio::spawn(internal.serve(app));
 
-		let client = reqwest::Client::builder()
-			.use_preconfigured_tls(moq_tokio::tls::Connect::default().build().unwrap())
-			.build()
-			.unwrap();
+		let client = reqwest::Client::new();
 		let url = format!("http://{addr}");
 		let embedder = client
 			.get(format!("{url}/embedder"))
