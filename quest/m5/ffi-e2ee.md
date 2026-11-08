@@ -20,7 +20,22 @@ the binding layer, and keep the encrypting publisher's refusal of a shared or
 explicit epoch. Add a binding test that decrypts a JS-published broadcast and
 the reverse to the interop suite.
 
-Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the bindings wrap moq-crypto's concrete `broadcast::{Producer, Consumer}` (`rs/moq-crypto/src/e2ee/broadcast.rs`, already public) directly, without waiting on [net-wrap](/quest/m5/net-wrap/README.md). So this quest requires neither e2ee quest below, both of which wait on net-wrap: it exposes encrypted tracks and frames, which is what the T3 app reads. Encrypted media publishing through moq-mux's catalog and codec publishers comes with [Rust protected publisher seams](/quest/m5/e2ee/rust-publish.md), and the bindings pick it up then without a break.
+✅ Decided 2026-11-07 (maintainer, /quest-complete): wait for
+[net-wrap's e2ee](/quest/m5/net-wrap/e2ee.md) and wrap its types once,
+reversing the API sweep's earlier "don't wait on net-wrap". net-wrap/e2ee
+reshapes moq-crypto's `broadcast::{Producer, Consumer}` (`abort` with an
+error, `create_group` taking `group::Info`, `track(semantic)` then
+`.subscribe(..)`, errors converting into `moq_net::Error`), so a binding
+over today's types would break when it lands. There is no interim binding
+over the existing encrypted broadcast types (rejected: binding the existing
+encrypted types now; dropping ffi-e2ee). Encrypted media publishing through
+moq-mux's catalog and codec publishers comes with
+[Rust protected publisher seams](/quest/m5/e2ee/rust-publish.md), and the
+bindings pick it up then without a break.
+
+## Required
+
+- [moq-crypto's e2ee implements the moq-net traits](/quest/m5/net-wrap/e2ee.md) - the encrypted broadcast, track, and group types these bindings wrap, in their final shape
 
 ## Related
 

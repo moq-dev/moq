@@ -16,7 +16,8 @@ future; consumers need advance notification. Metadata group sequences are
 independent of media GOPs.
 
 - A SCTE-35 scheme entry in the shared catalog `events` section names cue
-  tracks with optional program or rendition association, not a top-level
+  tracks with an optional `rendition` association (the program's rendition,
+  as [ID3](/quest/m5/id3.md) does), not a top-level
   `scte35` section (decided 2026-11-07, maintainer, /quest-plan from the API sweep of open PRs and remaining quests). Video is not required for audio-only programs.
 - Preserve complete raw splice_info_section bytes. Carry the event's
   presentation time on the broadcast clock; commands without splice_time

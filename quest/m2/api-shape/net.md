@@ -56,11 +56,10 @@ its JS and binding mirrors:
 - Remove `origin::Consumer::with_proxy` (from
   [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)) in favor of
   `origin::Producer::with_proxy`, which already reaches every consumer taken
-  from that producer. Only tests call the consumer override, but the moq-net
-  integration harness (`rs/moq-net/tests/integration/support/harness.rs`)
-  passes it about 195 scoped consumers, and `mount.rs` and moq-mux's
-  `container/test_util.rs` call it too; each sets proxy on the producer it
-  consumes from instead.
+  from that producer. Only tests call the consumer override: the moq-net
+  integration harness (`rs/moq-net/tests/integration/support/harness.rs`, two
+  sites), `mount.rs`, and moq-mux's `container/test_util.rs` (two sites);
+  each sets proxy on the producer it consumes from instead.
 - `auth::Grant` gets `#[non_exhaustive]`, since
   [rate-grant](/quest/m5/rate-grant.md) adds rates to it; callers outside
   moq-net build it from `Grant::default()`.

@@ -16,7 +16,7 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 
 - A service is the iroh ALPN analog: a socket endpoint per service name
   (below), while each node's address and status tracks stay under its
-  `mesh/<id>/`.
+  `mesh/node/<id>/`.
 - Decided 2026-11-01 (maintainer, socket planning interview), and updated
   2026-11-03 when sockets became endpoints and 2026-11-04 when the segment
   became `.socket` with the protocol in the session name: an `Endpoint` wraps
@@ -24,8 +24,7 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
   server at `.server/<id>`, a client at `.client/<id>`, or both.
   `connect` dials with the caller's own endpoint ID, and `accept` reads the
   remote ID from the dial, which the socket's answer check proves and the
-  grant pins (publish `.server/<id>` and `.client/<id>` only). Update `moq auth`'s mesh grant and
-  `doc/bin/relay/auth.md` to match.
+  grant pins (publish `.server/<id>` and `.client/<id>` only).
 - Streams are [byte streams](/quest/m3/stream/rust.md) at the protection
   level the service declares: identity reads `moq-net` directly, and
   authentication, the mesh default, reads through `moq_crypto::sign` against the
@@ -37,27 +36,33 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
   local [mesh relay node](/quest/m3/mesh/node.md).
 - Write a short porting note into the [guide](/quest/m3/mesh/guide.md).
 
-Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): one socket endpoint per service at prefix `mesh/<service>`, with the grant adding publish `mesh/*/.server/<id>` and `mesh/*/.client/<id>`, so `moq_net::socket` ships unchanged and needs no service field.
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): one socket endpoint per service, with a grant to publish on it under the member's own id, so `moq_net::socket` ships unchanged and needs no service field.
 
-Two constraints on that layout, found in review of
-[moq-dev/moq#8214](https://github.com/moq-dev/moq/pull/8214):
+✅ Decided 2026-11-07 (maintainer, /quest-complete): scope both
+namespaces. Members own `mesh/node/<id>/**` (was `mesh/<id>/**`) and each
+service lives at `mesh/service/<service>` (was `mesh/<service>`), so the
+grant adds publish `mesh/service/*/.server/<id>` and
+`mesh/service/*/.client/<id>` (rejected: `mesh/.service/<service>`;
+keeping `mesh/<service>` and refusing service names shaped like an endpoint
+ID). Review of [moq-dev/moq#8214](https://github.com/moq-dev/moq/pull/8214)
+found that each member publishing `mesh/<id>/**` lets a service named after
+member A put `.server/B` under A's own grant, so A could answer as B; the
+`node` and `service` segments keep the two apart. A service name is still
+one path segment, validated when the `Endpoint` is built, so `*` in the
+grant covers it (`video/h264` would fall outside).
 
-- A service name is one path segment, validated when the `Endpoint` is
-  built, so `*` in the grant covers it (`video/h264` would fall outside).
-- Service sockets must not overlap member subtrees. Each member may publish
-  `mesh/<id>/**`, so a service named after member A puts `.server/B` under
-  A's own grant, and A could answer as B. The prefix in the Waiting item
-  below keeps the two apart.
+Member grants change shape, which breaks every enrolled device's paths:
 
-## Waiting
-
-- Maintainer: pick the service prefix that keeps service sockets out of
-  `mesh/<id>/**`. Options: **`mesh/.service/<service>` (recommended)**,
-  since endpoint IDs never start with `.`, so no member subtree can contain
-  it, and the grant becomes publish `mesh/.service/*/.server/<id>` and
-  `.client/<id>`; or keep `mesh/<service>` and refuse service names that
-  parse as an endpoint ID, which leaves the check in every relay's grant
-  logic. Done when the Plan names the prefix.
+- `moq_auth::mesh`'s coordinator issues publish `mesh/node/<id>/**` and the
+  two service patterns (`rs/moq-auth/src/mesh/coordinator.rs`), with its
+  docs (`rs/moq-auth/src/mesh/mod.rs`), contract tests, and a `MIGRATE.md`
+  entry replacing the `Pattern::subtree(&format!("mesh/{endpoint}"))` note.
+- `doc/bin/relay/auth.md`'s mesh enrollment section names the new grant.
+- moq-crypto's and `@moq/crypto`'s sign examples and tests that use
+  `mesh/<key>/agent` paths move to `mesh/node/<key>/agent`, so the examples
+  match the grant.
+- A hosted coordinator implementing the JSON contract issues the same
+  grant; the PR's Impact section says so.
 
 ## Required
 

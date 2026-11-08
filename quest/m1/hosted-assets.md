@@ -25,3 +25,7 @@ package's `assets/` ships the libav wasm it needs. `@moq/libav` stays an
 implementation dependency. Future hosted files (the watch worker) join the
 same call. Test it on the CSP demo pages, including watch and publish
 configured with different directories.
+
+✅ Decided 2026-11-07 (maintainer, /quest-complete): each package keeps its
+own directory and points libav at its files, as above (rejected: one shared
+directory for every package).
