@@ -3962,6 +3962,7 @@ async function settled(read: Promise<unknown>): Promise<boolean> {
 test("a received end behind a hole settles only once the hole fills", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 0n });
 	const late = producer.createGroup(2n);
 	late.finish();
@@ -4027,6 +4028,7 @@ test("a source start follows the current requested floor after an update", async
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ ranges: [{ start: { absolute: 5n } }] });
 	try {
+		hooks.receiveTrack(producer);
 		hooks.startTrack(producer, { start: 6n, requested: 5n });
 		expect(hooks.sourceStart(reader)).toBe(6n);
 		const lower = producer.subscribe({ ranges: [{ start: { absolute: 2n } }] });
@@ -4055,6 +4057,7 @@ test("a source start follows the current requested floor after an update", async
 test("a pending tail owes from SUBSCRIBE_START while the demand keeps its floor", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) }, ranges: [{ start: { absolute: 1n } }] });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 3n, requested: 1n });
 	hooks.endTrack(producer, { group: 4n, frame: 0 });
 	const group = producer.createGroup(3n);
@@ -4075,6 +4078,7 @@ test("a pending tail owes from SUBSCRIBE_START while the demand keeps its floor"
 test("an end after the highest group holds the reader at the hole", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 0n });
 	const high = producer.createGroup(2n);
 	high.finish();

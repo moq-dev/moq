@@ -326,6 +326,8 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 	const b = new BroadcastProducer();
 	const ta = copy(a);
 	const tb = copy(b);
+	hooks.receiveTrack(ta.producer);
+	hooks.receiveTrack(tb.producer);
 	hooks.startTrack(ta.producer, { start: 1n });
 	hooks.startTrack(tb.producer, { start: 5n, requested: 3n });
 	const front = new Front();
