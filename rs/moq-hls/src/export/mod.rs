@@ -1239,16 +1239,12 @@ mod tests {
 		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
-		let rendition = kio::clock::timeout(Duration::from_secs(5), async {
-			loop {
-				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0") {
-					break rendition;
-				}
-				tokio::task::yield_now().await;
-			}
-		})
-		.await
-		.expect("rendition discovered from the catalog");
+		let added = kio::clock::timeout(Duration::from_secs(5), broadcaster.renditions().next())
+			.await
+			.expect("rendition discovered from the catalog");
+		let Ok(Some(renditions::Event::Added(rendition))) = added else {
+			panic!("expected an Added event");
+		};
 
 		assert!(
 			rendition.media_playlist(None).unwrap().is_none(),
@@ -1365,7 +1361,7 @@ mod tests {
 		media.set(disabled).unwrap();
 		kio::clock::timeout(Duration::from_secs(5), async {
 			while listed() {
-				tokio::task::yield_now().await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -3185,14 +3181,13 @@ mod tests {
 	}
 
 	async fn until_finished(rendition: &Rendition) {
-		let deadline = kio::clock::now() + Duration::from_secs(5);
-		loop {
-			if rendition.snapshot().finished {
-				return;
+		kio::clock::timeout(Duration::from_secs(5), async {
+			while !rendition.snapshot().finished {
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
-			assert!(kio::clock::now() < deadline, "the playlist did not end");
-			tokio::task::yield_now().await;
-		}
+		})
+		.await
+		.expect("the playlist did not end");
 	}
 
 	/// A sibling-media fixture: the catalog broadcast `live` lists `video0`, and its media lives in
