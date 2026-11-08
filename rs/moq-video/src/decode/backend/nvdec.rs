@@ -87,6 +87,9 @@ struct Decoder {
 	/// Output size: cuvid scales to this while writing the output surface.
 	width: u32,
 	height: u32,
+	/// Decode surfaces it was created with; the parser may index any of the
+	/// count it reports, so a larger requirement needs a new decoder.
+	surfaces: c_int,
 }
 
 impl Drop for Decoder {
@@ -199,6 +202,10 @@ impl Backend for Nvdec {
 	}
 
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		if self.parser.is_none() {
+			// A failed replacement ended the session; never install another parser.
+			return Err(Error::CodecGone("NVDEC parser replacement failed after a drain".into()));
+		}
 		let mut packet = CUVIDSOURCEDATAPACKET {
 			// NVIDIA requires an explicit EOS packet to release every picture still
 			// waiting in display order, even with zero display delay.
@@ -317,8 +324,10 @@ impl State {
 			&& decoder.coded == coded
 			&& decoder.display_area == display_area
 			&& (decoder.width, decoder.height) == (width, height)
+			&& decoder.surfaces >= surfaces
 		{
-			return Ok(surfaces);
+			// The parser indexes up to this count, so report what was allocated.
+			return Ok(decoder.surfaces);
 		}
 		self.decoder = None;
 
@@ -374,6 +383,7 @@ impl State {
 			display_area,
 			width,
 			height,
+			surfaces,
 		});
 		Ok(surfaces)
 	}
@@ -693,6 +703,11 @@ mod tests {
 			}
 			let frames = decoder.flush().unwrap();
 			timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros() as u64));
+			// A second flush lands on a parser that has seen no packet yet.
+			assert!(
+				decoder.flush().unwrap().is_empty(),
+				"a repeated flush hands back nothing"
+			);
 			decoded.push(timestamps);
 		}
 
