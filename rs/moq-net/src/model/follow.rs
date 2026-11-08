@@ -197,22 +197,36 @@ pub struct Following {
 	unseen: bool,
 	/// The resolution in flight, kept across a dropped wait so a retry picks it up.
 	resolving: Option<Requesting>,
-	/// The broadcast handed out last, until the path goes offline or the broadcast ends. Weak,
-	/// so it never keeps one the caller let go of from retiring.
-	last: Option<broadcast::WeakConsumer>,
-	/// Once the broadcast handed out last closed, waits for its instance to stop serving the
-	/// path.
-	moved: Option<Moved>,
-	/// A change resolved to the broadcast handed out last while it was still open, so it counts
-	/// as delivered only until that broadcast closes.
-	absorbed: bool,
-	/// A broadcast was handed out and its end not reported yet.
-	live: bool,
-	/// The broadcast handed out last stopped serving the path, and its end is owed.
-	ended: bool,
+	/// The broadcast handed out last, until the path goes offline, the broadcast ends, or a
+	/// resolution is refused.
+	last: Option<Last>,
+	/// Whether the end of what was handed out is still to be reported.
+	handed: Handed,
 	/// The last resolution was refused: any change to the serving route, even the same
 	/// instance over another route, is worth asking again.
 	refused: bool,
+}
+
+/// The broadcast a [`Following`] handed out last, and what it waits on once that closes.
+struct Last {
+	/// Weak, so it never keeps one the caller let go of from retiring.
+	broadcast: broadcast::WeakConsumer,
+	/// Once the broadcast closed, waits for its instance to stop serving the path.
+	moved: Option<Moved>,
+	/// A change resolved to this broadcast while it was still open, so it counts as delivered
+	/// only until the broadcast closes.
+	absorbed: bool,
+}
+
+/// Whether a [`Following`] owes the end of the broadcast it handed out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Handed {
+	/// Nothing handed out, or its end already reported.
+	Nothing,
+	/// A broadcast was handed out and still serves the path.
+	Live,
+	/// The broadcast handed out stopped serving the path, and its end is owed.
+	Ended,
 }
 
 impl Following {
@@ -225,10 +239,7 @@ impl Following {
 			unseen: false,
 			resolving: None,
 			last: None,
-			moved: None,
-			absorbed: false,
-			live: false,
-			ended: false,
+			handed: Handed::Nothing,
 			refused: false,
 		}
 	}
@@ -253,9 +264,8 @@ impl Following {
 				self.resolving = None;
 			}
 			// Report an end before whatever serves next, so a reader drops the old broadcast first.
-			if self.ended {
-				self.ended = false;
-				self.live = false;
+			if self.handed == Handed::Ended {
+				self.handed = Handed::Nothing;
 				return Poll::Ready(Ok(None));
 			}
 			// The broadcast handed out ended while the path is still served: its instance's
@@ -265,12 +275,13 @@ impl Following {
 			// change it absorbed is owed. A refusal forgets it, so only a route change asks again.
 			if !self.unseen
 				&& self.follow.serving().is_some()
-				&& let Some(last) = self.last.as_ref().map(broadcast::WeakConsumer::consume)
-				&& last.poll_closed(waiter).is_ready()
+				&& let Some(last) = &mut self.last
+				&& let broadcast = last.broadcast.consume()
+				&& broadcast.poll_closed(waiter).is_ready()
 			{
-				let moved = match &last.info().instance {
-					_ if self.absorbed => true,
-					Some(instance) => self
+				let moved = match &broadcast.info().instance {
+					_ if last.absorbed => true,
+					Some(instance) => last
 						.moved
 						.get_or_insert_with(|| {
 							self.consumer
@@ -281,7 +292,7 @@ impl Following {
 					None => true,
 				};
 				if moved {
-					self.moved = None;
+					last.moved = None;
 					self.unseen = true;
 				}
 			}
@@ -301,12 +312,10 @@ impl Following {
 			self.refused = resolved.is_err();
 			let broadcast = match resolved {
 				Ok(broadcast) => broadcast,
-				// `live` stays: the end of what was handed out is still owed once the path goes
+				// `handed` stays: the end of what was handed out is still owed once the path goes
 				// offline.
 				Err(err) => {
 					self.last = None;
-					self.moved = None;
-					self.absorbed = false;
 					return Poll::Ready(Err(err));
 				}
 			};
@@ -315,14 +324,18 @@ impl Following {
 			// the origin holds its restart, and that restart then names the instance handed
 			// out. The caller freeing it before reading the restart is owed it again.
 			let weak = broadcast.weak();
-			if self.last.as_ref().is_some_and(|last| last.same_channel(&weak)) {
-				self.absorbed = true;
+			if let Some(last) = &mut self.last
+				&& last.broadcast.same_channel(&weak)
+			{
+				last.absorbed = true;
 				continue;
 			}
-			self.last = Some(weak);
-			self.moved = None;
-			self.absorbed = false;
-			self.live = true;
+			self.last = Some(Last {
+				broadcast: weak,
+				moved: None,
+				absorbed: false,
+			});
+			self.handed = Handed::Live;
 			return Poll::Ready(Ok(Some(broadcast)));
 		}
 	}
@@ -339,10 +352,10 @@ impl Following {
 	/// The broadcast handed out last stopped serving the path: owe its end, and hand out
 	/// whatever serves next, even the same instance coming back.
 	fn end(&mut self) {
-		self.ended |= self.live;
+		if self.handed == Handed::Live {
+			self.handed = Handed::Ended;
+		}
 		self.last = None;
-		self.moved = None;
-		self.absorbed = false;
 	}
 
 	/// Apply one change to the path, returning whether it is one.
