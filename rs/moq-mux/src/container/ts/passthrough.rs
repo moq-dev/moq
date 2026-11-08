@@ -162,6 +162,9 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	all_random_access: bool,
 
 	mux_rate: Meter,
+
+	/// Whether input is still accepted: [`finish`](Self::finish) ends it.
+	input: crate::container::Input,
 }
 
 /// Owns the `m2ts` catalog section once written, removing it however the track ends, as the
@@ -266,6 +269,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			group: None,
 			all_random_access: true,
 			mux_rate: Meter::default(),
+			input: crate::container::Input::Open,
 		})
 	}
 
@@ -288,6 +292,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	/// Append `data` and publish every whole packet it completes. A trailing partial packet is
 	/// kept for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
+		self.input.check()?;
 		self.scratch.extend_from_slice(data);
 		if !self.sized {
 			self.probe_packet_size(false)?;
@@ -299,7 +304,31 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	///
 	/// No later PCR will arrive, so the objects since the last one are timed at the rate of the
 	/// interval before it. The catalog keeps the `m2ts` section until the importer drops.
+	///
+	/// A finish that fails ends the track with an error, and every later call returns its cause.
+	/// Calling it again after a success does nothing, and later input is refused with
+	/// [`Finished`](crate::Error::Finished).
 	pub fn finish(&mut self) -> crate::Result<()> {
+		match &self.input {
+			crate::container::Input::Open => {}
+			crate::container::Input::Finished => return Ok(()),
+			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => return Err(err.clone()),
+		}
+		let result = self.end();
+		match &result {
+			Ok(()) => self.input = crate::container::Input::Finished,
+			Err(err) => {
+				// The objects already written stay readable, then subscribers get an error.
+				let _ = self.media.fail(err.reason());
+				self.reservation = None;
+				self.input = crate::container::Input::Failed(err.clone());
+			}
+		}
+		result
+	}
+
+	/// Publish the rest of the input and finish the track, stopping at the first failure.
+	fn end(&mut self) -> crate::Result<()> {
 		if !self.sized {
 			self.probe_packet_size(true)?;
 			self.packets()?;

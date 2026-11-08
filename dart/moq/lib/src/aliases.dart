@@ -93,7 +93,7 @@ typedef BroadcastRequests = MoqBroadcastRequests;
 /// The write side of a raw track: append groups of frames.
 typedef TrackProducer = MoqTrackProducer;
 
-/// A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it.
+/// A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or reject it.
 typedef TrackRequest = MoqTrackRequest;
 
 /// A stream of the fills readers of one track need: runs of groups the cache lacks.
@@ -160,7 +160,7 @@ Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
 typedef Range = MoqRange;
 
-/// Where one end of a [Range] falls: absolute, relative to the latest group, or the group containing a time.
+/// Where one end of a [Range] falls: the oldest group (a start only), absolute, relative to the latest group, or the group containing a time.
 typedef Anchor = MoqAnchor;
 
 /// Which pending group the publisher sends first.

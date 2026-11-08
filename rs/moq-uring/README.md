@@ -21,7 +21,7 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   clock, and `Handle::run` drives MoQ with it and a single timer.
 - **Turns**: each turn reaps and dispatches completions first, then polls the
   root future and runs passes over the woken tasks until a pass wakes nothing
-  or `Config::passes` have run, then parks or submits. So a received
+  or four have run, then parks or submits. So a received
   datagram's routing, its connection's processing, and the reply that stages
   are carried by the one enter that follows. A connection stages a bounded
   number of GSO trains per turn, then yields its backlog to the next turn.
@@ -121,7 +121,7 @@ first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
 for their methodology. `echo_quic` is the ablation matrix over the real
 worker: the same QUIC echo with receive batching, GRO, and GSO toggled one
 at a time. `worker_turns` sweeps sockets against datagrams per burst for UDP,
-and connections against reply bytes and task passes for QUIC request/reply.
+and connections against reply bytes for QUIC request/reply.
 The QUIC client and server run as worker tasks; the root only waits for a
 measurement to finish. Counter deltas stay in the run's log beside the timing
 series in the nightly `rust-shared` group.

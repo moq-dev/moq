@@ -354,6 +354,14 @@ fn net_track(name: &Name) -> moq_net::track::Producer {
 		.unwrap()
 }
 
+/// A millisecond datagram track named `name`, in a broadcast of its own.
+fn datagram_track(name: &str) -> moq_net::datagram::Producer {
+	moq_net::broadcast::Info::new()
+		.produce()
+		.create_datagrams(name, timed_datagrams())
+		.unwrap()
+}
+
 struct Pair {
 	semantic: String,
 	generation: Consumer,
@@ -387,7 +395,7 @@ struct DatagramPair {
 
 fn datagram_pair(semantic: &str) -> DatagramPair {
 	let generation = test_generation();
-	let net = timed_datagrams().produce(generation.name(semantic).unwrap().as_str());
+	let net = datagram_track(generation.name(semantic).unwrap().as_str());
 	let producer = generation.produce_datagrams(net.clone(), semantic).unwrap();
 	let consuming = consume(&generation);
 	let consumer = consuming.consume_datagrams(net.consume(), semantic).unwrap();
@@ -404,7 +412,7 @@ impl DatagramPair {
 	/// Send `payload` raw, the way a relay could.
 	fn inject(&mut self, sequence: u64, timestamp: moq_net::Timestamp, payload: impl Into<Bytes>) {
 		self.net
-			.insert(moq_net::Datagram {
+			.insert(moq_net::datagram::Datagram {
 				sequence,
 				timestamp: Some(timestamp),
 				payload: payload.into(),
@@ -603,10 +611,10 @@ fn one_name_keys_its_stream_and_datagram_tracks_apart() {
 		Poll::Ready("authentication".to_string())
 	);
 
-	let mut forged = timed_datagrams().produce(name.as_str());
+	let mut forged = datagram_track(name.as_str());
 	let mut reader = consuming.consume_datagrams(forged.consume(), "audio").unwrap();
 	forged
-		.insert(moq_net::Datagram {
+		.insert(moq_net::datagram::Datagram {
 			sequence: 0,
 			timestamp: Some(ms(1)),
 			payload: frame,
@@ -642,7 +650,7 @@ fn reproduced_track_resumes_above_its_marks() {
 	// A datagram track of the name has sequences of its own, and resumes above them too.
 	let datagrams = || {
 		generation
-			.produce_datagrams(timed_datagrams().produce(name.as_str()), "video")
+			.produce_datagrams(datagram_track(name.as_str()), "video")
 			.unwrap()
 	};
 	let mut first = datagrams();
