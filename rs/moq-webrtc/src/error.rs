@@ -74,6 +74,10 @@ pub enum Error {
 	/// An internal video bridge could not be initialized.
 	#[error("video bridge initialization failed")]
 	BridgeFailed,
+
+	/// This CPU lacks a feature rind, the crypto under DTLS, SRTP, and HTTPS, requires.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }
 
 impl From<reqwest::Error> for Error {

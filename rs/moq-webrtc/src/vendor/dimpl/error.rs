@@ -242,6 +242,8 @@ pub enum CryptoOperation {
 	ComputeCookie,
 	/// Encode a key.
 	EncodeKey,
+	/// Compute an HMAC.
+	ComputeHmac,
 }
 
 /// Fine-grained reason for an [`Error::CertificateError`].
@@ -357,6 +359,8 @@ pub enum ConfigError {
 	NoDtls12KeyExchangeGroupsAfterFiltering,
 	/// Crypto provider validation failed.
 	CryptoProvider(CryptoProviderValidationError),
+	/// No provider was given, and rind's default refuses this CPU.
+	UnsupportedCpu(rind::cpu::MissingFeature),
 }
 
 /// Fine-grained reason for crypto provider validation failure.
@@ -687,6 +691,7 @@ impl fmt::Display for CryptoOperation {
 			Self::FillRandom => "random generation",
 			Self::ComputeCookie => "cookie computation",
 			Self::EncodeKey => "key encoding",
+			Self::ComputeHmac => "HMAC computation",
 		};
 		write!(f, "{text}")
 	}
@@ -817,6 +822,7 @@ impl fmt::Display for ConfigError {
 				)
 			),
 			Self::CryptoProvider(err) => write!(f, "crypto provider validation failed: {err}"),
+			Self::UnsupportedCpu(missing) => write!(f, "unsupported CPU: {missing}"),
 		}
 	}
 }
