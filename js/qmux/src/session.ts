@@ -1067,7 +1067,7 @@ export default class Session implements WebTransport {
 		} else if (frame.type === "max_data") {
 			this.#connCredit.increaseMax(frame.max);
 		} else if (frame.type === "max_stream_data") {
-			this.#streams.get(frame.id.value.value)?.send?.credit.increaseMax(frame.max);
+			this.#sendState(frame.id)?.send?.credit.increaseMax(frame.max);
 		} else if (frame.type === "max_streams_bidi") {
 			this.#bidiStreamCredit.increaseMax(frame.max);
 		} else if (frame.type === "max_streams_uni") {
@@ -1377,7 +1377,7 @@ export default class Session implements WebTransport {
 		// take it, so it releases that hold and resets a bidi stream's send half, and
 		// the slot returns once the peer's half is done too.
 		const drop = (err: Error) => {
-			stream.recv.refuse(err);
+			stream.recv.stop(err);
 			accept();
 			if (stream.send) this.#resetSend(id, stream, err, VarInt.from(resetCode(err)));
 			else this.#reap(id.value.value);
@@ -1470,11 +1470,28 @@ export default class Session implements WebTransport {
 				? this.#ourParams.initialMaxStreamDataBidiRemote
 				: this.#ourParams.initialMaxStreamDataUni;
 		this.#recvHalf(id, size).reset(err, frame.finalSize, frame.reliableSize);
+		// Nobody will write our half of a bidi stream, so end it for the peer's reader.
+		if (id.dir === Stream.Dir.Bi) {
+			this.#sendPriorityFrame({ type: "reset_stream", id, code: VarInt.from(0), finalSize: 0n });
+		}
 		limit.close();
 	}
 
+	/** The stream a MAX_STREAM_DATA or STOP_SENDING names. As in QUIC, either can be
+	 *  the first frame of a peer's bidi stream, and opens it like a STREAM frame. */
+	#sendState(id: Stream.Id): StreamState | undefined {
+		if (this.#closed) return undefined;
+		const stream = this.#streams.get(id.value.value);
+		if (stream) return stream;
+		if (!this.#isPeerStream(id) || id.dir !== Stream.Dir.Bi) return undefined;
+		if (this.#recvOpen(id.dir).isClosed(id.index)) return undefined;
+		const opened = this.#openPeerStream(id);
+		this.#announce(id, opened);
+		return opened;
+	}
+
 	#handleStopSending(frame: Frame.StopSending) {
-		const stream = this.#streams.get(frame.id.value.value);
+		const stream = this.#sendState(frame.id);
 		if (!stream?.send) return;
 		const stopped = new StreamError(streamCode(frame.code.value), "STOP_SENDING");
 		this.#resetSend(frame.id, stream, stopped, frame.code);
@@ -1567,6 +1584,8 @@ export default class Session implements WebTransport {
 			const chunkMax = payloadMax < remaining ? payloadMax : remaining;
 
 			const sendable = Number(await send.claim(chunkMax, this.#connCredit, signal));
+			// A STOP_SENDING may have reset the half while this resumed.
+			send.throwIfReset();
 			const chunk = data.subarray(offset, offset + sendable);
 			await this.#enqueueStreamFrame(
 				streamId,

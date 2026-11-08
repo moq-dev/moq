@@ -1,3 +1,5 @@
+import { VarInt } from "./varint.ts";
+
 /** Decide the new receive-window limit to advertise (MAX_DATA / MAX_STREAM_DATA).
  *
  * Replenishes only when the remaining advertised window has dropped to at most
@@ -68,6 +70,8 @@ export class Credit {
 		if (this.#max > this.#used) return;
 		await this.#wait(signal);
 		if (this.#closed) throw this.#closeReason ?? new Error("closed");
+		// The signal may have aborted between the wake and this resuming.
+		signal?.throwIfAborted();
 	}
 
 	#wait(signal?: AbortSignal): Promise<void> {
@@ -131,11 +135,14 @@ export class Credit {
  * application has read or discarded. Releasing credit marks an update pending
  * rather than sending one: the scheduler takes it with {@link takePending} when
  * it next writes, so however many releases happen first, the peer gets one frame
- * carrying the newest limit.
+ * carrying the newest limit. The peer is held to the limit it was last sent,
+ * not one still waiting behind a busy socket.
  */
 export class Window {
 	readonly #size: bigint;
+	// The limit owed to the peer, which `advertised` catches up to once taken.
 	#max: bigint;
+	#advertised: bigint;
 	#received = 0n;
 	#consumed = 0n;
 	#pending = false;
@@ -145,10 +152,11 @@ export class Window {
 	constructor(size: bigint, onPending: () => void) {
 		this.#size = size;
 		this.#max = size;
+		this.#advertised = size;
 		this.#onPending = onPending;
 	}
 
-	/** The limit we advertised. */
+	/** The newest limit, which the next update carries. */
 	get max(): bigint {
 		return this.#max;
 	}
@@ -160,12 +168,12 @@ export class Window {
 
 	/** Whether the peer may spend up to `end`. */
 	allows(end: bigint): boolean {
-		return end <= this.#max;
+		return end <= this.#advertised;
 	}
 
 	/** Spend the window up to `end`, which the caller has checked with {@link allows}. */
 	receiveTo(end: bigint): void {
-		if (end > this.#max) throw new Error("flow control error");
+		if (end > this.#advertised) throw new Error("flow control error");
 		if (end > this.#received) this.#received = end;
 	}
 
@@ -173,18 +181,23 @@ export class Window {
 	release(bytes: bigint): void {
 		if (bytes === 0n) return;
 		this.#consumed += bytes;
-		const next = replenishWindow(this.#consumed, this.#max, this.#size);
+		let next = replenishWindow(this.#consumed, this.#max, this.#size);
 		if (next === null) return;
+		// A varint can't carry more; a peer that reached it has nothing left to send.
+		if (next > VarInt.MAX) next = VarInt.MAX;
+		if (next <= this.#max) return;
 		this.#max = next;
 		if (this.#pending) return;
 		this.#pending = true;
 		this.#onPending();
 	}
 
-	/** Whether an update is owed, clearing it. */
+	/** Whether an update is owed, clearing it. The caller sends {@link max}, which
+	 *  becomes the limit the peer is held to. */
 	takePending(): boolean {
 		const pending = this.#pending;
 		this.#pending = false;
+		if (pending) this.#advertised = this.#max;
 		return pending;
 	}
 }
@@ -194,10 +207,12 @@ export class Window {
  * A stream's slot returns once the stream is closed; the limit rises once the
  * returned slots would let the peer open past it, so a peer at its limit gets
  * each slot back promptly. Like {@link Window}, a rise marks an update pending
- * for the scheduler.
+ * for the scheduler, and the peer is held to the limit it was last sent.
  */
 export class StreamLimit {
+	// The limit owed to the peer, which `advertised` catches up to once taken.
 	#max: bigint;
+	#advertised: bigint;
 	// One past the highest stream index the peer opened, which opens every lower one.
 	#opened = 0n;
 	// Closed streams whose slots have yet to be advertised.
@@ -207,25 +222,35 @@ export class StreamLimit {
 
 	constructor(max: bigint, onPending: () => void) {
 		this.#max = max;
+		this.#advertised = max;
 		this.#onPending = onPending;
 	}
 
-	/** The limit we advertised. */
+	/** The newest limit, which the next update carries. */
 	get max(): bigint {
 		return this.#max;
 	}
 
 	/** Open stream `index` and every lower one, or return false if that passes the limit. */
 	open(index: bigint): boolean {
-		if (index >= this.#max) return false;
-		if (index >= this.#opened) this.#opened = index + 1n;
+		if (index >= this.#advertised) return false;
+		if (index >= this.#opened) {
+			this.#opened = index + 1n;
+			// The peer moved closer to the limit, so slots held back may be due now.
+			this.#raise();
+		}
 		return true;
 	}
 
 	/** Return a closed stream's slot. */
 	close(): void {
 		this.#closed += 1n;
-		if (this.#opened + 2n * this.#closed <= this.#max) return;
+		this.#raise();
+	}
+
+	/** Advertise the returned slots once they would let the peer open past the limit. */
+	#raise(): void {
+		if (this.#closed === 0n || this.#opened + 2n * this.#closed <= this.#max) return;
 		this.#max += this.#closed;
 		this.#closed = 0n;
 		if (this.#pending) return;
@@ -233,10 +258,12 @@ export class StreamLimit {
 		this.#onPending();
 	}
 
-	/** Whether an update is owed, clearing it. */
+	/** Whether an update is owed, clearing it. The caller sends {@link max}, which
+	 *  becomes the limit the peer is held to. */
 	takePending(): boolean {
 		const pending = this.#pending;
 		this.#pending = false;
+		if (pending) this.#advertised = this.#max;
 		return pending;
 	}
 }

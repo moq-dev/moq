@@ -1932,6 +1932,52 @@ describe("Session integration (scripted peer)", () => {
 		});
 	});
 
+	// As in QUIC, a peer's bidi stream can open with a frame other than STREAM.
+	describe("a peer bidi stream's first frame", () => {
+		const id = Stream.Id.create(0n, Stream.Dir.Bi, true);
+
+		test("RESET_STREAM ends our half, which nobody will write", async () => {
+			const { session, peer } = connect();
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+
+			peer.send({ type: "reset_stream", id, code: VarInt.from(0), finalSize: 0n });
+			await waitFor(() => peer.has("reset_stream"));
+			const reset = peer.received().find((f) => f.type === "reset_stream") as Frame.ResetStream;
+			expect(reset.id.value.value).toBe(id.value.value);
+			expect(reset.finalSize).toBe(0n);
+			session.close();
+		});
+
+		test("MAX_STREAM_DATA opens it and keeps the grant", async () => {
+			const { session, peer } = connect();
+			peer.send({ type: "transport_parameters", params: peerParams({ initialMaxStreamDataBidiLocal: 0n }) });
+			await session.ready;
+
+			peer.send({ type: "max_stream_data", id, max: 10n });
+			const accepted = await session.incomingBidirectionalStreams.getReader().read();
+			if (accepted.done || !accepted.value) throw new Error("expected an incoming stream");
+			await accepted.value.writable.getWriter().write(new Uint8Array(10));
+			await waitFor(() => peer.has("stream"));
+			session.close();
+		});
+
+		test("STOP_SENDING opens it with our half reset", async () => {
+			const { session, peer } = connect();
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await session.ready;
+
+			peer.send({ type: "stop_sending", id, code: VarInt.from(5) });
+			const accepted = await session.incomingBidirectionalStreams.getReader().read();
+			if (accepted.done || !accepted.value) throw new Error("expected an incoming stream");
+			await waitFor(() => peer.has("reset_stream"));
+			expect(await settleTo(accepted.value.writable.getWriter().write(new Uint8Array(1)))).toBeInstanceOf(
+				StreamError,
+			);
+			session.close();
+		});
+	});
+
 	// The application will never take a stream once its acceptor is cancelled, so the
 	// slot returns as soon as both halves are done on the wire.
 	describe("a refused peer stream returns its stream-count credit", () => {
@@ -2075,20 +2121,19 @@ describe("Session integration (scripted peer)", () => {
 		peer.blockWrites();
 		peer.send({ type: "ping_request", sequence: 1n });
 		await settle();
-		let offset = 0n;
-		for (let i = 0; i < 10; i++) {
-			if (i > 0) peer.send({ type: "stream", id, offset, data: new Uint8Array(60), fin: false });
-			offset += 60n;
-			expect((await reader.read()).value?.byteLength).toBe(60);
-		}
+		// Reading the first 60 bytes owes both windows an update; the peer then spends
+		// the rest of what it was told, while the updates still wait.
+		expect((await reader.read()).value?.byteLength).toBe(60);
+		peer.send({ type: "stream", id, offset: 60n, data: new Uint8Array(40), fin: false });
+		expect((await reader.read()).value?.byteLength).toBe(40);
 		peer.unblockWrites();
 		await waitFor(() => peer.has("max_data") && peer.has("max_stream_data"));
 		await peer.barrier();
 
 		const maxData = peer.received().filter((f): f is Frame.MaxData => f.type === "max_data");
 		const maxStreamData = peer.received().filter((f): f is Frame.MaxStreamData => f.type === "max_stream_data");
-		expect(maxData.map((f) => f.max)).toEqual([offset + 100n]);
-		expect(maxStreamData.map((f) => f.max)).toEqual([offset + 100n]);
+		expect(maxData.map((f) => f.max)).toEqual([160n]);
+		expect(maxStreamData.map((f) => f.max)).toEqual([160n]);
 		session.close();
 	});
 
@@ -2276,9 +2321,9 @@ describe("Session integration (scripted peer)", () => {
 
 			await settle();
 			expect(rejections).toEqual([]);
-			// No per-frame amplification: the refused stream never sends STOP_SENDING and
+			// No per-frame amplification: the refused stream sends one STOP_SENDING and
 			// never re-credits the peer's stream-count limit.
-			expect(peer.count("stop_sending")).toBe(0);
+			expect(peer.count("stop_sending")).toBe(1);
 			expect(peer.has("max_streams_uni")).toBe(false);
 			expect(peer.has("connection_close")).toBe(false);
 			session.close();
@@ -2295,18 +2340,19 @@ describe("Session integration (scripted peer)", () => {
 
 			await session.incomingUnidirectionalStreams.cancel();
 
-			// Five distinct refused uni streams carrying 500B total - well past the 300B
-			// window. With correct accounting the window keeps pace (MAX_DATA is emitted)
-			// and the session stays healthy; the buggy refuse path froze `consumed` and
-			// closed with a spurious flow-control error by the 4th stream.
-			for (let i = 0n; i < 5n; i++) {
+			// Five distinct refused uni streams carrying 500B total - past the 300B
+			// window. The peer spends the window, then the rest only once MAX_DATA
+			// grants it, which the buggy refuse path never did: it froze `consumed`.
+			const send = (i: bigint) =>
 				peer.send({
 					type: "stream",
 					id: Stream.Id.create(i, Stream.Dir.Uni, true),
 					data: new Uint8Array(100),
 					fin: false,
 				});
-			}
+			for (let i = 0n; i < 3n; i++) send(i);
+			await waitFor(() => peer.has("max_data"));
+			for (let i = 3n; i < 5n; i++) send(i);
 			peer.send({ type: "ping_request", sequence: 1n });
 			await waitFor(() => peer.has("ping_response"), 5000);
 

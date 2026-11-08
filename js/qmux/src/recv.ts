@@ -52,6 +52,7 @@ export class RecvStream {
 	#wake?: () => void;
 	#conn: Window;
 	#window: Window;
+	#sendStop: (reason: unknown) => void;
 
 	/** The application-facing readable. */
 	readonly readable: ReadableStream<Uint8Array>;
@@ -59,6 +60,7 @@ export class RecvStream {
 	constructor(options: RecvStreamOptions) {
 		this.#conn = options.conn;
 		this.#window = options.window;
+		this.#sendStop = options.stop;
 		this.readable = new ReadableStream<Uint8Array>(
 			{
 				pull: async (controller) => {
@@ -219,9 +221,17 @@ export class RecvStream {
 		this.#signal();
 	}
 
-	/** Stop reading without telling the peer, as for an incoming stream nobody accepted
-	 *  or a closing session: discards the buffer, frees its credit, and errors the reader. */
+	/** Stop reading without telling the peer, as for a closing session: discards the
+	 *  buffer, frees its credit, and errors the reader. */
 	refuse(err: Error): void {
+		this.#stop(err);
+	}
+
+	/** Stop reading as {@link refuse} does, and send STOP_SENDING to a peer still
+	 *  sending, as for an incoming stream nobody will accept. Without it, a peer
+	 *  parked on this stream's window would never finish it. */
+	stop(err: Error): void {
+		if (this.#phase.state === "recv") this.#sendStop(err);
 		this.#stop(err);
 	}
 

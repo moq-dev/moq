@@ -61,6 +61,12 @@ export class SendHalf {
 		}
 	}
 
+	/** Throw the reset's reason once the half is reset, as a write that claimed credit
+	 *  just before a STOP_SENDING must, rather than queue a frame after the reset. */
+	throwIfReset(): void {
+		this.#reset.signal.throwIfAborted();
+	}
+
 	/** Queue the FIN, returning the final size. */
 	finish(): bigint {
 		if (this.#state !== "ready") throw new Error(`cannot finish a send half in ${this.#state}`);
