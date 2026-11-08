@@ -13,9 +13,9 @@
 //!
 //! Pause/resume state machine:
 //! ```text
-//!   Wanted { video, audio, closed } under the condvar's mutex
-//!     neither wanted and not closed → paused (emulation stops, condvar blocks)
-//!     anything wanted or closed → resumed (condvar notified)
+//!   Wanted { video, audio, video_closed, audio_closed } under the condvar's mutex
+//!     neither wanted and some track still open → paused (emulation stops, condvar blocks)
+//!     anything wanted or both closed → resumed (condvar notified)
 //!
 //!   On resume → force video keyframe, reanchor audio
 //! ```
@@ -161,13 +161,15 @@ struct Session {
 struct Wanted {
 	video: bool,
 	audio: bool,
-	/// A track's demand ended (shutdown): never block the emulator again.
-	closed: bool,
+	/// The video track's demand ended: it counts as unwanted from now on.
+	video_closed: bool,
+	/// The audio track's demand ended: it counts as unwanted from now on.
+	audio_closed: bool,
 }
 
 impl Wanted {
 	fn paused(&self) -> bool {
-		!(self.video || self.audio || self.closed)
+		!(self.video || self.audio || (self.video_closed && self.audio_closed))
 	}
 }
 
@@ -240,8 +242,11 @@ impl Session {
 			tracing::info!(?kind, "no viewers");
 			set(false);
 		}
-		// Ensure the emulator thread isn't stuck waiting on resume.
-		self.pause.update(|d| d.closed = true);
+		// A closed track is unwanted; once both close, the emulator never blocks again.
+		self.pause.update(|d| match kind {
+			Kind::Video => (d.video, d.video_closed) = (false, true),
+			Kind::Audio => (d.audio, d.audio_closed) = (false, true),
+		});
 	}
 
 	/// Block the emulator thread until viewers connect.
@@ -576,17 +581,22 @@ mod tests {
 		}
 	}
 
-	/// Paused only while neither track is wanted and demand is open.
+	/// Paused only while neither track is wanted and some track's demand is open.
 	#[test]
 	fn paused_is_derived() {
 		let mut d = Wanted::default();
 		assert!(d.paused());
 		d.audio = true;
 		assert!(!d.paused());
-		d = Wanted {
-			closed: true,
-			..Wanted::default()
-		};
+
+		// Video's encoder exits while audio plays: audio leaving must still pause.
+		d.video_closed = true;
+		assert!(!d.paused());
+		d.audio = false;
+		assert!(d.paused());
+
+		// Both closed: never block again.
+		d.audio_closed = true;
 		assert!(!d.paused());
 	}
 
