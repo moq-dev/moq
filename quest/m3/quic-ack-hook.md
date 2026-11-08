@@ -61,7 +61,9 @@ The same pair goes on `send::Finished`, the handle `finish(self)` returns
 `offset()` mints, instead of a `u64`. The `send::Error` says why the bytes will
 never be acknowledged: a reset, the peer's STOP_SENDING, or the connection's
 loss. Both drivers forward to `moq-quic`'s own `send::Stream::poll_acked`
-wait, which replaced `StreamEvent::Acked`. Four traps, each settled in moq-quic where the wait
+wait, which replaced `StreamEvent::Acked`. That wait is `#[cfg(test)]` and
+`pub(crate)` today (`rs/moq-quic/src/connection/streams/send.rs`), so the
+first step makes it public in a normal build. Four traps, each settled in moq-quic where the wait
 lives:
 
 - A finished stream whose every byte was acknowledged must not look like a
@@ -95,8 +97,11 @@ rejected as a fallback.
 
 Acceptance includes the first two traps, through each driver: a finished
 stream whose bytes were all acknowledged resolves `poll_acked` as delivered,
-while a reset one resolves it with the error; and an offset past the data
-written returns an error, not a panic, before and after finish.
+while a reset one resolves it with the error. An offset past the data
+written can only come from another stream, since only `offset()` mints one,
+so that case is the foreign-offset trap: build it from a longer stream and
+check it panics before the connection lock, leaving other handles on the
+connection usable, before and after finish.
 
 Tests also cover: offset already acknowledged before the first poll, an
 offset in the middle of an in-flight frame, several waiters on one stream in

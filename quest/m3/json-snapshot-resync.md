@@ -25,7 +25,9 @@ state. The maintainer approved planning the fix from #7693's iterate.
 
 - Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the consumer resyncs itself, with no new error variant. On a
   decode failure it resets its frame count and delta base, skips the rest
-  of the group, and counts the skip (optionally a `skipped()` counter). A
+  of the group, and counts the skip (optionally a `skipped()` counter). It
+  also logs a warning per skip, so a stream whose every group is malformed
+  is visible to an operator rather than silently stale. A
   terminal error stays terminal, so `@moq/room` and moq-boy need no change.
 - Do the same in Rust's snapshot consumer, and test a malformed delta
   followed by a good group in both languages.

@@ -36,6 +36,7 @@ and remaining quests), so it adds no break and waits on no other backend.
 
 ## Required
 
+- [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - the encoder API this backend implements
 - [AudioToolbox decode](/quest/m3/audio-decode-audiotoolbox.md) - the round-trip regression decodes through it
 
 ## Related

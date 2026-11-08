@@ -22,7 +22,10 @@ publication and a maintainer with npm rights:
 
 ## Waiting
 
-- Maintainer: with npm rights, run the deprecation above and freeze
-  web-transport's `js/qmux` publisher before the cut; an agent has no npm or
-  web-transport rights. Done when `npm view @moq/qmux repository` names
-  moq-dev/moq and `npm view @moq/web-socket-stream deprecated` is set.
+- Maintainer: freeze web-transport's `js/qmux` publisher before the cut,
+  then, with npm rights, run the deprecation above once the first moq
+  release of `@moq/qmux` is on npm, so the migration guide never points at
+  web-transport's 0.3.4; an agent has no npm or web-transport rights. Done
+  when web-transport's release config no longer publishes `@moq/qmux`,
+  `npm view @moq/qmux repository` names moq-dev/moq, and
+  `npm view @moq/web-socket-stream deprecated` is set.

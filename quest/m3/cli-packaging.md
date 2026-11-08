@@ -19,7 +19,7 @@ Decided 2026-10-26 (maintainer): defaults stay lean, and releases build
 everything. A default skips any feature that is expensive to build or relies
 on a system library, so `cargo build` and `cargo install moq-cli` stay fast
 and portable. moq-cli gains a `full` feature that turns on `capture`,
-`play`, `openh264`, `vaapi`, `nvidia`, and `v4l2` where the platform has it,
+`play`, `transcode`, `openh264`, `vaapi`, `nvidia`, and `v4l2` where the platform has it,
 and every distribution (the release binaries, Nix, Docker, winget, Homebrew)
 builds with it. `doc/bin/cli.md` tells source builders to pass
 `--features full`. This replaces the earlier plan to turn `capture` and
@@ -34,8 +34,8 @@ add nothing.
 
 Check each distribution actually builds: the Nix overlay needs those system
 dependencies present, and a Docker image without them fails at build rather
-than at run. Then verify the shipped artifact runs `moq devices` and
-`moq play` on each platform, since a feature that compiles into the binary and
+than at run. Then verify the shipped artifact runs `moq devices`,
+`moq play`, and a `transcode` command on each platform, since a feature that compiles into the binary and
 then fails to open a device is the same gap one layer down.
 
 Also enable `v4l2` in the Linux ARM release build, so a released binary on a

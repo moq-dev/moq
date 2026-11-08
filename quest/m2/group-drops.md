@@ -79,9 +79,16 @@ receive-window eviction can wait for the header, take the no-wire path, and
 remove this quest from [lite07-finalize](/quest/m2/lite07-finalize.md)'s
 Required.
 
+Open, for whoever starts this, with the maintainer: a `Gap`'s start-keyed
+`range` doesn't say how many groups it covers once starts are sparse, yet
+the Goal has readers count losses. Recommended: `Gap` also carries the
+number of groups dropped, which the drop set's runs already know.
+
 Public API: breaking for `track::Ordered` only. Its one read,
-`poll_next_group` (and its async wrapper), returns an item enum instead of
-`Result<Option<group::Consumer>>`: a group or a `Gap { range, error }`.
+`poll_next_group` (and its async wrapper), returns
+`Result<Option<Item>>` instead of `Result<Option<group::Consumer>>`, where
+`Item` is a group or a `Gap { range, error }`; `Ok(None)` still ends the
+read and `Err` still carries a track abort.
 Callers match the new item, and a caller that ignores drops takes the group
 arm; the PR's MIGRATE notes say so. `recv_group` and the unordered cursor are
 unchanged, so a reader that needs drop accounting reads through `Ordered`.

@@ -63,6 +63,12 @@ Member grants change shape, which breaks every enrolled device's paths:
   match the grant.
 - A hosted coordinator implementing the JSON contract issues the same
   grant; the PR's Impact section says so.
+- Rollout: an old client with a new grant, or a new client with an old
+  grant, can't publish. Open, for whoever starts this, with the maintainer:
+  recommended, the coordinator issues both the old and new patterns for one
+  release while clients upgrade and refresh their tokens, then drops the old
+  one, with the MIGRATE entry giving that order; the old pattern keeps the
+  service-name collision open until it is dropped.
 
 ## Required
 

@@ -40,8 +40,8 @@ its JS and binding mirrors:
   `RouteEvent::Takeover`, un-hide `origin::Consumer::routes`, `Routes`, and
   `RouteEvent`, documented as the relay-level stream that moq-relay and
   downstream relays already consume, and fix `request`'s doc to say what #8063 made it
-  do. `RouteEvent` becomes `struct RouteEvent { kind: RouteKind, announce:
-  Announce }` with `enum RouteKind { Start, Update, Restart, End }`,
+  do. `RouteEvent` becomes `pub struct RouteEvent { pub kind: RouteKind, pub
+  announce: Announce }` with `pub enum RouteKind { Start, Update, Restart, End }`,
   mirroring JS's `{ kind } & Routed`, so callers need no or-pattern and no
   accessors.
 - `stats::Registry::report` takes an explicit `now`, and
@@ -52,7 +52,10 @@ its JS and binding mirrors:
   fields instead of breaking moq-net again.
 - `group::MAX_CACHE_BYTES` becomes `pub(crate)`: byte-holes turns it from a
   size cap into a tail budget, and moq-json's `max_group_bytes` keeps its own
-  32 MiB default.
+  32 MiB default. Each outside use takes a limit of its own: moq-json's
+  encoder defaults and clamp, moq-mux's jitter, container-consumer, and
+  fMP4 bounds, the moq-stats `producer_tick` benchmark, and the oversize
+  tests in moq-json, moq-mux, and moq-gst.
 - Remove `origin::Consumer::with_proxy` (from
   [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)) in favor of
   `origin::Producer::with_proxy`, which already reaches every consumer taken

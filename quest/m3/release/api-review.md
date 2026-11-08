@@ -44,8 +44,12 @@ api-diff` cannot see (GStreamer properties, CLI flags and env, MIGRATE drift)
 and publish versions of packages exempt from the cut's version. `just
 api-diff` compares against this repository's `release` branch, which never
 held `@moq/qmux`, so compare `js/qmux`'s candidate API against npm's newest
-`@moq/qmux` (0.3.4, from moq-dev/web-transport) by hand, and the Rust `qmux`
-crate against crates.io's 0.6.6 the same way.
+`@moq/qmux` (0.3.4 today, from moq-dev/web-transport) by hand, and the Rust `qmux`
+crate against crates.io's newest `qmux` (0.6.6 today) the same way. The
+web-transport publishers are frozen by then
+([qmux-js-retire](/quest/m3/release/qmux-js-retire.md),
+[qmux-rs-retire](/quest/m3/release/qmux-rs-retire.md)), so the newest is
+the last.
 This review still runs after m2 lands, over what changed since.
 
 ## Required

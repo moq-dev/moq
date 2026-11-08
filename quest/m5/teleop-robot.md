@@ -15,7 +15,7 @@ Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 crate, too niche for a published library with no second consumer). The
 shapes below become documented conventions, and `moq-mavlink` ships as a
 moq-cli gateway like moq-srt. If a second consumer appears, generalize
-moq-boy's announce-prefix fan-in into moq-net instead of adding a robot
+an announce-prefix fan-in helper into moq-net instead of adding a robot
 crate. Where the text below says "the crate", read "the conventions".
 
 Decided 2026-10-08: parked in m5. No teleoperation consumer needs the crate
@@ -89,8 +89,11 @@ The framing is where the guarantee lives, not the subscription flags:
   fields. Decide whether the robot's fields ride there or in a namespaced
   root section through `moq-mux`'s `CatalogExt` and `RenditionConfig<E>`.
   No hang schema change.
-- Announce-prefix fan-in, documented from `rs/moq-boy/src/input.rs`; the
-  code stays in moq-boy until a second consumer moves it into moq-net.
+- Announce-prefix fan-in, documented against moq-net's origin announce
+  stream (`origin::Consumer`'s announcements under a prefix). moq-boy no
+  longer reads viewer broadcasts (its viewers dial a socket endpoint), so
+  there is no fan-in code to move; a helper lands in moq-net only when a
+  second consumer needs one.
 - The two delivery classes with the group structure and `Info::max_age` each
   one needs: `moq-json`'s snapshot and stream modes for JSON; plain tracks
   for opaque bytes, one group per latest value or one bounded ordered group
@@ -112,7 +115,7 @@ its own quest. A command, the telemetry sample it produced, and the video frame
 showing the result share one timebase, so a recording is usable as training
 data and an operator sees what the machine actually saw.
 
-The bridge is each broadcast's fixed catalog-root `clock: { wall, timescale }`,
+The bridge is each broadcast's fixed catalog `media.clock: { wall, timescale }`,
 documented in `doc/concept/hang.md` (#4461). Media and command tracks keep
 their own timescales; convert PTS explicitly into the broadcast clock before
 joining samples. The robot's video and telemetry share a clock; the operator's

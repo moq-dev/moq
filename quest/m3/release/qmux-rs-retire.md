@@ -4,7 +4,8 @@
 
 After the first `qmux` crate built from `rs/qmux` in this repository is on
 crates.io, moq-dev/web-transport no longer publishes `qmux`: its `rs/qmux`
-is frozen or removed, its release-plz config drops the crate, and its README
+is removed from its workspace or marked `release = false` in its
+release-plz config (dropping the entry alone leaves it publishable), and its README
 points at moq-dev/moq, so one repository owns the crate name.
 
 Check with `cargo info qmux` (its repository names moq-dev/moq) and the
@@ -20,7 +21,7 @@ move or close them there.
 ## Waiting
 
 - Maintainer: with rights in moq-dev/web-transport, freeze or remove its
-  `rs/qmux` and drop the crate from its release-plz config before the cut
-  publishes `qmux` from this repository; an agent has no publish rights
-  there. Done when `cargo info qmux` names moq-dev/moq and web-transport's
-  release-plz config no longer lists `qmux`.
+  `rs/qmux` (remove it from the workspace, or set `release = false` for it
+  in release-plz) before the cut publishes `qmux` from this repository; an
+  agent has no publish rights there. Done when `cargo info qmux` names
+  moq-dev/moq and web-transport can no longer publish `qmux`.

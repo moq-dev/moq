@@ -145,7 +145,10 @@ recorded only sequencing.
   (`rs/moq-net/src/model/subscription.rs`), and "oldest" is the sentinel
   `Relative(u64::MAX)`. Once keys are starts, `Absolute(key)` and `Time(ts)`
   name the same group, so `Absolute` goes; a legacy exclusive end `E` maps
-  to `Time(E - 1)`, since legacy keys pass through. An exclusive end of 0
+  to `Time(E - 1)`, since legacy keys pass through. A legacy inclusive
+  start `S` keeps its bound: it resolves to the first group keyed at or
+  above `S`, never to an earlier group that covers `S`, and a regression
+  covers sparse keys (4 and 7 with a start of 5 selects 7). An exclusive end of 0
   (today `sequence_bounds(..0)` and an empty range list's
   `Subscription::end()`) selects nothing, so it is dropped as an empty range
   before conversion, never saturated to `Time(0)`, which would include
@@ -159,6 +162,10 @@ recorded only sequencing.
   invariant audit, model-4).
 - **Fence what grows after the cut.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `Position` becomes
   `#[non_exhaustive]`, so byte-holes can add a byte offset without a break.
+- **Wires without a start.** Check which moq-lite versions can encode a
+  historical start; lite-01/02 may not. On any that can't, an `Oldest` or
+  earlier start gets the live feed, and the PR documents that exception
+  rather than changing the old format.
 - **Open, for whoever starts this, with the maintainer:** how lite-05/06,
   which carry both a sequence and frame timestamps, map on the way out.
 

@@ -60,8 +60,9 @@ of open PRs and remaining quests): each selected or admitted peer takes its
 own `iceServers`, defaulting to `Peers`' list, which replaces the earlier
 roster-size gate and its `max` knob. An application that wants to stop using
 STUN past some roster size passes an empty list for the peers it selects
-then. Host and mDNS candidates are always gathered, so LAN pairs form with
-an empty list. Changing a peer's list never closes an established pair; test
+then. Host and mDNS candidates are always gathered, so an empty list can
+still pair on a LAN when local-network access and mDNS resolution work;
+otherwise the peers stay on the relay. Changing a peer's list never closes an established pair; test
 roster churn and pending negotiations separately.
 
 Native entries: when `info.webtransport` is present the dialer tries its

@@ -33,4 +33,5 @@ Added 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and rem
 
 - `whep::accept` takes a `whep::Request` (`#[non_exhaustive]`), mirroring `whip::Request`, moved here from [rtc-pacing](/quest/m3/rtc-pacing.md), so its rate handle is additive.
 - moq-webrtc's `server::Config.udp_bind` becomes `socket: server::Socket` (`#[non_exhaustive]`, only `Bind(SocketAddr)` today), so a fed socket from [one port](/quest/m3/one-port/README.md) is additive.
+- moq-srt's dial-out `Client::publish` (`rs/moq-srt/src/dial.rs`), an egress that takes neither `Ingest` nor a request today, takes a `#[non_exhaustive]` `dial::Publish` request (the path, with room for m3's rate `Limit`), so [srt-rate-handle](/quest/m3/srt-rate-handle.md) reaches egress additively.
 - Per-session knobs m3 adds (the rate `Limit`, report and echo, the SRT `Wire`) are fields on these request structs or on `Ingest`, never new setters on `Client` or `Publish`.

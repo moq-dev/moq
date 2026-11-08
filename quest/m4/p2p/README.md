@@ -15,7 +15,9 @@ fails: a symmetric NAT, a denied local-network prompt, or a filtered multicast
 segment leaves the client exactly where it started.
 
 The application is in charge of policy. It supplies the ICE servers (an empty
-list is LAN only: host candidates and nothing else), publishes opaque hints
+list disables ICE servers: only host and mDNS candidates, which pair on a
+LAN when the network allows it, and can still pair across the Internet
+when a host address, often IPv6, is publicly reachable), publishes opaque hints
 about itself, decides which roster peers to dial, and sets the roster size
 above which new negotiations stop using STUN. P2P is off unless the
 application turns it on.
@@ -78,8 +80,10 @@ not a `Peers` knob):
 
 - `prefix`: the reserved prefix, `.p2p/` under the session root by default;
 - `iceServers`: the default RTCPeerConnection server list, which each
-  selected or admitted peer may override with its own; empty means LAN only.
-  Host and mDNS candidates are always gathered, so LAN pairing never stops,
+  selected or admitted peer may override with its own; empty disables ICE
+  servers (no STUN or TURN), which is not a LAN-only guarantee.
+  Host and mDNS candidates are always gathered, so LAN pairing stays
+  possible where local-network access and mDNS work,
   and changing a peer's list never closes an established pair;
 - `meta`: an opaque JSON value published in this peer's roster entry;
 - application-owned peer selection: discovery exposes candidates and only
