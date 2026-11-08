@@ -11,6 +11,9 @@
 //! is sure to honor a cut, and forces a keyframe whenever a joining subscriber asks for a group
 //! past the largest. The encoder's GOP stays the upper bound between keyframes.
 
+#[cfg(feature = "capture")]
+use std::sync::Arc;
+
 use moq_mux::catalog::hang::CatalogExt;
 #[cfg(feature = "capture")]
 use moq_mux::rate;
@@ -316,7 +319,7 @@ pub struct Capture {
 
 /// The capture publication's current lifecycle state.
 #[cfg(feature = "capture")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Status {
 	/// On demand, the source is closed until a subscriber wants the track.
@@ -325,13 +328,24 @@ pub enum Status {
 	Starting,
 	/// Frames are being captured, encoded, and published.
 	Live,
-	/// The capture, encoder, or track failed; [`Driver::run`] returned the error.
-	Failed,
+	/// The capture, encoder, or track failed with this error, which [`Driver::run`] returns.
+	Failed(Arc<Error>),
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
 	/// The [`Driver`] or its [`run`](Driver::run) future was dropped before it
 	/// finished, cancelling the capture.
 	Cancelled,
+}
+
+#[cfg(feature = "capture")]
+impl Status {
+	/// Whether publishing `self` over `other` changes nothing an observer can see.
+	fn same(&self, other: &Self) -> bool {
+		match (self, other) {
+			(Self::Failed(a), Self::Failed(b)) => Arc::ptr_eq(a, b),
+			_ => std::mem::discriminant(self) == std::mem::discriminant(other),
+		}
+	}
 }
 
 /// A snapshot of a capture publication's lifecycle.
@@ -344,8 +358,8 @@ pub struct State {
 #[cfg(feature = "capture")]
 impl State {
 	/// The publication's current lifecycle state.
-	pub fn status(&self) -> Status {
-		self.status
+	pub fn status(&self) -> &Status {
+		&self.status
 	}
 }
 
@@ -371,7 +385,7 @@ fn starting() -> kio::Producer<Published> {
 #[cfg(feature = "capture")]
 fn publish_status(state: &kio::Producer<Published>, status: Status) {
 	let Ok(mut published) = state.write() else { return };
-	if published.state.status != status {
+	if !published.state.status.same(&status) {
 		published.state.status = status;
 		published.revision = published.revision.wrapping_add(1);
 	}
@@ -399,6 +413,7 @@ pub fn publish_capture<E: CatalogExt>(
 	};
 	let driver = Driver {
 		track: Some(track),
+		producer: None,
 		catalog,
 		options,
 		state,
@@ -472,7 +487,10 @@ impl Publication {
 /// abandons a camera open or permission prompt still in flight.
 #[cfg(feature = "capture")]
 pub struct Driver<E: CatalogExt = ()> {
+	/// The registered track, until the probe knows its rendition.
 	track: Option<moq_net::track::Producer>,
+	/// The track's importer once probed, held here so a dropped `run` future still cancels it.
+	producer: Option<Producer>,
 	catalog: moq_mux::catalog::Producer<E>,
 	options: Capture,
 	state: kio::Producer<Published>,
@@ -488,9 +506,12 @@ impl<E: CatalogExt> std::fmt::Debug for Driver<E> {
 #[cfg(feature = "capture")]
 impl<E: CatalogExt> Drop for Driver<E> {
 	fn drop(&mut self) {
-		// Dropped before `run`: say so rather than `Dropped`.
+		// Dropped before `run` finished: say so rather than `Dropped`.
 		if let Some(track) = self.track.take() {
 			let _ = track.abort(moq_net::Error::Cancel);
+		}
+		if let Some(producer) = self.producer.take() {
+			producer.abort(moq_net::Error::Cancel);
 		}
 		// A no-op once `run` closed the state on its own terminal status.
 		publish_status(&self.state, Status::Cancelled);
@@ -505,24 +526,100 @@ impl<E: CatalogExt> Driver<E> {
 	/// Frames are stamped on the catalog's clock, so a concurrent audio publish into the
 	/// same catalog stays aligned. Off macOS and iOS the future is `Send` and can be
 	/// spawned; on macOS the capture session is `!Send`, so await it on a local task there.
-	pub async fn run(self) -> Result<(), Error> {
+	pub async fn run(self) -> Result<(), Arc<Error>> {
 		self.run_from(DeviceSource).await
 	}
 
 	/// [`run`](Self::run) from `source`, so the fixtures can drive it from a synthetic or
 	/// stalled one.
-	async fn run_from<S: CaptureSource>(mut self, source: S) -> Result<(), Error> {
-		let track = self.track.take().expect("a driver runs once");
-		let result = capture_from(track, &self.catalog, &self.options, source, &self.state).await;
+	async fn run_from<S: CaptureSource>(mut self, source: S) -> Result<(), Arc<Error>> {
+		let result = self.capture(source).await.map_err(Arc::new);
+		// This runs only when the capture ends on its own (the track is usually already
+		// going away by then); dropping the future leaves the track to `Drop` instead,
+		// since async `Drop` can't finalize it.
+		match &result {
+			// Clean end (the track was dropped): best-effort finish.
+			Ok(()) => {
+				if let Some(mut producer) = self.producer.take()
+					&& let Err(err) = producer.finish()
+				{
+					tracing::debug!(error = %err, "video track finish after capture ended");
+				}
+			}
+			// Abort with the real cause so subscribers see it. A track that already ended has
+			// nobody left to tell.
+			Err(err) => {
+				let cause = moq_net::Error::Transport(err.to_string());
+				if let Some(track) = self.track.take() {
+					let _ = track.abort(cause.clone());
+				}
+				if let Some(producer) = self.producer.take() {
+					producer.abort(cause);
+				}
+			}
+		}
 		publish_status(
 			&self.state,
-			match result {
+			match &result {
 				Ok(()) => Status::Ended,
-				Err(_) => Status::Failed,
+				Err(err) => Status::Failed(err.clone()),
 			},
 		);
 		let _ = self.state.close();
 		result
+	}
+
+	/// Probe `source`, wrap the track in an importer for its rendition, then run the capture loop.
+	async fn capture<S: CaptureSource>(&mut self, mut source: S) -> Result<(), Error> {
+		let clock = self.catalog.clock();
+		let options = &self.options;
+
+		// Open the camera to find out what it actually negotiated, since a requested size is only a
+		// hint (macOS ignores it outright) and the encoder is built from the mode, not the request.
+		// This buys a rendition that says exactly what the stream will carry, rather than one every
+		// consumer has to treat as provisional, and lets a consumer size itself against it without
+		// waiting for an encoder that may not run yet.
+		let (rendition, join, camera) = async {
+			let camera = source.open(&options.capture).await?;
+			let mut probe_config = encoder::Config::new(
+				camera.width(),
+				camera.height(),
+				options
+					.capture
+					.framerate
+					.or_else(|| camera.framerate())
+					.unwrap_or(DEFAULT_FRAMERATE),
+			);
+			probe_config.bitrate = options.bitrate;
+			probe_config.codec = options.codec;
+			probe_config.kind = options.kind.clone();
+			probe_config.color = camera.color();
+			let rendition = probe_config.probe().await?;
+			// The encoder is built from the same defaults, so the probe's join is the one it emits.
+			Ok::<_, Error>((rendition, probe_config.effective_join(), camera))
+		}
+		.await?;
+
+		// The importer consumes the track, so keep a handle to abort it if setup fails,
+		// then drop it so it never outlives the importer's.
+		let track = self.track.take().expect("a driver runs once");
+		let fallback = track.clone();
+		let producer = match Producer::new(track, self.catalog.reserve().with_interval(join), rendition) {
+			Ok(producer) => producer,
+			Err(err) => {
+				let _ = fallback.abort(moq_net::Error::Transport(err.to_string()));
+				return Err(err);
+			}
+		};
+		drop(fallback);
+		let producer = self.producer.insert(producer);
+		// Capturing from the start, the loop keeps the probe's camera rather than reopening it,
+		// which could mean a second permission prompt or picker. On demand it closes until a viewer.
+		let mut source = Opened {
+			stream: (!options.on_demand).then_some(camera),
+			source,
+		};
+		capture_loop(producer, &mut source, options, &clock, &self.state).await
 	}
 }
 
@@ -544,86 +641,6 @@ fn capture_track<E: CatalogExt>(
 	let refresh = super::backend::always_cuts(options.codec, &options.kind).then_some(REFRESH);
 	let info = catalog.track_info(hang::catalog::PRIORITY.video).with_refresh(refresh);
 	Ok(broadcast.unique_track(suffix, info)?)
-}
-
-/// Probe `source`, publish its rendition on `track`, then run the capture loop.
-#[cfg(feature = "capture")]
-async fn capture_from<E: CatalogExt, S: CaptureSource>(
-	track: moq_net::track::Producer,
-	catalog: &moq_mux::catalog::Producer<E>,
-	options: &Capture,
-	mut source: S,
-	state: &kio::Producer<Published>,
-) -> Result<(), Error> {
-	let clock = catalog.clock();
-
-	// Open the camera to find out what it actually negotiated, since a requested size is only a
-	// hint (macOS ignores it outright) and the encoder is built from the mode, not the request.
-	// This buys a rendition that says exactly what the stream will carry, rather than one every
-	// consumer has to treat as provisional, and lets a consumer size itself against it without
-	// waiting for an encoder that may not run yet.
-	let rendition = async {
-		let camera = source.open(&options.capture).await?;
-		let mut probe_config = encoder::Config::new(
-			camera.width(),
-			camera.height(),
-			options
-				.capture
-				.framerate
-				.or_else(|| camera.framerate())
-				.unwrap_or(DEFAULT_FRAMERATE),
-		);
-		probe_config.bitrate = options.bitrate;
-		probe_config.codec = options.codec;
-		probe_config.kind = options.kind.clone();
-		probe_config.color = camera.color();
-		let rendition = probe_config.probe().await?;
-		// The encoder is built from the same defaults, so the probe's join is the one it emits.
-		Ok::<_, Error>((rendition, probe_config.effective_join(), camera))
-	};
-	let (rendition, join, camera) = match rendition.await {
-		Ok(probed) => probed,
-		Err(err) => {
-			// A track that already ended has nobody left to tell.
-			let _ = track.abort(moq_net::Error::Transport(err.to_string()));
-			return Err(err);
-		}
-	};
-
-	// The importer consumes the track, so keep a handle to abort it if setup fails,
-	// then drop it so it never outlives the importer's.
-	let fallback = track.clone();
-	let mut producer = match Producer::new(track, catalog.reserve().with_interval(join), rendition) {
-		Ok(producer) => producer,
-		Err(err) => {
-			let _ = fallback.abort(moq_net::Error::Transport(err.to_string()));
-			return Err(err);
-		}
-	};
-	drop(fallback);
-	// Capturing from the start, the loop keeps the probe's camera rather than reopening it,
-	// which could mean a second permission prompt or picker. On demand it closes until a viewer.
-	let mut source = Opened {
-		stream: (!options.on_demand).then_some(camera),
-		source,
-	};
-
-	let result = capture_loop(&mut producer, &mut source, options, &clock, state).await;
-
-	// This runs only when the loop ends on its own (the track is usually already
-	// going away by then); dropping the future cancels it before this point, since
-	// async `Drop` can't finalize the track.
-	match &result {
-		// Clean end (the track was dropped): best-effort finish.
-		Ok(()) => {
-			if let Err(err) = producer.finish() {
-				tracing::debug!(error = %err, "video track finish after capture ended");
-			}
-		}
-		// The capture loop failed: abort with the real cause so subscribers see it.
-		Err(err) => producer.abort(moq_net::Error::Transport(err.to_string())),
-	}
-	result
 }
 
 /// Off macOS and iOS, [`Driver::run`]'s future must stay `Send` so a server can
@@ -1844,13 +1861,13 @@ mod tests {
 			catalog: moq_mux::catalog::Producer,
 			options: Capture,
 			source: impl CaptureSource,
-		) -> Result<(), Error> {
+		) -> Result<(), Arc<Error>> {
 			let (_, driver) = publish_capture(broadcast, catalog, options)?;
 			driver.run_from(source).await
 		}
 
-		async fn status(publication: &mut Publication, expected: Status) {
-			while publication.state().status() != expected {
+		async fn status(publication: &mut Publication, reached: impl Fn(&Status) -> bool) {
+			while !reached(publication.state().status()) {
 				publication.changed().await.expect("driver still alive");
 			}
 		}
@@ -2123,29 +2140,42 @@ mod tests {
 				let source = Streams::new([probe, stream]);
 				let opens = source.opens.clone();
 				let (mut publication, driver) = publish_capture(broadcast.clone(), catalog, options).unwrap();
-				assert_eq!(publication.state().status(), Status::Starting);
+				assert!(matches!(publication.state().status(), Status::Starting));
 				let run = tokio::task::spawn_local(driver.run_from(source));
 
 				let name = rendition_name(&consumer).await;
 				until(|| probed.released()).await;
 				assert_eq!(opens.load(Ordering::SeqCst), 1, "only the probe opened the camera");
-				status(&mut publication, Status::Waiting).await;
+				status(&mut publication, |status| matches!(status, Status::Waiting)).await;
 
 				let mut subscriber = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 				camera.push_native(surface(), us(0));
 				subscriber.recv_group().await.unwrap().expect("a group");
 				assert_eq!(opens.load(Ordering::SeqCst), 2, "the viewer opened the camera");
-				assert_eq!(publication.state().status(), Status::Live);
+				assert!(matches!(publication.state().status(), Status::Live));
 
 				drop(subscriber);
 				until(|| camera.released()).await;
-				status(&mut publication, Status::Waiting).await;
+				status(&mut publication, |status| matches!(status, Status::Waiting)).await;
 				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
+				let mut subscriber = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 				run.abort();
 				assert!(run.await.unwrap_err().is_cancelled());
-				// Dropping the driver's future cancels the publication.
+				// Dropping the driver's future cancels the publication and its track.
+				let error = loop {
+					match subscriber.recv_group().await {
+						Ok(Some(_)) => {}
+						Ok(None) => panic!("the cancelled track ended cleanly"),
+						Err(error) => break error,
+					}
+				};
+				assert!(format!("{error:?}").contains("Cancel"), "{error:?}");
+				let mut last = None;
+				while let Some(state) = publication.changed().await {
+					last = Some(state);
+				}
+				assert!(matches!(last.as_ref().map(State::status), Some(Status::Cancelled)));
 				assert!(publication.is_finished());
-				assert_eq!(publication.state().status(), Status::Cancelled);
 			})
 			.await
 		}

@@ -547,9 +547,18 @@ pub(crate) mod tests {
 	async fn takes_the_route_the_encoder_reads() {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let size = Size::new(64, 64);
-		let config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
+		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
+		let bitrate = Some(moq_net::bandwidth::Rate::from_kbps(700));
+		let join = std::time::Duration::from_millis(1500);
+		config.bitrate = bitrate;
+		config.join = join;
 		let (mut exporter, config, _) = Exporter::new(&device, &queue, &config).await.unwrap();
 		assert_eq!(exporter.size(), size);
+		assert_eq!(
+			(config.bitrate, config.join),
+			(bitrate, join),
+			"the caller's settings survive"
+		);
 		let mut encoder = crate::encode::Encoder::new(&config).unwrap();
 		let expected = match crate::encode::backend::reads_export(encoder.name()) {
 			true => Route::Gpu,
@@ -589,7 +598,13 @@ pub(crate) mod tests {
 	#[ignore = "needs a GPU and OpenH264; run by just rs render-sw"]
 	async fn choosing_passes_over_an_encoder_that_cannot_read_this_device() {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
-		let config = crate::encode::Config::new(64, 64, crate::FrameRate::new(30, 1).unwrap());
+		let mut config = crate::encode::Config::new(64, 64, crate::FrameRate::new(30, 1).unwrap());
+		// A caller's stale device must not survive onto the readback encoder.
+		config.input = Some(crate::frame::vulkan::Device {
+			device_uuid: [0xaa; 16],
+			driver_uuid: [0xbb; 16],
+			render_node: None,
+		});
 		let readback = Candidate {
 			name: "openh264",
 			hardware: false,

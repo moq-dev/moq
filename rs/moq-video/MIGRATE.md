@@ -4,6 +4,32 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Capture returns a `Publication` and a `Driver`
+
+`encode::publish_capture(broadcast, catalog, options).await?` is
+`let (publication, driver) = encode::publish_capture(broadcast, catalog, options)?;`,
+then `driver.run().await`. `Publication` reports the capture's `State`, whose
+`Status` is `Waiting`, `Starting`, `Live`, `Failed(Arc<Error>)`, `Ended`, or
+`Cancelled`. `Driver::run` returns `Result<(), Arc<Error>>`, sharing the error
+its `Status::Failed` carries.
+
+### `encode::Producer::new` takes a track
+
+`encode::Producer::new(broadcast, reserved, rendition)` is
+`new(track, reserved, rendition)`, and `with_track` is gone. Create the track
+with `broadcast.unique_track(".avc3", reserved.track_info(PRIORITY.video))?`
+(`.hev1` for H.265).
+
+### `encode::Applied::cut` reports cut support
+
+Read `encoder.applied().cut` instead of matching `Error::CutUnsupported`.
+
+### `render::Exporter::new` returns the encoder config
+
+`render::Exporter::new(&device, &queue, &config)` takes `&encode::Config` and
+returns `(Exporter, encode::Config, VideoConfig)`. Open the encoder with the
+returned config.
+
 ### Consumer decoder setup refusals are typed
 
 `decode::Consumer::new` reports `Error::UnsupportedConfig` for a codec or description this build cannot decode, where `decode::Decoder::new` reports `Error::UnsupportedCodec`. That now includes a missing or malformed avcC or hvcC description (previously `Error::Codec` or `Error::Mux`) and a codec no compiled-in decoder handles (previously `Error::NoDecoder`). A stream every decoder for its codec refuses because the device cannot decode it, such as AV1 on a GPU without AV1 decode or a size past its limits, is a refusal too. `Error::NoDecoder` now means that a decoder for the codec failed to open for another reason, such as a missing driver or no device. Backend faults, scale-hint errors, and subscription failures keep their own errors. A codec worker that cannot start or exits during initialization reports `Error::CodecGone`, like a worker lost after initialization, rather than `Error::Codec`.

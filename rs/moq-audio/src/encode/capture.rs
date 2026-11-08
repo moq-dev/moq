@@ -50,7 +50,7 @@ impl Capture {
 }
 
 /// The capture publication's current lifecycle state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Status {
 	/// Raw audio is retained until a subscriber needs encoding.
@@ -64,12 +64,22 @@ pub enum Status {
 	///
 	/// After a source failure the driver keeps serving retained history on demand
 	/// until it is served or expires, then returns the failure.
-	Failed,
+	Failed(Arc<Error>),
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
 	/// The [`Driver`] or its [`run`](Driver::run) future was dropped before it
 	/// finished, cancelling the track.
 	Cancelled,
+}
+
+impl Status {
+	/// Whether publishing `self` over `other` changes nothing an observer can see.
+	fn same(&self, other: &Self) -> bool {
+		match (self, other) {
+			(Self::Failed(a), Self::Failed(b)) => Arc::ptr_eq(a, b),
+			_ => std::mem::discriminant(self) == std::mem::discriminant(other),
+		}
+	}
 }
 
 /// A snapshot of a capture publication's lifecycle.
@@ -82,13 +92,12 @@ pub struct State {
 	status: Status,
 	source: capture::Source,
 	device: Option<capture::Device>,
-	failure: Option<Error>,
 }
 
 impl State {
 	/// The publication's current lifecycle state.
-	pub fn status(&self) -> Status {
-		self.status
+	pub fn status(&self) -> &Status {
+		&self.status
 	}
 
 	/// The selected source, including an unresolved default microphone.
@@ -101,11 +110,6 @@ impl State {
 	/// This is `None` for system-audio capture.
 	pub fn device(&self) -> Option<&capture::Device> {
 		self.device.as_ref()
-	}
-
-	/// The source failure or driver error while [`Status::Failed`].
-	pub fn failure(&self) -> Option<&Error> {
-		self.failure.as_ref()
 	}
 }
 
@@ -134,7 +138,6 @@ pub fn publish_capture<E: CatalogExt>(
 			status: Status::Starting,
 			source: options.capture.source().clone(),
 			device: options.capture.device().cloned(),
-			failure: None,
 		},
 		revision: 0,
 	});
@@ -269,7 +272,7 @@ impl Drop for Driver {
 			producer.abort(moq_net::Error::Cancel);
 		}
 		// A no-op once `run` closed the state on its own terminal status.
-		publish_state(&self.state, Status::Cancelled, None);
+		publish_state(&self.state, Status::Cancelled);
 		publish_level(&self.level, Level::default());
 	}
 }
@@ -279,7 +282,7 @@ enum End {
 	/// The track closed.
 	Closed,
 	/// The source failed, and every retained frame since was served or expired.
-	Failed(Error),
+	Failed(Arc<Error>),
 }
 
 impl Driver {
@@ -292,41 +295,42 @@ impl Driver {
 		let end = self.drive().await;
 		let mut producer = self.producer.take().unwrap();
 		let now = self.clock.now();
-		let ended = end.and_then(|end| match end {
+		let ended = end.map_err(Arc::new).and_then(|end| match end {
 			End::Closed => producer
 				.set_active(false, now)
 				.and_then(|()| producer.finish())
-				.map(|()| None),
-			End::Failed(error) => {
+				.map(|()| None)
+				.map_err(Arc::new),
+			End::Failed(failure) => {
 				let ended = producer
 					.set_active(false, now)
-					.and_then(|()| producer.fail(moq_net::Error::Transport(error.to_string())));
+					.and_then(|()| producer.fail(moq_net::Error::Transport(failure.to_string())));
 				// The source failure stays the cause, even when its track can no longer end
 				// cleanly, such as one aborted while it still retained audio.
 				match ended {
-					Ok(()) => Ok(Some(error)),
-					Err(_) => Err(error),
+					Ok(()) => Ok(Some(failure)),
+					Err(_) => Err(failure),
 				}
 			}
 		});
 		let result = match ended {
 			Ok(None) => {
-				self.update(Status::Ended, None);
+				self.update(Status::Ended);
 				Ok(())
 			}
-			Ok(Some(error)) => {
-				self.update(Status::Failed, Some(error.clone()));
-				Err(error)
+			Ok(Some(failure)) => {
+				self.update(Status::Failed(failure.clone()));
+				Err(failure)
 			}
-			Err(error) => {
-				self.update(Status::Failed, Some(error.clone()));
-				producer.abort(moq_net::Error::Transport(error.to_string()));
-				Err(error)
+			Err(failure) => {
+				self.update(Status::Failed(failure.clone()));
+				producer.abort(moq_net::Error::Transport(failure.to_string()));
+				Err(failure)
 			}
 		};
 		self.publish_level(Level::default());
 		let _ = self.state.close();
-		result
+		result.map_err(Arc::unwrap_or_clone)
 	}
 
 	async fn drive(&mut self) -> Result<End, Error> {
@@ -364,6 +368,8 @@ impl Driver {
 
 		// The source failed, yet retained history stays reachable: subscribers still encode
 		// it on demand until none is left or nothing can want it any more.
+		// One shared copy, so repeated failed refreshes publish nothing new.
+		let failure = Arc::new(failure);
 		retention.failed(failure.clone());
 		retention.refresh(producer)?;
 		while producer.retains() {
@@ -376,8 +382,8 @@ impl Driver {
 		Ok(End::Failed(failure))
 	}
 
-	fn update(&self, status: Status, failure: Option<Error>) {
-		publish_state(&self.state, status, failure);
+	fn update(&self, status: Status) {
+		publish_state(&self.state, status);
 	}
 
 	fn publish_level(&self, level: Level) {
@@ -388,20 +394,12 @@ impl Driver {
 /// Publish a lifecycle transition, skipping one that changes nothing.
 ///
 /// Levels and repeated capture states must not wake lifecycle-only observers.
-fn publish_state(state: &kio::Producer<Published>, status: Status, failure: Option<Error>) {
+fn publish_state(state: &kio::Producer<Published>, status: Status) {
 	let Ok(mut published) = state.write() else { return };
-	// `Error` is not `PartialEq`, and a failure publish is rare enough that
-	// rendering both to compare them costs nothing worth avoiding.
-	let same_failure = match (&published.state.failure, &failure) {
-		(None, None) => true,
-		(Some(before), Some(now)) => before.to_string() == now.to_string(),
-		_ => false,
-	};
-	if same_failure && published.state.status == status {
+	if published.state.status.same(&status) {
 		return;
 	}
 	published.state.status = status;
-	published.state.failure = failure;
 	published.revision = published.revision.wrapping_add(1);
 }
 
@@ -446,7 +444,7 @@ struct Retention<'a> {
 	state: &'a kio::Producer<Published>,
 	level: &'a kio::Producer<Level>,
 	/// The source failure, after which the status stays failed.
-	failure: Option<Error>,
+	failure: Option<Arc<Error>>,
 }
 
 impl Retention<'_> {
@@ -455,8 +453,8 @@ impl Retention<'_> {
 		let active = !self.retain || self.demand.wanted().is_some();
 		producer.set_active(active, self.clock.now())?;
 		match &self.failure {
-			Some(failure) => publish_state(self.state, Status::Failed, Some(failure.clone())),
-			None => publish_state(self.state, if active { Status::Live } else { Status::Waiting }, None),
+			Some(failure) => publish_state(self.state, Status::Failed(failure.clone())),
+			None => publish_state(self.state, if active { Status::Live } else { Status::Waiting }),
 		}
 		Ok(())
 	}
@@ -486,7 +484,7 @@ impl Retention<'_> {
 	}
 
 	/// The source failed: the level goes quiet and the status stays failed.
-	fn failed(&mut self, failure: Error) {
+	fn failed(&mut self, failure: Arc<Error>) {
 		publish_level(self.level, Level::default());
 		self.failure = Some(failure);
 	}
@@ -570,8 +568,8 @@ mod tests {
 		}
 	}
 
-	async fn status(publication: &mut Publication, expected: Status) {
-		while publication.state().status() != expected {
+	async fn status(publication: &mut Publication, reached: impl Fn(&Status) -> bool) {
+		while !reached(publication.state().status()) {
 			publication.changed().await.expect("driver still alive");
 		}
 	}
@@ -799,9 +797,8 @@ mod tests {
 				] {
 					assert!(matches!(result, Err(Error::Capture(message)) if message == "device lost"));
 				}
-				assert_eq!(publication.state().status(), Status::Failed);
 				assert!(
-					matches!(publication.state().failure(), Some(Error::Capture(message)) if message == "device lost")
+					matches!(publication.state().status(), Status::Failed(error) if matches!(&**error, Error::Capture(message) if message == "device lost"))
 				);
 				assert!(publication.is_finished());
 			})
@@ -825,7 +822,7 @@ mod tests {
 					let mut observer = capture.consume();
 					let capture_task = tokio::task::spawn_local(capture.run());
 					let encode_task = tokio::spawn(driver.run());
-					status(&mut publication, Status::Waiting).await;
+					status(&mut publication, |status| matches!(status, Status::Waiting)).await;
 					let mut block = Samples::plain(vec![0.25; 1920], false);
 					block.captured = Some(epoch + Duration::from_millis(100));
 					samples.try_push(Ok(block)).unwrap();
@@ -843,7 +840,7 @@ mod tests {
 						assert!(packet(&mut track).await.timestamp.as_micros() > 30_000_000);
 					} else {
 						assert_eq!(packet(&mut track).await.timestamp.as_micros(), 100_000);
-						assert_eq!(publication.state().status(), Status::Live);
+						assert!(matches!(publication.state().status(), Status::Live));
 					}
 					encode_task.abort();
 					assert!(encode_task.await.unwrap_err().is_cancelled());
@@ -871,16 +868,16 @@ mod tests {
 					let mut observer = capture.consume();
 					let capture_task = tokio::task::spawn_local(capture.run());
 					let encode_task = tokio::spawn(driver.run());
-					status(&mut publication, Status::Waiting).await;
+					status(&mut publication, |status| matches!(status, Status::Waiting)).await;
 					let mut block = Samples::plain(vec![0.25; 1920], false);
 					block.captured = Some(epoch + Duration::from_millis(100));
 					samples.try_push(Ok(block)).unwrap();
 					observer.read().await.unwrap();
 					retained(&publication).await;
 					samples.try_push(Err(Error::Capture("device lost".into()))).unwrap();
-					status(&mut publication, Status::Failed).await;
+					status(&mut publication, |status| matches!(status, Status::Failed(_))).await;
 					assert!(
-						matches!(publication.state().failure(), Some(Error::Capture(message)) if message == "device lost")
+						matches!(publication.state().status(), Status::Failed(error) if matches!(&**error, Error::Capture(message) if message == "device lost"))
 					);
 					// Failure is terminal, but the publication still serves what it retained.
 					assert!(!publication.is_finished());
@@ -895,7 +892,7 @@ mod tests {
 					let result = encode_task.await.unwrap();
 					assert!(matches!(result, Err(Error::Capture(message)) if message == "device lost"));
 					assert!(publication.is_finished());
-					assert_eq!(publication.state().status(), Status::Failed);
+					assert!(matches!(publication.state().status(), Status::Failed(_)));
 					if let Some(mut track) = track {
 						// The track keeps what it published, then ends with the failure rather than cleanly.
 						let error = loop {
@@ -918,14 +915,16 @@ mod tests {
 		let Fixture {
 			driver,
 			broadcast,
-			publication,
+			mut publication,
 			..
 		} = fixture(false);
 		let mut track = subscribe(&broadcast, Duration::ZERO).await;
 		drop(driver);
 		let error = track.read().await.unwrap_err();
 		assert!(format!("{error:?}").contains("Cancel"), "{error:?}");
-		assert_eq!(publication.state().status(), Status::Cancelled);
+		let state = publication.changed().await.expect("the cancellation is observed");
+		assert!(matches!(state.status(), Status::Cancelled));
+		assert!(publication.changed().await.is_none());
 		assert!(publication.is_finished());
 	}
 
