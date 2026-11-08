@@ -61,7 +61,6 @@ moves what remains of them once their claims merge.
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
 - [Copies of one group identity must agree beyond their bytes](/quest/m1/copy-identity.md) - copies that differ in timestamp, object fields, or frame count fail as a protocol violation
 - [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
-- [Relay settings parse once into a validated configuration](/quest/m1/relay-config-checks.md) - settings that cannot work together are refused at load instead of accepted and ignored
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 
 ## Related

@@ -328,24 +328,120 @@ impl Config {
 		deprecated
 	}
 
-	/// Refuse a config parsed from released spellings, then apply the relay's own
-	/// defaults.
+	/// Check every setting against the others, then apply the relay's own defaults.
 	///
-	/// The check comes first because those spellings configure nothing: a relay that
-	/// booted anyway would be serving on defaults, with the deployment's own
-	/// `--server-bind` and TLS material silently absent.
-	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
+	/// The one place settings that span sections are checked, so none is accepted
+	/// here and then ignored or refused later. Released spellings are refused
+	/// first because they configure nothing: a relay that booted anyway would be
+	/// serving on defaults, with the deployment's own `--server-bind` and TLS
+	/// material silently absent.
+	pub(crate) fn resolve(mut self) -> anyhow::Result<Resolved> {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		// Here rather than at an endpoint, since io_uring workers and lazily built
 		// dial clients would otherwise check `[quic]` late or never. `[limits.peer.quic]`
 		// is checked by `Cluster::new`, which embedders call directly.
 		self.quic.validate().context("invalid [quic]")?;
+		self.check_runtime()?;
+		self.check_stats()?;
+		#[cfg(feature = "cluster-lan")]
+		self.check_lan()?;
 
 		self.quic
 			.max_streams
 			.get_or_insert(moq_tokio::quic::DEFAULT_MAX_STREAMS);
+		// A relay keeps the moq-transport object state it forwards across a moq-lite hop to
+		// another relay. Only negotiated when both sides offer it, so other peers never see it.
+		self.listen.extensions.ietf = true;
+		self.connect.extensions.ietf = true;
+		// Name the relay ahead of its core unless the operator overrides it (empty omits it),
+		// and dial cluster peers under the same name.
+		let implementation = self
+			.listen
+			.implementation
+			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+			.clone();
+		self.connect.implementation = Some(implementation);
+		Ok(Resolved(self))
+	}
+
+	/// Refuse worker options that need a worker group, or a build, this relay lacks.
+	fn check_runtime(&self) -> anyhow::Result<()> {
+		let workers = self.runtime.workers().is_some();
+		anyhow::ensure!(!self.runtime.pin || workers, "runtime.pin requires runtime.workers");
+		let io_uring = self.runtime.io_uring();
+		anyhow::ensure!(!io_uring || workers, "runtime.io_uring requires runtime.workers");
+		#[cfg(not(target_os = "linux"))]
+		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
+		#[cfg(all(target_os = "linux", not(feature = "_uring")))]
+		anyhow::ensure!(
+			!io_uring,
+			"runtime.io_uring needs moq-relay built with the `io-uring` feature"
+		);
+		// Refused rather than ignored: a group is the whole point of the setting, and
+		// silently serving from the shared runtime instead would look like it worked.
+		#[cfg(not(feature = "_quic"))]
+		anyhow::ensure!(
+			io_uring || !workers,
+			"runtime.workers needs moq-relay built with the `quic` feature"
+		);
 		Ok(())
+	}
+
+	/// Refuse stats on a clustered relay without a node name: every node would
+	/// publish the same `<prefix>/node` broadcast and the origin keeps only one.
+	fn check_stats(&self) -> anyhow::Result<()> {
+		#[cfg(feature = "cluster-lan")]
+		let lan = self.cluster.lan.enabled;
+		#[cfg(not(feature = "cluster-lan"))]
+		let lan = false;
+		let clustered =
+			!self.cluster.connect.is_empty() || self.cluster.api.url.is_some() || self.cluster.node.is_some() || lan;
+		anyhow::ensure!(
+			!self.stats.enabled || !clustered || self.stats.node.is_some(),
+			"--stats-enabled on a clustered relay requires --stats-node, so each node publishes its own stats"
+		);
+		Ok(())
+	}
+
+	/// Refuse LAN discovery this relay cannot advertise or dial.
+	#[cfg(feature = "cluster-lan")]
+	fn check_lan(&self) -> anyhow::Result<()> {
+		if !self.cluster.lan.enabled {
+			return Ok(());
+		}
+		anyhow::ensure!(
+			self.listen.serves_quic(),
+			"--cluster-lan needs a QUIC listener (--listen) to advertise. See https://doc.moq.dev/bin/relay/cluster."
+		);
+		// A fingerprint is advertised only for a certificate generated or supplied in memory.
+		let generated = !self.listen.tls.generate.is_empty() || self.listen.tls.identity.is_some();
+		anyhow::ensure!(
+			generated || self.cluster.node.is_some(),
+			"`--cluster-lan` needs `--cluster-node <self-url>` or a generated certificate to advertise. \
+			 See https://doc.moq.dev/bin/relay/cluster."
+		);
+		cluster::Cluster::validate_lan_versions(&self.connect, &self.listen)
+	}
+}
+
+/// A [`Config`] whose settings passed [`Config::resolve`], with the relay's
+/// defaults applied: the only form [`Relay::load`](crate::Relay::load) assembles from.
+#[derive(Clone, Debug)]
+pub(crate) struct Resolved(Config);
+
+impl Resolved {
+	/// The checked settings, to take apart.
+	pub(crate) fn into_inner(self) -> Config {
+		self.0
+	}
+}
+
+impl std::ops::Deref for Resolved {
+	type Target = Config;
+
+	fn deref(&self) -> &Config {
+		&self.0
 	}
 }
 
@@ -609,14 +705,14 @@ mod tests {
 			return;
 		}
 
-		let mut config = Cli::parse_from(&[std::ffi::OsStr::new("--quic-max-streams"), std::ffi::OsStr::new("4096")])
+		let config = Cli::parse_from(&[std::ffi::OsStr::new("--quic-max-streams"), std::ffi::OsStr::new("4096")])
 			.unwrap()
 			.config;
-		config.resolve().expect("current spellings");
+		let config = config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(4096));
 
-		let mut config = Cli::parse_from(&[]).unwrap().config;
-		config.resolve().expect("current spellings");
+		let config = Cli::parse_from(&[]).unwrap().config;
+		let config = config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(crate::DEFAULT_MAX_STREAMS));
 	}
 
@@ -638,7 +734,7 @@ mod tests {
 			return;
 		}
 
-		let mut config = Cli::parse_from(&[
+		let config = Cli::parse_from(&[
 			std::ffi::OsStr::new("--server-bind"),
 			std::ffi::OsStr::new("[::]:4443"),
 			std::ffi::OsStr::new("--server-tls-cert"),
@@ -675,7 +771,7 @@ max_streams = 4096
 [client.quic]
 max_streams = 64
 "#;
-		let mut config: Config = toml::from_str(toml).expect("released config must still parse");
+		let config: Config = toml::from_str(toml).expect("released config must still parse");
 		assert_eq!(config.listen.bind, None, "the released table configures nothing");
 
 		let err = config.resolve().expect_err("must refuse").to_string();
@@ -702,7 +798,7 @@ public = "anon/**"
 [auth.tls]
 root = ["ca.pem"]
 "#;
-		let mut config: Config = toml::from_str(toml).expect("released config must still parse");
+		let config: Config = toml::from_str(toml).expect("released config must still parse");
 		let err = config.resolve().expect_err("must refuse").to_string();
 		for old in [
 			"[auth] key -> --auth-url to `moq auth serve --key`",
@@ -823,11 +919,62 @@ root = ["ca.pem"]
 		assert!(err.contains("[server.quic] -> [quic]"), "{err}");
 	}
 
+	/// Settings that span sections are refused together at resolve, naming what is missing.
+	#[test]
+	fn cross_section_settings_are_refused() {
+		let refuse = |body: &str, needle: &str| {
+			let config: Config = toml::from_str(body).expect("parse");
+			let err = config.resolve().expect_err(body).to_string();
+			assert!(err.contains(needle), "{body}: {err}");
+		};
+		let resolve = |body: &str| {
+			let config: Config = toml::from_str(body).expect("parse");
+			config.resolve().unwrap_or_else(|err| panic!("{body}: {err}"));
+		};
+
+		refuse("[runtime]\npin = true\n", "runtime.pin requires runtime.workers");
+		refuse(
+			"[runtime]\nworkers = 0\npin = true\n",
+			"runtime.pin requires runtime.workers",
+		);
+
+		// Any way of joining a cluster makes the stats node required.
+		for cluster in [
+			"[cluster]\nnode = \"https://a.example\"\n",
+			"[cluster]\nconnect = [\"https://b.example\"]\n",
+			"[cluster.api]\nurl = \"https://api.example/peers\"\n",
+		] {
+			refuse(&format!("[stats]\nenabled = true\n{cluster}"), "--stats-node");
+			resolve(&format!("[stats]\nenabled = true\nnode = \"a\"\n{cluster}"));
+			resolve(cluster);
+		}
+		resolve("[stats]\nenabled = true\n");
+	}
+
+	/// LAN discovery needs a QUIC port and an identity to advertise.
+	#[cfg(all(feature = "cluster-lan", feature = "uds", unix))]
+	#[test]
+	fn lan_discovery_needs_something_to_advertise() {
+		let refuse = |body: &str, needle: &str| {
+			let config: Config = toml::from_str(body).expect("parse");
+			let err = config.resolve().expect_err(body).to_string();
+			assert!(err.contains(needle), "{body}: {err}");
+		};
+		let node = "[cluster]\nnode = \"https://a.example\"\n[cluster.lan]\nenabled = true\n";
+		refuse(
+			&format!("{node}[listen.unix]\nbind = \"relay.sock\"\n"),
+			"needs a QUIC listener",
+		);
+		refuse("[cluster.lan]\nenabled = true\n", "--cluster-node");
+		let config: Config = toml::from_str(node).expect("parse");
+		config.resolve().expect("a node URL and the default QUIC listener");
+	}
+
 	/// The canonical top-level table, which is what the demo configs use.
 	#[test]
 	fn the_shared_quic_table_applies() {
-		let mut config: Config = toml::from_str("[quic]\nmax_streams = 128\n").expect("parse");
-		config.resolve().expect("current spellings");
+		let config: Config = toml::from_str("[quic]\nmax_streams = 128\n").expect("parse");
+		let config = config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(128));
 	}
 

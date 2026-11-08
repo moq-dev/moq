@@ -59,7 +59,8 @@ pub struct Config {
 	///
 	/// May be multi-segment (e.g. `sjc/1`, `sjc/2`) when a region has multiple
 	/// hosts; the segments nest under a shared region key on the advertised
-	/// path. Single-relay deployments can leave this unset.
+	/// path. Required once the relay joins a cluster; a single relay can leave
+	/// it unset.
 	#[usage(long = "stats-node", env = "MOQ_STATS_NODE", setting = "stats.node")]
 	pub node: Option<String>,
 

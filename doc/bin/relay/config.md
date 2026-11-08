@@ -209,7 +209,7 @@ By default one work-stealing runtime serves every connection off one UDP
 socket. On Linux, QUIC can instead run on single-threaded workers, each with
 its own socket on the listen address (`SO_REUSEPORT`), so a connection is
 handled start to finish by one worker thread and its packets never cross
-threads. `pin = true` also keeps that thread on one core.
+threads. `pin = true` also keeps that thread on one core, and needs `workers`.
 
 ```toml
 [runtime]
@@ -388,7 +388,7 @@ defaults that is two streams per client session and eight per peer link.
 enabled = true
 prefix = ".stats"                    # The broadcast appears at <prefix>/node/<node>.
 interval = "1s"                      # Time between snapshots. Default.
-node = "sjc/1"                       # Disambiguates relays sharing a cluster.
+node = "sjc/1"                       # Required on a clustered relay, so nodes do not overwrite each other.
 depth = 1                            # One group track per first N path segments (per tenant).
 linger = "5m"                        # Keep an empty group's track listed this long. Default.
 ```
