@@ -5,7 +5,10 @@
 Every public importer and producer whose `finish` takes `&mut self` takes
 `self` instead, so a finished producer cannot be written to and no runtime
 "already finished" refusal is needed. moq-rtmp and moq-srt already consume
-on finish.
+on finish. A `Clone` producer that shares its state (moq-json's
+`snapshot`, `stream`, and `window` producers, and moq-mux's
+`catalog::Producer`) still consumes the handle it finishes with, but its
+other clones can still write, so it keeps the shared runtime refusal.
 
 ## Plan
 

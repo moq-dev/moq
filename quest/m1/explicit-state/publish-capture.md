@@ -49,6 +49,9 @@ Also sweep:
   `AnnounceMode`, and an invalid `announce` attribute suspends announcing
   through `#invalid` like every other attribute, instead of the getter
   returning `undefined` (added 2026-11-07, maintainer, /quest-plan from the
-  API shape audit).
+  API shape audit). An invalid attribute stays detectable the way every
+  other one already is: its parse error is thrown from
+  `attributeChangedCallback` and `enabled` turns false. The getter's type
+  narrows, so TypeScript readers still compile; say so in the PR.
 - `js/moq-boy/src/game.ts`: a command sent while disconnected replays on
   reconnect.

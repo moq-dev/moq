@@ -59,6 +59,6 @@ Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 
 ## Related
 
-- [ID3 catalog section](/quest/m5/id3.md) - gives one payload type carried here a
+- [ID3 in the events section](/quest/m5/id3.md) - gives one payload type carried here a
   typed contract
 - [FLV script tags](/quest/m5/flv-script.md) - likewise

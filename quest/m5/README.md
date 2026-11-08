@@ -69,7 +69,7 @@ lite-07; bitrate enforcement is not part of the next release.
   in five minutes
 - [Ladder](/quest/m5/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [fMP4 emsg](/quest/m5/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
-- [ID3 catalog section](/quest/m5/id3.md) - timed ID3 as a first-class container-neutral catalog section
+- [ID3 in the events section](/quest/m5/id3.md) - timed ID3 as a container-neutral scheme in the catalog's `events` section
 - [FLV script tags](/quest/m5/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Half and quarter rate AC-3](/quest/m5/ac3-low-rate.md) - bsid 9 and 10 AC-3 parse through TS and FLV instead of being refused
 - [MSF feedback tracks](/quest/m5/msf-publish-tracks.md) - `--report` and `--echo` work under `--catalog-format msf` through `publishTracks`, once a consumer asks

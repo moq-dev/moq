@@ -3,10 +3,11 @@
 ## Goal
 
 The track shapes and discovery every teleoperated machine needs are
-documented conventions in `doc/`, built on moq-net and moq-json, that
-[the MAVLink gateway](/quest/m5/teleop-mavlink.md) implements, so an
+documented conventions in `doc/`, built on moq-net and moq-json, so an
 integrator writes an adapter rather than a stack. There is no `moq-robot`
-crate. It is the gate for the rest of the questline.
+crate, and this quest ships documentation only; [the MAVLink
+gateway](/quest/m5/teleop-mavlink.md) implements the conventions in its own
+quest. It is the gate for the rest of the questline.
 
 ## Plan
 
@@ -15,8 +16,7 @@ crate, too niche for a published library with no second consumer). The
 shapes below become documented conventions, and `moq-mavlink` ships as a
 moq-cli gateway like moq-srt. If a second consumer appears, generalize
 moq-boy's announce-prefix fan-in into moq-net instead of adding a robot
-crate. Where the text below says "the crate", read the conventions and
-their implementation in moq-mavlink.
+crate. Where the text below says "the crate", read "the conventions".
 
 Decided 2026-10-08: parked in m5. No teleoperation consumer needs the crate
 yet; telemetry beside video needs [data sync](/quest/m3/watch-data-sync.md),
@@ -89,7 +89,8 @@ The framing is where the guarantee lives, not the subscription flags:
   fields. Decide whether the robot's fields ride there or in a namespaced
   root section through `moq-mux`'s `CatalogExt` and `RenditionConfig<E>`.
   No hang schema change.
-- Announce-prefix fan-in, generalised from `rs/moq-boy/src/input.rs`.
+- Announce-prefix fan-in, documented from `rs/moq-boy/src/input.rs`; the
+  code stays in moq-boy until a second consumer moves it into moq-net.
 - The two delivery classes with the group structure and `Info::max_age` each
   one needs: `moq-json`'s snapshot and stream modes for JSON; plain tracks
   for opaque bytes, one group per latest value or one bounded ordered group
@@ -126,11 +127,13 @@ present, but never infer synchronization from its presence. No per-record
 anchors or clock-sync mechanism; see
 [#2278](https://github.com/moq-dev/moq/issues/2278).
 
-### Port
+### Check against moq-boy
 
-Port `moq-boy` onto the crate in the same change, as the no-arbitration case.
-It is the only existing consumer, and if the abstraction cannot express crowd
-control then it is the wrong abstraction.
+With no crate there is nothing to port. Instead, check the conventions
+against `moq-boy`, the only existing consumer, as the no-arbitration case: it
+merges viewers' JSON button states, where the gateway routes MAVLink frames,
+so if the documented shapes cannot describe its crowd control they are the
+wrong shapes. moq-boy changes only where it contradicts a convention.
 
 ## Related
 

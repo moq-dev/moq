@@ -3,10 +3,9 @@
 ## Goal
 
 When a frame fails to decode (a `SyntaxError` or `DuplicateKey`), `@moq/json`'s
-`Snapshot.Consumer` drops the current group and throws a distinct decode
-error, then resumes at the next group's snapshot. Callers such as
-`@moq/room` and moq-boy can catch that error and keep reading instead of
-ending. `rs/moq-json`'s snapshot consumer does the same.
+`Snapshot.Consumer` drops the current group and resumes at the next group's
+snapshot by itself, so callers such as `@moq/room` and moq-boy keep reading
+instead of ending. `rs/moq-json`'s snapshot consumer does the same.
 
 ## Plan
 
@@ -24,18 +23,14 @@ recover: after a parse error `#framesRead` and the delta base go stale
 `rs/moq-json/src/snapshot/consumer.rs`), so continuing would show wrong
 state. The maintainer approved planning the fix from #7693's iterate.
 
-- On a decode failure, reset the frame count and delta base, skip the rest
-  of the group, and throw a new typed error (wrapping the cause) so callers
-  can tell it apart from a track end.
-- Mirror it in Rust as a new `Error` variant, with the same skip.
-- Move `@moq/room`'s metadata reader and moq-boy's status loop
-  (`js/room/src/metadata.ts`, `js/moq-boy/src/game.ts`) to skip the error
-  and resync, and test a malformed delta followed by a good group in both
-  languages.
+- Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the consumer resyncs itself, with no new error variant. On a
+  decode failure it resets its frame count and delta base, skips the rest
+  of the group, and counts the skip (optionally a `skipped()` counter). A
+  terminal error stays terminal, so `@moq/room` and moq-boy need no change.
+- Do the same in Rust's snapshot consumer, and test a malformed delta
+  followed by a good group in both languages.
 
-Public API: a new decode error in `@moq/json` and `moq-json`. Wire: none.
-
-Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the consumer resyncs itself. It drops the bad group, resets its frame count and delta base, and counts the skip (optionally a `skipped()` counter), with no new error variant; a terminal error stays terminal, so room and moq-boy need no change.
+Public API: at most a `skipped()` counter in `@moq/json` and `moq-json`. Wire: none.
 
 ## Related
 

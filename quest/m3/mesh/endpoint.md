@@ -14,14 +14,14 @@ with small changes, without iroh's wire or discovery.
 Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 `EndpointAddr`, and `Router` are out unless porting proves they are needed.
 
-- A service is the iroh ALPN analog: a name under `mesh/<id>/`.
+- A service is the iroh ALPN analog: a socket endpoint per service name
+  (below), while each node's address and status tracks stay under its
+  `mesh/<id>/`.
 - Decided 2026-11-01 (maintainer, socket planning interview), and updated
   2026-11-03 when sockets became endpoints and 2026-11-04 when the segment
   became `.socket` with the protocol in the session name: an `Endpoint` wraps
   a [socket](/doc/concept/socket.md) endpoint, which since 2026-11-06 is a
-  server at `.server/<id>`, a client at `.client/<id>`, or both. Settle the
-  layout here: such as one socket endpoint per service under
-  `mesh/<service>/`, or one per node with the service named in the session.
+  server at `.server/<id>`, a client at `.client/<id>`, or both.
   `connect` dials with the caller's own endpoint ID, and `accept` reads the
   remote ID from the dial, which the socket's answer check proves and the
   grant pins (publish `.server/<id>` and `.client/<id>` only). Update `moq auth`'s mesh grant and
@@ -38,6 +38,26 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 - Write a short porting note into the [guide](/quest/m3/mesh/guide.md).
 
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): one socket endpoint per service at prefix `mesh/<service>`, with the grant adding publish `mesh/*/.server/<id>` and `mesh/*/.client/<id>`, so `moq_net::socket` ships unchanged and needs no service field.
+
+Two constraints on that layout, found in review of
+[moq-dev/moq#8214](https://github.com/moq-dev/moq/pull/8214):
+
+- A service name is one path segment, validated when the `Endpoint` is
+  built, so `*` in the grant covers it (`video/h264` would fall outside).
+- Service sockets must not overlap member subtrees. Each member may publish
+  `mesh/<id>/**`, so a service named after member A puts `.server/B` under
+  A's own grant, and A could answer as B. The prefix in the Waiting item
+  below keeps the two apart.
+
+## Waiting
+
+- Maintainer: pick the service prefix that keeps service sockets out of
+  `mesh/<id>/**`. Options: **`mesh/.service/<service>` (recommended)**,
+  since endpoint IDs never start with `.`, so no member subtree can contain
+  it, and the grant becomes publish `mesh/.service/*/.server/<id>` and
+  `.client/<id>`; or keep `mesh/<service>` and refuse service names that
+  parse as an endpoint ID, which leaves the check in every relay's grant
+  logic. Done when the Plan names the prefix.
 
 ## Required
 

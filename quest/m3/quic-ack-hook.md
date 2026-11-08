@@ -19,24 +19,31 @@ upstream. This quest supersedes the design in moq-dev/web-transport#368,
 whose snapshot-counter shape loses the
 wakeups a latency sample needs.
 
-Add one method to `SendStream`, in the trait's poll style:
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs
+and remaining quests): no `Option<()>` outcome, and one offset type on both
+layers. Add an offset type and two methods to `SendStream`, in the trait's
+poll style:
 
 ```rust
-fn poll_acked(&self, waiter: &kio::Waiter, offset: u64) -> Poll<Result<Option<()>, Self::Error>>;
+type Offset: Copy;
+fn offset(&self) -> Self::Offset;
+fn poll_acked(&self, waiter: &kio::Waiter, offset: Self::Offset) -> Poll<Result<Acked, Self::Error>>;
+
+#[non_exhaustive]
+pub enum Acked { Delivered, Unsupported }
 ```
 
-It is ready with `Some` once every byte below `offset` has been acknowledged.
+It is ready with `Delivered` once every byte below `offset` has been acknowledged.
 It carries no instant: the caller records one when woken, which includes the
 peer's delayed-ACK timer (up to `max_ack_delay`) as well as the return trip.
 Decided 2026-10-17 on #5817, which dropped `moq-quic`'s ACK-delay-corrected
 instant until a consumer shows it matters. It resolves
 with an error once the stream is reset by either side or the session closes,
 so a waiter never hangs on bytes the peer will never acknowledge. The default
-implementation is ready with `Ok(None)` immediately: `None` means the backend
-cannot see acknowledgments, the same convention the trait's `Stats` methods
-use. A default body cannot construct a backend's own `Self::Error`, so
-unsupported has to live in the return type rather than the error, and a
-consumer must treat `None` as unknown, never as delivered.
+implementation is ready with `Ok(Acked::Unsupported)` immediately. A default
+body cannot construct a backend's own `Self::Error`, so unsupported has to
+live in the return type rather than the error, and a consumer must treat
+`Unsupported` as unknown, never as delivered.
 
 Each QUIC driver, moq-tokio's `quic::driver` and moq-uring's, gets the hook
 first, in the drivers' caller-owned waiter shape,
@@ -44,8 +51,8 @@ with an async wrapper:
 
 ```rust
 impl send::Stream {
-    pub fn poll_acked(&self, waiter: &kio::Waiter, offset: u64) -> Poll<Result<(), send::Error>>;
-    pub async fn acked(&self, offset: u64) -> Result<(), send::Error>;
+    pub fn poll_acked(&self, waiter: &kio::Waiter, offset: send::Offset) -> Poll<Result<(), send::Error>>;
+    pub async fn acked(&self, offset: send::Offset) -> Result<(), send::Error>;
 }
 ```
 
@@ -67,11 +74,14 @@ lives:
 - `reset_at` below the acknowledged prefix, or STOP_SENDING after a reset
   (which truncates to 0), shrinks the acknowledged prefix. The waiters fail
   anyway; keep the prefix a `poll_acked` reports monotonic.
-- The offset counts bytes on the QUIC stream. The trait method takes a byte
-  offset, like `moq-quic` (decided 2026-10-17 on #5817), and the lag
-  histogram's writer counts the bytes it writes, so neither driver needs a public
-  `offset()`. A layer that writes its own prefix adds its length: `quic::web`
-  already tracks its WebTransport header for `reset_at`.
+- The offset counts bytes on the QUIC stream, but nobody computes one: the
+  trait's `Offset` is the driver's minted `send::Offset`, and the lag
+  histogram's writer records `offset()` after each frame end instead of
+  counting the bytes it writes. A layer that writes its own prefix mints
+  offsets that already include it, so `quic::web` forwards the driver's
+  `Offset` and its WebTransport header needs no adjustment. A backend that
+  cannot see acknowledgments mints a `u64` byte count and keeps the default
+  `poll_acked`.
 
 The moq-tokio and moq-uring adapters implement the trait method over the
 driver's. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
@@ -93,9 +103,6 @@ offset in the middle of an in-flight frame, several waiters on one stream in
 offset order, reset by sender, STOP_SENDING by the receiver, and session
 close.
 
-
 Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
 [viewer lag histogram](/quest/m3/qos/lag-histogram.md) and the
 [delivery-delay histogram](/quest/m5/delivery-delay.md).
-
-Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): no `Option<()>` outcome. Return a named `enum Acked { Delivered, Unsupported }` (or add `fn acks(&self) -> bool` and make the poll a plain `Result`), and use one offset type on both layers.

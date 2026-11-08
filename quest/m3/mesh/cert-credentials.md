@@ -58,7 +58,7 @@ Added 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and rem
 
 - A self-describing, versioned encoding (for example a `moqc1.` prefix, or a distinct token type) in a slot named by role. If the query key stays `jwt` for compatibility, the prefix still makes it dispatchable without sniffing, and moq-transport uses its AUTHORIZATION TOKEN type field.
 - One proof structure whose signed payload has a `nonce | timestamp` field, so [the challenge](/quest/m4/cert-challenge.md) reuses it instead of adding a second format.
-- Revocation is data in the trust-store handle (a revoked SPKI-hash or serial set the application replaces), not a per-connection predicate.
+- Revocation is data in the trust-store handle (a revoked SPKI-hash set, or a set of serials qualified by their issuer, which the application replaces), not a per-connection predicate. A bare serial is never enough, since two trusted issuers can reuse one; a test revokes one issuer's serial and still admits the other issuer's certificate with the same serial.
 - Chains are 2 to 4 KB in base64, close to common 8 KB URL limits; cache verified chains by fingerprint, and say in the PR how a long chain is carried.
 - The shared token corpus planned in [moq-dev/moq#8151](https://github.com/moq-dev/moq/pull/8151) includes this credential form.
 

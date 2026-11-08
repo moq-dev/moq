@@ -12,8 +12,10 @@ them and the relay. Its policy knobs mirror `@moq/p2p`.
 `--p2p` (`MOQ_P2P`) needs a relay session (`--connect`) and a listener
 (`--listen`); shape the flag so the value carries those prerequisites rather
 than adding startup checks. `--p2p-ice-server`,
-`--p2p-max`, `--p2p-prefix`, and `--p2p-meta` carry the same knobs the JS
-`Peers` takes. Decided 2026-10-13: the operator explicitly selects peers;
+`--p2p-prefix`, and `--p2p-meta` carry the same knobs the JS
+`Peers` takes; there is no `--p2p-max` (decided 2026-11-07, maintainer,
+/quest-plan from the API sweep of open PRs and remaining quests: no `max`
+roster gate, see [signal](/quest/m4/p2p/signal.md)). Decided 2026-10-13: the operator explicitly selects peers;
 there is no built-in dial-all default. Provide an explicit selection/configuration
 surface and per-connection priority/cost mirroring the application API; settle
 its concrete CLI shape before coding and update all invocations against --help.
@@ -38,8 +40,6 @@ deterministic simultaneous-dial resolution.
 Discovery alone does not initiate a connection.
 
 Docs: a "P2P" section in `doc/bin/cli.md` beside the LAN cluster one.
-
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): no `max` flag ([signal](/quest/m4/p2p/signal.md)).
 
 ## Required
 

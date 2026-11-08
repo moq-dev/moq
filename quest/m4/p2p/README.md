@@ -71,16 +71,16 @@ off by default, and used only when the application lists it.
 
 ### Policy is the application's
 
-`Peers` takes the shared origin, plus:
+`Peers` takes the shared origin, plus the knobs below (decided 2026-11-07,
+maintainer, /quest-plan from the API sweep of open PRs and remaining quests:
+no `max` roster gate, and the on/off `enabled` is the element's attribute,
+not a `Peers` knob):
 
-- `enabled`: an explicit on/off signal, off by default;
 - `prefix`: the reserved prefix, `.p2p/` under the session root by default;
-- `iceServers`: the RTCPeerConnection server list; empty means LAN only;
-- `max`: the roster size above which a new negotiation is built with an empty
-  server list. Host and mDNS candidates are always gathered, so LAN pairing
-  never stops; only server-reflexive candidates are withheld. Pairs already
-  established are left alone when the roster grows past `max`, which is what
-  keeps the boundary from flapping;
+- `iceServers`: the default RTCPeerConnection server list, which each
+  selected or admitted peer may override with its own; empty means LAN only.
+  Host and mDNS candidates are always gathered, so LAN pairing never stops,
+  and changing a peer's list never closes an established pair;
 - `meta`: an opaque JSON value published in this peer's roster entry;
 - application-owned peer selection: discovery exposes candidates and only
   explicitly selected peers are dialed; incoming connections need application

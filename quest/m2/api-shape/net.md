@@ -53,6 +53,14 @@ its JS and binding mirrors:
 - `group::MAX_CACHE_BYTES` becomes `pub(crate)`: byte-holes turns it from a
   size cap into a tail budget, and moq-json's `max_group_bytes` keeps its own
   32 MiB default.
+- Remove `origin::Consumer::with_proxy` (from
+  [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)) in favor of
+  `origin::Producer::with_proxy`, which already reaches every consumer taken
+  from that producer. Only tests call the consumer override, but the moq-net
+  integration harness (`rs/moq-net/tests/integration/support/harness.rs`)
+  passes it about 195 scoped consumers, and `mount.rs` and moq-mux's
+  `container/test_util.rs` call it too; each sets proxy on the producer it
+  consumes from instead.
 - `auth::Grant` gets `#[non_exhaustive]`, since
   [rate-grant](/quest/m5/rate-grant.md) adds rates to it; callers outside
   moq-net build it from `Grant::default()`.
@@ -61,12 +69,15 @@ its JS and binding mirrors:
 
 Found by the 2026-11-07 API shape audit (net model and net session); see
 the [epic](/quest/m2/api-shape/README.md). Each item is XS except
-`Attempt::client` and `Compression` (S each). `RefusalKind` is a stats-wire
+`Attempt::client`, `Compression`, and the `with_proxy` removal (S each). `RefusalKind` is a stats-wire
 field, so say in the PR which deployed dashboards read it. If #8063 has not
 merged when this starts, leave the un-hide for a follow-up and say so.
 
 Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests): the `RouteEvent`
 struct, the stats arguments, the cache cap, and `Grant`. The `RouteEvent`
 reshape replaces [moq-dev/moq#7862](https://github.com/moq-dev/moq/pull/7862)'s
-accessors; if its author takes the reshape in that PR, it lands there for
-credit and this item only un-hides.
+accessors. #7862 closed without taking it, so the reshape lands here.
+
+Decided 2026-11-07 (maintainer, /quest-complete, from
+[moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088)'s follow-ups):
+✅ remove `origin::Consumer::with_proxy` in favor of the producer's.

@@ -18,6 +18,9 @@ MediaCodec, Media Foundation, and WebCodecs in m5's audio encode and decode
 quests) emits zero or more outputs per call and needs a flush, so each would
 otherwise break `encode`'s one-packet return in its own release.
 
-Mirror moq-video's names and return types. moq-ffi, moq-c, and the wrappers
+Mirror moq-video's names and return types. Prove delayed and multiple
+outputs and flushing in the shared encoder and decoder tests with a test
+codec that buffers, since no backend in this repository does yet; the m5
+platform backends rely on those tests rather than each owning them. moq-ffi, moq-c, and the wrappers
 follow if they expose the codec. Bench the libopus path before and after,
 since it allocates per call if the return becomes a `Vec`.

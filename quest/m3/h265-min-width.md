@@ -38,10 +38,9 @@ prerequisite inside this quest.
   it comes from the failed open or a per-driver table. Check what NVENC and
   VideoToolbox report for the same case.
 
-Public API: maybe a minimum size on the encoder probe in moq-video. Wire:
-none.
-
 Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the probe stays private, and the typed error names the minimum width. It becomes public only when a consumer asks.
+
+Public API: the encode error names the minimum size; the probe stays private. Wire: none.
 
 ## Related
 

@@ -14,7 +14,11 @@ Each item below has one path and one name:
 - moq-mux stops re-exporting `mp4_atom` (`container::fmp4`), and
   `fmp4::Wire::{new, trak}` become `pub(crate)` or give way to the one
   accessor moq-hls needs, so an mp4-atom bump (two are planned in m3) is not
-  a moq-mux break.
+  a moq-mux break. The errors leak it too: `moq_mux::Error::Mp4` and
+  `fmp4::Error::Mp4` wrap `mp4_atom::Error`, `fmp4::Error::{UnknownCodec,
+  UnsupportedCodec}` carry `mp4_atom::FourCC` and `mp4_atom::Codec`, and
+  both have `From<mp4_atom::Error>`. Those variants carry an opaque source
+  and moq-mux's own codec name, and the public `From` impls go.
 - hang's echo drops `latency` in Rust, JS, and the draft: nothing produces
   it, and [latency-ledger](/quest/m5/latency-ledger.md) adds its measurement
   additively.

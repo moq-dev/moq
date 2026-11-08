@@ -12,10 +12,16 @@ needs the polyfill must also import `@moq/libav` and set its mutable
 
 ## Plan
 
-Found by the 2026-11-07 API shape audit (browser media). Move `assets` and
-its resolver into `@moq/hang`, the shared dependency whose
-`Util.Libav.polyfill()` (`js/hang/src/util/libav.ts`) loads libav, and have
-the polyfill take its base from it. `@moq/watch` and `@moq/publish`
-re-export it, so their existing `assets()` callers keep working and nothing
-breaks. `@moq/libav` stays an implementation dependency. Future hosted files
-(the watch worker) join the same call. Test it on the CSP demo pages.
+Found by the 2026-11-07 API shape audit (browser media). Move the resolver
+into `@moq/hang`, the shared dependency whose `Util.Libav.polyfill()`
+(`js/hang/src/util/libav.ts`) loads libav, as a small per-package directory
+helper, and have the polyfill take its base from the package that loads it.
+`@moq/watch`'s and `@moq/publish`'s `assets()` keep their signatures and
+their own directories, so an app that hosts each package's files in a
+different directory keeps working and nothing breaks; each also sets the
+libav base on the `@moq/hang` instance it imports, so a page that resolves
+two `@moq/hang` copies still configures the one each package uses. Each
+package's `assets/` ships the libav wasm it needs. `@moq/libav` stays an
+implementation dependency. Future hosted files (the watch worker) join the
+same call. Test it on the CSP demo pages, including watch and publish
+configured with different directories.

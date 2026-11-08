@@ -79,9 +79,13 @@ receive-window eviction can wait for the header, take the no-wire path, and
 remove this quest from [lite07-finalize](/quest/m2/lite07-finalize.md)'s
 Required.
 
-Public API: additive for a separate read; breaking if folded into `recv_group`
-(its `Result<Option<group::Consumer>>` return changes for every caller), with
-MIGRATE notes. `@moq/net` and the bindings mirror it only with a named consumer.
+Public API: breaking for `track::Ordered` only. Its one read,
+`poll_next_group` (and its async wrapper), returns an item enum instead of
+`Result<Option<group::Consumer>>`: a group or a `Gap { range, error }`.
+Callers match the new item, and a caller that ignores drops takes the group
+arm; the PR's MIGRATE notes say so. `recv_group` and the unordered cursor are
+unchanged, so a reader that needs drop accounting reads through `Ordered`.
+`@moq/net` and the bindings mirror it only with a named consumer.
 Wire: possibly lite-07 (SUBSCRIBE_DROP for a stopped group), decided here.
 
 ## Required

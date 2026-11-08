@@ -18,8 +18,14 @@
   takes the raw upgraded IO plus a role, `Error::WebSocket` is opaque, and
   `pub use tokio_tungstenite` goes (`rs/qmux/src/ws.rs`), so a tungstenite
   major is not a qmux break.
-- moq-tokio's `server::Request::quic()` is removed; nothing outside the
-  crate calls it, and it exposes the QUIC backend through the session API.
+- moq-tokio's `server::Request::quic()` is removed, since it exposes the QUIC
+  backend's connection through the session API. Its one outside caller, the
+  relay's `pacer()` (`rs/moq-relay/src/incoming.rs`), clones it to apply
+  changed bitrate caps after acceptance, which `with_quic_limits` cannot do.
+  It gets a narrow replacement: a cloneable live-limits handle (for example
+  `Request::quic_limits() -> Option<QuicLimits>` with `set(moq_quic::Limits)`),
+  `None` on qmux streams as today, so the relay keeps updating caps on a
+  running session without naming the connection.
 
 ## Plan
 

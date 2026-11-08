@@ -41,7 +41,11 @@ moq-video's environment knobs). Its approved changes are m2 quests
 gateway-ingest, and the [api-shape epic](/quest/m2/api-shape/README.md)),
 two m1 quests, and plan edits. Check first, next run: surfaces `just
 api-diff` cannot see (GStreamer properties, CLI flags and env, MIGRATE drift)
-and publish versions of packages exempt from the cut's version.
+and publish versions of packages exempt from the cut's version. `just
+api-diff` compares against this repository's `release` branch, which never
+held `@moq/qmux`, so compare `js/qmux`'s candidate API against npm's newest
+`@moq/qmux` (0.3.4, from moq-dev/web-transport) by hand, and the Rust `qmux`
+crate against crates.io's 0.6.6 the same way.
 This review still runs after m2 lands, over what changed since.
 
 ## Required

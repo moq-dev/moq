@@ -48,8 +48,11 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not
   the [routing identity](/quest/m2/cluster-routing/routes/README.md), which each
   process declares fresh.
-- Addressing is announcement: each node publishes under `mesh/<id>/...`, and
-  reaching an ID is subscribing there. There is no separate directory.
+- Addressing is announcement: each node publishes its address and status
+  tracks under `mesh/<id>/...`, and reaching an ID is subscribing there.
+  There is no separate directory. Services are not under `mesh/<id>/`: each
+  is one socket endpoint per service name, outside every member subtree
+  (see [Endpoint API](/quest/m3/mesh/endpoint.md)).
 - Certificates can stand in for the token (decided 2026-11-07, maintainer,
   Kixel's planning): a downstream mesh that must admit and evict devices
   with no internet issues long-lived certificates from its own signers, and

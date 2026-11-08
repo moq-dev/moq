@@ -130,10 +130,14 @@ recorded only sequencing.
   tracks stay independent.
 - **No local clock in the model.** Added 2026-11-07 (maintainer,
   /quest-plan from the API shape audit): `Timestamp::now()`, the only model
-  API that reads the local clock, is removed, and its caller (moq-boy)
-  stamps from its own clock. `Timed<P>` moves from moq-net's root to
-  moq-json, whose producers and readers are its only users, and its `at`
-  becomes required under the rule above.
+  API that reads the local clock, is removed, and its callers stamp from
+  their own clock: moq-boy, moq-hls, moq-room, moq-stats, moq-bench, hang's
+  video example, moq-tokio's examples, and tests across moq-net, moq-json,
+  moq-mux, and moq-hls. `Timed<P>` moves from moq-net's root to moq-json,
+  since moq-net never uses it internally, and its `at` becomes required under
+  the rule above. Every crate that names `moq_net::Timed` follows the move:
+  moq-mux, moq-ffi, moq-c, moq-cli, moq-room, moq-boy, moq-hls, moq-stats,
+  and moq-net-tests.
 - **One anchor rule.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ collapse `Anchor` to `{Oldest,
   Relative(n), Time(ts)}` with every end inclusive (rejected: keep
   `Absolute` and make it inclusive; only add `Oldest`). Today an `Absolute`
@@ -141,7 +145,12 @@ recorded only sequencing.
   (`rs/moq-net/src/model/subscription.rs`), and "oldest" is the sentinel
   `Relative(u64::MAX)`. Once keys are starts, `Absolute(key)` and `Time(ts)`
   name the same group, so `Absolute` goes; a legacy exclusive end `E` maps
-  to `Time(E - 1)`, since legacy keys pass through. `Oldest` is explicit and
+  to `Time(E - 1)`, since legacy keys pass through. An exclusive end of 0
+  (today `sequence_bounds(..0)` and an empty range list's
+  `Subscription::end()`) selects nothing, so it is dropped as an empty range
+  before conversion, never saturated to `Time(0)`, which would include
+  group 0. Regressions cover `E = 0` and `E = 1` beside the legacy round
+  trips. `Oldest` is explicit and
   encoded the same on every wire (lite-07, lite-06 and earlier, IETF), where
   today the lite encoder treats any `back > MAX_QUIC` as oldest and the
   model does not. `Range::groups(RangeBounds<u64>)` and

@@ -16,8 +16,6 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 - The fMP4 side has landed (`MAX_HELD_BYTES`, `MAX_METADATA_BYTES`, `MAX_FRAGMENT_SAMPLES`, and `MAX_TRACKS` in `rs/moq-mux/src/container/fmp4/mod.rs`). Note the MKV avcC bound (about 34 MiB) sits far above fMP4's 2 MiB `MAX_METADATA_BYTES`.
 - Inventory what each importer still holds whole, and how much parsed state it builds from it (fMP4's parse expands up to tenfold, which is what sets `MAX_METADATA_BYTES`).
 - Keep audio and video payloads unbounded in both: streaming each sample into its frame was decided 2026-10-27, and this quest is about metadata only. An fMP4 text sample is the one payload held whole, because its rewrite needs every byte, so `MAX_HELD_BYTES` covers it; keep that exception. MKV has no counterpart, since it refuses subtitle tracks.
-- Document the policy once, in moq-mux's import docs, and make both importers' bounds `pub const`s as #7232's are.
+- Document the policy once, in moq-mux's import docs. Both importers' bounds stay private, with no `pub const` (as [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088) did for `fmp4::MAX_*`). Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests).
 
-Public API: possibly new `pub const` bounds and a shared refusal error in moq-mux. Wire: none.
-
-Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the policy's bounds are private, with no `pub const` (as [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088) did for `fmp4::MAX_*`).
+Public API: possibly a shared refusal error in moq-mux. Wire: none.

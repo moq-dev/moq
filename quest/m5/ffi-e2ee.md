@@ -20,9 +20,9 @@ the binding layer, and keep the encrypting publisher's refusal of a shared or
 explicit epoch. Add a binding test that decrypts a JS-published broadcast and
 the reverse to the interop suite.
 
-Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the bindings wrap moq-crypto's concrete `broadcast::{Producer, Consumer}` directly, without waiting on [net-wrap](/quest/m5/net-wrap/README.md).
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the bindings wrap moq-crypto's concrete `broadcast::{Producer, Consumer}` (`rs/moq-crypto/src/e2ee/broadcast.rs`, already public) directly, without waiting on [net-wrap](/quest/m5/net-wrap/README.md). So this quest requires neither e2ee quest below, both of which wait on net-wrap: it exposes encrypted tracks and frames, which is what the T3 app reads. Encrypted media publishing through moq-mux's catalog and codec publishers comes with [Rust protected publisher seams](/quest/m5/e2ee/rust-publish.md), and the bindings pick it up then without a break.
 
-## Required
+## Related
 
-- [Rust protected publisher seams](/quest/m5/e2ee/rust-publish.md) - the producer these bindings wrap
-- [Encrypted consumer shape](/quest/m5/e2ee/consumer.md) - the consumer these bindings wrap
+- [Rust protected publisher seams](/quest/m5/e2ee/rust-publish.md) - moq-mux publishing into an encrypted broadcast, after net-wrap
+- [Encrypted consumer shape](/quest/m5/e2ee/consumer.md) - Rust and JS media readers over an encrypted broadcast, after net-wrap

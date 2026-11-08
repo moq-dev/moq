@@ -79,7 +79,7 @@ federation) land.
 - [Android capture](/quest/m3/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
 - [Latest readers use Range::live()](/quest/m3/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`
 - [PulseAudio capture periods](/quest/m3/pulseaudio-capture-period.md) - capture on cpal's PulseAudio host arrives in short periods, not the server's 2 s default fragment, proven on the null sink's monitor
-- [A JSON snapshot consumer resyncs after a bad frame](/quest/m3/json-snapshot-resync.md) - a decode failure drops the group with a typed error, so `@moq/room` and moq-boy resume at the next snapshot
+- [A JSON snapshot consumer resyncs after a bad frame](/quest/m3/json-snapshot-resync.md) - a decode failure drops the group and the consumer resumes at the next snapshot by itself, so `@moq/room` and moq-boy keep reading
 - [Go module proxy](/quest/m3/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m3/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
 - [Dart on iOS](/quest/m3/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
