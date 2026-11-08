@@ -2551,10 +2551,22 @@ mod tests {
 				.unwrap();
 			producer.cut(None).unwrap();
 		};
-		write(&mut producer, 0, crate::single(encoder.encode_all(&pcm).unwrap()).payload);
-		write(&mut producer, 1, crate::single(encoder.encode_all(&pcm).unwrap()).payload);
+		write(
+			&mut producer,
+			0,
+			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+		);
+		write(
+			&mut producer,
+			1,
+			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+		);
 		producer.discontinuity().unwrap();
-		write(&mut producer, 2, crate::single(encoder.encode_all(&pcm).unwrap()).payload);
+		write(
+			&mut producer,
+			2,
+			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+		);
 		producer.finish().unwrap();
 
 		let first = next_frame(&mut consumer).await.unwrap().expect("first decoded frame");

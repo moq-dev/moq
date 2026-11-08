@@ -472,7 +472,10 @@ pub(crate) mod tests {
 				crate::single(decoder.decode_all(&packets[0]).unwrap()).samples.len(),
 				960 - 312
 			);
-			assert_eq!(crate::single(decoder.decode_all(&packets[1]).unwrap()).samples.len(), 960);
+			assert_eq!(
+				crate::single(decoder.decode_all(&packets[1]).unwrap()).samples.len(),
+				960
+			);
 		}
 	}
 
@@ -566,7 +569,10 @@ pub(crate) mod tests {
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 24_000, 1);
 		let mut decoder = Decoder::new(&catalog, &Config::default()).unwrap();
 		assert_eq!(decoder.sample_rate(), 48_000);
-		assert_eq!(crate::single(decoder.decode_all(&packets[0]).unwrap()).samples.len(), 960);
+		assert_eq!(
+			crate::single(decoder.decode_all(&packets[0]).unwrap()).samples.len(),
+			960
+		);
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 6);
 		assert!(matches!(

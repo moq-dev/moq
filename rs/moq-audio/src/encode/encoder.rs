@@ -719,13 +719,19 @@ mod tests {
 		let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
 		let frame = vec![0.0; enc.frame_size() * enc.codec_channels() as usize];
 
-		let first = crate::single(dec.decode_all(&crate::single(enc.encode_all(&frame).unwrap()).payload).unwrap());
+		let first = crate::single(
+			dec.decode_all(&crate::single(enc.encode_all(&frame).unwrap()).payload)
+				.unwrap(),
+		);
 		assert_eq!(
 			first.samples.len(),
 			(enc.frame_size() - enc.backend.delay()) * enc.codec_channels() as usize
 		);
 
-		let second = crate::single(dec.decode_all(&crate::single(enc.encode_all(&frame).unwrap()).payload).unwrap());
+		let second = crate::single(
+			dec.decode_all(&crate::single(enc.encode_all(&frame).unwrap()).payload)
+				.unwrap(),
+		);
 		assert_eq!(second.samples.len(), frame.len());
 	}
 
@@ -848,7 +854,10 @@ mod tests {
 			.unwrap();
 			let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
 			let input = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
-			let output = crate::single(dec.decode_all(&crate::single(enc.encode_all(&input).unwrap()).payload).unwrap());
+			let output = crate::single(
+				dec.decode_all(&crate::single(enc.encode_all(&input).unwrap()).payload)
+					.unwrap(),
+			);
 			assert_eq!(output.samples, input, "{layout:?}");
 		}
 	}

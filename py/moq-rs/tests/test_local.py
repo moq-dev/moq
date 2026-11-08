@@ -1571,7 +1571,8 @@ def test_audio_encoder_frame_init_and_bitrate():
     assert init.data[:8] == b"OpusHead"
     encoder.set_bitrate(32_000)
     encoder.encode([0.0] * encoder.frame_size)
-    assert encoder.receive().data
+    packet = encoder.receive()
+    assert packet is not None and packet.data
 
     with pytest.raises(moq.Error.Audio):
         moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=15)))
