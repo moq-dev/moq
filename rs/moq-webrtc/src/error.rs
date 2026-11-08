@@ -43,6 +43,10 @@ pub enum Error {
 	#[error("io error: {0}")]
 	Io(#[from] std::io::Error),
 
+	/// The request named a broadcast path that is not a valid [`moq_net::Path`].
+	#[error("invalid path: {0}")]
+	InvalidPath(#[from] moq_net::path::Error),
+
 	/// Error from the underlying moq-net transport.
 	#[error("moq error: {0}")]
 	Moq(#[from] moq_net::Error),

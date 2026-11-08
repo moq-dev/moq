@@ -43,7 +43,7 @@ capture still pulls in `libav*`. This proposal replaces encode **and** capture.
 |---|---|---|---|
 | VideoToolbox (macOS, iOS) | [`objc2-video-toolbox`](https://docs.rs/objc2-video-toolbox/) + `objc2-core-media` / `objc2-core-video` | Raw FFI. We hand-write the `VTCompressionSession` glue. | System frameworks, always present. Zero external runtime deps. |
 | NVENC (NVIDIA) | `moq-nvenc` (in-tree `rs/moq-nvenc`; fork of [`nvidia-video-codec-sdk`](https://crates.io/crates/nvidia-video-codec-sdk) 0.4 trimmed to dlopen-only) | Safe `Encoder` wrapper. | NVENC API lives in the driver (`libnvidia-encode.so`), `dlopen`'d at runtime. No build-time SDK linking. |
-| VAAPI (Intel/AMD) | [`moq-vaapi`](https://crates.io/crates/moq-vaapi) `0.0.2` (published; vendored+trimmed from cros-libva + discord/cros-codecs) | VAAPI H.264 encoder (Google/ChromeOS, ships in crosvm). | As of 0.0.2 *links* `libva` (`NEEDED libva.so.2`), build needs libva-dev; `dlopen` (no NEEDED, no build dep) is intended but not yet realized, see #1837. |
+| VAAPI (Intel/AMD) | `moq-vaapi` (in-tree `rs/moq-vaapi`; fork of cros-libva + discord/cros-codecs) | VAAPI H.264/H.265 encoder and decoder (Google/ChromeOS, ships in crosvm). | libva `dlopen`'d at runtime, bindings checked in: no libva-dev or libclang at build, no `NEEDED libva.so.2`. |
 | Software fallback | [`openh264`](https://crates.io/crates/openh264) | Pure fallback when no GPU. | Vendored build -> static, zero runtime deps. |
 
 Decisions and rationale:
@@ -227,7 +227,7 @@ objc2-core-video = "..."
 # NVENC rides the default-on `nvidia` feature and VAAPI the default-on `vaapi`
 # feature. Both dlopen their drivers at runtime, so they link on a GPU-less builder.
 moq-nvenc = { path = "../moq-nvenc", optional = true }  # in-tree fork, dlopen-only
-moq-vaapi = { version = "0.0.2", optional = true }      # standalone; vendored cros-libva + cros-codecs
+moq-vaapi = { path = "../moq-vaapi", optional = true }  # in-tree fork of cros-libva + cros-codecs
 
 [dependencies]
 openh264 = { version = "...", optional = true } # default software fallback
@@ -262,9 +262,7 @@ A backend "fails to open" (driver missing, no device) the same way an ffmpeg
 - **Linux**: one binary that
 
   - `dlopen`s `libnvidia-encode` if an NVIDIA driver is present (no build dep),
-  - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev) - *intended*;
-    moq-vaapi 0.0.2 currently links libva instead, so this isn't realized yet
-    (see #1837),
+  - `dlopen`s `libva` for Intel/AMD (no build dep on libva-dev),
   - falls back to OpenH264 when its default feature is enabled and no GPU encoder is usable.
 
   That single artifact runs across Ubuntu 20.04 -> 24.04, Debian, Fedora, etc.,
@@ -408,10 +406,9 @@ actively-maintained fork (Discord ships it for Go Live) that bumps to cros-libva
 links on a libva-less builder and loads on a libva-less machine, falling back to
 software (see `backend::open`).
 
-> **Status: realized in moq-vaapi 0.0.3** (#1837, bumped in #2465). It dlopens
-> libva and vendors the libva headers. Since moq-dev/vaapi#8 it also checks its
-> bindings in, so VAAPI costs the build nothing: no libva-dev, no libclang, no
-> `NEEDED libva.so.2`, no entry in the nix devShell.
+moq-vaapi dlopens libva and checks in bindings generated from vendored libva
+headers, so VAAPI costs the build nothing: no libva-dev, no libclang, no
+`NEEDED libva.so.2`, no entry in the nix devShell.
 
 **Input: DMA-BUFs stay on the GPU, CPU frames are uploaded.** A
 `Surface::DmaBuf` is encoded without a download. An NV12 buffer at the encoder's

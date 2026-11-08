@@ -115,7 +115,7 @@ impl Producer {
 				.expect("track key")
 				.protect(sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD)
 		})?;
-		self.inner.insert(moq_net::Datagram {
+		self.inner.insert(moq_net::datagram::Datagram {
 			sequence,
 			timestamp,
 			payload,

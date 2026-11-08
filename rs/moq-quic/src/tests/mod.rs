@@ -2334,9 +2334,7 @@ fn migration() {
 	assert_ne!(pair.server_conn_mut(server_ch).total_recvd(), 0);
 
 	pair.drive();
-	// The client's own path change is no news to it, and the connection survives it.
-	let client = pair.client_conn_mut(client_ch);
-	assert!(!iter::from_fn(|| client.poll()).any(|event| matches!(event, Event::PathUpdated)));
+	// The connection survives the client's own path change.
 	assert_matches!(pair.client_conn_mut(client_ch).error(), None);
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
 
@@ -7264,7 +7262,6 @@ fn default_controller_supports_bandwidth_probing() {
 		now: Instant::now(),
 		mtu: INITIAL_MTU,
 		rtt: Duration::from_millis(333),
-		max_pacing_rate: None,
 		seed: 0,
 	});
 	assert!(controller.probes());

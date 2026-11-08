@@ -2,13 +2,7 @@
 
 ```ts
 import { Effect } from "@moq/signals";
-import { Getter } from "@moq/signals";
 import { Signal } from "@moq/signals";
-
-export interface Fullscreen {
-	active: Getter<boolean>;
-	toggle(): void;
-}
 
 export interface Graph {
 	el: HTMLElement;
@@ -18,8 +12,6 @@ export interface Graph {
 export interface GraphOptions {
 	color?: string;
 	format?: (v: number) => string;
-	max?: number;
-	samples?: number;
 }
 
 export type Level = "full" | "partial" | "none";
@@ -58,8 +50,6 @@ export abstract class Support extends HTMLElement {
 }
 
 export function controlButton(svg: string, label: string): HTMLButtonElement;
-
-export function createFullscreen(parent: Effect, player: HTMLElement): Fullscreen;
 
 export function formatBitrate(bps: number): string;
 
