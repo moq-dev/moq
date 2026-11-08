@@ -25,7 +25,8 @@
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
 //!   VideoToolbox / Media Foundation / NVENC / VAAPI / V4L2) or H.265
 //!   (VideoToolbox / Media Foundation / NVENC). Entry points:
-//!   - `encode::publish_capture` captures a webcam and publishes it (turnkey).
+//!   - `encode::publish_capture` captures a webcam and publishes it (turnkey),
+//!     returning a `Publication` handle and the `Driver` that runs it.
 //!     The track and catalog are advertised up front (the camera opens at
 //!     startup so they can be exact), and the camera stays open and encodes
 //!     whether or not anyone is watching, unless `encode::Capture::on_demand`

@@ -1,7 +1,8 @@
 use crate::{Algorithm, EllipticCurve, Error, Jwk, Key, KeyMaterial, RsaPublicKey};
 use pkcs1::der::Decode as _;
 use pkcs8::der::Decode as _;
-use rind::signature::{EcdsaKeyPair, EcdsaSigningAlgorithm, Ed25519KeyPair, RsaKeyPair, RsaKeySize, sign};
+use rind::rsa::KeySize;
+use rind::signature::{EcdsaKeyPair, EcdsaSigningAlgorithm, Ed25519KeyPair, RsaKeyPair, sign};
 
 /// Generate a key pair for the given algorithm, returning the private and public keys.
 pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result<Key> {
@@ -35,7 +36,7 @@ fn generate_hmac_key<const SIZE: usize>() -> crate::Result<KeyMaterial> {
 
 // rind exports an RSA private key only as PKCS#8, so each JWK field is read back out of it.
 fn generate_rsa_key() -> crate::Result<KeyMaterial> {
-	let pkcs8 = RsaKeyPair::generate(RsaKeySize::Rsa2048)
+	let pkcs8 = RsaKeyPair::generate(KeySize::Rsa2048)
 		.map_err(Error::crypto)?
 		.to_pkcs8();
 	let info = pkcs8::PrivateKeyInfoRef::from_der(pkcs8.as_ref()).map_err(Error::crypto)?;

@@ -195,6 +195,22 @@ impl std::fmt::Debug for Client {
 	}
 }
 
+impl Client {
+	/// The moq-lite version a server answers with: the first one offered that `supported` holds.
+	#[cfg_attr(not(any(test, feature = "async")), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn select(&self, supported: &crate::Versions) -> Result<lite::Version, crate::Error> {
+		let version = self
+			.versions
+			.iter()
+			.flat_map(|v| Version::try_from(*v).ok())
+			.find(|v| supported.contains(v));
+		match version {
+			Some(Version::Lite(version)) => Ok(version),
+			_ => Err(crate::Error::Version),
+		}
+	}
+}
+
 impl<'a> Decode<'a, Version> for Client {
 	fn decode(r: &mut Decoder<'a>, v: Version) -> Result<Self, DecodeError> {
 		r.control = Some(crate::stats::Message::Session);

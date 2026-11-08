@@ -1066,9 +1066,7 @@ async fn next_instance(announced: &mut moq_net::origin::Routes) -> moq_net::Inst
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
-				moq_net::origin::RouteEvent::Start(announce)
-				| moq_net::origin::RouteEvent::Restart(announce)
-				| moq_net::origin::RouteEvent::Takeover { announce, .. } => {
+				moq_net::origin::RouteEvent::Start(announce) | moq_net::origin::RouteEvent::Restart(announce) => {
 					return announce.route.instance().clone();
 				}
 				_ => continue,

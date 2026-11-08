@@ -1,3 +1,4 @@
+import type { Stats as Report } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -17,7 +18,6 @@ import type { Broadcast } from "../broadcast";
 import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
-import type { RenditionStats } from "../rendition";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
 import { Resampler } from "./resampler";
@@ -78,17 +78,13 @@ export type OpusConfig = {
 	useinbandfec?: boolean; // in-band forward error correction
 };
 
-/** Cumulative encoder output totals, measured from the chunks the encoder produces. */
-export interface Stats {
-	/** Total frames encoded while serving. Monotonic; diff over an interval for a frame rate. */
-	frames: number;
-
-	/** Total bytes encoded while serving. Monotonic; diff over an interval for an upload bitrate. */
-	bytes: number;
-
-	/** The bitrate the encoder targets now, in bits per second, or undefined while none is resolved. */
-	bitrate?: number;
-}
+/**
+ * Cumulative encoder output totals, measured from the chunks the encoder produces: the counters
+ * it keeps, always present, plus the bitrate it targets, absent while none is resolved.
+ */
+export type Stats = Required<Pick<Report.RenditionInput, "frames" | "bytes">> & {
+	bitrate?: NonNullable<Report.RenditionInput["bitrate"]>;
+};
 
 /** Signals the encoder reads. */
 export type EncoderInput = {
@@ -273,13 +269,10 @@ export class Encoder {
 	#slot = new Signal<Slot<Catalog.AudioConfig> | undefined>(undefined);
 	// The slot while no network broadcast is serving the rendition.
 	#local = new Slot<Catalog.AudioConfig>();
-	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
-	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
-	// leaves it disabled, which is accurate: no frames are coming.
-	#paused = false;
-	// Whether it was muted since a config last resolved, so it keeps advertising its last config,
-	// enabled, while a released capture is closed and until the reopened one resolves.
-	#muted = false;
+	// Whether the rendition was disabled or muted since a config last resolved, so it keeps advertising
+	// its last config until a new one resolves. Whether that config reads as enabled follows the
+	// current knobs alone, never how the gap began.
+	#held = false;
 
 	constructor(name: string, props?: EncoderProps) {
 		// `source` moved to Audio.Capture, which renditions share. TypeScript catches this, but a
@@ -447,7 +440,7 @@ export class Encoder {
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
-		effect.proxy<RenditionStats | undefined>(rendition.stats, this.out.stats);
+		effect.proxy<Report.RenditionInput | undefined>(rendition.stats, this.out.stats);
 
 		// The pipeline outlives any one subscription: it is built as soon as capture runs and
 		// #encode reads the live producer per frame rather than subscribing to it. Rebuilding on a
@@ -634,23 +627,24 @@ export class Encoder {
 		effect.cleanup(() => this.#failures.update((n) => n - 1));
 	}
 
-	// Publish the probed config before the first frame reaches the track. A disabled rendition keeps its
-	// last config, since a disable may also release the capture, and stays disabled after re-enabling
-	// until the reopened capture reports its format. A muted one keeps it enabled throughout.
+	// Publish the probed config before the first frame reaches the track. A disabled or muted rendition
+	// keeps its last config, since either may also release the capture. It reads as enabled only while
+	// muted, which keeps subscribers attached for the next word; otherwise nothing is coming until the
+	// reopened capture reports its format, so a capture that never reopens leaves it disabled.
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
+		const muted = effect.get(this.muted);
 		const slot = this.#current(effect);
-		if (!enabled) this.#paused = true;
-		if (effect.get(this.muted)) this.#muted = true;
+		if (!enabled || muted) this.#held = true;
 		const config = enabled ? effect.get(this.#config)?.catalog : undefined;
 		if (!config) {
-			const last = this.#paused || this.#muted ? slot.last : undefined;
-			effect.set(this.#out.catalog, last && { ...last, ...estimate, ...(this.#paused && { enabled: false }) });
+			const last = this.#held ? slot.last : undefined;
+			const stillEnabled = enabled && muted;
+			effect.set(this.#out.catalog, last && { ...last, ...estimate, ...(!stillEnabled && { enabled: false }) });
 			return;
 		}
-		this.#paused = false;
-		this.#muted = false;
+		this.#held = false;
 
 		// The catalog bitrate is the most this track has been configured for, so lowering the knob
 		// retunes the encoder without lowering what the catalog advertises.
