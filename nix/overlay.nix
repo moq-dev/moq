@@ -13,10 +13,14 @@ let
   # Helper function to get crate info from Cargo.toml
   crateInfo = cargoTomlPath: craneLib.crateNameFromCargoToml { cargoToml = cargoTomlPath; };
 
-  # moq-video embeds a vendored PTX kernel at compile time, so every package
-  # source that may pull it in must preserve PTX alongside Cargo's sources.
+  # moq-video embeds PTX and moq-webrtc embeds crypto validation data at compile
+  # time, so packages must preserve these alongside Cargo's sources.
   filterCargoSources =
-    path: type: (final.lib.hasSuffix ".ptx" path) || (craneLib.filterCargoSources path type);
+    path: type:
+    (final.lib.hasSuffix ".ptx" path)
+    || (final.lib.hasSuffix ".der" path)
+    || (final.lib.hasSuffix ".bin" path)
+    || (craneLib.filterCargoSources path type);
   cleanCargoSource = final.lib.cleanSourceWith {
     src = ../.;
     name = "source";

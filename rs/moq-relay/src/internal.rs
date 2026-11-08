@@ -1616,7 +1616,10 @@ mod tests {
 			.merge(Router::new().route("/embedder", get(async || "embedded\n")));
 		let server = tokio::spawn(internal.serve(app));
 
-		let client = reqwest::Client::new();
+		let client = reqwest::Client::builder()
+			.use_preconfigured_tls(moq_tokio::tls::Connect::default().build().unwrap())
+			.build()
+			.unwrap();
 		let url = format!("http://{addr}");
 		let embedder = client
 			.get(format!("{url}/embedder"))

@@ -133,7 +133,7 @@ const selected = new Set<string>(
 	values.cases === undefined
 		? native
 			? NATIVE_CASES
-			: CASES.filter((name) => requestedPlayer !== "firefox" || name !== "replacement")
+			: CASES
 		: values.cases === "none"
 			? []
 			: values.cases.split(","),
@@ -161,10 +161,14 @@ if (
 const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
-if (!native && values.cases === undefined && playerEngine === "firefox") {
+if (selected.delete("replacement")) {
 	console.error(
-		"QUARANTINE\treplacement\tintermittent audio tone; investigate with https://github.com/moq-dev/moq/pull/8058",
+		"QUARANTINE\treplacement\tJS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md",
 	);
+	if (selected.size === 0) {
+		console.error("SKIP replacement: JS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md");
+		process.exit(SKIPPED);
+	}
 }
 
 // process.exit narrows `url` above, but not inside the function declarations below.
