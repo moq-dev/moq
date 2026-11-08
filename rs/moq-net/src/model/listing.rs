@@ -402,7 +402,13 @@ impl Queue {
 			Some(Pending::Add(_)) => {
 				self.pending.remove(name);
 			}
-			// Read, then re-added unread: the reader sees only the last removal.
+			// Read, then re-added unread: the reader sees only the last removal, one event fewer.
+			Some(pending @ Pending::Readd { .. }) => {
+				*pending = Pending::Remove { finished };
+				if let SyncPhase::Counting(left) = &mut self.sync {
+					*left = left.saturating_sub(1);
+				}
+			}
 			Some(pending) => *pending = Pending::Remove { finished },
 			None => {
 				self.pending.insert(name.clone(), Pending::Remove { finished });
@@ -726,6 +732,11 @@ mod tests {
 		queue.remove(&"a".into(), false);
 		queue.add("b".into(), track::Info::default());
 		queue.sync();
+		// Churn coalesces in place, so it owes SYNCED nothing extra.
+		for _ in 0..3 {
+			queue.add("a".into(), track::Info::default());
+			queue.remove(&"a".into(), false);
+		}
 		queue.add("a".into(), track::Info::default());
 		let mut events = Vec::new();
 		while queue.is_ready() {
