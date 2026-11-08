@@ -515,11 +515,11 @@ impl CaptureSource for DeviceSource {
 /// with nothing to divide grants `None` rather than being absent. Retiring stops
 /// the `select!` arm from spinning on a channel that is permanently ready.
 #[cfg(feature = "capture")]
-type RateControl = Option<rate::Follower>;
+type RateControl = Option<rate::Grant>;
 
 /// Wait for the next target bitrate, or forever when rate control is off or finished.
 ///
-/// Cancel-safe: [`Follower::poll_next`](rate::Follower::poll_next) keeps its state in
+/// Cancel-safe: [`Grant::poll_next`](rate::Grant::poll_next) keeps its state in
 /// the follower, so losing this race to a frame drops no target.
 #[cfg(feature = "capture")]
 async fn next_target(rate: &mut RateControl) -> Result<rate::Target, moq_net::Error> {
@@ -647,7 +647,7 @@ async fn rest(
 	rate.as_ref()?;
 	match encoder.set_bitrate(ceiling).await {
 		Ok(()) => {
-			*rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
+			*rate = Some(rate::Grant::new(claim.consume(), rate::Policy::new(ceiling)));
 			Some(ceiling)
 		}
 		Err(Error::BitrateUnsupported(name)) => {
@@ -744,7 +744,7 @@ async fn capture_loop<S: CaptureSource>(
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
+		let mut rate = Some(rate::Grant::new(claim.consume(), rate::Policy::new(ceiling)));
 		// The encoder's current target, reported again on any track the capture moves to.
 		let mut bitrate = ceiling;
 		producer.report_bitrate(bitrate);
@@ -2107,7 +2107,7 @@ mod tests {
 			let mut sink = Sink::open(&config).await.unwrap();
 
 			let estimate = moq_net::bandwidth::Producer::new();
-			let mut rate = Some(rate::Follower::new(estimate.consume(), rate::Policy::new(ceiling)));
+			let mut rate = Some(rate::Grant::new(estimate.consume(), rate::Policy::new(ceiling)));
 
 			estimate.set(Some(Rate::from_mbps(1))).unwrap();
 			let next = next_target(&mut rate).await;
