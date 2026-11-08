@@ -203,11 +203,11 @@ quests that require them.
 - [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
 - [Public constructors spawn nothing, or say why](/quest/m2/spawn-constructors.md) - each public library entry point that spawns returns a driver its caller polls, or is listed as kept
 - [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - `encode` and `decode` return any number of outputs and gain `flush`, as moq-video's do
-- [A mix-minus removes several sources](/quest/m2/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
 - [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - the catalog's new `warmup` contract is settled before the cut publishes it
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [Finishing a producer returns a Finished handle](/quest/m2/finished-handle.md) - `finish(self)` consumes moq-net's and the media crates' producers, so appending after finish doesn't compile
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
 - [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge
+- [moq-tokio's resolved config reports "off" as None](/quest/m2/tokio-resolved-options.md) - resolved timeouts and backoff accessors use `Option` while the text knobs keep `0` = off
 - [Nix clusters authenticate leaves with mTLS](/quest/m2/nix-cluster-mtls.md) - a clustered NixOS relay authenticates leaves with cluster-CA client certificates and `--mtls-link peer`, and the module stops minting an unbounded cluster JWT
