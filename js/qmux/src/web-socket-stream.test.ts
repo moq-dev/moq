@@ -216,6 +216,43 @@ describe("WebSocketStream ponyfill", () => {
 		expect(ws.closeArgs).toBeDefined();
 	});
 
+	test("writes reject once the peer closes or the socket errors", async () => {
+		for (const end of [(ws: FakeWebSocket) => ws.fireClose(1000, "bye"), (ws: FakeWebSocket) => ws.error()]) {
+			const wss = new WebSocketStream("wss://x", { webSocket: ctor });
+			const ws = FakeWebSocket.last as FakeWebSocket;
+			ws.open();
+			const writer = (await wss.opened).writable.getWriter();
+			end(ws);
+			await expect(writer.write(new Uint8Array(1))).rejects.toThrow();
+			expect(ws.sent).toHaveLength(0);
+		}
+	});
+
+	test("a close removes the abort listener", async () => {
+		const abort = new AbortController();
+		const wss = new WebSocketStream("wss://x", { webSocket: ctor, signal: abort.signal });
+		const ws = FakeWebSocket.last as FakeWebSocket;
+		ws.open();
+		ws.fireClose();
+		await wss.closed;
+		abort.abort();
+		expect(ws.closeArgs).toBeUndefined();
+	});
+
+	test("a real peer's close rejects later writes", async () => {
+		const server = Bun.serve({
+			port: 0,
+			fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no", { status: 400 })),
+			websocket: { open: (sock) => sock.close(1000, "bye"), message: () => {} },
+		});
+		onTestFinished(() => server.stop(true));
+		const wss = new WebSocketStream(`ws://localhost:${server.port}`);
+		const { writable } = await wss.opened;
+		const writer = writable.getWriter();
+		await wss.closed;
+		await expect(writer.write(new Uint8Array(1024))).rejects.toThrow();
+	});
+
 	test("openWebSocketStream uses the ponyfill when there's no native global", () => {
 		const wss = openWebSocketStream("wss://x", { webSocket: ctor });
 		expect(wss).toBeInstanceOf(WebSocketStream);

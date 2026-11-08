@@ -195,7 +195,14 @@ export class WebSocketStream implements WebSocketStreamLike {
 		// Avoid unhandled-rejection noise if a caller only awaits `closed`.
 		this.opened.catch(() => {});
 
+		// The socket's lifecycle: once `closed`, every half has been settled with `error`.
+		let state: { kind: "live" } | { kind: "closed"; error: Error } = { kind: "live" };
+		// Removes the abort listener once the socket ends, so a long-lived signal
+		// doesn't keep every closed socket reachable.
+		const cleanup = new AbortController();
+
 		let controller: ReadableStreamDefaultController<WebSocketStreamData> | undefined;
+		let writer: WritableStreamDefaultController | undefined;
 		const readable = new ReadableStream<WebSocketStreamData>({
 			start: (c) => {
 				controller = c;
@@ -209,8 +216,13 @@ export class WebSocketStream implements WebSocketStreamLike {
 		const sizes: number[] = [];
 		const writable = new WritableStream<WebSocketStreamData>(
 			{
+				start: (c) => {
+					writer = c;
+				},
 				write: (chunk) => {
 					queued -= sizes.shift() ?? 0;
+					// A closed socket discards sends while growing `bufferedAmount`.
+					if (state.kind === "closed") throw state.error;
 					ws.send(chunk);
 					return drain(ws, () => this.#highWaterMark);
 				},
@@ -249,19 +261,25 @@ export class WebSocketStream implements WebSocketStreamLike {
 				controller?.enqueue(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
 			}
 		};
-		ws.onerror = () => {
-			const err = new Error("WebSocket connection error");
-			opened.reject(err);
-			try {
-				controller?.error(err);
-			} catch {}
+		// Settle every half at once. `error` errors the readable; a clean close ends it.
+		// `closed` resolves only from a close event, which follows any error.
+		const finish = (error: Error, clean: boolean, close?: WebSocketStreamCloseEvent) => {
+			if (state.kind === "live") {
+				state = { kind: "closed", error };
+				cleanup.abort();
+				opened.reject(error);
+				try {
+					if (clean) controller?.close();
+					else controller?.error(error);
+				} catch {}
+				writer?.error(error);
+			}
+			if (close) closed.resolve(close);
 		};
+
+		ws.onerror = () => finish(new Error("WebSocket connection error"), false);
 		ws.onclose = (event) => {
-			opened.reject(new Error("WebSocket closed before opening"));
-			try {
-				controller?.close();
-			} catch {}
-			closed.resolve({ closeCode: event.code ?? 1006, reason: event.reason ?? "" });
+			finish(new Error("WebSocket closed"), true, { closeCode: event.code ?? 1006, reason: event.reason ?? "" });
 		};
 
 		// An adopted socket may already have finished (or missed) its handshake, in
@@ -270,18 +288,15 @@ export class WebSocketStream implements WebSocketStreamLike {
 			if (ws.readyState === OPEN) {
 				opened.resolve({ readable, writable, extensions: ws.extensions, protocol: ws.protocol });
 			} else {
-				opened.reject(new Error("WebSocket is already closed"));
-				try {
-					controller?.close();
-				} catch {}
-				closed.resolve({ closeCode: 1006, reason: "" });
+				finish(new Error("WebSocket is already closed"), true, { closeCode: 1006, reason: "" });
 			}
 		}
 
 		const { signal } = options;
 		if (signal) {
 			if (signal.aborted) ws.close();
-			else signal.addEventListener("abort", () => ws.close(), { once: true });
+			else if (state.kind === "live")
+				signal.addEventListener("abort", () => ws.close(), { signal: cleanup.signal });
 		}
 	}
 
