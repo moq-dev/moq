@@ -72,22 +72,7 @@ pub(crate) struct MediaFoundation {
 	/// The color space of the input frames, stamped onto both media types so the
 	/// encoder writes it into the bitstream's VUI.
 	color: Color,
-	/// Lazily configured on the first frame, since the Direct3D11 device to bind
-	/// (for zero-copy texture input) comes from the frame itself.
-	started: bool,
-	/// The MFT allocates its own output samples (true for hardware encoders).
-	provides_samples: bool,
-	/// Output buffer size we must allocate when `provides_samples` is false.
-	/// Cached from `GetOutputStreamInfo` so the output hot path doesn't re-query.
-	output_size: u32,
-	/// True once the MFT has asked for input and we haven't fed it since.
-	needs_input: bool,
-	/// True once the MFT has reported its drain complete, so a drain knows the
-	/// tail is out rather than still coming.
-	drained: bool,
-	/// Set while the next sample is the first of a restarted stream, so it can be
-	/// marked as such.
-	discontinuity: bool,
+	phase: Phase,
 	sample_index: i64,
 	/// Frames handed to the MFT that haven't come back out, oldest first: the
 	/// sample time we gave the codec paired with the frame's real timestamp. This
@@ -102,6 +87,38 @@ pub(crate) struct MediaFoundation {
 	/// Kept alive for the MFT's lifetime once a texture frame binds a device.
 	_manager: Option<IMFDXGIDeviceManager>,
 	_com: ComGuard,
+}
+
+/// Where the MFT stands.
+enum Phase {
+	/// Not configured yet: that happens on the first frame, since the
+	/// Direct3D11 device to bind (for zero-copy texture input) comes from the
+	/// frame itself.
+	Unstarted,
+	Streaming(Stream),
+	/// The stream ended for the last time ([`Backend::finish`]), or the MFT
+	/// failed to start, drain, or restart, so it takes no more frames.
+	Ended,
+}
+
+/// What a streaming MFT needs between calls.
+struct Stream {
+	output: Output,
+	/// True once the MFT has asked for input and we haven't fed it since.
+	needs_input: bool,
+	/// Set while the next sample is the first of a restarted stream, so it can be
+	/// marked as such.
+	discontinuity: bool,
+}
+
+/// Who allocates the output samples, cached from `GetOutputStreamInfo` so the
+/// output hot path doesn't re-query.
+#[derive(Clone, Copy, Debug)]
+enum Output {
+	/// The MFT allocates its own (true for hardware encoders).
+	Provided,
+	/// We allocate them, this many bytes each.
+	Allocated(u32),
 }
 
 impl MediaFoundation {
@@ -143,12 +160,7 @@ impl MediaFoundation {
 			bitrate: clamp_u32(config.resolved_bitrate().as_bps()),
 			gop: config.keyframe_interval(),
 			color: config.resolved_color(),
-			started: false,
-			provides_samples: false,
-			output_size: 0,
-			needs_input: false,
-			drained: false,
-			discontinuity: false,
+			phase: Phase::Unstarted,
 			sample_index: 0,
 			pending: VecDeque::new(),
 			last_timestamp: None,
@@ -159,7 +171,11 @@ impl MediaFoundation {
 
 	/// One-time configuration, deferred to the first frame so a texture frame can
 	/// bind its own Direct3D11 device for zero-copy input.
+	///
+	/// A start that fails leaves the encoder [`Phase::Ended`]: the MFT is
+	/// configured partway, which nothing here can take back.
 	fn start(&mut self, frame: &Surface) -> Result<(), Error> {
+		self.phase = Phase::Ended;
 		// Bind the frame's D3D11 device when it's a texture, so the MFT reads the
 		// captured surface directly. A CPU frame runs the MFT in system memory.
 		if let Surface::Texture(texture) = frame {
@@ -176,7 +192,7 @@ impl MediaFoundation {
 		self.configure_codec_api()?;
 		self.set_output_type()?;
 		self.set_input_type()?;
-		self.read_output_info()?;
+		let output = self.read_output_info()?;
 
 		unsafe {
 			self.transform
@@ -186,21 +202,39 @@ impl MediaFoundation {
 				.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
 				.map_err(|e| mf_err("start of stream", e))?;
 		}
-		self.started = true;
+		self.phase = Phase::Streaming(Stream {
+			output,
+			needs_input: false,
+			discontinuity: false,
+		});
 		Ok(())
 	}
 
-	/// Cache whether the MFT provides its own output samples and, if not, how
-	/// big a buffer we must allocate. Re-read after a format renegotiation.
-	fn read_output_info(&mut self) -> Result<(), Error> {
+	/// Whether the MFT provides its own output samples and, if not, how big a
+	/// buffer we must allocate. Re-read after a format renegotiation.
+	fn read_output_info(&self) -> Result<Output, Error> {
 		let info = unsafe {
 			self.transform
 				.GetOutputStreamInfo(0)
 				.map_err(|e| mf_err("GetOutputStreamInfo", e))?
 		};
-		self.provides_samples = info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
-		self.output_size = info.cbSize;
-		Ok(())
+		Ok(match info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0 {
+			true => Output::Provided,
+			false => Output::Allocated(info.cbSize),
+		})
+	}
+
+	/// The stream's state, which only a started encoder has.
+	fn stream(&mut self) -> Result<&mut Stream, Error> {
+		match &mut self.phase {
+			Phase::Streaming(stream) => Ok(stream),
+			Phase::Unstarted => Err(Error::Codec(anyhow::anyhow!(
+				"the mediafoundation encoder has not started"
+			))),
+			Phase::Ended => Err(Error::Codec(anyhow::anyhow!(
+				"the mediafoundation encoder has ended its stream and takes no more frames"
+			))),
+		}
 	}
 
 	fn configure_codec_api(&self) -> Result<(), Error> {
@@ -419,7 +453,7 @@ impl MediaFoundation {
 	/// that arrives meanwhile. Runs on the dedicated encode thread (see
 	/// `encode::sink`), so this blocking wait never parks a tokio worker.
 	fn wait_for_input(&mut self, out: &mut Vec<Encoded>) -> Result<(), Error> {
-		while !self.needs_input {
+		while !self.stream()?.needs_input {
 			let event = unsafe {
 				self.events
 					.GetEvent(MF_EVENT_FLAG_NONE)
@@ -434,14 +468,19 @@ impl MediaFoundation {
 	fn drain_ready(&mut self, out: &mut Vec<Encoded>) -> Result<(), Error> {
 		loop {
 			match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
-				Ok(event) => self.handle_event(&event, out)?,
+				Ok(event) => {
+					self.handle_event(&event, out)?;
+				}
 				Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(()),
 				Err(e) => return Err(mf_err("GetEvent (drain)", e)),
 			}
 		}
 	}
 
-	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Encoded>) -> Result<(), Error> {
+	/// Act on one event from the MFT, returning whether it reported a drain
+	/// complete, which is how a drain knows the tail is out rather than still
+	/// coming.
+	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Encoded>) -> Result<bool, Error> {
 		// Surface an async failure (e.g. an MEError event) instead of looping in
 		// `wait_for_input` forever for an input request that will never come.
 		unsafe { event.GetStatus() }
@@ -454,29 +493,30 @@ impl MediaFoundation {
 		const HAVE_OUTPUT: u32 = METransformHaveOutput.0 as u32;
 		const DRAIN_COMPLETE: u32 = METransformDrainComplete.0 as u32;
 		match unsafe { event.GetType().map_err(|e| mf_err("event GetType", e))? } {
-			NEED_INPUT => self.needs_input = true,
+			NEED_INPUT => self.stream()?.needs_input = true,
 			HAVE_OUTPUT => {
 				if let Some(packet) = self.process_output()? {
 					out.push(packet);
 				}
 			}
-			DRAIN_COMPLETE => self.drained = true,
+			DRAIN_COMPLETE => return Ok(true),
 			_ => {}
 		}
-		Ok(())
+		Ok(false)
 	}
 
 	/// Pull one encoded access unit, stamped with the timestamp of the frame it was
 	/// encoded from. Returns `None` if the MFT had nothing ready or asked us to
 	/// renegotiate the output type.
 	fn process_output(&mut self) -> Result<Option<Encoded>, Error> {
-		let provided = if self.provides_samples {
-			None
-		} else {
-			let buffer = unsafe { MFCreateMemoryBuffer(self.output_size).map_err(|e| mf_err("output buffer", e))? };
-			let sample = unsafe { MFCreateSample().map_err(|e| mf_err("output sample", e))? };
-			unsafe { sample.AddBuffer(&buffer).map_err(|e| mf_err("output AddBuffer", e))? };
-			Some(sample)
+		let provided = match self.stream()?.output {
+			Output::Provided => None,
+			Output::Allocated(size) => {
+				let buffer = unsafe { MFCreateMemoryBuffer(size).map_err(|e| mf_err("output buffer", e))? };
+				let sample = unsafe { MFCreateSample().map_err(|e| mf_err("output sample", e))? };
+				unsafe { sample.AddBuffer(&buffer).map_err(|e| mf_err("output AddBuffer", e))? };
+				Some(sample)
+			}
 		};
 
 		let mut data = [MFT_OUTPUT_DATA_BUFFER {
@@ -500,7 +540,7 @@ impl MediaFoundation {
 				// The encoder revised its output format; re-apply ours, refresh the
 				// cached output-buffer info, and retry on the next event.
 				self.set_output_type()?;
-				self.read_output_info()?;
+				self.stream()?.output = self.read_output_info()?;
 				return Ok(None);
 			}
 			Err(e) => return Err(mf_err("ProcessOutput", e)),
@@ -532,14 +572,6 @@ impl MediaFoundation {
 	/// error here rather than a block later.
 	fn drain(&mut self) -> Result<Vec<Encoded>, Error> {
 		let mut out = Vec::new();
-		if !self.started {
-			return Ok(out);
-		}
-
-		// Cleared here rather than after the wait: a drain we exited early once
-		// leaves its completion queued, and reading that later would let the next
-		// drain believe it was already done.
-		self.drained = false;
 		unsafe {
 			self.transform
 				.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
@@ -548,12 +580,43 @@ impl MediaFoundation {
 				.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
 				.map_err(|e| mf_err("drain", e))?;
 		}
-		while !self.drained {
+		loop {
 			let event =
 				unsafe { self.events.GetEvent(MF_EVENT_FLAG_NONE) }.map_err(|e| mf_err("GetEvent (drain)", e))?;
-			self.handle_event(&event, &mut out)?;
+			if self.handle_event(&event, &mut out)? {
+				return Ok(out);
+			}
 		}
-		Ok(out)
+	}
+
+	/// Drain the stream and restart it, or end the encoder for good.
+	///
+	/// A drain cut short leaves the MFT somewhere between streams, with its
+	/// completion perhaps still queued for the next drain to mistake for its own,
+	/// so nothing after one can be trusted.
+	fn cycle(&mut self) -> Result<Vec<Encoded>, Error> {
+		let cycled = self.drain().and_then(|out| {
+			// A drain leaves the MFT stopped: it stops asking for input until a new
+			// stream starts.
+			unsafe {
+				self.transform
+					.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+					.map_err(|e| mf_err("start of stream", e))?;
+			}
+			Ok(out)
+		});
+		match cycled {
+			Ok(out) => {
+				let stream = self.stream()?;
+				stream.needs_input = false;
+				stream.discontinuity = true;
+				Ok(out)
+			}
+			Err(err) => {
+				self.phase = Phase::Ended;
+				Err(err)
+			}
+		}
 	}
 
 	/// The timestamp of the frame this output belongs to, found by the sample time
@@ -597,7 +660,7 @@ impl MediaFoundation {
 
 impl Backend for MediaFoundation {
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
-		if !self.started {
+		if let Phase::Unstarted = self.phase {
 			self.start(&frame.surface)?;
 		}
 
@@ -609,7 +672,7 @@ impl Backend for MediaFoundation {
 		}
 
 		let sample = self.build_sample(&frame.surface)?;
-		if self.discontinuity {
+		if self.stream()?.discontinuity {
 			// The first picture of a restarted stream is not temporally continuous
 			// with the one before the drain, and only this says so: the encoder would
 			// otherwise be free to predict across the seam.
@@ -623,8 +686,9 @@ impl Backend for MediaFoundation {
 		}
 		// Cleared only once the sample is in: a rejected one never carried the mark
 		// anywhere, so the next attempt still owns it.
-		self.discontinuity = false;
-		self.needs_input = false;
+		let stream = self.stream()?;
+		stream.discontinuity = false;
+		stream.needs_input = false;
 		// Record the pairing before advancing the index, so this is the sample time
 		// `build_sample` just stamped the sample with.
 		let sample_time = self.sample_time();
@@ -636,23 +700,24 @@ impl Backend for MediaFoundation {
 	}
 
 	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-		let out = self.drain()?;
-		if self.started {
-			// A drain leaves the MFT stopped: it stops asking for input until a new
-			// stream starts.
-			unsafe {
-				self.transform
-					.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-					.map_err(|e| mf_err("start of stream", e))?;
-			}
-			self.needs_input = false;
-			self.discontinuity = true;
+		if let Phase::Unstarted = self.phase {
+			return Ok(Vec::new());
 		}
-		Ok(out)
+		// An ended encoder fails here rather than being sent a drain.
+		self.stream()?;
+		self.cycle()
 	}
 
 	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-		self.drain()
+		if let Phase::Unstarted = self.phase {
+			self.phase = Phase::Ended;
+			return Ok(Vec::new());
+		}
+		// An ended encoder fails here rather than being sent a drain.
+		self.stream()?;
+		let out = self.drain();
+		self.phase = Phase::Ended;
+		out
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
