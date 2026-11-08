@@ -1548,9 +1548,10 @@ async def test_read_frame_keeps_group_across_cancelled_call():
 def test_audio_encoder_returns_namespaced_records():
     """The codec-only encoder's results are named under ``moq.audio``."""
     encoder = moq.audio.Encoder(moq.audio.EncoderOutput(codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1))
-    packet = encoder.encode([0.0] * encoder.frame_size)
+    [packet] = encoder.encode([0.0] * encoder.frame_size)
     assert isinstance(packet, moq.audio.Packet)
     assert packet.data
+    assert encoder.flush() == []
     finish = encoder.finish()
     assert isinstance(finish, moq.audio.EncoderFinish)
 
@@ -1566,7 +1567,7 @@ def test_audio_encoder_frame_init_and_bitrate():
     assert init.format == moq.media.AudioFormat.OPUS
     assert init.data[:8] == b"OpusHead"
     encoder.set_bitrate(32_000)
-    assert encoder.encode([0.0] * encoder.frame_size).data
+    assert encoder.encode([0.0] * encoder.frame_size)[0].data
 
     with pytest.raises(moq.Error.Audio):
         moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=15)))

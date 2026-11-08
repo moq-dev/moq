@@ -118,7 +118,7 @@ impl Libopus {
 }
 
 impl Backend for Libopus {
-	fn encode(&mut self, pcm: &[f32]) -> Result<Encoded, Error> {
+	fn encode(&mut self, pcm: &[f32]) -> Result<Vec<Encoded>, Error> {
 		// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices are
 		// bounded by the lengths we pass, and the front end sized `pcm` to one frame.
 		let n = unsafe {
@@ -135,7 +135,12 @@ impl Backend for Libopus {
 		}
 		let payload = Bytes::copy_from_slice(&self.scratch[..n as usize]);
 		let activity = opus::activity(&payload, false);
-		Ok(Encoded { payload, activity })
+		Ok(vec![Encoded { payload, activity }])
+	}
+
+	/// libopus returns each frame's packet from the call that submits it.
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		Ok(Vec::new())
 	}
 
 	fn reset(&mut self) {

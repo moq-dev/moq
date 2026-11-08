@@ -223,9 +223,13 @@ class Encoder:
         """Retune the live encoder in bits per second."""
         self._inner.set_bitrate(bitrate)
 
-    def encode(self, pcm: list[float]) -> Packet:
-        """Encode one full PCM frame."""
+    def encode(self, pcm: list[float]) -> list[Packet]:
+        """Encode one full PCM frame, returning the packets now ready: none while the codec holds it, or several."""
         return self._inner.encode(pcm)
+
+    def flush(self) -> list[Packet]:
+        """Return every packet the codec still holds, without padding or closing the encoder."""
+        return self._inner.flush()
 
     def finish(self, pcm: list[float] | None = None) -> EncoderFinish:
         """Pad an optional partial frame and drain the codec."""

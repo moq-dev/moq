@@ -150,7 +150,7 @@ impl Backend for Libopus {
 	/// An empty packet conceals as much audio as the last packet that decoded
 	/// held, and is refused before any has. Loss during DTX remains classified
 	/// as DTX, while loss during active audio remains active.
-	fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
+	fn decode(&mut self, packet: &[u8]) -> Result<Vec<Decoded>, Error> {
 		let channels = self.layout.channels() as usize;
 		// libopus conceals exactly `frame_size` samples for a lost packet, and
 		// the decoder can't know how long it was, so assume the last one's length.
@@ -195,7 +195,12 @@ impl Backend for Libopus {
 
 		let activity = opus::multistream_activity(packet, self.streams, self.in_dtx);
 		self.in_dtx = activity.is_dtx();
-		Ok(Decoded { samples: out, activity })
+		Ok(vec![Decoded { samples: out, activity }])
+	}
+
+	/// libopus returns each packet's samples from the call that submits it.
+	fn flush(&mut self) -> Result<Vec<Decoded>, Error> {
+		Ok(Vec::new())
 	}
 
 	fn reset(&mut self) -> Result<(), Error> {
@@ -363,7 +368,7 @@ mod tests {
 
 			let mut pcm = Vec::new();
 			for packet in &packets {
-				pcm.extend(decoder.decode(packet).unwrap().samples);
+				pcm.extend(crate::single(decoder.decode(packet).unwrap()).samples);
 			}
 			// Skip the encoder's warmup.
 			let pcm = &pcm[pcm.len() / 2..];
@@ -387,13 +392,13 @@ mod tests {
 	fn surround_silence_is_dtx() {
 		let (head, packets) = surround(6);
 		let mut decoder = Decoder::new(&catalog(head.clone(), 6), &Config::default()).unwrap();
-		let mid = decoder.decode(&packets[PACKETS / 2]).unwrap();
+		let mid = crate::single(decoder.decode(&packets[PACKETS / 2]).unwrap());
 		assert!(mid.activity.is_active(), "a coded surround frame must stay active");
 
 		// Two coupled streams, then two mono, each a 20 ms empty frame.
 		let dtx = [0xfc, 0x00, 0xfc, 0x00, 0xf8, 0x00, 0xf8];
 		let mut decoder = Decoder::new(&catalog(head, 6), &Config::default()).unwrap();
-		let decoded = decoder.decode(&dtx).expect("empty multistream packet");
+		let decoded = crate::single(decoder.decode(&dtx).expect("empty multistream packet"));
 		assert!(decoded.activity.is_dtx(), "all-DTX surround packet read as active");
 		assert_eq!(decoded.samples.len() % 6, 0);
 	}

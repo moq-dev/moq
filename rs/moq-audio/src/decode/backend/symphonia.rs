@@ -65,7 +65,7 @@ impl Symphonia {
 }
 
 impl Backend for Symphonia {
-	fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
+	fn decode(&mut self, packet: &[u8]) -> Result<Vec<Decoded>, Error> {
 		let packet = if self.adts {
 			let header =
 				moq_mux::codec::aac::adts::Header::parse(packet).map_err(|err| Error::Decode(format!("aac: {err}")))?;
@@ -99,10 +99,15 @@ impl Backend for Symphonia {
 
 		let mut samples = Vec::new();
 		decoded.copy_to_vec_interleaved(&mut samples);
-		Ok(Decoded {
+		Ok(vec![Decoded {
 			samples,
 			activity: Activity::Active,
-		})
+		}])
+	}
+
+	/// Symphonia returns each packet's samples from the call that submits it.
+	fn flush(&mut self) -> Result<Vec<Decoded>, Error> {
+		Ok(Vec::new())
 	}
 
 	fn reset(&mut self) -> Result<(), Error> {

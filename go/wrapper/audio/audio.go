@@ -207,8 +207,11 @@ func (e *Encoder) TrackInit() (media.AudioInit, error) { return e.inner.TrackIni
 // SetBitrate retunes the live encoder in bits per second.
 func (e *Encoder) SetBitrate(value uint64) error { return e.inner.SetBitrate(value) }
 
-// Encode encodes one codec-sized interleaved f32 frame.
-func (e *Encoder) Encode(pcm []float32) (Packet, error) { return e.inner.Encode(pcm) }
+// Encode encodes one codec-sized interleaved f32 frame, returning the packets now ready: none while the codec holds it, or several.
+func (e *Encoder) Encode(pcm []float32) ([]Packet, error) { return e.inner.Encode(pcm) }
+
+// Flush returns every packet the codec still holds, without padding or closing the encoder.
+func (e *Encoder) Flush() ([]Packet, error) { return e.inner.Flush() }
 
 // Finish pads an optional partial frame, drains the codec, and closes the encoder.
 func (e *Encoder) Finish(pcm []float32) (EncoderFinish, error) { return e.inner.Finish(pcm) }

@@ -49,10 +49,15 @@ impl Drop for Installed {
 }
 
 /// Emits each frame's index as its payload, and cannot retune.
+///
+/// Pipelines like a platform encoder: it holds every other frame and releases
+/// it with the next, so calls alternate between no packet and two, and a tail
+/// waits for [`flush`](Backend::flush).
 pub(crate) struct Stub {
 	_resource: Arc<()>,
 	bitrate: u64,
 	frames: u64,
+	held: Option<Encoded>,
 }
 
 impl Stub {
@@ -61,19 +66,31 @@ impl Stub {
 			_resource: INSTALLED.with(|installed| installed.borrow().upgrade().unwrap()),
 			bitrate: config.bitrate.map_or(128_000, |rate| rate.as_bps()),
 			frames: 0,
+			held: None,
 		}))
 	}
 }
 
 impl Backend for Stub {
-	fn encode(&mut self, _pcm: &[f32]) -> Result<Encoded, Error> {
-		let payload = Bytes::copy_from_slice(&self.frames.to_be_bytes());
+	fn encode(&mut self, _pcm: &[f32]) -> Result<Vec<Encoded>, Error> {
+		let packet = Encoded::new(Bytes::copy_from_slice(&self.frames.to_be_bytes()));
 		self.frames += 1;
-		Ok(Encoded::new(payload))
+		Ok(match self.held.take() {
+			Some(held) => vec![held, packet],
+			None => {
+				self.held = Some(packet);
+				Vec::new()
+			}
+		})
+	}
+
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		Ok(self.held.take().into_iter().collect())
 	}
 
 	fn reset(&mut self) {
 		self.frames = 0;
+		self.held = None;
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {

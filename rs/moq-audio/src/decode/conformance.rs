@@ -201,7 +201,7 @@ async fn every_backend_matches_independent_reference() {
 
 			let mut pcm = Vec::new();
 			for packet in &packets {
-				pcm.extend(decoder.decode(packet).unwrap().samples);
+				pcm.extend(crate::single(decoder.decode(packet).unwrap()).samples);
 			}
 			compare(vector, decoder.name(), &pcm[delay..]);
 		}

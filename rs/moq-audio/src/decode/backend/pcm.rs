@@ -40,7 +40,7 @@ impl Pcm {
 }
 
 impl Backend for Pcm {
-	fn decode(&mut self, packet: &[u8]) -> Result<Decoded, Error> {
+	fn decode(&mut self, packet: &[u8]) -> Result<Vec<Decoded>, Error> {
 		if packet.is_empty() || !packet.len().is_multiple_of(self.bytes_per_frame) {
 			return Err(Error::Misaligned {
 				got: packet.len(),
@@ -54,10 +54,14 @@ impl Backend for Pcm {
 			.iter()
 			.map(|sample| f32::from_le_bytes(*sample))
 			.collect();
-		Ok(Decoded {
+		Ok(vec![Decoded {
 			samples,
 			activity: Activity::Active,
-		})
+		}])
+	}
+
+	fn flush(&mut self) -> Result<Vec<Decoded>, Error> {
+		Ok(Vec::new())
 	}
 
 	fn reset(&mut self) -> Result<(), Error> {

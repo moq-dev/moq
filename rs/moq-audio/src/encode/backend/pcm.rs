@@ -27,12 +27,16 @@ impl Pcm {
 }
 
 impl Backend for Pcm {
-	fn encode(&mut self, pcm: &[f32]) -> Result<Encoded, Error> {
+	fn encode(&mut self, pcm: &[f32]) -> Result<Vec<Encoded>, Error> {
 		let mut payload = Vec::with_capacity(std::mem::size_of_val(pcm));
 		for sample in pcm {
 			payload.extend_from_slice(&sample.to_le_bytes());
 		}
-		Ok(Encoded::new(payload.into()))
+		Ok(vec![Encoded::new(payload.into())])
+	}
+
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		Ok(Vec::new())
 	}
 
 	fn reset(&mut self) {}

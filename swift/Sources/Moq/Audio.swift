@@ -138,8 +138,11 @@ public enum Audio {
         /// Retune the live encoder in bits per second.
         public func setBitrate(_ bitrate: UInt64) throws { try ffi.setBitrate(bitrate: bitrate) }
 
-        /// Encode one codec-sized interleaved f32 frame.
-        public func encode(_ pcm: [Float]) throws -> Packet { try ffi.encode(pcm: pcm) }
+        /// Encode one codec-sized interleaved f32 frame, returning the packets now ready: none while the codec holds it, or several.
+        public func encode(_ pcm: [Float]) throws -> [Packet] { try ffi.encode(pcm: pcm) }
+
+        /// Return every packet the codec still holds, without padding or closing the encoder.
+        public func flush() throws -> [Packet] { try ffi.flush() }
 
         /// Pad an optional partial frame, drain the codec, and close the encoder.
         public func finish(_ pcm: [Float] = []) throws -> EncoderFinish { try ffi.finish(pcm: pcm) }

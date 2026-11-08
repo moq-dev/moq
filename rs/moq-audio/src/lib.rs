@@ -54,6 +54,13 @@
 #[cfg(test)]
 mod allocation;
 
+/// The one output a codec that holds nothing returns for each call.
+#[cfg(test)]
+pub(crate) fn single<T: std::fmt::Debug>(outputs: Vec<T>) -> T {
+	let [output] = <[T; 1]>::try_from(outputs).expect("exactly one output");
+	output
+}
+
 #[cfg(feature = "aac")]
 mod aac;
 mod activity;

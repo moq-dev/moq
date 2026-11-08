@@ -9429,8 +9429,9 @@ class FfiConverterMoqAudioConsumer {
 }
 
 abstract class MoqAudioEncoderInterface {
-  MoqAudioPacket encode({required List<double> pcm});
+  List<MoqAudioPacket> encode({required List<double> pcm});
   MoqAudioEncoderFinished finish({required List<double> pcm});
+  List<MoqAudioPacket> flush();
   int frameSize();
   void setBitrate({required int bitrate});
   MoqAudioInit trackInit();
@@ -9483,14 +9484,14 @@ class MoqAudioEncoder implements MoqAudioEncoderInterface {
     }
   }
 
-  MoqAudioPacket encode({required List<double> pcm}) {
+  List<MoqAudioPacket> encode({required List<double> pcm}) {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqaudioencoder_encode(
         uniffiClonePointer(),
         FfiConverterSequenceDouble32.lower(pcm),
         status,
       ),
-      FfiConverterMoqAudioPacket.lift,
+      FfiConverterSequenceMoqAudioPacket.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -9503,6 +9504,17 @@ class MoqAudioEncoder implements MoqAudioEncoderInterface {
         status,
       ),
       FfiConverterMoqAudioEncoderFinished.lift,
+      moqExceptionErrorHandler,
+    );
+  }
+
+  List<MoqAudioPacket> flush() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqaudioencoder_flush(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterSequenceMoqAudioPacket.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -19779,6 +19791,14 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqaudioencoder_finish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqaudioencoder_flush(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -23285,6 +23305,9 @@ external int uniffi_moq_ffi_checksum_method_moqaudioencoder_encode();
 external int uniffi_moq_ffi_checksum_method_moqaudioencoder_finish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqaudioencoder_flush();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqaudioencoder_frame_size();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -24148,10 +24171,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_next() != 7650) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_encode() != 56589) {
+  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_encode() != 18180) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioencoder_finish() != 24341) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_flush() != 64556) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioencoder_frame_size() != 37264) {
