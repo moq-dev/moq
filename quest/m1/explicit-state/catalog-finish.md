@@ -21,4 +21,9 @@ Record the terminal outcome after the fallible work, as #8210 did: keep the
 first error, abort or end the other track, and store the failure rather
 than `Closed`. Test a failing track finish.
 
+A handle created after the failed finish reports that same first error, not
+`NotPublished`: a `catalog::Producer::video(..., None)` (or `audio`/`text`)
+container producer, and its `modify()`, `set`, and the other calls that
+reach the catalog. Test one created after the failure.
+
 Public API: none. Wire: none.
