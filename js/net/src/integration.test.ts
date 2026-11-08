@@ -1,6 +1,5 @@
 import { afterEach, expect, mock, onTestFinished, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
-import type { Getter } from "@moq/signals";
 import type * as Announce from "./announced.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import {
@@ -21,7 +20,7 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
-import { createMockTransportPair, manual, settlesWithin, textFrame } from "./mock.ts";
+import { createMockTransportPair, manual, settlesWithin, textFrame, waitFor } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -1427,15 +1426,6 @@ async function runConsumeDedup(protocol: string, version?: number) {
 
 	client.abort();
 	server.abort();
-}
-
-/** Wait for `signal` to hold a value that passes `pred`, and return it. */
-async function waitFor<T>(signal: Getter<T>, pred: (value: T) => boolean): Promise<T> {
-	for (;;) {
-		const value = signal.peek();
-		if (pred(value)) return value;
-		await signal.changed();
-	}
 }
 
 // Closing the last subscriber to a track tears the wire subscription down, so the publisher stops

@@ -42,4 +42,4 @@ before starting, since tests land and move.
 
 ## Required
 
-- [Manual.drive waits for mocked I/O the work is blocked on](/quest/m1/mock-clock-tests/manual-drive-host-io.md) - `drive` stops at the deadline the work meets, and `js/net`'s `driveUntil` workaround is deleted
+- [A lint rejects expect(clock.drive(...)).rejects and .resolves](/quest/m1/mock-clock-tests/drive-expect-guard.md) - wrapping `drive` in `expect(...).rejects` or `.resolves` fails lint

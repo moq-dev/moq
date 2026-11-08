@@ -39,8 +39,8 @@ timeline that rewinds ends the import. The MPEG-TS import ends at a clock step
 onto another timeline with `ts::Restart`, which carries the input from the step
 for the caller to publish as a new broadcast. fMP4 export fixes its track
 set at the init segment, so a new rendition or a changed configuration ends the
-export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
-one program per broadcast, private PES, damaged packets, and feed checks.
+export. The [MPEG-TS guide](/bin/ts) covers the MPEG-TS specifics: one program
+per broadcast, private PES, passthrough, acquisition, and loss.
 
 Exporters take a catalog stream alongside the source. Choose its encoding and
 rendition selection before exporting; the same stream shape drives every container.

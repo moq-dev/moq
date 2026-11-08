@@ -18,12 +18,6 @@ const compare = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
  */
 export const GRACE = Milli(1000);
 
-/**
- * How long idle cached content is kept, matching Rust `cache::DEFAULT_EXPIRY`: a group older
- * than this is evicted, so nothing waits for one longer.
- */
-export const CACHE_EXPIRY = Milli(30_000);
-
 /** The grace for a subscription with `delay.max`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
 export function grace(maxDelay: Milli): Milli {
 	return maxDelay > 0 ? maxDelay : GRACE;
