@@ -234,7 +234,8 @@ test("arrival capture uses AAC's codec duration when the container leaves it imp
 	for await (const arrival of arrivals(group.consume(), { decoder: new Legacy.Format("audio"), config: aac })) {
 		captured.push(arrival);
 	}
-	expect(captured[0][3]).toBe((1024 * 1000) / 44100);
+	// Durations hold whole nanoseconds, so the frame duration matches to the nanosecond.
+	expect(captured[0][3]).toBeCloseTo((1024 * 1000) / 44100, 6);
 });
 
 test("arrival capture refuses a packet with no usable duration", async () => {

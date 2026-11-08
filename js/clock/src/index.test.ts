@@ -84,6 +84,11 @@ test("durations keep a whole count of any unit exact past 2^53 ns", () => {
 	expect(Duration.millis(250).mul(4)).toEqual(Duration.secs(1));
 	expect(Duration.secs(1).div(4)).toEqual(Duration.millis(250));
 	expect(() => Duration.micros(1).sub(Duration.micros(2))).toThrow(RangeError);
+	// A unit with no exact binary form rounds to whole nanoseconds, so it orders as it converts.
+	expect(Duration.secs(1.1)).toEqual(Duration.millis(1100));
+	expect(Duration.millis(3300).divDuration(Duration.secs(1.1))).toBe(3);
+	expect(Duration.millis(3300).sub(Duration.secs(1.1).mul(3)).isZero()).toBe(true);
+	expect(Duration.nanos(0.4).isZero()).toBe(true);
 });
 
 test("wall time round-trips Unix milliseconds exactly", () => {

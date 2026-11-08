@@ -41,7 +41,9 @@ export class Timeline {
 	/** The file timestamp and pass due at the given clock time, the inverse of {@link at}. */
 	position(at: Instant): { timestamp: Duration; loop: number } {
 		const elapsed = at.since(this.#zero);
-		const loop = this.loops ? Math.floor(elapsed.divDuration(this.#duration)) : 0;
+		let loop = this.loops ? Math.floor(elapsed.divDuration(this.#duration)) : 0;
+		// The quotient is a float, so step back a pass if it rounded up past the elapsed time.
+		if (loop > 0 && this.#duration.mul(loop).gt(elapsed)) loop -= 1;
 		return { timestamp: elapsed.sub(this.#duration.mul(loop)), loop };
 	}
 }

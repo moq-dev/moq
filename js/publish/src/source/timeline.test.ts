@@ -58,6 +58,19 @@ describe("Timeline", () => {
 		expect(timeline.at(-2_000_000, 0)).toEqual(Instant.ZERO);
 	});
 
+	test("maps a loop boundary of a duration with no exact binary form to the next pass", () => {
+		const timeline = new Timeline(Instant.ZERO, 1.1);
+
+		expect(timeline.position(Instant.ZERO.add(Duration.millis(1100)))).toEqual({
+			timestamp: Duration.ZERO,
+			loop: 1,
+		});
+		expect(timeline.position(Instant.ZERO.add(Duration.millis(3300)))).toEqual({
+			timestamp: Duration.ZERO,
+			loop: 3,
+		});
+	});
+
 	test("loops on a usable duration", () => {
 		expect(new Timeline(ZERO, 10).loops).toBe(true);
 	});

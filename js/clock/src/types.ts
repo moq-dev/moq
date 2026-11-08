@@ -32,8 +32,9 @@ const NANOS_PER_SEC = 1_000_000_000;
  * Build one with a unit (`Duration.millis(5)`) and read it with one (`asMillis()`). It never
  * converts to a number implicitly: arithmetic, `<`, and `JSON.stringify` throw.
  *
- * Whole seconds and the nanoseconds past them are held apart, as Rust holds them, so a whole
- * number of any unit converts back exactly, such as microseconds since the Unix epoch.
+ * Whole seconds and the whole nanoseconds past them are held apart, as Rust holds them, so a
+ * whole number of any unit converts back exactly, such as microseconds since the Unix epoch.
+ * A value finer than a nanosecond rounds to the nearest one.
  */
 export class Duration {
 	/** No time at all. */
@@ -41,7 +42,7 @@ export class Duration {
 
 	/** @internal Whole seconds. */
 	readonly [VALUE]: number;
-	/** @internal Nanoseconds past the whole seconds, in `[0, 1e9)`. */
+	/** @internal Whole nanoseconds past the whole seconds, in `[0, 1e9)`. */
 	readonly [NANOS]: number;
 	declare private readonly kind: "duration";
 
@@ -65,10 +66,11 @@ export class Duration {
 		return Duration.#carry(secs, rest * (NANOS_PER_SEC / perSec));
 	}
 
-	// Whole seconds plus any nanoseconds, possibly out of range or fractional seconds.
+	// Whole seconds plus any nanoseconds, possibly out of range or fractional seconds, rounded to
+	// whole nanoseconds as Rust's are, so a value's conversions agree with its ordering.
 	static #carry(secs: number, nanos: number): Duration {
 		let whole = Math.floor(secs);
-		let rest = (secs - whole) * NANOS_PER_SEC + nanos;
+		let rest = Math.round((secs - whole) * NANOS_PER_SEC + nanos);
 		const carry = Math.floor(rest / NANOS_PER_SEC);
 		whole += carry;
 		rest -= carry * NANOS_PER_SEC;
@@ -85,7 +87,7 @@ export class Duration {
 		return new Duration(whole, rest);
 	}
 
-	/** A duration of `value` nanoseconds; throws a `RangeError` unless finite and nonnegative. */
+	/** A duration of `value` nanoseconds, rounded to a whole one; throws a `RangeError` unless finite and nonnegative. */
 	static nanos(value: number): Duration {
 		return Duration.#unit(value, NANOS_PER_SEC);
 	}
@@ -105,7 +107,7 @@ export class Duration {
 		return Duration.#unit(value, 1);
 	}
 
-	/** The duration in nanoseconds, possibly fractional; past 2^53 ns (about 104 days) it rounds. */
+	/** The duration in nanoseconds; past 2^53 ns (about 104 days) it rounds. */
 	asNanos(): number {
 		return this[VALUE] * NANOS_PER_SEC + this[NANOS];
 	}
