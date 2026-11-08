@@ -14,7 +14,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_audio::bus::{Bus, Live, Config, Driver, Strip};
+use moq_audio::bus::{Bus, Config, Driver, Live, Strip};
 use moq_audio::encode::Input;
 use moq_audio::{Format, Layout};
 

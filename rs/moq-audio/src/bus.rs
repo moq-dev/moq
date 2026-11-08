@@ -2008,10 +2008,7 @@ mod tests {
 		assert!(Bus::new(config).is_err());
 
 		let (bus, _driver) = Bus::new(Config::default()).unwrap();
-		assert!(
-			bus.live(input(48_000, Layout::Discrete(3)), Strip::default())
-				.is_err()
-		);
+		assert!(bus.live(input(48_000, Layout::Discrete(3)), Strip::default()).is_err());
 	}
 
 	/// A NaN survives every gain, mute included, so it is refused before it can
