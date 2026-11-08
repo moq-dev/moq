@@ -331,6 +331,9 @@ struct Web {
 	/// `CloseWebTransportSession` capsule, or the local [`Session::close`].
 	/// First writer wins.
 	closed: RefCell<Option<Error>>,
+	request: proto::ConnectRequest,
+	/// The response sent, with the subprotocol it selected.
+	response: proto::ConnectResponse,
 }
 
 struct State {
@@ -359,12 +362,8 @@ pub struct Session {
 	opening: Rc<kio::Bridge<Opening>>,
 	handles: Rc<Handles>,
 	conn: Connection,
+	/// The WebTransport layering, or `None` for raw QUIC.
 	web: Option<Rc<Web>>,
-	/// What [`protocol`](Self::protocol)
-	/// reports: the selected subprotocol in web mode, the ALPN in raw mode.
-	alpn: Option<String>,
-	request: Option<proto::ConnectRequest>,
-	response: Option<proto::ConnectResponse>,
 }
 
 impl Session {
@@ -407,15 +406,11 @@ impl Session {
 	/// Wrap a raw-QUIC connection in a session, with no
 	/// WebTransport layering: streams and datagrams pass through untouched.
 	pub fn raw(conn: Connection) -> Self {
-		let alpn = conn.protocol().map(str::to_owned);
 		Self {
 			opening: Default::default(),
 			handles: Handles::new(&conn, None),
 			conn,
 			web: None,
-			alpn,
-			request: None,
-			response: None,
 		}
 	}
 
@@ -476,6 +471,8 @@ impl Session {
 				connect_send: Some(send),
 			}),
 			closed: RefCell::new(None),
+			request,
+			response,
 		});
 
 		// The peer signals session close with a capsule on the CONNECT
@@ -490,9 +487,6 @@ impl Session {
 			handles: Handles::new(&conn, Some(&web)),
 			conn,
 			web: Some(web),
-			alpn: None,
-			request: Some(request),
-			response: Some(response),
 		}
 	}
 
@@ -509,9 +503,6 @@ impl Clone for Session {
 			handles: self.handles.clone(),
 			conn: self.conn.clone(),
 			web: self.web.clone(),
-			alpn: self.alpn.clone(),
-			request: self.request.clone(),
-			response: self.response.clone(),
 		}
 	}
 }
@@ -705,18 +696,18 @@ impl Session {
 	}
 	/// The CONNECT request, or `None` for raw QUIC.
 	pub fn request(&self) -> Option<&proto::ConnectRequest> {
-		self.request.as_ref()
+		self.web.as_ref().map(|web| &web.request)
 	}
 	/// The CONNECT response, or `None` for raw QUIC.
 	pub fn response(&self) -> Option<&proto::ConnectResponse> {
-		self.response.as_ref()
+		self.web.as_ref().map(|web| &web.response)
 	}
 	/// The negotiated WebTransport subprotocol, or raw QUIC ALPN.
 	pub fn protocol(&self) -> Option<&str> {
-		self.response
-			.as_ref()
-			.and_then(|response| response.protocol.as_deref())
-			.or(self.alpn.as_deref())
+		match &self.web {
+			Some(web) => web.response.protocol.as_deref(),
+			None => self.conn.protocol(),
+		}
 	}
 	/// Close the session with an application code and reason.
 	pub fn close(&self, code: u32, reason: &str) {
