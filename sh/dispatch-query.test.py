@@ -618,16 +618,18 @@ esac
 
     def test_terminating_just_before_a_phase_forks_its_command_stops_it(self):
         # PS4 expands in the phase's shell after its last pending-trap check and
-        # before it forks a foreground command. The hook terminates the run,
-        # then blocks until the lane's group TERM kills it, so that TERM is
-        # pending when the shell would fork rs's lint.
+        # before it forks a foreground command. The hook sends the lane's
+        # process group the TERM a cancel delivers, then blocks until that TERM
+        # kills it, so the TERM is pending when the shell would fork rs's lint.
+        # Signalling the group rather than the dispatcher keeps the dispatcher's
+        # own lane-launch window out of this test.
         script = (self.repo / "sh/dispatch.sh").read_text().splitlines()
         line = next(n for n, text in enumerate(script, 1) if text.lstrip().startswith("check:rs)"))
         hook = self.root / "hook.sh"
         hook.write_text(f"""exec 9>/dev/null
 BASH_XTRACEFD=9
 declare -A hook=([dispatch.sh:{line}]=1)
-PS4='${{hook[${{BASH_SOURCE##*/}}:$LINENO]:+$(kill -TERM $$; exec sleep 600)}}'
+PS4='${{hook[${{BASH_SOURCE##*/}}:$LINENO]:+$(kill -TERM 0; exec sleep 600)}}'
 set -x
 """)
         pid = self.root / "pid"
