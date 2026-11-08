@@ -269,6 +269,21 @@ mod tests {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
+	/// A fractional expiry writes earlier and a fractional not-before later, so neither
+	/// widens the window the claims asked for.
+	#[test]
+	fn fractional_times_narrow_the_window() {
+		let at = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(1500);
+		let claims = Claims {
+			publish: patterns(&["**"]),
+			expires: Some(at),
+			not_before: Some(at),
+			..Default::default()
+		};
+		let json = serde_json::to_value(&claims).unwrap();
+		assert_eq!((json["exp"].as_u64(), json["nbf"].as_u64()), (Some(1), Some(2)));
+	}
+
 	fn create_test_claims() -> Claims {
 		Claims {
 			publish_rate: None,

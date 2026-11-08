@@ -37,7 +37,11 @@ pub(crate) struct Claims {
 	exp: Option<kio::clock::Wall>,
 	#[serde(with = "seconds", skip_serializing_if = "Option::is_none")]
 	iat: Option<kio::clock::Wall>,
-	#[serde(with = "seconds", skip_serializing_if = "Option::is_none")]
+	#[serde(
+		serialize_with = "seconds::serialize_ceil",
+		deserialize_with = "seconds::deserialize",
+		skip_serializing_if = "Option::is_none"
+	)]
 	nbf: Option<kio::clock::Wall>,
 	// Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
 	// Every other claim is refused, since an unknown one may narrow the grant, and a
@@ -182,6 +186,19 @@ mod seconds {
 	pub(super) fn serialize<S: Serializer>(wall: &Option<Wall>, serializer: S) -> Result<S::Ok, S::Error> {
 		match wall {
 			Some(wall) => serializer.serialize_u64(wall.saturating_duration_since(Wall::UNIX_EPOCH).as_secs()),
+			None => serializer.serialize_none(),
+		}
+	}
+
+	/// Rounded up, so a not-before never moves earlier; past the clock's last second it
+	/// writes a time this refuses to read.
+	pub(super) fn serialize_ceil<S: Serializer>(wall: &Option<Wall>, serializer: S) -> Result<S::Ok, S::Error> {
+		match wall {
+			Some(wall) => {
+				let since = wall.saturating_duration_since(Wall::UNIX_EPOCH);
+				let seconds = since.as_secs() + u64::from(since.subsec_nanos() > 0);
+				serializer.serialize_u64(seconds)
+			}
 			None => serializer.serialize_none(),
 		}
 	}
