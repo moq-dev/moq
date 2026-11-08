@@ -212,7 +212,7 @@ rcgen = { version = "0.14", default-features = false }
 # default-features off so each consumer picks its own TLS backend and body
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }
-rind = "0.3.1"
+rind = { version = "0.3.1", features = ["wipe"] }
 rind-jsonwebtoken = "11.0.2"
 rind-object-store = "0.14.2"
 rind-rcgen = "0.14.2"
