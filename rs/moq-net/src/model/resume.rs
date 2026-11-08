@@ -1031,7 +1031,8 @@ struct Reader {
 	/// declaring another breaks the track's identity, which hurts only its own broadcast, so
 	/// nothing checks that copies agree.
 	declared: Option<Position>,
-	/// The first error a copy's end carried, kept with the end so a route switch keeps it.
+	/// The first error a copy's end carried, from a copy at the end [`Self::declared`] holds, kept
+	/// with the end so a route switch keeps it.
 	declared_error: Option<Error>,
 	this: Weak<Mutex<Reader>>,
 	route: Consumer,
@@ -1280,8 +1281,12 @@ impl Reader {
 				}
 				Some(_) => {}
 			}
-			// A copy over a version with no end error declares the same end cleanly.
-			if self.declared_error.is_none() {
+			// A copy over a version with no end error declares the same end cleanly. Only a copy
+			// at the end that stands says how the track ended there.
+			let same = self.declared.is_some_and(|declared| {
+				declared == end || end.frame == 0 && end.final_sequence() == declared.final_sequence()
+			});
+			if same && self.declared_error.is_none() {
 				self.declared_error = copy.track.declared_error();
 			}
 		}
@@ -2939,6 +2944,28 @@ mod test {
 				"{next:?}"
 			);
 		}
+	}
+
+	/// Only a copy at the end that stands says how the track ended: another copy's end, with
+	/// its error, leaves the first end clean.
+	#[kio::test]
+	async fn a_contradicting_copys_end_error_leaves_the_end_clean() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 4);
+		assert_eq!(recv(&mut sub).sequence, 4);
+		a.finish_at(Position::group(5), None).unwrap();
+		let mut b = copy();
+		b.finish_at(Position::group(6), Some(Error::App(7))).unwrap();
+		routes.serve(b.consume());
+		assert_eq!(
+			sub.poll_finished(&kio::Waiter::noop()).map(Result::unwrap),
+			Poll::Ready(Position::group(5))
+		);
+		assert!(sub.end_error().is_none());
 	}
 
 	/// A copy holding a group past an end another copy declared never fails the reader.

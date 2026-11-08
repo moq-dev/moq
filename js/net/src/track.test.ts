@@ -4012,6 +4012,46 @@ test("a pending tail ends readers at the boundary once the track closes", async 
 	expect(await reader.closed).toBeNull();
 });
 
+// A FETCH_OK's end of track on a copy no subscription feeds: nothing is in flight below it, so a
+// reader above the groups another reader's floor still lacks ends at the boundary.
+test("an end no subscription feeds owes no tail", async () => {
+	const producer = new TrackProducer("test");
+	const history = producer.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(60_000) } });
+	const group = producer.createGroup(2n);
+	group.finish();
+	hooks.endTrack(producer, { group: 3n, frame: 0 });
+	const live = producer.subscribe({ ranges: [{ start: { absolute: 2n } }], delay: { max: Milli(60_000) } });
+	expect((await live.recvGroup())?.sequence).toBe(2n);
+	const next = live.recvGroup();
+	expect(await settled(next)).toBe(true);
+	expect(await next).toBeUndefined();
+	history.close();
+	live.close();
+	producer.close();
+});
+
+// A group still in flight when the subscription ended may refine the end, but no subscription
+// feeds the tail `cacheTrack` cleared anymore.
+test("an end refined after the subscription ended owes no tail", async () => {
+	const producer = new TrackProducer("test");
+	hooks.receiveTrack(producer);
+	const history = producer.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(60_000) } });
+	const group = producer.createGroup(2n);
+	group.writeFrame({ payload: new Uint8Array([1]) });
+	group.finish();
+	hooks.endTrack(producer, { group: 3n, frame: 0 });
+	hooks.cacheTrack(producer);
+	hooks.endTrack(producer, { group: 2n, frame: 1 });
+	const live = producer.subscribe({ ranges: [{ start: { absolute: 2n } }], delay: { max: Milli(60_000) } });
+	expect((await live.recvGroup())?.sequence).toBe(2n);
+	const next = live.recvGroup();
+	expect(await settled(next)).toBe(true);
+	expect(await next).toBeUndefined();
+	history.close();
+	live.close();
+	producer.close();
+});
+
 test("without a declared start, the first arrival stands in for it", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });

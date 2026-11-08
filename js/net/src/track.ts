@@ -2005,20 +2005,23 @@ export class Producer {
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
 	// boundary it falls just before. Either must carry the same error code. Mirrors the Rust
-	// `finish_at` on a `received()` copy.
+	// `finish_at` on a `received()` copy. Only a wire subscription owes a tail below the end: a
+	// FETCH's end leaves nothing in flight, as the Rust `set_end` a fill declares.
 	#endPending(end: Position, error?: Error): void {
 		const declared = this.#state.end.peek();
 		const code = (err?: Error) => (err === undefined ? undefined : toStreamCode(err));
+		const tail = this.#wire !== undefined;
 		if (declared === undefined) {
 			if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
-			this.#declareEnd(end, error, true);
+			this.#declareEnd(end, error, tail);
 		} else if (code(declared.error) !== code(error)) {
 			throw new ProtocolViolation(`conflicting track end error: ${error}`);
 		} else if (declared.at.group !== end.group || declared.at.frame !== end.frame) {
 			if (declared.at.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.at.group) {
 				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
 			}
-			this.#declareEnd(end, error, true);
+			// A tail `cacheTrack` cleared stays cleared: no subscription feeds it anymore.
+			this.#declareEnd(end, error, declared.tail || tail);
 		}
 		this.#owe();
 	}

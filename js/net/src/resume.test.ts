@@ -2897,11 +2897,12 @@ test("an end a replaced copy declared holds across a swap", async () => {
 	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2n, frame: 0 });
 	expect(await sub.finished()).toEqual({ group: 2n, frame: 0 });
 
-	// A copy declaring another end leaves the first one.
-	tb.producer.finishAt({ group: 3n, frame: 0 });
+	// A copy declaring another end leaves the first one, and its error with it.
+	tb.producer.finishAt({ group: 3n, frame: 0 }, new StreamError(StreamCode(70), { message: "other" }));
 	await settle();
 	expect(sub.closed.peek()).not.toBeInstanceOf(Error);
 	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2n, frame: 0 });
+	expect(hooks.subscriberEndError(sub)).toBeUndefined();
 
 	sub.close();
 	front.consumer.close();
@@ -3649,4 +3650,35 @@ test("routed metadata receives a refusal without polling a group cursor", async 
 		origin.close();
 		installed.close();
 	}
+});
+
+test("a group an inner front hands out already failed still continues on the outer front's next route", async () => {
+	const inner = new Front();
+	const outer = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	inner.serve(a.consume());
+	outer.serve(inner.consumer);
+	const sub = outer.consumer.track("seq").subscribe();
+	const failed = ta.write(0n, 1, false);
+	// The outer front switches routes before the reader takes the group: the inner front has
+	// no other route, so only the outer one may continue it.
+	outer.serve(b.consume());
+	failed.abort(new StreamError(StreamCode(70), { message: "cut" }));
+	await settle();
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	const read = group.readFrame();
+	tb.write(0n, 2);
+	expect(dec.decode((await read)?.payload)).toBe("0.1");
+	expect(await group.closed).toBeNull();
+
+	sub.close();
+	outer.consumer.close();
+	inner.consumer.close();
+	a.close();
+	b.close();
 });

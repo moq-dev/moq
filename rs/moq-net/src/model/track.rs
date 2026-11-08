@@ -2331,14 +2331,19 @@ impl TrackState {
 	}
 
 	/// Refuse a request nobody published with `err`, waking the subscribes waiting on it.
-	/// No producer ever wrote to it, so there is nothing to tear down.
+	/// No producer ever wrote to it, so there is nothing to tear down, but a fill answered
+	/// before the refusal may have cached the live edge, which nothing protects anymore.
 	fn reject(&mut self, err: Error, retry: Option<Duration>) {
+		let released = self.outcome.is_released();
 		self.outcome = Outcome::Aborted {
 			err,
 			end: None,
 			resume: None,
 			retry,
 		};
+		if !released {
+			self.close_cache();
+		}
 	}
 
 	/// Attach the publisher's immutable metadata without replacing it with local cache policy.
@@ -12295,6 +12300,24 @@ mod test {
 		assert_eq!(state.max_age_bound(), None);
 	}
 
+	/// A refused request stops protecting the live edge a fill cached before the refusal: it
+	/// joins the eviction order, so pool pressure and idle expiry can still reclaim it.
+	#[test]
+	fn a_refusal_releases_the_live_edge_a_fill_cached() {
+		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
+		let mut guard = state.write().ok().unwrap();
+		let _group = guard
+			.insert_group_request(0, group::Bounds::default(), None)
+			.unwrap();
+		assert!(guard.protects(0));
+		guard.reject(Error::NotFound, None);
+		assert!(!guard.protects(0));
+		assert!(
+			guard.evict.iter().any(|(sequence, _)| *sequence == 0),
+			"the released live edge is reclaimable"
+		);
+	}
+
 	#[test]
 	fn optional_age_keeps_publisher_metadata_and_local_policy_separate() {
 		assert_eq!(Info::default().max_age, Some(Duration::ZERO));
@@ -20666,6 +20689,33 @@ mod test {
 		);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the reader asks below the start");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 2));
+	}
+
+	/// A received copy's start the publisher later resolves from a budget, at the same group,
+	/// turns the history below it from unasked into fillable: a reader asks for it then.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_start_resolved_in_place_asks_the_history_below_it() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		let dynamic = producer.requests();
+		let mut reader = producer.subscribe(replay());
+		producer.start_at(2).unwrap();
+		write_group(&producer, 2);
+		write_group(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut reader), [2, 3]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"below a declared start is no miss"
+		);
+
+		producer.start_resolved(2).unwrap();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asks below the resolved start");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
 	}

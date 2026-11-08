@@ -39,8 +39,9 @@
  * The logical track ends cleanly once its serving copy does and no group the reader lacks may
  * still land below that end on a copy it replaced. Its `closed` settles and the reader leaves the
  * route, keeping each copy only while it holds something left to read, as a direct reader keeps
- * its buffer. Its end is the first one any copy declared, which every later copy has to match, and
- * no copy may hold a group at or past it.
+ * its buffer. Its end is the first one any copy declared, which a later mid-group end may refine;
+ * a copy declaring another breaks the track's identity, which hurts only its own broadcast, so
+ * nothing checks that copies agree.
  *
  * @module
  */
@@ -1300,7 +1301,13 @@ class Reader implements ResumeSource {
 			const end = hooks.subscriberEnd(copy.sub);
 			if (!end) continue;
 			this.#declare(end);
-			this.#declaredError ??= hooks.subscriberEndError(copy.sub);
+			// Only a copy at the end that stands says how the track ended there.
+			const declared = this.#declared;
+			const same =
+				declared !== undefined &&
+				((declared.group === end.group && declared.frame === end.frame) ||
+					(end.frame === 0 && finalSequence(end) === finalSequence(declared)));
+			if (same) this.#declaredError ??= hooks.subscriberEndError(copy.sub);
 		}
 		return this.#declared;
 	}

@@ -728,7 +728,9 @@ class Expired implements GetPromise<Error> {
 // consumer: a failure recovery can still continue does not, so it never reaches a caller. Built
 // on first read, which only a caller holding the group makes: a reader attaches its recovery
 // (`hooks.recoverGroup`) before handing the group out, and the track's own scans read
-// `hooks.groupFailed` instead.
+// `hooks.groupFailed` instead. A front serving another front is the exception: the inner front
+// holds the handle before the outer attaches its recovery, so attaching rebuilds a handle that
+// latched a failure, and the inner front alone keeps the failure it saw.
 class CombinedClosed implements GetPromise<Error | null> {
 	#preferred: Once<Error>;
 	#source: () => Once<Error | null>;
@@ -946,6 +948,9 @@ export class Consumer {
 		hooks.groupFailed = (group) => group.#failed();
 		hooks.recoverGroup = (group, recover) => {
 			group.#recover = recover;
+			// A front serving another front attaches its recovery after the inner one handed the
+			// group out, whose reads may have latched a failure this recovery continues past.
+			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined) group.#closed = undefined;
 		};
 		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
 		hooks.evictGroup = (group) => group.#evict();

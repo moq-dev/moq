@@ -36,7 +36,7 @@ use crate::{Error, ledger};
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
 /// and readers start, and the drops revision.
-type JudgedAt = (u64, u64, Option<u64>, Option<u64>, Option<u64>, Option<u64>, u64);
+type JudgedAt = (u64, u64, Option<u64>, Option<u64>, Option<u64>, super::Start, u64);
 
 /// The misses of one cursor, judged as what it reads or the feed moves.
 #[derive(Default)]
@@ -646,7 +646,9 @@ impl Misses {
 			key.2,
 			Some(newest),
 			state.live_floor,
-			state.start.sequence(),
+			// Whole, not just its sequence: a start resolving from a budget turns the history
+			// below it from unasked into fillable.
+			state.start,
 			state.drops_revision,
 		);
 		let ended = state.nothing_arrives();
@@ -899,7 +901,6 @@ impl Misses {
 		self.view = view.cloned();
 		for run in candidates.iter() {
 			self.deferred.remove(run.clone());
-			self.judged.insert(run.clone());
 		}
 		let start = state.start.sequence().unwrap_or(0);
 		// Below a start its publisher resolved from a budget, which an update may have changed
@@ -912,6 +913,10 @@ impl Misses {
 				&& named.is_none_or(|named| named >= start);
 		if unasked && start > 0 {
 			candidates.remove(0..start);
+		}
+		// History left unasked stays unjudged, so a start that changes judges it again.
+		for run in candidates.iter() {
+			self.judged.insert(run.clone());
 		}
 		for run in candidates.iter() {
 			// Backfill another reader's fill cached is no hole, yet the arrival walk never
