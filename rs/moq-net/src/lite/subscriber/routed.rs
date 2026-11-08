@@ -681,7 +681,13 @@ mod tests {
 			node: 7,
 			advert: ADVERT,
 		};
-		for msg in [route, start("room"), start(".stats/node"), start(".stats/node/evil"), floor] {
+		for msg in [
+			route,
+			start("room"),
+			start(".stats/node"),
+			start(".stats/node/evil"),
+			floor,
+		] {
 			routed.receive(&prefix, msg, &mut decoder).unwrap();
 		}
 		let shown = |routed: &super::Routed| -> Vec<String> {
