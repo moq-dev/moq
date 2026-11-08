@@ -36,7 +36,7 @@ use content::{Input, Spec};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::ops::RangeBounds;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 
@@ -316,16 +316,32 @@ impl Outcome {
 	}
 }
 
-/// Why a group was aborted, as track scans read it without taking the group lock.
+/// Whether and why a group was aborted, as track scans read it without taking the group
+/// lock: one atomic phase in [`Alive`], so a scan never sees part of an abort.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum Fall {
+	/// Not aborted.
+	Live,
 	/// Freed by cache policy (`Old`, `Timeout`, `Evicted`), or after it finished: it aged
 	/// out of a cache rather than failed.
 	Released,
 	/// Given up deliberately: a reader cancelling, a lagged copy, or the upstream's own
 	/// cache policy. It failed, but readers never see a cut.
 	Abandoned,
-	/// The publisher gave it up with this error.
-	Cut(Error),
+	/// The publisher gave it up, with the error in [`Alive::cut`].
+	Cut,
+}
+
+impl Fall {
+	fn from_u8(phase: u8) -> Self {
+		match phase {
+			0 => Self::Live,
+			1 => Self::Released,
+			2 => Self::Abandoned,
+			_ => Self::Cut,
+		}
+	}
 }
 
 /// The frames a copy of a group holds, from where it starts, which a successor copy of
@@ -1498,11 +1514,19 @@ impl Detached {
 /// Whether a group failed, without holding it open or pinning its frames.
 pub(super) struct Fate(Arc<Alive>);
 
+impl Alive {
+	/// The abort's phase. Acquire pairs with the abort's release, so a [`Fall::Cut`] finds
+	/// its error in [`Self::cut`].
+	fn fall(&self) -> Fall {
+		Fall::from_u8(self.fall.load(Ordering::Acquire))
+	}
+}
+
 impl Fate {
 	/// Whether the group was aborted other than by cache policy (`Old`, `Timeout`,
 	/// `Evicted`): it failed or was given up, rather than aged out of a cache.
 	pub(super) fn failed(&self) -> bool {
-		matches!(self.0.fall.get(), Some(Fall::Abandoned | Fall::Cut(_)))
+		matches!(self.0.fall(), Fall::Abandoned | Fall::Cut)
 	}
 }
 
@@ -1515,7 +1539,13 @@ struct Alive {
 	// Only ever read on its own. A decision that pairs the abort with something else
 	// out of `GroupState` has to read both under one guard, or the two halves can
 	// straddle the abort: see `Handle::live_first_frame`.
-	fall: OnceLock<Fall>,
+	//
+	// A [`Fall`] as one atomic phase rather than a `OnceLock`, whose first set takes a
+	// slow path on every released group.
+	fall: AtomicU8,
+	// The publisher's error once `fall` reads [`Fall::Cut`]: set before that phase is
+	// published, so a scan reading it finds the error.
+	cut: OnceLock<Error>,
 	// Set once frame 0's rewind check ran, so later writes skip the track lock it takes. A
 	// stale false only takes that lock once more.
 	checked: AtomicBool,
@@ -1656,7 +1686,8 @@ impl Producer {
 			(state.log.reader(), state.pace.clone())
 		};
 		let alive = Arc::new(Alive {
-			fall: OnceLock::new(),
+			fall: AtomicU8::new(Fall::Live as u8),
+			cut: OnceLock::new(),
 			checked: AtomicBool::new(false),
 			started: AtomicBool::new(false),
 			access,
@@ -2696,15 +2727,19 @@ impl Handle {
 			{
 				Fall::Abandoned
 			}
-			_ => Fall::Cut(err.clone()),
+			_ => Fall::Cut,
 		};
-		let cut = matches!(fall, Fall::Cut(_));
+		let cut = fall == Fall::Cut;
+		if cut {
+			let _ = self.alive.cut.set(err.clone());
+		}
 		guard.outcome = match guard.outcome {
 			Outcome::Finished(frames) => Outcome::Released(frames, err),
 			_ => Outcome::Aborted(err),
 		};
 		// After the outcome exists, so a scan reading the mirror never hides a live group.
-		let _ = self.alive.fall.set(fall);
+		// The group lock admits one abort, so this is the only store.
+		self.alive.fall.store(fall as u8, Ordering::Release);
 		guard.release(salvage);
 		guard.close();
 		self.cache.aborted(self.sequence, cut);
@@ -2718,7 +2753,7 @@ impl Handle {
 	/// concurrent abort can still read as live for the length of [`Self::abort`],
 	/// which hands out a group whose consumer then surfaces the abort.
 	pub(crate) fn is_aborted(&self) -> bool {
-		self.alive.fall.get().is_some()
+		self.alive.fall() != Fall::Live
 	}
 
 	/// Why the publisher gave this group up, once it did, rather than cache policy
@@ -2726,9 +2761,9 @@ impl Handle {
 	///
 	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
 	pub(super) fn cut_error(&self) -> Option<&Error> {
-		match self.alive.fall.get()? {
-			Fall::Cut(err) => Some(err),
-			Fall::Released | Fall::Abandoned => None,
+		match self.alive.fall() {
+			Fall::Cut => self.alive.cut.get(),
+			Fall::Live | Fall::Released | Fall::Abandoned => None,
 		}
 	}
 
