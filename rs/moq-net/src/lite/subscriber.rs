@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
 	Error, Path, Timescale, Timestamp, bandwidth,
-	coding::{Decode as _, Reader, Stream, varint::MAX_QUIC},
+	coding::{Decode as _, Reader, Stream},
 	lite,
 	track::{Anchor, Position, Subscription},
 };
@@ -200,7 +200,7 @@ impl TrackEntry {
 		self.start = self.start.or(start);
 		self.first = self.first.or(first);
 		if let (Some(start), Some(first), Some(copy)) = (self.start, self.first, &mut self.copy) {
-			copy.producer.set_live(Some(first), Some(start));
+			copy.producer.set_live_from(first, Some(start));
 		}
 	}
 }
@@ -402,11 +402,11 @@ impl TrackEntry {
 				frame: hdr.frame_start,
 			};
 			if !version.has_track_stream() {
-				producer.set_live(Some(first), None);
+				producer.set_live_from(first, None);
 			} else if !version.has_largest() {
 				self.first = self.first.or(Some(first));
 				if let (Some(start), Some(first)) = (self.start, self.first) {
-					producer.set_live(Some(first), Some(start));
+					producer.set_live_from(first, Some(start));
 				}
 			}
 		}
@@ -7710,6 +7710,17 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(wire_ranges(&timed, None), Err(Error::TimestampMismatch)));
+
+		// Only the oldest start goes out without an anchor; any count back stays one.
+		let start = |start| {
+			let subscription = Subscription::default().with_ranges([track::Range { start, end: None }]);
+			wire_ranges(&subscription, None).unwrap().unwrap()[0].start
+		};
+		assert_eq!(start(Anchor::Oldest), None);
+		assert_eq!(
+			start(Anchor::Relative(u64::MAX)),
+			Some(lite::Anchor::Relative(u64::MAX))
+		);
 	}
 
 	/// A wire without ranges asks from group 0 when no single start covers both a count
@@ -9319,9 +9330,7 @@ fn wire_ranges(subscription: &Subscription, timescale: Option<Timescale>) -> Res
 			continue;
 		}
 		let start = match range.start {
-			// Past the varint's reach, a count back clamps to group 0 just as the oldest
-			// start does, which only that start can spell.
-			Anchor::Relative(back) if back > MAX_QUIC => None,
+			Anchor::Oldest => None,
 			Anchor::Relative(back) => Some(lite::Anchor::Relative(back)),
 			Anchor::Absolute(group) => Some(lite::Anchor::Absolute(Position::group(group))),
 			Anchor::Time(pts) => Some(time(pts)?),
@@ -9331,7 +9340,7 @@ fn wire_ranges(subscription: &Subscription, timescale: Option<Timescale>) -> Res
 		// nothing names a resolved end, so one resolved upstream would leave the copy short.
 		let end = match range.end {
 			Some(Anchor::Absolute(group)) => Some(lite::Anchor::Absolute(Position::group(group))),
-			None | Some(Anchor::Relative(_) | Anchor::Time(_)) => None,
+			None | Some(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_)) => None,
 		};
 		ranges.push(lite::Range { start, end });
 	}
@@ -10144,7 +10153,7 @@ impl TrackServe {
 				|| subscription
 					.ranges
 					.iter()
-					.all(|range| range.end.is_none() && matches!(range.start, Anchor::Relative(0 | u64::MAX))));
+					.all(|range| range.end.is_none() && matches!(range.start, Anchor::Oldest | Anchor::Relative(0))));
 		if opening && idle {
 			subscription = subscription.with_start(newest);
 		}
@@ -11712,10 +11721,12 @@ impl ServeLoop {
 				} else if serve.subscriber.version.has_largest() {
 					// A bounded feed that never delivers Largest goes live at the
 					// answer alone; one that does waits for it to show.
+					// An answer behind the copy's cache fails it.
 					match active.never_serves(start.largest) {
 						Some(largest) => self.serving.set_live_ahead(largest, served),
 						None => self.serving.set_live(start.largest, served),
 					}
+					.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
 					if let Some(largest) = start.largest {
 						self.serving.report_largest(largest);
 					}

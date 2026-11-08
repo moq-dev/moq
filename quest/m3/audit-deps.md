@@ -124,8 +124,7 @@ Most duplicates still come from upstream ecosystem transitions: RustCrypto's
 older generation through rsa/jsonwebtoken/STUN/SRT; retina's h264-reader 0.8
 and bitstream-io 2; srt-tokio's older rand/socket2/derive_more; rustls-acme's
 rcgen 0.13 and web client; winit's older platform stack; and libspa's
-system-deps 7 beside GStreamer's 9. moq-vaapi still holds bindgen 0.70,
-libloading 0.8 and thiserror 1; mp4-atom also holds thiserror 1. Do not treat
+system-deps 7 beside GStreamer's 9. mp4-atom still holds thiserror 1. Do not treat
 all 117 extras as locally removable without checking those consumers.
 
 Bun's same-major duplicates can persist until a parent re-resolves.

@@ -160,7 +160,7 @@ Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
 typedef Range = MoqRange;
 
-/// Where one end of a [Range] falls: absolute, relative to the latest group, or the group containing a time.
+/// Where one end of a [Range] falls: the oldest group (a start only), absolute, relative to the latest group, or the group containing a time.
 typedef Anchor = MoqAnchor;
 
 /// Which pending group the publisher sends first.
