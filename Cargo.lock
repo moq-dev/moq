@@ -5234,14 +5234,13 @@ dependencies = [
 [[package]]
 name = "moq-vaapi"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67e1eee8b86560f73818e82838ac5ec60b04f1251deb94df35640de190db67f5"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
- "libloading 0.8.9",
- "log",
- "thiserror 1.0.69",
+ "libloading 0.9.0",
+ "thiserror 2.0.21",
+ "tracing",
+ "workspace-hack",
 ]
 
 [[package]]

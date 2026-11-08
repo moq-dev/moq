@@ -51,7 +51,7 @@ pub enum VideoFormat {
 ///
 /// Names only the input the importer parses. Every container is demuxed into its tracks' frames;
 /// republishing the input whole is a choice made on the concrete importer
-/// ([`fmp4::Import::with_passthrough`](crate::container::fmp4::Import::with_passthrough),
+/// ([`fmp4::Import::with_cmaf`](crate::container::fmp4::Import::with_cmaf),
 /// [`ts::Passthrough`](crate::container::ts::Passthrough)), never by the format name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]

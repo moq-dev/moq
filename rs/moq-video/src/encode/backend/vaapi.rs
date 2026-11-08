@@ -5,7 +5,7 @@
 //! with the parameter sets in band, matching avc3 and hev1, and labels the color
 //! space in the VUI. H.265 is the Main profile.
 //!
-//! As of moq-vaapi 0.0.3 libva is `dlopen`'d at runtime, so a VAAPI-enabled build
+//! libva is `dlopen`'d at runtime, so a VAAPI-enabled build
 //! needs no libva at build time and the binary carries no `NEEDED libva`. A
 //! libva-less host, or a present-but-unusable VA stack (no render node, no usable
 //! driver), makes `Encoder::new` return an error; under automatic selection
@@ -37,7 +37,9 @@
 //! pixels. The H.265 case decodes with the VA-API decoder, since there is no
 //! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of
 //! them, ignored ones included, also pass on an AMD RX 9070 with radeonsi (Mesa
-//! 26.2.6). They skip on a machine without a VA-API device.
+//! 26.2.6). They skip on a machine without a VA-API device, except the ignored
+//! `vaapi_1080p_ladder_stays_on_the_gpu`, which requests hardware explicitly and
+//! fails without it.
 
 use std::collections::HashSet;
 use std::path::Path;
