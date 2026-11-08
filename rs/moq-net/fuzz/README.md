@@ -87,4 +87,4 @@ cp rs/moq-net/fuzz/artifacts/ingest/crash-<hash> rs/moq-net/fuzz/regressions/ing
 
 `fuzz::tests::regressions` replays everything under `regressions/<target>/` as part of
 the normal test suite, so the case stays covered. A crash on a single moq-lite message
-becomes a case in [`../corpus/`](../corpus/README.md) instead, which `js/net` replays too.
+becomes a case in `../fixtures/lite.json` instead, which `js/net` replays too.

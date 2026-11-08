@@ -1,11 +1,19 @@
-//! Replays the moq-lite corpus in `corpus/lite/`, which `js/net` replays too, so a decoder
-//! that drifts from the other language fails a test on both sides. See `corpus/README.md`.
+//! Replays `fixtures/lite.json`, the moq-lite corpus `js/net` replays too
+//! (`src/lite/corpus.test.ts`), so a decoder that drifts from the other language fails a test
+//! on both sides.
+//!
+//! Each case is one complete wire input at a negotiated `version` (its handshake name), with
+//! the outcome both must reach: `decoded`, where our own encoding of the decoded value must
+//! equal the input, so a case also pins the value, or `refused`, where the input is rejected
+//! without asking for more bytes. A fuzz crash on a single moq-lite message belongs here
+//! rather than in `fuzz/regressions/`, so JS replays it too.
 
 use crate::coding::{Decode, DecodeError, Decoder, Encode, Form};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Case {
+	name: String,
 	version: crate::Version,
 	message: Message,
 	hex: String,
@@ -19,9 +27,13 @@ struct Case {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Message {
+	/// One announcement on the announce stream, type and length prefix included.
 	Announce,
+	/// A lite-01/02 ANNOUNCE_INIT, length prefix included.
 	AnnounceInit,
+	/// A group stream header, length prefix included.
 	Group,
+	/// A `moql` CLIENT_SETUP.
 	ClientSetup,
 }
 
@@ -91,26 +103,18 @@ fn unhex(text: &str) -> Vec<u8> {
 
 #[test]
 fn corpus() {
-	let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/lite");
+	let cases: Vec<Case> = serde_json::from_str(include_str!("../../fixtures/lite.json")).expect("a malformed corpus");
+	assert!(!cases.is_empty(), "the corpus is empty");
 	let mut failures = Vec::new();
-	let mut count = 0;
-	for entry in std::fs::read_dir(&dir).expect("could not read the corpus") {
-		let path = entry.expect("could not read the corpus").path();
-		if path.extension().is_none_or(|ext| ext != "json") {
-			continue;
-		}
-		let text = std::fs::read_to_string(&path).expect("could not read a corpus case");
-		let case: Case = serde_json::from_str(&text).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+	for case in &cases {
 		let want = match case.expect {
 			Expect::Decoded => case.hex.clone(),
 			Expect::Refused => "refused".to_string(),
 		};
-		let got = run(&case, &unhex(&case.hex));
+		let got = run(case, &unhex(&case.hex));
 		if got != want {
-			failures.push(format!("{}: expected {want}, got {got}", path.display()));
+			failures.push(format!("{}: expected {want}, got {got}", case.name));
 		}
-		count += 1;
 	}
-	assert!(count > 0, "the corpus is empty");
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

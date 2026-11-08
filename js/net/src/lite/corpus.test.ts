@@ -1,9 +1,8 @@
-// Replays the moq-lite corpus in `rs/moq-net/corpus/lite/`, which moq-net replays too, so a
-// decoder that drifts from the other language fails a test on both sides.
+// Replays `rs/moq-net/fixtures/lite.json`, the moq-lite corpus moq-net replays too, so a decoder
+// that drifts from the other language fails a test on both sides. `rs/moq-net/src/lite/corpus.rs`
+// describes the cases.
 
 import { expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { select } from "../connection/accept.ts";
 import { Reader, UnexpectedEnd, Writer } from "../stream.ts";
 import { isDecodeError } from "../util/decode_error.ts";
@@ -12,9 +11,8 @@ import { ClientSetup } from "./compat.ts";
 import { Group } from "./group.ts";
 import { Version, versionName } from "./version.ts";
 
-const DIR = join(import.meta.dir, "../../../../rs/moq-net/corpus/lite");
-
 interface Case {
+	name: string;
 	version: string;
 	message: "announce" | "announce_init" | "group" | "client_setup";
 	hex: string;
@@ -71,15 +69,14 @@ async function outcome(c: Case): Promise<string> {
 	return Buffer.from(await Writer.collect(v, encode)).toString("hex");
 }
 
-const files = readdirSync(DIR).filter((file) => file.endsWith(".json"));
+const cases = (await Bun.file(new URL("../../../../rs/moq-net/fixtures/lite.json", import.meta.url)).json()) as Case[];
 
 test("the corpus has cases", () => {
-	expect(files.length).toBeGreaterThan(0);
+	expect(cases.length).toBeGreaterThan(0);
 });
 
-for (const file of files) {
-	const c = JSON.parse(readFileSync(join(DIR, file), "utf8")) as Case;
-	test(file, async () => {
+for (const c of cases) {
+	test(c.name, async () => {
 		expect(await outcome(c)).toBe(c.expect === "decoded" ? c.hex : "refused");
 	});
 }
