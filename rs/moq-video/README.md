@@ -115,14 +115,16 @@ later one goes in, and for the tail `finish()` drains. Bring your own pixels wit
 
 Group boundaries are automatic: `Config::join` is the time between join points
 (a keyframe every two seconds by default, rounded to whole frames, and a join of
-zero is refused at open), so an application never has to think about them.
+zero is refused at open), so an application never has to think about them. It
+is measured by the frames' timestamps, so a source running slower than
+`Config::framerate` still keys every join.
 `Encoder::cut()` opens a group at the next frame when something outside the
 encoder needs a decodable starting point there: a source group boundary, a scene
 change, a source switch. The request is held until a frame
 arrives, so it is safe to call before you have one. It fails with
 `Error::CutUnsupported` on a backend that cannot force a boundary (a V4L2
 driver without the force-keyframe control), and queues nothing then: groups
-keep falling where `Config::join` puts them. `encode::Sink` answers the same
+keep falling every `Config::join`'s worth of frames at `Config::framerate`. `encode::Sink` answers the same
 way, awaited.
 
 Public entry points:
