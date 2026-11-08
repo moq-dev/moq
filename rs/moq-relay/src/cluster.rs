@@ -2133,9 +2133,9 @@ impl Cluster {
 
 		loop {
 			let started = kio::clock::now();
-			let result = match Self::dial_addrs(target, &token) {
-				Ok(addrs) => self.run_remote_once(&addrs, target, dial).await,
-				Err(err) => Err(err),
+			let (result, presented) = match Self::dial_addrs(target, &token) {
+				Ok((addrs, presented)) => (self.run_remote_once(&addrs, target, dial).await, presented),
+				Err(err) => (Err(err), None),
 			};
 			dial.disconnected();
 			let elapsed = started.elapsed();
@@ -2143,7 +2143,16 @@ impl Cluster {
 			match result {
 				Ok(()) if elapsed >= stable_threshold => redial = Redial::default(),
 				Ok(()) => tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off"),
-				Err(err) => tracing::warn!(%err, "cluster peer error; will retry"),
+				Err(err) => {
+					tracing::warn!(%err, "cluster peer error; will retry");
+					// The session's own reconnects reuse the token it started with, so a
+					// failure after the file rotated is most likely that token expiring:
+					// present the new one at once instead of after a backoff.
+					if presented.is_some() && token.read().ok().flatten() != presented {
+						tracing::info!("cluster token rotated; redialing with it");
+						continue;
+					}
+				}
 			}
 
 			let wait = redial.next(&mut kio::clock::rng());
@@ -2154,13 +2163,14 @@ impl Cluster {
 	/// `target`'s addresses for one attempt, with the shared cluster token applied
 	/// unless a URL already carries its own non-empty `?jwt=` (a per-peer inline
 	/// token or object `token` wins; an empty `?jwt=` counts as absent, as
-	/// `moq auth serve` reads it). LAN dials never get the token: they authenticate
-	/// with the mDNS credential.
-	fn dial_addrs(target: &DialTarget, token: &ClusterToken) -> anyhow::Result<moq_tokio::Addrs> {
+	/// `moq auth serve` reads it), and the shared token if any URL presents it.
+	/// LAN dials never get the token: they authenticate with the mDNS credential.
+	fn dial_addrs(target: &DialTarget, token: &ClusterToken) -> anyhow::Result<(moq_tokio::Addrs, Option<String>)> {
 		let mut urls = target.addrs();
 		let bare = |url: &Url| !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty());
 		// Read only when a URL needs it, so an unreadable file never blocks a peer
 		// carrying its own credential.
+		let mut presented = None;
 		if !target.lan
 			&& urls.iter().any(bare)
 			&& let Some(token) = token.read()?
@@ -2168,8 +2178,10 @@ impl Cluster {
 			for url in urls.iter_mut().filter(|url| bare(url)) {
 				url.query_pairs_mut().append_pair("jwt", &token);
 			}
+			presented = Some(token);
 		}
-		moq_tokio::Addrs::collect(urls).context("peer advertised no reachable address")
+		let addrs = moq_tokio::Addrs::collect(urls).context("peer advertised no reachable address")?;
+		Ok((addrs, presented))
 	}
 
 	/// One session to `target` over `addrs`, which carry any credential.
@@ -4034,7 +4046,7 @@ mod tests {
 		let path = dir.path().join("token");
 		let token = ClusterToken(Some(path.clone()));
 		let query = |target: &DialTarget| {
-			let addrs = Cluster::dial_addrs(target, &token).expect("addrs");
+			let (addrs, _) = Cluster::dial_addrs(target, &token).expect("addrs");
 			addrs.as_slice()[0].url().query().map(str::to_string)
 		};
 		let shared = DialTarget::parse("https://peer.example/").unwrap();
