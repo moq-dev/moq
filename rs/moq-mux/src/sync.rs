@@ -1,13 +1,13 @@
 //! One playout clock shared by a broadcast's tracks.
 //!
-//! Each [`Track`] folds its arrivals into the clock with [`Track::received`]
-//! and reads when its media is due. The clock's reference is the earliest
+//! Each [`Track`] folds its arrivals into the clock with [`Track::received`],
+//! and [`Producer::due`] says when media is due. The clock's reference is the earliest
 //! arrival any live track has seen, measured against its timestamp, so it sits
 //! on the wall clock and follows the live edge. Every track presents against
 //! it, which holds them together in the steady state. One that falls behind,
 //! such as audio stalled by congestion, only arrives late: it never holds or
 //! moves the others. Audio converges on the clock by stretching toward its
-//! [`due`](Track::due) time rather than owning it.
+//! [`due`](Producer::due) time rather than owning it.
 //!
 //! Playback trails the reference by the largest target a live track holds
 //! ([`Track::set_target`]), or by the delay passed to [`Producer::new`] while
@@ -16,9 +16,9 @@
 //! previous picture.
 //!
 //! A track also maps encoder segments onto the clock across declared ends.
-//! Keep one active track per [`Kind`](crate::container::Kind); retire it before starting its successor.
-//! Bound replacement media with the caller's retention budget and
-//! [`Track::abandon`] transitions whose replacement is discarded.
+//! Keep one active track per [`Kind`]; retire it before
+//! starting its successor. Bound replacement media with the caller's retention
+//! budget and [`Track::abandon`] transitions whose replacement is discarded.
 
 use kio::clock::Instant;
 use std::time::Duration;
@@ -74,7 +74,10 @@ impl Anchor {
 	fn earlier(&self, other: &Self) -> bool {
 		match other.media.checked_sub(self.media) {
 			Some(ahead) => self.at.checked_add(ahead).is_some_and(|at| at < other.at),
-			None => other.at.checked_add(self.media - other.media).is_none_or(|at| self.at < at),
+			None => other
+				.at
+				.checked_add(self.media - other.media)
+				.is_none_or(|at| self.at < at),
 		}
 	}
 }
@@ -113,7 +116,7 @@ struct State {
 	/// Endpoints declared by each live role, on the shared playback timeline.
 	ends: [Option<Boundary>; KINDS],
 	/// When each retired role's tail finishes playing, frozen on the wall clock:
-	/// a later rendition re-pins the anchor, which would carry a media endpoint
+	/// a later rendition anchors afresh, which would carry a media endpoint
 	/// onto an unrelated timeline. Kept apart from `ends` so a successor role
 	/// never clears its predecessor's tail.
 	tails: Vec<Instant>,
@@ -361,12 +364,6 @@ impl Track {
 		moved
 	}
 
-	/// When `timestamp`, on the shared timeline, should be presented, or `None`
-	/// before any frame has anchored the clock.
-	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
-		self.clock.state.lock().unwrap().due(timestamp)
-	}
-
 	/// Stop while a tail still plays until `drained`, holding a declared end until
 	/// then. Dropping instead discards the tail with the end.
 	pub fn retire(self, drained: Option<Instant>) {
@@ -580,7 +577,11 @@ impl Resume<'_> {
 		// A transition abandoned under this resume, by a gap the caller rechecks,
 		// maps alone like one no peer joined.
 		let (mapping, paired) = state.transition(self.transition).map_or((None, None), |pending| {
-			let mut plans = pending.members.iter().zip(&pending.plans).filter(|(member, _)| **member);
+			let mut plans = pending
+				.members
+				.iter()
+				.zip(&pending.plans)
+				.filter(|(member, _)| **member);
 			let joined = pending.members[own] && plans.clone().count() > 1;
 			let origin = plans
 				.try_fold(None::<Plan>, |earliest, (_, plan)| {
@@ -797,7 +798,6 @@ mod tests {
 		audio.reset();
 		assert!(!audio.received(ms(1_000), resumed + Duration::from_millis(100)));
 		assert_eq!(clock.due(ms(1_000)), steady, "stalled audio held video");
-		assert_eq!(audio.due(ms(1_000)), steady, "audio converges on the shared schedule");
 	}
 
 	/// A video tune-in burst is the live edge: nothing owns the schedule, so it
@@ -810,7 +810,7 @@ mod tests {
 		let video = clock.track(Kind::Video);
 		audio.received(ms(1_000), start);
 		assert!(video.received(ms(4_000), start));
-		assert_eq!(audio.due(ms(4_000)), Some(start + DELAY));
+		assert_eq!(clock.due(ms(4_000)), Some(start + DELAY));
 	}
 
 	/// A track that resets gives up its arrivals: the schedule falls back to the
@@ -860,7 +860,10 @@ mod tests {
 		assert_eq!(reader.delay(), Duration::from_millis(60));
 		assert_eq!(clock.due(ms(0)), Some(start + Duration::from_millis(60)));
 		assert!(video.set_target(Duration::from_millis(80)));
-		assert!(!audio.set_target(Duration::from_millis(70)), "a shallower target moved the delay");
+		assert!(
+			!audio.set_target(Duration::from_millis(70)),
+			"a shallower target moved the delay"
+		);
 		assert_eq!(reader.delay(), Duration::from_millis(80));
 
 		drop(video);
@@ -1031,7 +1034,10 @@ mod tests {
 		audio.plan(transition, ms(0), Some(DELAY));
 		let mapping = audio.resume(transition, ms(0), Some(DELAY)).ready().await.unwrap();
 		audio.apply(transition, mapping);
-		assert!(kio::clock::now() >= start + DELAY * 2, "the replacement waited for the tail");
+		assert!(
+			kio::clock::now() >= start + DELAY * 2,
+			"the replacement waited for the tail"
+		);
 		let unchanged = clock.state.lock().unwrap().due(ms(10_500));
 		for frame in 0..10 {
 			let at = start + Duration::from_millis(frame * 20);

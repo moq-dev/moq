@@ -714,7 +714,9 @@ async fn play_audio<O: Output>(
 							let first = lead(delay);
 							let mapping = role.resume(transition, frame.timestamp, Some(first)).ready().await?;
 							role.apply(transition, mapping);
-							let at = role.due(role.map(frame.timestamp)?).and_then(|at| at.checked_sub(first));
+							let at = presentation
+								.due(role.map(frame.timestamp)?)
+								.and_then(|at| at.checked_sub(first));
 							if let Some(at) = at {
 								kio::clock::sleep_until(at).await;
 							}
@@ -794,7 +796,7 @@ async fn play_audio<O: Output>(
 			// spacing instead of fitting that queued burst as if it arrived live.
 			// The lead follows the current target so jitter can still deepen the sink.
 			if sequential {
-				let at = role.due(mapped).and_then(|at| at.checked_sub(lead(delay)));
+				let at = presentation.due(mapped).and_then(|at| at.checked_sub(lead(delay)));
 				if let Some(at) = at {
 					kio::clock::sleep_until(at).await;
 				}
@@ -820,7 +822,7 @@ async fn play_audio<O: Output>(
 			let now = Instant::now();
 			let held = moq_net::Timestamp::try_from(timing.end)
 				.ok()
-				.and_then(|end| role.due(end))
+				.and_then(|end| presentation.due(end))
 				.map_or(input.latency, |due| due.saturating_duration_since(now))
 				.clamp(AUDIO_BUFFER_MIN, max_delay.max(AUDIO_BUFFER_MIN));
 			let target = samples(held);
@@ -1198,7 +1200,7 @@ mod tests {
 					})
 					.unwrap();
 				// Audio stops after 200 ms; its backlog lands in one late burst at 800 ms.
-				if index < 10 || index > 40 {
+				if !(10..=40).contains(&index) {
 					audio.write(packet(index, if index < 10 { 0.25 } else { 0.5 })).unwrap();
 				} else if index == 40 {
 					for late in 10..=40 {

@@ -13,8 +13,8 @@ use super::args::Args;
 use super::media::Media;
 use super::metrics::Metrics;
 use super::output::Output;
-use super::window::Event;
 use super::timeline::Playhead;
+use super::window::Event;
 use moq_mux::sync::Producer as Presentation;
 
 /// The speaker and the run loop's events, plus `--metrics`' observer feed.
