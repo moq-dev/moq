@@ -86,17 +86,6 @@ in
         '';
       };
 
-      allowUnboundedTokens = lib.mkOption {
-        type = lib.types.bool;
-        default = cfg.cluster.mode != "none";
-        defaultText = lib.literalExpression ''config.services.moq-relay.cluster.mode != "none"'';
-        description = ''
-          Admit tokens without `exp`. On by default with clustering, since the cluster
-          token a leaf signs at start is presented for as long as it runs. Turn it on
-          to keep admitting long-lived tokens signed before expiry was required.
-        '';
-      };
-
       port = lib.mkOption {
         type = lib.types.port;
         default = 4440;
@@ -151,7 +140,7 @@ in
         description = ''
           Path to the cluster token file. If null, a leaf with `auth.enable` signs one
           without `exp` using its own auth key, so the root's auth server must trust
-          that key and admit unbounded tokens.
+          that key.
         '';
       };
 
@@ -239,7 +228,6 @@ in
             "--key ${authKey}"
             "--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer"
           ]
-          ++ lib.optionals cfg.auth.allowUnboundedTokens [ "--allow-unbounded-tokens" ]
           ++ lib.optionals (cfg.auth.publicPath != null) [
             "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"
           ]

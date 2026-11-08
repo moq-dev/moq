@@ -248,8 +248,7 @@ async fn auth_server_public_rules_are_rooted_at_slash() {
 
 	let claims = moq_auth::Claims::default()
 		.with_root("event")
-		.with_publish(["**".parse().unwrap()])
-		.with_expires(Some(kio::clock::wall() + std::time::Duration::from_secs(3600)));
+		.with_publish(["**".parse().unwrap()]);
 	let jwt = key.sign(&claims).expect("sign");
 	let mut camera = url(port, "/event");
 	camera.query_pairs_mut().append_pair("jwt", &jwt);

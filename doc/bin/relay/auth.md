@@ -422,10 +422,6 @@ never falls through to the anonymous rules. A JWT presented with a certificate
 is refused too, because neither can safely win, so a peer presents
 `cluster.token` or a certificate, not both.
 
-A token without `exp` is refused, so a leaked one cannot admit forever.
-`--allow-unbounded-tokens` admits it, for a deployment that revokes by rotating
-keys; `moq auth sign --unbounded` mints one.
-
 Nothing is re-checked or closed by default: a session lives until its token's
 `exp` or its certificate's notAfter. `--expires D` bounds a grant with no bound
 of its own. `--revalidate D` has the relay re-check each grant on that cadence,

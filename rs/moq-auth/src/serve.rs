@@ -223,12 +223,8 @@ pub struct Policy {
 	/// How often the relay re-checks each grant; `None` never re-checks. The contract
 	/// refuses a cadence without a bound, so set [`expires`](Self::expires) with it.
 	pub revalidate: Option<Duration>,
-	/// Admit a token without `exp`. Off refuses one, so a leaked token cannot admit
-	/// forever; turn it on only where keys are rotated to revoke.
-	pub unbounded_tokens: bool,
 	/// How long a grant with no bound of its own lasts: an anonymous session, a token
-	/// without `exp` that [`unbounded_tokens`](Self::unbounded_tokens) admits, a
-	/// certificate without one. `None` leaves those unbounded.
+	/// without `exp`, a certificate without one. `None` leaves those unbounded.
 	/// A bound past the system clock's range is refused by [`Server::new`], and by
 	/// [`decide`](Self::decide) for each session it would bound.
 	pub expires: Option<Duration>,
@@ -391,12 +387,6 @@ pub enum Denial {
 		/// The token's root.
 		root: String,
 	},
-	/// The token has no `exp`, and the policy does not admit unbounded tokens.
-	#[error("the token has no expiry")]
-	Unbounded {
-		/// The token's root.
-		root: String,
-	},
 }
 
 impl Denial {
@@ -410,7 +400,7 @@ impl Denial {
 			_ => Reason::Refused,
 		};
 		let root = match self {
-			Self::Expired { root } | Self::Unbounded { root } | Self::RootMismatch { root, .. } => Some(root.clone()),
+			Self::Expired { root } | Self::RootMismatch { root, .. } => Some(root.clone()),
 			Self::NoAccess { root, .. } | Self::TokenLimit { root } | Self::RemoteLimit { root } => root.clone(),
 			_ => None,
 		};
@@ -433,9 +423,6 @@ impl Policy {
 		let mut link = None;
 		let (permissions, rates, expires, root) = if let Some(jwt) = jwt {
 			let claims = self.verify(&jwt).await?;
-			if claims.expires.is_none() && !self.unbounded_tokens {
-				return Err(Denial::Unbounded { root: claims.root });
-			}
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Denial::RootMismatch {
 					root: claims.root.clone(),
@@ -910,7 +897,7 @@ mod tests {
 
 		let (dir, key) = key_dir();
 		let root = "root\nforged-root\r\x1b[31m";
-		let jwt = sign(&key, root, &["**"], &[], in_an_hour());
+		let jwt = sign(&key, root, &["**"], &[], None);
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
@@ -1023,11 +1010,6 @@ mod tests {
 		key.sign(&claims).unwrap()
 	}
 
-	/// An `exp` an hour out, for a token whose expiry the test does not exercise.
-	fn in_an_hour() -> Option<kio::clock::Wall> {
-		Some(kio::clock::wall() + Duration::from_secs(3600))
-	}
-
 	/// The server behind a client, with a signal for each `end` it has handled.
 	async fn serve(policy: Policy) -> (Client, Arc<tokio::sync::Notify>) {
 		let server = Server::new(policy).unwrap();
@@ -1078,24 +1060,6 @@ mod tests {
 		assert_eq!(grant.revalidate, None);
 		assert_eq!(grant.tier.as_deref(), Some("gold"));
 		assert_eq!(grant.root, None);
-	}
-
-	#[tokio::test]
-	async fn a_token_without_exp_is_refused_unless_unbounded_tokens_are_admitted() {
-		let (dir, key) = key_dir();
-		let mut policy = Policy {
-			keys: Some(Keys::Dir(dir.path().into())),
-			// A default bound still refuses: each new session would get a fresh one.
-			expires: Some(Duration::from_secs(3600)),
-			..Default::default()
-		};
-		let jwt = sign(&key, "demo", &["**"], &[], None);
-		let err = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err();
-		assert_eq!(err, Denial::Unbounded { root: "demo".into() });
-		assert_eq!(err.body(None).root.as_deref(), Some("demo"));
-
-		policy.unbounded_tokens = true;
-		policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap();
 	}
 
 	#[tokio::test]
@@ -1168,7 +1132,6 @@ mod tests {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
-			unbounded_tokens: true,
 			expires: Some(Duration::from_secs(3600)),
 			..Default::default()
 		};
@@ -1187,7 +1150,7 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["alice/**"], &["**"], in_an_hour());
+		let jwt = sign(&key, "demo", &["alice/**"], &["**"], None);
 		let grant = policy.decide(&with_token(request("/demo/alice"), &jwt)).await.unwrap();
 		assert_eq!(grant.publish, patterns(&["**"]));
 		assert_eq!(grant.subscribe, patterns(&["**"]));
@@ -1195,7 +1158,7 @@ mod tests {
 		let err = policy.decide(&with_token(request("/other"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::RootMismatch { .. }), "{err}");
 
-		let jwt = sign(&key, "", &[], &["demo/**"], in_an_hour());
+		let jwt = sign(&key, "", &[], &["demo/**"], None);
 		let err = policy.decide(&with_token(request("/other"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::NoAccess { .. }), "{err}");
 	}
@@ -1222,19 +1185,19 @@ mod tests {
 
 		// Signed by a stranger.
 		let stranger = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
-		let jwt = sign(&stranger, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&stranger, "demo", &["**"], &[], None);
 		let err = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::InvalidToken(_)), "{err}");
 
 		// Unknown kid, and no kid at all.
 		let other = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid2").unwrap())).unwrap();
-		let jwt = sign(&other, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&other, "demo", &["**"], &[], None);
 		assert_eq!(
 			policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err(),
 			Denial::UnknownKey
 		);
 		let bare = Key::generate(Algorithm::HS256, None).unwrap();
-		let jwt = sign(&bare, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&bare, "demo", &["**"], &[], None);
 		assert_eq!(
 			policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err(),
 			Denial::MissingKeyId
@@ -1300,13 +1263,13 @@ mod tests {
 			keys: Some(Keys::File(path)),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&key, "demo", &["**"], &[], None);
 		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
 
 		let mut wrong = key.export();
 		wrong.kid = Some(KeyId::decode("unexpected").unwrap());
 		let wrong = wrong.import().unwrap();
-		let mismatched = sign(&wrong, "demo", &["**"], &[], in_an_hour());
+		let mismatched = sign(&wrong, "demo", &["**"], &[], None);
 		assert_eq!(
 			policy
 				.decide(&with_token(request("/demo"), &mismatched))
@@ -1330,7 +1293,7 @@ mod tests {
 			keys: Some(Keys::Set(path)),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&key, "demo", &["**"], &[], None);
 		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
 
 		// The same file read as a single key is no key, whatever the set cached.
@@ -1344,7 +1307,7 @@ mod tests {
 		let mut wrong = key.export();
 		wrong.kid = Some(KeyId::decode("kid2").unwrap());
 		let wrong = wrong.import().unwrap();
-		let mismatched = sign(&wrong, "demo", &["**"], &[], in_an_hour());
+		let mismatched = sign(&wrong, "demo", &["**"], &[], None);
 		assert!(matches!(
 			policy.decide(&with_token(request("/demo"), &mismatched)).await,
 			Err(Denial::InvalidToken(_))
@@ -1397,7 +1360,7 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["alice/**"], &[], in_an_hour());
+		let jwt = sign(&key, "demo", &["alice/**"], &[], None);
 		let grant = policy
 			.decide(&with_setup_token(request("/demo"), Token::OUT_OF_BAND, &jwt))
 			.await
@@ -1406,7 +1369,7 @@ mod tests {
 
 		// And refused like one: a stranger's key never falls through to public.
 		let stranger = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
-		let forged = sign(&stranger, "demo", &["**"], &[], in_an_hour());
+		let forged = sign(&stranger, "demo", &["**"], &[], None);
 		let err = policy
 			.decide(&with_setup_token(request("/demo"), Token::OUT_OF_BAND, &forged))
 			.await
@@ -1431,7 +1394,7 @@ mod tests {
 			public: rules(&["**"], &["**"]),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&key, "demo", &["**"], &[], None);
 		let err = policy
 			.decide(&with_setup_token(request("/demo"), Token::CAT, &jwt))
 			.await
@@ -1451,7 +1414,7 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&key, "demo", &["**"], &[], None);
 		let request = with_setup_token(with_token(request("/demo"), &jwt), Token::OUT_OF_BAND, &jwt);
 		let grant = policy.decide(&request).await.unwrap();
 		assert_eq!(grant.publish, patterns(&["**"]));
@@ -1465,8 +1428,8 @@ mod tests {
 			keys: Some(Keys::Dir(dir.path().into())),
 			..Default::default()
 		};
-		let setup = sign(&key, "demo", &["**"], &[], in_an_hour());
-		let query = sign(&key, "demo", &[], &["**"], in_an_hour());
+		let setup = sign(&key, "demo", &["**"], &[], None);
+		let query = sign(&key, "demo", &[], &["**"], None);
 		let different = with_setup_token(with_token(request("/demo"), &query), Token::OUT_OF_BAND, &setup);
 		assert_eq!(policy.decide(&different).await.unwrap_err(), Denial::TwoTokens);
 
@@ -1484,7 +1447,7 @@ mod tests {
 			public: rules(&["**"], &["**"]),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&key, "demo", &["**"], &[], None);
 
 		let mut request = request("/demo");
 		request.query = Some(format!("a=1&jwt={jwt}"));
@@ -1709,7 +1672,7 @@ mod tests {
 		grant.validate().unwrap();
 		let grant = policy.decide(&request("/")).await.unwrap();
 		assert!(!grant.peer && !grant.upstream);
-		let jwt = sign(&key, "", &["**"], &[], in_an_hour());
+		let jwt = sign(&key, "", &["**"], &[], None);
 		let grant = policy.decide(&with_token(request("/"), &jwt)).await.unwrap();
 		assert!(!grant.peer && !grant.upstream);
 	}
@@ -1743,7 +1706,7 @@ mod tests {
 			mtls: rules(&["**"], &["**"]),
 			..Default::default()
 		};
-		let jwt = sign(&key, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&key, "demo", &["**"], &[], None);
 		for request in [
 			with_peer(with_token(request("/demo"), &jwt), None),
 			with_peer(with_token(request("/demo"), "garbage"), None),
@@ -1969,7 +1932,7 @@ mod tests {
 			..limited()
 		})
 		.unwrap();
-		let jwt = sign(&key, "demo", &["**"], &[], in_an_hour());
+		let jwt = sign(&key, "demo", &["**"], &[], None);
 
 		server.answer(&with_token(request("/demo"), &jwt)).await.unwrap();
 		let mut mapped = with_token(request("/demo"), &jwt);
@@ -2013,7 +1976,7 @@ mod tests {
 		})
 		.unwrap();
 		let exp = Some(kio::clock::wall() + Duration::from_secs(60));
-		let a = sign(&key, "demo", &["**"], &[], in_an_hour());
+		let a = sign(&key, "demo", &["**"], &[], None);
 		let b = sign(&key, "demo", &["**"], &[], exp);
 		let c = sign(
 			&key,
@@ -2105,7 +2068,7 @@ mod tests {
 			})
 			.await;
 			let expired_jwt = sign(&key, "tenant", &["media/**"], &[], expired);
-			let valid_jwt = sign(&key, "tenant", &["media/**"], &[], in_an_hour());
+			let valid_jwt = sign(&key, "tenant", &["media/**"], &[], None);
 			let forged_jwt = sign(&stranger, "forged", &["**"], &[], expired);
 			for (path, token, reason, root) in [
 				(

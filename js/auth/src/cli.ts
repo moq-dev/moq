@@ -81,7 +81,7 @@ program
 			.argParser(parseDuration)
 			.conflicts("unbounded"),
 	)
-	.addOption(new Option("--unbounded", "Write no exp, for a server run with --allow-unbounded-tokens"))
+	.addOption(new Option("--unbounded", "Write no exp, so the token never expires"))
 	.option("--issued <timestamp>", "Issued time as unix timestamp", parseUnixTimestamp)
 	.action(async (options) => {
 		try {

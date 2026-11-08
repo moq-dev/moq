@@ -2,8 +2,7 @@
 # Sign the local development tokens (demo-web.jwt, demo-cli.jwt) with root.jwk
 # in the current directory, skipping any that already exist.
 #
-# They carry no `exp`, since they are kept across runs: an auth server admits them
-# only with `--allow-unbounded-tokens`.
+# They carry no `exp`, since they are kept across runs.
 #
 # Usage: sh/demo/token.sh, from demo/relay.
 set -euo pipefail

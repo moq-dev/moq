@@ -67,8 +67,7 @@ impl Fixture {
 		let claims = moq_auth::Claims::default()
 			.with_root(ROOT)
 			.with_publish([publish.parse().expect("publish pattern")])
-			.with_subscribe([subscribe.parse().expect("subscribe pattern")])
-			.with_expires(Some(kio::clock::wall() + std::time::Duration::from_secs(3600)));
+			.with_subscribe([subscribe.parse().expect("subscribe pattern")]);
 		self.key.sign(&claims).expect("sign")
 	}
 

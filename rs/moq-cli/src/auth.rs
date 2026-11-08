@@ -208,7 +208,7 @@ enum Command {
 		#[usage(long, default = "1h", conflicts = "--unbounded")]
 		ttl: moq_tokio::cli::Duration,
 
-		/// Write no `exp`, for a server run with `--allow-unbounded-tokens`.
+		/// Write no `exp`, so the token never expires.
 		#[usage(long)]
 		unbounded: bool,
 
@@ -440,18 +440,12 @@ pub struct Serve {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	tier: Option<String>,
 
-	/// Admit a token without `exp`, which otherwise is refused so a leaked one cannot
-	/// admit forever. For deployments that revoke by rotating keys.
-	#[usage(long, setting = "allow_unbounded_tokens")]
-	#[serde(default)]
-	allow_unbounded_tokens: bool,
-
 	/// How often the relay re-checks each grant. Off by default; needs `--expires`.
 	#[usage(long, setting = "revalidate")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	revalidate: Option<moq_tokio::cli::Duration>,
 
-	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp` (with `--allow-unbounded-tokens`), certificates without one. Off by default.
+	/// How long a grant with no bound of its own lasts: anonymous sessions, tokens without `exp`, certificates without one. Off by default.
 	#[usage(long, setting = "expires")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	expires: Option<moq_tokio::cli::Duration>,
@@ -608,8 +602,6 @@ struct ServeSettings {
 	mtls: MtlsSettings,
 	#[usage(cli("--tier"))]
 	tier: Option<String>,
-	#[usage(cli("--allow-unbounded-tokens"))]
-	allow_unbounded_tokens: Option<bool>,
 	#[usage(cli("--revalidate"))]
 	revalidate: Option<String>,
 	#[usage(cli("--expires"))]
@@ -795,7 +787,6 @@ impl Serve {
 		policy.mtls_link = mtls.link;
 		policy.certificates = mtls.certificates.clone();
 		policy.tier = self.tier.clone();
-		policy.unbounded_tokens = self.allow_unbounded_tokens;
 		policy.revalidate = revalidate;
 		policy.expires = expires;
 		policy.limits.token = self.limit.token;
@@ -1470,12 +1461,9 @@ mod tests {
 			"3",
 			"--limit-remote",
 			"8",
-			"--allow-unbounded-tokens",
 		])
 		.policy()
 		.unwrap();
-		assert!(policy.unbounded_tokens);
-		assert!(!serve(&["moq", "auth", "serve"]).policy().unwrap().unbounded_tokens);
 		assert!(matches!(&policy.keys, Some(Keys::Dir(dir)) if dir == std::path::Path::new("/keys")));
 		assert_eq!(
 			policy.public.subscribe,

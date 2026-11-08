@@ -87,7 +87,7 @@ moq-auth sign --key "root.jwk" \
   --publish "alice/**" > "alice.jwt"
 ```
 
-The token expires in an hour unless `--ttl`, `--expires`, or `--unbounded` says otherwise; `moq auth serve` refuses one without an expiry unless run with `--allow-unbounded-tokens`.
+The token expires in an hour unless `--ttl`, `--expires`, or `--unbounded` says otherwise.
 
 ### Verifying
 
