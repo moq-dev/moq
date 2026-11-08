@@ -174,8 +174,6 @@ pub enum Event {
 pub enum Transport {
 	/// A native QUIC connection.
 	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
 	/// A TCP connection using qmux framing, plaintext or TLS.
@@ -203,7 +201,6 @@ impl Transport {
 	pub const fn as_str(self) -> &'static str {
 		match self {
 			Self::Quic => "quic",
-			Self::Iroh => "iroh",
 			Self::WebSocket => "websocket",
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
