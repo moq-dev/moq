@@ -18,7 +18,10 @@
 //!
 //! Each channel is resampled from its own rate to the bus's, and a source that
 //! runs slightly fast or slow against the clock is corrected by the same ring
-//! that absorbs its jitter, so it never drifts out of the mix.
+//! that absorbs its jitter, so it never drifts out of the mix. A source that
+//! already runs on the bus's clock, such as decoded media scheduled against
+//! video, opens a [`Positioned`] channel instead, and says where on the clock
+//! each write belongs.
 //!
 //! ```
 //! # async fn example() -> Result<(), moq_audio::Error> {
@@ -44,6 +47,7 @@
 //!
 //! Enabled by the default-on `bus` feature; `Bus::capture` also needs `capture`.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::f32::consts::FRAC_PI_4;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -76,6 +80,10 @@ const RETENTION: Duration = Duration::from_millis(200);
 
 /// The longest [`Strip::set_delay`] accepts, which bounds a source's delay line.
 pub const MAX_DELAY: Duration = Duration::from_secs(2);
+
+/// How far past the next frame the bus mixes a [`Positioned::write`] may end:
+/// the audio a positioned channel holds, as much as a live channel can.
+pub const REACH: Duration = LATENCY.saturating_add(HEADROOM);
 
 /// What every mix is mixed to.
 ///
@@ -137,9 +145,37 @@ type StripKey = usize;
 /// One open channel of a source, as the mixer reads it.
 struct Feed {
 	id: u64,
-	ring: ring::Consumer,
+	queue: Queue,
 	/// Panned with constant power rather than balanced.
 	mono: bool,
+}
+
+/// Where a channel's audio waits to be mixed.
+enum Queue {
+	/// A [`Channel`]'s jitter buffer, filled without the mixer's lock.
+	Live(ring::Consumer),
+	/// A [`Positioned`] channel's interleaved samples, the first of which is
+	/// mixed at the bus's next position. Filled under the mixer's lock, so a
+	/// write sees exactly where the mix is.
+	Positioned(VecDeque<f32>),
+}
+
+impl Feed {
+	/// Fill `output` with this channel's next samples, and silence past them.
+	fn read(&mut self, output: &mut [f32]) {
+		match &mut self.queue {
+			Queue::Live(ring) => {
+				ring.read(output);
+			}
+			Queue::Positioned(queue) => {
+				let queued = queue.len().min(output.len());
+				for (out, sample) in output.iter_mut().zip(queue.drain(..queued)) {
+					*out = sample;
+				}
+				output[queued..].fill(0.0);
+			}
+		}
+	}
 }
 
 /// The channels sharing one strip, as the mixer sees them.
@@ -265,6 +301,11 @@ fn key(strip: &Strip) -> StripKey {
 	Arc::as_ptr(&strip.shared) as StripKey
 }
 
+/// `duration` in frames at `sample_rate`, rounded down.
+fn frames(sample_rate: u32, duration: Duration) -> usize {
+	(u128::from(sample_rate) * duration.as_nanos() / 1_000_000_000) as usize
+}
+
 impl Bus {
 	/// An empty bus producing PCM in `config`'s format, and the one driver
 	/// that advances it.
@@ -279,7 +320,7 @@ impl Bus {
 			)));
 		}
 
-		let retention = (u128::from(config.sample_rate) * RETENTION.as_nanos() / 1_000_000_000) as usize;
+		let retention = frames(config.sample_rate, RETENTION);
 		let inner = Arc::new(Inner {
 			config,
 			mixer: Mutex::new(Mixer {
@@ -320,22 +361,8 @@ impl Bus {
 		if input.sample_rate == 0 {
 			return Err(Error::Unsupported("channel sample rate must be > 0".into()));
 		}
-		let output = self.inner.config.layout;
-		let remix = if input.layout == output {
-			None
-		} else {
-			Some(Remix::new(input.layout, output)?)
-		};
-		// Only a stereo bus pans, so any other holds the strip at center for
-		// as long as this channel is open. Nothing below fails, so the hold
-		// is always released by the channel's drop.
-		let centered = output != Layout::Stereo;
-		if centered {
-			strip.hold_center(output)?;
-		}
-
 		let (prod, cons) = ring::channel(
-			output.channels() as usize,
+			self.inner.config.layout.channels() as usize,
 			input.sample_rate,
 			self.inner.config.sample_rate,
 			ring::Config {
@@ -347,6 +374,48 @@ impl Bus {
 				trim: true,
 			},
 		);
+		let port = self.open(input, strip, Queue::Live(cons))?;
+		Ok(Channel { prod, port })
+	}
+
+	/// Add a source on the bus's own clock, whose every write says the bus
+	/// position its first frame is mixed at, as [`channel`](Self::channel) adds
+	/// one running on a clock of its own.
+	///
+	/// For audio scheduled against something else on the bus's clock, such as
+	/// the video of the same media: there is no jitter buffer between a write
+	/// and its position, and no drift correction to move it.
+	///
+	/// Refuses `input` at another rate than the bus's, which positions count
+	/// frames of, and a strip as [`channel`](Self::channel) does.
+	pub fn positioned(&self, input: Input, strip: Strip) -> Result<Positioned, Error> {
+		let sample_rate = self.inner.config.sample_rate;
+		if input.sample_rate != sample_rate {
+			return Err(Error::Unsupported(format!(
+				"a positioned channel takes the bus rate, {sample_rate} Hz (got {} Hz)",
+				input.sample_rate
+			)));
+		}
+		let samples = frames(sample_rate, REACH) * self.inner.config.layout.channels() as usize;
+		let port = self.open(input, strip, Queue::Positioned(VecDeque::with_capacity(samples)))?;
+		Ok(Positioned { port })
+	}
+
+	/// Add a channel reading `queue` to `strip`'s source.
+	fn open(&self, input: Input, strip: Strip, queue: Queue) -> Result<Port, Error> {
+		let output = self.inner.config.layout;
+		let remix = if input.layout == output {
+			None
+		} else {
+			Some(Remix::new(input.layout, output)?)
+		};
+		// Only a stereo bus pans, so any other holds the strip at center for
+		// as long as this channel is open. Nothing below fails, so the hold
+		// is always released by the port's drop.
+		let centered = output != Layout::Stereo;
+		if centered {
+			strip.hold_center(output)?;
+		}
 
 		let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
 		let mut mixer = self.inner.mixer.lock().unwrap();
@@ -364,14 +433,13 @@ impl Bus {
 			.channels
 			.push(Feed {
 				id,
-				ring: cons,
+				queue,
 				mono: input.layout == Layout::Mono,
 			});
 		drop(mixer);
 
-		Ok(Channel {
+		Ok(Port {
 			id,
-			prod,
 			remix,
 			input,
 			strip,
@@ -532,14 +600,14 @@ impl Source {
 			let lane = &mut self.lanes[usize::from(stereo && feed.mono)];
 			if lane.fed {
 				scratch.resize(samples, 0.0);
-				feed.ring.read(scratch);
+				feed.read(scratch);
 				for (out, sample) in lane.block.iter_mut().zip(scratch.iter()) {
 					*out += *sample;
 				}
 			} else {
 				lane.block.clear();
 				lane.block.resize(samples, 0.0);
-				feed.ring.read(&mut lane.block);
+				feed.read(&mut lane.block);
 				lane.fed = true;
 			}
 		}
@@ -859,18 +927,12 @@ impl Reader {
 	}
 }
 
-/// One source's PCM on its way into a [`Bus`].
+/// One source's PCM on its way into a [`Bus`], on a clock of its own.
 ///
 /// Dropping it takes this channel out of the bus.
 pub struct Channel {
-	id: u64,
 	prod: ring::Producer,
-	remix: Option<Remix>,
-	input: Input,
-	strip: Strip,
-	/// Holds the strip at center, since the bus cannot pan.
-	centered: bool,
-	bus: Weak<Inner>,
+	port: Port,
 }
 
 impl Channel {
@@ -882,19 +944,13 @@ impl Channel {
 	/// Refuses a NaN or infinite sample, which would reach every mix and
 	/// survive any gain, mute included.
 	pub fn write(&mut self, data: &[u8]) -> Result<(), Error> {
-		let pcm = self
-			.input
-			.format
-			.as_interleaved_f32(data, self.input.layout.channels())?;
-		if pcm.iter().any(|sample| !sample.is_finite()) {
-			return Err(Error::Unsupported("a non-finite PCM sample".into()));
-		}
+		let pcm = self.port.pcm(data)?;
 		self.push(&pcm);
 		Ok(())
 	}
 
 	fn push(&mut self, pcm: &[f32]) {
-		match &self.remix {
+		match &self.port.remix {
 			Some(remix) => {
 				let _ = self.prod.push(&remix.process(pcm));
 			}
@@ -906,11 +962,118 @@ impl Channel {
 
 	/// This source's gain, mute, pan, delay, and meter.
 	pub fn strip(&self) -> &Strip {
-		&self.strip
+		&self.port.strip
 	}
 }
 
-impl Drop for Channel {
+/// One source's PCM on its way into a [`Bus`], placed on the bus's clock.
+///
+/// Built by [`Bus::positioned`]. Dropping it takes this channel out of the bus.
+pub struct Positioned {
+	port: Port,
+}
+
+impl Positioned {
+	/// Mix PCM in this channel's format and layout so its first frame plays at
+	/// bus `position`, on the clock [`Driver::position`] counts, then delayed
+	/// by the strip's sync delay.
+	///
+	/// Writes only move forward: whatever lies between the end of the previous
+	/// write and `position` is silence. A write fails, and nothing of it is
+	/// mixed, if any of it would land where the bus has already mixed or where
+	/// this channel already holds audio, or would end more than [`REACH`] past
+	/// the next frame the bus mixes. The bus never shifts a write to fit.
+	///
+	/// Waits only for a [`Driver::advance`] in progress. Once the driver is
+	/// gone nothing mixes, so writes are dropped.
+	///
+	/// Refuses a NaN or infinite sample, as [`Channel::write`] does.
+	pub fn write(&mut self, position: u64, data: &[u8]) -> Result<(), Error> {
+		let pcm = self.port.pcm(data)?;
+		let pcm = match &self.port.remix {
+			Some(remix) => remix.process(&pcm).into(),
+			None => pcm,
+		};
+		if pcm.is_empty() {
+			return Ok(());
+		}
+		let Some(bus) = self.port.bus.upgrade() else {
+			return Ok(());
+		};
+		let channels = bus.config.layout.channels() as usize;
+		let reach = frames(bus.config.sample_rate, REACH) as u64;
+
+		let mut mixer = bus.mixer.lock().unwrap();
+		if mixer.closed {
+			return Ok(());
+		}
+		let next = mixer.position;
+		let feed = mixer
+			.sources
+			.get_mut(&key(&self.port.strip))
+			.and_then(|source| source.channels.iter_mut().find(|feed| feed.id == self.port.id))
+			.expect("an open channel keeps its feed");
+		let Queue::Positioned(queue) = &mut feed.queue else {
+			unreachable!("a positioned channel feeds a positioned queue");
+		};
+
+		let end = next + (queue.len() / channels) as u64;
+		let frames = (pcm.len() / channels) as u64;
+		if position < next {
+			return Err(Error::Unsupported(format!(
+				"bus position {position} is already mixed, up to {next}"
+			)));
+		}
+		if position < end {
+			return Err(Error::Unsupported(format!(
+				"bus position {position} overlaps this channel's audio, which runs to {end}"
+			)));
+		}
+		if (position - next).saturating_add(frames) > reach {
+			return Err(Error::Unsupported(format!(
+				"a write of {frames} frames at bus position {position} ends past {}, the reach from {next}",
+				next + reach
+			)));
+		}
+		queue.extend(std::iter::repeat_n(0.0, (position - end) as usize * channels));
+		queue.extend(pcm.iter().copied());
+		Ok(())
+	}
+
+	/// This source's gain, mute, pan, delay, and meter.
+	pub fn strip(&self) -> &Strip {
+		&self.port.strip
+	}
+}
+
+/// What every channel shares: its place in the mixer, and the conversion of
+/// its input to the bus layout.
+struct Port {
+	id: u64,
+	remix: Option<Remix>,
+	input: Input,
+	strip: Strip,
+	/// Holds the strip at center, since the bus cannot pan.
+	centered: bool,
+	bus: Weak<Inner>,
+}
+
+impl Port {
+	/// `data` as interleaved `f32` in the input's layout, refusing a NaN or
+	/// infinite sample, which would reach every mix and survive any gain.
+	fn pcm<'a>(&self, data: &'a [u8]) -> Result<Cow<'a, [f32]>, Error> {
+		let pcm = self
+			.input
+			.format
+			.as_interleaved_f32(data, self.input.layout.channels())?;
+		if pcm.iter().any(|sample| !sample.is_finite()) {
+			return Err(Error::Unsupported("a non-finite PCM sample".into()));
+		}
+		Ok(pcm)
+	}
+}
+
+impl Drop for Port {
 	fn drop(&mut self) {
 		if self.centered {
 			self.strip.release_center();
@@ -1179,8 +1342,8 @@ mod tests {
 		}
 		for _ in 0..blocks {
 			for (channel, value) in sources.iter_mut() {
-				let frames = BLOCK * channel.input.sample_rate as usize / 48_000;
-				let channels = channel.input.layout.channels() as usize;
+				let frames = BLOCK * channel.port.input.sample_rate as usize / 48_000;
+				let channels = channel.port.input.layout.channels() as usize;
 				channel.write(&constant(*value, frames, channels)).unwrap();
 			}
 			driver.advance(BLOCK);
@@ -1859,6 +2022,140 @@ mod tests {
 		for bad in [f32::NAN, f32::INFINITY] {
 			assert!(channel.write(&constant(bad, BLOCK, 2)).is_err(), "{bad}");
 		}
+	}
+
+	/// A bus-rate source at `layout` placing its writes on the bus clock.
+	fn positioned(bus: &Bus, layout: Layout) -> (Positioned, Strip) {
+		let strip = Strip::default();
+		let channel = bus.positioned(input(48_000, layout), strip.clone()).unwrap();
+		(channel, strip)
+	}
+
+	/// Advance `frames` in blocks of `sizes`, returning the left channel of
+	/// every frame mixed, indexed from the driver's position at the call.
+	fn mixed(driver: &mut Driver, reader: &mut Reader, sizes: &[usize], frames: usize) -> Vec<f32> {
+		let start = driver.position();
+		let mut left = Vec::with_capacity(frames);
+		for size in sizes.iter().cycle() {
+			if left.len() >= frames {
+				break;
+			}
+			driver.advance((*size).min(frames - left.len()));
+			let block = ready(reader).unwrap();
+			assert_eq!(block.position, start + left.len() as u64, "contiguous");
+			left.extend(block.data.as_chunks::<2>().0.iter().map(|frame| frame[0]));
+		}
+		left
+	}
+
+	/// Each write plays from the sample it names, wherever that falls in a
+	/// block, however the clock's blocks are sized, and whatever the channel
+	/// held before: a first write after silence included.
+	#[test]
+	fn a_positioned_write_plays_at_its_position() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let (mut channel, strip) = positioned(&bus, Layout::Stereo);
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		let sizes = [441, 512, 256, 480, 1024];
+
+		// Before the first advance, then contiguous with it.
+		channel.write(100, &constant(0.25, 300, 2)).unwrap();
+		channel.write(400, &constant(0.5, 100, 2)).unwrap();
+		// A gap of exactly 7 frames.
+		channel.write(507, &constant(0.25, 93, 2)).unwrap();
+		let left = mixed(&mut driver, &mut reader, &sizes, 3_000);
+		let mut want = vec![0.0; 3_000];
+		want[100..400].fill(0.25);
+		want[400..500].fill(0.5);
+		want[507..600].fill(0.25);
+		assert_eq!(left, want);
+
+		// The channel has long run dry: a write after the silence plays at the
+		// sample it names, not where the bus happens to be.
+		let next = driver.position();
+		channel.write(next + 333, &constant(0.25, 10, 2)).unwrap();
+		let left = mixed(&mut driver, &mut reader, &sizes, 1_000);
+		let onset = left.iter().position(|sample| *sample != 0.0);
+		assert_eq!(onset, Some(333));
+		assert_eq!(left.iter().filter(|sample| **sample != 0.0).count(), 10);
+
+		// The strip's sync delay moves it on from there, by exactly that much.
+		strip.set_delay(Duration::from_millis(10));
+		let next = driver.position();
+		channel.write(next + 1_200, &constant(0.25, 10, 2)).unwrap();
+		let left = mixed(&mut driver, &mut reader, &sizes, 3_000);
+		let onset = left.iter().position(|sample| *sample != 0.0);
+		assert_eq!(onset, Some(1_200 + BLOCK));
+	}
+
+	/// A write the bus cannot place where it names fails whole, rather than
+	/// being shifted or cut to fit, and leaves the channel as it was.
+	#[test]
+	fn a_positioned_write_fails_rather_than_moves() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		let (mut channel, strip) = positioned(&bus, Layout::Stereo);
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		let block = constant(0.25, BLOCK, 2);
+		let reach = 48_000 / 5;
+
+		driver.advance(BLOCK);
+		ready(&mut reader);
+		let next = BLOCK as u64;
+		assert!(channel.write(next - 1, &block).is_err(), "already mixed");
+		assert!(channel.write(0, &block).is_err(), "already mixed");
+		channel.write(next + 100, &block).unwrap();
+		assert!(channel.write(next + 100, &block).is_err(), "overlaps the last write");
+		assert!(channel.write(next + 579, &block).is_err(), "overlaps by one frame");
+		assert!(
+			channel.write(next + 99, &constant(0.25, 1, 2)).is_err(),
+			"before the last write"
+		);
+		let at_reach = next + reach as u64 - BLOCK as u64;
+		assert!(channel.write(at_reach + 1, &block).is_err(), "ends past the reach");
+		assert!(channel.write(u64::MAX - 1, &block).is_err(), "ends past the reach");
+		channel.write(at_reach, &block).unwrap();
+
+		// Only the two writes that fit play, each where it said.
+		let left = mixed(&mut driver, &mut reader, &[BLOCK], reach + BLOCK);
+		let heard: Vec<_> = (0..left.len()).filter(|&index| left[index] != 0.0).collect();
+		let mut want: Vec<_> = (100..580).collect();
+		want.extend(reach - BLOCK..reach);
+		assert_eq!(heard, want);
+
+		// The position it fails on moves with the clock.
+		let next = driver.position();
+		assert!(channel.write(next - 1, &block).is_err());
+		channel.write(next, &block).unwrap();
+
+		// Once the driver is gone, nothing mixes, and writes are dropped.
+		drop(driver);
+		channel.write(0, &block).unwrap();
+	}
+
+	/// A positioned channel takes another layout, remixed and panned as any
+	/// channel is, but only the bus's rate, which its positions count.
+	#[test]
+	fn a_positioned_channel_takes_the_bus_rate() {
+		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
+		assert!(bus.positioned(input(44_100, Layout::Stereo), Strip::default()).is_err());
+		assert!(
+			bus.positioned(input(48_000, Layout::Discrete(3)), Strip::default())
+				.is_err()
+		);
+
+		let (mut channel, strip) = positioned(&bus, Layout::Mono);
+		let program = bus.mix();
+		program.route(&strip);
+		let mut reader = program.reader();
+		channel.write(0, &constant(0.5, BLOCK, 1)).unwrap();
+		assert!(channel.write(BLOCK as u64, &constant(f32::NAN, 1, 1)).is_err());
+		let block = step(&mut driver, &mut reader);
+		assert!(all_near(&block, 0.5 * CENTER), "{:?}", &block.data[..4]);
+		assert!(all_near(&step(&mut driver, &mut reader), 0.0));
 	}
 
 	#[test]
