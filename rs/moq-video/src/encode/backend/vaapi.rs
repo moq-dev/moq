@@ -11,7 +11,7 @@
 //! driver), makes `Encoder::new` return an error; under automatic selection
 //! [`backend::open`](super::open) then moves on to openh264, like the NVENC backend.
 //! The render node is the one the decoder and the GPU resize share, unless that
-//! one cannot encode H.265, and `MOQ_VAAPI_DEVICE` can name it; see
+//! one cannot encode H.265, and `Config::vaapi` can name it; see
 //! `frame::vaapi::device`.
 //!
 //! A [`Surface::DmaBuf`] is encoded without touching the CPU. An NV12 buffer at
@@ -42,7 +42,6 @@
 //! fails without it.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
@@ -93,7 +92,7 @@ impl Vaapi {
 			Codec::H265 => moq_vaapi::Codec::H265,
 		};
 		let vaapi = VaapiConfig {
-			device: vaapi::device(codec).map(Path::to_path_buf),
+			device: vaapi::device(codec, config.vaapi.as_deref()),
 			color: vaapi::color(color)?,
 			codec,
 			..VaapiConfig::new(

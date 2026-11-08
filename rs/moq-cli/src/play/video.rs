@@ -722,6 +722,10 @@ mod tests {
 				delay: Delay::Fixed(delay),
 				catalog_format: None,
 				metrics: None,
+				#[cfg(target_os = "linux")]
+				vaapi_device: None,
+				#[cfg(target_os = "linux")]
+				v4l2_decoder: None,
 				select: Default::default(),
 			},
 			video: Default::default(),

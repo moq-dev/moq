@@ -43,6 +43,24 @@ pub struct Args {
 	/// decode through encode) or `cpu` (decode to CPU pixels, resize on the CPU).
 	#[usage(long, default = "native")]
 	frames: OutputArg,
+
+	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
+	/// first that encodes, decodes, and scales.
+	#[cfg(target_os = "linux")]
+	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	pub vaapi_device: Option<std::path::PathBuf>,
+
+	/// The V4L2 M2M encoder node, such as `/dev/video11`. Defaults to the first
+	/// that encodes H.264.
+	#[cfg(target_os = "linux")]
+	#[usage(long, env = "MOQ_V4L2_ENCODER", value_hint = usage_rs::ValueHint::FilePath)]
+	pub v4l2_encoder: Option<std::path::PathBuf>,
+
+	/// The V4L2 M2M decoder node, such as `/dev/video10`. Defaults to the first
+	/// that decodes H.264.
+	#[cfg(target_os = "linux")]
+	#[usage(long, env = "MOQ_V4L2_DECODER", value_hint = usage_rs::ValueHint::FilePath)]
+	pub v4l2_decoder: Option<std::path::PathBuf>,
 }
 
 /// A `size:bitrate` rung, e.g. `720:2500000`.
@@ -105,6 +123,12 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
 	config.resize.output = args.frames.0;
+	#[cfg(target_os = "linux")]
+	{
+		config.vaapi = args.vaapi_device.clone();
+		config.v4l2_encoder = args.v4l2_encoder.clone();
+		config.v4l2_decoder = args.v4l2_decoder.clone();
+	}
 
 	let source_path = moq_net::Path::try_from(
 		moq.broadcast

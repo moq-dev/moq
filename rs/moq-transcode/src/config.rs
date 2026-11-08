@@ -44,16 +44,47 @@ pub struct Config {
 	/// frames on the GPU from decode through encode; CPU output downloads at
 	/// the decoder and scales on the CPU.
 	pub resize: moq_video::resize::Config,
+
+	/// The VA-API render node the decoder and encoders open; see
+	/// [`encode::Config::vaapi`](moq_video::encode::Config::vaapi).
+	#[cfg(target_os = "linux")]
+	pub vaapi: Option<std::path::PathBuf>,
+
+	/// The V4L2 M2M node the decoder opens; see
+	/// [`decode::Config::v4l2`](moq_video::decode::Config::v4l2).
+	#[cfg(target_os = "linux")]
+	pub v4l2_decoder: Option<std::path::PathBuf>,
+
+	/// The V4L2 M2M node the encoders open; see
+	/// [`encode::Config::v4l2`](moq_video::encode::Config::v4l2).
+	#[cfg(target_os = "linux")]
+	pub v4l2_encoder: Option<std::path::PathBuf>,
 }
 
 impl Config {
-	/// The decoder the shared live feed opens: the configured implementation,
-	/// delivering frames where the resize expects them. No scale hint, since
-	/// the feed decodes once at native size for every rung.
-	pub(crate) fn feed_decoder(&self) -> moq_video::decode::Config {
+	/// The source decoder: the configured implementation and devices,
+	/// delivering frames where the resize expects them, at native size.
+	pub(crate) fn decoder(&self) -> moq_video::decode::Config {
 		let mut decoder = moq_video::decode::Config::new();
 		decoder.kind = self.decoder.clone();
 		decoder.output = self.resize.output;
+		#[cfg(target_os = "linux")]
+		{
+			decoder.vaapi = self.vaapi.clone();
+			decoder.v4l2 = self.v4l2_decoder.clone();
+		}
 		decoder
+	}
+
+	/// A rung encoder at `size` and `framerate`: the configured implementation and devices.
+	pub(crate) fn encoder(&self, size: moq_video::Size, framerate: moq_video::FrameRate) -> moq_video::encode::Config {
+		let mut encoder = moq_video::encode::Config::new(size.width, size.height, framerate);
+		encoder.kind = self.encoder.clone();
+		#[cfg(target_os = "linux")]
+		{
+			encoder.vaapi = self.vaapi.clone();
+			encoder.v4l2 = self.v4l2_encoder.clone();
+		}
+		encoder
 	}
 }

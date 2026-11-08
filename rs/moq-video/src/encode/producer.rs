@@ -334,6 +334,29 @@ pub struct Capture {
 	/// the recent past in the track's cache. On demand saves the capture and encode while nobody
 	/// watches, and leaves nothing to fetch from before the first viewer arrived.
 	pub on_demand: bool,
+	/// The VA-API render node the encoder opens; see [`Config::vaapi`](encoder::Config::vaapi).
+	#[cfg(target_os = "linux")]
+	pub vaapi: Option<std::path::PathBuf>,
+	/// The V4L2 M2M node the encoder opens; see [`Config::v4l2`](encoder::Config::v4l2).
+	#[cfg(target_os = "linux")]
+	pub v4l2: Option<std::path::PathBuf>,
+}
+
+#[cfg(feature = "capture")]
+impl Capture {
+	/// The encoder for a `width` x `height` source at `framerate`, with these options.
+	fn encoder(&self, width: u32, height: u32, framerate: FrameRate) -> encoder::Config {
+		let mut config = encoder::Config::new(width, height, framerate);
+		config.bitrate = self.bitrate;
+		config.codec = self.codec;
+		config.kind = self.kind.clone();
+		#[cfg(target_os = "linux")]
+		{
+			config.vaapi = self.vaapi.clone();
+			config.v4l2 = self.v4l2.clone();
+		}
+		config
+	}
 }
 
 /// Capture a webcam and publish it as a video track.
@@ -398,7 +421,7 @@ async fn publish_capture_from<E: CatalogExt, S: CaptureSource>(
 	// waiting for an encoder that may not run yet.
 	let rendition = async {
 		let camera = source.open(&options.capture).await?;
-		let mut probe_config = encoder::Config::new(
+		let mut probe_config = options.encoder(
 			camera.width(),
 			camera.height(),
 			options
@@ -407,9 +430,6 @@ async fn publish_capture_from<E: CatalogExt, S: CaptureSource>(
 				.or_else(|| camera.framerate())
 				.unwrap_or(DEFAULT_FRAMERATE),
 		);
-		probe_config.bitrate = options.bitrate;
-		probe_config.codec = options.codec;
-		probe_config.kind = options.kind.clone();
 		probe_config.color = camera.color();
 		let rendition = probe_config.probe().await?;
 		// The encoder is built from the same defaults, so the probe's join is the one it emits.
@@ -716,10 +736,7 @@ async fn capture_loop<S: CaptureSource>(
 			.framerate
 			.or_else(|| camera.framerate())
 			.unwrap_or(DEFAULT_FRAMERATE);
-		let mut encoder_config = encoder::Config::new(camera.width(), camera.height(), framerate);
-		encoder_config.bitrate = options.bitrate;
-		encoder_config.codec = options.codec;
-		encoder_config.kind = options.kind.clone();
+		let mut encoder_config = options.encoder(camera.width(), camera.height(), framerate);
 		encoder_config.color = camera.color();
 		// Off macOS and iOS this opens the encoder on a dedicated thread; see `sink`.
 		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,

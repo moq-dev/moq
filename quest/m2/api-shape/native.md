@@ -26,6 +26,5 @@
 
 Found by the 2026-11-07 API shape audit (native media); see the
 [epic](/quest/m2/api-shape/README.md). moq-ffi, moq-c, and the wrappers
-follow each rename. The device paths are in
-[video-devices](/quest/m2/video-devices.md). Check downstream audio
+follow each rename. Check downstream audio
 callers of `on_demand` before picking the new name.

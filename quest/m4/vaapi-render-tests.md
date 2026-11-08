@@ -46,9 +46,10 @@ which covers only NVIDIA.
 - Added 2026-11-06 (maintainer, /quest-unblock) from
   [moq-dev/moq#8013](https://github.com/moq-dev/moq/pull/8013)'s follow-ups:
   - The VA-API tests open the first suitable render node, so a second GPU
-    is covered only when `MOQ_VAAPI_DEVICE` names it. `just rs gpu` runs the
-    VA-API tests once for each AMD or Intel render node, with
-    `MOQ_VAAPI_DEVICE` set; a node of either vendor without its VA-API
+    is covered only when `Config::vaapi` names it, which moq-video no longer
+    reads from the environment. `just rs gpu` runs the VA-API tests once for
+    each AMD or Intel render node, passing it to the tests through a test-only
+    knob ([env-knobs](/quest/m4/env-knobs.md) owns its name); a node of either vendor without its VA-API
     driver fails, and NVIDIA nodes are left to GPU CI. The renderer
     fixtures allocate their NV12 and I420 buffers on that node and pick the
     Vulkan adapter whose DRM render node matches it

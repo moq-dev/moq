@@ -31,9 +31,6 @@ use super::{DmaBuf, DmaBufExport, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFor
 use crate::color::{self, Color};
 use crate::{Error, Size};
 
-/// Environment variable naming the render node, such as `/dev/dri/renderD129`, the VA-API codecs and resize share.
-const DEVICE_ENV: &str = "MOQ_VAAPI_DEVICE";
-
 /// The render node the VA-API encoders, decoders, and resize share.
 struct Shared {
 	node: PathBuf,
@@ -43,9 +40,7 @@ struct Shared {
 
 /// Returns the node shared by the VA-API codecs and resize, or `None` for each to find its own.
 ///
-/// [`DEVICE_ENV`] names one outright, and a named node is used even when it
-/// fails to open, so a typo is an error rather than a silent fallback.
-/// Otherwise this is the first node whose driver encodes and decodes H.264 and
+/// The first node whose driver encodes and decodes H.264 and
 /// post-processes video, preferring one that also encodes and decodes H.265.
 /// Sharing one node is what lets a DMA-BUF move from the decoder through a
 /// resize into the encoder without a copy; on a machine with two GPUs, the first
@@ -57,11 +52,6 @@ fn shared() -> Option<&'static Shared> {
 	static SHARED: OnceLock<Option<Shared>> = OnceLock::new();
 	SHARED
 		.get_or_init(|| {
-			if let Some(node) = std::env::var_os(DEVICE_ENV) {
-				let node = PathBuf::from(node);
-				tracing::info!(device = %node.display(), "using the VA-API render node {DEVICE_ENV} names");
-				return Some(Shared { node, h265: true });
-			}
 			let shared = choose(moq_vaapi::DrmDeviceIterator::default().filter_map(|node| {
 				let display = moq_vaapi::Display::open_drm_display(&node).ok()?;
 				let codes = |codec| {
@@ -94,12 +84,17 @@ fn choose(mut candidates: impl Iterator<Item = Shared>) -> Option<Shared> {
 
 /// Returns the render node a VA-API `codec` encoder or decoder opens, or `None` for it to find its own.
 ///
-/// The shared node, unless it does not do H.265: an H.265 codec then opens the
-/// first node that offers it, rather than failing on one that cannot.
-pub(crate) fn device(codec: Codec) -> Option<&'static Path> {
+/// The `named` node outright, used even when it fails to open, so a typo is an
+/// error rather than a silent fallback. Otherwise the shared node, unless it
+/// does not do H.265: an H.265 codec then opens the first node that offers it,
+/// rather than failing on one that cannot.
+pub(crate) fn device(codec: Codec, named: Option<&Path>) -> Option<PathBuf> {
+	if let Some(node) = named {
+		return Some(node.to_path_buf());
+	}
 	shared()
 		.filter(|shared| codec == Codec::H264 || shared.h265)
-		.map(|shared| shared.node.as_path())
+		.map(|shared| shared.node.clone())
 }
 
 /// Describes `buffer` for a VA-API import, returning the producer lease to hold until the import is done with.
@@ -351,14 +346,9 @@ impl DmaBufFrame for Exported {
 mod tests {
 	use super::*;
 
-	/// Without an override, the node the codecs share is one that does
-	/// everything it is shared for.
+	/// The node the codecs share is one that does everything it is shared for.
 	#[test]
 	fn the_shared_node_encodes_decodes_and_scales() {
-		if std::env::var_os(DEVICE_ENV).is_some() {
-			eprintln!("skipping: {DEVICE_ENV} names the node");
-			return;
-		}
 		let Some(shared) = shared() else {
 			eprintln!("skipping: no render node encodes, decodes, and scales");
 			return;

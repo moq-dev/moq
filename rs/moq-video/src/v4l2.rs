@@ -170,9 +170,6 @@ pub(crate) struct Format {
 
 /// How to recognize the M2M node for one codec, since node numbering is per SoC.
 pub(crate) struct Role {
-	/// Environment variable naming a node directly, for a driver whose format
-	/// enumeration doesn't match what it can actually do.
-	pub env: &'static str,
 	/// Fourccs the OUTPUT queue has to accept, any one of them.
 	pub input: &'static [u32],
 	/// Fourccs the CAPTURE queue has to produce, any one of them.
@@ -184,10 +181,11 @@ pub(crate) struct Role {
 ///
 /// The path is per SoC (`/dev/video11` encodes on a Raspberry Pi, and other SoCs
 /// number theirs differently), so the node is identified by what it converts
-/// rather than by a table of guesses. `role.env` overrides the search.
-pub(crate) fn open(role: &Role) -> Result<Device, Error> {
-	if let Ok(path) = std::env::var(role.env) {
-		let device = Device::open(Path::new(&path))?;
+/// rather than by a table of guesses. A `named` node skips the search, for a
+/// driver whose format enumeration doesn't match what it can actually do.
+pub(crate) fn open(role: &Role, named: Option<&Path>) -> Result<Device, Error> {
+	if let Some(path) = named {
+		let device = Device::open(path)?;
 		device.check(role)?;
 		return Ok(device);
 	}
@@ -207,10 +205,9 @@ pub(crate) fn open(role: &Role) -> Result<Device, Error> {
 	}
 
 	Err(Error::Codec(anyhow::anyhow!(
-		"no V4L2 M2M node converts {} to {} (set {} to name one; tried {})",
+		"no V4L2 M2M node converts {} to {} (name one in the config; tried {})",
 		join_fourcc(role.input),
 		join_fourcc(role.output),
-		role.env,
 		match refused.is_empty() {
 			true => "no nodes".to_owned(),
 			false => refused.join(", "),

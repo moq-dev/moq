@@ -197,6 +197,16 @@ pub struct Config {
 	/// `None` retains selection for CPU and native decoder/capture surfaces.
 	#[cfg(target_os = "linux")]
 	pub input: Option<crate::frame::vulkan::Device>,
+	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
+	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
+	/// without a copy. A named node is used even when it fails to open.
+	#[cfg(target_os = "linux")]
+	pub vaapi: Option<std::path::PathBuf>,
+	/// The V4L2 M2M encoder node, such as `/dev/video11`. `None` searches every
+	/// node for one that encodes H.264, which a driver whose format enumeration
+	/// is wrong can defeat.
+	#[cfg(target_os = "linux")]
+	pub v4l2: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -216,6 +226,10 @@ impl Config {
 			resize: None,
 			#[cfg(target_os = "linux")]
 			input: None,
+			#[cfg(target_os = "linux")]
+			vaapi: None,
+			#[cfg(target_os = "linux")]
+			v4l2: None,
 		}
 	}
 
