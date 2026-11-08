@@ -35,6 +35,8 @@
 //!   serve it, for a reader that restarts on each one.
 //! - [`Linger`] keeps a cleanly ended broadcast up for a fixed time, so a
 //!   subscriber that arrives after the end still gets its tail.
+//! - [`Ingest`] is how a protocol gateway publishes what it ingests: max age,
+//!   allocator, and linger.
 //!
 //! The `poll_*` methods are always available. Enable the `async` feature for their generated
 //! async wrappers and the async constructors with no poll of their own; it is off by default.
@@ -53,6 +55,7 @@ pub mod follow;
 #[doc(hidden)]
 pub mod fuzz;
 pub mod import;
+mod ingest;
 mod jitter;
 pub mod json;
 mod linger;
@@ -65,6 +68,7 @@ pub mod timeline;
 
 pub use clock::Clock;
 pub use error::*;
+pub use ingest::Ingest;
 pub use linger::Linger;
 pub use pace::Pacer;
 pub use source::{Binding, Source};

@@ -15,6 +15,9 @@
 //! The receive direction mirrors it: [Viewers] divides the receive estimate among the
 //! broadcasts watched over one connection, and their ceilings summed are the PROBE
 //! target the session asks its peer to probe up to.
+//!
+//! A [Limit] is the other side: a live [Cap] an embedder puts on one session's media,
+//! which a gateway enforces however its protocol allows.
 
 use std::{
 	collections::BTreeMap,
@@ -80,6 +83,121 @@ impl Rate {
 	/// The absolute difference between two rates.
 	pub const fn abs_diff(self, other: Self) -> Self {
 		Self(self.0.abs_diff(other.0))
+	}
+}
+
+/// A rate cap: the sustained rate media may arrive or leave at, and the burst above it.
+///
+/// What it counts is up to whoever enforces it: a WebRTC ingest counts depacketized media
+/// payload, leaving RTP, SRTP, and UDP overhead outside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Cap {
+	/// The sustained rate.
+	pub rate: Rate,
+	/// How far ahead of `rate` media may run, as time at `rate`. Defaults to
+	/// [`Cap::DEFAULT_BURST`], as on QUIC.
+	pub burst: std::time::Duration,
+}
+
+impl Cap {
+	/// About one second of the cap.
+	pub const DEFAULT_BURST: std::time::Duration = std::time::Duration::from_secs(1);
+
+	/// A cap at `rate` with the default burst.
+	pub const fn new(rate: Rate) -> Self {
+		Self {
+			rate,
+			burst: Self::DEFAULT_BURST,
+		}
+	}
+
+	/// This cap with a burst of `burst` at its rate.
+	pub const fn with_burst(mut self, burst: std::time::Duration) -> Self {
+		self.burst = burst;
+		self
+	}
+}
+
+impl From<Rate> for Cap {
+	fn from(rate: Rate) -> Self {
+		Self::new(rate)
+	}
+}
+
+/// A live cap for one session, uncapped while it holds `None`.
+///
+/// Clones share the cap, so an embedder keeps one and hands another to the session, which
+/// follows each [`set`](Self::set) at once. [`Default`] is uncapped.
+pub struct Limit {
+	cap: kio::Producer<Option<Cap>>,
+	/// The cap [`poll_changed`](Self::poll_changed) last reported through this handle.
+	last: Option<Cap>,
+}
+
+impl Limit {
+	/// A handle starting at `cap`, or uncapped for `None`.
+	pub fn new(cap: impl Into<Option<Cap>>) -> Self {
+		let cap = cap.into();
+		Self {
+			cap: kio::Producer::new(cap),
+			last: cap,
+		}
+	}
+
+	/// Replace the cap; `None` lifts it.
+	pub fn set(&self, cap: impl Into<Option<Cap>>) {
+		let cap = cap.into();
+		// Only a dropped producer closes the channel, and this handle is one.
+		if let Ok(mut state) = self.cap.write()
+			&& *state != cap
+		{
+			*state = cap;
+		}
+	}
+
+	/// The current cap, if any.
+	pub fn get(&self) -> Option<Cap> {
+		*self.cap.read()
+	}
+
+	/// The cap once it differs from the one this handle last saw: at its creation or clone,
+	/// or its last report.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Cap>> {
+		let last = self.last;
+		match self.cap.poll_ref(waiter, |cap| match **cap {
+			cap if cap != last => Poll::Ready(cap),
+			_ => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(cap)) => {
+				self.last = cap;
+				Poll::Ready(cap)
+			}
+			// This handle holds the producer, so the channel never closes under it.
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
+impl Clone for Limit {
+	fn clone(&self) -> Self {
+		Self {
+			cap: self.cap.clone(),
+			last: self.get(),
+		}
+	}
+}
+
+impl Default for Limit {
+	fn default() -> Self {
+		Self::new(None)
+	}
+}
+
+impl std::fmt::Debug for Limit {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("Limit").field(&self.get()).finish()
 	}
 }
 
@@ -1209,6 +1327,25 @@ impl Consumer {
 mod tests {
 	use super::*;
 	use crate::broadcast;
+
+	#[test]
+	fn a_limit_reports_each_change_to_every_clone() {
+		let cap = Cap::new(Rate::from_kbps(8));
+		let limit = Limit::default();
+		let mut watch = limit.clone();
+		assert_eq!(watch.get(), None);
+		assert!(watch.poll_changed(&kio::Waiter::noop()).is_pending());
+
+		limit.set(cap);
+		assert_eq!(watch.poll_changed(&kio::Waiter::noop()), Poll::Ready(Some(cap)));
+		assert!(watch.poll_changed(&kio::Waiter::noop()).is_pending());
+
+		// A clone starts at the current cap.
+		let mut late = limit.clone();
+		assert!(late.poll_changed(&kio::Waiter::noop()).is_pending());
+		limit.set(None);
+		assert_eq!(late.poll_changed(&kio::Waiter::noop()), Poll::Ready(None));
+	}
 
 	/// Priorities matching `hang`'s, which is what the allocator sees in practice.
 	const AUDIO: i8 = 80;

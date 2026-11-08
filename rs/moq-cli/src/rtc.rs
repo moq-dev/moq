@@ -58,12 +58,8 @@ pub struct Listen {
 /// WHIP server: accept incoming WebRTC publishes into the Origin as `target.name` (import).
 pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Result<()> {
 	let publisher = scope_producer(&target.origin, &target.name)?;
-	let mut config = server_config(&listen);
-	config.max_age = target.max_age;
-	config.bandwidth = target.bandwidth;
-	config.linger = target.linger;
-	let server = moq_webrtc::Server::new(config);
-	serve(server.publish_router(publisher), "WHIP", listen).await
+	let server = moq_webrtc::Server::new(server_config(&listen));
+	serve(server.publish_router(publisher, target.ingest), "WHIP", listen).await
 }
 
 /// WHEP server: serve WebRTC plays of `name` from the Origin (export).
@@ -105,11 +101,10 @@ pub async fn connect_import(target: ImportTarget, url: Url, instance: moq_net::I
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHEP client pulling");
 	notify_ready();
 
-	let mut config = moq_webrtc::client::Config::default();
-	config.max_age = target.max_age;
-	config.bandwidth = target.bandwidth;
-	let client = moq_webrtc::Client::new(config)?;
-	client.subscribe(url, route.broadcast().clone()).await?;
+	let client = moq_webrtc::Client::new(moq_webrtc::client::Config::default())?;
+	client
+		.subscribe(url, route.broadcast().clone(), target.ingest.catalog())
+		.await?;
 	Ok(())
 }
 
@@ -135,7 +130,7 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 
 fn server_config(listen: &Listen) -> moq_webrtc::server::Config {
 	let mut config = moq_webrtc::server::Config::default();
-	config.udp_bind = listen.udp_bind;
+	config.socket = moq_webrtc::server::Socket::Bind(listen.udp_bind);
 	config.ice_candidates.clone_from(&listen.public_addr);
 	config
 }

@@ -66,13 +66,7 @@ impl ExportArgs {
 
 /// Accept incoming RTMP publishes into the Origin as `target.name`; reject plays (import).
 pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Result<()> {
-	let ImportTarget {
-		origin,
-		name,
-		max_age,
-		linger,
-		bandwidth,
-	} = target;
+	let ImportTarget { origin, name, ingest } = target;
 	let name = moq_net::Path::new(&name)?;
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (import)");
@@ -83,15 +77,9 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Re
 			Request::Publish(publish) => {
 				let origin = origin.clone();
 				let name = name.clone();
-				let bandwidth = bandwidth.clone();
+				let ingest = ingest.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish
-						.with_max_age(max_age)
-						.with_bandwidth(bandwidth)
-						.with_linger(linger)
-						.accept(&origin, &name)
-						.await
-					{
+					if let Err(err) = publish.accept(&origin, &name, &ingest).await {
 						tracing::warn!(%name, %err, "RTMP ingest ended with error");
 					}
 				});
@@ -153,12 +141,8 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	tracing::info!(%addr, %app, %name, "RTMP client pulling");
 	notify_ready();
 
-	let client = Client::connect(addr, &app)
-		.await?
-		.with_max_age(target.max_age)
-		.with_bandwidth(target.bandwidth)
-		.with_linger(target.linger);
-	Ok(client.pull(&key, &target.origin, name).await?)
+	let client = Client::connect(addr, &app).await?;
+	Ok(client.pull(&key, &target.origin, name, &target.ingest).await?)
 }
 
 /// Push a broadcast from the Origin to a remote RTMP server (export).

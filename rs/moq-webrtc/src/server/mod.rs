@@ -62,6 +62,8 @@ struct AcceptedSession {
 	session: Option<crate::session::Session>,
 	registration: Option<mux::Registration>,
 	cancel: Option<oneshot::Receiver<()>>,
+	/// How long an ingest the peer ended with a `DELETE` stays up.
+	linger: Duration,
 	role: &'static str,
 }
 
@@ -94,7 +96,7 @@ impl AcceptedSession {
 		// gets the tail; dropping this future ends that early. A peer that vanishes instead
 		// closes the broadcast at once.
 		tracing::debug!(role = self.role, "webrtc session terminated by DELETE");
-		let linger = self.server.config().linger;
+		let linger = self.linger;
 		if let Some(finished) = session.finish(linger)? {
 			tracing::info!(role = self.role, ?linger, "serving the finished broadcast");
 			finished.wait().await;
@@ -126,6 +128,7 @@ pub(crate) fn session_location(uri: &Uri, resource_id: &str) -> Option<HeaderVal
 /// Configuration shared by both `server publish` and `server subscribe`.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[derive(Default)]
 pub struct Config {
 	/// Public UDP socket addresses that should be advertised as ICE host
 	/// candidates. Each is sent as a separate `candidate` line in the SDP
@@ -136,44 +139,24 @@ pub struct Config {
 	/// loopback testing but not behind NAT.
 	pub ice_candidates: Vec<SocketAddr>,
 
-	/// Address the shared WebRTC media socket binds to. Every WHIP/WHEP session
-	/// shares this one UDP port (demuxed by ICE ufrag), so a deployment opens
-	/// exactly one media port in its firewall. `0.0.0.0:0` (the default) lets
-	/// the OS pick a port, which is fine for dev/loopback; production pins it.
-	pub udp_bind: SocketAddr,
-
-	/// How long a superseded group of an ingested media track stays fresh, or `None` for no
-	/// publisher limit.
-	///
-	/// A freshness bound, not a delivery one: it never makes a subscriber play further
-	/// behind live, it caps how far back a FETCH can still reach. Defaults to
-	/// [`MAX_AGE`](hang::container::MAX_AGE), which suits a segmented
-	/// egress (HLS/DASH) reading the broadcast downstream: it may only advertise segments
-	/// that are still fetchable. Lower it when nothing reads history.
-	///
-	/// Ingest only (`server publish` / WHIP): WHEP egress reads a broadcast someone else
-	/// declared, so it ignores this.
-	pub max_age: Option<Duration>,
-
-	/// Connection allocator each ingested track claims its peak-hold bitrate on.
-	/// Ingest only (`server publish` / WHIP); WHEP egress ignores this.
-	pub bandwidth: moq_net::bandwidth::Allocator,
-
-	/// How long an ingest the peer ended with a `DELETE` stays up, so a subscriber that
-	/// arrives after the end still gets the tail. Defaults to [`moq_mux::Linger::DEFAULT`];
-	/// zero closes it at once. Ingest only (`server publish` / WHIP).
-	pub linger: Duration,
+	/// The shared WebRTC media socket. Every WHIP/WHEP session shares this one UDP port
+	/// (demuxed by ICE ufrag), so a deployment opens exactly one media port in its firewall.
+	/// Defaults to binding `0.0.0.0:0`, letting the OS pick a port, which is fine for
+	/// dev/loopback; production pins it.
+	pub socket: Socket,
 }
 
-impl Default for Config {
+/// Where the shared WebRTC media socket comes from.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum Socket {
+	/// Bind a UDP socket at this address on the first accept.
+	Bind(SocketAddr),
+}
+
+impl Default for Socket {
 	fn default() -> Self {
-		Self {
-			ice_candidates: Vec::new(),
-			udp_bind: SocketAddr::from(([0, 0, 0, 0], 0)),
-			max_age: Some(hang::container::MAX_AGE),
-			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-			linger: moq_mux::Linger::DEFAULT,
-		}
+		Self::Bind(SocketAddr::from(([0, 0, 0, 0], 0)))
 	}
 }
 
@@ -210,20 +193,22 @@ impl Server {
 	pub(crate) async fn mux(&self) -> Result<&Mux> {
 		self.inner
 			.mux
-			.get_or_try_init(|| Mux::bind(self.inner.config.udp_bind, &self.inner.config.ice_candidates))
+			.get_or_try_init(|| match self.inner.config.socket {
+				Socket::Bind(addr) => Mux::bind(addr, &self.inner.config.ice_candidates),
+			})
 			.await
 	}
 
-	/// Router for `server publish` (WHIP). Mount under whichever HTTP path
-	/// the deployment prefers (`/whip`, `/`, ...).
+	/// Router for `server publish` (WHIP), publishing each session as `ingest` says. Mount
+	/// under whichever HTTP path the deployment prefers (`/whip`, `/`, ...).
 	///
 	/// The router derives the broadcast name from the request path and performs
 	/// no authentication. To own the route and authorize requests yourself
 	/// (resolving the broadcast name from a verified token), skip the router and
 	/// call [`whip::accept`] directly from your own handler. Only with the `server` feature.
 	#[cfg(feature = "server")]
-	pub fn publish_router(&self, publisher: moq_net::origin::Producer) -> Router {
-		whip::router(self.clone(), publisher)
+	pub fn publish_router(&self, publisher: moq_net::origin::Producer, ingest: moq_mux::Ingest) -> Router {
+		whip::router(self.clone(), publisher, ingest)
 	}
 
 	/// Router for `server subscribe` (WHEP). Mount under whichever HTTP path
@@ -236,10 +221,6 @@ impl Server {
 	#[cfg(feature = "server")]
 	pub fn subscribe_router(&self, subscriber: moq_net::origin::Consumer) -> Router {
 		whep::router(self.clone(), subscriber)
-	}
-
-	pub(crate) fn config(&self) -> &Config {
-		&self.inner.config
 	}
 
 	/// Register a session under its resource id, returning the cancel receiver.

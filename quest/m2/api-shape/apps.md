@@ -37,5 +37,5 @@
 Found by the 2026-11-07 API shape audit (apps); see the
 [epic](/quest/m2/api-shape/README.md). Decided 2026-11-07 (maintainer):
 ✅ hide `p2p` until m4 (rejected: keep it public; delete it). Gateway ingest
-is [gateway-ingest](/quest/m2/gateway-ingest.md). Downstream code that
+shares `moq_mux::Ingest` already. Downstream code that
 matches the deleted webrtc variants loses only dead arms.
