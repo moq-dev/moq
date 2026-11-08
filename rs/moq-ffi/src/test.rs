@@ -7552,9 +7552,12 @@ async fn video_encoder_follows_a_shrinking_grant() {
 			})
 			.map(|followed| followed.is_ok())
 	});
-	let open = kio::clock::timeout(TIMEOUT, followed)
-		.await
-		.unwrap_or_else(|_| panic!("encoder did not follow the shrinking grant, last applied {}", *applied.read()));
+	let open = kio::clock::timeout(TIMEOUT, followed).await.unwrap_or_else(|_| {
+		panic!(
+			"encoder did not follow the shrinking grant, last applied {}",
+			*applied.read()
+		)
+	});
 	assert!(open, "the applied bitrate closed");
 
 	video.finish().unwrap();
