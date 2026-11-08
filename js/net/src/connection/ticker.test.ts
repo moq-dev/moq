@@ -25,9 +25,11 @@ test("subscribers share one tick and the loop stops with the last", async () => 
 		expect(ticks).toEqual(["a", "b", "b"]);
 
 		// A stopped loop restarts for a later subscriber, rather than leaving the page unsampled.
-		tick(period, () => ticks.push("c"));
+		const c = tick(period, () => ticks.push("c"));
 		await clock.advance(period);
 		expect(ticks).toEqual(["a", "b", "b", "c"]);
+		// Stopped, or the page-wide loop outlives this clock and a later test's tick joins it.
+		c();
 	} finally {
 		installed.close();
 	}
