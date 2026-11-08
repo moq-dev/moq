@@ -173,6 +173,47 @@ test("an http:// URL pins the fetched fingerprint and dials https", async () => 
 	]);
 });
 
+test("a fingerprint fetch slower than the hedge starts no second dial", async () => {
+	using clock = manual();
+	// Hold the fingerprint until the clock has passed the 500 ms hedge: the hedge arms only once
+	// the fingerprint resolves, so a slow fetch neither fires it nor fetches or dials twice.
+	const requested = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const server = fingerprintServer(async () => {
+		requested.resolve();
+		await release.promise;
+		return new Response("ab".repeat(32));
+	});
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let dials = 0;
+	function StubWebTransport(this: unknown) {
+		dials++;
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+	const captured = captureConsole();
+
+	try {
+		const connecting = connect(server.url, { websocket: { enabled: false } });
+		await requested.promise;
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
+		// The hedge logs inside its timer callback, so this catches it as deterministically as the
+		// clock; the dial/request counts below race connect() cancelling the hedge once one dial wins.
+		expect(captured.lines.filter((line) => line.includes("dialing a second"))).toEqual([]);
+		release.resolve();
+		const connection = await connecting;
+		connection.abort();
+	} finally {
+		captured.restore();
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+
+	expect(dials).toBe(1);
+	expect(server.requests()).toBe(1);
+});
+
 test("an http:// fingerprint longer than a SHA-256 is refused without reading the rest", async () => {
 	// A chunked body with no Content-Length that never ends: only a bounded read can refuse it.
 	const chunk = new TextEncoder().encode("a".repeat(1024));
