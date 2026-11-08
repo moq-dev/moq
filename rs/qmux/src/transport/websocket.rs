@@ -103,7 +103,10 @@ impl<T: WsStream> Transport for WsTransport<T> {
 		if let Some(keep_alive) = self.keep_alive {
 			// The first tick is one interval out, so we don't ping on connect. A long pause
 			// sends one Ping, not a catch-up burst.
-			let mut ping = kio::clock::interval_at(kio::clock::now() + keep_alive.interval, keep_alive.interval);
+			let mut ping = kio::clock::interval_at(
+				kio::clock::now().saturating_add(keep_alive.interval),
+				keep_alive.interval,
+			);
 			ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
 			self.ping = Some(ping);
 			self.deadline = Some((kio::clock::sleep(keep_alive.timeout), keep_alive.timeout));
@@ -118,7 +121,7 @@ impl<T: WsStream> Transport for WsTransport<T> {
 		while let Poll::Ready(message) = Pin::new(&mut self.ws).poll_next(&mut cx) {
 			// Any message, data or control, proves the peer is alive.
 			if let Some((sleep, timeout)) = &mut self.deadline {
-				sleep.reset(kio::clock::now() + *timeout);
+				sleep.reset(kio::clock::now().saturating_add(*timeout));
 			}
 			let message = match message {
 				Some(Ok(message)) => message,

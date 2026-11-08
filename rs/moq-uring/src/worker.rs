@@ -626,7 +626,7 @@ impl Drop for Worker {
 		self.shared.stopped.set(true);
 		// One deadline bounds cancellation staging and draining together. It is
 		// on the host's time, so it passes even on a manual clock.
-		let deadline = self.shared.clock.host_now() + TEARDOWN_TIMEOUT;
+		let deadline = self.shared.clock.host_now().saturating_add(TEARDOWN_TIMEOUT);
 		// The kernel may still write into provided buffers and read send
 		// headers owned by the ops slab. Queue cancels behind every staged
 		// receive and the futex, so partial submissions cannot strand an
@@ -909,7 +909,7 @@ mod tests {
 	/// Past on the host clock but ahead of the worker's last turn, so a park
 	/// for it times out at once.
 	fn due(worker: &Worker) -> Instant {
-		worker.shared.deadlines.now() + Duration::from_nanos(1)
+		worker.shared.deadlines.now().saturating_add(Duration::from_nanos(1))
 	}
 
 	fn worker_result(result: Result<Worker, Error>, required: bool) -> Option<Worker> {
@@ -1070,7 +1070,7 @@ mod tests {
 		worker.shared.ring.borrow_mut().submit().expect("arm receive");
 		peer.send_to(b"deferred", sock.local_addr().expect("addr"))
 			.expect("send");
-		let deadline = worker.shared.clock.now() + Duration::from_secs(5);
+		let deadline = worker.shared.clock.now().saturating_add(Duration::from_secs(5));
 		while !worker.shared.ring.borrow_mut().submission().taskrun() {
 			assert!(
 				worker.shared.clock.now() < deadline,
@@ -1238,7 +1238,7 @@ mod tests {
 		let handle = worker.handle();
 		let at = worker
 			.block_on(async move {
-				let at = kio::clock::now() + Duration::from_millis(50);
+				let at = kio::clock::now().saturating_add(Duration::from_millis(50));
 				let mut timer = handle.timer();
 				timer.set(Some(at));
 				timer.wait().await;
@@ -1274,7 +1274,7 @@ mod tests {
 			})
 			.unwrap();
 		advancer.join().unwrap();
-		assert_eq!(woke, start + Duration::from_secs(5));
+		assert_eq!(woke, start.saturating_add(Duration::from_secs(5)));
 	}
 
 	/// Ambient timers and reads on the worker resolve to its clock.
@@ -1292,7 +1292,7 @@ mod tests {
 				(now, timed_out.is_err())
 			})
 			.unwrap();
-		assert_eq!(now, kio::clock::Instant::ZERO + Duration::from_secs(1));
+		assert_eq!(now, kio::clock::Instant::ZERO.saturating_add(Duration::from_secs(1)));
 		assert!(timed_out);
 	}
 
@@ -1348,20 +1348,20 @@ mod tests {
 		assert!(timer.poll(&kio::Waiter::noop()).is_ready());
 
 		// Re-arming to the future pends again; disarming stays pending.
-		timer.set(Some(now + Duration::from_secs(60)));
+		timer.set(Some(now.saturating_add(Duration::from_secs(60))));
 		assert!(timer.poll(&kio::Waiter::noop()).is_pending());
 		timer.set(None);
 		assert!(timer.poll(&kio::Waiter::noop()).is_pending());
 
 		// And a re-arm fires through the worker once its clock gets there.
-		timer.set(Some(now + Duration::from_millis(20)));
+		timer.set(Some(now.saturating_add(Duration::from_millis(20))));
 		clock.advance(Duration::from_millis(20));
 		worker
 			.block_on(async move {
 				kio::wait(|waiter| timer.poll(waiter)).await;
 			})
 			.unwrap();
-		assert_eq!(handle.now(), now + Duration::from_millis(20));
+		assert_eq!(handle.now(), now.saturating_add(Duration::from_millis(20)));
 	}
 
 	#[test]
@@ -1404,7 +1404,7 @@ mod tests {
 			flags: 0,
 		};
 		let before = kio::clock::Instant::ZERO;
-		let deadline = before + Duration::from_millis(1);
+		let deadline = before.saturating_add(Duration::from_millis(1));
 		let mut now = [before, deadline].into_iter();
 
 		worker.cqes = vec![cqe(first), cqe(second)];
@@ -1544,7 +1544,7 @@ mod tests {
 
 		// Drive the worker until every completion, backlog included, has been
 		// reaped and released its buffer back to the pool.
-		let deadline = handle.now() + Duration::from_secs(10);
+		let deadline = handle.now().saturating_add(Duration::from_secs(10));
 		loop {
 			overflowed = overflowed || saw_overflow(&worker);
 			let h = handle.clone();
@@ -1784,7 +1784,7 @@ mod tests {
 		// Two trains of two: the first is rejected and resent, the second
 		// never tries GSO.
 		for _ in 0..2 {
-			let deadline = handle.now() + Duration::from_secs(5);
+			let deadline = handle.now().saturating_add(Duration::from_secs(5));
 			let mut received = 0;
 			let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 				panic!("the socket failed after a rejected train");
@@ -1838,7 +1838,7 @@ mod tests {
 
 		// Drive the worker until the loopback delivers, parking on a timer each
 		// turn so the park and timer counters see traffic too.
-		let deadline = handle.now() + Duration::from_secs(5);
+		let deadline = handle.now().saturating_add(Duration::from_secs(5));
 		let mut received = 0;
 		while received == 0 && handle.now() < deadline {
 			let handle = handle.clone();
@@ -1916,7 +1916,7 @@ mod tests {
 
 		// Hold the received packet: its buffer is the pool, so the re-arm has
 		// nowhere to receive into.
-		let deadline = handle.now() + Duration::from_secs(5);
+		let deadline = handle.now().saturating_add(Duration::from_secs(5));
 		let mut held = None;
 		while held.is_none() && handle.now() < deadline {
 			let handle = handle.clone();
@@ -1961,11 +1961,11 @@ mod tests {
 		let mut timer = handle.timer();
 		let now = handle.now();
 
-		timer.set(Some(now + Duration::from_secs(60)));
+		timer.set(Some(now.saturating_add(Duration::from_secs(60))));
 		assert_eq!(metrics.snapshot().timers_active(), 1);
 
 		// A re-arm is a cancel plus an arm, which is exactly the churn signal.
-		timer.set(Some(now + Duration::from_secs(61)));
+		timer.set(Some(now.saturating_add(Duration::from_secs(61))));
 		let snap = metrics.snapshot();
 		assert_eq!((snap.timers_armed, snap.timers_cancelled, snap.timers_fired), (2, 1, 0));
 		assert_eq!(snap.timers_active(), 1);
@@ -1978,7 +1978,7 @@ mod tests {
 		assert_eq!(snap.timers_active(), 0);
 
 		// A dropped armed timer is a cancel, and the queue empties again.
-		timer.set(Some(now + Duration::from_secs(60)));
+		timer.set(Some(now.saturating_add(Duration::from_secs(60))));
 		assert_eq!(metrics.snapshot().timers_active(), 1);
 		drop(timer);
 		assert_eq!(metrics.snapshot().timers_active(), 0);
@@ -2005,7 +2005,7 @@ mod tests {
 		worker.block_on(async {}).unwrap();
 
 		drop(dropped);
-		rearmed.set(Some(handle.now() + Duration::from_secs(1)));
+		rearmed.set(Some(handle.now().saturating_add(Duration::from_secs(1))));
 		let snap = metrics.snapshot();
 		assert_eq!((snap.timers_armed, snap.timers_cancelled, snap.timers_fired), (3, 0, 2));
 		assert_eq!(snap.timers_active(), 1);

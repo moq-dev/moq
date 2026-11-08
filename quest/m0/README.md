@@ -29,7 +29,7 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [JS qmux streams follow QUIC's per-stream state machine](/quest/m0/qmux-js-credit.md) - credit changes only in stream state transitions, so a JS WebSocket session cannot stall on cancelled streams or send a short final size that a Rust peer refuses
-- [kio's Instant has no panicking arithmetic, and peer values never wrap](/quest/m0/peer-arithmetic.md) - every deadline states what overflow means, so a peer's retry interval or a huge configured duration cannot panic a task
+- [A lite SUBSCRIBE_DROP or SUBSCRIBE_SKIP ending at group u64::MAX accounts for that group](/quest/m0/peer-arithmetic.md) - a drop through the last group sequence gives up that group too, or is refused
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
 - [Release's audio encoder rolls groups before the cap](/quest/m0/release-audio-group-cap.md) - a long `groupDuration` with short frames never throws `GroupTooLarge` on `release`
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last

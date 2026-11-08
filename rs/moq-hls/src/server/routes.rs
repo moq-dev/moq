@@ -347,7 +347,7 @@ mod tests {
 	}
 
 	async fn wait_listed(app: &axum::Router, playlist: &str, segment: &str) {
-		let deadline = kio::clock::now() + TIMEOUT;
+		let deadline = kio::clock::now().saturating_add(TIMEOUT);
 		let mut last = String::new();
 		loop {
 			let response = oneshot(app.clone(), playlist).await;
@@ -537,7 +537,7 @@ mod tests {
 		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
 
 		drop((old_catalog, old_track, old_media, old));
-		let deadline = kio::clock::now() + TIMEOUT;
+		let deadline = kio::clock::now().saturating_add(TIMEOUT);
 		while status(&app, &old_playlist).await != StatusCode::NOT_FOUND {
 			assert!(kio::clock::now() < deadline, "the closed instance kept serving");
 			kio::clock::sleep(Duration::from_millis(50)).await;
@@ -579,7 +579,7 @@ mod tests {
 			publish_video(&mut new.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut new_media);
 
-		let deadline = kio::clock::now() + TIMEOUT;
+		let deadline = kio::clock::now().saturating_add(TIMEOUT);
 		let successor = loop {
 			let current = server.broadcaster("live").await.expect("announced");
 			if current.instance().as_ref() == next.as_str() {
@@ -658,7 +658,7 @@ mod tests {
 			.abort(moq_net::Error::Transport("connection lost".into()))
 			.unwrap();
 		for uri in [&format!("/live/@{RUN}/video/video0/media.m3u8"), "/live/manifest.mpd"] {
-			let deadline = kio::clock::now() + TIMEOUT;
+			let deadline = kio::clock::now().saturating_add(TIMEOUT);
 			let response = loop {
 				let response = oneshot(app.clone(), uri).await;
 				if response.status() != StatusCode::OK {

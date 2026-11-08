@@ -7549,7 +7549,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	let deadline = kio::clock::Instant::now() + TIMEOUT;
+	let deadline = kio::clock::Instant::now().saturating_add(TIMEOUT);
 	loop {
 		if video.applied_bitrate() == 1_000_000 {
 			break;

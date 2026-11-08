@@ -46,7 +46,9 @@ fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
     let mut elapsed = Duration::ZERO;
     for first in (0..flight).step_by(batch) {
         let end = (first + batch).min(flight);
-        let now = base + Duration::from_millis(10) + Duration::from_micros(first as u64);
+        let now = base
+            .saturating_add(Duration::from_millis(10))
+            .saturating_add(Duration::from_micros(first as u64));
         let in_flight = if steady {
             flight - (end - first)
         } else {

@@ -6238,7 +6238,7 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	// Wait until it has resolved the handle, so it is genuinely inside the stalled
 	// call rather than still on its way in: the slab holds one reference, this test
 	// a second, and the parked publish is the third.
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	while handle.holders() < 3 {
 		assert!(kio::clock::now() < deadline, "the publish never reached the encoder");
 		std::thread::yield_now();
@@ -7291,7 +7291,7 @@ fn rate(reservation: u32) -> Option<u64> {
 /// Wait for `reservation`'s grant to reach `bps`, since a subscription reaches the
 /// allocator asynchronously and an unwatched track already reads a would-be share.
 fn wait_rate(reservation: u32, bps: u64) {
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	loop {
 		let last = rate(reservation);
 		if last == Some(bps) {

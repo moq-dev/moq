@@ -1326,13 +1326,13 @@ mod tests {
 		// somewhere inside `connect`, so bracket it: the bounds hold however long it takes.
 		let (wall, tick) = (kio::clock::wall(), kio::clock::now());
 		let consumer = script.connect().await.unwrap();
-		let earliest = tick + expires.checked_duration_since(kio::clock::wall()).unwrap();
-		let latest = kio::clock::now() + expires.checked_duration_since(wall).unwrap();
+		let earliest = tick.saturating_add(expires.checked_duration_since(kio::clock::wall()).unwrap());
+		let latest = kio::clock::now().saturating_add(expires.checked_duration_since(wall).unwrap());
 
 		// A millisecond either side for Tokio's timer resolution.
 		let tolerance = Duration::from_millis(1);
 		assert!(
-			kio::clock::timeout_at(earliest - tolerance, consumer.closed())
+			kio::clock::timeout_at(earliest.saturating_sub(tolerance), consumer.closed())
 				.await
 				.is_err(),
 			"an outage must not close before expires"
@@ -1343,7 +1343,7 @@ mod tests {
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);
-		let reason = kio::clock::timeout_at(latest + tolerance, consumer.closed())
+		let reason = kio::clock::timeout_at(latest.saturating_add(tolerance), consumer.closed())
 			.await
 			.expect("closed at expires, not later");
 		assert_eq!(reason, Reason::Expired);

@@ -206,7 +206,7 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 /// one, would park the handler forever. No route by the deadline is
 /// [`moq_net::Error::Unroutable`], so the WHEP client sees a 404 and retries (typical).
 async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path) -> Result<EgressSource> {
-	let deadline = kio::clock::now() + CATALOG_TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(CATALOG_TIMEOUT);
 	let mut following = subscriber.follow(path, None)?;
 	let broadcast = kio::clock::timeout_at(deadline, following.available())
 		.await

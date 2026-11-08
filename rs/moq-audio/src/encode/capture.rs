@@ -819,7 +819,7 @@ mod tests {
 		let (capture, samples) = capture::test_source();
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let epoch = Instant::now() - Duration::from_secs(1);
+		let epoch = Instant::now().saturating_sub(Duration::from_secs(1));
 		let clock = moq_mux::Clock::at(epoch, kio::clock::wall()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(
 			&mut broadcast,
@@ -1004,7 +1004,7 @@ mod tests {
 				let encode_task = tokio::spawn(driver.run());
 				let mut track = subscribe(&broadcast, Duration::ZERO).await;
 				for (index, gap) in [false, true, false].into_iter().enumerate() {
-					let captured = epoch + Duration::from_millis([100, 200, 220][index]);
+					let captured = epoch.saturating_add(Duration::from_millis([100, 200, 220][index]));
 					let value = (index + 1) as f32 / 8.0;
 					let mut block = Samples::plain(vec![value; 1920], gap);
 					block.captured = Some(captured);
@@ -1037,7 +1037,7 @@ mod tests {
 				bus_pcm.extend_from_slice(&mix(2400));
 				assert_eq!(&bus_pcm[4800..], expected);
 				drop(bus_run);
-				let captured = epoch + Duration::from_millis(240);
+				let captured = epoch.saturating_add(Duration::from_millis(240));
 				let mut block = Samples::plain(vec![0.625; 1920], false);
 				block.captured = Some(captured);
 				samples.try_push(Ok(block)).unwrap();
@@ -1106,7 +1106,7 @@ mod tests {
 				let capture_task = tokio::task::spawn_local(capture.run());
 				let encode_task = tokio::spawn(driver.run());
 				status(&mut control, Status::Waiting).await;
-				let captured = epoch + Duration::from_millis(100);
+				let captured = epoch.saturating_add(Duration::from_millis(100));
 				let mut block = Samples::plain(vec![0.25; 1920], false);
 				block.captured = Some(captured);
 				samples.try_push(Ok(block)).unwrap();
@@ -1159,7 +1159,7 @@ mod tests {
 					let encode_task = tokio::spawn(driver.run());
 					status(&mut control, Status::Waiting).await;
 					let mut block = Samples::plain(vec![0.25; 1920], false);
-					block.captured = Some(epoch + Duration::from_millis(100));
+					block.captured = Some(epoch.saturating_add(Duration::from_millis(100)));
 					samples.try_push(Ok(block)).unwrap();
 					observer.read().await.unwrap();
 					retained(&control).await;
@@ -1210,7 +1210,7 @@ mod tests {
 					let encode_task = tokio::spawn(driver.run());
 					status(&mut control, Status::Waiting).await;
 					let mut block = Samples::plain(vec![0.25; 1920], false);
-					block.captured = Some(epoch + Duration::from_millis(100));
+					block.captured = Some(epoch.saturating_add(Duration::from_millis(100)));
 					samples.try_push(Ok(block)).unwrap();
 					observer.read().await.unwrap();
 					retained(&control).await;
@@ -1276,7 +1276,7 @@ mod tests {
 				let mut track = subscribe(&broadcast, Duration::ZERO).await;
 				// The original consumer is still selected and encoding.
 				let mut block = Samples::plain(vec![0.25; 1920], false);
-				block.captured = Some(epoch + Duration::from_millis(100));
+				block.captured = Some(epoch.saturating_add(Duration::from_millis(100)));
 				samples.try_push(Ok(block)).unwrap();
 				observer.read().await.unwrap();
 				assert_eq!(packet(&mut track).await.timestamp.as_micros(), 100_000);
@@ -1314,7 +1314,7 @@ mod tests {
 					// Ten whole 10 ms resampler chunks plus a partial one.
 					let frames = 4_410 + 200;
 					let mut block = Samples::plain(vec![0.25; frames], false);
-					block.captured = Some(epoch + Duration::from_millis(100));
+					block.captured = Some(epoch.saturating_add(Duration::from_millis(100)));
 					samples.try_push(Ok(block)).unwrap();
 					observer.read().await.unwrap();
 					packet(&mut track).await;
@@ -1405,9 +1405,9 @@ mod tests {
 					let mut track = subscribe(&broadcast, Duration::ZERO).await;
 					let now = Instant::now();
 					let (captured, expected) = match placement {
-						0 => (Some(now - Duration::from_millis(40)), 960_000),
-						1 => (Some(epoch - Duration::from_millis(10)), 0),
-						2 => (Some(now + Duration::from_secs(1)), 1_000_000),
+						0 => (Some(now.saturating_sub(Duration::from_millis(40))), 960_000),
+						1 => (Some(epoch.saturating_sub(Duration::from_millis(10))), 0),
+						2 => (Some(now.saturating_add(Duration::from_secs(1))), 1_000_000),
 						_ => (None, 1_000_000),
 					};
 					let mut block = Samples::plain(vec![0.25; 1920], false);

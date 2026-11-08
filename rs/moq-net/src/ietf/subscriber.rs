@@ -17023,7 +17023,10 @@ mod stitch_tests {
 				.run_group_fetch(Path::from_static("broadcast"), "video".into(), fill, None)
 				.await;
 			// The peer may still deliver a late subgroup stream during the arrival grace.
-			run.track.broadcast().pool.poll(now + crate::ledger::GRACE, &waiter);
+			run.track
+				.broadcast()
+				.pool
+				.poll(now.saturating_add(crate::ledger::GRACE), &waiter);
 			assert_eq!(
 				reader.poll_drop(&waiter),
 				Poll::Ready((1..3, crate::track::Hole::drop(crate::StreamError::NotFound))),

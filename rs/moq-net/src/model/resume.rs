@@ -5003,7 +5003,7 @@ mod test {
 				write(&a, 2);
 				assert_eq!(drain(&mut sub, false), [0, 2]);
 
-				pool.poll(opened + budget / 2, &noop);
+				pool.poll(opened.saturating_add(budget / 2), &noop);
 				let b = copy();
 				write(&b, if first_group { 3 } else { 2 });
 				routes.serve(b.consume());
@@ -5023,8 +5023,11 @@ mod test {
 				assert!(poll().is_pending());
 				assert!(!wake.0.load(std::sync::atomic::Ordering::Relaxed));
 
-				let deadline = opened + budget;
-				assert_eq!(pool.poll(deadline - Duration::from_micros(1), &noop), Some(deadline));
+				let deadline = opened.saturating_add(budget);
+				assert_eq!(
+					pool.poll(deadline.saturating_sub(Duration::from_micros(1)), &noop),
+					Some(deadline)
+				);
 				assert!(
 					!wake.0.load(std::sync::atomic::Ordering::Relaxed),
 					"not before the grace"

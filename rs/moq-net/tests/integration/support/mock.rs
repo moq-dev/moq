@@ -63,7 +63,7 @@ impl Conn {
 	}
 
 	fn arrival(&self) -> Instant {
-		now() + self.latency()
+		now().saturating_add(self.latency())
 	}
 }
 

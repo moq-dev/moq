@@ -196,7 +196,7 @@ impl App {
 		};
 		let mut video = self.video.lock().unwrap();
 		// Re-read the shared anchor on every redraw: audio may have moved it.
-		let cutoff = Instant::now() + VIDEO_EARLY_TOLERANCE;
+		let cutoff = Instant::now().saturating_add(VIDEO_EARLY_TOLERANCE);
 		let mut due = None;
 		if let Some(index) = self
 			.presentation

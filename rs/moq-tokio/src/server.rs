@@ -2741,7 +2741,7 @@ mod tests {
 		// `serve` binds the socket; wait for it. Keep the last error, since a bind
 		// failure is the only clue to why it never showed up.
 		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-		let deadline = kio::clock::now() + std::time::Duration::from_secs(5);
+		let deadline = kio::clock::now().saturating_add(std::time::Duration::from_secs(5));
 		let mut delay = std::time::Duration::from_millis(1);
 		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
 			assert!(kio::clock::now() < deadline, "unix listener never bound: {err}");

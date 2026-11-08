@@ -219,7 +219,9 @@ impl Meter {
 		let tokens = self.tokens + rate * elapsed.as_secs_f64();
 		if tokens > burst {
 			// The bucket filled partway through and discarded credit from then until now.
-			let since = (from + Duration::from_secs_f64((burst - self.tokens).max(0.0) / rate)).min(now);
+			let since = from
+				.saturating_add(Duration::from_secs_f64((burst - self.tokens).max(0.0) / rate))
+				.min(now);
 			match self.full.back_mut() {
 				Some(full) if full.until == since && full.rate == rate => full.until = now,
 				_ => self.full.push_back(Full {
@@ -252,7 +254,7 @@ impl Meter {
 			let start = since.max(at);
 			let take = (rate * until.saturating_duration_since(start).as_secs_f64()).min(limit - refund);
 			refund += take;
-			self.full[i].since = (start + Duration::from_secs_f64(take / rate)).min(until);
+			self.full[i].since = start.saturating_add(Duration::from_secs_f64(take / rate)).min(until);
 			if since < at {
 				// The credit discarded before `at` stays for frames that arrived earlier.
 				self.full.insert(i, Full { since, until: at, rate });
@@ -294,7 +296,12 @@ mod tests {
 		let mut meter = Meter::new(Some(cap()), t0);
 		// 500 bytes every half second is exactly the cap, for a minute.
 		for i in 0..120 {
-			assert!(meter.charge_at(500, t0 + Duration::from_millis(500 * i)).is_ok(), "{i}");
+			assert!(
+				meter
+					.charge_at(500, t0.saturating_add(Duration::from_millis(500 * i)))
+					.is_ok(),
+				"{i}"
+			);
 		}
 	}
 
@@ -305,8 +312,11 @@ mod tests {
 		// The whole burst at once is allowed.
 		assert!(meter.charge_at(1000, t0).is_ok());
 		// A second later, one more second of the cap is allowed, but no more.
-		assert!(meter.charge_at(1000, t0 + Duration::from_secs(1)).is_ok());
-		assert_eq!(meter.charge_at(1, t0 + Duration::from_secs(1)), Err(cap()));
+		assert!(meter.charge_at(1000, t0.saturating_add(Duration::from_secs(1))).is_ok());
+		assert_eq!(
+			meter.charge_at(1, t0.saturating_add(Duration::from_secs(1))),
+			Err(cap())
+		);
 	}
 
 	#[test]
@@ -314,7 +324,11 @@ mod tests {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(Some(cap()), t0);
 		// 10% over the cap: 550 bytes every half second spends 50 bytes of burst per tick.
-		let refused = (1..100).find(|i| meter.charge_at(550, t0 + Duration::from_millis(500 * i)).is_err());
+		let refused = (1..100).find(|i| {
+			meter
+				.charge_at(550, t0.saturating_add(Duration::from_millis(500 * i)))
+				.is_err()
+		});
 		assert_eq!(refused, Some(11));
 	}
 
@@ -322,7 +336,7 @@ mod tests {
 	fn idle_time_banks_no_more_than_the_burst() {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(Some(cap()), t0);
-		let later = t0 + Duration::from_secs(3600);
+		let later = t0.saturating_add(Duration::from_secs(3600));
 		assert!(meter.charge_at(1000, later).is_ok());
 		assert!(meter.charge_at(1, later).is_err());
 	}
@@ -330,7 +344,7 @@ mod tests {
 	#[test]
 	fn a_frame_charged_late_is_refunded_the_credit_discarded_since_it_arrived() {
 		let t0 = Instant::now();
-		let ms = |ms| t0 + Duration::from_millis(ms);
+		let ms = |ms| t0.saturating_add(Duration::from_millis(ms));
 
 		// A 1000-byte video frame arrives over 0..50 ms with 10-byte audio frames at 20 and
 		// 40 ms, which str0m completes first. In arrival order the bucket ends at 30 bytes.
@@ -359,11 +373,18 @@ mod tests {
 		// under the cap, though four times the burst.
 		let cap = Cap::new(Rate::from_kbps(2_000)).with_burst(Duration::from_millis(100));
 		let mut meter = Meter::new(Some(cap), t0);
-		assert!(meter.charge(100_000, t0, t0 + Duration::from_millis(500)).is_ok());
+		assert!(
+			meter
+				.charge(100_000, t0, t0.saturating_add(Duration::from_millis(500)))
+				.is_ok()
+		);
 
 		// The same keyframe over 100 ms is 8 Mbps.
 		let mut meter = Meter::new(Some(cap), t0);
-		assert_eq!(meter.charge(100_000, t0, t0 + Duration::from_millis(100)), Err(cap));
+		assert_eq!(
+			meter.charge(100_000, t0, t0.saturating_add(Duration::from_millis(100))),
+			Err(cap)
+		);
 	}
 
 	#[test]
@@ -373,15 +394,24 @@ mod tests {
 		// 20-byte audio frames at 20..180 ms. Arrival order accepts all of them.
 		let mut meter = Meter::new(Some(cap().with_burst(Duration::from_millis(100))), t0);
 		for i in 1..10 {
-			assert!(meter.charge_at(20, t0 + Duration::from_millis(20 * i)).is_ok(), "{i}");
+			assert!(
+				meter
+					.charge_at(20, t0.saturating_add(Duration::from_millis(20 * i)))
+					.is_ok(),
+				"{i}"
+			);
 		}
-		assert!(meter.charge(100, t0, t0 + Duration::from_millis(180)).is_ok());
+		assert!(
+			meter
+				.charge(100, t0, t0.saturating_add(Duration::from_millis(180)))
+				.is_ok()
+		);
 	}
 
 	#[test]
 	fn a_refund_leaves_newer_credit_to_frames_that_arrived_later() {
 		let t0 = Instant::now();
-		let ms = |ms| t0 + Duration::from_millis(ms);
+		let ms = |ms| t0.saturating_add(Duration::from_millis(ms));
 		// Frame A takes 499 bytes at 0 ms and 1 at 1000 ms. Frame B takes 1000 bytes at
 		// 500 ms and 499 at 1001 ms. In packet order the bucket ends at 1 byte.
 		let mut meter = Meter::new(Some(cap()), t0);
@@ -397,10 +427,14 @@ mod tests {
 		let t0 = Instant::now();
 		// Idle for a minute, then a frame at 60 s and one charged late from 10 ms before it.
 		let mut meter = Meter::new(Some(cap()), t0);
-		assert!(meter.charge_at(10, t0 + Duration::from_secs(60)).is_ok());
+		assert!(meter.charge_at(10, t0.saturating_add(Duration::from_secs(60))).is_ok());
 		assert!(
 			meter
-				.charge(1000, t0 + Duration::from_millis(59_990), t0 + Duration::from_secs(60))
+				.charge(
+					1000,
+					t0.saturating_add(Duration::from_millis(59_990)),
+					t0.saturating_add(Duration::from_secs(60))
+				)
 				.is_ok()
 		);
 		// Only the 10 bytes discarded over those 10 ms came back.
@@ -412,8 +446,12 @@ mod tests {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(Some(cap()), t0);
 		// 100 bytes discarded over 0..100 ms, then two frames from 0 ms charged late.
-		assert!(meter.charge_at(0, t0 + Duration::from_millis(100)).is_ok());
-		let done = t0 + Duration::from_millis(100);
+		assert!(
+			meter
+				.charge_at(0, t0.saturating_add(Duration::from_millis(100)))
+				.is_ok()
+		);
+		let done = t0.saturating_add(Duration::from_millis(100));
 		assert!(meter.charge(600, t0, done).is_ok());
 		assert!(meter.charge(500, t0, done).is_ok());
 		assert!((meter.tokens - 0.0).abs() < 1e-6, "{}", meter.tokens);
@@ -442,9 +480,9 @@ mod tests {
 		let t0 = Instant::now();
 		let mut meter = Meter::new(None, t0);
 		assert!(meter.charge_at(1_000_000, t0).is_ok());
-		meter.set(Some(cap()), t0 + Duration::from_secs(1));
-		assert!(meter.charge_at(1000, t0 + Duration::from_secs(1)).is_ok());
-		assert!(meter.charge_at(1, t0 + Duration::from_secs(1)).is_err());
+		meter.set(Some(cap()), t0.saturating_add(Duration::from_secs(1)));
+		assert!(meter.charge_at(1000, t0.saturating_add(Duration::from_secs(1))).is_ok());
+		assert!(meter.charge_at(1, t0.saturating_add(Duration::from_secs(1))).is_err());
 	}
 
 	#[test]

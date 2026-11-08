@@ -707,11 +707,17 @@ fn dialing_never_logs_the_credential() {
 	let events = crate::test_tracing::capture(tracing::Level::DEBUG, || {
 		assert!(matches!(machine.poll(started, &waiter), Action::Dial(_)));
 		// The first address has a fallback, so it times out with an error naming it.
-		assert!(matches!(machine.poll(started + ATTEMPT, &waiter), Action::Abandon));
-		assert!(matches!(machine.poll(started + ATTEMPT, &waiter), Action::Dial(_)));
-		machine.failed(started + ATTEMPT, TestError::Dial, Verdict::Retry);
+		assert!(matches!(
+			machine.poll(started.saturating_add(ATTEMPT), &waiter),
+			Action::Abandon
+		));
+		assert!(matches!(
+			machine.poll(started.saturating_add(ATTEMPT), &waiter),
+			Action::Dial(_)
+		));
+		machine.failed(started.saturating_add(ATTEMPT), TestError::Dial, Verdict::Retry);
 		loop {
-			match machine.poll(started + ATTEMPT, &waiter) {
+			match machine.poll(started.saturating_add(ATTEMPT), &waiter) {
 				Action::Retrying(err) => reported.push(err.to_string()),
 				Action::Wait(_) => break,
 				action => panic!("unexpected {action:?}"),

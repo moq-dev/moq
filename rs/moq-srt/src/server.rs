@@ -699,7 +699,7 @@ mod tests {
 	#[test]
 	fn chunker_flushes_before_the_pacing_instant_changes() {
 		let first = moq_net::time::Instant::now();
-		let second = first + Duration::from_millis(25);
+		let second = first.saturating_add(Duration::from_millis(25));
 		let mut chunker = SrtChunker::default();
 
 		assert!(chunker.push(first, &[1; 188]).is_empty());
@@ -782,23 +782,27 @@ mod tests {
 	/// step as a rewind would drag the whole stream onto the reorder's instant.
 	#[test]
 	fn a_reorder_is_not_a_rewind() {
-		let start = Instant::ZERO + Duration::from_secs(1);
+		let start = Instant::ZERO.saturating_add(Duration::from_secs(1));
 		let mut egress = Egress::default();
 
 		let first = egress.push(&frame(1_400_000, &[1; SRT_PAYLOAD]), 0, start);
 		let edge = egress.push(
 			&frame(1_483_000, &[2; SRT_PAYLOAD]),
 			0,
-			start + Duration::from_millis(1),
+			start.saturating_add(Duration::from_millis(1)),
 		);
 		let reorder = egress.push(
 			&frame(1_442_000, &[3; SRT_PAYLOAD]),
 			0,
-			start + Duration::from_millis(2),
+			start.saturating_add(Duration::from_millis(2)),
 		);
 
 		assert_eq!(first[0].0, start, "the first payload anchors the connection");
-		assert_eq!(edge[0].0, start + Duration::from_millis(1), "the live edge re-anchors");
+		assert_eq!(
+			edge[0].0,
+			start.saturating_add(Duration::from_millis(1)),
+			"the live edge re-anchors"
+		);
 		assert_eq!(reorder[0].0, first[0].0, "the reorder is clamped, not re-anchored");
 	}
 
@@ -816,13 +820,13 @@ mod tests {
 		let after = egress.push(
 			&frame(WRAP + 25_000, &[2; SRT_PAYLOAD]),
 			0,
-			start + Duration::from_millis(50),
+			start.saturating_add(Duration::from_millis(50)),
 		);
 
 		assert_eq!(before[0].0, start);
 		assert_eq!(
 			after[0].0,
-			start + Duration::from_millis(50),
+			start.saturating_add(Duration::from_millis(50)),
 			"the wrap paces like any other 50ms step"
 		);
 	}
@@ -841,12 +845,12 @@ mod tests {
 
 		// Ten minutes into the program, on the muxer's 25ms grid.
 		let first = egress.push(&frame(600_000_000, &[1; SRT_PAYLOAD]), 0, start);
-		let second = egress.push(&frame(600_025_000, &[1; SRT_PAYLOAD]), 0, start + SLOT);
+		let second = egress.push(&frame(600_025_000, &[1; SRT_PAYLOAD]), 0, start.saturating_add(SLOT));
 		assert_eq!(first[0].0, start, "the first payload anchors the connection");
-		assert_eq!(second[0].0, start + SLOT);
+		assert_eq!(second[0].0, start.saturating_add(SLOT));
 
 		// The program switches to an instance whose timeline starts at zero.
-		let mut now = start + 2 * SLOT;
+		let mut now = start.saturating_add(2 * SLOT);
 		let switched = egress.push(&frame(0, &[2; SRT_PAYLOAD]), 1, now);
 		assert_eq!(switched[0].0, now, "the new generation becomes the live edge");
 
@@ -854,7 +858,7 @@ mod tests {
 		// one of them is ten minutes in the past and clamps to `start`, so the receiver
 		// gets the next ten minutes of program under a single timestamp.
 		for slot in 1..=8u64 {
-			now += SLOT;
+			now = now.saturating_add(SLOT);
 			let chunks = egress.push(&frame(slot * 25_000, &[3; SRT_PAYLOAD]), 1, now);
 			assert_eq!(chunks[0].0, now, "slot {slot} paces off the new anchor");
 		}
@@ -880,11 +884,23 @@ mod tests {
 		assert_eq!(chunks[1].1.as_ref(), [2u8; SRT_PAYLOAD].as_slice());
 
 		// And a tail paced earlier keeps that earlier instant rather than the new clock's.
-		assert!(egress.push(&frame(25_000, &[3; 188]), 1, start + SLOT).is_empty());
-		let chunks = egress.push(&frame(0, &[4; SRT_PAYLOAD]), 2, start + 2 * SLOT);
-		assert_eq!(chunks[0].0, start + SLOT, "the old tail keeps its own instant");
+		assert!(
+			egress
+				.push(&frame(25_000, &[3; 188]), 1, start.saturating_add(SLOT))
+				.is_empty()
+		);
+		let chunks = egress.push(&frame(0, &[4; SRT_PAYLOAD]), 2, start.saturating_add(2 * SLOT));
+		assert_eq!(
+			chunks[0].0,
+			start.saturating_add(SLOT),
+			"the old tail keeps its own instant"
+		);
 		assert_eq!(chunks[0].1.as_ref(), [3u8; 188].as_slice());
-		assert_eq!(chunks[1].0, start + 2 * SLOT, "the new generation is the live edge");
+		assert_eq!(
+			chunks[1].0,
+			start.saturating_add(2 * SLOT),
+			"the new generation is the live edge"
+		);
 	}
 
 	/// End to end over a real SRT receiver: a publisher that declares a marker after

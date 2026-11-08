@@ -1027,7 +1027,7 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let deadline = kio::clock::now() + tokio::time::Duration::from_secs(30);
+	let deadline = kio::clock::now().saturating_add(tokio::time::Duration::from_secs(30));
 
 	// The lease outlives this handler: the body streams after it returns, so the
 	// response holds the lease and ends it when the last frame is served.

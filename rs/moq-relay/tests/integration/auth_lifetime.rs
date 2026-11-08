@@ -781,7 +781,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	moved_grant.label = Some("project/key/2".into());
 	script.on_revalidate(Answer::Grant(moved_grant));
 
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	while active(&moved) < 2 {
 		assert!(kio::clock::now() < deadline, "the re-checked tier never applied");
 		kio::clock::sleep(Duration::from_millis(50)).await;

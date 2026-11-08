@@ -465,7 +465,7 @@ fn run_emulator(
 			)]
 			std::thread::sleep(next_frame - now);
 		}
-		next_frame += frame_duration;
+		next_frame = next_frame.saturating_add(frame_duration);
 
 		// Capture a single reference timestamp for this tick.
 		// Used for both video and audio PTS so they stay aligned.

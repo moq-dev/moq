@@ -844,12 +844,11 @@ mod tests {
 			tokio::spawn(playback(&media, delay).run(track, decoder, None))
 		};
 		tokio::task::yield_now().await;
-		let last_due = start
-			+ delay + if speaker {
+		let last_due = start.saturating_add(delay).saturating_add(if speaker {
 			Duration::from_millis(1_980)
 		} else {
 			Duration::ZERO
-		};
+		});
 		assert_eq!(media.presentation.due(last), Some(last_due));
 		assert!(media.video.lock().unwrap().len() <= MAX_FRAMES);
 		if speaker {
@@ -860,8 +859,8 @@ mod tests {
 		}
 		let mut shown = Vec::new();
 		let mut sizes = Vec::new();
-		while Instant::now() <= last_due + Duration::from_millis(10) {
-			if (!paused_window || Instant::now() >= start + Duration::from_secs(1))
+		while Instant::now() <= last_due.saturating_add(Duration::from_millis(10)) {
+			if (!paused_window || Instant::now() >= start.saturating_add(Duration::from_secs(1)))
 				&& let Some(picture) = media.output.present_frame(&media)
 			{
 				shown.push((picture.timestamp, Instant::now()));
@@ -980,7 +979,7 @@ mod tests {
 		tokio::task::yield_now().await;
 		assert_eq!(
 			media.presentation.due(moq_net::Timestamp::from_millis(500).unwrap()),
-			Some(restarted + delay)
+			Some(restarted.saturating_add(delay))
 		);
 		assert!(media.output.present(&media).is_none());
 		tokio::time::advance(delay + Duration::from_millis(1)).await;
@@ -1725,7 +1724,7 @@ mod tests {
 		let mut shown = Vec::new();
 		let mut restarted = false;
 		while !task.is_finished() {
-			if !restarted && Instant::now() >= start + late {
+			if !restarted && Instant::now() >= start.saturating_add(late) {
 				restart(&mut min);
 				restarted = true;
 			}
@@ -1770,7 +1769,7 @@ mod tests {
 		let last = moq_net::Timestamp::from_millis(order.iter().max().unwrap() * 33).unwrap();
 		let end = media.presentation.due(last).unwrap();
 		let mut shown = Vec::new();
-		while Instant::now() <= end + Duration::from_millis(10) {
+		while Instant::now() <= end.saturating_add(Duration::from_millis(10)) {
 			if let Some(timestamp) = media.output.present(&media) {
 				shown.push((timestamp, Instant::now()));
 			}

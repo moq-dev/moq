@@ -357,7 +357,12 @@ mod tests {
         cubic.state.ssthresh = window;
         cubic.state.w_max = 12.0 * BASE_DATAGRAM_SIZE as f64;
 
-        cubic.on_congestion(now, now + Duration::from_millis(1), false, false);
+        cubic.on_congestion(
+            now,
+            now.saturating_add(Duration::from_millis(1)),
+            false,
+            false,
+        );
 
         assert_eq!(cubic.state.w_max, window as f64 * (1.0 + BETA_CUBIC) / 2.0);
         assert_eq!(cubic.state.ssthresh, (window as f64 * BETA_CUBIC) as u64);
@@ -374,7 +379,12 @@ mod tests {
         cubic.state.ssthresh = window;
         cubic.state.w_max = window as f64;
 
-        cubic.on_congestion(now, now + Duration::from_millis(1), true, false);
+        cubic.on_congestion(
+            now,
+            now.saturating_add(Duration::from_millis(1)),
+            true,
+            false,
+        );
 
         // RFC 9438 §4.8 (Timeout): ssthresh is the pre-event window reduced by β_cubic
         // exactly once, as in §4.6; only cwnd is lowered to the minimum window.
@@ -399,7 +409,7 @@ mod tests {
 
         cubic.on_acked(
             now,
-            now + Duration::from_millis(1),
+            now.saturating_add(Duration::from_millis(1)),
             BASE_DATAGRAM_SIZE,
             false,
         );
@@ -422,7 +432,7 @@ mod tests {
 
         // After ten days without a congestion event, w_cubic exceeds u64::MAX.
         // Before this fix, computing the window increment overflowed.
-        let later = now + Duration::from_secs(10 * 24 * 60 * 60);
+        let later = now.saturating_add(Duration::from_secs(10 * 24 * 60 * 60));
         cubic.on_acked(later, later, BASE_DATAGRAM_SIZE, false);
 
         assert_eq!(cubic.state.window, window + BASE_DATAGRAM_SIZE);

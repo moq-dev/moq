@@ -1085,7 +1085,7 @@ async fn export_trims_leading_pictures_after_a_late_drop() {
 		(2080, 2060, false),
 		(2120, 2120, false),
 	] {
-		kio::clock::sleep_until(start + Duration::from_millis(at)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_millis(at))).await;
 		// Finding the source empty dates the next frame's arrival.
 		out.extend(poll_frames(&mut export));
 		video
@@ -1171,7 +1171,7 @@ async fn export_resumes_whole_mpeg2_video_at_a_sequence_header() {
 	for (index, (at, pts, sequence)) in pictures.into_iter().enumerate() {
 		// The audio arrives on time throughout, so only the video is late.
 		while sample * AUDIO_US <= at * 1_000 {
-			kio::clock::sleep_until(start + Duration::from_micros(sample * AUDIO_US)).await;
+			kio::clock::sleep_until(start.saturating_add(Duration::from_micros(sample * AUDIO_US))).await;
 			out.extend(poll_frames(&mut export));
 			audio
 				.write(Frame {
@@ -1183,7 +1183,7 @@ async fn export_resumes_whole_mpeg2_video_at_a_sequence_header() {
 				.unwrap();
 			sample += 1;
 		}
-		kio::clock::sleep_until(start + Duration::from_millis(at)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_millis(at))).await;
 		out.extend(poll_frames(&mut export));
 		let mut payload = if sequence { vec![0, 0, 1, 0xb3] } else { Vec::new() };
 		payload.extend_from_slice(&[0, 0, 1, 0x00, index as u8]);
@@ -5990,7 +5990,7 @@ impl Interleave {
 	/// Run the paused clock to `micros` of media time, as a live source would.
 	async fn at(&mut self, micros: u64) {
 		let start = *self.start.get_or_insert_with(kio::clock::now);
-		kio::clock::sleep_until(start + Duration::from_micros(micros)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_micros(micros))).await;
 	}
 
 	fn video(&mut self, tick: u64) {
@@ -8194,7 +8194,7 @@ async fn export_reordered(
 	let mut b = None;
 	let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
 	for tick in 0..TICKS {
-		kio::clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_micros(tick * VIDEO_US))).await;
 		if let Some((at, jitter)) = jitter
 			&& at == tick
 		{
@@ -8349,7 +8349,7 @@ async fn reordered_video_loses_nothing_on_a_clean_path() {
 	let start = kio::clock::now();
 	let mut out = Vec::new();
 	for tick in 0..TICKS / 2 {
-		kio::clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_micros(tick * VIDEO_US))).await;
 		rig.video(tick);
 		while rig.audio_before(tick + 1) {}
 		out.extend(poll_frames(&mut export));
@@ -8388,7 +8388,7 @@ async fn padded_video_needs_the_delay_its_hrd_declares() {
 		let mut out = Vec::new();
 		let mut failed = None;
 		'run: for tick in 0..TICKS / 2 {
-			kio::clock::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
+			kio::clock::sleep_until(start.saturating_add(Duration::from_micros(tick * VIDEO_US))).await;
 			rig.video(tick);
 			while rig.audio_before(tick + 1) {}
 			while let std::task::Poll::Ready(frame) = export.poll_next(&waiter) {
@@ -8526,7 +8526,7 @@ async fn a_skipped_group_flags_the_clock() {
 			let mut out = Vec::new();
 			// 100 ms groups of five 20 ms frames, a minute in, with two short or long holes.
 			for sequence in 0..80 + 2 * missing {
-				kio::clock::sleep_until(start + Duration::from_millis(sequence * 100)).await;
+				kio::clock::sleep_until(start.saturating_add(Duration::from_millis(sequence * 100))).await;
 				if !(20..20 + missing).contains(&sequence) && !(40 + missing..40 + 2 * missing).contains(&sequence) {
 					let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 					for k in 0..5u64 {
@@ -8660,7 +8660,7 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 	// One-second groups of 20 ms frames for 10 s, then a group back at zero. The track refuses
 	// a group whose first frame rewinds, so that group opens at the previous start.
 	for sequence in 0..11u64 {
-		kio::clock::sleep_until(start + Duration::from_secs(sequence)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_secs(sequence))).await;
 		let base = if sequence < 10 { sequence * 1_000 } else { 0 };
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		for k in 0..50u64 {
@@ -8701,7 +8701,7 @@ async fn a_late_join_starts_at_the_live_edge() {
 	let mut out = Vec::new();
 	// One-second groups of 20 ms frames; the exporter joins 5.5 s in with a 2 s delay.
 	for k in 0..400u64 {
-		kio::clock::sleep_until(start + Duration::from_millis(k * 20)).await;
+		kio::clock::sleep_until(start.saturating_add(Duration::from_millis(k * 20))).await;
 		if k % 50 == 0 && k > 0 {
 			audio.cut(None).unwrap();
 		}

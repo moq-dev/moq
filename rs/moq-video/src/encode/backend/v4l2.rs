@@ -276,7 +276,7 @@ impl V4l2 {
 	/// Take a raw buffer, waiting for the driver to release one if it holds them
 	/// all.
 	fn free_buffer(&mut self) -> Result<u32, Error> {
-		let deadline = Instant::now() + BUFFER_TIMEOUT;
+		let deadline = Instant::now().saturating_add(BUFFER_TIMEOUT);
 		loop {
 			self.reclaim()?;
 			if let Some(index) = self.raw.take_free() {
@@ -400,7 +400,7 @@ impl V4l2 {
 	/// Run the rest of the drain sequence, up to and including the restart.
 	fn drain_to_last(&mut self) -> Result<Vec<Encoded>, Error> {
 		let mut out = Vec::new();
-		let mut deadline = Instant::now() + FLUSH_TIMEOUT;
+		let mut deadline = Instant::now().saturating_add(FLUSH_TIMEOUT);
 		loop {
 			let before = out.len();
 			if self.drain(&mut out)? {
@@ -409,7 +409,7 @@ impl V4l2 {
 			// Progress earns more time, so a slow encoder finishes a long tail while
 			// a stalled one still gives up after `FLUSH_TIMEOUT` of silence.
 			if out.len() > before {
-				deadline = Instant::now() + FLUSH_TIMEOUT;
+				deadline = Instant::now().saturating_add(FLUSH_TIMEOUT);
 			} else if Instant::now() >= deadline {
 				return Err(Error::Codec(anyhow::anyhow!(
 					"V4L2 encoder did not finish its drain within {FLUSH_TIMEOUT:?}, holding {} frame(s)",
@@ -444,7 +444,7 @@ impl V4l2 {
 	/// which is what an empty [`Pending`] says here.
 	fn wait_out(&mut self) -> Result<Vec<Encoded>, Error> {
 		let mut out = Vec::new();
-		let mut deadline = Instant::now() + FLUSH_TIMEOUT;
+		let mut deadline = Instant::now().saturating_add(FLUSH_TIMEOUT);
 		loop {
 			let before = out.len();
 			self.drain(&mut out)?;
@@ -452,7 +452,7 @@ impl V4l2 {
 				return Ok(out);
 			}
 			if out.len() > before {
-				deadline = Instant::now() + FLUSH_TIMEOUT;
+				deadline = Instant::now().saturating_add(FLUSH_TIMEOUT);
 			} else if Instant::now() >= deadline {
 				return Err(Error::Codec(anyhow::anyhow!(
 					"V4L2 encoder held {} frame(s) for {FLUSH_TIMEOUT:?} without encoding them",

@@ -459,7 +459,8 @@ impl Pool {
 		let wall = super::clock::wall();
 		match self.inner.wall_epoch.get() {
 			Some(epoch) => {
-				let driven = *epoch + Duration::from_micros(self.inner.wall_micros.load(Ordering::Relaxed));
+				let driven =
+					epoch.saturating_add(Duration::from_micros(self.inner.wall_micros.load(Ordering::Relaxed)));
 				wall.max(driven)
 			}
 			None => wall,
@@ -508,7 +509,7 @@ impl Pool {
 			.map(|clock| clock.now);
 		let now = now.unwrap_or_else(super::clock::wall);
 		self.date(now);
-		self.date(now + duration);
+		self.date(now.saturating_add(duration));
 	}
 
 	#[cfg(test)]
@@ -1450,7 +1451,7 @@ mod test {
 		let pool = Pool::unbounded();
 		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let now = super::super::clock::wall();
-		let at = now + Duration::from_secs(1);
+		let at = now.saturating_add(Duration::from_secs(1));
 		let (read, reading) = flag();
 		track.watch_wall(at, &reading);
 
@@ -1468,7 +1469,7 @@ mod test {
 		);
 		assert_eq!(pool.poll(now, &driving), Some(at));
 
-		pool.poll(at - Duration::from_millis(1), &driving);
+		pool.poll(at.saturating_sub(Duration::from_millis(1)), &driving);
 		assert!(!read.0.load(Ordering::SeqCst), "released early");
 		assert_eq!(pool.poll(at, &driving), None);
 		assert!(read.0.load(Ordering::SeqCst), "the read was never released");
@@ -1485,12 +1486,12 @@ mod test {
 		let (read, reading) = flag();
 		let (driver, driving) = flag();
 		assert_eq!(pool.poll(now, &driving), None);
-		let at = now + Duration::from_secs(1);
+		let at = now.saturating_add(Duration::from_secs(1));
 		track.watch_wall(at, &reading);
 		assert!(driver.0.swap(false, Ordering::SeqCst));
 		assert_eq!(pool.poll(at, &driving), None);
 		assert!(read.0.swap(false, Ordering::SeqCst));
-		track.watch_wall(at + Duration::from_secs(1), &reading);
+		track.watch_wall(at.saturating_add(Duration::from_secs(1)), &reading);
 		assert!(driver.0.load(Ordering::SeqCst), "the drained list was never rearmed");
 	}
 
@@ -1504,13 +1505,13 @@ mod test {
 		pool.poll(now, &waiter);
 		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
-		let at = now + Duration::from_secs(1);
+		let at = now.saturating_add(Duration::from_secs(1));
 		track.watch_wall(at, &reading);
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(pool.poll(now, &waiter), None);
 		assert!(read.0.swap(false, Ordering::SeqCst), "ambient time was ignored");
 
-		let future = at + Duration::from_secs(1);
+		let future = at.saturating_add(Duration::from_secs(1));
 		track.watch_wall(future, &reading);
 		assert_eq!(pool.poll(future, &waiter), None);
 		assert!(read.0.swap(false, Ordering::SeqCst), "driven time was ignored");
@@ -1528,8 +1529,8 @@ mod test {
 		pool.poll(now, &kio::Waiter::noop());
 		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (_read, reading) = flag();
-		track.watch_wall(now + Duration::from_secs(2), &reading);
-		track.watch_wall(now + Duration::from_secs(1), &reading);
+		track.watch_wall(now.saturating_add(Duration::from_secs(2)), &reading);
+		track.watch_wall(now.saturating_add(Duration::from_secs(1)), &reading);
 		assert_eq!(pool.inner.wall.lock().due.len(), 1, "the later deadline lingers");
 
 		drop(track);
@@ -1775,7 +1776,7 @@ mod test {
 		let now = crate::time::Instant::now();
 		let deadline = pool.poll(now, &kio::Waiter::noop());
 		assert_eq!(
-			pool.poll(now + Duration::from_millis(500), &kio::Waiter::noop()),
+			pool.poll(now.saturating_add(Duration::from_millis(500)), &kio::Waiter::noop()),
 			deadline
 		);
 	}
@@ -1786,11 +1787,17 @@ mod test {
 		let now = crate::time::Instant::now();
 		assert_eq!(pool.poll(now, &kio::Waiter::noop()), None);
 		pool.resize(1024);
-		assert_eq!(pool.poll(now, &kio::Waiter::noop()), Some(now + DEFAULT_EXPIRY / 2));
-		pool.poll(now + DEFAULT_EXPIRY, &kio::Waiter::noop());
+		assert_eq!(
+			pool.poll(now, &kio::Waiter::noop()),
+			Some(now.saturating_add(DEFAULT_EXPIRY / 2))
+		);
+		pool.poll(now.saturating_add(DEFAULT_EXPIRY), &kio::Waiter::noop());
 		assert!(pool.now() > 0);
 		pool.resize(None);
-		assert_eq!(pool.poll(now + DEFAULT_EXPIRY, &kio::Waiter::noop()), None);
+		assert_eq!(
+			pool.poll(now.saturating_add(DEFAULT_EXPIRY), &kio::Waiter::noop()),
+			None
+		);
 	}
 
 	#[test]

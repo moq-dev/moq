@@ -590,9 +590,14 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		let connect = Some(self.config.timeout).filter(|timeout| !timeout.is_zero());
 		let attempt = (index + 1 < self.targets.len()).then_some(ATTEMPT);
 		let deadline = match (attempt, connect) {
-			(Some(attempt), Some(connect)) if connect <= attempt => Some((now + connect, Failure::Timeout(connect))),
-			(Some(attempt), _) => Some((now + attempt, Failure::Attempt(Shown(target.url()).to_string()))),
-			(None, Some(connect)) => Some((now + connect, Failure::Timeout(connect))),
+			(Some(attempt), Some(connect)) if connect <= attempt => {
+				Some((now.saturating_add(connect), Failure::Timeout(connect)))
+			}
+			(Some(attempt), _) => Some((
+				now.saturating_add(attempt),
+				Failure::Attempt(Shown(target.url()).to_string()),
+			)),
+			(None, Some(connect)) => Some((now.saturating_add(connect), Failure::Timeout(connect))),
 			(None, None) => None,
 		};
 
@@ -731,7 +736,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			old.retire();
 		}
 		self.predecessor = Some(Predecessor {
-			deadline: now + self.config.goaway.handover(msg.timeout()),
+			deadline: now.saturating_add(self.config.goaway.handover(msg.timeout())),
 			session: live.session,
 			closing: false,
 		});
@@ -806,7 +811,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		};
 		tracing::warn!(?wait, "{reason}");
 		self.phase = Phase::Backoff {
-			until: now + wait,
+			until: now.saturating_add(wait),
 			restart,
 		};
 	}

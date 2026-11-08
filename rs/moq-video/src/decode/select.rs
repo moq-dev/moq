@@ -254,7 +254,9 @@ impl Selector {
 
 		// Only a held min-delay picture has a deadline.
 		let deadline = match self.source {
-			Lane::Max => self.lanes[Lane::Min as usize].held().map(|(_, at)| at + interval),
+			Lane::Max => self.lanes[Lane::Min as usize]
+				.held()
+				.map(|(_, at)| at.saturating_add(interval)),
 			Lane::Min => None,
 		};
 		Next::Wait(deadline)
@@ -465,9 +467,9 @@ mod tests {
 		let Next::Wait(Some(deadline)) = selector.next(start) else {
 			panic!("a held picture must carry a deadline");
 		};
-		assert_eq!(deadline, start + FRAME);
+		assert_eq!(deadline, start.saturating_add(FRAME));
 		assert!(matches!(
-			selector.next(deadline - Duration::from_millis(1)),
+			selector.next(deadline.saturating_sub(Duration::from_millis(1))),
 			Next::Wait(_)
 		));
 		assert_eq!(drain(&mut selector, deadline), [33]);
@@ -670,7 +672,7 @@ mod tests {
 				selector.push(Lane::Max, picture(max[b]), now);
 				b += 1;
 			}
-			now += Duration::from_millis(7);
+			now = now.saturating_add(Duration::from_millis(7));
 			out.extend(drain(&mut selector, now));
 		}
 		selector.finish(Lane::Min);

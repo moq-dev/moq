@@ -793,7 +793,7 @@ mod tests {
 			},
 			now,
 		);
-		assert_eq!(reader.due(ms(0)), Some(now + DELAY));
+		assert_eq!(reader.due(ms(0)), Some(now.saturating_add(DELAY)));
 		let video = clock.track(Kind::Video);
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
@@ -845,7 +845,7 @@ mod tests {
 				buffered: DELAY,
 				target: DELAY,
 			},
-			now + Duration::from_millis(20),
+			now.saturating_add(Duration::from_millis(20)),
 		);
 		assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
 		clock.audio(
@@ -854,7 +854,7 @@ mod tests {
 				buffered: DELAY,
 				target: DELAY,
 			},
-			now + Duration::from_millis(20),
+			now.saturating_add(Duration::from_millis(20)),
 		);
 		assert!(
 			wakes.0.load(Ordering::Relaxed) > 0,
@@ -889,7 +889,10 @@ mod tests {
 		clock.video(ms(0), now);
 		let frames = [ms(0), ms(20), ms(40)];
 		assert_eq!(video.present(frames, now), None);
-		assert_eq!(video.present(frames, now + Duration::from_millis(60)), Some(1));
+		assert_eq!(
+			video.present(frames, now.saturating_add(Duration::from_millis(60))),
+			Some(1)
+		);
 		// The speaker takes over with 100ms queued; stale video deadlines no longer apply.
 		clock.audio(
 			Audio {
@@ -899,14 +902,26 @@ mod tests {
 			},
 			now,
 		);
-		assert_eq!(video.present(frames, now + Duration::from_millis(60)), Some(0));
-		assert_eq!(video.present(frames, now + Duration::from_millis(99)), Some(1));
-		assert_eq!(video.present(frames, now + Duration::from_millis(100)), Some(2));
+		assert_eq!(
+			video.present(frames, now.saturating_add(Duration::from_millis(60))),
+			Some(0)
+		);
+		assert_eq!(
+			video.present(frames, now.saturating_add(Duration::from_millis(99))),
+			Some(1)
+		);
+		assert_eq!(
+			video.present(frames, now.saturating_add(Duration::from_millis(100))),
+			Some(2)
+		);
 		// Neither a stall nor a future-only queue invents a new picture.
-		assert_eq!(video.present([], now + Duration::from_secs(1)), None);
-		assert_eq!(video.present([ms(80)], now + Duration::from_millis(100)), None);
+		assert_eq!(video.present([], now.saturating_add(Duration::from_secs(1))), None);
+		assert_eq!(
+			video.present([ms(80)], now.saturating_add(Duration::from_millis(100))),
+			None
+		);
 		clock.video(ms(1_000), now);
-		assert_eq!(video.due(ms(40)), Some(now + Duration::from_millis(100)));
+		assert_eq!(video.due(ms(40)), Some(now.saturating_add(Duration::from_millis(100))));
 	}
 
 	const DELAY: Duration = Duration::from_millis(100);
@@ -926,9 +941,9 @@ mod tests {
 		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
 		presentation.hold(DELAY);
 		assert_eq!(presentation.playhead(now), Some(Duration::from_millis(9_800)));
-		let later = now + Duration::from_millis(150);
+		let later = now.saturating_add(Duration::from_millis(150));
 		assert_eq!(presentation.playhead(later), Some(Duration::from_millis(9_950)));
-		let dry = now + Duration::from_secs(1);
+		let dry = now.saturating_add(Duration::from_secs(1));
 		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
 		assert_eq!(presentation.target(), Some(DELAY));
 
@@ -943,15 +958,15 @@ mod tests {
 		let now = Instant::now();
 		let mut presentation = State::new(DELAY);
 		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
-		let dry = now + Duration::from_secs(1);
+		let dry = now.saturating_add(Duration::from_secs(1));
 		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
 
 		// 100 ms of padding, then a 20 ms frame continuing from 10 s.
 		presentation.audio(Duration::from_millis(10_020), Duration::from_millis(120), dry);
 		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
-		let padded = dry + Duration::from_millis(100);
+		let padded = dry.saturating_add(Duration::from_millis(100));
 		assert_eq!(presentation.playhead(padded), Some(Duration::from_secs(10)));
-		let played = dry + Duration::from_millis(110);
+		let played = dry.saturating_add(Duration::from_millis(110));
 		assert_eq!(presentation.playhead(played), Some(Duration::from_millis(10_010)));
 
 		// A new timeline may start anywhere.
@@ -1119,7 +1134,7 @@ mod tests {
 		);
 		video.apply(next, video.resume(next, ms(5_000), None).ready().await.unwrap());
 		// The later replacement maps onto the running clock, not the audio restart's.
-		let resumed = kio::clock::now() + DELAY;
+		let resumed = kio::clock::now().saturating_add(DELAY);
 		assert_eq!(
 			presentation.state.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
 			Some(resumed)
@@ -1150,7 +1165,7 @@ mod tests {
 			transition,
 			video.resume(transition, ms(40), None).ready().await.unwrap(),
 		);
-		let resumed = kio::clock::now() + DELAY;
+		let resumed = kio::clock::now().saturating_add(DELAY);
 		assert_eq!(
 			presentation.state.lock().unwrap().due(video.map(ms(40)).unwrap()),
 			Some(resumed)
@@ -1232,7 +1247,7 @@ mod tests {
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		// The track closed, but its returned sink still plays the tail up to the end.
-		audio.retire(Some(now + Duration::from_millis(300)));
+		audio.retire(Some(now.saturating_add(Duration::from_millis(300))));
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
@@ -1258,7 +1273,7 @@ mod tests {
 		let video = Track::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
-		audio.retire(Some(now + Duration::from_millis(300)));
+		audio.retire(Some(now.saturating_add(Duration::from_millis(300))));
 		// A replacement rendition starts over at zero and re-pins the anchor.
 		{
 			let mut presentation = presentation.state.lock().unwrap();
@@ -1289,7 +1304,7 @@ mod tests {
 		let video = Track::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
-		audio.retire(Some(now + Duration::from_millis(300)));
+		audio.retire(Some(now.saturating_add(Duration::from_millis(300))));
 		// The next rendition fails while the retired sink still plays.
 		let successor = Track::new(presentation.clone(), Kind::Audio);
 		successor.declare();
@@ -1341,7 +1356,7 @@ mod tests {
 		);
 		assert_eq!(
 			presentation.state.lock().unwrap().due(audio.map(ms(0)).unwrap()),
-			Some(now + Duration::from_millis(200))
+			Some(now.saturating_add(Duration::from_millis(200)))
 		);
 	}
 
@@ -1355,19 +1370,22 @@ mod tests {
 		// Produced 500ms ago, though nothing here knows that yet. The window is
 		// asleep on the deadline the anchor last gave it, so every move is reported.
 		assert!(presentation.video(ms(0), start), "the first anchor");
-		assert_eq!(presentation.due(ms(0)), Some(start + DELAY));
+		assert_eq!(presentation.due(ms(0)), Some(start.saturating_add(DELAY)));
 
 		// 40ms of media later, but only 20ms of wall clock: the anchor was 480ms
 		// behind live, so it moves onto this frame.
-		let now = start + Duration::from_millis(20);
+		let now = start.saturating_add(Duration::from_millis(20));
 		assert!(presentation.video(ms(40), now), "an early frame left the anchor alone");
-		assert_eq!(presentation.due(ms(40)), Some(now + DELAY));
+		assert_eq!(presentation.due(ms(40)), Some(now.saturating_add(DELAY)));
 
 		// A frame that merely arrives late keeps its media instant. The delay is
 		// the room it has to be late in.
-		let late = now + Duration::from_millis(70);
+		let late = now.saturating_add(Duration::from_millis(70));
 		assert!(!presentation.video(ms(80), late), "a late arrival moved the anchor");
-		assert_eq!(presentation.due(ms(80)), Some(now + Duration::from_millis(140)));
+		assert_eq!(
+			presentation.due(ms(80)),
+			Some(now.saturating_add(Duration::from_millis(140)))
+		);
 	}
 
 	/// The speaker cannot skip forward with a re-anchor, so while it is playing a
@@ -1392,7 +1410,7 @@ mod tests {
 		// Once audio stops, video anchors again.
 		presentation.stopped();
 		presentation.video(ms(4_040), start);
-		assert_eq!(presentation.due(ms(4_040)), Some(start + DELAY));
+		assert_eq!(presentation.due(ms(4_040)), Some(start.saturating_add(DELAY)));
 	}
 
 	/// The speaker reports the sample sounding now, which is a delay behind the
@@ -1406,13 +1424,16 @@ mod tests {
 		// The last sample written is a full delay from sounding, which is exactly
 		// where a settled sink sits: media time and the picture agree.
 		presentation.audio(Duration::from_secs(1), DELAY, start);
-		assert_eq!(presentation.due(ms(1_000)), Some(start + DELAY));
+		assert_eq!(presentation.due(ms(1_000)), Some(start.saturating_add(DELAY)));
 
 		// Filling up, with only 40ms queued: that sample sounds in 40ms, so the
 		// picture that goes with it is due then too.
-		let now = start + Duration::from_millis(500);
+		let now = start.saturating_add(Duration::from_millis(500));
 		presentation.audio(Duration::from_millis(1_500), Duration::from_millis(40), now);
-		assert_eq!(presentation.due(ms(1_500)), Some(now + Duration::from_millis(40)));
+		assert_eq!(
+			presentation.due(ms(1_500)),
+			Some(now.saturating_add(Duration::from_millis(40)))
+		);
 	}
 
 	/// Video usually anchors first, and audio's first frame can sit behind that
@@ -1425,14 +1446,14 @@ mod tests {
 		presentation.video(ms(4_000), start);
 
 		presentation.audio(Duration::from_secs(1), DELAY, start);
-		assert_eq!(presentation.due(ms(1_000)), Some(start + DELAY));
+		assert_eq!(presentation.due(ms(1_000)), Some(start.saturating_add(DELAY)));
 
 		// A replacement rendition is a track boundary too: its timestamps need not
 		// continue the one that just ended.
 		presentation.stopped();
-		let now = start + Duration::from_millis(20);
+		let now = start.saturating_add(Duration::from_millis(20));
 		presentation.audio(Duration::from_millis(200), DELAY, now);
-		assert_eq!(presentation.due(ms(200)), Some(now + DELAY));
+		assert_eq!(presentation.due(ms(200)), Some(now.saturating_add(DELAY)));
 	}
 
 	/// A hole too large to play through drops the buffered audio and starts a new
@@ -1446,10 +1467,10 @@ mod tests {
 
 		// The publisher rewound: without the restart this pins media 9 seconds
 		// behind the anchor, leaving the picture 9 seconds in the past.
-		let now = start + Duration::from_millis(20);
+		let now = start.saturating_add(Duration::from_millis(20));
 		presentation.restarted();
 		presentation.audio(Duration::from_secs(1), DELAY, now);
-		assert_eq!(presentation.due(ms(1_000)), Some(now + DELAY));
+		assert_eq!(presentation.due(ms(1_000)), Some(now.saturating_add(DELAY)));
 	}
 
 	/// A retired rendition marks a restart for its replacement, which may never
@@ -1466,11 +1487,11 @@ mod tests {
 		presentation.audio(Duration::from_secs(1), DELAY, start);
 		// 20ms of media, 40ms of wall clock: a late frame paces and leaves the
 		// anchor where it was.
-		let now = start + Duration::from_millis(40);
+		let now = start.saturating_add(Duration::from_millis(40));
 		presentation.audio(Duration::from_millis(1_020), DELAY, now);
 		assert_eq!(
 			presentation.due(ms(1_020)),
-			Some(start + Duration::from_millis(20) + DELAY)
+			Some(start.saturating_add(Duration::from_millis(20)).saturating_add(DELAY))
 		);
 	}
 
@@ -1486,7 +1507,7 @@ mod tests {
 		);
 
 		// On schedule: 40ms of media, 40ms of wall clock, same sink depth.
-		let now = start + Duration::from_millis(40);
+		let now = start.saturating_add(Duration::from_millis(40));
 		assert!(
 			!presentation.audio(Duration::from_millis(1_040), DELAY, now),
 			"a frame on the anchor moved it"

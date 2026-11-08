@@ -763,7 +763,7 @@ impl Import {
 	/// amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
-		let mut deadline = kio::clock::now() + STEP_RETRY_BUDGET;
+		let mut deadline = kio::clock::now().saturating_add(STEP_RETRY_BUDGET);
 
 		loop {
 			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
@@ -787,7 +787,7 @@ impl Import {
 				Ok(outcome) => {
 					// The source is alive, so the earlier failures no longer describe it.
 					delay = STEP_RETRY_MIN;
-					deadline = kio::clock::now() + STEP_RETRY_BUDGET;
+					deadline = kio::clock::now().saturating_add(STEP_RETRY_BUDGET);
 					outcome
 				}
 				Err(err @ Error::ResourceRefused) => return Err(err),

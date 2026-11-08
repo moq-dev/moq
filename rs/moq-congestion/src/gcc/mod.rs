@@ -244,7 +244,7 @@ impl Gcc {
         if now < self.next_process {
             return;
         }
-        self.next_process = now + PROCESS_INTERVAL;
+        self.next_process = now.saturating_add(PROCESS_INTERVAL);
         let update = self.cc.on_process_interval(ProcessInterval {
             at_time: timestamp(now),
             pacer_queue: None,
@@ -465,7 +465,7 @@ impl Controller for Gcc {
             if next <= at {
                 return None;
             }
-            return Some(now + Duration::from_micros((next - at).us().max(0) as u64));
+            return Some(now.saturating_add(Duration::from_micros((next - at).us().max(0) as u64)));
         }
         let rate = Rate {
             window: self.congestion_window(),

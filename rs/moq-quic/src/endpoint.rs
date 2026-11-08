@@ -276,7 +276,7 @@ impl Endpoint {
 	) -> Option<Transmit> {
 		if self
 			.last_stateless_reset
-			.is_some_and(|last| last + self.config.min_reset_interval > now)
+			.is_some_and(|last| last.saturating_add(self.config.min_reset_interval) > now)
 		{
 			debug!("ignoring unexpected packet within minimum stateless reset interval");
 			return None;

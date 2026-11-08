@@ -3034,7 +3034,7 @@ mod tests {
 	fn activity_follows_recent_payload() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let at = |secs| Instant::ZERO + std::time::Duration::from_secs(secs);
+		let at = |secs| Instant::ZERO.saturating_add(std::time::Duration::from_secs(secs));
 		let activity = |secs| stats.snapshot_at(at(secs)).activity[&tier];
 		let both = |idle, active| Activity { idle, active };
 

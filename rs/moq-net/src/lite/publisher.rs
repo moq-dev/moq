@@ -2639,8 +2639,9 @@ impl Request for SubscribeServe {
 					let send = send.as_ref().expect("set above");
 					return match ready!(consumer.poll_recv(waiter))? {
 						Some(datagram) => {
-							*end = (*end).max(datagram.sequence.saturating_add(1));
-							send.send(datagram);
+							let next = datagram.sequence.saturating_add(1);
+							send.send(datagram)?;
+							*end = (*end).max(next);
 							Poll::Ready(Ok(ControlFlow::Continue(())))
 						}
 						None => {
@@ -2886,7 +2887,8 @@ impl LegacyDatagrams {
 	}
 
 	/// Send the next datagram: `true` once one went, `false` once none will come, such as a
-	/// name with no datagram track. The subscription goes on either way.
+	/// name with no datagram track or a sequence the wire cannot carry. The subscription
+	/// goes on either way.
 	fn poll_send(&mut self, shared: &Shared, waiter: &kio::Waiter) -> Poll<bool> {
 		if self.send.is_none() {
 			let Ok(info) = ready!(self.consumer.poll_info(waiter)) else {
@@ -2897,10 +2899,7 @@ impl LegacyDatagrams {
 		}
 		let send = self.send.as_ref().expect("set above");
 		match ready!(self.consumer.poll_recv(waiter)) {
-			Ok(Some(datagram)) => {
-				send.send(datagram);
-				Poll::Ready(true)
-			}
+			Ok(Some(datagram)) => Poll::Ready(send.send(datagram).is_ok()),
 			Ok(None) | Err(_) => Poll::Ready(false),
 		}
 	}
@@ -2946,13 +2945,16 @@ impl DatagramSend {
 	/// Send one datagram over a QUIC datagram, newest first within the subscription. It is
 	/// dropped, as a datagram may be anywhere, if its body doesn't fit the transport's
 	/// datagram size or the transport has no room for it now.
-	fn send(&self, datagram: crate::Datagram) {
+	///
+	/// Fails on a sequence the version's varints cannot carry (2^62 and up before lite-07):
+	/// every later datagram is at least as far, so the subscription can deliver no more.
+	fn send(&self, datagram: crate::Datagram) -> Result<(), Error> {
 		let Ok(timestamp) = self
 			.stamp
 			.map(|stamp| stamp.wire(datagram.timestamp, &self.runtime))
 			.transpose()
 		else {
-			return;
+			return Ok(());
 		};
 		let sequence = datagram.sequence;
 		let body = lite::Datagram {
@@ -2963,19 +2965,18 @@ impl DatagramSend {
 		};
 		// The stamp is set wherever the version needs a timestamp, so this never hits a
 		// version guard.
-		let Ok(body) = body.encode_bytes(self.version) else {
-			return;
-		};
+		let body = body.encode_bytes(self.version)?;
 		let max = self.session.max_datagram_size().min(lite::Datagram::MAX_SIZE);
 		if body.len() > max {
 			tracing::debug!(sequence, size = body.len(), max, "dropping oversized datagram");
-			return;
+			return Ok(());
 		}
 		let options = SendOptions {
 			group: self.group.as_ref(),
 			priority: crate::priority::in_group(sequence, 0, Order::Descending),
 		};
 		let _ = self.session.send_datagram(body, options);
+		Ok(())
 	}
 }
 
@@ -3059,7 +3060,7 @@ impl Request for DatagramServe {
 		let send = self.send.as_ref().expect("set above");
 		match ready!(self.consumer.poll_recv(waiter))? {
 			Some(datagram) => {
-				send.send(datagram);
+				send.send(datagram)?;
 				Poll::Ready(Ok(ControlFlow::Continue(())))
 			}
 			None => Poll::Ready(Ok(ControlFlow::Break(()))),
@@ -7375,11 +7376,13 @@ mod serve_group_test {
 					let log = session.log.clone();
 					// Lite-07's type adds one byte to the three one-byte fields.
 					let header = if version.has_padding() { 4 } else { 3 };
-					datagram_send(version, session).send(crate::Datagram {
-						sequence: 1,
-						timestamp: Some(Timestamp::ZERO),
-						payload: bytes::Bytes::from(vec![0; size - header]),
-					});
+					datagram_send(version, session)
+						.send(crate::Datagram {
+							sequence: 1,
+							timestamp: Some(Timestamp::ZERO),
+							payload: bytes::Bytes::from(vec![0; size - header]),
+						})
+						.unwrap();
 					assert_eq!(
 						log.datagrams.lock().unwrap().len(),
 						usize::from(size <= transport.min(1200)),
@@ -7387,6 +7390,23 @@ mod serve_group_test {
 					);
 				}
 			}
+		}
+	}
+
+	/// A sequence past QUIC's varints fails the send before lite-07, which carries any.
+	#[kio::test]
+	async fn a_datagram_past_the_wire_s_sequences_fails() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let session = SinkSession::new(Log::default()).with_datagrams(1200);
+			let log = session.log.clone();
+			let sent = datagram_send(version, session).send(crate::Datagram {
+				sequence: 1 << 62,
+				timestamp: Some(Timestamp::ZERO),
+				payload: bytes::Bytes::from_static(b"d"),
+			});
+			let carried = version == Version::Lite07;
+			assert_eq!(sent.is_ok(), carried, "{version}");
+			assert_eq!(log.datagrams.lock().unwrap().len(), usize::from(carried), "{version}");
 		}
 	}
 
@@ -7401,7 +7421,8 @@ mod serve_group_test {
 				sequence,
 				timestamp: Some(Timestamp::ZERO),
 				payload: bytes::Bytes::from_static(b"d"),
-			});
+			})
+			.unwrap();
 		}
 		assert_eq!(
 			log.datagram_ranks(),
@@ -7411,11 +7432,13 @@ mod serve_group_test {
 		// Without send groups, the rank goes alone.
 		let session = SinkSession::new(Log::default()).with_datagrams(1200);
 		let log = session.log.clone();
-		datagram_send(Version::Lite07, session).send(crate::Datagram {
-			sequence: 4,
-			timestamp: Some(Timestamp::ZERO),
-			payload: bytes::Bytes::from_static(b"d"),
-		});
+		datagram_send(Version::Lite07, session)
+			.send(crate::Datagram {
+				sequence: 4,
+				timestamp: Some(Timestamp::ZERO),
+				payload: bytes::Bytes::from_static(b"d"),
+			})
+			.unwrap();
 		assert_eq!(
 			log.datagram_ranks(),
 			[(None, crate::priority::in_group(4, 0, Order::Descending))]

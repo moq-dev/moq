@@ -11398,17 +11398,17 @@ mod test {
 		let now = crate::model::clock::now();
 		assert_eq!(
 			pool.poll(now, &kio::Waiter::noop()),
-			Some(now + Duration::from_millis(500))
+			Some(now.saturating_add(Duration::from_millis(500)))
 		);
 		let producer = track_producer_pooled("test", pool.clone());
 		let mut group = producer.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"first".as_slice()).unwrap();
 		let _open = producer.append_group().unwrap();
 		// Activity written while cleanup was idle gets the new supplied time.
-		let later = now + Duration::from_secs(60);
+		let later = now.saturating_add(Duration::from_secs(60));
 		pool.poll(later, &kio::Waiter::noop());
 		assert!(producer.state.read().lookup.contains_key(&0));
-		pool.poll(later + Duration::from_secs(2), &kio::Waiter::noop());
+		pool.poll(later.saturating_add(Duration::from_secs(2)), &kio::Waiter::noop());
 		assert!(!producer.state.read().lookup.contains_key(&0));
 	}
 
@@ -11425,7 +11425,7 @@ mod test {
 		for group in &groups[..EVICT_SCAN * 2] {
 			group.handle().cache_refresh();
 		}
-		pool.poll(now + expiry * 2, &kio::Waiter::noop());
+		pool.poll(now.saturating_add(expiry * 2), &kio::Waiter::noop());
 		let state = producer.state.read();
 		for sequence in 0..EVICT_SCAN * 2 {
 			assert!(state.lookup.contains_key(&(sequence as u64)), "fresh front survives");

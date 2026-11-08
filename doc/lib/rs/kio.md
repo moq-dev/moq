@@ -15,7 +15,10 @@ and in a simulator that tests drive.
 ## The clock
 
 `kio::clock::Instant` is a monotonic instant, counted in nanoseconds from the
-clock's origin, with the methods of `std::time::Instant`. `Wall` is wall
+clock's origin, with the methods of `std::time::Instant`. It has no `+` or `-`
+with a `Duration`, which would panic past the clock's range: pick
+`checked_add`/`checked_sub`, or `saturating_add`/`saturating_sub`, which stop
+at the clock's last instant (centuries out) or its origin. `Wall` is wall
 time from the same clock. It is a separate type because wall time can step
 forward or back without any time passing, so it never measures elapsed time.
 
@@ -76,7 +79,7 @@ async fn gives_up_after_five_seconds() {
         kio::clock::timeout(Duration::from_secs(5), std::future::pending::<()>()).await
     });
     assert!(task.await.unwrap().is_err());
-    assert_eq!(kio::clock::now(), kio::clock::Instant::ZERO + Duration::from_secs(5));
+    assert_eq!(kio::clock::now(), kio::clock::Instant::ZERO.saturating_add(Duration::from_secs(5)));
 }
 ```
 

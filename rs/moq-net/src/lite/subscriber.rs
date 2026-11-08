@@ -3258,10 +3258,10 @@ mod tests {
 		let mut fetches = FeedFetches::new(&clock);
 		fetches.push(req, &track.consume());
 		arrive(&track, &tail, 2, start);
-		let late = start + crate::tail::GRACE / 2;
+		let late = start.saturating_add(crate::tail::GRACE / 2);
 		fetches.poll(&sub, late, &kio::Waiter::noop());
 		assert_eq!(fetches.held.len(), 1, "group 2 alone does not give up on group 1");
-		assert_eq!(fetches.fold.deadline(), Some(start + crate::tail::GRACE));
+		assert_eq!(fetches.fold.deadline(), Some(start.saturating_add(crate::tail::GRACE)));
 
 		arrive(&track, &tail, 1, late);
 		fetches.poll(&sub, late, &kio::Waiter::noop());
@@ -3286,7 +3286,7 @@ mod tests {
 
 		let mut fetches = FeedFetches::new(&clock);
 		fetches.push(req, &track.consume());
-		fetches.poll(&sub, start + crate::tail::GRACE, &kio::Waiter::noop());
+		fetches.poll(&sub, start.saturating_add(crate::tail::GRACE), &kio::Waiter::noop());
 		assert!(fetches.held.is_empty());
 		assert!(matches!(fetching.now_or_never(), Some(Err(Error::NotFound))));
 	}
@@ -3417,9 +3417,9 @@ mod tests {
 		fetches.poll(&sub, start, &waiter);
 		assert!(fetches.held.is_empty());
 		arrive(&track, &tail, 200, start);
-		fetches.poll(&sub, start + crate::tail::GRACE, &waiter);
+		fetches.poll(&sub, start.saturating_add(crate::tail::GRACE), &waiter);
 		wakes.0.store(0, atomic::Ordering::Relaxed);
-		fetches.poll(&sub, start + crate::tail::GRACE, &waiter);
+		fetches.poll(&sub, start.saturating_add(crate::tail::GRACE), &waiter);
 		assert_eq!(
 			wakes.0.load(atomic::Ordering::Relaxed),
 			0,
@@ -3453,7 +3453,7 @@ mod tests {
 		fetches.poll(&sub, start, &waiter);
 		assert_eq!(fetches.polled - polled, 1, "an arrival touches its group alone");
 		assert_eq!(fetches.held.len(), 31);
-		assert_eq!(fetches.fold.deadline(), Some(start + crate::tail::GRACE));
+		assert_eq!(fetches.fold.deadline(), Some(start.saturating_add(crate::tail::GRACE)));
 	}
 
 	#[kio::test]
@@ -3470,17 +3470,21 @@ mod tests {
 		arrive(&track, &tail, 0, start);
 		arrive(&track, &tail, 2, start);
 		kio::clock::sleep(crate::tail::GRACE / 2).await;
-		arrive(&track, &tail, 4, start + crate::tail::GRACE / 2);
+		arrive(&track, &tail, 4, start.saturating_add(crate::tail::GRACE / 2));
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
 		let polled = fetches.polled;
-		fetches.poll(&sub, start + crate::tail::GRACE, &waiter);
+		fetches.poll(&sub, start.saturating_add(crate::tail::GRACE), &waiter);
 		assert_eq!(fetches.polled - polled, 1);
 		assert!(!fetches.held.contains_key(&1));
 		assert_eq!(fetches.held.len(), 3);
 		assert_eq!(
 			fetches.fold.deadline(),
-			Some(start + crate::tail::GRACE + crate::tail::GRACE / 2)
+			Some(
+				start
+					.saturating_add(crate::tail::GRACE)
+					.saturating_add(crate::tail::GRACE / 2)
+			)
 		);
 	}
 

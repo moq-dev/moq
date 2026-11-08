@@ -180,7 +180,7 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 		events: libc::POLLIN,
 		revents: 0,
 	};
-	let deadline = kio::clock::now() + DMA_BUF_FENCE_TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(DMA_BUF_FENCE_TIMEOUT);
 	loop {
 		// A signal restarts the wait against the same deadline rather than
 		// granting a fresh budget, so the total stall stays bounded.

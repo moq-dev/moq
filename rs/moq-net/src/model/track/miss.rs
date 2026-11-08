@@ -1576,7 +1576,7 @@ mod tests {
 			let waiter = kio::Waiter::new(flag.clone().into());
 			assert!(misses.resolve(&state, Some(budget), &mut given_up, &waiter).is_empty());
 			if let Some(requests) = requests {
-				pool.poll(opened + budget / 2, &noop);
+				pool.poll(opened.saturating_add(budget / 2), &noop);
 				let Poll::Ready(Ok(fill)) = requests.poll_requested_fill_group(&noop) else {
 					panic!("the queued fill");
 				};
@@ -1586,8 +1586,11 @@ mod tests {
 			assert!(misses.refused.contains(&1));
 			assert!(given_up.is_empty(), "the live feed may still deliver the group");
 			flag.0.store(false, Ordering::Relaxed);
-			let deadline = opened + budget;
-			assert_eq!(pool.poll(deadline - Duration::from_micros(1), &noop), Some(deadline));
+			let deadline = opened.saturating_add(budget);
+			assert_eq!(
+				pool.poll(deadline.saturating_sub(Duration::from_micros(1)), &noop),
+				Some(deadline)
+			);
 			assert!(!flag.0.load(Ordering::Relaxed));
 			pool.poll(deadline, &noop);
 			assert!(
@@ -2051,7 +2054,7 @@ mod tests {
 		assert_eq!(misses.deferred.overlapping(0..5).collect::<Vec<_>>(), vec![3..4]);
 		assert_eq!(
 			misses.deferred.deadline(),
-			Some(opened + wider),
+			Some(opened.saturating_add(wider)),
 			"timed by the new grace"
 		);
 	}
@@ -2457,8 +2460,8 @@ mod tests {
 	#[test]
 	fn deferred_splits_and_replacements_retire_the_old_age_entries() {
 		let mut deferred = Deferred::default();
-		let early = crate::time::Instant::ZERO + Duration::from_secs(1);
-		let late = early + Duration::from_secs(1);
+		let early = crate::time::Instant::ZERO.saturating_add(Duration::from_secs(1));
+		let late = early.saturating_add(Duration::from_secs(1));
 		deferred.insert(0..u64::MAX, Some(early));
 		deferred.insert(10..20, Some(late));
 		deferred.remove(5..25);

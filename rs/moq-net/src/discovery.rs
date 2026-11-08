@@ -276,7 +276,7 @@ impl Discovery {
 		if request.linger.is_some() {
 			return;
 		}
-		let at = self.runtime.now() + LINGER;
+		let at = self.runtime.now().saturating_add(LINGER);
 		request.linger = Some(at);
 		self.lingering.insert((at, prefix));
 		self.timer.set(self.lingering.first().map(|(at, _)| *at));

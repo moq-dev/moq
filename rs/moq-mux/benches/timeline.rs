@@ -8,7 +8,7 @@ use moq_net::Timestamp;
 
 fn presentation(c: &mut Criterion) {
 	let mut group = c.benchmark_group("timeline_present");
-	let now = Instant::ZERO + Duration::from_secs(1);
+	let now = Instant::ZERO.saturating_add(Duration::from_secs(1));
 	for readers in [1, 8, 64] {
 		for frames in [1, 3, 30] {
 			let clock = timeline::Producer::new(Duration::from_millis(100));
@@ -28,8 +28,10 @@ fn presentation(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new(readers.to_string(), frames), |b| {
 				b.iter(|| {
 					for consumer in &consumers {
-						let selected =
-							consumer.present(black_box(timestamps.iter().copied()), now + Duration::from_secs(1));
+						let selected = consumer.present(
+							black_box(timestamps.iter().copied()),
+							now.saturating_add(Duration::from_secs(1)),
+						);
 						assert_eq!(selected, Some(frames as usize - 1));
 					}
 				});
@@ -40,7 +42,7 @@ fn presentation(c: &mut Criterion) {
 }
 
 fn update(c: &mut Criterion) {
-	let now = Instant::ZERO + Duration::from_secs(1);
+	let now = Instant::ZERO.saturating_add(Duration::from_secs(1));
 	let clock = timeline::Producer::new(Duration::from_millis(100));
 	c.bench_function("timeline_audio_update", |b| {
 		b.iter(|| {

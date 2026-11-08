@@ -259,12 +259,12 @@ mod tests {
 
 		grant.expires = Some(now + Duration::from_secs(10));
 		kio::clock::sim::advance(Duration::from_secs(4)).await;
-		assert_eq!(grant.deadline(), Some(start + Duration::from_secs(10)));
+		assert_eq!(grant.deadline(), Some(start.saturating_add(Duration::from_secs(10))));
 
 		grant.expires = Some(now - Duration::from_secs(1));
 		assert_eq!(
 			grant.deadline(),
-			Some(start + Duration::from_secs(4)),
+			Some(start.saturating_add(Duration::from_secs(4))),
 			"a past expiry is now, not a grace window"
 		);
 	}

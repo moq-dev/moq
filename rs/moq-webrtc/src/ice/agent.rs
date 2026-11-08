@@ -270,7 +270,9 @@ impl Agent {
 	/// When [`ESTABLISH_TIMEOUT`] expires, or `None` while it is held or ICE connected.
 	fn establish(&self) -> Option<Instant> {
 		match (self.started, self.gathered) {
-			(Some(started), Some(gathered)) if !self.connected => Some(started.max(gathered) + ESTABLISH_TIMEOUT),
+			(Some(started), Some(gathered)) if !self.connected => {
+				Some(started.max(gathered).saturating_add(ESTABLISH_TIMEOUT))
+			}
 			_ => None,
 		}
 	}
@@ -399,11 +401,10 @@ impl Agent {
 				return false;
 			}
 			query.sends += 1;
-			query.deadline = now
-				+ match query.sends {
-					STUN_SENDS => STUN_RTO * STUN_LAST_WAIT,
-					_ => query.rto,
-				};
+			query.deadline = now.saturating_add(match query.sends {
+				STUN_SENDS => STUN_RTO * STUN_LAST_WAIT,
+				_ => query.rto,
+			});
 			query.rto *= 2;
 			due.push((query.request.clone(), query.server));
 			true
@@ -518,7 +519,7 @@ mod tests {
 		agent.stun.clear();
 		assert!(matches!(agent.next().await, Ok(Event::Gathered)));
 		let gathered = agent.gathered.unwrap();
-		assert_eq!(agent.establish(), Some(gathered + ESTABLISH_TIMEOUT));
+		assert_eq!(agent.establish(), Some(gathered.saturating_add(ESTABLISH_TIMEOUT)));
 	}
 
 	/// A peer that answers but never sends: DTLS gives up on its handshake before ICE

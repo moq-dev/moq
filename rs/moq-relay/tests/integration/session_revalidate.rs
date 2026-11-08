@@ -291,7 +291,7 @@ async fn connect(url: url::Url, bind: &str) -> moq_tokio::Connection {
 }
 
 async fn wait_listed(fixture: &Fixture, n: usize) -> List {
-	let deadline = kio::clock::now() + Duration::from_secs(5);
+	let deadline = kio::clock::now().saturating_add(Duration::from_secs(5));
 	loop {
 		let (status, list) = fixture.list("").await;
 		assert_eq!(status, reqwest::StatusCode::OK);
@@ -455,7 +455,7 @@ async fn a_pushed_retier_arrives_on_the_next_reply() {
 
 	// A re-check applies a new tier only once it has decided to keep the session.
 	let gold = moq_net::stats::Tier::new(moq_net::Path::from_static("gold"));
-	let deadline = kio::clock::now() + TIMEOUT;
+	let deadline = kio::clock::now().saturating_add(TIMEOUT);
 	while !fixture
 		.stats
 		.snapshot()

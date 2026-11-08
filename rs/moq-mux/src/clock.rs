@@ -301,15 +301,18 @@ mod tests {
 	async fn a_capture_maps_onto_the_clock() {
 		kio::clock::sleep(Duration::from_secs(6)).await;
 		let now = kio::clock::now();
-		let clock = Clock::at(now - Duration::from_secs(5), moq_epoch()).unwrap();
-		assert_eq!(clock.capture(now - Duration::from_secs(2)).unwrap(), us(3_000_000));
+		let clock = Clock::at(now.saturating_sub(Duration::from_secs(5)), moq_epoch()).unwrap();
+		assert_eq!(
+			clock.capture(now.saturating_sub(Duration::from_secs(2))).unwrap(),
+			us(3_000_000)
+		);
 
 		assert!(matches!(
-			clock.capture(kio::clock::now() + Duration::from_secs(1)),
+			clock.capture(kio::clock::now().saturating_add(Duration::from_secs(1))),
 			Err(crate::Error::InvalidCapture)
 		));
 		assert!(matches!(
-			clock.capture(now - Duration::from_secs(6)),
+			clock.capture(now.saturating_sub(Duration::from_secs(6))),
 			Err(crate::Error::InvalidCapture)
 		));
 	}
@@ -341,14 +344,14 @@ mod tests {
 			"a new mapping samples the corrected wall"
 		);
 
-		let captured = epoch + Duration::from_secs(2);
+		let captured = epoch.saturating_add(Duration::from_secs(2));
 		assert_eq!(clock.capture(captured).unwrap(), us(2_000_000));
 		assert!(matches!(
-			clock.capture(epoch + Duration::from_secs(4)),
+			clock.capture(epoch.saturating_add(Duration::from_secs(4))),
 			Err(crate::Error::InvalidCapture)
 		));
 		assert!(matches!(
-			clock.capture(epoch - Duration::from_secs(1)),
+			clock.capture(epoch.saturating_sub(Duration::from_secs(1))),
 			Err(crate::Error::InvalidCapture)
 		));
 	}
@@ -404,7 +407,9 @@ mod tests {
 		assert!(drift < Duration::from_secs(1), "the first timestamp is live on arrival");
 
 		// A capture from before the arrival still maps, down to PTS zero.
-		let earlier = clock.capture(kio::clock::now() - Duration::from_secs(1)).unwrap();
+		let earlier = clock
+			.capture(kio::clock::now().saturating_sub(Duration::from_secs(1)))
+			.unwrap();
 		assert!(earlier.as_micros() < now.as_micros());
 
 		// PTS zero before 2020 cannot be named on the wire.

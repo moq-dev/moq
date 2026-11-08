@@ -454,7 +454,7 @@ mod test {
 			let waiter = parked();
 			let budget = Duration::from_secs(1) + Duration::from_micros(i);
 			wakes.watch_deadline(Timestamp::from_secs(10).unwrap(), budget, &waiter);
-			wakes.watch_wall(now + budget, &waiter);
+			wakes.watch_wall(now.saturating_add(budget), &waiter);
 			live.push(waiter);
 		}
 		assert!(
@@ -473,7 +473,7 @@ mod test {
 			let waiter = parked();
 			let budget = Duration::from_secs(1) + Duration::from_micros(i);
 			wakes.watch_deadline(Timestamp::from_secs(10).unwrap(), budget, &waiter);
-			wakes.watch_wall(now + budget, &waiter);
+			wakes.watch_wall(now.saturating_add(budget), &waiter);
 		}
 		let (media, wall) = wakes.deadlines_indexed();
 		assert!(

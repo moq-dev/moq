@@ -511,7 +511,10 @@ fn bench_wall(c: &mut Criterion) {
 					|| Aged::new(tracks, groups),
 					|aged| {
 						// Past every deadline, which setup armed after `now`.
-						black_box(aged.pool.poll(aged.now + 2 * AGED_BUDGET, &kio::Waiter::noop()));
+						black_box(
+							aged.pool
+								.poll(aged.now.saturating_add(2 * AGED_BUDGET), &kio::Waiter::noop()),
+						);
 						aged
 					},
 					BatchSize::PerIteration,
@@ -538,7 +541,7 @@ fn bench_gc(c: &mut Criterion) {
 			let mut now = swept.now;
 			let waiter = kio::Waiter::noop();
 			b.iter(|| {
-				now += Duration::from_nanos(1);
+				now = now.saturating_add(Duration::from_nanos(1));
 				black_box(swept.pool.poll(now, &waiter))
 			});
 		});
@@ -550,7 +553,7 @@ fn bench_gc(c: &mut Criterion) {
 			let mut now = swept.now;
 			let waiter = kio::Waiter::noop();
 			b.iter(|| {
-				now += interval;
+				now = now.saturating_add(interval);
 				black_box(swept.pool.poll(now, &waiter))
 			});
 		});
@@ -1392,12 +1395,12 @@ impl Expiring {
 		let mut fixture = Self {
 			sparse,
 			pool,
-			now: Instant::now() + Duration::from_secs(3600),
+			now: Instant::now().saturating_add(Duration::from_secs(3600)),
 		};
 		for gap in 0..gaps {
 			fixture.pool.poll(fixture.now, &kio::Waiter::noop());
 			fixture.sparse.hand_out(gap * 2);
-			fixture.now += Duration::from_millis(1);
+			fixture.now = fixture.now.saturating_add(Duration::from_millis(1));
 		}
 		fixture.sparse.next = gaps * 2;
 		// The eviction queue trails arrivals by one entry: warm both capacities.
@@ -1413,7 +1416,7 @@ impl Expiring {
 	}
 
 	fn step(&mut self) {
-		self.now += Duration::from_millis(1);
+		self.now = self.now.saturating_add(Duration::from_millis(1));
 		self.pool.poll(self.now, &kio::Waiter::noop());
 		self.sparse.hand_out(self.sparse.next);
 		self.sparse.next += 2;
