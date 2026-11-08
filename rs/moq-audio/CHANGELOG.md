@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Breaking:** `Bus::channel` and `bus::Channel` are renamed `Bus::live` and
+  `bus::Live`, pairing with `Bus::positioned` and `bus::Positioned`. See
+  `MIGRATE.md`.
 - `Bus::positioned` adds a bus source whose every write names the bus position
   its first frame plays at, for audio scheduled against video on the bus's
   clock. A write that would land where the bus already mixed, overlap the

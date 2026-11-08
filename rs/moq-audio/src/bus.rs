@@ -1,9 +1,10 @@
 //! Route PCM sources into several mixes, advanced on the caller's clock.
 //!
-//! A [`Bus`] holds sources, each a [`Channel`] fed with PCM and controlled by a
-//! [`Strip`] of gain, mute, pan, sync delay, and level meter, and [`Mix`]es, each
-//! the sum of the sources routed into it. A [`Minus`] is a mix-minus: one mix
-//! with one of its sources taken out, for a guest's return feed. Every mix
+//! A [`Bus`] holds sources, each a [`Live`] or [`Positioned`] channel fed with
+//! PCM and controlled by a [`Strip`] of gain, mute, pan, sync delay, and level
+//! meter, and [`Mix`]es, each the sum of the sources routed into it. A
+//! [`Minus`] is a mix-minus: one mix with one of its sources taken out, for a
+//! guest's return feed. Every mix
 //! publishes interleaved `f32` at the bus's [`Config`] to any number of
 //! independent [`Reader`]s.
 //!
@@ -29,7 +30,7 @@
 //!
 //! let (bus, mut driver) = bus::Bus::new(bus::Config::default())?;
 //! let strip = bus::Strip::default();
-//! let mut mic = bus.channel(encode::Input::new(44_100, moq_audio::Layout::Mono), strip.clone())?;
+//! let mut mic = bus.live(encode::Input::new(44_100, moq_audio::Layout::Mono), strip.clone())?;
 //! strip.set_gain(0.5);
 //!
 //! let program = bus.mix();
@@ -60,7 +61,7 @@ use crate::resample::Remix;
 use crate::ring;
 use crate::{Error, Layout, Level};
 
-/// Audio held between a [`Channel::write`] and the [`Driver::advance`] that mixes it.
+/// Audio held between a [`Live::write`] and the [`Driver::advance`] that mixes it.
 ///
 /// The jitter a late write absorbs without a dropout, and the delay every
 /// source carries into the mix. Matches the playback sink's default, which
@@ -152,7 +153,7 @@ struct Feed {
 
 /// Where a channel's audio waits to be mixed.
 enum Queue {
-	/// A [`Channel`]'s jitter buffer, filled without the mixer's lock.
+	/// A [`Live`]'s jitter buffer, filled without the mixer's lock.
 	Live(ring::Consumer),
 	/// A [`Positioned`] channel's interleaved samples, the first of which is
 	/// mixed at the bus's next position. Filled under the mixer's lock, so a
@@ -357,7 +358,7 @@ impl Bus {
 	///
 	/// Refuses a strip panned off center unless the bus is stereo, and holds
 	/// the strip at center while this channel is open on such a bus.
-	pub fn channel(&self, input: Input, strip: Strip) -> Result<Channel, Error> {
+	pub fn live(&self, input: Input, strip: Strip) -> Result<Live, Error> {
 		if input.sample_rate == 0 {
 			return Err(Error::Unsupported("channel sample rate must be > 0".into()));
 		}
@@ -375,7 +376,7 @@ impl Bus {
 			},
 		);
 		let port = self.open(input, strip, Queue::Live(cons))?;
-		Ok(Channel { prod, port })
+		Ok(Live { prod, port })
 	}
 
 	/// Add a source on the bus's own clock, whose every write says the bus
@@ -492,7 +493,7 @@ impl Bus {
 	/// Requires the `capture` feature.
 	#[cfg(feature = "capture")]
 	pub fn capture(&self, capture: crate::capture::Consumer, strip: Strip) -> Result<Capture, Error> {
-		let channel = self.channel(capture.input().clone(), strip)?;
+		let channel = self.live(capture.input().clone(), strip)?;
 		Ok(Capture { capture, channel })
 	}
 }
@@ -930,12 +931,12 @@ impl Reader {
 /// One source's PCM on its way into a [`Bus`], on a clock of its own.
 ///
 /// Dropping it takes this channel out of the bus.
-pub struct Channel {
+pub struct Live {
 	prod: ring::Producer,
 	port: Port,
 }
 
-impl Channel {
+impl Live {
 	/// Push PCM in the format, rate, and layout this channel was created with.
 	///
 	/// Never blocks. Audio that arrives before the bus first advances, or that
@@ -987,7 +988,7 @@ impl Positioned {
 	/// Waits only for a [`Driver::advance`] in progress. Once the driver is
 	/// gone nothing mixes, so writes are dropped.
 	///
-	/// Refuses a NaN or infinite sample, as [`Channel::write`] does.
+	/// Refuses a NaN or infinite sample, as [`Live::write`] does.
 	pub fn write(&mut self, position: u64, data: &[u8]) -> Result<(), Error> {
 		let pcm = self.port.pcm(data)?;
 		let pcm = match &self.port.remix {
@@ -1093,7 +1094,7 @@ impl Drop for Port {
 /// The gain, mute, pan, sync delay, and meter of one source in a [`Bus`].
 ///
 /// Cheap to clone and `Send + Sync`: clones control the same source, so a UI
-/// can hold one while a task owns the [`Channel`]. Its settings apply to every
+/// can hold one while a task owns the [`Live`]. Its settings apply to every
 /// mix the source is routed into, from the next [`Driver::advance`], with gain
 /// and pan ramped across it.
 #[derive(Clone, Debug, Default)]
@@ -1264,7 +1265,7 @@ impl Meter {
 #[cfg(feature = "capture")]
 pub struct Capture {
 	capture: crate::capture::Consumer,
-	channel: Channel,
+	channel: Live,
 }
 
 #[cfg(feature = "capture")]
@@ -1320,9 +1321,9 @@ mod tests {
 
 	/// A stereo 48 kHz source the test feeds one block per advance, the way a
 	/// live source keeps pace with the clock.
-	fn source(bus: &Bus) -> (Channel, Strip) {
+	fn source(bus: &Bus) -> (Live, Strip) {
 		let strip = Strip::default();
-		let channel = bus.channel(input(48_000, Layout::Stereo), strip.clone()).unwrap();
+		let channel = bus.live(input(48_000, Layout::Stereo), strip.clone()).unwrap();
 		(channel, strip)
 	}
 
@@ -1331,7 +1332,7 @@ mod tests {
 	/// each reader's last block.
 	fn feed(
 		driver: &mut Driver,
-		sources: &mut [(&mut Channel, f32)],
+		sources: &mut [(&mut Live, f32)],
 		readers: &mut [&mut Reader],
 		blocks: usize,
 	) -> Vec<Block> {
@@ -1362,7 +1363,7 @@ mod tests {
 		for sample_rate in [44_100, 96_000, 4_000_000_000] {
 			let (bus, _driver) = Bus::new(Config::default()).unwrap();
 			let (_, stats) = crate::allocation::measure(|| {
-				bus.channel(input(sample_rate, Layout::SevenPointOne), Strip::default())
+				bus.live(input(sample_rate, Layout::SevenPointOne), Strip::default())
 					.unwrap()
 			});
 			let baseline = *baseline.get_or_insert(stats.bytes);
@@ -1565,7 +1566,7 @@ mod tests {
 	fn converts_layout_and_rate() {
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 		let strip = Strip::default();
-		let mut channel = bus.channel(input(16_000, Layout::Mono), strip.clone()).unwrap();
+		let mut channel = bus.live(input(16_000, Layout::Mono), strip.clone()).unwrap();
 		let program = bus.mix();
 		program.route(&strip);
 		let mut reader = program.reader();
@@ -1637,9 +1638,9 @@ mod tests {
 		let program = bus.mix();
 		program.route(&strip);
 		let mut reader = program.reader();
-		drop(bus.channel(input(48_000, Layout::Stereo), strip.clone()).unwrap());
+		drop(bus.live(input(48_000, Layout::Stereo), strip.clone()).unwrap());
 
-		let mut second = bus.channel(input(16_000, Layout::Mono), strip.clone()).unwrap();
+		let mut second = bus.live(input(16_000, Layout::Mono), strip.clone()).unwrap();
 		let last = feed(&mut driver, &mut [(&mut second, 0.5)], &mut [&mut reader], 40);
 		let sample = *last[0].data.last().unwrap();
 		assert!((sample - 0.25 * CENTER).abs() < 1e-2, "{sample}");
@@ -1787,7 +1788,7 @@ mod tests {
 	fn pans_a_mono_source() {
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 		let strip = Strip::default();
-		let mut channel = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let mut channel = bus.live(input(48_000, Layout::Mono), strip.clone()).unwrap();
 		let program = bus.mix();
 		program.route(&strip);
 		let mut reader = program.reader();
@@ -1844,7 +1845,7 @@ mod tests {
 	fn pan_changes_ramp_at_constant_power() {
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 		let strip = Strip::default();
-		let mut channel = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let mut channel = bus.live(input(48_000, Layout::Mono), strip.clone()).unwrap();
 		strip.set_pan(-1.0).unwrap();
 		let program = bus.mix();
 		program.route(&strip);
@@ -1887,8 +1888,8 @@ mod tests {
 
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 		let strip = Strip::default();
-		let mut mono = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
-		let mut stereo = bus.channel(input(48_000, Layout::Stereo), strip.clone()).unwrap();
+		let mut mono = bus.live(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let mut stereo = bus.live(input(48_000, Layout::Stereo), strip.clone()).unwrap();
 		strip.set_pan(0.5).unwrap();
 		strip.set_delay(Duration::from_millis(20));
 		let program = bus.mix();
@@ -1943,7 +1944,7 @@ mod tests {
 	fn pan_applies_after_the_sync_delay() {
 		let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 		let strip = Strip::default();
-		let mut channel = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let mut channel = bus.live(input(48_000, Layout::Mono), strip.clone()).unwrap();
 		strip.set_delay(Duration::from_millis(100));
 		strip.set_pan(-1.0).unwrap();
 		let program = bus.mix();
@@ -1976,11 +1977,11 @@ mod tests {
 		let (bus, mut driver) = Bus::new(config).unwrap();
 		let strip = Strip::default();
 		strip.set_pan(0.5).unwrap();
-		assert!(bus.channel(input(48_000, Layout::Mono), strip.clone()).is_err());
+		assert!(bus.live(input(48_000, Layout::Mono), strip.clone()).is_err());
 
 		strip.set_pan(0.0).unwrap();
-		let mut first = bus.channel(input(48_000, Layout::Mono), strip.clone()).unwrap();
-		let second = bus.channel(input(48_000, Layout::Stereo), strip.clone()).unwrap();
+		let mut first = bus.live(input(48_000, Layout::Mono), strip.clone()).unwrap();
+		let second = bus.live(input(48_000, Layout::Stereo), strip.clone()).unwrap();
 		assert!(strip.set_pan(-0.5).is_err());
 		assert_eq!(strip.pan(), 0.0);
 		strip.set_pan(0.0).unwrap();
@@ -2008,7 +2009,7 @@ mod tests {
 
 		let (bus, _driver) = Bus::new(Config::default()).unwrap();
 		assert!(
-			bus.channel(input(48_000, Layout::Discrete(3)), Strip::default())
+			bus.live(input(48_000, Layout::Discrete(3)), Strip::default())
 				.is_err()
 		);
 	}
