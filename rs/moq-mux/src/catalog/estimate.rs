@@ -27,7 +27,7 @@ const FRAMERATES: [f64; 11] = [
 /// rate and its integer neighbour, so no measurement is ambiguous between them.
 const FRAMERATE_TOLERANCE: f64 = 0.0005;
 
-/// The catalog fields an [`Estimator`] can measure from the frames fed to it.
+/// The catalog fields a producer measures from the frames written to it.
 ///
 /// An absent field is one to measure: whatever the config already carries when it reaches
 /// [`container::Producer::set`](crate::container::Producer::set) is authoritative and left alone,
