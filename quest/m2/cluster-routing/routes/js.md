@@ -30,7 +30,7 @@ the cheapest one; fix it with the route-selection rework here.
   `--versions moq-lite-07-wip` with JS clients), `lite_tracks_interop` in
   `test/justfile`, and the lite-07 legs of `max_age_relay_javascript` and
   `relay_fill_javascript`. Also restore `test drain` in the nightly matrix,
-  enable the `Datagram tracks` interop workflow step, reset
+  restore the `Datagram tracks` interop workflow step and its report outcome, reset
   `datagram_tracks_javascript`'s ignore reason, and remove the default media `replacement`
   route-wire quarantine (every replacement publisher pins lite-07 even for
   older readers). Keep the separate Firefox audio-tone quarantine until
