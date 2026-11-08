@@ -37,7 +37,7 @@ documents as a use, becomes holding its `Finished`. Decide per type what
 below the end, without adding anything the producer can't do today.
 
 This breaks every caller that finishes and then keeps using the producer.
-List them in the PR and update each package's `MIGRATE.md`.
+List them in the PR, with the migration for each package in its Impact section.
 
 Public API: breaking in moq-net, moq-mux, moq-audio, moq-json, and their JS
 packages. Wire: none.
