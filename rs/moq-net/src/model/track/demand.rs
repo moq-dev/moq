@@ -372,6 +372,19 @@ mod tests {
 		}
 	}
 
+	/// An oldest end is refused wherever it is read, so it asks nothing upstream, even
+	/// past an absolute start.
+	#[test]
+	fn an_oldest_end_adds_no_demand() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let producer = broadcast.create_track("demand", None).unwrap();
+		let _sub = producer.subscribe(Subscription::default().with_ranges([Range {
+			start: Anchor::Absolute(3),
+			end: Some(Anchor::Oldest),
+		}]));
+		assert_eq!(producer.subscription().map(|sub| sub.ranges), Some(Vec::new()));
+	}
+
 	#[test]
 	fn unchanged_demand_does_not_wake_the_publisher() {
 		let broadcast = crate::broadcast::Info::default().produce();

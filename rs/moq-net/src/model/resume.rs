@@ -1315,6 +1315,20 @@ impl Reader {
 		}
 	}
 
+	/// Why the reader can read nothing more: copies contradicted the track's end, or its
+	/// ranges hold an [`Anchor::Oldest`] end. That end is refused here, before waiting on a
+	/// copy to refuse it, since the demand asked upstream leaves it out.
+	fn refusal(&self) -> Option<Error> {
+		if self.refused {
+			return Some(Error::ProtocolViolation);
+		}
+		self.mirrored
+			.ranges
+			.iter()
+			.any(|range| range.end == Some(Anchor::Oldest))
+			.then_some(Error::InvalidRange)
+	}
+
 	/// Whether `at` is past the declared end, which refuses the track: another copy
 	/// contradicts the copy that declared it.
 	fn past_end(&mut self, at: Position) -> bool {
@@ -1495,8 +1509,8 @@ impl Reader {
 		waiter: &kio::Waiter,
 	) -> Option<Poll<Result<Option<Candidate>>>> {
 		self.sync(waiter);
-		if self.refused {
-			return Some(Poll::Ready(Err(Error::ProtocolViolation)));
+		if let Some(err) = self.refusal() {
+			return Some(Poll::Ready(Err(err)));
 		}
 		self.groups_read = true;
 		self.backfill_gaps(delivered);
@@ -1704,8 +1718,8 @@ impl Reader {
 		loop {
 			self.sync(waiter);
 			self.learn_end(Some(waiter));
-			if self.refused {
-				return Poll::Ready(Err(Error::ProtocolViolation));
+			if let Some(err) = self.refusal() {
+				return Poll::Ready(Err(err));
 			}
 			if let Some(end) = self.declared {
 				return Poll::Ready(Ok(end));
@@ -2184,8 +2198,8 @@ impl Recover {
 		if let Some(reader) = self.reader.as_ref().and_then(Weak::upgrade) {
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 			reader.sync(waiter);
-			if reader.refused {
-				return Poll::Ready(Err(Error::ProtocolViolation));
+			if let Some(err) = reader.refusal() {
+				return Poll::Ready(Err(err));
 			}
 		}
 		loop {
@@ -7042,16 +7056,25 @@ mod test {
 		assert_eq!(sub.floor(), Some(0));
 	}
 
-	/// No hop can place an oldest end: a routed reader's copy refuses it, rather than the
-	/// reader's own window panicking on it.
+	/// No hop can place an oldest end: a routed reader refuses it, with or without a copy,
+	/// rather than its own window panicking on it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_routed_reader_refuses_an_oldest_end() {
+		for served in [true, false] {
+			a_routed_reader_refuses_an_oldest_end_when(served);
+		}
+	}
+
+	#[cfg(feature = "async")]
+	fn a_routed_reader_refuses_an_oldest_end_when(served: bool) {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
 		write(&a, 0);
-		routes.serve(a.consume());
+		if served {
+			routes.serve(a.consume());
+		}
 		let subscription = Subscription::default().with_ranges([track::Range {
 			start: Anchor::Absolute(0),
 			end: Some(Anchor::Oldest),
@@ -7065,7 +7088,7 @@ mod test {
 		let result = sub.poll_recv_group(&kio::Waiter::noop());
 		assert!(
 			matches!(result, Poll::Ready(Err(Error::InvalidRange))),
-			"{:?}",
+			"served={served}: {:?}",
 			result.map(|r| r.map(|g| g.map(|g| g.sequence)))
 		);
 	}

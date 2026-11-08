@@ -274,8 +274,12 @@ impl Range {
 	}
 
 	/// Whether this range certainly delivers nothing, wherever the latest group lands.
+	///
+	/// An [`Anchor::Oldest`] end delivers nothing either: every reader holding one is
+	/// refused, so it never reaches the demand asked upstream.
 	pub(super) fn is_empty(&self) -> bool {
 		match (self.start, self.end) {
+			(_, Some(Anchor::Oldest)) => true,
 			(Anchor::Absolute(start), Some(Anchor::Absolute(end))) => end <= start,
 			_ => false,
 		}
