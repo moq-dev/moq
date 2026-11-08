@@ -166,8 +166,9 @@ the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull
 
 moq-gst's stale-completion sink test, which failed once in 30 stress iterations
 in [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160)'s validation,
-mistook a give-up for a stop; the session now tells them apart through
-`Connection::closed`, fixed by [moq-dev/moq#8246](https://github.com/moq-dev/moq/pull/8246).
+because the sink reported a stopped session as a terminal failure; the session
+now tells a stop from a give-up through `Connection::closed`, fixed by
+[moq-dev/moq#8246](https://github.com/moq-dev/moq/pull/8246).
 
 `js/net`'s lite-07 relative-start integration test, which failed once on main in
 [moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run,
