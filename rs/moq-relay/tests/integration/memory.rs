@@ -5,6 +5,7 @@
 
 #[cfg(feature = "test-support")]
 use moq_net::transport::memory;
+#[cfg(feature = "test-support")]
 use std::time::Duration;
 
 #[cfg(feature = "test-support")]
@@ -356,6 +357,7 @@ pub async fn start(cluster: cluster::Cluster, connect: moq_tokio::connect::Confi
 }
 
 /// Run `test` on the simulator, on a thread with room for the relay's large futures.
+#[cfg(feature = "test-support")]
 pub fn run<F: std::future::Future<Output = ()> + 'static>(test: fn() -> F) {
 	std::thread::Builder::new()
 		.stack_size(32 * 1024 * 1024)
