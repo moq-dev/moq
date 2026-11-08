@@ -58,6 +58,8 @@ moves what remains of them once their claims merge.
 - [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
 - [Relay settings parse once into a validated configuration](/quest/m1/relay-config-checks.md) - settings that cannot work together are refused at load instead of accepted and ignored
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
+- [A macOS camera delivers frames the renderer imports](/quest/m1/camera-nv12-macos.md) - AVFoundation capture asks for NV12, so a camera whose native format is `2vuy` reaches the renderer
+- [Encoders keyframe by time, not frame count](/quest/m1/keyframe-by-time.md) - groups stay within the declared join interval when a source's frame rate drifts from the configured one
 
 ## Related
 
