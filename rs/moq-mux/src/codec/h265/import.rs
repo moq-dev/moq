@@ -2,8 +2,9 @@
 //!
 //! Publishes H.265 frames on a single moq track and resolves the catalog
 //! rendition, in either wire shape: Annex-B with inline VPS/SPS/PPS ("hev1"), or
-//! length-prefixed NALU with an out-of-band hvcC ("hvc1"). Only single-layer
-//! streams are supported (VPS is cached but not parsed).
+//! length-prefixed NALU with an out-of-band hvcC ("hvc1"). A layered stream
+//! (MV-HEVC, SHVC) imports as its base layer: only a base-layer SPS configures the
+//! rendition, while every layer's NAL units pass through (VPS is cached but not parsed).
 //!
 //! The codec config comes from exactly one of two places: an hvcC handed to
 //! [`initialize`](Import::initialize) (the hvc1 shape), or the SPS the splitter
@@ -22,14 +23,13 @@ use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
 use crate::container::Frame;
 
-/// A pure-publisher importer for H.265.
-/// Only supports single layer streams (VPS is cached but not parsed).
+/// A pure-publisher importer for H.265, configured from the base layer of a layered stream.
 ///
 /// Build it with [`new`](Self::new), passing the track producer and the
 /// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from, and feed it
 /// frames a [`Split`](super::Split) produced via [`decode`](Self::decode). The
 /// catalog rendition fills in lazily once the codec config is known (hvcC via
-/// [`initialize`](Self::initialize) for hvc1, the first SPS for hev1).
+/// [`initialize`](Self::initialize) for hvc1, the first base-layer SPS for hev1).
 pub struct Import {
 	/// The NALU length size for the hvc1 shape, whose codec config is out-of-band (hvcC), so
 	/// frame payloads are length-prefixed rather than Annex-B. `None` for Annex-B.
@@ -72,7 +72,7 @@ impl Import {
 	/// - **hvc1** (no leading start code): parsed as an `HEVCDecoderConfigurationRecord`,
 	///   which resolves the config and is stored as the catalog `description`. Required
 	///   for hvc1.
-	/// - **hev1** (leading start code): parsed as Annex-B; any SPS resolves the config.
+	/// - **hev1** (leading start code): parsed as Annex-B; the first base-layer SPS resolves the config.
 	///   Optional, since hev1 also self-initializes from the first keyframe.
 	///
 	/// Takes a read-only slice: the dispatcher-owned [`Split`](super::Split) is what
@@ -97,12 +97,11 @@ impl Import {
 		Ok(())
 	}
 
-	/// Resolve the config from any SPS in the buffer.
+	/// Resolve the config from the first base-layer SPS in the buffer, if it holds any SPS.
 	fn initialize_hev1(&mut self, buf: &[u8]) -> Result<()> {
-		for nal in crate::codec::annexb::complete_nals(buf)? {
-			if is_sps(&nal) {
-				self.seed_sps(&nal)?;
-			}
+		let nals = crate::codec::annexb::complete_nals(buf)?;
+		if let Some(sps) = super::base_sps(nals.iter().filter(|nal| is_sps(nal)))? {
+			self.seed_sps(sps)?;
 		}
 		Ok(())
 	}
@@ -249,7 +248,10 @@ impl Import {
 		// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
 		// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
 		// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
-		let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+		let sps = match self.length_size {
+			Some(_) => None,
+			None => find_sps(&frame.payload)?,
+		};
 		// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
 		// first, so a keyframe that also configures publishes once.
 		let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
@@ -275,7 +277,7 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	if crate::codec::annexb::is_config_record(buf) {
 		return Ok(super::config_from_hvcc(buf)?);
 	}
-	let sps = find_sps(buf).ok_or(Error::NotInitialized)?;
+	let sps = find_sps(buf)?.ok_or(Error::NotInitialized)?;
 	Ok(super::config_from_sps(&sps, true)?)
 }
 
@@ -283,16 +285,17 @@ fn is_sps(nal: &[u8]) -> bool {
 	nal.first().is_some_and(|h| NalType::of(*h) == NalType::SPS)
 }
 
-/// Find the first SPS NAL in an Annex-B payload, if any.
-fn find_sps(payload: &[u8]) -> Option<Bytes> {
+/// Find the first base-layer SPS NAL in an Annex-B payload, if it carries any SPS.
+fn find_sps(payload: &[u8]) -> super::Result<Option<Bytes>> {
 	let mut buf = Bytes::copy_from_slice(payload);
 	let mut nals = NalIterator::new(&mut buf);
-	while let Some(Ok(nal)) = nals.next() {
-		if is_sps(&nal) {
-			return Some(nal);
-		}
-	}
-	nals.flush().ok().flatten().filter(|nal| is_sps(nal))
+	let mut sps: Vec<Bytes> = nals
+		.by_ref()
+		.map_while(|nal| nal.ok())
+		.filter(|nal| is_sps(nal))
+		.collect();
+	sps.extend(nals.flush().ok().flatten().filter(|nal| is_sps(nal)));
+	Ok(super::base_sps(&sps)?.cloned())
 }
 
 #[cfg(test)]
@@ -550,5 +553,84 @@ mod tests {
 		assert!(cfg.description.is_none(), "hev1 has no out-of-band description");
 		assert_eq!(cfg.coded_width, Some(1280));
 		assert_eq!(cfg.coded_height, Some(720));
+	}
+
+	/// A layered stream configures from its base layer's SPS wherever it lists the enhancement
+	/// layer's first: an hvcC, an hev1 init, or a keyframe. One whose only SPS is an enhancement
+	/// layer's is refused.
+	#[tokio::test(start_paused = true)]
+	async fn layered_stream_configures_from_the_base_layer() {
+		let annexb = |nals: &[&[u8]]| {
+			let mut buf = BytesMut::new();
+			for nal in nals {
+				buf.extend_from_slice(&[0, 0, 0, 1]);
+				buf.extend_from_slice(nal);
+			}
+			buf
+		};
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let size = |catalog: &crate::catalog::Producer| {
+			let snapshot = catalog.snapshot();
+			let config = &snapshot.video.renditions["video"];
+			(config.coded_width, config.coded_height)
+		};
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let layered: &[&[u8]] = &[
+			fixtures::VPS,
+			fixtures::MV_SPS_LAYER1,
+			fixtures::MV_SPS,
+			fixtures::PPS,
+			fixtures::MV_PPS_LAYER1,
+		];
+
+		let hvcc = super::super::build_hvcc(
+			&[Bytes::from_static(fixtures::VPS)],
+			&[
+				Bytes::from_static(fixtures::MV_SPS_LAYER1),
+				Bytes::from_static(fixtures::MV_SPS),
+			],
+			&[Bytes::from_static(fixtures::PPS)],
+		)
+		.unwrap();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		import.initialize(&hvcc).unwrap();
+		assert_eq!(size(&catalog), (Some(128), Some(64)));
+
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		import.initialize(&annexb(layered)).unwrap();
+		assert_eq!(size(&catalog), (Some(128), Some(64)));
+		assert_eq!(
+			config(&annexb(layered)).unwrap().coded_width,
+			Some(128),
+			"config() reads the base layer too"
+		);
+
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let mut frames = split.decode(&annexb(&[layered, &[idr]].concat()), pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		assert_eq!(size(&catalog), (Some(128), Some(64)));
+
+		// A later keyframe redefining only the enhancement layer keeps the base layer's config.
+		let update = annexb(&[fixtures::MV_SPS_LAYER1, fixtures::MV_PPS_LAYER1, idr]);
+		let mut frames = split.decode(&update, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		assert_eq!(size(&catalog), (Some(128), Some(64)));
+
+		let enhancement = annexb(&[fixtures::VPS, fixtures::MV_SPS_LAYER1, fixtures::MV_PPS_LAYER1, idr]);
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let err = import.initialize(&enhancement).unwrap_err();
+		assert!(matches!(err, crate::Error::H265(Error::NoBaseLayerSps)), "{err:?}");
+		let mut split = Split::new();
+		let mut frames = split.decode(&enhancement, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		let err = import.decode(frames).unwrap_err();
+		assert!(matches!(err, crate::Error::H265(Error::NoBaseLayerSps)), "{err:?}");
 	}
 }

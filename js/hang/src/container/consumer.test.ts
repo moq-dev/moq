@@ -1355,8 +1355,9 @@ test("Consumer reads a gap when retiring an open group", async () => {
 	await flush();
 	expect(frameOf(await consumer.next()).timestamp).toBe(0 as Micro);
 
+	// Group 1 starts a whole budget behind the newest content, so the open group is retired.
 	writeGroupWithLegacyFrames(track, 1n, [100_000 as Micro]);
-	writeGroupWithLegacyFrames(track, 2n, [200_000 as Micro]);
+	writeGroupWithLegacyFrames(track, 2n, [250_000 as Micro]);
 	await flush();
 
 	// Legacy carries no duration, so the gap starts at the last frame read.
@@ -1733,9 +1734,9 @@ test("Consumer delivers a contiguous group after one that completed out of order
 	consumer.close();
 });
 
-// A resubscribe can replay a stale group, lose the group after it, then carry on live. Once the live
-// head reaches past where presentation left off by more than the budget, whatever is missing would
-// arrive too old to play, so the head is the group to play next and must not be dropped as "slow".
+// A resubscribe can replay a stale group, lose the group after it, then carry on live. Once the head
+// past the hole starts a whole budget behind the newest content, whatever is missing would arrive too
+// old to play, so the head is the group to play next and must not be dropped as "slow".
 test("Consumer plays the head once a waited-out gap exceeds the budget (Legacy)", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), {
@@ -1752,10 +1753,15 @@ test("Consumer plays the head once a waited-out gap exceeds the budget (Legacy)"
 	// The reader is parked on the missing 1001, as a decoder is while it waits for the next group.
 	const pending = consumer.next();
 
-	// B (seq 2000) starts at 90_000 ticks (1_000_000µs), a second past A's end: the missing group
-	// could only ever arrive far beyond the 100ms budget, so B plays from its first frame.
+	// B (seq 2000) starts at 90_000 ticks (1_000_000µs), a second past A's end. The missing groups end
+	// where B starts, so B alone proves nothing: one may hold media just before it.
 	const b = track.createGroup(2000n);
 	b.writeFrame(timedFrame(0x02, 90_000, 1));
+	expect(await poll(pending)).toBe("pending");
+
+	// C (seq 2001) carries on live 200ms past B's start, so anything missing below B is too old to play.
+	const c = track.createGroup(2001n);
+	c.writeFrame(timedFrame(0x03, 108_000, 2));
 
 	// The missing group's span was never delivered, so a gap from A's end to B comes first.
 	const result = await poll(pending);

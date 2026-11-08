@@ -17,10 +17,22 @@ import { Key, KeySchema, type PublicKey } from "./key.ts";
  *
  * See {@link https://datatracker.ietf.org/doc/html/rfc7517#section-5 | RFC 7517, section 5}.
  */
-export const KeySetSchema = z.object({
-	/** The keys in the set, in preference order. */
-	keys: z.array(KeySchema),
-});
+export const KeySetSchema = z
+	.object({
+		/** The keys in the set, in preference order. */
+		keys: z.array(KeySchema),
+	})
+	.check(
+		// A token selects its key by `kid`, so two keys sharing one would make the
+		// verifying key depend on the order the set happens to list them in.
+		z.refine(
+			({ keys }) => {
+				const kids = keys.flatMap((key) => (key.kid === undefined ? [] : [key.kid]));
+				return new Set(kids).size === kids.length;
+			},
+			{ message: "duplicate kid" },
+		),
+	);
 
 /** A set of keys, each optionally identified by a `kid`. */
 export type KeySet = z.infer<typeof KeySetSchema>;

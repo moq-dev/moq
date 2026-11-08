@@ -23,5 +23,10 @@ schemas, which would lose the 53-bit integer check on read.
 
 Added 2026-11-07 (maintainer, /quest-plan from the API shape audit):
 `Video.Stats` and `Audio.Stats`, a third and fourth copy of the shape.
+Every counter in the schema is optional, but the encoders initialize theirs
+and do arithmetic on them, so these two derive from the schema input with
+the counters they always set made required (for example
+`Required<Pick<z.input<typeof RenditionSchema>, "frames" | "bytes" | ...>>`
+plus the optional rest), rather than restating fields or loosening them.
 
 It changes a published TypeScript type, so it lands before the cut.

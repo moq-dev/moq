@@ -1403,7 +1403,8 @@ impl Cluster {
 	/// The origin takes a fresh random Hop ID on every call.
 	///
 	/// Errors if the `peer.quic` receive window does not fit a QUIC varint,
-	/// `config.tier` is not a valid stats tier, or the stats config is invalid.
+	/// `config.tier` is not a valid stats tier, a LAN option is set without
+	/// `--cluster-lan`, or the stats config is invalid.
 	pub fn new(options: Options) -> anyhow::Result<(Self, Driver)> {
 		let Options {
 			config,
@@ -1425,6 +1426,9 @@ impl Cluster {
 		}
 		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
+		#[cfg(feature = "cluster-lan")]
+		config.lan.validate()?;
+		stats.check(&config)?;
 		let mut work = kio::Tasks::new();
 		let mut origin_config = origin::Config::default();
 		origin_config.route_key = Some(match &config.route_key {
@@ -1772,8 +1776,6 @@ impl Cluster {
 	pub async fn start(mut self) -> anyhow::Result<Started> {
 		let node = self.config.node.clone();
 		let lan = self.lan();
-		#[cfg(feature = "cluster-lan")]
-		self.config.lan.validate()?;
 		#[cfg(feature = "cluster-lan")]
 		if lan {
 			let advertise = self.advertise.as_ref();
@@ -2560,7 +2562,7 @@ mod tests {
 		options.peer.announces = 20;
 		let cluster = Cluster::spawn(options).unwrap();
 		for (peer, upstream, expected) in [(false, false, 2), (true, false, 20), (true, true, 20)] {
-			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
+			let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
 			grant.peer = peer;
 			grant.upstream = upstream;
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);

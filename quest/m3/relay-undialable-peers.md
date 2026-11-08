@@ -53,4 +53,4 @@ Public API: additive in moq-tokio. Wire: none.
 
 ## Related
 
-- [Drop moq-auth's iroh transport](/quest/m4/auth-drop-iroh.md) - the other iroh leftover
+- [Drop moq-auth's iroh transport](/quest/m2/auth-drop-iroh.md) - the other iroh leftover

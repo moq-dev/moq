@@ -48,8 +48,11 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not
   the [routing identity](/quest/m2/cluster-routing/routes/README.md), which each
   process declares fresh.
-- Addressing is announcement: each node publishes under `mesh/<id>/...`, and
-  reaching an ID is subscribing there. There is no separate directory.
+- Addressing is announcement: each node publishes its address and status
+  tracks under `mesh/node/<id>/...`, and reaching an ID is subscribing
+  there. There is no separate directory. Services are not under a member
+  subtree: each is one socket endpoint at `mesh/service/<service>` (decided
+  2026-11-07, see [Endpoint API](/quest/m3/mesh/endpoint.md)).
 - Certificates can stand in for the token (decided 2026-11-07, maintainer,
   Kixel's planning): a downstream mesh that must admit and evict devices
   with no internet issues long-lived certificates from its own signers, and
@@ -57,12 +60,14 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   against a trust store it supplies. The coordinator's token stays the
   default for `moq auth`.
 - The token is the binding: enrollment proves the device key, then the
-  coordinator issues a grant to publish `mesh/<id>/**` and subscribe
+  coordinator issues a grant to publish `mesh/node/<id>/**` and subscribe
   `mesh/**`, plus publish on its own [socket](/doc/concept/socket.md)
-  endpoints, `.server/<id>` and `.client/<id>`, so it can accept and dial
-  under its own id (amended 2026-11-01, 2026-11-03 when sockets became
-  endpoints, and 2026-11-06 when endpoints split into server and client
-  roles). Relays need no new check. Membership is the coordinator's
+  endpoints, `mesh/service/*/.server/<id>` and `mesh/service/*/.client/<id>`,
+  so it can accept and dial under its own id (amended 2026-11-01,
+  2026-11-03 when sockets became endpoints, 2026-11-06 when endpoints split
+  into server and client roles, and 2026-11-07 when member and service
+  paths were scoped apart; the [Endpoint API](/quest/m3/mesh/endpoint.md)
+  changes the shipped `mesh/<id>/**` grant). Relays need no new check. Membership is the coordinator's
   token only; a Tailnet-Lock analog was declined.
 - Protection is per broadcast, with levels that nest: identity (the token
   only), authentication (per-frame Ed25519 signatures, the default), and
@@ -115,4 +120,4 @@ the third, and survives a relay restart.
 - [P2P](/quest/m4/p2p/README.md) - internet peer sessions, which the m3 mesh does not use
 - [Mesh over ICE](/quest/m5/mesh-ice.md) - deferred direct paths between mesh nodes on different networks
 - [End-to-end encryption](/quest/m5/e2ee/README.md) - the AEAD the encryption level will reuse
-- [Teleoperation](/quest/m5/teleop-robot.md) - robot track shapes that could ride the mesh
+- [Teleoperation](/quest/m5/teleop-robot.md) - robot track conventions that could ride the mesh

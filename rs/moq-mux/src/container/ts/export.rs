@@ -4998,28 +4998,28 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 	}
 }
 
-/// The HRD declared by the first SPS in a video rendition's avcC/hvcC.
+/// The HRD declared by the first (base-layer) SPS in a video rendition's avcC/hvcC.
 fn declared_hrd(stream_type: StreamType, description: &[u8]) -> Option<Hrd> {
 	match stream_type {
 		StreamType::H264 => {
 			crate::codec::h264::sps_hrd(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
 		}
-		StreamType::H265 => {
-			crate::codec::h265::sps_hrd(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
-		}
+		StreamType::H265 => crate::codec::h265::sps_hrd(
+			crate::codec::h265::base_sps(&crate::codec::h265::Hvcc::parse(description).ok()?.sps).ok()??,
+		),
 		_ => None,
 	}
 }
 
-/// The reordering declared by the first SPS in a video rendition's avcC/hvcC.
+/// The reordering declared by the first (base-layer) SPS in a video rendition's avcC/hvcC.
 fn declared_reorder(stream_type: StreamType, description: &[u8]) -> Option<Reorder> {
 	match stream_type {
 		StreamType::H264 => {
 			crate::codec::h264::sps_reorder(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
 		}
-		StreamType::H265 => {
-			crate::codec::h265::sps_reorder(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
-		}
+		StreamType::H265 => crate::codec::h265::sps_reorder(
+			crate::codec::h265::base_sps(&crate::codec::h265::Hvcc::parse(description).ok()?.sps).ok()??,
+		),
 		_ => None,
 	}
 }

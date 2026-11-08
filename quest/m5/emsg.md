@@ -55,8 +55,10 @@ Test version 0 and version 1 boxes, an emsg before the first moof, several on
 one fragment, an unknown scheme, a zero duration, and a round trip that is
 byte-identical.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): one catalog `events` section, `[{track, scheme, rendition?}]` keyed by scheme URI, shared with SCTE-35, ID3, and FLV script data as schemes with their own parsing helpers, instead of one top-level section per format.
+
 ## Related
 
-- [ID3 catalog section](/quest/m5/id3.md) - gives one payload type carried here a
+- [ID3 in the events section](/quest/m5/id3.md) - gives one payload type carried here a
   typed contract
 - [FLV script tags](/quest/m5/flv-script.md) - likewise

@@ -28,7 +28,3 @@ watcher.
 
 Public API: additive in moq-c, or in moq-ffi if the generated C line has
 replaced it. Wire: none.
-
-## Related
-
-- [moq-c at parity](/quest/m2/cut-gate/c/README.md) - the hand-written crate's pre-cut parity work, which this does not block

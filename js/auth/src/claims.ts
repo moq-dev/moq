@@ -8,7 +8,7 @@
 import { Pattern, Patterns } from "@moq/pattern";
 import * as z from "zod/mini";
 import * as Path from "./path.ts";
-import { decodeGrants, decodeRoles, PatternListSchema, WireRoleSchema } from "./wire.ts";
+import { decodeGrants, decodeRoles, PatternListSchema, UnixSecondsSchema, WireRoleSchema } from "./wire.ts";
 
 export { PatternListSchema } from "./wire.ts";
 
@@ -32,7 +32,7 @@ const ScopeFields = {
  * `root` is optional on the wire to match the Rust `moq-auth` crate, which omits it
  * when the scope sits at the top level. A legacy `put`/`get` prefix scope reads as the
  * subtree patterns it meant. A scope bounds paths, never bitrate, so a capped role is
- * refused. Any other field is refused.
+ * refused, as is a root `Key.sign` would refuse. Any other field is refused.
  */
 export const ScopeSchema = z
 	.pipe(
@@ -47,6 +47,13 @@ export const ScopeSchema = z
 		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
 			message: "Either publish or subscribe must contain at least one pattern",
 		}),
+		z.superRefine((data, ctx) => {
+			try {
+				Path.validate(data.root);
+			} catch (error) {
+				ctx.addIssue({ code: "custom", message: error instanceof Error ? error.message : String(error) });
+			}
+		}),
 	);
 
 /** A value parsed by {@link ScopeSchema}. */
@@ -59,11 +66,11 @@ const ClaimsFields = {
 	/** Patterns the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
 	subscribe: z.optional(WireRoleSchema),
 	/** Expiration time, as a whole unix timestamp in seconds. */
-	exp: z.optional(z.int()),
+	exp: z.optional(UnixSecondsSchema),
 	/** Issued-at time, as a whole unix timestamp in seconds. */
-	iat: z.optional(z.int()),
+	iat: z.optional(UnixSecondsSchema),
 	/** Not-before time, as a whole unix timestamp in seconds. Enforced by verification. */
-	nbf: z.optional(z.int()),
+	nbf: z.optional(UnixSecondsSchema),
 };
 
 // Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
