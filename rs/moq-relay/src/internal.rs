@@ -1084,10 +1084,10 @@ impl EncodeMetric for Distribution {
 			.into_iter()
 			.zip(self.0.buckets)
 			.map(|(bound, cumulative)| {
-				// The encoder writes `f64::MAX` as `+Inf`. Bucket reads may be a few
+				// The encoder writes `f64::INFINITY` as `+Inf`. Bucket reads may be a few
 				// operations apart, so a later bucket can read below an earlier one.
 				let bucket = (
-					bound.map_or(f64::MAX, |bound| bound as f64),
+					bound.map_or(f64::INFINITY, |bound| bound as f64),
 					cumulative.saturating_sub(below),
 				);
 				below = below.max(cumulative);
