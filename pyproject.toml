@@ -78,6 +78,8 @@ asyncio_mode = "auto"
 reportUnnecessaryTypeIgnoreComment = "error"
 pythonVersion = "3.10"
 include = ["py"]
+# The tests import their test clock as a sibling module.
+extraPaths = ["py/moq-rs/tests"]
 # Skip uniffi-bindgen output: it's regenerated on every build and isn't
 # expected to pass our type checks.
 exclude = ["**/_uniffi"]

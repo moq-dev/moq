@@ -3,12 +3,13 @@
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 
 def _run(script: str) -> None:
     # The native runtime is process-global and never leaves the test clock, so
-    # each case gets a process of its own.
-    subprocess.run([sys.executable, "-c", textwrap.dedent(script)], check=True)
+    # each case gets a process of its own. It runs beside `clock.py` to import it.
+    subprocess.run([sys.executable, "-c", textwrap.dedent(script)], check=True, cwd=Path(__file__).parent)
 
 
 def test_a_pending_timer_waits_for_advance() -> None:

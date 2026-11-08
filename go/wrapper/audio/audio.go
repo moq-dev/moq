@@ -242,7 +242,9 @@ func (d *Consumer) Next(ctx context.Context) (Read, error) {
 }
 
 // All ranges over every read until the track ends or the loop breaks.
-func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] { return bridge.Seq(ctx, d.inner.Cancel, d.Next) }
+func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] {
+	return bridge.Seq(ctx, d.inner.Cancel, d.Next)
+}
 
 // Delay is the playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
 // The estimate measures when Next returns, so call it again as soon as the previous frame is handled.
