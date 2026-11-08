@@ -164,10 +164,10 @@ closed, left no finished record, so the final catalog snapshot started the
 rendition again and replayed a group on its held pad. A failure now counts as
 the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160).
 
-Added 2026-11-07 (maintainer, /quest-complete): moq-gst's stale-completion
-sink test, which failed once in 30 stress iterations in
-[moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160)'s validation.
-It is quarantined with `#[ignore]` until its child fixes it.
+moq-gst's stale-completion sink test, which failed once in 30 stress iterations
+in [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160)'s validation,
+mistook a give-up for a stop; the session now tells them apart through
+`Connection::closed`, fixed by [moq-dev/moq#8246](https://github.com/moq-dev/moq/pull/8246).
 
 `js/net`'s lite-07 relative-start integration test, which failed once on main in
 [moq-dev/moq#8165](https://github.com/moq-dev/moq/pull/8165)'s baseline run,
