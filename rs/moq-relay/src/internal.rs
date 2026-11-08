@@ -44,9 +44,7 @@ use axum::{
 use axum_server::accept::Accept;
 use prometheus_client::{
 	collector::Collector,
-	encoding::{
-		DescriptorEncoder, EncodeGaugeValue, EncodeLabelSet, EncodeLabelValue, EncodeMetric, LabelValueEncoder,
-	},
+	encoding::{DescriptorEncoder, EncodeGaugeValue, EncodeLabelSet, EncodeMetric},
 	metrics::{MetricType, counter::ConstCounter, gauge::ConstGauge},
 };
 
@@ -511,27 +509,6 @@ async fn revalidate_sessions(RawQuery(query): RawQuery, State(state): State<Inte
 	}
 }
 
-/// A Prometheus label value, escaped per the text exposition format so no value
-/// can end its label or line early. `prometheus-client` writes label values
-/// verbatim, so a tier or listener name carrying a quote would otherwise forge a
-/// series.
-pub(crate) struct Label<'a>(pub(crate) &'a str);
-
-impl EncodeLabelValue for Label<'_> {
-	fn encode(&self, encoder: &mut LabelValueEncoder) -> std::fmt::Result {
-		use std::fmt::Write as _;
-		for c in self.0.chars() {
-			match c {
-				'\\' => encoder.write_str("\\\\")?,
-				'"' => encoder.write_str("\\\"")?,
-				'\n' => encoder.write_str("\\n")?,
-				c => encoder.write_char(c)?,
-			}
-		}
-		Ok(())
-	}
-}
-
 /// Encode whatever `encode` writes as one OpenMetrics text exposition.
 pub(crate) fn render(encode: impl Fn(&mut DescriptorEncoder) -> std::fmt::Result + Send + Sync + 'static) -> String {
 	/// The registry only takes collectors, so this adapts a closure into one.
@@ -636,7 +613,7 @@ fn encode_demux(encoder: &mut DescriptorEncoder, counters: &moq_tokio::quic::dem
 		"Datagrams the QUIC port dropped, by reason.",
 		moq_tokio::quic::demux::Discard::ALL
 			.into_iter()
-			.map(|reason| ([("reason", Label(reason.as_str()))], counters.get(reason))),
+			.map(|reason| ([("reason", reason.as_str())], counters.get(reason))),
 	)
 }
 
@@ -699,7 +676,7 @@ impl Scrape {
 				"Sessions admission refused, by reason.",
 				RefusalKind::ALL
 					.iter()
-					.map(|&refusal| ([("reason", Label(refusal.as_str()))], refusals.count(refusal))),
+					.map(|&refusal| ([("reason", refusal.as_str())], refusals.count(refusal))),
 			)?;
 		}
 
@@ -780,12 +757,9 @@ impl Scrape {
 				|c| c.broadcasts_ended,
 			),
 		] {
-			let rows = traffic.iter().map(|(tier, role, totals)| {
-				(
-					[("tier", Label(tier.as_str())), ("role", Label(role.as_str()))],
-					field(totals),
-				)
-			});
+			let rows = traffic
+				.iter()
+				.map(|(tier, role, totals)| ([("tier", tier.as_str()), ("role", role.as_str())], field(totals)));
 			counter(encoder, name, help, rows)?;
 		}
 		Ok(())
@@ -821,7 +795,7 @@ impl Scrape {
 		] {
 			let rows = sessions
 				.iter()
-				.map(|(tier, presence)| ([("tier", Label(tier.as_str()))], field(presence)));
+				.map(|(tier, presence)| ([("tier", tier.as_str())], field(presence)));
 			counter(encoder, name, help, rows)?;
 		}
 
@@ -835,7 +809,7 @@ impl Scrape {
 			"Connected sessions; active if media payload moved through them within the last 10 seconds, idle otherwise.",
 			activity.iter().flat_map(|(tier, activity)| {
 				[("idle", activity.idle), ("active", activity.active)]
-					.map(|(state, count)| ([("tier", Label(tier.as_str())), ("state", Label(state))], count))
+					.map(|(state, count)| ([("tier", tier.as_str()), ("state", state)], count))
 			}),
 		)?;
 
@@ -846,7 +820,7 @@ impl Scrape {
 			sessions.iter().flat_map(|(tier, presence)| {
 				moq_net::stats::Failure::ALL.iter().map(|&kind| {
 					(
-						[("tier", Label(tier.as_str())), ("kind", Label(kind.as_str()))],
+						[("tier", tier.as_str()), ("kind", kind.as_str())],
 						presence.sessions_failed.count(kind),
 					)
 				})
@@ -866,12 +840,9 @@ impl Scrape {
 				|b| b.rx,
 			),
 		] {
-			let rows = control.iter().map(|(tier, class, bytes)| {
-				(
-					[("tier", Label(tier.as_str())), ("class", Label(class.as_str()))],
-					field(bytes),
-				)
-			});
+			let rows = control
+				.iter()
+				.map(|(tier, class, bytes)| ([("tier", tier.as_str()), ("class", class.as_str())], field(bytes)));
 			counter(encoder, name, help, rows)?;
 		}
 		Ok(())
@@ -896,10 +867,7 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 		listeners.iter().flat_map(|health| {
 			Failure::ALL.iter().map(|&failure| {
 				(
-					[
-						("listener", Label(health.listener())),
-						("class", Label(failure.as_str())),
-					],
+					[("listener", health.listener()), ("class", failure.as_str())],
 					health.failures(failure),
 				)
 			})
@@ -911,7 +879,7 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 		"How long a listener has been unable to accept a connection; 0 when it is serving.",
 		listeners.iter().map(|health| {
 			(
-				[("listener", Label(health.listener()))],
+				[("listener", health.listener())],
 				health.stalled().unwrap_or_default().as_secs_f64(),
 			)
 		}),
