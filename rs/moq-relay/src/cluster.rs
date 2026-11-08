@@ -2442,8 +2442,7 @@ fn take_cost(url: &mut Url) -> anyhow::Result<Option<u64>> {
 	Ok(Some(cost))
 }
 
-/// Drop `?jwt=` so a LAN dial never presents [`Config::token`].
-#[cfg(feature = "cluster-lan")]
+/// Drop `?jwt=` so a dial never presents [`Config::token`] in its URL.
 fn strip_jwt(url: &mut Url) {
 	let remaining: Vec<(String, String)> = url
 		.query_pairs()
