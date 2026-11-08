@@ -1140,6 +1140,7 @@ export class Producer {
 		hooks.useSequences = (producer, used) => {
 			producer.#used = used;
 			producer.#fresh = used.next;
+			used.writer = producer;
 		};
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
@@ -1929,9 +1930,11 @@ export class Producer {
 		if (run?.skip) throw new Skipped(sequence);
 	}
 
-	// Refuse a sequence an earlier track of the name used.
+	// Refuse a sequence an earlier track of the name used, and every write once a newer track
+	// of the name replaced this one, which could reuse any sequence this one writes.
 	#refuseReused(sequence: bigint): void {
-		if (this.#used && sequence < this.#fresh) throw new Reused(sequence);
+		if (!this.#used) return;
+		if (sequence < this.#fresh || this.#used.writer !== this) throw new Reused(sequence);
 	}
 
 	/**

@@ -397,6 +397,7 @@ function localStreamCode(err: unknown): StreamCode {
 	if (err instanceof TimeoutError) return StreamCode.DeliveryTimeout;
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
+	if (err instanceof Reused) return StreamCode.MalformedTrack;
 	// App codes share the 64+ range in both registries.
 	if (err instanceof Session) return err.code >= 64 ? StreamCode(err.code) : StreamCode.Unroutable;
 	// A session that failed underneath without a close code, as on a network or idle failure.

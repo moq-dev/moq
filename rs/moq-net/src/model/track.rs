@@ -3171,6 +3171,11 @@ impl TrackState {
 		if self.skipped(sequence) {
 			return Err(Error::Skipped);
 		}
+		// A fill the producer's own handler answers is authored content like any group.
+		self.unused(sequence)?;
+		if let Some(used) = &self.used {
+			used.raise(sequence);
+		}
 
 		// Adopt the supplied info only if the track hasn't been accepted yet. Groups
 		// created here charge the same account as any other, so backfill written
@@ -20620,6 +20625,28 @@ mod test {
 			.unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
 		assert!(fill.is_wanted(3), "the answer has not reached the reader yet");
+	}
+
+	/// A replacement's own handler answering a fill is authored content, so it refuses a
+	/// sequence the predecessor used as `create_group` does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_replacements_fill_refuses_a_used_sequence() {
+		let broadcast = broadcast::Info::new().produce();
+		let first = broadcast.create_track("a", Info::timed()).unwrap();
+		write_group(&first, 0);
+		drop(first);
+		let mut producer = broadcast.create_track("a", Info::timed()).unwrap();
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_range(0..1));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_next_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		assert!(matches!(fill.accept(0, None), Err(Error::Reused)));
 	}
 
 	/// An ordered reader taking a filled group leaves the fill at once, so a reader that drops

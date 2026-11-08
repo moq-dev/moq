@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { NotFound, Reused, StreamCode } from "./error.ts";
+import { NotFound, Reused, StreamCode, toStreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -126,6 +126,14 @@ test("a recreated track never reuses a sequence", () => {
 
 	// A name never used starts at 0.
 	expect(broadcast.createTrack("other").appendGroup().sequence).toBe(0n);
+
+	// A track removed while open writes nothing once a replacement took its name.
+	const removed = broadcast.createTrack("removed");
+	broadcast.removeTrack("removed");
+	const replacement = broadcast.createTrack("removed");
+	expect(replacement.appendGroup().sequence).toBe(0n);
+	expect(() => removed.appendGroup()).toThrow(Reused);
+	expect(toStreamCode(new Reused(0n))).toBe(StreamCode.MalformedTrack);
 	broadcast.close();
 });
 
