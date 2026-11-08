@@ -106,7 +106,7 @@ fn bench_minus(c: &mut Criterion) {
 		for (_, strip) in &sources {
 			program.route(strip);
 		}
-		let minuses: Vec<_> = sources.iter().map(|(_, strip)| program.minus(strip)).collect();
+		let minuses: Vec<_> = sources.iter().map(|(_, strip)| program.minus([strip])).collect();
 
 		group.bench_function(BenchmarkId::from_parameter(count), |b| {
 			b.iter(|| run(&mut driver, &mut sources, &block));
