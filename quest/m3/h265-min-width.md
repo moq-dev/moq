@@ -25,8 +25,7 @@ is 320 wide for a 4:3 source), and a failed rung probe must fail only that
 rung: today `Pipeline::new` propagates it and aborts the whole transcode.
 
 Decided 2026-11-06 (maintainer, /quest-unblock): ✅ an S quest in m3. Not
-chosen: folding it into [the radeonsi quest](/quest/m1/vaapi-radeonsi.md),
-or dropping it.
+chosen: folding it into the radeonsi quest (since completed), or dropping it.
 
 Decided 2026-11-07 (maintainer, /quest-complete): ✅ narrowed to the
 capture encode (`moq import capture --codec h265`), an S in m3, with H.265
@@ -44,5 +43,4 @@ Public API: the encode error names the minimum size; the probe stays private. Wi
 
 ## Related
 
-- [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - the same AMD hardware run
 - [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - may report a different minimum
