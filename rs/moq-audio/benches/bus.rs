@@ -14,7 +14,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_audio::bus::{Bus, Channel, Config, Driver, Strip};
+use moq_audio::bus::{Bus, Config, Driver, Live, Strip};
 use moq_audio::encode::Input;
 use moq_audio::{Format, Layout};
 
@@ -23,7 +23,7 @@ const BLOCK: usize = 480;
 
 /// A bus with `count` stereo sources at `rate`, opened by a first advance, and
 /// one block of PCM for each.
-fn sources(count: usize, rate: u32) -> (Bus, Driver, Vec<(Channel, Strip)>, Vec<u8>) {
+fn sources(count: usize, rate: u32) -> (Bus, Driver, Vec<(Live, Strip)>, Vec<u8>) {
 	let (bus, mut driver) = Bus::new(Config::default()).unwrap();
 	let frames = BLOCK * rate as usize / 48_000;
 	let block: Vec<u8> = std::iter::repeat_n(0.25f32, frames * 2)
@@ -34,7 +34,7 @@ fn sources(count: usize, rate: u32) -> (Bus, Driver, Vec<(Channel, Strip)>, Vec<
 			let mut input = Input::new(rate, Layout::Stereo);
 			input.format = Format::F32;
 			let strip = Strip::default();
-			(bus.channel(input, strip.clone()).unwrap(), strip)
+			(bus.live(input, strip.clone()).unwrap(), strip)
 		})
 		.collect();
 	// Writes before the first advance are dropped, so open the channels first.
@@ -42,7 +42,7 @@ fn sources(count: usize, rate: u32) -> (Bus, Driver, Vec<(Channel, Strip)>, Vec<
 	(bus, driver, sources, block)
 }
 
-fn run(driver: &mut Driver, sources: &mut [(Channel, Strip)], block: &[u8]) {
+fn run(driver: &mut Driver, sources: &mut [(Live, Strip)], block: &[u8]) {
 	for (channel, _) in sources.iter_mut() {
 		channel.write(black_box(block)).unwrap();
 	}

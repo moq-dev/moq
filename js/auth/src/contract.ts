@@ -32,19 +32,7 @@ const TierSchema = z.string().check(z.regex(/^([A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+
 export const TransportSchema = z.pipe(
 	z.string(),
 	z.catch(
-		z.enum([
-			"quic",
-			"iroh",
-			"websocket",
-			"tcp",
-			"unix",
-			"http",
-			"rtmp",
-			"srt",
-			"webrtc",
-			"webtransport",
-			"unknown",
-		]),
+		z.enum(["quic", "websocket", "tcp", "unix", "http", "rtmp", "srt", "webrtc", "webtransport", "unknown"]),
 		"unknown",
 	),
 );
