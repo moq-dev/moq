@@ -23,7 +23,6 @@ export function replenishWindow(consumed: bigint, currentMax: bigint, window: bi
 export class Credit {
 	#used: bigint;
 	#max: bigint;
-	#blocked = false;
 	#closed = false;
 	#closeReason?: Error;
 	// A Set, so an aborted claim unlinks itself in O(1).
@@ -39,10 +38,7 @@ export class Credit {
 	tryClaim(limit: bigint): bigint {
 		if (limit === 0n || this.#closed) return 0n;
 		const available = this.#max - this.#used;
-		if (available <= 0n) {
-			this.#blocked = true;
-			return 0n;
-		}
+		if (available <= 0n) return 0n;
 		const claimed = limit < available ? limit : available;
 		this.#used += claimed;
 		return claimed;
@@ -122,11 +118,6 @@ export class Credit {
 		return avail > 0n ? avail : 0n;
 	}
 
-	/** Whether a claim found no credit since credit last returned, as QUIC's *_BLOCKED says. */
-	get blocked(): boolean {
-		return this.#blocked;
-	}
-
 	/** Get the current max value. */
 	get max(): bigint {
 		return this.#max;
@@ -138,7 +129,6 @@ export class Credit {
 	}
 
 	#wake(): void {
-		this.#blocked = false;
 		const waiters = this.#waiters;
 		this.#waiters = new Set();
 		for (const { resolve } of waiters) resolve();

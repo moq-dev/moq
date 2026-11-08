@@ -8,17 +8,18 @@
  * @module
  */
 
+import type * as z from "zod/mini";
 import * as audio from "./audio";
 import * as video from "./video";
 
-/** Audio schemas and quality ordering. */
-export { audio as Audio };
+/** Audio quality ordering. */
+export const Audio = { ranked: audio.ranked };
 /** The catalog audio section. */
-export type Audio = audio.Audio;
-/** Video schemas and quality ordering. */
-export { video as Video };
+export type Audio = z.infer<typeof audio.AudioSchema>;
+/** Video quality ordering. */
+export const Video = { ranked: video.ranked };
 /** The catalog video section. */
-export type Video = video.Video;
+export type Video = z.infer<typeof video.VideoSchema>;
 
 export type { AudioConfig } from "./audio";
 export { AudioConfigSchema, AudioSchema } from "./audio";

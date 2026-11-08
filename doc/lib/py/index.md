@@ -26,7 +26,7 @@ Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz ti
 `Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
 A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
-and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`.
+and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowEventPush`, `WindowEventPop`, or `WindowEventSkip`.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
 `TrackInfo(compress=True)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `update`, `append`, `push`, and `pop` require a `timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.

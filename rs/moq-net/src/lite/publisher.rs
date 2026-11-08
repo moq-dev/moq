@@ -2946,7 +2946,7 @@ impl DatagramSend {
 	/// Send one datagram over a QUIC datagram, newest first within the subscription. It is
 	/// dropped, as a datagram may be anywhere, if its body doesn't fit the transport's
 	/// datagram size or the transport has no room for it now.
-	fn send(&self, datagram: crate::Datagram) {
+	fn send(&self, datagram: crate::datagram::Datagram) {
 		let Ok(timestamp) = self
 			.stamp
 			.map(|stamp| stamp.wire(datagram.timestamp, &self.runtime))
@@ -7375,7 +7375,7 @@ mod serve_group_test {
 					let log = session.log.clone();
 					// Lite-07's type adds one byte to the three one-byte fields.
 					let header = if version.has_padding() { 4 } else { 3 };
-					datagram_send(version, session).send(crate::Datagram {
+					datagram_send(version, session).send(crate::datagram::Datagram {
 						sequence: 1,
 						timestamp: Some(Timestamp::ZERO),
 						payload: bytes::Bytes::from(vec![0; size - header]),
@@ -7397,7 +7397,7 @@ mod serve_group_test {
 		let log = session.log.clone();
 		let send = datagram_send(Version::Lite07, session);
 		for sequence in [4, 9] {
-			send.send(crate::Datagram {
+			send.send(crate::datagram::Datagram {
 				sequence,
 				timestamp: Some(Timestamp::ZERO),
 				payload: bytes::Bytes::from_static(b"d"),
@@ -7411,7 +7411,7 @@ mod serve_group_test {
 		// Without send groups, the rank goes alone.
 		let session = SinkSession::new(Log::default()).with_datagrams(1200);
 		let log = session.log.clone();
-		datagram_send(Version::Lite07, session).send(crate::Datagram {
+		datagram_send(Version::Lite07, session).send(crate::datagram::Datagram {
 			sequence: 4,
 			timestamp: Some(Timestamp::ZERO),
 			payload: bytes::Bytes::from_static(b"d"),

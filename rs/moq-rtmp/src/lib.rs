@@ -74,7 +74,7 @@ mod rml;
 mod server;
 
 /// Default FLV release delay and stalled-group budget.
-const DEFAULT_MAX_DELAY: Duration = Duration::from_millis(500);
+const DEFAULT_DELAY: Duration = Duration::from_millis(500);
 
 pub use dial::Client;
 pub use error::{Error, Result};
