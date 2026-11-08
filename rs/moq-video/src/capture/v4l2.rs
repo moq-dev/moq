@@ -101,7 +101,7 @@ fn convertible_with(mut format: impl FnMut(u32) -> Result<Option<FourCC>, Error>
 			None => return Ok(false),
 		}
 	}
-	Err(Error::Codec(anyhow::anyhow!("V4L2 format index overflow")))
+	Err(Error::codec(anyhow::anyhow!("V4L2 format index overflow")))
 }
 
 /// List the modes a V4L2 camera reports, for the formats this backend converts.
@@ -207,9 +207,9 @@ fn frame_sizes(device: &Device, fourcc: FourCC) -> Result<Vec<FrameSizeEnum>, Er
 		if enumeration(result)?.is_none() {
 			return Ok(sizes);
 		}
-		sizes.push(FrameSizeEnum::try_from(entry).map_err(|e| Error::Codec(anyhow::anyhow!(e)))?);
+		sizes.push(FrameSizeEnum::try_from(entry).map_err(|e| Error::codec(anyhow::anyhow!(e)))?);
 	}
-	Err(Error::Codec(anyhow::anyhow!("V4L2 frame size index overflow")))
+	Err(Error::codec(anyhow::anyhow!("V4L2 frame size index overflow")))
 }
 
 fn enumeration<T>(result: std::io::Result<T>) -> Result<Option<T>, Error> {
@@ -241,17 +241,17 @@ fn framerates(device: &Device, fourcc: FourCC, size: Size) -> Result<Vec<FrameRa
 		if enumeration(result)?.is_none() {
 			return Ok(rates);
 		}
-		let interval = FrameIntervalEnum::try_from(entry).map_err(|e| Error::Codec(anyhow::anyhow!(e)))?;
+		let interval = FrameIntervalEnum::try_from(entry).map_err(|e| Error::codec(anyhow::anyhow!(e)))?;
 		if let FrameIntervalEnum::Discrete(interval) = interval {
 			rates.push(rate(interval)?);
 		}
 	}
-	Err(Error::Codec(anyhow::anyhow!("V4L2 frame interval index overflow")))
+	Err(Error::codec(anyhow::anyhow!("V4L2 frame interval index overflow")))
 }
 
 fn rate(interval: moq_v4l::Fraction) -> Result<FrameRate, Error> {
 	FrameRate::new(interval.denominator, interval.numerator)
-		.map_err(|error| Error::Codec(anyhow::anyhow!("invalid V4L2 frame interval: {error}")))
+		.map_err(|error| Error::codec(anyhow::anyhow!("invalid V4L2 frame interval: {error}")))
 }
 
 /// Open a V4L2 camera and stream its frames over a pump thread.
@@ -367,7 +367,7 @@ impl Camera {
 		// The stream owns a clone of the device's `Arc<Handle>`, so the fd stays
 		// open after `device` drops here; the mmap'd buffers live with the stream.
 		let mut stream = MmapStream::with_buffers(&device, BufType::VideoCapture, BUFFER_COUNT)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("V4L2 stream init: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("V4L2 stream init: {e}")))?;
 		stream.set_timeout(READ_TIMEOUT);
 
 		tracing::info!(device = %name, width, height, "opened V4L2 capture");
@@ -512,13 +512,13 @@ fn negotiate_with(
 	let Some((best, source, _)) = closest(replies, want) else {
 		if offered.is_empty() {
 			let Some(error) = probe_error else {
-				return Err(Error::Codec(anyhow::anyhow!("camera {name} has no formats to probe")));
+				return Err(Error::codec(anyhow::anyhow!("camera {name} has no formats to probe")));
 			};
 			return Err(error);
 		}
 		let offered = offered.join(", ");
 		let wanted = Source::ALL.map(|source| source.fourcc().to_string()).join(", ");
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"camera {name} has no encodable {wanted} mode (the driver returned {offered})"
 		)));
 	};
@@ -526,7 +526,7 @@ fn negotiate_with(
 	// A successful probe may have left the device on another candidate.
 	let (applied, rate) = apply(Format::new(best.width, best.height, best.fourcc))?;
 	if applied.fourcc != best.fourcc || applied.width != best.width || applied.height != best.height {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"camera {name} would not re-apply the {}x{} {} mode it just negotiated",
 			best.width,
 			best.height,
@@ -549,7 +549,7 @@ fn closest(
 }
 
 fn set_format(device: &Device, format: Format) -> Result<Format, Error> {
-	Capture::set_format(device, &format).map_err(|e| Error::Codec(anyhow::anyhow!("V4L2 set format: {e}")))
+	Capture::set_format(device, &format).map_err(|e| Error::codec(anyhow::anyhow!("V4L2 set format: {e}")))
 }
 
 #[cfg(test)]
@@ -745,7 +745,7 @@ mod tests {
 			calls += 1;
 			match calls {
 				1 => Ok((Format::new(640, 480, Source::Yuyv.fourcc()), None)),
-				2 => Err(Error::Codec(anyhow::anyhow!("MJPEG is unsupported"))),
+				2 => Err(Error::codec(anyhow::anyhow!("MJPEG is unsupported"))),
 				3 => Ok((requested, None)),
 				_ => panic!("unexpected format probe"),
 			}
@@ -763,7 +763,7 @@ mod tests {
 		let mut calls = 0;
 		let error = negotiate_with("camera", request(640, 480), |_| {
 			calls += 1;
-			Err(Error::Codec(anyhow::anyhow!("probe {calls} failed")))
+			Err(Error::codec(anyhow::anyhow!("probe {calls} failed")))
 		})
 		.expect_err("no format probe succeeded");
 

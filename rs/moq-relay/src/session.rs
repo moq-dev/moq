@@ -453,6 +453,7 @@ impl IntoResponse for Error {
 #[serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub struct View {
 	/// Random 128-bit hex, unique per session.
 	pub id: String,

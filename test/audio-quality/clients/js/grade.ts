@@ -1,9 +1,11 @@
 /**
  * Grades a run's summaries against `budgets.json`, prints the table, and writes `grade.md`.
  *
- * Every budget value is a ceiling on one `<metric>_<aggregation>` key. Under `--enforce` a run fails
- * on any of: a value over its ceiling, a budgeted value the run never measured, a void row, or a row
- * with no budget at all. Each of those would otherwise read as a pass while grading nothing.
+ * Every budget value is a ceiling on one `<metric>_<aggregation>` key, except on a replay row, which
+ * is deterministic and so budgets exactly what it measures. Under `--enforce` a run fails on any of: a
+ * value over its ceiling, a replay value that differs from its budget in either direction, a budgeted
+ * value the run never measured, a void row, or a row with no budget at all. Each of those would
+ * otherwise read as a pass while grading nothing.
  *
  *     bun grade.ts --run <run dir> --budgets <budgets.json> [--enforce]
  *
@@ -58,6 +60,8 @@ for (const summary of summaries) {
 		if (typeof ceiling !== "number") continue;
 		const value = summary.metrics[metric];
 		if (value === null || value === undefined) failures.push(`${key}: ${metric} unmeasured, ceiling ${ceiling}`);
+		else if (summary.row.runtime === "replay" && value !== ceiling)
+			failures.push(`${key}: ${metric} ${value} != ${ceiling}, a replay budgets exactly what it measures`);
 		else if (value > ceiling) failures.push(`${key}: ${metric} ${value} > ${ceiling}`);
 	}
 }

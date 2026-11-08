@@ -61,7 +61,7 @@ impl Vpx {
 				Codec::Vp8 => vpx_codec_vp8_dx(),
 				Codec::Vp9 => vpx_codec_vp9_dx(),
 				other => {
-					return Err(Error::Codec(anyhow::anyhow!("{NAME} cannot decode {}", other.label())));
+					return Err(Error::codec(anyhow::anyhow!("{NAME} cannot decode {}", other.label())));
 				}
 			}
 		};
@@ -78,7 +78,7 @@ impl Vpx {
 		// SAFETY: `ctx` is zeroed and outlives the call; libvpx copies `cfg`.
 		let err = unsafe { vpx_codec_dec_init_ver(&mut ctx, iface, &cfg, 0, VPX_DECODER_ABI_VERSION as i32) };
 		if err != vpx_codec_err_t::VPX_CODEC_OK {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"{NAME} {} decoder init: {}",
 				codec.label(),
 				describe(err, None)
@@ -119,7 +119,7 @@ impl Vpx {
 			)
 		};
 		if err != vpx_codec_err_t::VPX_CODEC_OK {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"{NAME} corruption check: {}",
 				self.error(err)
 			)));
@@ -203,7 +203,7 @@ fn picture(codec: Codec, img: &vpx_image_t, timestamp: Timestamp) -> Result<Fram
 
 	let size = Size::new(img.d_w, img.d_h);
 	if !size.width.is_multiple_of(2) || !size.height.is_multiple_of(2) {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"decoded frame has odd dimensions {size}, expected 4:2:0"
 		)));
 	}
@@ -235,7 +235,7 @@ impl Backend for Vpx {
 		}
 
 		let len = u32::try_from(frame.len()).map_err(|_| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"{} frame of {} bytes is too large",
 				self.codec.label(),
 				frame.len()
@@ -246,7 +246,7 @@ impl Backend for Vpx {
 		if err != vpx_codec_err_t::VPX_CODEC_OK {
 			let reason = self.error(err);
 			if !describes_frame(err) {
-				return Err(Error::Codec(anyhow::anyhow!("{NAME} decode: {reason}")));
+				return Err(Error::codec(anyhow::anyhow!("{NAME} decode: {reason}")));
 			}
 			self.picture_lost(&reason);
 			return Ok(Vec::new());

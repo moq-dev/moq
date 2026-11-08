@@ -19,10 +19,17 @@ Found by the 2026-11-07 API shape audit (transport); mirrors
 web-transport still carries `qmux` 0.6.6 and live quests that change it;
 move or close them there.
 
+Decided 2026-11-08 (maintainer, /quest-unblock): ✅ freeze at the cut
+(rejected: freeze now; skip). web-transport still lands qmux work, such as
+[moq-dev/web-transport#498](https://github.com/moq-dev/web-transport/pull/498), and a freeze today would strand it unpublished.
+The freeze is a PR an agent opens; only merging it needs the maintainer.
+
 ## Waiting
 
-- Maintainer: with rights in moq-dev/web-transport, freeze or remove its
-  `rs/qmux` (remove it from the workspace, or set `release = false` for it
-  in release-plz) before the cut publishes `qmux` from this repository; an
-  agent has no publish rights there. Done when crates.io's published `qmux` names
-  moq-dev/moq and web-transport can no longer publish `qmux`.
+- moq-dev/moq: the next breaking cut starts. As the cut's first step, an
+  agent opens a moq-dev/web-transport PR that sets `release = false` for
+  `qmux` in its `release-plz.toml`, points its `rs/qmux` README at
+  moq-dev/moq, and moves web-transport's open qmux quests here; the
+  maintainer merges it before the cut publishes `qmux` from this repository.
+  Done when crates.io's published `qmux` names moq-dev/moq and web-transport
+  can no longer publish `qmux`.
