@@ -5463,6 +5463,90 @@ fn consume_audio_refuses_a_sibling_of_another_instance() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A decoded consumer follows a rendition's sibling reference and instance too, decoding the
+/// sibling's track rather than looking for it on the catalog's own broadcast.
+#[test]
+fn decode_audio_follows_a_sibling_broadcast_reference() {
+	let origin = id(moq_origin_create());
+	let instance = fresh_instance();
+	let source = create_route(origin, b"d/source", Some(&route_options(0, &instance, false))).1;
+	let input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let producer = id(unsafe { moq_encode_audio(source, c"audio".as_ptr(), 5, &input, &output, 0) });
+	let pcm: Vec<u8> = (0..960).flat_map(|i| (i as f32 / 960.0).to_le_bytes()).collect();
+	let frame = moq_audio_frame {
+		timestamp: micros(0),
+		data: pcm.as_ptr(),
+		data_size: pcm.len(),
+	};
+	assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+	assert_eq!(moq_encode_audio_finish(producer), 0);
+
+	// Describe the sibling's rendition in `d/pub`'s catalog, pointing back at it.
+	let broadcast = publish_broadcast(origin, b"d/pub");
+	{
+		let mut state = State::lock();
+		let (name, mut config) = {
+			let catalog = state.publish.target(Id::try_from(source).unwrap()).unwrap().catalog;
+			let catalog = catalog.modify().unwrap();
+			let (name, config) = catalog.audio.renditions.iter().next().expect("one rendition");
+			(name.clone(), config.clone())
+		};
+		config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
+		config.instance = Some(instance.parse().unwrap());
+		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
+		catalog.modify().unwrap().audio.renditions.insert(name, config);
+	}
+
+	let consume = request_broadcast(origin, b"d/pub");
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+	let decoded = moq_audio_decoder_output {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 0,
+		channels: 0,
+		delay: moq_delay {
+			max_us: 30_000_000,
+			..moq_delay::default()
+		},
+		start: 0,
+		fixed: false,
+	};
+	let read_cb = Callback::new();
+	id(unsafe { moq_decode_audio(catalog_id, 0, &decoded, Some(channel_callback), read_cb.ptr) });
+	let mut frames = 0;
+	loop {
+		let code = read_cb.recv();
+		if code <= 0 {
+			assert_eq!(code, 0, "the sibling's finished track closes cleanly");
+			break;
+		}
+		frames += 1;
+		assert_eq!(moq_decode_audio_read_free(id(code)), 0);
+	}
+	assert!(frames > 0, "the sibling's audio decodes");
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_close(source), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn follow_close_cancels() {
 	let origin = id(moq_origin_create());

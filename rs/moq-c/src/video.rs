@@ -825,6 +825,7 @@ impl Video {
 	) -> Result<Id, Error> {
 		let crate::consume::Rendition {
 			broadcast,
+			origin,
 			config: catalog,
 			name,
 			driver,
@@ -838,6 +839,8 @@ impl Video {
 			|close| async move {
 				driver
 					.watch(async move {
+						// The rendition may live in a sibling broadcast.
+						let broadcast = crate::consume::Rendition::resolve(broadcast, origin, &catalog).await?;
 						let consumer = moq_video::decode::Consumer::new(&broadcast, &catalog, name, options).await?;
 						Self::run(on_frame, consumer, close, output).await
 					})

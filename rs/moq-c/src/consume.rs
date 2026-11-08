@@ -71,6 +71,7 @@ impl ConsumeCatalog {
 	fn rendition<C: Clone>(&self, name: &str, config: &C) -> Rendition<C> {
 		Rendition {
 			broadcast: self.broadcast.clone(),
+			origin: self.origin.clone(),
 			config: config.clone(),
 			name: name.to_string(),
 			driver: self
@@ -129,13 +130,33 @@ impl Media for hang::catalog::AudioConfig {
 	}
 }
 
-/// A catalog rendition to decode: the broadcast and track serving it, and the owner whose panic
-/// ends the decode.
+/// A catalog rendition to decode: the catalog's broadcast and the origin that resolves the
+/// rendition's reference against it, the track serving it, and the owner whose panic ends the
+/// decode.
 pub struct Rendition<C> {
 	pub broadcast: moq_net::broadcast::Consumer,
+	pub(crate) origin: Option<crate::origin::Consumer>,
 	pub config: C,
 	pub name: String,
 	pub driver: crate::ffi::Background,
+}
+
+impl<C: hang::catalog::Reference> Rendition<C> {
+	/// The broadcast serving the rendition, honoring its reference and instance like
+	/// [`moq_consume_video`](crate::moq_consume_video) does. Awaited inside the decode task.
+	pub(crate) async fn resolve(
+		broadcast: moq_net::broadcast::Consumer,
+		origin: Option<crate::origin::Consumer>,
+		config: &C,
+	) -> Result<moq_net::broadcast::Consumer, Error> {
+		resolve(
+			broadcast,
+			origin,
+			config.broadcast().cloned(),
+			config.instance().cloned(),
+		)
+		.await
+	}
 }
 
 /// A broadcast handed to C, plus the origin cursor that named it.
@@ -159,7 +180,7 @@ struct ConsumeBroadcast {
 /// over a wire that carries no instance cannot prove one, so there it is best effort. Awaited
 /// inside the track task, never under the state lock, so `origin` is cloned out rather than
 /// borrowed.
-async fn resolve(
+pub(crate) async fn resolve(
 	broadcast: moq_net::broadcast::Consumer,
 	origin: Option<crate::origin::Consumer>,
 	reference: Option<moq_net::path::Relative>,

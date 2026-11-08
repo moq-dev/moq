@@ -345,14 +345,15 @@ fn track_largest_and_group_ready() {
 		0
 	);
 	// Let the wait park first: finishing must still end it, though moq-net does not wake
-	// `poll_ready` on a finish.
+	// `poll_ready` on a finish. Best effort: a runtime slow to poll only skips the parked case,
+	// since a wait first polled after the finish resolves at once.
 	#[expect(
 		clippy::disallowed_methods,
 		reason = "the test thread has no runtime; it gives the C API's runtime time to park the wait"
 	)]
 	std::thread::sleep(Duration::from_millis(50));
 	assert_eq!(moq_publish_group_finish(first), 0);
-	assert_eq!(ready.rx.recv_timeout(Duration::from_secs(2)), Ok(0));
+	assert_eq!(ready.recv(), 0);
 	assert!(
 		unsafe { moq_publish_group_ready(first, 1, Some(ignore_callback), std::ptr::null_mut()) } < 0,
 		"a finished group's handle is gone"
@@ -361,6 +362,21 @@ fn track_largest_and_group_ready() {
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Whether a ready wait on raw `group` would park now, polled synchronously.
+fn group_pending(group: u32) -> bool {
+	let (group, _ended) = State::lock().publish.group(Id::try_from(group).unwrap()).unwrap();
+	let group = group.lock();
+	let frame = moq_net::frame::Info {
+		size: 1,
+		timestamp: None,
+	};
+	group
+		.as_ref()
+		.expect("the group handle is live")
+		.poll_ready(&kio::Waiter::noop(), &frame)
+		.is_pending()
 }
 
 /// Closing a broadcast ends its open tracks' groups and so their ready waits, but a track
@@ -385,6 +401,9 @@ fn group_ready_across_a_broadcast_close() {
 			0
 		);
 	}
+	// Unread, so both waits have something to wait for.
+	assert!(group_pending(open_group) && group_pending(declared_group));
+	// Best effort, as above: a wait first polled after the close still resolves the same way.
 	#[expect(
 		clippy::disallowed_methods,
 		reason = "the test thread has no runtime; it gives the C API's runtime time to park the waits"
@@ -392,26 +411,21 @@ fn group_ready_across_a_broadcast_close() {
 	std::thread::sleep(Duration::from_millis(50));
 
 	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(
-		open_ready.rx.recv_timeout(Duration::from_secs(2)),
-		Ok(0),
-		"the close ends the group"
-	);
+	assert_eq!(open_ready.recv(), 0, "the close ends the group");
 	let payload = b"late";
 	assert!(
 		unsafe { moq_publish_group_frame(open_group, payload.as_ptr(), payload.len(), &micros(0)) } < 0,
 		"the next write reports why"
 	);
-	assert!(
-		declared_ready.rx.recv_timeout(Duration::from_millis(100)).is_err(),
-		"a declared-end track's group stays writable"
-	);
+	// Nothing will resolve the declared group's wait yet: it is still open and unread.
+	assert!(group_pending(declared_group), "a declared-end track's group stays open");
+	assert!(declared_ready.rx.try_recv().is_err());
 	assert_eq!(
 		unsafe { moq_publish_group_frame(declared_group, payload.as_ptr(), payload.len(), &micros(0)) },
 		0
 	);
 	assert_eq!(moq_publish_group_finish(declared_group), 0);
-	assert_eq!(declared_ready.rx.recv_timeout(Duration::from_secs(2)), Ok(0));
+	assert_eq!(declared_ready.recv(), 0);
 
 	assert!(
 		moq_publish_group_abort(open_group, 0) < 0,
