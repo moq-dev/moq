@@ -129,8 +129,9 @@ public typealias Position = MoqFFI.MoqPosition
 extension Subscription {
     /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.absolute(group:)`, `.relative(groups:)`
-    /// back from the latest group, or `.time(timestamp:)` for the group containing it.
+    /// Where one end of a `Range` falls: `.oldest` (a start only), `.absolute(group:)`,
+    /// `.relative(groups:)` back from the latest group, or `.time(timestamp:)` for the group
+    /// containing it.
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder

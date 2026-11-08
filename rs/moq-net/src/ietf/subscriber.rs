@@ -14233,9 +14233,8 @@ fn has_time(subscription: &track::Subscription) -> bool {
 fn needs_resolution(subscription: &track::Subscription) -> bool {
 	subscription.ranges.iter().any(|range| {
 		let start = match range.start {
-			track::Anchor::Absolute(_) => false,
-			track::Anchor::Relative(back) => back != 0 && back != u64::MAX,
-			track::Anchor::Time(_) => true,
+			track::Anchor::Oldest | track::Anchor::Absolute(_) | track::Anchor::Relative(0) => false,
+			track::Anchor::Relative(_) | track::Anchor::Time(_) => true,
 		};
 		start || matches!(range.end, Some(track::Anchor::Time(_) | track::Anchor::Relative(_)))
 	})
