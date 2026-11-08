@@ -200,7 +200,9 @@ test, which spins a fixed count waiting on a background thread, from
 [moq-dev/moq#8208](https://github.com/moq-dev/moq/pull/8208)'s follow-ups.
 
 Added 2026-11-08 (maintainer): `js/net`'s bandwidth sampling test and lite-07
-createWritable datagram queue test, which failed under load. Both are
+createWritable datagram queue test, which failed under load. So is the lite-06 case of the
+datagram session-close-after-end test, which dropped
+[moq-dev/moq#8280](https://github.com/moq-dev/moq/pull/8280) from the merge queue. All are
 quarantined with `test.skip` until their children fix them.
 
 Added 2026-11-08 (maintainer, /quest-complete): `js/net`'s widened max-age
@@ -216,4 +218,5 @@ Public API: none. Wire: none.
 - [moq-uring's qlog accounting test waits on the accounting](/quest/m0/test-flakes-2/qlog-staging-spin.md) - `an_open_trace_accounts_for_staging_and_close` waits for the accounting, not 10,000 spins
 - [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
 - [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the createWritable queue test waits on the writes it asserts, and its `test.skip` is removed
+- [js/net's lite-06 session-close test keeps the end under load](/quest/m0/test-flakes-2/session-close-end.md) - a session close right after a datagram track's end returns the end, not a `remote error: 0`, and its lite-06 skip is removed
 - [js/net's widened max-age re-drop test ends cleanly, not with a reset](/quest/m0/test-flakes-2/widened-max-age-reset.md) - the test finishes the track only after the re-drop reply arrives, so the end is a FIN, and drops its wall-clock assert
