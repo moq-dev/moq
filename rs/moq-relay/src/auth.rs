@@ -84,10 +84,6 @@ pub struct Config {
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public_publish: Vec<Pattern>,
 
-	#[usage(skip)]
-	#[serde(rename = "verifications", skip_serializing)]
-	pub(crate) removed_verifications: Option<serde::de::IgnoredAny>,
-
 	/// The 0.14 flags and env vars #3688 removed, kept parsing but hidden. Never
 	/// read as settings: [`deprecated`](Self::deprecated) names what replaced each.
 	#[usage(flatten)]
@@ -125,9 +121,6 @@ const VERIFICATIONS: usize = 128;
 #[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
-	#[usage(long = "auth-verifications", env = "MOQ_AUTH_VERIFICATIONS", hide = true)]
-	verifications: Option<usize>,
-
 	#[usage(name = "auth-key", long = "auth-key", env = "MOQ_AUTH_KEY", hide = true)]
 	key: Option<String>,
 	#[usage(name = "auth-key-dir", long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR", hide = true)]
@@ -194,22 +187,6 @@ impl Config {
 	/// ignored.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
-		if self.legacy.verifications.is_some() {
-			found.changed(
-				"--auth-verifications",
-				Some("MOQ_AUTH_VERIFICATIONS"),
-				"the fixed per-session verification policy",
-				"the configurable verification window is removed",
-			);
-		}
-		if self.removed_verifications.is_some() {
-			found.toml(
-				"[auth] verifications",
-				"the fixed per-session verification policy",
-				None,
-			);
-		}
-
 		let legacy = &self.legacy;
 		for (set, flag, env, toml, new) in [
 			(
@@ -1657,17 +1634,6 @@ mod tests {
 		let grant = split.public_grant().unwrap();
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
-	}
-
-	/// Removed explicit window values, including zero, are refused by name.
-	#[test]
-	fn configurable_verifications_are_refused() {
-		for value in [0, 4] {
-			let parsed: Config =
-				toml::from_str(&format!("url = \"http://127.0.0.1:4440/\"\nverifications = {value}\n")).unwrap();
-			let error = parsed.validate(false).unwrap_err();
-			assert!(error.to_string().contains("verifications"), "{error}");
-		}
 	}
 
 	/// Public rules grant a certificate what they grant anyone, so a client CA

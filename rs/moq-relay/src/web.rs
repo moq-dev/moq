@@ -278,11 +278,9 @@ impl Web {
 	/// RTMP opens with a byte no HTTP request or TLS ClientHello starts with, and an
 	/// RTMPS client negotiates no ALPN, so both share the web ports. Until this is
 	/// called, or once the returned consumer is dropped, they are logged and closed.
-	/// A later call replaces the earlier consumer.
-	pub fn rtmp(&mut self) -> rtmp::Incoming {
-		let (handoff, incoming) = rtmp::Handoff::new();
-		self.rtmp = handoff;
-		incoming
+	/// `None` once taken.
+	pub fn rtmp(&mut self) -> Option<rtmp::Incoming> {
+		self.rtmp.incoming()
 	}
 
 	/// Serve `tls://` on the HTTPS listener with `acceptor`, usually
@@ -2232,7 +2230,7 @@ mod tests {
 				.with_listen(&listen(None))
 				.bind()
 				.unwrap();
-			let incoming = rtmp.then(|| web.rtmp());
+			let incoming = rtmp.then(|| web.rtmp().expect("taken once"));
 			let Addrs {
 				http: Some(http),
 				https: Some(https),

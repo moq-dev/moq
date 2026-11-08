@@ -13,7 +13,7 @@ a remote HLS master or media playlist into a broadcast.
 # Publish, then serve. Players open
 # http://localhost:8089/my-stream.hang/master.m3u8 (or manifest.mpd for DASH)
 ffmpeg -re -i input.mp4 -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import fmp4
-moq --connect https://relay.example.com/anon --broadcast my-stream.hang export hls --listen '[::]:8089'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang export hls --hls-listen '[::]:8089'
 
 # Record into ./recording, ending once the broadcast finishes
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang export hls --output ./recording
@@ -83,7 +83,7 @@ recording needs moq-lite 07 on every network hop for track discovery; see
 ```bash
 moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<instance>
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang export hls --listen '[::]:8089'
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang export hls --hls-listen '[::]:8089'
 ```
 
 The archived catalog and media replay as recorded, so the export lists the same
@@ -111,7 +111,7 @@ removed and re-added with another target, which logs a warning. A GOP longer
 than the target is still recorded, with a warning, so keep keyframe intervals
 within the declared interval.
 
-`--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
+`--hls-tls-cert`/`--hls-tls-key` or `--hls-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers. HLS TLS reads `MOQ_HLS_TLS_*`;
 `MOQ_LISTEN_TLS_*` configures only the MoQ listener. See `moq export hls --help`.
 

@@ -450,7 +450,7 @@ async fn uring_custom_route_and_quic() {
 async fn webrtc_feed(mut config: Config) {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	config.drain_timeout = Some((Duration::ZERO).into());
-	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
+	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let feed = relay.webrtc().expect("tokio serves QUIC");
 	let trigger = relay.shutdown_trigger().clone();
