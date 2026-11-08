@@ -1083,7 +1083,7 @@ export class Producer {
 				this.#evict(entry, reason);
 				this.#uncache(entry, true);
 			},
-			shed: (entry, debt, cap) => hooks.shedGroup(entry.group, debt, cap),
+			shed: (entry, debt, cap) => hooks.shedGroup(entry.group, debt, cap, entry.mirrors.values()),
 			settle: () => this.#settle(),
 		});
 	}

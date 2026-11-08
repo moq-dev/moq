@@ -238,9 +238,11 @@ export class Track<E extends Entry> {
 	// The tick a frame write may next run an idle scan at.
 	#nextExpiry = 0;
 	// Every cached group, and the eviction order, oldest first, which keeps hints of groups no
-	// longer cached until a scan reaches them.
+	// longer cached until a scan reaches them. The order starts at `#head`, since `Array.shift`
+	// moves every entry behind it in V8.
 	#live = new Set<E>();
 	#order: E[] = [];
+	#head = 0;
 	// Debt carried over from earlier payments.
 	#debt = 0;
 	// Where the next bounded idle scan starts, rotating so fresh groups at the front do not
@@ -287,6 +289,7 @@ export class Track<E extends Entry> {
 		entry.charge.clear();
 		if (this.#live.size === 0) {
 			this.#order = [];
+			this.#head = 0;
 			this.#debt = 0;
 			this.pool.unregister(this as Track<Entry>);
 		}
@@ -318,7 +321,7 @@ export class Track<E extends Entry> {
 	// at the front reads as not stale until a scan drops it.
 	#oldestIsStale(): boolean {
 		const average = this.pool.average();
-		const front = this.#order[0];
+		const front = this.#order[this.#head];
 		if (average === undefined || front === undefined || !this.#live.has(front)) return false;
 		return !this.#owner.protects(front) && front.charge.accessed <= average;
 	}
@@ -334,10 +337,11 @@ export class Track<E extends Entry> {
 		let scanned = 0;
 		let evicted = false;
 		const fresh: E[] = [];
-		for (let i = this.#order.length; i > 0; i--) {
+		for (let i = this.#order.length - this.#head; i > 0; i--) {
 			if (this.#debt === 0 || paid >= cap || scanned >= EVICT_SCAN) break;
-			const entry = this.#order.shift();
-			if (entry === undefined) break;
+			// An eviction that emptied the account reset the order.
+			if (this.#head >= this.#order.length) break;
+			const entry = this.#order[this.#head++];
 			if (!this.#live.has(entry)) continue;
 			if (this.#owner.protects(entry)) {
 				this.#order.push(entry);
@@ -351,7 +355,9 @@ export class Track<E extends Entry> {
 			}
 			const size = entry.charge.size;
 			if (size > this.#debt) {
-				this.#order.unshift(entry);
+				// Its slot still holds it.
+				this.#head--;
+				this.#compact();
 				return evicted;
 			}
 			this.#debt -= size;
@@ -368,6 +374,7 @@ export class Track<E extends Entry> {
 			this.#debt -= Math.min(freed, this.#debt);
 			paid += freed;
 		}
+		this.#compact();
 		return evicted;
 	}
 
@@ -378,7 +385,8 @@ export class Track<E extends Entry> {
 	evictExpired(full: boolean): boolean {
 		const expiry = this.pool.expiryTicks;
 		const order = this.#order;
-		const len = order.length;
+		const head = this.#head;
+		const len = order.length - head;
 		if (expiry === undefined || len === 0) return false;
 		const now = this.pool.now();
 		const start = full ? 0 : this.#cursor % len;
@@ -386,7 +394,7 @@ export class Track<E extends Entry> {
 		if (!full) this.#cursor = start + width;
 		const expired: E[] = [];
 		for (let step = 0; step < width; step++) {
-			const entry = order[(start + step) % len];
+			const entry = order[head + ((start + step) % len)];
 			if (!this.#live.has(entry) || this.#owner.protects(entry)) continue;
 			if (now - Math.floor(entry.charge.accessed / BOOSTS) > expiry) expired.push(entry);
 		}
@@ -395,15 +403,14 @@ export class Track<E extends Entry> {
 		return expired.length > 0;
 	}
 
-	// Drop the dead entries at the front of the order, and rebuild it once dead entries behind
-	// a live front clearly outnumber the live ones.
+	// Skip the dead entries at the front of the order, and rebuild it once the slots before the
+	// front and the dead entries behind it clearly outnumber the live ones.
 	#compact(): void {
 		const order = this.#order;
-		let dead = 0;
-		while (dead < order.length && !this.#live.has(order[dead])) dead++;
-		if (dead > 0) order.splice(0, dead);
+		while (this.#head < order.length && !this.#live.has(order[this.#head])) this.#head++;
 		if (order.length > 2 * this.#live.size + EVICT_SLACK) {
-			this.#order = order.filter((entry) => this.#live.has(entry));
+			this.#order = order.slice(this.#head).filter((entry) => this.#live.has(entry));
+			this.#head = 0;
 		}
 	}
 

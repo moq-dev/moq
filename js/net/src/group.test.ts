@@ -957,3 +957,34 @@ test.each(["eviction", "expiry"] as const)("a group end wait observes reader %s"
 	source.finish();
 	reader.close();
 });
+
+// Rust's `GroupState::shed` keeps an open group's newest committed frame even while a newer
+// frame is still being written, since that partial frame is not readable yet.
+test("a debt shed keeps the newest committed frame behind one being written", async () => {
+	const producer = new Producer(0n);
+	producer.writeFrame({ payload: new Uint8Array(1024) });
+	const reader = producer.consume();
+	producer.createFrame({ size: 10 }).write(new Uint8Array(5));
+
+	expect(hooks.shedGroup(producer, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, [])).toBe(0);
+	expect((await reader.readFrame())?.payload.byteLength).toBe(1024);
+});
+
+// A finished group no longer tees into its copies, so shedding it ends the copies its track
+// holds that had not taken the shed frames, rather than crediting bytes they still hold.
+test("a debt shed of a finished group ends the copies that lost a frame", async () => {
+	const producer = new Producer(0n);
+	producer.writeFrame({ payload: new Uint8Array(1024) });
+	producer.writeFrame({ payload: new Uint8Array(1024) });
+	producer.finish();
+	const behind = producer.consume();
+	const drained = producer.consume();
+	await drained.readFrame();
+	await drained.readFrame();
+
+	expect(
+		hooks.shedGroup(producer, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, [behind, drained]),
+	).toBeGreaterThan(0);
+	await expect(behind.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	expect(await drained.readFrame()).toBeUndefined();
+});

@@ -774,8 +774,11 @@ export const hooks: {
 	groupCacheBytes: (group: GroupProducer) => number;
 	/** Bill a cached group's bytes to `charge` from now on, or stop billing them with undefined. */
 	chargeGroup: (group: GroupProducer, charge: Charge | undefined) => void;
-	/** Shed whole frames from a group's front toward a cache `debt`, freeing about `cap` at most; returns the bytes freed. */
-	shedGroup: (group: GroupProducer, debt: number, cap: number) => number;
+	/**
+	 * Shed whole frames from a group's front toward a cache `debt`, freeing about `cap` at most,
+	 * and end the `readers` its track holds that lost a shed frame; returns the bytes freed.
+	 */
+	shedGroup: (group: GroupProducer, debt: number, cap: number, readers: Iterable<GroupConsumer>) => number;
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
 	/**
