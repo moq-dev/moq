@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { Instant, Manual, Milli, Nano, now } from "@moq/clock";
+import { Instant, Manual, Milli, Nano } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, driveUntil, manual } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
@@ -96,6 +96,7 @@ async function readAll(group: GroupConsumer | undefined): Promise<string[]> {
 }
 
 test("a group stream that arrives after PUBLISH_DONE is delivered", async () => {
+	using clock = manual();
 	const { subscriber, reader, done } = await subscribed();
 	const first = groupStream(subscriber, 0n);
 	first.write(object("0.0"));
@@ -104,17 +105,21 @@ test("a group stream that arrives after PUBLISH_DONE is delivered", async () => 
 	await done(TRACK_ENDED, 2n);
 
 	// QUIC does not order streams, so the second one lands after PUBLISH_DONE.
-	const started = now();
+	const started = clock.now();
 	const late = groupStream(subscriber, 1n);
 	late.write(object("1.0"));
 	late.finish();
 
-	expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
-	expect(await readAll(await reader.recvGroup())).toEqual(["1.0"]);
-	expect(await reader.recvGroup()).toBeUndefined();
-	expect(await reader.closed).toBeNull();
+	const read = (async () => {
+		expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
+		expect(await readAll(await reader.recvGroup())).toEqual(["1.0"]);
+		expect(await reader.recvGroup()).toBeUndefined();
+		expect(await reader.closed).toBeNull();
+	})();
+	await driveUntil(clock, read);
+	await read;
 	// The Stream Count was met, so nothing waited out the grace.
-	expect(Nano.toMilli(Instant.durationSince(now(), started))).toBeLessThan(GRACE);
+	expect(Nano.toMilli(Instant.durationSince(clock.now(), started))).toBeLessThan(GRACE);
 });
 
 test("a group read across PUBLISH_DONE is delivered whole", async () => {
