@@ -31,12 +31,20 @@ pub(crate) const NAME: &str = "vpx";
 pub(crate) struct Vpx {
 	ctx: vpx_codec_ctx_t,
 	codec: Codec,
-	/// A frame was refused, so the reference chain is broken until the next
-	/// keyframe. Delta frames in between are dropped rather than decoded against
-	/// references that are missing or wrong.
-	broken: bool,
-	/// Frames dropped since the chain broke, so a run of them logs once.
-	lost: u64,
+	chain: Chain,
+}
+
+/// Whether the decoder holds the references the next delta frame needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Chain {
+	Intact,
+	/// A frame was refused, so the chain is broken until a keyframe decodes.
+	/// Delta frames in between are dropped rather than decoded against
+	/// references that are missing or wrong. `lost` counts the frames dropped
+	/// since it broke, so a run of them logs once.
+	Broken {
+		lost: u64,
+	},
 }
 
 impl Vpx {
@@ -81,8 +89,7 @@ impl Vpx {
 		Ok(Self {
 			ctx,
 			codec,
-			broken: false,
-			lost: 0,
+			chain: Chain::Intact,
 		})
 	}
 
@@ -123,9 +130,12 @@ impl Vpx {
 	/// Records a frame the decoder refused, or one dropped while waiting for a
 	/// keyframe, and logs the first of a run.
 	fn picture_lost(&mut self, reason: &str) {
-		self.broken = true;
-		self.lost += 1;
-		if self.lost == 1 {
+		let lost = match self.chain {
+			Chain::Intact => 1,
+			Chain::Broken { lost } => lost + 1,
+		};
+		self.chain = Chain::Broken { lost };
+		if lost == 1 {
 			tracing::warn!(
 				decoder = NAME,
 				codec = self.codec.label(),
@@ -219,14 +229,9 @@ fn picture(codec: Codec, img: &vpx_image_t, timestamp: Timestamp) -> Result<Fram
 
 impl Backend for Vpx {
 	fn decode(&mut self, frame: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
-		if self.broken {
-			if !keyframe {
-				self.picture_lost("reference chain broken");
-				return Ok(Vec::new());
-			}
-			tracing::info!(decoder = NAME, lost = self.lost, "picture recovered");
-			self.broken = false;
-			self.lost = 0;
+		if matches!(self.chain, Chain::Broken { .. }) && !keyframe {
+			self.picture_lost("reference chain broken");
+			return Ok(Vec::new());
 		}
 
 		let len = u32::try_from(frame.len()).map_err(|_| {
@@ -249,6 +254,12 @@ impl Backend for Vpx {
 		if self.corrupted()? {
 			self.picture_lost("corrupt frame");
 			return Ok(Vec::new());
+		}
+		// Only now the keyframe has decoded whole: one refused on the way back
+		// keeps counting into the same run.
+		if let Chain::Broken { lost } = self.chain {
+			tracing::info!(decoder = NAME, lost, "picture recovered");
+			self.chain = Chain::Intact;
 		}
 
 		// Without frame threading a call hands back at most the one picture it

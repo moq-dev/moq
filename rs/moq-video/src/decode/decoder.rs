@@ -265,13 +265,21 @@ impl Decoder {
 	pub fn decode(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Wait for the first keyframe: a decoder started mid-GOP can't decode
 		// delta frames, and the parameter sets ride along with the keyframe.
-		if !self.got_keyframe {
-			if !keyframe {
-				return Ok(Vec::new());
-			}
-			self.got_keyframe = true;
+		if !self.got_keyframe && !keyframe {
+			return Ok(Vec::new());
 		}
 
+		let frames = self.submit(payload, timestamp, keyframe);
+		// Set by how the keyframe went rather than by its arrival: one that failed
+		// leaves nothing for the deltas behind it to predict from.
+		if keyframe {
+			self.got_keyframe = frames.is_ok();
+		}
+		self.deliver(frames?)
+	}
+
+	/// Convert one access unit and hand it to the backend.
+	fn submit(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		let access_unit = self.conversion.access_unit(payload, keyframe)?;
 		if keyframe
 			&& let Some(color) = super::vui::signalled(self.codec, &access_unit)
@@ -279,8 +287,7 @@ impl Decoder {
 		{
 			self.switches.push_back((timestamp, color));
 		}
-		let frames = self.backend.decode(access_unit, timestamp, keyframe)?;
-		self.deliver(frames)
+		self.backend.decode(access_unit, timestamp, keyframe)
 	}
 
 	/// Return the frames the backend still holds once the stream has ended.
@@ -842,6 +849,28 @@ mod tests {
 		};
 		assert_eq!(color(pq), Some(expected));
 		assert_eq!(color(Default::default()), Some(Color::BT601));
+	}
+
+	/// A keyframe the backend fails to decode leaves the gate closed, so the
+	/// deltas behind it never reach a codec holding no reference for them.
+	#[test]
+	fn a_keyframe_that_fails_to_decode_keeps_the_gate_closed() {
+		let kind = super::Kind::Named(probe::IMMEDIATE_NAME.into());
+		let mut decoder = super::Decoder::new(&probe_catalog(), &decode_config(kind)).unwrap();
+		let at = |micros| Timestamp::from_micros(micros).unwrap();
+
+		let corrupt = bytes::Bytes::from_static(probe::CORRUPT);
+		assert!(decoder.decode(&corrupt, at(0), true).is_err());
+		let delta = bytes::Bytes::from_static(&[0]);
+		assert!(decoder.decode(&delta, at(33_333), false).unwrap().is_empty());
+
+		// The next keyframe that decodes opens it.
+		assert_eq!(decoder.decode(&delta, at(66_666), true).unwrap().len(), 1);
+		assert_eq!(decoder.decode(&delta, at(99_999), false).unwrap().len(), 1);
+
+		// And one that fails mid-stream closes it again.
+		assert!(decoder.decode(&corrupt, at(133_332), true).is_err());
+		assert!(decoder.decode(&delta, at(166_665), false).unwrap().is_empty());
 	}
 
 	/// An inline-H.264 catalog the test probes accept.
