@@ -699,13 +699,13 @@ fn dtls12_handshake_secp384r1_key_exchange() {
 	//! and verify both sides reach connected.
 
 	use crate::vendor::dimpl::certificate::generate_self_signed_certificate;
-	use crate::vendor::dimpl::crypto::aws_lc_rs;
+	use crate::vendor::dimpl::crypto::rind;
 
 	let client_cert = generate_self_signed_certificate().expect("gen client cert");
 	let server_cert = generate_self_signed_certificate().expect("gen server cert");
 
 	// Build a crypto provider with only the P-384 key exchange group.
-	let mut provider = aws_lc_rs::default_provider();
+	let mut provider = rind::default_provider().unwrap();
 	let p384_vec: Vec<&'static dyn crate::vendor::dimpl::crypto::SupportedKxGroup> = provider
 		.kx_groups
 		.iter()
@@ -838,14 +838,14 @@ fn dtls12_handshake_p384_certificate() {
 	//! same hash algorithm it advertises on the wire (SHA-384 for P-384).
 
 	let p384 = || {
-		let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).expect("P-384 key");
-		let cert = rcgen::CertificateParams::new(vec!["WebRTC".to_string()])
-			.expect("certificate params")
-			.self_signed(&key)
-			.expect("self-signed certificate");
+		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P384_SHA384).expect("P-384 key");
+		let mut params = rcgen::CertificateParams::new(vec!["WebRTC".to_string()]).expect("certificate params");
+		// rcgen draws no serial number without its own crypto backend.
+		params.serial_number = Some(1u64.into());
+		let cert = params.self_signed(&key).expect("self-signed certificate");
 		crate::vendor::dimpl::DtlsCertificate {
 			certificate: cert.der().to_vec(),
-			private_key: key.serialize_der(),
+			private_key: key.to_pkcs8().secret_pkcs8_der().to_vec(),
 		}
 	};
 

@@ -91,7 +91,7 @@ impl Buf {
 	}
 }
 
-// aws-lc-rs AEAD operations require Extend<&u8> for appending authentication tags
+// AEAD backends may append their authentication tags through Extend<&u8>
 impl<'a> Extend<&'a u8> for Buf {
 	fn extend<T: IntoIterator<Item = &'a u8>>(&mut self, iter: T) {
 		self.data.extend(iter.into_iter().copied());
