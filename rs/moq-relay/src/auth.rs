@@ -31,7 +31,7 @@ const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[serde_as]
 #[derive(usage_rs::Args, Clone, Debug, Default, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
 	/// The auth server asked once per session event: `connect`, `attach`, `revalidate`, and
@@ -1634,6 +1634,13 @@ mod tests {
 		let grant = split.public_grant().unwrap();
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
+	}
+
+	/// An unknown `[auth]` key, such as the never-released `verifications`, fails to parse.
+	#[test]
+	fn unknown_keys_are_refused() {
+		let error = toml::from_str::<Config>("url = \"http://127.0.0.1:4440/\"\nverifications = 4\n").unwrap_err();
+		assert!(error.to_string().contains("verifications"), "{error}");
 	}
 
 	/// Public rules grant a certificate what they grant anyone, so a client CA

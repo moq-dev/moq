@@ -94,7 +94,7 @@ window as a live broadcast.
 `--output <dir>` writes `master.m3u8` and each rendition's
 `{video,audio}/{name}/media.m3u8`, init, and `.m4s` segments into an empty or
 absent directory as each segment completes. Recording alone binds no HTTP port;
-add `--listen` to serve and record from one stage, in which case serving goes on
+add `--hls-listen` to serve and record from one stage, in which case serving goes on
 after the recording completes.
 
 The recording starts at the oldest segment in the `--window` and gets
