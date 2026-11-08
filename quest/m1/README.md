@@ -33,7 +33,6 @@ moves what remains of them once their claims merge.
 
 - [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
 - [js/net and moq-net decode the same inputs the same way](/quest/m1/js-net-input-checks.md) - a shared input corpus pins both decoders, and a typed endpoint stops loopback spellings from slipping past GOAWAY checks
-- [Rust and JS run one token and key-set corpus](/quest/m1/token-parse-strict.md) - a shared corpus pins both parsers, so a null `exp` no longer means never-expiring in Rust
 - [Resetting a kio sleep to its deadline does not wake it](/quest/m1/kio-reset-same-deadline.md) - a caller that resets on every poll no longer spins the simulator
 - [A cluster peer's identity is a type, not a string](/quest/m1/cluster-peer-identity.md) - a canonical `PeerKey` and a refused duplicate cluster id stop self-dials, double links, and silent mesh partitions
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup

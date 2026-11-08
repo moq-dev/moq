@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,8 +23,9 @@ use kio::clock::Instant;
 
 use crate::{Event, Grant, Key, KeyId, KeySet, Patterns, Permissions, Rate, Request, Token};
 
-/// Where the signing keys a `jwt` is verified against come from. Read per request,
-/// so a rotated file takes effect without a restart.
+/// Where the signing keys a `jwt` is verified against come from. Each file is parsed
+/// once and re-read when its modification time or size changes, so a rotated file
+/// takes effect without a restart.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Keys {
@@ -229,6 +230,84 @@ pub struct Policy {
 	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
+	/// The key files as last parsed.
+	cache: KeyCache,
+}
+
+/// Parsed key files, keyed by path and format, so a token costs a `stat` rather than a
+/// read and parse.
+#[derive(Clone, Default)]
+struct KeyCache(Arc<Mutex<HashMap<(PathBuf, Format), Cached>>>);
+
+/// How a key file is read.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Format {
+	/// One key, as a set holding just it, which selects it by `kid` exactly as
+	/// verifying with the key alone would.
+	Key,
+	/// A JWK Set.
+	Set,
+}
+
+impl Format {
+	fn parse(self, json: &str) -> Result<KeySet, Denial> {
+		match self {
+			Self::Key => {
+				let key = json.parse::<Key>().map_err(|_| Denial::UnknownKey)?;
+				Ok(KeySet {
+					keys: vec![Arc::new(key)],
+				})
+			}
+			Self::Set => json
+				.parse()
+				.map_err(|err: crate::Error| Denial::InvalidToken(err.to_string())),
+		}
+	}
+}
+
+struct Cached {
+	stamp: (kio::clock::Wall, u64),
+	keys: Arc<KeySet>,
+}
+
+impl std::fmt::Debug for KeyCache {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("KeyCache")
+	}
+}
+
+impl KeyCache {
+	/// The keys in `path`, parsed again only when its modification time or size changed
+	/// since they were cached. A file that is gone forgets its keys.
+	async fn load(&self, path: &Path, format: Format) -> Result<Arc<KeySet>, Denial> {
+		let lock = || self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		let entry = (path.to_owned(), format);
+		let Ok(meta) = tokio::fs::metadata(path).await else {
+			lock().remove(&entry);
+			return Err(Denial::UnknownKey);
+		};
+		// Stamped before reading, so a write racing the read is caught at the next token.
+		let modified = meta.modified().ok().and_then(|modified| modified.try_into().ok());
+		let stamp = modified.map(|modified| (modified, meta.len()));
+		if let Some(cached) = lock().get(&entry)
+			&& Some(cached.stamp) == stamp
+		{
+			return Ok(cached.keys.clone());
+		}
+		let json = tokio::fs::read_to_string(path).await.map_err(|_| Denial::UnknownKey)?;
+		let keys = Arc::new(format.parse(&json)?);
+		// A file without a modification time this clock holds parses every time.
+		if let Some(stamp) = stamp {
+			lock().insert(
+				entry,
+				Cached {
+					stamp,
+					keys: keys.clone(),
+				},
+			);
+		}
+		Ok(keys)
+	}
 }
 
 /// Why the policy denied a session, mapped to the typed [`Refusal`](crate::Refusal) in the 403 body.
@@ -415,27 +494,16 @@ impl Policy {
 		// Every key source reads the header first, so a token that is not a JWT fails here
 		// whichever one is configured.
 		let header = jsonwebtoken::decode_header(jwt).map_err(|err| Denial::MalformedToken(err.to_string()))?;
-		let claims = match keys {
-			Keys::File(path) => Key::from_file_async(path)
-				.await
-				.map_err(|_| Denial::UnknownKey)?
-				.verify_claims(jwt),
+		let set = match keys {
+			Keys::File(path) => self.cache.load(path, Format::Key).await?,
 			Keys::Dir(dir) => {
 				let kid = header.kid.ok_or(Denial::MissingKeyId)?;
 				let kid = KeyId::decode(&kid).map_err(|_| Denial::UnknownKey)?;
-				Key::from_file_async(dir.join(format!("{kid}.jwk")))
-					.await
-					.map_err(|_| Denial::UnknownKey)?
-					.verify_claims(jwt)
+				self.cache.load(&dir.join(format!("{kid}.jwk")), Format::Key).await?
 			}
-			Keys::Set(path) => {
-				let json = tokio::fs::read_to_string(path).await.map_err(|_| Denial::UnknownKey)?;
-				json.parse::<KeySet>()
-					.map_err(|err| Denial::InvalidToken(err.to_string()))?
-					.key(jwt)
-					.and_then(|key| key.verify_claims(jwt))
-			}
+			Keys::Set(path) => self.cache.load(path, Format::Set).await?,
 		};
+		let claims = set.key(jwt).and_then(|key| key.verify_claims(jwt));
 		let claims = claims.map_err(|err| match err {
 			crate::Error::Key(crate::KeyError::MissingKid) => Denial::MissingKeyId,
 			crate::Error::Key(crate::KeyError::KeyNotFound(_)) => Denial::UnknownKey,
@@ -1036,6 +1104,40 @@ mod tests {
 		assert!(policy.decide(&request("/demo")).await.is_ok());
 	}
 
+	/// A key file is parsed once and re-read only when it changes, so rotating it still
+	/// takes effect without a restart.
+	#[tokio::test]
+	async fn a_key_file_is_cached_until_it_changes() {
+		let (dir, key) = key_dir();
+		let path = dir.path().join("kid1.jwk");
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		};
+		let old = with_token(request("/demo"), &sign(&key, "demo", &["**"], &[], None));
+		policy.decide(&old).await.unwrap();
+
+		// Rewritten at the same size and modification time, the cached key still answers.
+		let before = std::fs::metadata(&path).unwrap();
+		let rotated = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
+		rotated.to_file(&path).unwrap();
+		let file = std::fs::File::options().write(true).open(&path).unwrap();
+		assert_eq!(file.metadata().unwrap().len(), before.len());
+		file.set_modified(before.modified().unwrap()).unwrap();
+		policy.decide(&old).await.unwrap();
+
+		// A new modification time reads the rotated key.
+		file.set_modified(before.modified().unwrap() + Duration::from_secs(1))
+			.unwrap();
+		assert!(matches!(policy.decide(&old).await, Err(Denial::InvalidToken(_))));
+		let new = with_token(request("/demo"), &sign(&rotated, "demo", &["**"], &[], None));
+		policy.decide(&new).await.unwrap();
+
+		// A removed file forgets its key.
+		std::fs::remove_file(&path).unwrap();
+		assert_eq!(policy.decide(&new).await.unwrap_err(), Denial::UnknownKey);
+	}
+
 	#[tokio::test]
 	async fn a_single_key_file_checks_the_kid() {
 		let dir = tempfile::tempdir().unwrap();
@@ -1078,6 +1180,14 @@ mod tests {
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
 		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
+
+		// The same file read as a single key is no key, whatever the set cached.
+		let mut single = policy.clone();
+		single.keys = Some(Keys::File(dir.path().join("keys.jwks")));
+		assert_eq!(
+			single.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err(),
+			Denial::UnknownKey
+		);
 
 		let mut wrong = key.export();
 		wrong.kid = Some(KeyId::decode("kid2").unwrap());
