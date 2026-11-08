@@ -19,7 +19,7 @@ does for the cut's packages.
 `moq-watch` and `moq-publish` gain a `p2p` attribute that constructs
 `Peers` on the shared connection's origin and its relay auth handle (see
 [Signaling and policy](/quest/m4/p2p/signal.md)), with the demo's ICE servers
-and a `max` from the page; `demo/web` exposes the toggle and an explicit application
+(per peer when the page selects them); `demo/web` exposes the toggle and an explicit application
 peer-selection policy. Enabling discovery alone must not dial every peer. The route pick is the
 origin's, under the rule from [Peer route policy](/quest/m4/p2p/cost-scopes.md):
 application priority then total cost selects among eligible connections.

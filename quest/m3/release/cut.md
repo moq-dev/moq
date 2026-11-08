@@ -19,7 +19,12 @@ from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
 fails, and `workspace:^` would resolve `@moq/net`'s dependency to
 web-transport's 0.3.4, a different API. `js/qmux` must publish above 0.3.4;
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
-Rust
+Before publishing, confirm moq-dev/web-transport's release config no longer
+publishes `@moq/qmux` or `qmux` (the freeze step of
+[qmux-js-retire](/quest/m3/release/qmux-js-retire.md) and
+[qmux-rs-retire](/quest/m3/release/qmux-rs-retire.md)): otherwise it could
+publish a 0.3.x above ours, which `@moq/net`'s `^` range would pick up with
+the old API. Rust
 publication remains owned by release-plz. This supersedes keeping `moq-rs` at
 its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify

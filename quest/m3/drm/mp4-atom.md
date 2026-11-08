@@ -17,3 +17,5 @@ Parse `moof`'s `pssh` too, even though key rotation stays out of scope, so the i
 
 Cover `tenc` versions 0 and 1, since `cbcs` uses version 1's crypt and skip byte blocks and a constant IV.
 Open the PR on kixelated/mp4-atom, release it through that repository's process, and bump `mp4-atom` in `[workspace.dependencies]` here, absorbing any API churn the bump brings.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/media](/quest/m2/api-shape/media.md) stops moq-mux re-exporting `mp4_atom` before the cut, so this bump is not a moq-mux break.
