@@ -1040,7 +1040,9 @@ impl GroupState {
 			&& freed < cap
 			&& freed < debt
 		{
-			freed += flate.plain.shed(debt - freed, cap - freed, self.outcome.frames().is_none());
+			freed += flate
+				.plain
+				.shed(debt - freed, cap - freed, self.outcome.frames().is_none());
 		}
 		freed
 	}
@@ -1440,7 +1442,9 @@ impl Drop for GroupState {
 }
 
 fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>> {
-	state.write().map_err(|r| r.outcome.error().cloned().unwrap_or(Error::Dropped))
+	state
+		.write()
+		.map_err(|r| r.outcome.error().cloned().unwrap_or(Error::Dropped))
 }
 
 /// Writes frames to a group in order.

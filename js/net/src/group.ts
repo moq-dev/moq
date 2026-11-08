@@ -739,11 +739,7 @@ class CombinedClosed implements GetPromise<Error | null> {
 	#unwatch?: Dispose;
 	#dispose: Dispose[] = [];
 
-	constructor(
-		preferred: Once<Error>,
-		source: () => Once<Error | null>,
-		final: (value: Error | null) => boolean,
-	) {
+	constructor(preferred: Once<Error>, source: () => Once<Error | null>, final: (value: Error | null) => boolean) {
 		this.#preferred = preferred;
 		this.#source = source;
 		this.#final = final;
@@ -1016,7 +1012,8 @@ export class Consumer {
 
 	// Fail this reader with `error`, unless it already failed: the first verdict stands.
 	#fail(error: unknown): Error {
-		if (this.#verdict.peek() === undefined) this.#verdict.set(error instanceof Error ? error : new Error(String(error)));
+		if (this.#verdict.peek() === undefined)
+			this.#verdict.set(error instanceof Error ? error : new Error(String(error)));
 		return this.#verdict.peek() as Error;
 	}
 
@@ -1199,7 +1196,8 @@ export class Consumer {
 	/** True once no further frames can be read: this handle or the group has closed, and every buffered frame is read. */
 	get done(): boolean {
 		return (
-			this.#verdict.peek() !== undefined || (this.#bufferedFrames().length === 0 && (this.#released || this.#settled()))
+			this.#verdict.peek() !== undefined ||
+			(this.#bufferedFrames().length === 0 && (this.#released || this.#settled()))
 		);
 	}
 

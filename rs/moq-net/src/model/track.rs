@@ -3078,7 +3078,11 @@ impl TrackState {
 	fn resume_position(&self) -> Option<Position> {
 		// A snapshot taken when the open groups were released wins; the group it was
 		// derived from may be gone.
-		if let Outcome::Dropped { resume: Some(resume) } | Outcome::Aborted { resume: Some(resume), .. } = self.outcome {
+		if let Outcome::Dropped { resume: Some(resume) }
+		| Outcome::Aborted {
+			resume: Some(resume), ..
+		} = self.outcome
+		{
 			return Some(resume);
 		}
 
@@ -3262,7 +3266,9 @@ impl TrackState {
 	}
 
 	fn modify(producer: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>> {
-		producer.write().map_err(|r| r.outcome.aborted().cloned().unwrap_or(Error::Dropped))
+		producer
+			.write()
+			.map_err(|r| r.outcome.aborted().cloned().unwrap_or(Error::Dropped))
 	}
 
 	/// Observe a shared track's abort, or every producer leaving, without extending its
@@ -3837,7 +3843,8 @@ impl Producer {
 
 	fn create_group_inner(&self, info: group::Info, received: Option<u64>) -> Result<Received> {
 		let mut state = self.modify()?;
-		if matches!(state.outcome, Outcome::Sealed(_)) || state.final_sequence().is_some_and(|fin| info.sequence >= fin) {
+		if matches!(state.outcome, Outcome::Sealed(_)) || state.final_sequence().is_some_and(|fin| info.sequence >= fin)
+		{
 			return Err(Error::Closed);
 		}
 		// A skip says the sequence will never be produced, so it is final. A drop is not: a

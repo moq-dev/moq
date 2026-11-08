@@ -2191,7 +2191,8 @@ export class Producer {
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = this.#cache.filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
-		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? this.#state.end.peek()?.error ?? null);
+		if (this.#state.outcome.peek() === undefined)
+			this.#state.outcome.set(abort ?? this.#state.end.peek()?.error ?? null);
 		// Closing a copy never supplies the missing tail of a group. Already finished groups
 		// ignore the abort and stay readable; unfinished ones retain their truncation cause.
 		const groupError =
