@@ -105,8 +105,8 @@ pub enum Error {
 	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
 	KeylogUnset,
 
-	/// A zero `connect.backoff.healthy`, which would count every session as healthy.
-	#[error("connect.backoff.healthy must be non-zero")]
+	/// A zero `Backoff::healthy`, which would count every session as healthy.
+	#[error("the healthy backoff bar must be non-zero")]
 	BackoffHealthy,
 
 	/// The config was parsed from released spellings that no longer work. The

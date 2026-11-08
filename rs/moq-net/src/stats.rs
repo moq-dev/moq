@@ -824,7 +824,7 @@ impl Presence {
 }
 
 /// Connected sessions right now, split by whether media payload moved through them
-/// within the last [`Activity::WINDOW`], in either direction.
+/// within the last 10 seconds, in either direction.
 ///
 /// A gauge, not a counter. A session that only holds announces, or subscriptions
 /// with nothing flowing, is idle: it costs keepalives and control traffic, not
@@ -841,7 +841,7 @@ pub struct Activity {
 
 impl Activity {
 	/// How recently payload must have moved for a session to count as active.
-	pub const WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+	const WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
 	fn add(&mut self, other: Self) {
 		self.idle += other.idle;

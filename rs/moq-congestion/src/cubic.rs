@@ -72,7 +72,7 @@ impl State {
 
 /// The RFC8312 congestion controller, as widely used for TCP
 #[derive(Debug, Clone)]
-pub struct Cubic {
+pub(crate) struct Cubic {
     current_mtu: u64,
     state: State,
     /// Copy of the controller state to restore when a spurious congestion event is detected.
@@ -97,7 +97,7 @@ impl Cubic {
             current_mtu,
             pre_congestion_state: None,
             rtt: init.rtt,
-            pacer: Pacer::new(init.rtt, window, init.mtu, init.max_pacing_rate, init.now),
+            pacer: Pacer::new(init.rtt, window, init.mtu, init.now),
         }
     }
 
@@ -300,7 +300,7 @@ impl Controller for Cubic {
     }
 }
 
-/// Configuration for the `Cubic` congestion controller
+/// Configuration for the CUBIC congestion controller
 #[derive(Debug, Clone)]
 pub struct Config {
     initial_window: u64,
@@ -341,7 +341,6 @@ mod tests {
                 now,
                 mtu: BASE_DATAGRAM_SIZE as u16,
                 rtt: Duration::from_millis(100),
-                max_pacing_rate: None,
                 seed: 0,
             },
         )

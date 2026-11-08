@@ -194,7 +194,8 @@ impl Broadcaster {
 	}
 
 	/// Return true if this is a clone of the same broadcaster.
-	pub fn is_clone(&self, other: &Self) -> bool {
+	#[cfg(feature = "server")]
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self._guard, &other._guard)
 	}
 

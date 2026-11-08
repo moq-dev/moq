@@ -27,7 +27,7 @@ export namespace Audio {
 		readonly out: Signals.Readonlys<Audio.DecoderOutput>;
 		reset(): void;
 		readonly source: Audio.Source;
-		static supported: (config: Hang.Catalog.Audio.AudioConfig) => Promise<boolean>;
+		static supported: (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
 		readonly sync: Sync;
 	}
 	export type DecoderInput = {
@@ -77,9 +77,9 @@ export namespace Audio {
 		target: Signals.Getter<Audio.Target | undefined>;
 	};
 	export type SourceOutput = {
-		available: Signals.Signal<Record<string, Hang.Catalog.Audio.AudioConfig>>;
+		available: Signals.Signal<Record<string, Hang.Catalog.AudioConfig>>;
 		catalog: Signals.Signal<Hang.Catalog.Audio | undefined>;
-		config: Signals.Signal<Hang.Catalog.Audio.AudioConfig | undefined>;
+		config: Signals.Signal<Hang.Catalog.AudioConfig | undefined>;
 		error: Signals.Signal<Error | undefined>;
 		jitter: Signals.Signal<Clock.Milli | undefined>;
 		track: Signals.Signal<string | undefined>;
@@ -96,7 +96,7 @@ export namespace Audio {
 		stalls: number;
 		underruns: number;
 	}
-	export type Supported = (config: Hang.Catalog.Audio.AudioConfig) => Promise<boolean>;
+	export type Supported = (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
 	export type Target = {
 		name?: string;
 	};
@@ -258,7 +258,7 @@ export namespace Video {
 		readonly in: Signals.Readonlys<Video.DecoderInput>;
 		readonly out: Signals.Readonlys<Video.DecoderOutput>;
 		readonly source: Video.Source;
-		static supported: (config: Hang.Catalog.Video.VideoConfig) => Promise<boolean>;
+		static supported: (config: Hang.Catalog.VideoConfig) => Promise<boolean>;
 		readonly sync: Sync;
 	}
 	export type DecoderInput = {
@@ -315,10 +315,10 @@ export namespace Video {
 		target: Signals.Getter<Video.Target | undefined>;
 	};
 	export type SourceOutput = {
-		available: Signals.Signal<Record<string, Hang.Catalog.Video.VideoConfig>>;
+		available: Signals.Signal<Record<string, Hang.Catalog.VideoConfig>>;
 		catalog: Signals.Signal<Hang.Catalog.Video | undefined>;
 		ceiling: Signals.Signal<number | undefined>;
-		config: Signals.Signal<Hang.Catalog.Video.VideoConfig | undefined>;
+		config: Signals.Signal<Hang.Catalog.VideoConfig | undefined>;
 		error: Signals.Signal<Error | undefined>;
 		track: Signals.Signal<string | undefined>;
 	};
@@ -334,7 +334,7 @@ export namespace Video {
 		stalled: Clock.Milli;
 		stalls: number;
 	}
-	export type Supported = (config: Hang.Catalog.Video.VideoConfig) => Promise<boolean>;
+	export type Supported = (config: Hang.Catalog.VideoConfig) => Promise<boolean>;
 	export type Target = {
 		bitrate?: number;
 		height?: number;

@@ -2591,6 +2591,16 @@ impl Handle {
 		self.state.read().next_index
 	}
 
+	/// The newest object's ID, by its moq-transport object ID when the group carries one,
+	/// else its frame index; `None` before the first frame.
+	pub(crate) fn last_object(&self) -> Option<u64> {
+		let state = self.state.read();
+		match state.wire() {
+			Some(wire) => wire.last,
+			None => (state.next_index as u64).checked_sub(1),
+		}
+	}
+
 	/// Cap the group at `frames`, for a track end inside it, or lift the cap with `None`:
 	/// later writes past the cap are [`Error::Closed`]. A frame already at or past the cap is
 	/// [`Error::ProtocolViolation`]. An aborted group gets no more frames, so it takes no cap.

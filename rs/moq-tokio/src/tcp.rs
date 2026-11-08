@@ -410,13 +410,9 @@ impl Listener {
 	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
 	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
 	/// retried, because the caller has no better answer than to ask again. A
-	/// per-connection *handshake* failure is still yielded as `Some(Err(..))`.
-	///
-	/// The `Option` no longer has a `None` case to report: nothing ends the accept
-	/// loop, so this always yields. It stays because dropping it is a breaking change
-	/// to a published signature.
-	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		crate::runtime::scope(async move { Some(self.accept_pending().await.await.map(|(session, _)| session)) }).await
+	/// per-connection *handshake* failure is still returned as an error.
+	pub async fn accept(&self) -> Result<qmux::Session> {
+		crate::runtime::scope(async move { self.accept_pending().await.await.map(|(session, _)| session) }).await
 	}
 
 	/// Accept a socket and return its independently driven qmux handshake.
@@ -674,7 +670,7 @@ mod tests {
 			.with_protocols(["moq-test"]);
 		let addr = listener.local_addr().expect("local addr");
 
-		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
+		let accept = tokio::spawn(async move { listener.accept().await.expect("accept") });
 
 		let blackhole: net::SocketAddr = "192.0.2.1:9".parse().unwrap();
 		let candidates = crate::resolve::Candidates::fixed([blackhole, addr]);
@@ -706,7 +702,7 @@ mod tests {
 			.expect("bind listener")
 			.with_protocols(["moq-test"]);
 		let addr = listener.local_addr().expect("local addr");
-		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
+		let accept = tokio::spawn(async move { listener.accept().await.expect("accept") });
 		let candidates = crate::resolve::Candidates::fixed([addr]);
 		let client = connect_addrs(candidates, &["moq-test"], &crate::qmux_default(), Duration::ZERO)
 			.await

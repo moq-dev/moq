@@ -158,10 +158,24 @@ impl<T> std::fmt::Debug for Driver<T> {
 enum Phase {
 	/// Moving records both ways.
 	Open,
-	/// The connection said everything; closing the transport until this deadline.
+	/// The connection ended, by a close from either side; still moving records both ways to
+	/// deliver what it has left to say, until this deadline.
+	Flushing(Instant),
+	/// The connection said everything; closing the transport until this deadline, the same one
+	/// [`Self::Flushing`] had.
 	Closing(Instant),
 	/// The transport is closed and the session's end published.
 	Done,
+}
+
+impl Phase {
+	/// When a closing session gives up, if it is closing.
+	fn deadline(&self) -> Option<Instant> {
+		match self {
+			Self::Flushing(deadline) | Self::Closing(deadline) => Some(*deadline),
+			Self::Open | Self::Done => None,
+		}
+	}
 }
 
 /// What one round of reading and writing came to.
@@ -209,7 +223,7 @@ impl<T: Transport> Run<T> {
 					}
 					self.finish(Ok(()));
 				}
-				Phase::Open => match self.step(waiter, recv) {
+				Phase::Open | Phase::Flushing(_) => match self.step(waiter, recv) {
 					Step::Progress => {
 						rounds += 1;
 						if rounds == ROUNDS {
@@ -219,9 +233,10 @@ impl<T: Transport> Run<T> {
 					}
 					Step::Idle => return Poll::Pending,
 					Step::Drained => {
+						// Drained means closed, so `step` already started the close bound.
 						let deadline = self
-							.timer
-							.closing
+							.phase
+							.deadline()
 							.unwrap_or_else(|| kio::clock::now().saturating_add(CLOSE_TIMEOUT));
 						self.phase = Phase::Closing(deadline);
 					}
@@ -291,8 +306,8 @@ impl<T: Transport> Run<T> {
 		// room for, so wait for the close with `poll_closed`; the transport wakes us for room.
 		let _ = state.conn.poll_closed(waiter);
 		state.check_lost();
-		if state.conn.is_closed() && self.timer.closing.is_none() {
-			self.timer.closing = Some(now.saturating_add(CLOSE_TIMEOUT));
+		if state.conn.is_closed() && matches!(self.phase, Phase::Open) {
+			self.phase = Phase::Flushing(now.saturating_add(CLOSE_TIMEOUT));
 		}
 		let drained = state.conn.is_drained();
 		let deadline = state.conn.poll_timeout();
@@ -340,7 +355,8 @@ impl<T: Transport> Run<T> {
 		if drained && self.outbound.is_empty() && self.room {
 			return Step::Drained;
 		}
-		if self.timer.closing.is_some_and(|at| now >= at) {
+		let closing = self.phase.deadline();
+		if closing.is_some_and(|at| now >= at) {
 			// The close never got through a stalled transport.
 			return Step::Failed(Error::Closed);
 		}
@@ -350,7 +366,7 @@ impl<T: Transport> Run<T> {
 		if more_to_read || (self.room && (gathered >= BATCH_BYTES || !had_room)) {
 			return Step::Progress;
 		}
-		let deadline = match (deadline, self.timer.closing) {
+		let deadline = match (deadline, closing) {
 			(Some(a), Some(b)) => Some(a.min(b)),
 			(a, b) => a.or(b),
 		};
@@ -395,7 +411,7 @@ fn deliver(state: &mut State, record: Result<Bytes, Error>, now: Instant) {
 			// The transport's own error says more than the connection's reset, unless this side
 			// is closing, when the peer hanging up is the expected answer and the driver
 			// publishes the close it asked for.
-			if state.local_close.is_none() {
+			if !state.closing() {
 				state.fail(err);
 			}
 			state.conn.transport_closed();
@@ -406,26 +422,20 @@ fn deliver(state: &mut State, record: Result<Bytes, Error>, now: Instant) {
 /// The transport is done: publish a local close, or the failure that ended it.
 fn finish(inner: &Inner, result: Result<(), Error>) {
 	let mut state = inner.lock();
-	state.check_lost();
-	if let Some(err) = state.local_close.take() {
-		state.fail(err);
-	}
+	// A close from either side comes first: the driver is done delivering it.
+	state.publish();
 	if let Err(err) = result {
 		state.fail(err);
 	}
+	// Otherwise the transport died under a live connection, which this ends.
 	state.conn.transport_closed();
-	state.check_lost();
-	// A drained connection ended with a close from either side, already published; this only
-	// lands when the transport died under a live one.
-	state.fail(Error::Closed);
+	state.publish();
 }
 
-/// The driver's timers.
+/// The driver's timer.
 #[derive(Default)]
 struct Timer {
 	sleep: Option<kio::clock::Sleep>,
-	/// When a closing session gives up on delivering its close frame.
-	closing: Option<Instant>,
 	/// Writes are stalled on the transport.
 	stalled: bool,
 }

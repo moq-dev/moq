@@ -1,4 +1,4 @@
-//! A single QUIC connection: its state machine, the events it reports, and why it ends.
+//! A single QUIC connection: its state machine and why it ends.
 
 use std::{
 	cmp,
@@ -68,7 +68,7 @@ mod packet_crypto;
 use packet_crypto::PrevCrypto;
 
 mod paths;
-use paths::{PathData, PathResponses};
+use paths::{Challenge, PathData, PathResponses};
 
 pub(crate) mod qlog;
 use qlog::QlogSink;
@@ -104,9 +104,9 @@ impl ConnectionTag {
 }
 pub use stats::{CreditStats, FrameStats, PathStats, Stats, UdpStats};
 
-mod streams;
-pub(crate) use streams::StreamsState;
-pub use streams::{Streams, recv, send};
+pub(crate) mod streams;
+pub use streams::Streams;
+pub(crate) use streams::{StreamsState, recv, send};
 
 mod timer;
 
@@ -116,8 +116,8 @@ use timer::{Timer, TimerTable};
 
 /// Protocol state and logic for a single QUIC connection
 ///
-/// Objects of this type receive [`ConnectionEvent`]s and emit [`EndpointEvent`]s and application
-/// [`Event`]s to make progress. To handle timeouts, a `Connection` returns timer updates and
+/// Objects of this type receive [`ConnectionEvent`]s and emit [`EndpointEvent`]s to make
+/// progress. To handle timeouts, a `Connection` returns timer updates and
 /// expects timeouts through various methods. A number of simple getter methods are exposed
 /// to allow callers to inspect some of the connection state.
 ///
@@ -141,7 +141,6 @@ use timer::{Timer, TimerTable};
 /// 1. [`poll_transmit`](Self::poll_transmit)
 /// 2. [`poll_timeout`](Self::poll_timeout)
 /// 3. [`poll_endpoint_events`](Self::poll_endpoint_events)
-/// 4. [`poll`](Self::poll)
 ///
 /// Currently the only actual dependency is from (2) to (1), however additional
 /// dependencies may be added in future, so the above order is recommended.
@@ -190,9 +189,11 @@ pub struct Connection {
 	/// The value that the server included in the Source Connection ID field of a Retry packet, if
 	/// one was received
 	retry_src_cid: Option<ConnectionId>,
-	events: VecDeque<Event>,
 	endpoint_events: VecDeque<EndpointEventInner>,
 	/// Whether `EndpointEventInner::Draining` was emitted, which happens once.
+	///
+	/// Not derived from `state`: a server's first Initial can carry a CONNECTION_CLOSE, which
+	/// reaches `Draining` without reporting it, since that packet skips `finish_packet`.
 	draining_reported: bool,
 	/// Whether the spin bit is in use for this connection
 	spin_enabled: bool,
@@ -236,7 +237,6 @@ pub struct Connection {
 	//
 	/// Responses to PATH_CHALLENGE frames
 	path_responses: PathResponses,
-	close: bool,
 
 	//
 	// ACK frequency
@@ -352,7 +352,6 @@ impl Connection {
 			orig_rem_cid: rem_cid,
 			initial_dst_cid: init_cid,
 			retry_src_cid: None,
-			events: VecDeque::new(),
 			endpoint_events: VecDeque::new(),
 			draining_reported: false,
 			spin_enabled: config.allow_spin && rng.random_ratio(7, 8),
@@ -380,7 +379,6 @@ impl Connection {
 			packet_number_filter: PacketNumberFilter::new(&mut rng),
 
 			path_responses: PathResponses::default(),
-			close: false,
 
 			ack_frequency: AckFrequencyState::new(get_max_ack_delay(&TransportParameters::default())),
 			next_bundled_ack_time: None,
@@ -466,7 +464,8 @@ impl Connection {
 	}
 
 	/// Wait for the handshake to be confirmed, as [`poll_connected`](Self::poll_connected) does
-	pub fn poll_handshake_confirmed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	#[cfg(test)]
+	pub(crate) fn poll_handshake_confirmed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.streams.waits.poll_confirmed(waiter)
 	}
 
@@ -482,16 +481,6 @@ impl Connection {
 		self.streams.waits.lost()
 	}
 
-	/// Returns application-facing notifications that no `poll_*` wait covers
-	///
-	/// Connections should be polled for events after:
-	/// - a call was made to `handle_event`
-	/// - a call was made to `handle_timeout`
-	#[must_use]
-	pub fn poll(&mut self) -> Option<Event> {
-		self.events.pop_front()
-	}
-
 	/// Return endpoint-facing events
 	#[must_use]
 	pub fn poll_endpoint_events(&mut self) -> Option<EndpointEvent> {
@@ -503,7 +492,7 @@ impl Connection {
 	pub fn streams(&mut self) -> Streams<'_> {
 		Streams {
 			state: &mut self.streams,
-			conn_state: &self.state,
+			closed: self.state.is_closed(),
 		}
 	}
 
@@ -534,7 +523,7 @@ impl Connection {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.spaces[SpaceId::Data].pending,
-			conn_state: &self.state,
+			closed: self.state.is_closed(),
 		}
 	}
 
@@ -596,7 +585,11 @@ impl Connection {
 		// The peer's maximum UDP payload size can reduce the path MTU below our configured minimum.
 		let min_mtu = Ord::min(self.config.min_mtu, self.path.current_mtu());
 
-		if let Some(challenge) = self.send_path_challenge(now, buf) {
+		// A closing endpoint sends only CONNECTION_CLOSE (RFC 9000 §10.2.1), so a challenge the
+		// previous path still owes stays unsent.
+		if !self.state.is_closed()
+			&& let Some(challenge) = self.send_path_challenge(now, buf)
+		{
 			return Some(challenge);
 		}
 
@@ -622,10 +615,10 @@ impl Connection {
 				self.app_limited = true;
 				return None;
 			}
-			State::Draining | State::Closed(_) => {
-				// self.close is only reset once the associated packet had been
+			State::Draining { send_close } | State::Closed(state::Closed { send_close, .. }) => {
+				// `send_close` is only reset once the associated packet had been
 				// encoded successfully
-				if !self.close {
+				if !send_close {
 					self.app_limited = true;
 					return None;
 				}
@@ -1015,7 +1008,7 @@ impl Connection {
 				} else if buf.len() + frame::ConnectionClose::SIZE_BOUND <= builder.max_size {
 					let max_frame_size = builder.max_size - buf.len();
 					match &self.state {
-						State::Closed(state::Closed { reason }) => {
+						State::Closed(state::Closed { reason, .. }) => {
 							if space_id == SpaceId::Data || reason.is_transport_layer() {
 								reason.encode(buf, max_frame_size)
 							} else {
@@ -1027,7 +1020,7 @@ impl Connection {
 								.encode(buf, max_frame_size)
 							}
 						}
-						State::Draining => frame::ConnectionClose {
+						State::Draining { .. } => frame::ConnectionClose {
 							error_code: TransportErrorCode::NO_ERROR,
 							frame_type: None,
 							reason: String::new(),
@@ -1038,7 +1031,7 @@ impl Connection {
 				}
 				if space_id == self.highest_space {
 					// Don't send another close packet
-					self.close = false;
+					self.state.close_sent();
 					// `CONNECTION_CLOSE` is the final packet
 					break;
 				} else {
@@ -1225,13 +1218,9 @@ impl Connection {
 	/// Send PATH_CHALLENGE for a previous path if necessary
 	fn send_path_challenge(&mut self, now: Instant, buf: &mut Vec<u8>) -> Option<Transmit> {
 		let (prev_cid, prev_path) = self.prev_path.as_mut()?;
-		if !prev_path.challenge_pending {
-			return None;
-		}
-		prev_path.challenge_pending = false;
-		let token = prev_path
-			.challenge
-			.expect("previous path challenge pending without token");
+		let challenge = prev_path.challenge.as_mut().filter(|challenge| challenge.pending)?;
+		challenge.pending = false;
+		let token = challenge.token;
 		let remote = prev_path.remote;
 		debug_assert_eq!(
 			self.highest_space,
@@ -1306,8 +1295,8 @@ impl Connection {
 	/// Process `ConnectionEvent`s generated by the associated `Endpoint`
 	///
 	/// Will execute protocol logic upon receipt of a connection event, in turn preparing signals
-	/// (including application `Event`s, `EndpointEvent`s and outgoing datagrams) that should be
-	/// extracted through the relevant methods.
+	/// (including `EndpointEvent`s and outgoing datagrams) that should be extracted through the
+	/// relevant methods.
 	pub fn handle_event(&mut self, event: ConnectionEvent) {
 		use ConnectionEventInner::*;
 		match event.0 {
@@ -1373,9 +1362,8 @@ impl Connection {
 
 	/// Process timer expirations
 	///
-	/// Executes protocol logic, potentially preparing signals (including application `Event`s,
-	/// `EndpointEvent`s and outgoing datagrams) that should be extracted through the relevant
-	/// methods.
+	/// Executes protocol logic, potentially preparing signals (including `EndpointEvent`s and
+	/// outgoing datagrams) that should be extracted through the relevant methods.
 	///
 	/// It is most efficient to call this immediately after the system clock reaches the latest
 	/// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
@@ -1426,10 +1414,8 @@ impl Connection {
 					if let Some((_, prev)) = self.prev_path.take() {
 						self.path = prev;
 						self.set_loss_detection_timer(now);
-						self.events.push_back(Event::PathUpdated);
 					}
 					self.path.challenge = None;
-					self.path.challenge_pending = false;
 				}
 				Timer::Pacing => trace!("pacing timer expired"),
 				Timer::PushNewCid => {
@@ -1496,8 +1482,10 @@ impl Connection {
 			let unanswered = matches!(&self.state, State::Handshake(state) if !state.rem_cid_set);
 			self.close_common();
 			self.set_close_timer(now);
-			self.close = true;
-			self.state = State::Closed(state::Closed { reason });
+			self.state = State::Closed(state::Closed {
+				reason,
+				send_close: true,
+			});
 			if unanswered {
 				self.report_draining();
 			}
@@ -2755,7 +2743,7 @@ impl Connection {
 	) {
 		// State transitions for error cases
 		if let Err(Error::Reset) = result
-			&& matches!(self.state, State::Closed(_) | State::Draining | State::Drained)
+			&& matches!(self.state, State::Closed(_) | State::Draining { .. } | State::Drained)
 		{
 			// Preserve the original close reason once the connection has closed.
 			self.state = State::Drained;
@@ -2776,7 +2764,7 @@ impl Connection {
 					debug!("closing connection due to transport error: {}", err);
 					State::closed(err)
 				}
-				Error::VersionMismatch => State::Draining,
+				Error::VersionMismatch => State::Draining { send_close: false },
 				Error::LocallyClosed { .. } => {
 					unreachable!("LocallyClosed isn't generated by packet processing");
 				}
@@ -2792,7 +2780,7 @@ impl Connection {
 				self.set_close_timer(now);
 			}
 		}
-		if matches!(self.state, State::Draining | State::Drained) {
+		if matches!(self.state, State::Draining { .. } | State::Drained) {
 			self.report_draining();
 		}
 		if !was_drained && self.state.is_drained() {
@@ -2803,8 +2791,9 @@ impl Connection {
 		}
 
 		// Transmit CONNECTION_CLOSE if necessary
-		if let State::Closed(_) = self.state {
-			self.close = remote == self.path.remote;
+		let on_path = remote == self.path.remote;
+		if let State::Closed(closed) = &mut self.state {
+			closed.send_close = on_path;
 		}
 	}
 
@@ -2826,7 +2815,8 @@ impl Connection {
 				}
 				return Ok(());
 			}
-			State::Closed(_) => {
+			State::Closed(closed) => {
+				let send_close = closed.send_close;
 				for result in frame::Iter::new(packet.payload.freeze())? {
 					let frame = match result {
 						Ok(frame) => frame,
@@ -2844,13 +2834,14 @@ impl Connection {
 
 					if let Frame::Close(_) = frame {
 						trace!("draining");
-						self.state = State::Draining;
+						// A close still due goes out once more, as the draining state's one reply.
+						self.state = State::Draining { send_close };
 						break;
 					}
 				}
 				return Ok(());
 			}
-			State::Draining | State::Drained => return Ok(()),
+			State::Draining { .. } | State::Drained => return Ok(()),
 			State::Handshake(state) => state,
 		};
 		// Whether a server Initial was processed or a Retry accepted. Packets the client discards
@@ -3065,7 +3056,7 @@ impl Connection {
 				// through to the catch-all arm below.
 				Frame::Close(reason @ Close::Connection(_)) => {
 					self.lose(reason.into());
-					self.state = State::Draining;
+					self.state = State::Draining { send_close: false };
 					return Ok(());
 				}
 				_ => {
@@ -3173,14 +3164,15 @@ impl Connection {
 					}
 				}
 				Frame::PathResponse(token) => {
-					if self.path.challenge == Some(token) && remote == self.path.remote {
+					if self.path.challenge.is_some_and(|challenge| challenge.token == token)
+						&& remote == self.path.remote
+					{
 						trace!("new path validated");
 						self.timers.stop(Timer::PathValidation);
 						self.path.challenge = None;
 						self.path.validated = true;
 						if let Some((_, prev_path)) = &mut self.prev_path {
 							prev_path.challenge = None;
-							prev_path.challenge_pending = false;
 						}
 					} else {
 						debug!(token, "ignoring invalid PATH_RESPONSE");
@@ -3383,8 +3375,8 @@ impl Connection {
 
 		if let Some(reason) = close {
 			self.lose(reason.into());
-			self.state = State::Draining;
-			self.close = true;
+			// Reply with a close of our own, the one packet draining allows (RFC 9000 §10.2.2)
+			self.state = State::Draining { send_close: true };
 		}
 
 		if remote != self.path.remote && !is_probing_packet && number == self.spaces[SpaceId::Data].rx_packet {
@@ -3426,18 +3418,15 @@ impl Connection {
 			)
 		};
 		new_path.congestion.on_probe_target(self.bandwidth_probe.target());
-		new_path.challenge = Some(self.rng.random());
-		new_path.challenge_pending = true;
+		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
 		let mut prev = mem::replace(&mut self.path, new_path);
 		self.datagrams().drop_oversized();
-		self.events.push_back(Event::PathUpdated);
 
 		// Don't clobber the original path if the previous one hasn't been validated yet
 		if prev.challenge.is_none() {
-			prev.challenge = Some(self.rng.random());
-			prev.challenge_pending = true;
+			prev.challenge = Some(Challenge::new(self.rng.random()));
 			// We haven't updated the remote CID yet, this captures the remote CID we were using on
 			// the previous path.
 			self.prev_path = Some((self.rem_cids.active(), prev));
@@ -3582,9 +3571,10 @@ impl Connection {
 		// PATH_CHALLENGE
 		if buf.len() + 9 < max_size && space_id == SpaceId::Data {
 			// Transmit challenges with every outgoing frame on an unvalidated path
-			if let Some(token) = self.path.challenge {
+			if let Some(challenge) = &mut self.path.challenge {
 				// But only send a packet solely for that purpose at most once
-				self.path.challenge_pending = false;
+				challenge.pending = false;
+				let token = challenge.token;
 				sent.non_retransmits = true;
 				sent.requires_padding = true;
 				trace!("PATH_CHALLENGE {:08x}", token);
@@ -4096,8 +4086,11 @@ impl Connection {
 	/// See also `self.space(SpaceId::Data).can_send()`
 	fn can_send_1rtt(&self, max_size: usize) -> bool {
 		self.streams.can_send_frames(max_size)
-			|| self.path.challenge_pending
-			|| self.prev_path.as_ref().is_some_and(|(_, x)| x.challenge_pending)
+			|| self.path.challenge.is_some_and(|challenge| challenge.pending)
+			|| self
+				.prev_path
+				.as_ref()
+				.is_some_and(|(_, prev)| prev.challenge.is_some_and(|challenge| challenge.pending))
 			|| !self.path_responses.is_empty()
 	}
 
@@ -4377,14 +4370,28 @@ pub(crate) enum State {
 	Handshake(state::Handshake),
 	Established,
 	Closed(state::Closed),
-	Draining,
+	Draining {
+		/// A packet with a CONNECTION_CLOSE is due
+		send_close: bool,
+	},
 	/// Waiting for application to call close so we can dispose of the resources
 	Drained,
 }
 
 impl State {
 	fn closed<R: Into<Close>>(reason: R) -> Self {
-		Self::Closed(state::Closed { reason: reason.into() })
+		Self::Closed(state::Closed {
+			reason: reason.into(),
+			send_close: false,
+		})
+	}
+
+	/// A CONNECTION_CLOSE went out, so none is due until another packet asks for one
+	fn close_sent(&mut self) {
+		match self {
+			Self::Closed(state::Closed { send_close, .. }) | Self::Draining { send_close } => *send_close = false,
+			Self::Handshake(_) | Self::Established | Self::Drained => {}
+		}
 	}
 
 	fn is_handshake(&self) -> bool {
@@ -4396,7 +4403,7 @@ impl State {
 	}
 
 	fn is_closed(&self) -> bool {
-		matches!(*self, Self::Closed(_) | Self::Draining | Self::Drained)
+		matches!(*self, Self::Closed(_) | Self::Draining { .. } | Self::Drained)
 	}
 
 	fn is_drained(&self) -> bool {
@@ -4426,18 +4433,10 @@ mod state {
 	#[derive(Clone)]
 	pub(crate) struct Closed {
 		pub(super) reason: Close,
+		/// A packet with a CONNECTION_CLOSE is due: set on closing, and again by each packet the
+		/// peer sends on the current path meanwhile
+		pub(super) send_close: bool,
 	}
-}
-
-/// Notifications of interest to the application that no `poll_*` wait covers
-///
-/// Everything an application waits for (a connection, a stream, data, credit, an end, a loss)
-/// is a `poll_*` taking its [`kio::Waiter`] instead.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Event {
-	/// The currently active path was updated
-	PathUpdated,
 }
 
 fn get_max_ack_delay(params: &TransportParameters) -> Duration {
@@ -4573,7 +4572,10 @@ mod tests {
 			let mut buf = Vec::new();
 			assert!(conn.transmit(now, 1, &mut buf).is_some());
 			assert!(buf.len() <= 1200);
-			assert!(!conn.close);
+			assert!(matches!(
+				conn.state,
+				State::Closed(state::Closed { send_close: false, .. })
+			));
 
 			let (packet, rest) =
 				PartialDecode::new(buf.as_slice().into(), &FixedLengthConnectionIdParser::new(0), false).unwrap();

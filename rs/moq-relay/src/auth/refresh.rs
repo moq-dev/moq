@@ -1084,7 +1084,7 @@ mod tests {
 			assert_eq!(admission.request.query.as_deref(), Some("jwt=replacement"));
 			admission.grant(lease::Consumer::fixed(grant("a/**", 20)));
 		});
-		let (token, _) = token.unwrap();
+		let token = token.unwrap();
 		clock.advance(Duration::from_secs(4));
 		assert!(
 			settles_pending(&mut supervising).await,
@@ -1125,7 +1125,7 @@ mod tests {
 			async {
 				tokio::select! {
 					reason = lease.ended() => panic!("the lease ended while renewing: {reason}"),
-					token = auth.add("replacement") => token.unwrap().0,
+					token = auth.add("replacement") => token.unwrap(),
 				}
 			},
 			async { admissions.next().await.unwrap().grant(replacement) },
@@ -1229,7 +1229,7 @@ mod tests {
 		let (token, ()) = tokio::join!(auth.add("replacement"), async {
 			admissions.next().await.unwrap().grant(consumer);
 		});
-		let (token, _) = token.unwrap();
+		let token = token.unwrap();
 		assert!(
 			token.grant().peek().unwrap().subscribe.is_empty(),
 			"publisher SETUP role widened"
@@ -1278,7 +1278,7 @@ mod tests {
 		assert!(
 			matches!(result, Err(moq_net::Error::Session(SessionError::Unauthorized))),
 			"an empty token reissued a credential the relay removed: {:?}",
-			result.map(|(token, _)| token.grant().peek())
+			result.map(|token| token.grant().peek())
 		);
 		assert!(!supervising.is_finished());
 		client.abort(moq_net::Error::Cancel);

@@ -2038,7 +2038,7 @@ async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 		.established()
 		.await
 		.unwrap();
-	let (token, _) = publisher.auth().add("shared").await.unwrap();
+	let token = publisher.auth().add("shared").await.unwrap();
 	let first = origin
 		.route(
 			"first",

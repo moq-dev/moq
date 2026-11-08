@@ -2949,7 +2949,7 @@ impl DatagramSend {
 	/// Fails on a sequence the version's varints cannot carry (2^62 and up before lite-07):
 	/// every datagram its source produces later is at least as far, so the subscription can
 	/// deliver no more. One the network reordered below it is lost, as any datagram may be.
-	fn send(&self, datagram: crate::Datagram) -> Result<(), Error> {
+	fn send(&self, datagram: crate::datagram::Datagram) -> Result<(), Error> {
 		let Ok(timestamp) = self
 			.stamp
 			.map(|stamp| stamp.wire(datagram.timestamp, &self.runtime))
@@ -5088,21 +5088,20 @@ impl TrackRun {
 		};
 		let groups = bounds.groups();
 		let (start, end) = (groups.start(), groups.end());
-		if self
-			.track
-			.update(crate::track::Subscription {
-				priority: upd.priority,
-				delay: crate::track::Delay {
-					min: upd.min_delay,
-					max: serving_max_delay(self.ctx.version, upd.max_delay),
-				},
-				order: upd.order,
-				..groups
-			})
-			.is_ok()
-		{
-			self.named = start;
+		// A refusal leaves the model's ranges as they were, so this side keeps them too.
+		if let Err(err) = self.track.update(crate::track::Subscription {
+			priority: upd.priority,
+			delay: crate::track::Delay {
+				min: upd.min_delay,
+				max: serving_max_delay(self.ctx.version, upd.max_delay),
+			},
+			order: upd.order,
+			..groups
+		}) {
+			self.refused = Some(err);
+			return;
 		}
+		self.named = start;
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to
 		// drop back to 0: the cursor only rises on its own, and a finished group
@@ -7356,7 +7355,7 @@ mod serve_group_test {
 					// Lite-07's type adds one byte to the three one-byte fields.
 					let header = if version.has_padding() { 4 } else { 3 };
 					datagram_send(version, session)
-						.send(crate::Datagram {
+						.send(crate::datagram::Datagram {
 							sequence: 1,
 							timestamp: Some(Timestamp::ZERO),
 							payload: bytes::Bytes::from(vec![0; size - header]),
@@ -7378,7 +7377,7 @@ mod serve_group_test {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let session = SinkSession::new(Log::default()).with_datagrams(1200);
 			let log = session.log.clone();
-			let sent = datagram_send(version, session).send(crate::Datagram {
+			let sent = datagram_send(version, session).send(crate::datagram::Datagram {
 				sequence: 1 << 62,
 				timestamp: Some(Timestamp::ZERO),
 				payload: bytes::Bytes::from_static(b"d"),
@@ -7396,7 +7395,7 @@ mod serve_group_test {
 		let log = session.log.clone();
 		let send = datagram_send(Version::Lite07, session);
 		for sequence in [4, 9] {
-			send.send(crate::Datagram {
+			send.send(crate::datagram::Datagram {
 				sequence,
 				timestamp: Some(Timestamp::ZERO),
 				payload: bytes::Bytes::from_static(b"d"),
@@ -7412,7 +7411,7 @@ mod serve_group_test {
 		let session = SinkSession::new(Log::default()).with_datagrams(1200);
 		let log = session.log.clone();
 		datagram_send(Version::Lite07, session)
-			.send(crate::Datagram {
+			.send(crate::datagram::Datagram {
 				sequence: 4,
 				timestamp: Some(Timestamp::ZERO),
 				payload: bytes::Bytes::from_static(b"d"),
@@ -7680,6 +7679,46 @@ mod serve_group_test {
 		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
 		let resolved = run.track.resolved()[1].map(|r| (r.start, r.end));
 		assert_eq!(resolved, Some((2, None)), "the update kept where it started");
+	}
+
+	/// An update the model refuses, here a time start that a group-only copy's cache cannot
+	/// settle, ends the subscription with the refusal and keeps the ranges it had, rather
+	/// than serving under terms the model never took.
+	#[kio::test]
+	async fn lite07_a_refused_update_ends_the_subscription() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.anchored_cached();
+		for sequence in 0..5 {
+			write_group(&mut track, sequence, sequence * 1000);
+		}
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_range(0..1),
+		);
+		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		while run.start.is_none() {
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		}
+
+		// Swap range 0 for one ending at a time later groups may still start before.
+		let later = lite::Range {
+			start: Some(lite::Anchor::Time(1_000)),
+			end: Some(lite::Anchor::Time(100_000)),
+		};
+		run.update(lite07_add(&[], 1, &[later]));
+		assert_eq!(run.ids, [0], "kept the ranges the model holds");
+		assert!(run.unstarted.is_empty(), "owes no start for a refused range");
+		let result = loop {
+			if let Poll::Ready(Err(err)) = run.poll_step(&mut writer, &kio::Waiter::noop()) {
+				break err;
+			}
+		};
+		assert!(matches!(result, Error::Unsupported), "ended with {result:?}");
 	}
 
 	/// Where an added time start `time` resolves among `groups` (sequence and start, in

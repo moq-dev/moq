@@ -64,7 +64,6 @@ impl Sim {
             now: epoch,
             mtu: MTU,
             rtt: Duration::from_millis(333),
-            max_pacing_rate: None,
             seed: 0,
         });
         Self {
@@ -377,7 +376,6 @@ fn probe_inflight_rounds_up_to_a_packet() {
         now,
         mtu: MTU,
         rtt: Duration::from_millis(100),
-        max_pacing_rate: None,
         seed: 0,
     });
     // 3000 bytes, two and a half packets
@@ -449,7 +447,6 @@ fn survives_hostile_receive_times() {
         now,
         mtu: MTU,
         rtt: Duration::from_millis(100),
-        max_pacing_rate: None,
         seed: 0,
     });
     let times = [
@@ -488,17 +485,16 @@ fn survives_hostile_receive_times() {
     }
 }
 
-/// A rate cap that shrinks GoogCC's window below two datagrams of a large MTU leaves the window
-/// at two datagrams, which `kMinCwnd`'s 1500-byte packets fall short of.
+/// A GoogCC window below two datagrams of the largest MTU leaves the window at two datagrams,
+/// which `kMinCwnd`'s 1500-byte packets fall short of.
 #[test]
 fn window_floor_tracks_mtu() {
-    const LARGE: u16 = 16384;
+    const LARGE: u16 = 65527;
     let mut now = Instant::ZERO.saturating_add(Duration::from_secs(1000));
     let mut gcc = Gcc::new(Init {
         now,
         mtu: LARGE,
         rtt: Duration::from_millis(10),
-        max_pacing_rate: Some(10_000),
         seed: 0,
     });
     for _ in 0..200 {

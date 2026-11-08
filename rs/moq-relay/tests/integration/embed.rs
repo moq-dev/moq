@@ -78,15 +78,17 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 	);
 }
 
-/// The socket inodes this process holds bound to `port`: every UDP socket, but
-/// only a TCP listener, since accepted connections are not the owner's to close.
+/// The socket inodes this process holds bound to `port` of type `kind`: every
+/// UDP socket, but only a TCP listener, since accepted connections are not the
+/// owner's to close. The type matters because UDP and TCP number ports
+/// separately: the test's own QUIC client can hold the HTTP port's number.
 ///
 /// Asked of this process's own descriptors, for two reasons. Rebinding the port
 /// races any concurrent process's ephemeral bind, which may take a freed port.
 /// And `/proc/net/udp` is served in chunks that skip entries while other
 /// processes churn sockets.
 #[cfg(target_os = "linux")]
-fn bound(port: u16) -> std::collections::HashSet<u64> {
+fn bound(kind: socket2::Type, port: u16) -> std::collections::HashSet<u64> {
 	use std::os::fd::FromRawFd;
 	use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
@@ -111,8 +113,8 @@ fn bound(port: u16) -> std::collections::HashSet<u64> {
 		}
 		let socket = socket2::SockRef::from(&file);
 		let owned = match socket.r#type() {
-			Ok(socket2::Type::DGRAM) => true,
-			Ok(socket2::Type::STREAM) => socket.is_listener().unwrap_or(false),
+			Ok(socket2::Type::DGRAM) => kind == socket2::Type::DGRAM,
+			Ok(socket2::Type::STREAM) => kind == socket2::Type::STREAM && socket.is_listener().unwrap_or(false),
 			_ => false,
 		};
 		let on_port = socket
@@ -336,8 +338,8 @@ async fn embed_and_stop(mut config: Config) {
 
 	#[cfg(target_os = "linux")]
 	let owned = {
-		let quic_sockets = bound(quic.port());
-		let http_sockets = bound(http.port());
+		let quic_sockets = bound(socket2::Type::DGRAM, quic.port());
+		let http_sockets = bound(socket2::Type::STREAM, http.port());
 		assert!(!quic_sockets.is_empty(), "no QUIC socket found on {quic}");
 		assert!(!http_sockets.is_empty(), "no HTTP listener found on {http}");
 		&quic_sockets | &http_sockets

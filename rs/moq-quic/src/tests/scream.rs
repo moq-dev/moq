@@ -1,4 +1,4 @@
-//! SCReAMv2 ([`congestion::Scream`]) on the seeded sim: an encoder that follows the controller's
+//! SCReAMv2 ([`congestion::scream::Scream`]) on the seeded sim: an encoder that follows the controller's
 //! estimate sends up through a bottleneck shaped like each cellular moq-shaper preset, and the run
 //! reports the queue it built, what it carried, and how fast it answered each step.
 //!

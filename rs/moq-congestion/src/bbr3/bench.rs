@@ -22,7 +22,6 @@ fn measure(flight: usize, batch: usize, steady: bool) -> (Duration, usize) {
         now: base,
         mtu: PACKET,
         rtt: Duration::from_millis(10),
-        max_pacing_rate: None,
         seed: 0,
     };
     let mut bbr = Bbr3::new(Arc::new(config), init);

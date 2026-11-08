@@ -187,7 +187,10 @@ export class Producer {
 	}
 }
 
-/** A datagram track requested on demand, waiting for its publisher's answer. */
+/**
+ * A datagram track requested on demand, waiting for its publisher's answer.
+ * @internal Wire layers only.
+ */
 export class Request {
 	#producer: Producer;
 	#pending: Set<Request>;

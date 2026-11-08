@@ -55,9 +55,10 @@ const TEARDOWN_EINTR_RETRIES: usize = 8;
 /// Maximum time spent staging cancellations and draining completions.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_millis(3200);
 
-/// The default [`Config::passes`]. A received datagram's chain is the demux,
-/// its connection, the application task it wakes, and the connection again
-/// for the reply; more found nothing left to run.
+/// The most passes over its woken tasks one turn runs before it submits. A
+/// received datagram's chain is the demux, its connection, the application
+/// task it wakes, and the connection again for the reply. A sweep of 1, 2, 4,
+/// and 8 passes found nothing left to run past four.
 const PASSES: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 /// Worker construction knobs.
@@ -76,14 +77,15 @@ pub struct Config {
 	/// so give each worker its own. Cloning this config starts a fresh set for
 	/// the cloned worker.
 	pub metrics: Metrics,
-	/// The most passes over its woken tasks one turn runs before it submits.
+	/// The most passes over its woken tasks one turn runs before it submits:
+	/// [`PASSES`], which only tests change.
 	///
 	/// A turn runs its tasks until a pass wakes nothing, so work a completion
 	/// sets off (a datagram routed to its connection, the connection staging
 	/// its reply) is staged by the enter that follows it. The budget bounds a
 	/// wake chain, or a task waking itself, so the ring is still reaped and
 	/// submitted to between steps of it. One is a pass per turn.
-	pub passes: NonZeroUsize,
+	pub(crate) passes: NonZeroUsize,
 }
 
 impl Default for Config {

@@ -767,8 +767,8 @@ pub struct Play<S = Conn> {
 	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one; see [`with_max_delay`](Self::with_max_delay).
-	max_delay: Duration,
+	/// one; see [`with_delay`](Self::with_delay).
+	delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -800,8 +800,8 @@ impl<S: Stream> Play<S> {
 
 	/// Set the FLV release delay and stalled-group budget.
 	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
+	pub fn with_delay(mut self, delay: Duration) -> Self {
+		self.delay = delay;
 		self
 	}
 
@@ -890,7 +890,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.max_delay)
+			.with_delay(self.delay)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -1222,7 +1222,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_delay: crate::DEFAULT_MAX_DELAY,
+							delay: crate::DEFAULT_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
