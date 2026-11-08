@@ -202,10 +202,14 @@ impl Stream {
 	/// A stream whose header still does not fit could never deliver its FIN, so it is reset
 	/// instead, failing with [`Error::Unsent`] here and from `poll_closed`.
 	fn finish_mut(&mut self) -> Result<(), Error> {
-		if self.poll_header(&kio::Waiter::noop()).is_pending() {
-			self.reset_mut(0);
-			self.unsent = true;
-			return Err(Error::Unsent);
+		match self.poll_header(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(())) => {}
+			Poll::Ready(Err(err)) => return Err(err),
+			Poll::Pending => {
+				self.reset_mut(0);
+				self.unsent = true;
+				return Err(Error::Unsent);
+			}
 		}
 		if matches!(self.state, State::Open(_)) {
 			let State::Open(stream) = std::mem::replace(&mut self.state, State::Reset(Ok(None))) else {
