@@ -246,7 +246,7 @@ mod tests {
 
 			fn alloc(&self, _len: usize) -> Result<(), Error> {
 				if self.0.swap(false, Ordering::Relaxed) {
-					return Err(Error::Codec(anyhow::anyhow!("out of device memory")));
+					return Err(Error::codec(anyhow::anyhow!("out of device memory")));
 				}
 				Ok(())
 			}

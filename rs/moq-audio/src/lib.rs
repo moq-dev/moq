@@ -16,14 +16,12 @@
 //!   they don't exist in a default build.
 //! - [`encode`] encodes PCM and publishes it through `moq_mux::container`,
 //!   registering the rendition in the `hang` catalog. Two entry points:
-//!   - `encode::Control::new` takes a capture consumer and returns a `Control`
-//!     and `Driver`. The handle starts, stops, and replaces this track's reader,
-//!     preserving track identity without controlling the shared device.
-//!   - `encode::publish_capture` is the turnkey shorthand for an already-open
-//!     capture consumer. Its rendition is registered before processing samples.
-//!     Capture keeps running while raw audio
-//!     waits for a subscriber, then encodes that history and continues live.
-//!     Set `encode::Capture::on_demand` to false to encode continuously instead.
+//!   - `encode::publish_capture` publishes an already-open capture consumer,
+//!     returning a `Publication` that reports its state and level, and the
+//!     `Driver` that encodes. Its rendition is registered before processing
+//!     samples. Capture keeps running while raw audio waits for a subscriber,
+//!     then encodes that history and continues live. Set
+//!     `encode::Capture::retain` to false to encode continuously instead.
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`]. It reads AAC-LC

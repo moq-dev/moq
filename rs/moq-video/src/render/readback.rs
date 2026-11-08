@@ -15,7 +15,7 @@ use crate::convert::Rgba;
 use crate::{Error, Size};
 
 fn err(message: impl std::fmt::Display) -> Error {
-	Error::Render(anyhow::anyhow!("{message}"))
+	Error::render(anyhow::anyhow!("{message}"))
 }
 
 /// Copies textures back to the CPU, through a small pool of staging buffers.

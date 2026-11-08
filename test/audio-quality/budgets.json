@@ -324,7 +324,7 @@
 			"skip_aheads_per_min": 0,
 			"discarded_ms_per_min": 0,
 			"stalled_share": 0.009,
-			"silence_share": 0.013,
+			"silence_share": 0.01,
 			"target_ms_p95": 343.2
 		},
 		{
