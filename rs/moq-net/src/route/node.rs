@@ -1150,6 +1150,33 @@ mod tests {
 		);
 	}
 
+	/// A peer that withholds ROUTE_END echoes holds one end per identity however
+	/// often its only claim flaps: the route starts again only once the end is echoed.
+	#[test]
+	fn a_route_restarts_only_once_its_end_is_echoed() {
+		let instance = Instance::random();
+		let origin = Node::new(1, 1);
+		let edge = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		outputs(&edge);
+		// The peer reads everything, and echoes nothing.
+		let mut ends = 0;
+		for _ in 0..100 {
+			origin.own(p("live/x"), None);
+			origin.own(p("live/x"), Some(claim(&instance, 0)));
+			ends += (outputs(&edge).into_iter())
+				.filter(|output| matches!(output, Output::Route { reach: None, .. }))
+				.count();
+		}
+		assert_eq!(ends, 1);
+		assert_eq!(origin.retained().echoes, 1);
+
+		edge.echo(1);
+		let read = outputs(&edge);
+		assert!(matches!(read[0], Output::Route { id: 1, reach: Some(_) }), "{read:?}");
+		assert_eq!(read.len(), 2, "the route, then its claim");
+	}
+
 	#[test]
 	fn a_route_lost_with_its_session_leaves_the_others_serving() {
 		let instance = Instance::random();

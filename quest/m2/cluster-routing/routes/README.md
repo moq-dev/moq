@@ -335,7 +335,8 @@ loss never reports an END:
   route on a stream only while the route meets the stream's interest (Plan
   item 15): it starts the route before its first claim in or covering the
   interest, and when the last such claim goes it sends a floor certifying the
-  withdrawal, then ends the route. A peer therefore holds no route, and
+  withdrawal, then ends the route; it starts the route there again only once
+  that end is echoed. A peer therefore holds no route, and
   waits on no certifier, for an origin its interest does not meet
   (`a_disjoint_interest_is_answered_with_nothing`), and a node presents each
   stream only the claims that changed.

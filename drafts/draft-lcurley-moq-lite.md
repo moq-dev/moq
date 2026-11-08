@@ -497,7 +497,7 @@ It MUST NOT select an infeasible route, and a distance only ever falls within a 
 A node MAY mark a session upstream.
 A route is down-only when it arrived on an upstream session or with its Down Only bit set; a node sends a down-only route with the bit set, and never on an upstream session.
 
-A node sends its selected route to an origin node on an Announce Stream it answers only while the route has a claim the stream's request presents (see [Announce](#announce)): it sends ROUTE_START before the first such claim, and once the last one is withdrawn, the batch whose floor certifies that withdrawal, then ROUTE_END. A subscriber therefore holds no route for an origin node its request does not meet.
+A node sends its selected route to an origin node on an Announce Stream it answers only while the route has a claim the stream's request presents (see [Announce](#announce)): it sends ROUTE_START before the first such claim, and once the last one is withdrawn, the batch whose floor certifies that withdrawal, then ROUTE_END. It starts that route on the stream again only once the subscriber echoed the ROUTE_END. A subscriber therefore holds no route for an origin node its request does not meet.
 A node that does not forward, such as a client, sends only its own route, and holds no feasibility distance for any other.
 An origin advances its Seqno whenever its own set of sessions changes.
 It never advertises a Seqno or Revision of 2^64-1: a change that would reach it instead rotates its Node ID, ending the old route everywhere and announcing its claims again under the new one.

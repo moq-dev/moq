@@ -1484,6 +1484,9 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 				None if serves && ctx.live && was.is_some() => Some(Reach::Held),
 				_ => None,
 			};
+			// A route starts again only once the neighbor echoed its last end there, so
+			// one that withholds echoes holds at most one end per identity.
+			let reach = reach.filter(|_| was.is_some() || !self.unacked.contains_key(&(id, to)));
 			let watch = peer.watch.as_ref().expect("a watching peer");
 			let sent = self.sent_views.get(&(id, to));
 			let (changes, meets) = match (reach, sent) {
