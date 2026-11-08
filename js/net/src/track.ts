@@ -995,6 +995,8 @@ export class Producer {
 	// producer created this track.
 	#used?: UsedSequences;
 	#fresh = 0n;
+	// This producer's identity in `#used.writer`, so the record never keeps a removed producer alive.
+	#writer = Symbol();
 	#subscribing = new Signal(false);
 	// The aggregate across live subscribers only. A fetch's preferences judge just the group it
 	// asks for, so a publisher sizing what it serves (such as how much retained media to replay)
@@ -1140,7 +1142,7 @@ export class Producer {
 		hooks.useSequences = (producer, used) => {
 			producer.#used = used;
 			producer.#fresh = used.next;
-			used.writer = producer;
+			used.writer = producer.#writer;
 		};
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
@@ -1934,7 +1936,7 @@ export class Producer {
 	// of the name replaced this one, which could reuse any sequence this one writes.
 	#refuseReused(sequence: bigint): void {
 		if (!this.#used) return;
-		if (sequence < this.#fresh || this.#used.writer !== this) throw new Reused(sequence);
+		if (sequence < this.#fresh || this.#used.writer !== this.#writer) throw new Reused(sequence);
 	}
 
 	/**

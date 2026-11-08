@@ -163,8 +163,8 @@ export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pat
 export interface UsedSequences {
 	/** One past the highest sequence any of them created, 0n before any. */
 	next: bigint;
-	/** The newest of them, the only one that may still write: an older one removed while open would reuse identities. */
-	writer?: Producer;
+	/** The newest of them by identity token, the only one that may still write: an older one removed while open would reuse identities. */
+	writer?: symbol;
 }
 
 export interface Run {
