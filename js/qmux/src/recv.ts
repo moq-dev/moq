@@ -1,10 +1,21 @@
 import type { Window } from "./credit.ts";
 
-/** A receive half's state, from RFC 9000 §3.2.
+/** A receive half's phase, each carrying its own data: the RFC 9000 §3.2 states,
+ *  plus `stopped` once the application stops reading.
  *
  * The transport is ordered, so a FIN means every byte has arrived: "Size Known"
- * and "Data Recvd" are one state, `sizeKnown`. */
-export type RecvState = "recv" | "sizeKnown" | "dataRead" | "resetRecvd" | "resetRead";
+ * and "Data Recvd" are one state, `sizeKnown`. A stopped half buffers nothing and
+ * only tracks whether the peer has sent its final size. */
+type Phase =
+	| { state: "recv"; queue: Uint8Array[] }
+	| { state: "sizeKnown"; queue: Uint8Array[] }
+	| { state: "dataRead" }
+	| { state: "resetRecvd"; queue: Uint8Array[]; error: Error }
+	| { state: "resetRead"; error: Error }
+	| { state: "stopped"; error: Error; sizeKnown: boolean };
+
+/** A receive half's state. */
+export type RecvState = Phase["state"];
 
 /** What a receive half charges and tells the session about. */
 export interface RecvStreamOptions {
@@ -33,15 +44,11 @@ export interface RecvStreamOptions {
  * explicitly flow-controlled queue below.
  */
 export class RecvStream {
-	#queue: Uint8Array[] = [];
-	#state: RecvState = "recv";
+	#phase: Phase = { state: "recv", queue: [] };
 	// The end of the bytes received, and the final size once known.
 	#end = 0n;
-	// Bytes handed to the reader so far: the stream offset where #queue starts.
+	// Bytes handed to the reader so far: the stream offset where the queue starts.
 	#delivered = 0n;
-	// The application stopped reading, so arriving bytes are discarded.
-	#stopped = false;
-	#error?: Error;
 	#wake?: () => void;
 	#conn: Window;
 	#window: Window;
@@ -55,22 +62,33 @@ export class RecvStream {
 		this.readable = new ReadableStream<Uint8Array>(
 			{
 				pull: async (controller) => {
-					while (this.#queue.length === 0) {
-						if (this.#error) {
-							if (this.#state === "resetRecvd") this.#state = "resetRead";
-							controller.error(this.#error);
-							return;
+					let phase = this.#phase;
+					while (!("queue" in phase) || phase.queue.length === 0) {
+						switch (phase.state) {
+							case "recv":
+								await new Promise<void>((resolve) => {
+									this.#wake = resolve;
+								});
+								phase = this.#phase;
+								continue;
+							case "sizeKnown":
+								this.#phase = { state: "dataRead" };
+								controller.close();
+								return;
+							case "dataRead":
+								controller.close();
+								return;
+							case "resetRecvd":
+								this.#phase = { state: "resetRead", error: phase.error };
+								controller.error(phase.error);
+								return;
+							case "resetRead":
+							case "stopped":
+								controller.error(phase.error);
+								return;
 						}
-						if (this.#state === "sizeKnown") {
-							this.#state = "dataRead";
-							controller.close();
-							return;
-						}
-						await new Promise<void>((resolve) => {
-							this.#wake = resolve;
-						});
 					}
-					const chunk = this.#queue.shift() as Uint8Array;
+					const chunk = phase.queue.shift() as Uint8Array;
 					const bytes = BigInt(chunk.byteLength);
 					this.#delivered += bytes;
 					controller.enqueue(chunk);
@@ -78,11 +96,11 @@ export class RecvStream {
 					// pull only runs for an application read, so even the first chunk cannot be
 					// prefetched into an unaccepted stream's hidden ReadableStream queue.
 					this.#conn.release(bytes);
-					if (this.#state === "recv") this.#window.release(bytes);
+					if (phase.state === "recv") this.#window.release(bytes);
 				},
 				cancel: (reason: unknown) => {
 					// Only a peer still sending has anything to stop.
-					if (this.#state === "recv" && !this.#stopped) options.stop(reason);
+					if (this.#phase.state === "recv") options.stop(reason);
 					this.#stop(new Error("stream cancelled"));
 				},
 			},
@@ -92,17 +110,19 @@ export class RecvStream {
 
 	/** The current state. */
 	get state(): RecvState {
-		return this.#state;
+		return this.#phase.state;
 	}
 
 	/** Whether the final size is known, from a FIN or RESET_STREAM, so no more bytes can arrive. */
 	get sizeKnown(): boolean {
-		return this.#state !== "recv";
+		const phase = this.#phase;
+		if (phase.state === "stopped") return phase.sizeKnown;
+		return phase.state !== "recv";
 	}
 
 	/** Whether MAX_STREAM_DATA still matters: the peer is sending and we still want its bytes. */
 	get wantsCredit(): boolean {
-		return this.#state === "recv" && !this.#stopped;
+		return this.#phase.state === "recv";
 	}
 
 	/** The stream's window, for the MAX_STREAM_DATA it owes. */
@@ -119,7 +139,8 @@ export class RecvStream {
 	 *  continue the stream or that exceeds a window. A frame after the final size
 	 *  is known is dropped. */
 	data(offset: bigint | undefined, chunk: Uint8Array, fin: boolean): void {
-		if (this.sizeKnown) return;
+		const phase = this.#phase;
+		if (phase.state !== "recv" && (phase.state !== "stopped" || phase.sizeKnown)) return;
 		// The transport is ordered, so a frame must start exactly where the last one
 		// ended (draft-02 §4.1): there is nothing to reassemble, and anything else
 		// would deliver bytes out of order or twice. An absent offset comes from a
@@ -135,12 +156,14 @@ export class RecvStream {
 		this.#conn.receiveTo(total);
 		this.#end = end;
 
-		if (bytes > 0n) {
+		if (phase.state === "stopped") {
 			// A stopped stream frees the bytes as they land.
-			if (this.#stopped) this.#conn.release(bytes);
-			else this.#queue.push(chunk);
+			this.#conn.release(bytes);
+			if (fin) this.#phase = { state: "stopped", error: phase.error, sizeKnown: true };
+		} else {
+			if (bytes > 0n) phase.queue.push(chunk);
+			if (fin) this.#phase = { state: "sizeKnown", queue: phase.queue };
 		}
-		if (fin) this.#state = "sizeKnown";
 		this.#signal();
 	}
 
@@ -152,7 +175,8 @@ export class RecvStream {
 	 * Drafts through -02 were emitted by implementations that used an incorrect zero
 	 * final size, so a final size below the bytes received counts as those bytes. */
 	reset(err: Error, finalSize: bigint, reliableSize = 0n): void {
-		if (this.sizeKnown) return;
+		const phase = this.#phase;
+		if (phase.state !== "recv" && (phase.state !== "stopped" || phase.sizeKnown)) return;
 		// The transport is ordered, so every byte the peer sent arrived before this
 		// frame. A reliable prefix longer than that promises bytes that will never come.
 		if (reliableSize > this.#end) throw new Error("RESET_STREAM_AT reliable_size exceeds the bytes received");
@@ -164,15 +188,21 @@ export class RecvStream {
 		this.#window.receiveTo(size);
 		this.#conn.receiveTo(total);
 		this.#end = size;
-		this.#state = "resetRecvd";
-		this.#error ??= err;
+
+		if (phase.state === "stopped") {
+			// Nothing is buffered, so only the gap is freed.
+			this.#phase = { state: "stopped", error: phase.error, sizeKnown: true };
+			this.#conn.release(gap);
+			this.#signal();
+			return;
+		}
 
 		// Keep the reliable prefix the reader hasn't had yet; pull() delivers it before
 		// surfacing the error.
 		let keep = reliableSize - this.#delivered;
 		let discarded = 0n;
 		const queue: Uint8Array[] = [];
-		for (const chunk of this.#queue) {
+		for (const chunk of phase.queue) {
 			const bytes = BigInt(chunk.byteLength);
 			if (keep >= bytes) {
 				queue.push(chunk);
@@ -184,7 +214,7 @@ export class RecvStream {
 				keep = 0n;
 			}
 		}
-		this.#queue = queue;
+		this.#phase = { state: "resetRecvd", queue, error: err };
 		this.#conn.release(gap + discarded);
 		this.#signal();
 	}
@@ -196,11 +226,14 @@ export class RecvStream {
 	}
 
 	#stop(err: Error): void {
-		this.#stopped = true;
-		this.#error ??= err;
+		const phase = this.#phase;
+		// A read-out or already stopped half has nothing left to discard.
+		if (!("queue" in phase)) return;
 		let bytes = 0n;
-		for (const chunk of this.#queue) bytes += BigInt(chunk.byteLength);
-		this.#queue = [];
+		for (const chunk of phase.queue) bytes += BigInt(chunk.byteLength);
+		// A reset's error already explains the end to the reader.
+		const error = phase.state === "resetRecvd" ? phase.error : err;
+		this.#phase = { state: "stopped", error, sizeKnown: phase.state !== "recv" };
 		this.#conn.release(bytes);
 		this.#signal();
 	}

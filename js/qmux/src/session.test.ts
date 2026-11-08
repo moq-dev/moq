@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { type Installed, Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { type Installed, Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
@@ -1104,8 +1104,8 @@ describe("Session integration (scripted peer)", () => {
 		await settle();
 
 		peer.send({ type: "stop_sending", id: Stream.Id.create(0n, Stream.Dir.Bi, false), code: VarInt.from(5) });
-		const err = await Promise.race([write, sleep(Nano.fromMilli(Milli(500))).then(() => "pending" as const)]);
-		expect(err).toBeInstanceOf(StreamError);
+		// A write left parked hangs here until bun's test timeout fails it.
+		expect(await write).toBeInstanceOf(StreamError);
 		session.close();
 	});
 
@@ -2116,8 +2116,8 @@ describe("Session integration (scripted peer)", () => {
 		await settle();
 
 		peer.send({ type: "stop_sending", id: Stream.Id.create(0n, Stream.Dir.Uni, false), code: VarInt.from(5) });
-		const err = await Promise.race([write, sleep(Nano.fromMilli(Milli(500))).then(() => "pending" as const)]);
-		expect(err).toBeInstanceOf(StreamError);
+		// A write left parked hangs here until bun's test timeout fails it.
+		expect(await write).toBeInstanceOf(StreamError);
 		session.close();
 	});
 
