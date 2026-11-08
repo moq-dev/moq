@@ -63,7 +63,7 @@ only the route children federation builds on,
 [acceptance](/quest/m2/cluster-routing/routes/acceptance.md), not the whole
 [route epic](/quest/m2/cluster-routing/routes/README.md). Federation is
 relay-to-relay, so browser route-key proofs, the Playwright pin they wait on,
-and the mixed-version follow-ups (lite-06 failover, mount takeover) gate the
+and the mixed-version follow-up (mount takeover) gates the
 lite-07 cut, not this. Its consumer, the [mesh node](/quest/m3/mesh/node.md),
 is a Rust relay too. Acceptance still brings the js/net route layer for its
 Rust/JS interop checks. Rejected: session integration alone, which drops the
