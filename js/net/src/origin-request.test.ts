@@ -1043,8 +1043,8 @@ test("a hidden job announces under the instance its claim moved to", async () =>
 });
 
 // A hidden job that read its instance, as a signer does, announces under it or not at all: once an
-// unrelated job's end moves the claim past it, the announce is refused and its request is asked
-// again, so the worker prepares the job under the claim's new instance.
+// unrelated job's end moves the claim past it, the announce is refused and its request goes back to
+// the worker, which prepares the job under the claim's new instance. Every requester waits on.
 test("a job that read its instance is refused once its claim moves", async () => {
 	const origin = new Producer();
 	const claim = origin.routePrefix(Path.from("room"));
@@ -1065,9 +1065,10 @@ test("a job that read its instance is refused once its claim moves", async () =>
 	const moved = claim.instance;
 	expect(moved).not.toBe(minted);
 	expect(hidden.instance).toBe(minted);
+	const late = origin.request(Path.from("room/bob"));
 	expect(() => hidden.announce()).toThrow(expect.objectContaining({ code: StreamCode.Unroutable }));
 	await settle();
-	expect(bob.closed.peek()).toBeUndefined();
+	for (const request of [bob, late]) expect(request.closed.peek()).toBeUndefined();
 
 	const third = (await requests.next()).value;
 	if (!third) throw new Error("expected the request again");
@@ -1076,8 +1077,8 @@ test("a job that read its instance is refused once its claim moves", async () =>
 	expect(again.instance).toBe(moved);
 	again.announce();
 	await settle();
-	expect(bob.active.peek()?.instance).toBe(moved);
-	for (const request of [alice, bob]) request.close();
+	for (const request of [bob, late]) expect(request.active.peek()?.instance).toBe(moved);
+	for (const request of [alice, bob, late]) request.close();
 	again.close();
 	claim.close();
 	origin.close();

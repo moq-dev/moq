@@ -3040,14 +3040,16 @@ impl Route {
 	/// [`Driver`] was dropped, and with [`Error::Unroutable`], announcing nothing, when a
 	/// job's request was released or its prefix route retracted meanwhile, or when the job
 	/// read its [`instance`](Self::instance) and its prefix route has moved past it since:
-	/// that route can never announce. Its requesters ask the prefix route again.
+	/// that route can never announce. In that last case the request goes back to the prefix
+	/// route's handler, its requesters still waiting.
 	pub fn announce(&self) -> Result<(), Error> {
 		let mut control = self.state.control.lock();
 		let info = control.info();
-		let Some(request) = control.request.take() else {
+		let Some(mut request) = control.request.take() else {
 			return self.state.announcement.update_if(info, None, |_| true).map(|_| ());
 		};
 		let bound = std::mem::take(&mut control.bound).then(|| control.instance.0.clone());
+		let mut moved = false;
 		let answer = self.broadcast().consume();
 		let mut resolved = None;
 		// Answered under the table lock that every release takes first, so the route
@@ -3075,6 +3077,7 @@ impl Route {
 					.lender(&request.path, &request.home)
 					.is_some_and(|lent| lent.instance != *bound)
 			{
+				moved = true;
 				return false;
 			}
 			// The exact route owns this answer's availability. Caching it under the
@@ -3092,6 +3095,10 @@ impl Route {
 			// advertising through the ordinary branch now that the request is taken.
 			self.state.announcement.retract(false);
 			drop(control);
+			// The prefix route moved past the instance the job read: its requesters wait on
+			// for the handler to prepare the job again under the new one.
+			request.requeue = moved;
+			drop(request);
 			return Err(admitted.err().unwrap_or(Error::Unroutable));
 		};
 		drop(control);
@@ -3184,6 +3191,7 @@ impl Route {
 			producer,
 			home: server.clone(),
 			publisher: self.state.publisher.clone(),
+			requeue: false,
 		}))
 	}
 
@@ -4878,13 +4886,6 @@ impl kio::Task for FrontServe {
 								standing: false,
 							}),
 						},
-						// A refusal for an instance the route has since moved off, such as a
-						// job's announce refused because it read its claim's old instance, is
-						// not the answer for the new one: ask again.
-						Err(err) if self.stale(route, &asked) => Event::Resolved {
-							route,
-							result: Err(Refusal { err, standing: false }),
-						},
 						Ok(source) => {
 							let id = self.next_source;
 							self.next_source += 1;
@@ -6467,6 +6468,18 @@ impl ServeState {
 	fn forget(shared: &kio::Shared<Self>, path: &Path, producer: &kio::Producer<PendingBroadcast>) {
 		shared.lock().requests.remove_if(path, |p| p.same_channel(producer));
 	}
+
+	/// Queue the still-pending entry again for the next handler, its requesters still waiting,
+	/// or drop it as [`Self::forget`] does when no handler is left to take it.
+	fn requeue(shared: &kio::Shared<Self>, path: &Path, producer: &kio::Producer<PendingBroadcast>) {
+		let mut state = shared.lock();
+		if !state.requests.get(path).is_some_and(|p| p.same_channel(producer)) {
+			return;
+		}
+		if !state.requests.requeue(path.clone()) {
+			state.requests.remove_if(path, |p| p.same_channel(producer));
+		}
+	}
 }
 
 /// A pending request for a broadcast to be served on demand.
@@ -6500,6 +6513,10 @@ pub struct Request {
 	// Applications can create routes in this origin; a session-forwarded request
 	// can only serve its peer's already-routed broadcast.
 	publisher: Option<Producer>,
+
+	// Dropped back onto its queue rather than refused: its job read an instance the prefix
+	// route has since moved past, so the handler answers it again.
+	requeue: bool,
 }
 
 impl Request {
@@ -6551,6 +6568,12 @@ impl Request {
 
 impl Drop for Request {
 	fn drop(&mut self) {
+		// Requeued in the same lock as the removal it replaces, so no handler pops it while
+		// this one still holds it.
+		if self.requeue {
+			ServeState::requeue(&self.home, &self.path, &self.producer);
+			return;
+		}
 		// Handed off but neither accepted nor rejected: drop the still-pending entry so its
 		// producer clone (plus this one) closes the channel, resolving coalesced requesters to
 		// `Unroutable` rather than hanging.
@@ -12290,7 +12313,8 @@ mod tests {
 
 	/// A hidden job that read its instance, as a signer does, announces under it or not at
 	/// all: once a sibling's end moves the claim past it, the announce is refused and its
-	/// requesters ask the claim again, so the worker prepares the job under the new instance.
+	/// request goes back to the worker, which prepares the job under the new instance. Every
+	/// requester waits on, including one that joined after the claim moved.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_job_that_read_its_instance_is_refused_once_the_claim_moves() {
@@ -12310,12 +12334,14 @@ mod tests {
 		let second = claim.instance();
 		assert_ne!(second, first);
 		assert_eq!(prepared.instance(), first, "a read instance moved");
+		let late = consumer.request("room/alice", None);
 		assert!(matches!(prepared.announce(), Err(Error::Unroutable)));
 
 		let again = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
 		assert_eq!(again.instance(), second);
 		again.announce().unwrap();
-		assert_eq!(alice.await.unwrap().info().instance, Some(second));
+		assert_eq!(alice.await.unwrap().info().instance, Some(second.clone()));
+		assert_eq!(late.await.unwrap().info().instance, Some(second));
 	}
 
 	/// A request pinned to the claim's instance resolves through its job's route even when a
