@@ -40,7 +40,7 @@ impl CatalogExt for () {}
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
 /// `version`, `video`, `audio`, `media`, `text`, `archive`, `clock`, `json`, `binary`, `stats`,
-/// `echo`, and the retired `timeline` key are reserved, so decoding and [`set`](Self::set) reject
+/// `echo`, `drm`, and the retired `timeline` key are reserved, so decoding and [`set`](Self::set) reject
 /// them to keep the wire JSON free of duplicate or retired keys. The exception is a root `clock`,
 /// which moved under `media`: an older publisher's is dropped on decode, so its media still plays.
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
@@ -70,7 +70,7 @@ fn reserved(name: &str) -> bool {
 			| "clock" | "json"
 			| "binary"
 			| "stats" | "echo"
-			| "timeline"
+			| "drm" | "timeline"
 	) || moq_msf::reserved_root(name)
 }
 
@@ -235,7 +235,7 @@ mod test {
 				.set_section("timeline", serde_json::json!({})),
 			Err(crate::Error::ReservedSection(_))
 		));
-		for name in ["media", "clock", "stats", "echo"] {
+		for name in ["media", "clock", "stats", "echo", "drm"] {
 			assert!(
 				matches!(
 					producer.modify().unwrap().set_section(name, serde_json::json!({})),
