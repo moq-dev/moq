@@ -150,28 +150,34 @@ struct ConsumeBroadcast {
 	origin: Option<crate::origin::Consumer>,
 }
 
-/// The broadcast serving a rendition, honoring its catalog `broadcast` reference.
+/// The broadcast serving a rendition, honoring its catalog `broadcast` reference and `instance`.
 ///
-/// An absent or empty reference names the catalog's own broadcast, which the caller already
-/// holds; anything else resolves against that broadcast's path through the origin, which
-/// deduplicates the subscription the catalog itself already holds. Awaited inside the track
-/// task, never under the state lock, so `origin` is cloned out rather than borrowed.
+/// An absent or empty reference names the catalog's own broadcast; anything else resolves
+/// against that broadcast's path through the origin, which deduplicates the subscription the
+/// catalog itself already holds. A rendition naming an instance resolves through the origin
+/// even without a reference, so a broadcast proven to serve another stream is refused; a route
+/// over a wire that carries no instance cannot prove one, so there it is best effort. Awaited
+/// inside the track task, never under the state lock, so `origin` is cloned out rather than
+/// borrowed.
 async fn resolve(
 	broadcast: moq_net::broadcast::Consumer,
 	origin: Option<crate::origin::Consumer>,
 	reference: Option<moq_net::path::Relative>,
+	instance: Option<moq_net::Instance>,
 ) -> Result<moq_net::broadcast::Consumer, Error> {
-	let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
+	let reference = reference.filter(|reference| !reference.is_empty());
+	// The catalog's own broadcast, with no instance to check, or none to prove: a standalone
+	// broadcast came through no route.
+	if reference.is_none() && (instance.is_none() || origin.is_none()) {
 		return Ok(broadcast);
-	};
-
-	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
+	}
+	let origin = origin.ok_or_else(|| {
+		Error::UnresolvableBroadcast(reference.as_ref().map(|r| r.as_str().to_string()).unwrap_or_default())
+	})?;
 	let source = moq_mux::Source::new(origin.inner, broadcast);
-	// The C ABI does not expose a reference's instance yet, so it reads like an older reader: the
-	// first instance resolved, without the instance's guarantee.
 	origin
 		.driver
-		.watch(async { Ok(source.resolve(Some(&reference), None).await?) })
+		.watch(async { Ok(source.resolve(reference.as_ref(), instance.as_ref()).await?) })
 		.await
 }
 
@@ -643,6 +649,7 @@ impl Consume {
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
 		let reference = config.broadcast().cloned();
+		let instance = config.instance().cloned();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
@@ -659,7 +666,7 @@ impl Consume {
 							playout.subscription(moq_net::track::Subscription::default().with_priority(C::PRIORITY));
 						// Resolving a sibling broadcast can wait too, so the close races both steps.
 						let setup = async {
-							let broadcast = resolve(broadcast, origin, reference).await?;
+							let broadcast = resolve(broadcast, origin, reference, instance).await?;
 							Self::subscribe(&broadcast, &name, subscription).await
 						};
 						let Some(track) = Self::until_closed(&mut close, setup).await? else {

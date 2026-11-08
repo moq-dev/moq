@@ -5318,15 +5318,12 @@ fn follow_local() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
-/// there, not on the broadcast the catalog came from. Ignoring the reference subscribes on the
-/// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
-#[test]
-fn consume_audio_follows_a_sibling_broadcast_reference() {
-	let origin = id(moq_origin_create());
-
+/// Publish an Opus rendition on `a/source` (served under `source_instance`) and describe it
+/// in `a/pub`'s catalog as a sibling reference naming `rendition_instance`, returning
+/// (source, media, broadcast).
+fn publish_sibling_audio(origin: u32, source_instance: &str, rendition_instance: Option<&str>) -> (u32, u32, u32) {
 	// Only the sibling serves the track; the catalog broadcast just describes it.
-	let source = publish_broadcast(origin, b"a/source");
+	let source = create_route(origin, b"a/source", Some(&route_options(0, source_instance, false))).1;
 	let init = opus_head();
 	let media = id(publish_audio(
 		source,
@@ -5351,6 +5348,10 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 
 	let broadcast = publish_broadcast(origin, b"a/pub");
 	let codec = "opus";
+	let sibling = "./source";
+	let (instance, instance_len) = rendition_instance.map_or((std::ptr::null(), 0), |instance| {
+		(instance.as_ptr() as *const c_char, instance.len())
+	});
 	let config = moq_audio_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
@@ -5367,28 +5368,26 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 		has_jitter: false,
 		warmup_us: 0,
 		has_warmup: false,
-		broadcast: std::ptr::null(),
-		broadcast_len: 0,
-		instance: std::ptr::null(),
-		instance_len: 0,
+		broadcast: sibling.as_ptr() as *const c_char,
+		broadcast_len: sibling.len(),
+		instance,
+		instance_len,
 		track: std::ptr::null(),
 		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &config) }, 0);
+	(source, media, broadcast)
+}
 
-	// The C config struct has no broadcast field, so point the rendition at the sibling here.
-	{
-		let mut state = State::lock();
-		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
-		catalog
-			.modify()
-			.unwrap()
-			.audio
-			.renditions
-			.get_mut(&name)
-			.unwrap()
-			.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
-	}
+/// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
+/// there, not on the broadcast the catalog came from. Ignoring the reference subscribes on the
+/// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
+/// The rendition's instance, when it matches the sibling's, does not get in the way.
+#[test]
+fn consume_audio_follows_a_sibling_broadcast_reference() {
+	let origin = id(moq_origin_create());
+	let instance = fresh_instance();
+	let (source, media, broadcast) = publish_sibling_audio(origin, &instance, Some(&instance));
 
 	let consume = request_broadcast(origin, b"a/pub");
 	let catalog_cb = Callback::new();
@@ -5421,6 +5420,39 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_close(source), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A rendition naming an instance refuses a sibling proven to serve another stream, rather
+/// than delivering that stream's frames.
+#[test]
+fn consume_audio_refuses_a_sibling_of_another_instance() {
+	let origin = id(moq_origin_create());
+	let (wanted, served) = (fresh_instance(), fresh_instance());
+	let (source, media, broadcast) = publish_sibling_audio(origin, &served, Some(&wanted));
+
+	let consume = request_broadcast(origin, b"a/pub");
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let frame_cb = Callback::new();
+	let _track = id(unsafe { moq_consume_audio(catalog_id, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
+	let payload = b"another stream";
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(1_000_000)) },
+		0
+	);
+	let code = frame_cb.recv();
+	assert!(code < 0, "a sibling of another instance is refused, got {code}");
+
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");

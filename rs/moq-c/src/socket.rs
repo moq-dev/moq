@@ -110,6 +110,12 @@ async fn deliver(
 }
 
 impl Socket {
+	/// The open and kept counts of an endpoint's children.
+	#[cfg(test)]
+	pub(crate) fn endpoint_children(&self, id: Id) -> (usize, usize) {
+		self.endpoints.get(id).expect("endpoint").children.counts()
+	}
+
 	fn endpoint(&self, id: Id) -> Result<&EndpointEntry, Error> {
 		let endpoint = self.endpoints.get(id).ok_or(Error::NotFound)?;
 		endpoint.driver.check()?;
@@ -121,7 +127,7 @@ impl Socket {
 		self.endpoints.insert(EndpointEntry {
 			inner: Arc::new(inner),
 			driver: origin.driver.clone(),
-			children: Children::new(),
+			children: Children::unkept(),
 		})
 	}
 
@@ -181,14 +187,17 @@ impl Socket {
 				let watch = driver.clone();
 				let run = async move {
 					loop {
-						let next = match first.take() {
-							Some(res) => res,
-							// `biased` so a pending close always wins over a ready dial.
-							None => tokio::select! {
-								biased;
-								_ = &mut close => return Ok(()),
-								res = kio::wait(&poll) => res,
-							},
+						// `biased` so a pending close always wins over a ready dial, the one the
+						// first poll buffered included.
+						let next = tokio::select! {
+							biased;
+							_ = &mut close => return Ok(()),
+							res = async {
+								match first.take() {
+									Some(res) => res,
+									None => kio::wait(&poll).await,
+								}
+							} => res,
 						};
 						let incoming = match next {
 							Ok(incoming) => incoming,

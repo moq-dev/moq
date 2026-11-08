@@ -178,6 +178,61 @@ fn socket_track_round_trip_and_endpoint_close() {
 }
 
 #[test]
+fn socket_finished_tracks_are_not_kept_by_the_endpoint() {
+	let origin = id(moq_origin_create());
+	let (a, b) = (endpoint(origin, "a"), endpoint(origin, "b"));
+	let accepts = Callback::new();
+	let _accept = id(unsafe { moq_socket_accept_track(b, Some(channel_callback), accepts.ptr) });
+	let peer = "b";
+	for round in 0..3u8 {
+		let dialed = Callback::new();
+		let _dial = id(unsafe {
+			moq_socket_dial_track(
+				a,
+				peer.as_ptr().cast(),
+				peer.len(),
+				std::ptr::null(),
+				Some(channel_callback),
+				dialed.ptr,
+			)
+		});
+		let incoming = id(accepts.recv());
+		let accepted = Callback::new();
+		let _accepting =
+			id(unsafe { moq_socket_incoming_accept(incoming, std::ptr::null(), Some(channel_callback), accepted.ptr) });
+		let client = id(dialed.recv());
+		assert_eq!(dialed.recv_terminal(), 0);
+		let server = id(accepted.recv());
+		assert_eq!(accepted.recv_terminal(), 0);
+
+		let track = id(moq_socket_stream_writer(client));
+		let frames = Callback::new();
+		let _reader = id(unsafe { moq_socket_stream_reader(server, Some(channel_callback), frames.ptr) });
+		let group = id(moq_publish_track_group(track));
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, &round, 1, std::ptr::null()) },
+			0
+		);
+		assert_eq!(moq_publish_group_finish(group), 0);
+		assert_eq!(moq_publish_track_finish(track), 0);
+		assert_eq!(next_frame(&frames), [round]);
+		assert_eq!(frames.recv_terminal(), 0, "a finished track ends its reader cleanly");
+		assert_eq!(moq_socket_stream_free(client), 0);
+		assert_eq!(moq_socket_stream_free(server), 0);
+		assert_eq!(
+			State::lock().socket.endpoint_children(Id::try_from(a).unwrap()),
+			(0, 0),
+			"round {round}: the endpoint neither tracks nor keeps a finished track"
+		);
+	}
+
+	assert_eq!(moq_socket_close(a), 0);
+	assert_eq!(moq_socket_close(b), 0);
+	assert_eq!(accepts.recv_terminal(), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn socket_reject_and_cancel() {
 	let origin = id(moq_origin_create());
 	let (a, b) = (endpoint(origin, "a"), endpoint(origin, "b"));
@@ -308,6 +363,63 @@ fn track_largest_and_group_ready() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Closing a broadcast ends its open tracks' groups and so their ready waits, but a track
+/// that declared its end keeps taking groups below it, so its group's wait lasts until the
+/// group itself ends.
+#[test]
+fn group_ready_across_a_broadcast_close() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"ready-close");
+	let open = publish_named_track(broadcast, b"open");
+	let declared = publish_named_track(broadcast, b"declared");
+	assert_eq!(moq_publish_track_finish_at(declared, 1), 0);
+
+	let (open_group, declared_group) = (
+		id(moq_publish_track_group(open)),
+		id(moq_publish_track_group_at(declared, 0)),
+	);
+	let (open_ready, declared_ready) = (Callback::new(), Callback::new());
+	for (group, ready) in [(open_group, &open_ready), (declared_group, &declared_ready)] {
+		assert_eq!(
+			unsafe { moq_publish_group_ready(group, 1, Some(channel_callback), ready.ptr) },
+			0
+		);
+	}
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the test thread has no runtime; it gives the C API's runtime time to park the waits"
+	)]
+	std::thread::sleep(Duration::from_millis(50));
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(
+		open_ready.rx.recv_timeout(Duration::from_secs(2)),
+		Ok(0),
+		"the close ends the group"
+	);
+	let payload = b"late";
+	assert!(
+		unsafe { moq_publish_group_frame(open_group, payload.as_ptr(), payload.len(), &micros(0)) } < 0,
+		"the next write reports why"
+	);
+	assert!(
+		declared_ready.rx.recv_timeout(Duration::from_millis(100)).is_err(),
+		"a declared-end track's group stays writable"
+	);
+	assert_eq!(
+		unsafe { moq_publish_group_frame(declared_group, payload.as_ptr(), payload.len(), &micros(0)) },
+		0
+	);
+	assert_eq!(moq_publish_group_finish(declared_group), 0);
+	assert_eq!(declared_ready.rx.recv_timeout(Duration::from_secs(2)), Ok(0));
+
+	assert!(
+		moq_publish_group_abort(open_group, 0) < 0,
+		"the close already ended the group; this only releases its handle"
+	);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn timebase_handles_are_owned_by_their_broadcast() {
 	let origin = id(moq_origin_create());
@@ -417,10 +529,23 @@ fn session_tokens_and_grants() {
 		assert_eq!(moq_grant_free(id(code)), 0);
 	}
 
+	// A watcher still running when the session closes ends cleanly.
+	let ending = Callback::new();
+	let _watcher = id(unsafe { moq_session_grants(client, Some(channel_callback), ending.ptr) });
+	assert_eq!(moq_grant_free(id(ending.recv())), 0);
+
 	assert_eq!(moq_session_close(session), 0);
 	session_cb.recv_terminal();
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
+	loop {
+		let code = ending.recv();
+		if code <= 0 {
+			assert_eq!(code, 0, "a closed session ends the watch cleanly");
+			break;
+		}
+		assert_eq!(moq_grant_free(id(code)), 0);
+	}
 	assert_eq!(moq_server_close(server), 0);
 	assert_eq!(server_cb.recv_terminal(), 0);
 	assert_eq!(moq_origin_close(served), 0);

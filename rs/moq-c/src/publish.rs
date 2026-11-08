@@ -94,8 +94,9 @@ enum Family {
 	Open {
 		/// Handles that may still publish, ended on close.
 		open: HashSet<Child>,
-		/// Finished producers, kept so a late subscriber still finds their tracks.
-		kept: Vec<Box<dyn Send>>,
+		/// Finished producers, kept so a late subscriber still finds their tracks, or `None` for
+		/// a family that drops them on finish.
+		kept: Option<Vec<Box<dyn Send>>>,
 	},
 	/// The broadcast closed: its children ended and new ones are refused.
 	Closed,
@@ -123,7 +124,16 @@ impl Children {
 	pub(crate) fn new() -> Self {
 		Self(Arc::new(std::sync::Mutex::new(Family::Open {
 			open: HashSet::new(),
-			kept: Vec::new(),
+			kept: Some(Vec::new()),
+		})))
+	}
+
+	/// A family that drops each finished producer instead of keeping it until the close, for
+	/// children no late subscriber looks up, such as a socket endpoint's streams.
+	pub(crate) fn unkept() -> Self {
+		Self(Arc::new(std::sync::Mutex::new(Family::Open {
+			open: HashSet::new(),
+			kept: None,
 		})))
 	}
 
@@ -153,12 +163,29 @@ impl Children {
 		Err(Error::BroadcastNotFound)
 	}
 
-	/// Keep `child`'s finished producer until the broadcast ends, or drop it now if it already has.
+	/// Keep `child`'s finished producer until the broadcast ends, or drop it now if it already
+	/// has or the family keeps none.
 	pub(crate) fn keep(&self, child: Child, producer: impl Send + 'static) {
 		let producer: Box<dyn Send> = Box::new(producer);
-		if let Family::Open { open, kept, .. } = &mut *self.lock() {
+		let mut family = self.lock();
+		if let Family::Open { open, kept } = &mut *family {
 			open.remove(&child);
-			kept.push(producer);
+			if let Some(kept) = kept {
+				kept.push(producer);
+				return;
+			}
+		}
+		// Dropped outside the lock: the last producer's drop tears its track down.
+		drop(family);
+		drop(producer);
+	}
+
+	/// How many children are open and how many finished producers are kept.
+	#[cfg(test)]
+	pub(crate) fn counts(&self) -> (usize, usize) {
+		match &*self.lock() {
+			Family::Open { open, kept } => (open.len(), kept.as_ref().map_or(0, Vec::len)),
+			Family::Closed => (0, 0),
 		}
 	}
 

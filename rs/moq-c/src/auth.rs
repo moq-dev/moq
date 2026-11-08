@@ -104,8 +104,9 @@ impl Auth {
 				_ = &mut close => return Ok(()),
 				changed = kio::wait(|waiter| watch.poll_changed(waiter)) => match changed {
 					Ok(grant) => grant,
-					// Nothing will change the grant again: the session ended.
-					Err(_) => return Ok(()),
+					// Nothing will change the grant again: the session closed, or failed.
+					Err(moq_net::Error::Cancel | moq_net::Error::Closed) => return Ok(()),
+					Err(err) => return Err(err.into()),
 				},
 			};
 		}
@@ -195,9 +196,9 @@ pub unsafe extern "C" fn moq_session_tokens_answered(
 /// Follow the grant a session's peer gave it: the union of every token the session presented.
 ///
 /// `on_grant` fires at once with a positive grant handle for the current grant, again with a
-/// new handle on every change, then exactly once more with a terminal `0` once nothing will
-/// change it (the session ended, or [moq_session_grants_cancel]) or a negative error; release
-/// `user_data` there. Read each handle with [moq_grant_info] and release it with
+/// new handle on every change, then exactly once more with a terminal code once nothing will
+/// change it: `0` when the session closed or [moq_session_grants_cancel] stopped the watch, or
+/// a negative error when the session failed. Release `user_data` there. Read each handle with [moq_grant_info] and release it with
 /// [moq_grant_free]. A dialed session's grant survives reconnects, reading not present while
 /// offline. AUTH is only on `moq-lite-07-wip` and on moq-transport sessions that negotiate the
 /// MoQ Auth extension; elsewhere the grant stays not present.

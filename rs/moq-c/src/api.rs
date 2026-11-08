@@ -3876,7 +3876,9 @@ pub extern "C" fn moq_publish_group_finish(group: u32) -> i32 {
 /// the next write reports why; or a negative code. Wait before each [moq_publish_group_frame]
 /// and that reader paces the writer, instead of the group shedding frames it has not taken;
 /// slower readers are not waited on. Writing without waiting never fails; the group sheds its
-/// front instead.
+/// front instead. Closing the broadcast ends the group, and so the wait, unless its track
+/// declared an end with [moq_publish_track_finish_at]: such a track still takes groups below
+/// its end, so the wait lasts until a reader takes the group or the group ends.
 ///
 /// Returns zero once the wait started, or a negative code, in which case `on_ready` never fires.
 ///

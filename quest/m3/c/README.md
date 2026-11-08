@@ -12,7 +12,10 @@ scope; they already sit on moq-ffi through the generated C++.
 
 Decided 2026-10-25 (maintainer): this line ships after the cut, once moq builds
 its bindings from rust2's UniFFI fork. The hand-written crate ships at the cut
-with parity ([moq-dev/moq#8060](https://github.com/moq-dev/moq/pull/8060)) instead. The generator fix for the C name
+instead, with the binding features moq-ffi gained in m1 and m2
+([moq-dev/moq#8060](https://github.com/moq-dev/moq/pull/8060)). Features moq-c
+never had, such as single-group fetch and group-level consumption, wait for this
+line. The generator fix for the C name
 clash landed in rust2's fork
 ([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)), not in a
 `kixelated/uniffi-bindgen-cpp` release, and reaches moq with the switch.
