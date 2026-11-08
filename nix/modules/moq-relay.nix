@@ -134,13 +134,43 @@ in
         description = "This node's advertised URL";
       };
 
+      ca = lib.mkOption {
+        type = lib.types.listOf lib.types.path;
+        default = [ ];
+        example = [ "/etc/moq/cluster-ca.pem" ];
+        description = ''
+          Cluster CA certificates (PEM) a dialing peer's client certificate must chain to.
+          Set on every node that peers dial, such as a root. The auth server grants any
+          certificate under them everything as a cluster peer, so issue them to relays only.
+          Needs `auth.enable`.
+        '';
+      };
+
+      certFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        example = "/run/secrets/moq-cluster.pem";
+        description = ''
+          Client certificate chain (PEM) this node presents when it dials `rootUrl`, issued
+          by the peers' `ca`. Reloaded when it changes. Needs `keyFile`.
+        '';
+      };
+
+      keyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        example = "/run/secrets/moq-cluster.key";
+        description = ''
+          Private key (PEM) for `certFile`. Use a path outside the Nix store, readable by `user`.
+        '';
+      };
+
       tokenFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = ''
-          Path to the cluster token file. If null, a leaf with `auth.enable` signs one
-          without `exp` using its own auth key, so the root's auth server must trust
-          that key.
+          A JWT this node presents when it dials `rootUrl`, for peers whose auth server
+          verifies tokens instead of certificates. Re-read on every dial. Prefer `certFile`.
         '';
       };
 
@@ -185,6 +215,18 @@ in
       {
         assertion = cfg.cluster.mode != "leaf" || cfg.cluster.rootUrl != null;
         message = "services.moq-relay: cluster.mode = \"leaf\" needs cluster.rootUrl; a leaf without one runs standalone";
+      }
+      {
+        assertion = cfg.cluster.ca == [ ] || cfg.auth.enable;
+        message = "services.moq-relay: cluster.ca needs auth.enable; public rules alone cannot grant a certificate";
+      }
+      {
+        assertion = (cfg.cluster.certFile == null) == (cfg.cluster.keyFile == null);
+        message = "services.moq-relay: set cluster.certFile and cluster.keyFile together";
+      }
+      {
+        assertion = cfg.cluster.certFile == null || cfg.cluster.tokenFile == null;
+        message = "services.moq-relay: set cluster.certFile or cluster.tokenFile, not both; an auth server refuses a session presenting both";
       }
     ];
 
@@ -251,24 +293,6 @@ in
       ]
       ++ lib.optional cfg.auth.enable "moq-auth.service";
 
-      preStart = ''
-        # Generate cluster token for leaf nodes
-        ${lib.optionalString
-          (cfg.cluster.mode == "leaf" && cfg.auth.enable && cfg.cluster.tokenFile == null)
-          (
-            let
-              keyPath = authKey;
-            in
-            ''
-              ${pkgs.moq-cli}/bin/moq auth sign --key "${keyPath}" --unbounded \
-                --subscribe '**' --publish '**' \
-                > "${cfg.stateDir}/cluster.jwt"
-              chown ${cfg.user}:${cfg.group} "${cfg.stateDir}/cluster.jwt"
-            ''
-          )
-        }
-      '';
-
       serviceConfig = {
         # The relay reports ready only once it serves.
         Type = "notify";
@@ -330,13 +354,16 @@ in
         # Cluster configuration
         MOQ_CLUSTER_CONNECT = lib.concatStringsSep "," cfg.cluster.rootUrl;
       }
-      # Public rules refuse a token, so a peer only presents one an auth server will read.
-      //
-        lib.optionalAttrs (cfg.cluster.mode != "none" && (cfg.auth.enable || cfg.cluster.tokenFile != null))
-          {
-            MOQ_CLUSTER_TOKEN =
-              if cfg.cluster.tokenFile != null then cfg.cluster.tokenFile else "${cfg.stateDir}/cluster.jwt";
-          }
+      // lib.optionalAttrs (cfg.cluster.ca != [ ]) {
+        MOQ_LISTEN_TLS_ROOT = lib.concatMapStringsSep "," toString cfg.cluster.ca;
+      }
+      // lib.optionalAttrs (cfg.cluster.certFile != null) {
+        MOQ_CONNECT_TLS_CERT = toString cfg.cluster.certFile;
+        MOQ_CONNECT_TLS_KEY = toString cfg.cluster.keyFile;
+      }
+      // lib.optionalAttrs (cfg.cluster.tokenFile != null) {
+        MOQ_CLUSTER_TOKEN = toString cfg.cluster.tokenFile;
+      }
       // lib.optionalAttrs (cfg.cluster.nodeUrl != null) {
         MOQ_CLUSTER_NODE = cfg.cluster.nodeUrl;
       };
