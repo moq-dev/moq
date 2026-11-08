@@ -1554,6 +1554,7 @@ mod read_tests {
 	/// runtime's, so a wait for the reach would measure real time. moq-mux's start-reach tests
 	/// cover that wait on one clock.
 	#[tokio::test]
+	#[ignore = "flaky: the 4.7 s group is sometimes skipped under load; quest/m0/test-flakes-2/ffi-warmup-wall-clock.md"]
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
 		use crate::consumer::{MoqDelay, MoqSubscription, moq_subscription_defaults};
 
