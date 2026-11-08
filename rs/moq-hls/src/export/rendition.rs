@@ -1571,6 +1571,16 @@ impl Rendition {
 pub(crate) struct Fetch {
 	row: segments::Row,
 	state: Fetching,
+	/// Set when only sizing the row: each group's frames are counted and dropped as they are
+	/// read rather than kept for a fragment.
+	sizing: Option<Size>,
+}
+
+/// What a sizing [`Fetch`] counted so far.
+#[derive(Default)]
+struct Size {
+	frames: usize,
+	bytes: usize,
 }
 
 #[allow(
@@ -1606,7 +1616,21 @@ impl Fetch {
 		Self {
 			row,
 			state: Fetching::Start,
+			sizing: None,
 		}
+	}
+
+	/// A fetch that only sizes the row; see [`poll_size`](Self::poll_size).
+	pub(crate) fn sizing(row: segments::Row) -> Self {
+		Self {
+			sizing: Some(Size::default()),
+			..Self::new(row)
+		}
+	}
+
+	/// Whether this fetch only sizes the row.
+	pub(crate) fn sizes(&self) -> bool {
+		self.sizing.is_some()
 	}
 
 	/// The row fetched.
@@ -1621,17 +1645,21 @@ impl Fetch {
 		Poll::Ready(result)
 	}
 
-	/// The payload bytes of the row's frames, without building its fragment, or `None` when it is
-	/// a stop or its media is gone. Keeps no frames once ready.
+	/// The payload bytes of a [`sizing`](Self::sizing) fetch's frames, without building its
+	/// fragment, or `None` when it is a stop or its media is gone. Holds at most one group's
+	/// frames at a time.
 	pub(crate) fn poll_size(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
-		let result = ready!(self.poll_frames(rendition, waiter))
-			.map(|frames| frames.map(|frames| frames.iter().map(|frame| frame.payload.len()).sum()));
+		let result = ready!(self.poll_groups(rendition, waiter)).map(|read| {
+			let size = self.sizing.as_ref().expect("a sizing fetch");
+			(read && size.frames > 0).then_some(size.bytes)
+		});
 		self.state = Fetching::Done;
 		Poll::Ready(result)
 	}
 
 	fn poll_fragment(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		if ready!(self.poll_frames(rendition, waiter))?.is_none() {
+		debug_assert!(!self.sizes(), "a sizing fetch keeps no frames");
+		if !ready!(self.poll_groups(rendition, waiter))? {
 			return Poll::Ready(Ok(None));
 		}
 		let row = &self.row;
@@ -1641,6 +1669,9 @@ impl Fetch {
 		else {
 			unreachable!("read every group above");
 		};
+		if frames.is_empty() {
+			return Poll::Ready(Ok(None));
+		}
 		// The last presented sample has no successor to time it, so the fragment ends where the
 		// next group starts, unless its codec or a duration marker times it.
 		let end = row
@@ -1655,12 +1686,9 @@ impl Fetch {
 		Poll::Ready(Ok(Some(fragment)))
 	}
 
-	/// Read every group of the row; `None` when it is a stop, its media is gone, or it has no frames.
-	fn poll_frames(
-		&mut self,
-		rendition: &Rendition,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<&[moq_mux::container::Frame]>>> {
+	/// Read every group of the row, keeping or counting its frames; `false` when it is a stop or
+	/// its media is gone.
+	fn poll_groups(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		let row = &self.row;
 		loop {
 			match &mut self.state {
@@ -1670,7 +1698,7 @@ impl Fetch {
 					// its groups is never cached for a run that started while they were being fetched.
 					let epoch = rendition.run().epoch;
 					if row.stop {
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					}
 					// A segment must be served whole. If its group span exceeds the safety cap (a
 					// publisher grouping far finer than its interval), 404 rather than silently
@@ -1681,14 +1709,14 @@ impl Fetch {
 							groups = ?row.groups,
 							"segment spans more groups than one request fetches; refusing to truncate"
 						);
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					}
 					self.state = Fetching::Track { binding, epoch };
 				}
 				Fetching::Track { binding, epoch } => {
 					let Some((broadcast, track)) = ready!(rendition.media.poll_track_or_refusal(binding, waiter))?
 					else {
-						return Poll::Ready(Ok(None));
+						return Poll::Ready(Ok(false));
 					};
 					self.state = Fetching::Groups {
 						_binding: binding.clone(),
@@ -1720,7 +1748,13 @@ impl Fetch {
 					let sequence = read.sequence;
 					let miss = match ready!(read.poll(waiter, muxer, broadcast))? {
 						Ok(mut read) => {
-							frames.append(&mut read);
+							match &mut self.sizing {
+								Some(size) => {
+									size.frames += read.len();
+									size.bytes += read.iter().map(|frame| frame.payload.len()).sum::<usize>();
+								}
+								None => frames.append(&mut read),
+							}
 							*group = None;
 							continue;
 						}
@@ -1732,15 +1766,12 @@ impl Fetch {
 						err = %miss,
 						"abandoning an advertised segment: a group is unavailable"
 					);
-					return Poll::Ready(Ok(None));
+					return Poll::Ready(Ok(false));
 				}
 				Fetching::Done => panic!("polled a finished segment fetch"),
 			}
 		}
-		let Fetching::Groups { frames, .. } = &self.state else {
-			unreachable!("read every group above");
-		};
-		Poll::Ready(Ok((!frames.is_empty()).then_some(frames.as_slice())))
+		Poll::Ready(Ok(true))
 	}
 }
 

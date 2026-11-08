@@ -543,11 +543,14 @@ impl Consumer {
 	/// The payload bytes of the next segment's media, so a caller can reserve memory before
 	/// [`next`](Self::next) builds it; the fragment adds only container overhead.
 	///
-	/// Reads the segment's groups but keeps none of them, so nothing is held while the caller
-	/// waits, and `next` reads them again. `Some(0)` for a gap, `None` once the rendition ends
+	/// Reads the segment's groups one at a time and keeps none of them, so nothing is held while
+	/// the caller waits, and `next` reads them again. `Some(0)` for a gap, `None` once the rendition ends
 	/// cleanly. Fails as `next` would, and never advances the cursor.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_size(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
+		if self.fetch.as_ref().is_some_and(|fetch| !fetch.sizes()) {
+			self.fetch = None;
+		}
 		loop {
 			let Some(fetch) = &mut self.fetch else {
 				let Some(row) = ready!(self.poll_row(waiter))? else {
@@ -556,7 +559,7 @@ impl Consumer {
 				if row.stop {
 					return Poll::Ready(Ok(Some(0)));
 				}
-				self.fetch = Some(Fetch::new(row));
+				self.fetch = Some(Fetch::sizing(row));
 				continue;
 			};
 			let size = ready!(fetch.poll_size(&self.rendition, waiter));
@@ -584,6 +587,9 @@ impl Consumer {
 	/// media is never read under the old rows.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Segment>>> {
+		if self.fetch.as_ref().is_some_and(Fetch::sizes) {
+			self.fetch = None;
+		}
 		let (row, media) = loop {
 			let Some(fetch) = &mut self.fetch else {
 				let Some(row) = ready!(self.poll_row(waiter))? else {
