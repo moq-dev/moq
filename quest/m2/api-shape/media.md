@@ -1,47 +1,44 @@
-# [M] Media crates' small surface fixes
+# [S] Media crates' small surface fixes
 
 ## Goal
 
 Each item below has one path and one name:
 
-- moq-mux exporters (fmp4, mkv, flv, mp4): the fmp4 and catalog internals
-  no caller uses become private, flv returns a typed error instead of a
-  string, and fMP4, MP4, MKV, and FLV take a `moq_net::Delay { min, max }`
-  (`min` the start behind the live edge, `max` today's skip budget), the
-  pair [export-live-start](/quest/m3/export-live-start.md) needs, instead of
-  one `Duration` under three spellings. TS keeps its jitter `delay`, a
-  different role ([moq-dev/moq#7981](https://github.com/moq-dev/moq/pull/7981)).
-- moq-mux stops re-exporting `mp4_atom` (`container::fmp4`), and
-  `fmp4::Wire::{new, trak}` become `pub(crate)` or give way to the one
-  accessor moq-hls needs, so an mp4-atom bump (two are planned in m3) is not
-  a moq-mux break. The errors leak it too: `moq_mux::Error::Mp4` and
-  `fmp4::Error::Mp4` wrap `mp4_atom::Error`, `fmp4::Error::{UnknownCodec,
-  UnsupportedCodec}` carry `mp4_atom::FourCC` and `mp4_atom::Codec`, and
-  both have `From<mp4_atom::Error>`. Those variants carry an opaque source
-  and moq-mux's own codec name, and the public `From` impls go.
-- hang's echo drops `latency` in Rust, JS, and the draft: nothing produces
-  it, and [latency-ledger](/quest/m5/latency-ledger.md) adds its measurement
-  additively.
-- `moq_json::{diff, Diff}` become `pub(crate)`.
-- `moq_mux::codec::aac::Config` gets `#[non_exhaustive]`, since
-  [aac-sbr-config](/quest/m4/aac-sbr-config.md) adds a field.
 - The container `Consumer` has one constructor, through
-  `container::Playout`; `with_delay` goes.
-- hang's `catalog::Range` becomes `ColorRange`, and the MoQ epoch constant
-  lives only in `kio::clock::Wall`; hang and moq-mux re-export nothing.
-- `moq_mux::rate::Follower` becomes `rate::Grant`, so it no longer collides
-  with `ts::Follower`.
-- moq-stats drops its ten `moq_net::stats` re-exports.
+  `container::Playout`.
 - `moq_mux::json::Options` folds into `json::Config`.
 - `msf::Track.init_data` returns to `Option<String>`.
 
 ## Plan
 
-Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests): exporter delays, mp4-atom, echo latency, the JSON diff, and the AAC config.
+Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests).
 
 Found by the 2026-11-07 API shape audit (media formats); see the
 [epic](/quest/m2/api-shape/README.md). The playout clock is
 [mux-sync](/quest/m2/mux-sync.md).
-Check the
-`ts::Follower` and `ts::Release` collision too, and rename whichever name
-the PR shows is ambiguous.
+
+The rest of this quest landed in its first PR: exporter `Delay`s, mp4-atom
+kept out of moq-mux's API, echo `latency`, the JSON diff, `aac::Config`,
+`Consumer::with_delay`, `ColorRange`, `Wall::MOQ_EPOCH`, `rate::Grant`, the
+moq-stats re-exports, the FLV error, and the unused fMP4 and catalog
+internals. Each remaining item conflicts with another rule, so it waits on
+the maintainer.
+
+## Waiting
+
+- Maintainer: make `container::Consumer::new` crate-private so
+  `Playout::consumer` is the only constructor? `new` inherits the delay the
+  subscription already carries, which about 45 call sites in moq-audio,
+  moq-cli, moq-gst, moq-ffi, and moq-c rely on; through `Playout` each would
+  restate that delay or reset it to `Playout::default()`'s. Recommendation:
+  keep `new` and drop this item, now that `with_delay` is gone.
+- Maintainer: fold `json::Options` into `json::Config`? `Config` is the
+  catalog entry that `json_stream` takes too, and `json_snapshot` accepts any
+  `IntoRendition` entry, so `deltas` on it would be a setter streams ignore
+  and an application section cannot carry. Recommendation: drop this item.
+- Maintainer: return `msf::Track.init_data` to `Option<String>`? The
+  `Arc<str>` is what
+  [moq-dev/moq#7949](https://github.com/moq-dev/moq/pull/7949) added so a
+  catalog referencing one large `initRef` from many tracks holds one copy; a
+  `String` brings back the 0.6 MiB catalog that held 500 MiB.
+  Recommendation: drop this item.
