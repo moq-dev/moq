@@ -445,6 +445,23 @@ impl Follower {
 		}
 	}
 
+	/// Follow on from a sender already producing at `target`, such as one moving to a new
+	/// grant, rather than at [`Policy::max`]. The current grant is fed on the next poll, so a
+	/// sender below a grant that has room climbs back without waiting for the grant to change.
+	pub fn assume(&mut self, target: Target) {
+		match target {
+			Target::Enabled(rate) => {
+				self.control.target = rate.min(self.control.policy.max);
+				self.control.enabled = true;
+			}
+			Target::Disabled => self.control.enabled = false,
+		}
+		self.control.applied = None;
+		self.control.deadline = None;
+		self.control.last = None;
+		self.refeed = true;
+	}
+
 	/// The policy the target follows.
 	pub fn policy(&self) -> &Policy {
 		&self.control.policy
@@ -941,6 +958,26 @@ mod tests {
 		assert!(refused, "the final raise was never asked for: {applied:?}");
 		assert_eq!(applied.last(), Some(&bps(4_000_000)), "{applied:?}");
 		assert!(applied.windows(2).all(|pair| pair[0] < pair[1]), "{applied:?}");
+	}
+
+	/// A follower that assumes its sender's state corrects it against an unchanged grant: a
+	/// sender below a full grant climbs back, and a disabled one resumes.
+	#[tokio::test(start_paused = true)]
+	async fn an_assumed_target_climbs_to_the_grant() {
+		let grant = bandwidth::Producer::new();
+		grant.set(Some(bps(4_000_000))).unwrap();
+
+		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		follower.assume(on(bps(1_000_000)));
+		let mut last = None;
+		while let Ok(target) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
+			last = Some(target.unwrap());
+		}
+		assert_eq!(last, Some(on(bps(4_000_000))));
+
+		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		follower.assume(Target::Disabled);
+		assert!(matches!(follower.next().await.unwrap(), Target::Enabled(_)));
 	}
 
 	/// A new policy feeds the unchanged grant through it at once, and setting the same

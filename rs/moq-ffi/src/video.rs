@@ -11,7 +11,7 @@
 //! timestamp.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::oneshot;
 
@@ -353,6 +353,9 @@ struct VideoProducer {
 	ceiling: kio::Producer<moq_net::bandwidth::Rate>,
 	/// The track priority this rendition was published at; a higher rung takes one below.
 	priority: i8,
+	/// What the encoder currently produces, which a follower started on a moved track resumes
+	/// from rather than assuming the ceiling.
+	target: moq_mux::rate::Target,
 	/// The bandwidth claim on the current track and its follower, when published against
 	/// an allocator. Beside the encoder, so a move to a new track, a finish, and an abort
 	/// change all three together.
@@ -372,22 +375,23 @@ struct Following {
 }
 
 impl Following {
-	/// Reserve `ceiling` against `demand` and follow the grant, retuning the producer in `inner`.
+	/// Reserve `producer`'s ceiling against its current track and follow the grant from its
+	/// current target, retuning the producer in `inner`.
 	fn start(
 		allocator: Arc<MoqAllocator>,
 		lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
-		demand: &moq_net::track::Demand,
-		ceiling: moq_net::bandwidth::Rate,
-		owner: &MoqVideoProducer,
+		producer: &VideoProducer,
+		inner: &Shared,
 	) -> Self {
-		let reservation = allocator.reserve_demand(demand, ceiling.as_bps());
+		let ceiling = *producer.ceiling.read();
+		let reservation = allocator.reserve_demand(&producer.producer.demand(), ceiling.as_bps());
 		let follower = spawn_follow(Followed {
-			inner: owner.inner.clone(),
+			inner: inner.clone(),
 			lower: lower.clone(),
 			consumer: reservation.consume(),
 			reservation: Arc::downgrade(&reservation),
 			ceiling,
-			applied: owner.applied.clone(),
+			target: producer.target,
 		});
 		Self {
 			allocator,
@@ -443,6 +447,18 @@ impl VideoProducer {
 			.is_some_and(|follow| std::ptr::eq(Arc::as_ptr(&follow.reservation), reservation.as_ptr()))
 	}
 
+	/// Move the claim to the track the rendition is on now, if publishing moved it off the one
+	/// named `before`, such as on a decoder identity change. Returns the replaced follower, which
+	/// takes the producer's lock on its way out.
+	fn follow_track(&mut self, before: &str, inner: &Shared) -> Option<Follow> {
+		if self.producer.demand().name() == before {
+			return None;
+		}
+		let follow = self.follow.as_ref()?;
+		let moved = Following::start(follow.allocator.clone(), follow.lower.clone(), self, inner);
+		Some(std::mem::replace(self.follow.as_mut()?, moved).follower)
+	}
+
 	fn write(&mut self, frame: MoqVideoFrame) -> Result<(), MoqError> {
 		// A buffer that isn't one picture at the configured size is rejected here,
 		// by the surface constructors, rather than reinterpreted.
@@ -468,6 +484,7 @@ impl VideoProducer {
 		// A disabled rung has no encoder to retune; it reopens at the new ceiling.
 		if let Some(encoder) = self.encoder.as_mut() {
 			block_on(encoder.set_bitrate(bitrate))?;
+			self.target = moq_mux::rate::Target::Enabled(bitrate);
 		}
 		// Under the same lock as the retune, so the follower sees both or neither.
 		let Ok(mut ceiling) = self.ceiling.write() else {
@@ -497,6 +514,7 @@ impl VideoProducer {
 				// advertises a rendition whose frames are dropped.
 				self.producer.set_enabled(false)?;
 				if let Some(encoder) = self.encoder.take() {
+					self.target = moq_mux::rate::Target::Disabled;
 					// The encoder is gone either way, so a lost tail only costs those frames.
 					let drained = block_on(encoder.finish()).and_then(|encoded| self.producer.publish(&encoded));
 					if let Err(err) = drained {
@@ -508,7 +526,9 @@ impl VideoProducer {
 			}
 		};
 		if let Some(encoder) = self.encoder.as_mut() {
-			return block_on(encoder.set_bitrate(bitrate));
+			block_on(encoder.set_bitrate(bitrate))?;
+			self.target = target;
+			return Ok(());
 		}
 
 		let ceiling = *self.ceiling.read();
@@ -526,6 +546,10 @@ impl VideoProducer {
 		}
 		self.producer.set_enabled(true)?;
 		self.encoder = Some(encoder);
+		self.target = moq_mux::rate::Target::Enabled(match retuned {
+			Ok(()) => bitrate.min(ceiling),
+			Err(_) => ceiling,
+		});
 		retuned
 	}
 
@@ -564,9 +588,7 @@ impl VideoProducer {
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	/// `None` once finished or aborted.
-	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
-	/// Last bitrate applied by the follow loop or [`set_bitrate`](Self::set_bitrate).
-	applied: Arc<AtomicU64>,
+	inner: Shared,
 	children: crate::producer::Children,
 }
 
@@ -585,9 +607,13 @@ impl MoqVideoProducer {
 		self.with(|producer| Ok(producer.producer.demand()))
 	}
 
+	/// The bitrate the encoder produces at, or 0 while disabled.
 	#[cfg(test)]
 	pub(crate) fn applied_bitrate(&self) -> u64 {
-		self.applied.load(Ordering::SeqCst)
+		match self.inner.lock().unwrap().as_ref().map(|producer| producer.target) {
+			Some(moq_mux::rate::Target::Enabled(bitrate)) => bitrate.as_bps(),
+			_ => 0,
+		}
 	}
 }
 
@@ -638,16 +664,7 @@ impl MoqVideoProducer {
 			// declared level, moved the rendition to a newly named track, and the claim moves
 			// with it under the same lock. It moves even when publishing on the new track
 			// failed, so the claim never stays on the ended one.
-			let after = producer.producer.demand();
-			if after.name() == before.name() {
-				return Ok((written, None));
-			}
-			let ceiling = *producer.ceiling.read();
-			let moved = producer.follow.as_mut().map(|follow| {
-				let moved = Following::start(follow.allocator.clone(), follow.lower.clone(), &after, ceiling, self);
-				std::mem::replace(follow, moved).follower
-			});
-			Ok((written, moved))
+			Ok((written, producer.follow_track(before.name(), &self.inner)))
 		})?;
 		// Outside the lock, which the old follower takes on its way out.
 		let stopped = moved.map_or(Ok(()), Follow::stop);
@@ -699,9 +716,7 @@ impl MoqVideoProducer {
 	/// stop publishing.
 	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
-		self.with(|producer| producer.set_ceiling(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
-		self.applied.store(bitrate, Ordering::SeqCst);
-		Ok(())
+		self.with(|producer| producer.set_ceiling(moq_net::bandwidth::Rate::from_bps(bitrate)))
 	}
 
 	/// This encoder's bandwidth reservation, if it was published against a
@@ -839,9 +854,9 @@ impl MoqVideoProducer {
 				config,
 				ceiling: kio::Producer::new(ceiling),
 				priority,
+				target: moq_mux::rate::Target::Enabled(ceiling),
 				follow: None,
 			}))),
-			applied: Arc::new(AtomicU64::new(ceiling.as_bps())),
 			children: children.clone(),
 		};
 		if let Some(allocator) = bandwidth {
@@ -849,8 +864,7 @@ impl MoqVideoProducer {
 			let mut guard = video.inner.lock().map_err(|_| panic_error())?;
 			let producer = guard.as_mut().expect("just constructed");
 			let lower = lower.map(|(lower, _, _)| lower);
-			let demand = producer.producer.demand();
-			producer.follow = Some(Following::start(allocator, lower, &demand, ceiling, &video));
+			producer.follow = Some(Following::start(allocator, lower, producer, &video.inner));
 		}
 		children.adopt(Arc::new(video))
 	}
@@ -873,9 +887,12 @@ fn video_ceiling(
 		})
 }
 
+/// The rendition behind a [`MoqVideoProducer`], `None` once finished or aborted.
+type Shared = Arc<std::sync::Mutex<Option<VideoProducer>>>;
+
 /// What the follow thread reads and retunes.
 struct Followed {
-	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
+	inner: Shared,
 	/// The next lower rendition's ceiling, which sets this one's band. A consumer, so a rung
 	/// never keeps the rendition below it publishing.
 	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
@@ -883,7 +900,8 @@ struct Followed {
 	/// The claim this thread follows, which retires it once the rendition moves off it or ends.
 	reservation: std::sync::Weak<MoqReservation>,
 	ceiling: moq_net::bandwidth::Rate,
-	applied: Arc<AtomicU64>,
+	/// What the encoder produces when the follower starts.
+	target: moq_mux::rate::Target,
 }
 
 fn spawn_follow(followed: Followed) -> Follow {
@@ -949,10 +967,11 @@ async fn follow_reservation(followed: Followed) {
 		consumer,
 		reservation,
 		ceiling,
-		applied,
+		target,
 	} = followed;
 	let noop = kio::Waiter::noop();
 	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
+	follower.assume(target);
 	loop {
 		// Both ceilings are read on every wake, before the follower filters a grant against
 		// them. This one's `set_bitrate` moves its reservation after moving its ceiling,
@@ -980,11 +999,13 @@ async fn follow_reservation(followed: Followed) {
 			return;
 		};
 		let policy = video_policy(*producer.ceiling.read(), below);
-		match retune(&mut follower, policy, target, |target| producer.apply(target)) {
-			Ok(Some(moq_mux::rate::Target::Enabled(bitrate))) => applied.store(bitrate.as_bps(), Ordering::SeqCst),
-			Ok(Some(moq_mux::rate::Target::Disabled)) => applied.store(0, Ordering::SeqCst),
-			Ok(None) => {}
-			Err(_) => return,
+		let before = producer.producer.demand();
+		let retuned = retune(&mut follower, policy, target, |target| producer.apply(target));
+		// A disable drains the encoder into the track, and output with a new decoder identity
+		// moves the rendition, so the claim moves with it. The replaced follower is this
+		// thread, which ends here, so it is detached rather than joined.
+		if producer.follow_track(before.name(), &inner).is_some() || retuned.is_err() {
+			return;
 		}
 	}
 }
@@ -1637,6 +1658,7 @@ mod finish_tests {
 			config: encode.clone(),
 			format: MoqVideoPixelFormat::I420,
 			size: encode.size(),
+			target: moq_mux::rate::Target::Enabled(moq_net::bandwidth::Rate::from_mbps(1)),
 			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
 			priority: hang::catalog::PRIORITY.video,
 			follow: None,

@@ -313,9 +313,11 @@ async fn follow_reservation(
 	consumer: moq_net::bandwidth::Consumer,
 	reservation: std::sync::Weak<moq_net::bandwidth::Reservation>,
 	ceiling: moq_net::bandwidth::Rate,
+	target: moq_mux::rate::Target,
 ) {
 	let noop = kio::Waiter::noop();
 	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
+	follower.assume(target);
 	loop {
 		// Both ceilings are read on every wake, before the follower filters a grant against
 		// them. This one's `moq_encode_video_bitrate` moves its reservation after moving its
@@ -343,7 +345,11 @@ async fn follow_reservation(
 			return;
 		};
 		let policy = video_policy(*producer.ceiling.read(), below);
-		if retune(&mut follower, policy, target, |target| producer.apply(target)).is_err() {
+		let before = producer.producer.demand();
+		let retuned = retune(&mut follower, policy, target, |target| producer.apply(target));
+		// A disable drains the encoder into the track, and output with a new decoder identity
+		// moves the rendition, so the claim moves with it and this task ends.
+		if producer.follow_track(before.name(), &inner) || retuned.is_err() {
 			return;
 		}
 	}
@@ -414,6 +420,9 @@ pub(crate) struct VideoEncoder {
 	/// allocator. Beside the encoder, so a move to a new track, a finish, and an abort change
 	/// all three together.
 	follow: Option<Following>,
+	/// What the encoder currently produces, which a follower started on a moved track resumes
+	/// from rather than assuming the ceiling.
+	target: moq_mux::rate::Target,
 	/// The manual ceiling [`moq_encode_video_bitrate`] last applied, which caps every
 	/// grant. Behind the encoder's lock, so the follower never reads an old, higher
 	/// one and retunes over a newer cap. A channel, so a rung above this rendition
@@ -563,11 +572,12 @@ impl VideoEncoder {
 			let lower = self.lower.clone();
 			let consumer = reservation.consume();
 			let identity = Arc::downgrade(&reservation);
+			let target = self.target;
 			async move {
 				tokio::select! {
 					biased;
 					_ = stopped => {}
-					_ = follow_reservation(shared, lower, consumer, identity, ceiling) => {}
+					_ = follow_reservation(shared, lower, consumer, identity, ceiling, target) => {}
 				}
 				Ok(())
 			}
@@ -578,6 +588,19 @@ impl VideoEncoder {
 			_stop: stop,
 			follower,
 		});
+	}
+
+	/// Move the claim to the track the rendition is on now, if publishing moved it off the one
+	/// named `before`, such as on a decoder identity change. Returns whether it moved.
+	fn follow_track(&mut self, before: &str, shared: &Shared<VideoEncoder>) -> bool {
+		if self.producer.demand().name() == before {
+			return false;
+		}
+		let Some(follow) = &self.follow else {
+			return false;
+		};
+		self.follow_grant(shared, follow.allocator.clone());
+		true
 	}
 
 	/// Whether this rendition still follows `reservation`, rather than having moved off the
@@ -628,11 +651,7 @@ impl VideoEncoder {
 		// level, moved the rendition to a newly named track, whose demand the claim has to watch.
 		// The claim moves even when publishing on the new track failed, so it never stays on the
 		// ended one.
-		if self.producer.demand().name() != before.name()
-			&& let Some(follow) = &self.follow
-		{
-			self.follow_grant(shared, follow.allocator.clone());
-		}
+		self.follow_track(before.name(), shared);
 		Ok(published?)
 	}
 
@@ -652,6 +671,7 @@ impl VideoEncoder {
 		// A disabled rung has no encoder to retune; it reopens at the new ceiling.
 		if let Some(encoder) = self.encoder.as_mut() {
 			block_on(encoder.set_bitrate(bitrate))?;
+			self.target = moq_mux::rate::Target::Enabled(bitrate);
 		}
 		let Ok(mut ceiling) = self.ceiling.write() else {
 			unreachable!("only dropping the encoder closes its ceiling")
@@ -680,6 +700,7 @@ impl VideoEncoder {
 				// advertises a rendition whose frames are dropped.
 				self.producer.set_enabled(false)?;
 				if let Some(encoder) = self.encoder.take() {
+					self.target = moq_mux::rate::Target::Disabled;
 					// The encoder is gone either way, so a lost tail only costs those frames.
 					let drained = block_on(encoder.finish()).and_then(|encoded| self.producer.publish(&encoded));
 					if let Err(err) = drained {
@@ -691,7 +712,9 @@ impl VideoEncoder {
 			}
 		};
 		if let Some(encoder) = self.encoder.as_mut() {
-			return block_on(encoder.set_bitrate(bitrate));
+			block_on(encoder.set_bitrate(bitrate))?;
+			self.target = target;
+			return Ok(());
 		}
 
 		let ceiling = *self.ceiling.read();
@@ -709,6 +732,10 @@ impl VideoEncoder {
 		}
 		self.producer.set_enabled(true)?;
 		self.encoder = Some(encoder);
+		self.target = moq_mux::rate::Target::Enabled(match retuned {
+			Ok(()) => bitrate.min(ceiling),
+			Err(_) => ceiling,
+		});
 		retuned
 	}
 
@@ -798,6 +825,7 @@ impl Video {
 			format,
 			size: config.size(),
 			follow: None,
+			target: moq_mux::rate::Target::Enabled(ceiling),
 			ceiling: kio::Producer::new(ceiling),
 			children: target.children.clone(),
 		});
@@ -1452,6 +1480,7 @@ mod tests {
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA,
 			size: probed.size(),
 			follow: None,
+			target: moq_mux::rate::Target::Enabled(moq_net::bandwidth::Rate::from_mbps(1)),
 			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
 			children: Default::default(),
 		});
@@ -1527,6 +1556,7 @@ mod tests {
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420,
 			size: encode.size(),
 			follow: None,
+			target: moq_mux::rate::Target::Enabled(moq_net::bandwidth::Rate::from_mbps(1)),
 			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
 			children: Default::default(),
 		});
@@ -1617,6 +1647,7 @@ mod tests {
 				_stop: oneshot::channel().0,
 				follower,
 			}),
+			target: moq_mux::rate::Target::Enabled(moq_net::bandwidth::Rate::from_mbps(1)),
 			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
 			children: Default::default(),
 		};
