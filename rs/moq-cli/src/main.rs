@@ -1613,7 +1613,6 @@ mod tests {
 	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
 	#[tokio::test(start_paused = true)]
 	async fn tcp_only_moq_side_starts_a_server() {
-		kio::clock::host_time();
 		let invocation = Invocation::try_parse_from([
 			"moq",
 			"--listen-tcp-bind",

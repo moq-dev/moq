@@ -3297,7 +3297,6 @@ fn audio_rejects_bad_init_bytes() {
 /// the announcement.
 #[tokio::test]
 async fn a_hidden_route_is_invisible_until_announced() {
-	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let route = origin.route("live".into(), hidden()).unwrap();
@@ -6239,13 +6238,11 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 
 #[tokio::test]
 async fn follow_hands_out_a_takeover_once_while_resolving() {
-	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("").await;
 }
 
 #[tokio::test]
 async fn follow_hands_out_a_held_takeover_once() {
-	kio::clock::host_time();
 	follow_hands_out_a_takeover_once("live").await;
 }
 
@@ -6377,7 +6374,6 @@ async fn an_instance_pins_request_and_follow() {
 /// clock that nothing comes past the origin's update hold either.
 #[tokio::test]
 async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
-	kio::clock::host_time();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "live");
 	let followed = origin.consume().follow("live".into(), None).unwrap();
@@ -7496,7 +7492,6 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
-	kio::clock::host_time();
 	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
@@ -7547,18 +7542,20 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	let deadline = kio::clock::Instant::now() + TIMEOUT;
-	loop {
-		if video.applied_bitrate() == 1_000_000 {
-			break;
-		}
-		assert!(
-			kio::clock::Instant::now() < deadline,
-			"encoder did not follow the shrinking grant, last applied {}",
-			video.applied_bitrate()
-		);
-		kio::clock::sleep(Duration::from_millis(10)).await;
-	}
+	// The follow thread retunes the encoder, so wait for it to record the grant.
+	let applied = video.applied_bitrate();
+	let followed = kio::wait(|waiter| {
+		applied
+			.poll(waiter, |bitrate| match **bitrate {
+				1_000_000 => std::task::Poll::Ready(()),
+				_ => std::task::Poll::Pending,
+			})
+			.map(|followed| followed.is_ok())
+	});
+	let open = kio::clock::timeout(TIMEOUT, followed)
+		.await
+		.unwrap_or_else(|_| panic!("encoder did not follow the shrinking grant, last applied {}", *applied.read()));
+	assert!(open, "the applied bitrate closed");
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();
@@ -7651,13 +7648,13 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 
 	video.set_bitrate(1_000_000).unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
-	assert_eq!(video.applied_bitrate(), 1_000_000);
+	assert_eq!(*video.applied_bitrate().read(), 1_000_000);
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
-	assert_eq!(video.applied_bitrate(), 1_000_000);
+	assert_eq!(*video.applied_bitrate().read(), 1_000_000);
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();

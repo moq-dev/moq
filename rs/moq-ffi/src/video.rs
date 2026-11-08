@@ -11,7 +11,7 @@
 //! timestamp.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::oneshot;
 
@@ -489,8 +489,9 @@ pub struct MoqVideoProducer {
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	follow: std::sync::Mutex<Option<Follow>>,
-	/// Last bitrate applied by the follow loop or [`set_bitrate`](Self::set_bitrate).
-	applied: Arc<AtomicU64>,
+	/// Last bitrate applied by the follow loop or [`set_bitrate`](Self::set_bitrate). A
+	/// channel, so a test can await the follow thread's retune.
+	applied: kio::Producer<u64>,
 	/// The next lower rendition's ceiling, kept to follow a new track with.
 	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles, and to reserve
@@ -570,8 +571,8 @@ impl MoqVideoProducer {
 	}
 
 	#[cfg(test)]
-	pub(crate) fn applied_bitrate(&self) -> u64 {
-		self.applied.load(Ordering::SeqCst)
+	pub(crate) fn applied_bitrate(&self) -> kio::Consumer<u64> {
+		self.applied.consume()
 	}
 }
 
@@ -671,7 +672,7 @@ impl MoqVideoProducer {
 		if let Some(reservation) = self.reservation.lock().unwrap().as_ref() {
 			reservation.update(bitrate);
 		}
-		self.applied.store(bitrate, Ordering::SeqCst);
+		store(&self.applied, bitrate);
 		Ok(())
 	}
 
@@ -816,7 +817,7 @@ impl MoqVideoProducer {
 			ceiling: kio::Producer::new(ceiling),
 			priority,
 		})));
-		let applied = Arc::new(AtomicU64::new(ceiling.as_bps()));
+		let applied = kio::Producer::new(ceiling.as_bps());
 		let reserved = bandwidth.as_ref().map(|bandwidth| {
 			let demand = inner
 				.lock()
@@ -875,7 +876,15 @@ struct Followed {
 	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
 	consumer: moq_net::bandwidth::Consumer,
 	ceiling: moq_net::bandwidth::Rate,
-	applied: Arc<AtomicU64>,
+	applied: kio::Producer<u64>,
+}
+
+/// Record `bitrate` as the last one applied.
+fn store(applied: &kio::Producer<u64>, bitrate: u64) {
+	let Ok(mut applied) = applied.write() else {
+		unreachable!("nothing closes the applied bitrate")
+	};
+	*applied = bitrate;
 }
 
 fn spawn_follow(followed: Followed) -> Follow {
@@ -974,8 +983,8 @@ async fn follow_reservation(followed: Followed) {
 		};
 		let policy = video_policy(*producer.ceiling.read(), below);
 		match retune(&mut follower, policy, target, |target| producer.apply(target)) {
-			Ok(Some(moq_mux::rate::Target::Enabled(bitrate))) => applied.store(bitrate.as_bps(), Ordering::SeqCst),
-			Ok(Some(moq_mux::rate::Target::Disabled)) => applied.store(0, Ordering::SeqCst),
+			Ok(Some(moq_mux::rate::Target::Enabled(bitrate))) => store(&applied, bitrate.as_bps()),
+			Ok(Some(moq_mux::rate::Target::Disabled)) => store(&applied, 0),
 			Ok(None) => {}
 			Err(_) => return,
 		}
