@@ -321,7 +321,7 @@ impl<E> Catalog<E> {
 	}
 
 	/// Copy the media sections into a catalog with no application extension.
-	pub fn media(&self) -> Catalog<()> {
+	pub fn without_ext(&self) -> Catalog<()> {
 		Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),

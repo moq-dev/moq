@@ -310,7 +310,7 @@ pub struct Consume {
 	datagram_task: NonZeroSlab<DatagramTaskEntry>,
 
 	/// Buffered datagrams ready for consumption.
-	datagram: NonZeroSlab<Timed<moq_net::Datagram>>,
+	datagram: NonZeroSlab<Timed<moq_net::datagram::Datagram>>,
 
 	/// JSON consumer tasks (snapshot, stream, and window share this slab).
 	json_task: NonZeroSlab<Task>,

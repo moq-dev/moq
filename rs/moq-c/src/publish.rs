@@ -1870,7 +1870,7 @@ impl Publish {
 			.append(timestamp, bytes::Bytes::copy_from_slice(payload))?)
 	}
 
-	pub fn datagrams_insert(&mut self, track: Id, datagram: moq_net::Datagram) -> Result<(), Error> {
+	pub fn datagrams_insert(&mut self, track: Id, datagram: moq_net::datagram::Datagram) -> Result<(), Error> {
 		Ok(self
 			.datagrams
 			.get_mut(track)

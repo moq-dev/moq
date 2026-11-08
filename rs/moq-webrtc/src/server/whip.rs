@@ -14,7 +14,7 @@ use axum::{
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
-use str0m::{Candidate, RtcConfig};
+use str0m::Candidate;
 
 use crate::{Error, Result, ingest::IngestSink, rate, sdp, server::Server, session};
 
@@ -82,7 +82,7 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	let broadcast = moq_net::Path::new(path).map_err(moq_net::Error::from)?;
+	let broadcast = moq_net::Path::new(path)?;
 	accept(server, Request::new(publisher, broadcast, offer)).await
 }
 
@@ -171,7 +171,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// and a guard the session task holds for its lifetime (unregisters on exit).
 	let mux = server.mux().await?;
 	let (creds, inbound, registration) = mux.register();
-	let mut rtc = RtcConfig::new()
+	let mut rtc = session::rtc_config()?
 		.set_local_ice_credentials(creds)
 		.build(kio::clock::now().into_std());
 	for addr in mux.candidates() {
@@ -229,9 +229,7 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 #[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
-		Error::InvalidSdp(_) | Error::Moq(moq_net::Error::EmptySegment | moq_net::Error::InvalidEscape) => {
-			StatusCode::BAD_REQUEST
-		}
+		Error::InvalidSdp(_) | Error::InvalidPath(_) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
@@ -250,7 +248,7 @@ mod tests {
 
 	/// An encoder's offer to send one Opus track.
 	fn offer() -> String {
-		let mut rtc = session::rtc_with_codecs(&[Codec::Opus]);
+		let mut rtc = session::rtc_with_codecs(&[Codec::Opus]).unwrap();
 		let mut api = rtc.sdp_api();
 		api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
 		let (offer, _pending) = api.apply().expect("an offer");

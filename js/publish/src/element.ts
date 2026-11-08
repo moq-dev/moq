@@ -157,18 +157,18 @@ export default class MoqPublish extends HTMLElement {
 	 * same URL. The broadcast publishes into its `origin`, so a `<moq-watch>` on the same
 	 * page and URL resolves it locally with no round trip.
 	 */
-	connection: Moq.Connection;
+	readonly connection: Moq.Connection;
 	#capture: Video.Capture;
 	/** The broadcast being published. */
-	broadcast: Broadcast;
+	readonly broadcast: Broadcast;
 
 	/**
 	 * The single video encoder, tuned via `video.config`. For multiple renditions (e.g. simulcast), drop
 	 * the element and register your own encoders on a Broadcast via the JS API.
 	 */
-	video: Video.Encoder;
+	readonly video: Video.Encoder;
 	/** The single audio encoder, tuned via its knobs (`codec`, `volume`, ...). */
-	audio: Audio.Encoder;
+	readonly audio: Audio.Encoder;
 
 	// The selected input sources: the Camera/Screen, Microphone/Screen, and File holders driving capture.
 	// Read by the UI (device pickers) and written by #runSource.

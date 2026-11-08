@@ -20,7 +20,7 @@ export { assets } from "./assets";
 export * as Audio from "./audio";
 export * from "./broadcast";
 export * from "./catalog";
-export { Fanout, type FanoutProps } from "./fanout";
+export type { Fanout } from "./fanout";
 /** The local canvas preview. */
 export * as Preview from "./preview";
 export * from "./rendition";
