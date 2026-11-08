@@ -56,7 +56,6 @@ pub enum Kind {
 	Start,
 	Update,
 	Restart,
-	Takeover,
 	End,
 }
 
@@ -83,7 +82,6 @@ pub fn watch(mut announced: origin::Routes) -> mpsc::UnboundedReceiver<(String, 
 				origin::RouteEvent::Start(announce) => (Kind::Start, announce),
 				origin::RouteEvent::Update(announce) => (Kind::Update, announce),
 				origin::RouteEvent::Restart(announce) => (Kind::Restart, announce),
-				origin::RouteEvent::Takeover { announce, .. } => (Kind::Takeover, announce),
 				origin::RouteEvent::End(announce) => (Kind::End, announce),
 			};
 			if tx.unbounded_send((announce.prefix.to_string(), kind)).is_err() {

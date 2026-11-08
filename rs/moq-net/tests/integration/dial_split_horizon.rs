@@ -102,8 +102,7 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> u64 {
 			let announce = match event {
 				moq_net::origin::RouteEvent::Start(announce)
 				| moq_net::origin::RouteEvent::Update(announce)
-				| moq_net::origin::RouteEvent::Restart(announce)
-				| moq_net::origin::RouteEvent::Takeover { announce, .. } => announce,
+				| moq_net::origin::RouteEvent::Restart(announce) => announce,
 				moq_net::origin::RouteEvent::End(_) => continue,
 			};
 			if announce.prefix.as_str() == path {

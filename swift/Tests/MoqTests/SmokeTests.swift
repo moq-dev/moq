@@ -407,7 +407,7 @@ final class SmokeTests: XCTestCase {
         let request = try XCTUnwrap(requested)
         XCTAssertEqual(try request.path, "live/cam")
         let served = try request.route(hidden: true)
-        XCTAssertNotEqual(served.instance, dynamic.instance)
+        XCTAssertEqual(served.instance, dynamic.instance)
         let broadcast = try served.broadcast
         XCTAssertTrue(broadcast === (try served.broadcast))
         // Only announcing answers the requester.

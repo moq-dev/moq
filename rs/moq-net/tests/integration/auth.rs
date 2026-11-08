@@ -410,8 +410,7 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::origin::RouteEvent| match event {
 		moq_net::origin::RouteEvent::Start(update)
 		| moq_net::origin::RouteEvent::Update(update)
-		| moq_net::origin::RouteEvent::Restart(update)
-		| moq_net::origin::RouteEvent::Takeover { announce: update, .. } => {
+		| moq_net::origin::RouteEvent::Restart(update) => {
 			live.insert(update.prefix.to_string());
 		}
 		moq_net::origin::RouteEvent::End(update) => {

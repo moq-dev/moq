@@ -30,7 +30,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -924,7 +923,7 @@ class SmokeTest {
                 val request = assertNotNull(dynamic.requested())
                 assertEquals("live/cam", request.path())
                 request.route(RouteOptions(hidden = true)).use { job ->
-                    assertNotEquals(dynamic.instance(), job.instance())
+                    assertEquals(dynamic.instance(), job.instance())
                     job.broadcast().use { fill ->
                         // Only announcing answers the requester.
                         job.announce()

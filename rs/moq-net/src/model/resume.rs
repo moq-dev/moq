@@ -401,7 +401,6 @@ impl Consumer {
 				reported_stale: RangeSet::new(),
 				declared: None,
 				declared_error: None,
-				refused: false,
 			})
 		});
 		// Subscribed to the serving copy at once, so groups it has now are the reader's
@@ -1028,12 +1027,13 @@ impl Candidate {
 
 /// A [`Subscriber`]'s state.
 struct Reader {
-	/// The first exclusive end any copy declared, refined by a matching mid-group end.
+	/// The first exclusive end any copy declared, refined by a matching mid-group end. A copy
+	/// declaring another breaks the track's identity, which hurts only its own broadcast, so
+	/// nothing checks that copies agree.
 	declared: Option<Position>,
-	/// The first error a copy's end carried, kept with the end so a route switch keeps it.
+	/// The first error a copy's end carried, from a copy at the end [`Self::declared`] holds, kept
+	/// with the end so a route switch keeps it.
 	declared_error: Option<Error>,
-	/// Copies of one logical track contradicted its end.
-	refused: bool,
 	this: Weak<Mutex<Reader>>,
 	route: Consumer,
 	/// The reader's own preferences, mirrored into every copy's subscription.
@@ -1130,9 +1130,6 @@ impl Reader {
 	fn sync(&mut self, waiter: &kio::Waiter) {
 		// Learn before a swap or retention drops the only copy that knows the end.
 		self.learn_end(None);
-		if self.refused {
-			return;
-		}
 		// Snapshot and re-arm together, including when a change was observed: another
 		// update must wake a reader that parks after applying this one.
 		let mut changed = None;
@@ -1276,66 +1273,34 @@ impl Reader {
 			let Some(end) = end else { continue };
 			match self.declared {
 				None => self.declared = Some(end),
-				Some(declared) if declared == end => {}
 				// FETCH can name only the group boundary just after a mid-group end.
 				Some(declared)
-					if declared.final_sequence() == end.final_sequence() && (declared.frame == 0 || end.frame == 0) =>
+					if declared.frame == 0 && end.frame != 0 && declared.final_sequence() == end.final_sequence() =>
 				{
-					if declared.frame == 0 {
-						self.declared = Some(end);
-					}
+					self.declared = Some(end);
 				}
-				Some(_) => self.refused = true,
+				Some(_) => {}
 			}
-			// A copy over a version with no end error declares the same end cleanly.
-			if self.declared_error.is_none() {
+			// A copy over a version with no end error declares the same end cleanly. Only a copy
+			// at the end that stands says how the track ended there.
+			let same = self.declared.is_some_and(|declared| {
+				declared == end || end.frame == 0 && end.final_sequence() == declared.final_sequence()
+			});
+			if same && self.declared_error.is_none() {
 				self.declared_error = copy.track.declared_error();
-			}
-		}
-		// A group or frame at or past it, handed out or on any copy, claims
-		// other content.
-		if let Some(declared) = self.declared {
-			let end = declared.final_sequence();
-			let seen = |sequence: Option<u64>| sequence.zip(end).is_some_and(|(sequence, end)| sequence >= end);
-			let cut = |copy: &Copy| {
-				declared.frame != 0
-					&& copy
-						.track
-						.peek_group(declared.group)
-						.is_some_and(|group| group.frame_count() as u64 > declared.frame)
-			};
-			if seen(self.newest)
-				|| self
-					.copies
-					.iter()
-					.any(|copy| seen(copy.track.latest_sequence()) || cut(copy))
-			{
-				self.refused = true;
 			}
 		}
 	}
 
-	/// Why the reader can read nothing more: copies contradicted the track's end, or its
-	/// ranges hold an [`Anchor::Oldest`] end. That end is refused here, before waiting on a
-	/// copy to refuse it, since the demand asked upstream leaves it out.
+	/// Why the reader can read nothing more: its ranges hold an [`Anchor::Oldest`] end. That
+	/// end is refused here, before waiting on a copy to refuse it, since the demand asked
+	/// upstream leaves it out.
 	fn refusal(&self) -> Option<Error> {
-		if self.refused {
-			return Some(Error::ProtocolViolation);
-		}
 		self.mirrored
 			.ranges
 			.iter()
 			.any(|range| range.end == Some(Anchor::Oldest))
 			.then_some(Error::InvalidRange)
-	}
-
-	/// Whether `at` is past the declared end, which refuses the track: another copy
-	/// contradicts the copy that declared it.
-	fn past_end(&mut self, at: Position) -> bool {
-		if self.declared.is_some_and(|end| at >= end) {
-			self.refused = true;
-		}
-		self.refused
 	}
 
 	/// Drop the replaced copies nothing needs any more; see [`Copy::retains`]. Whether one
@@ -1475,9 +1440,6 @@ impl Reader {
 	/// eviction can abort that group but cannot substitute a later one and advance the
 	/// logical reader past a gap.
 	fn take(&mut self, candidate: Candidate) -> Result<group::Consumer> {
-		if self.past_end(Position::group(candidate.sequence())) {
-			return Err(Error::ProtocolViolation);
-		}
 		let index = self
 			.copies
 			.iter()
@@ -2954,34 +2916,61 @@ mod test {
 		));
 	}
 
+	/// The first end any copy declares stands, refined only by a mid-group end just before
+	/// it. A copy contradicting it breaks the track's identity, which hurts only this track:
+	/// the reader never fails or panics over it.
 	#[kio::test]
-	async fn copies_must_agree_on_the_declared_end() {
-		for next in [Position::group(5), Position { group: 4, frame: 3 }, Position::group(6)] {
+	async fn the_first_declared_end_stands() {
+		for (next, end) in [
+			(Position::group(5), Position::group(5)),
+			(Position { group: 4, frame: 3 }, Position { group: 4, frame: 3 }),
+			(Position::group(6), Position::group(5)),
+			(Position::group(3), Position::group(5)),
+		] {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let mut a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, HOUR);
+			write(&a, 4);
+			assert_eq!(recv(&mut sub).sequence, 4);
 			a.finish_at(Position::group(5), None).unwrap();
 			let mut b = copy();
 			b.finish_at(next, None).unwrap();
 			routes.serve(b.consume());
-			let result = sub.poll_finished(&kio::Waiter::noop());
-			if next == Position::group(6) {
-				assert!(matches!(result, Poll::Ready(Err(Error::ProtocolViolation))));
-				assert!(matches!(
-					sub.poll_recv_group(&kio::Waiter::noop()),
-					Poll::Ready(Err(Error::ProtocolViolation))
-				));
-			} else {
-				assert_eq!(result.map(Result::unwrap), Poll::Ready(next));
-			}
+			assert_eq!(
+				sub.poll_finished(&kio::Waiter::noop()).map(Result::unwrap),
+				Poll::Ready(end),
+				"{next:?}"
+			);
 		}
 	}
 
-	/// A copy that delivers past an end another copy declared contradicts it.
+	/// Only a copy at the end that stands says how the track ended: another copy's end, with
+	/// its error, leaves the first end clean.
 	#[kio::test]
-	async fn content_past_the_declared_end_refuses_the_track() {
+	async fn a_contradicting_copys_end_error_leaves_the_end_clean() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 4);
+		assert_eq!(recv(&mut sub).sequence, 4);
+		a.finish_at(Position::group(5), None).unwrap();
+		let mut b = copy();
+		b.finish_at(Position::group(6), Some(Error::App(7))).unwrap();
+		routes.serve(b.consume());
+		assert_eq!(
+			sub.poll_finished(&kio::Waiter::noop()).map(Result::unwrap),
+			Poll::Ready(Position::group(5))
+		);
+		assert!(sub.end_error().is_none());
+	}
+
+	/// A copy holding a group past an end another copy declared never fails the reader.
+	#[kio::test]
+	async fn content_past_the_declared_end_leaves_the_end() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let mut a = copy();
@@ -2993,14 +2982,12 @@ mod test {
 		write(&b, 4);
 		assert_eq!(recv(&mut sub).sequence, 4);
 		write(&b, 5);
-		assert!(matches!(
-			sub.poll_recv_group(&kio::Waiter::noop()),
-			Poll::Ready(Err(Error::ProtocolViolation))
-		));
-		assert!(matches!(
-			sub.poll_finished(&kio::Waiter::noop()),
-			Poll::Ready(Err(Error::ProtocolViolation))
-		));
+		write(&b, 6);
+		let _ = drain(&mut sub, false);
+		assert_eq!(
+			sub.poll_finished(&kio::Waiter::noop()).map(Result::unwrap),
+			Poll::Ready(Position::group(5))
+		);
 	}
 
 	/// A mid-group end another copy declared caps the group it falls in, even for frames
@@ -3026,54 +3013,6 @@ mod test {
 		assert_eq!(read(&mut reading), Some(b"x".to_vec()));
 		assert_eq!(read(&mut reading), Some(b"x".to_vec()));
 		assert_eq!(read(&mut reading), None);
-		// The copy holding them contradicts the end.
-		assert!(matches!(
-			sub.poll_finished(&kio::Waiter::noop()),
-			Poll::Ready(Err(Error::ProtocolViolation))
-		));
-	}
-
-	/// An end below a group a copy handed out or holds claims other content.
-	#[kio::test]
-	async fn an_end_below_a_seen_group_refuses_the_track() {
-		for handed_out in [false, true] {
-			let routes = Producer::new();
-			let logical = logical(&routes);
-			let a = copy();
-			routes.serve(a.consume());
-			let mut sub = subscribe(&logical, HOUR);
-			write(&a, 5);
-			if handed_out {
-				assert_eq!(drain(&mut sub, false), [5]);
-			}
-			let mut b = copy();
-			routes.serve(b.consume());
-			b.finish_at(Position::group(3), None).unwrap();
-			assert!(matches!(
-				sub.poll_finished(&kio::Waiter::noop()),
-				Poll::Ready(Err(Error::ProtocolViolation))
-			));
-		}
-	}
-
-	/// A mid-group end learned late, below a frame already seen, claims other content.
-	#[kio::test]
-	async fn a_late_mid_group_end_below_a_seen_object_refuses_the_track() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, HOUR);
-		let mut group = a.create_group(group::Info { sequence: 4 }).unwrap();
-		for frame in 0..4 {
-			group.write_frame(ts(frame), b"x".as_ref()).unwrap();
-		}
-		let _held = (group, recv(&mut sub));
-		let mut b = copy();
-		routes.serve(b.consume());
-		b.finish_at(Position { group: 4, frame: 2 }, None).unwrap();
-		let res = sub.poll_finished(&kio::Waiter::noop());
-		assert!(matches!(res, Poll::Ready(Err(Error::ProtocolViolation))), "{res:?}");
 	}
 
 	/// A gap that stays open across route flaps keeps one backfill per distinct route: a

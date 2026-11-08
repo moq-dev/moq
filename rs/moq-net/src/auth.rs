@@ -684,19 +684,23 @@ impl Handle {
 	/// Called before the session's driver first polls, since that decides who answers.
 	/// A later call hands the queue to the new [`Requests`], ending the earlier one.
 	pub(crate) fn requests(&self) -> Requests {
-		let mut state = self.state.lock();
-		debug_assert!(
-			!matches!(state.acceptor, Acceptor::Default),
-			"the driver already answers the peer's tokens"
-		);
-		if let Acceptor::App(earlier) = &state.acceptor {
+		let queue = Pending::default();
+		let (earlier, closed) = {
+			let mut state = self.state.lock();
+			debug_assert!(
+				!matches!(state.acceptor, Acceptor::Default),
+				"the driver already answers the peer's tokens"
+			);
+			let earlier = std::mem::replace(&mut state.acceptor, Acceptor::App(queue.clone()));
+			(earlier, state.closed.is_some())
+		};
+		// Closed once the lock is released, since refusing its tokens takes the lock again.
+		if let Acceptor::App(earlier) = earlier {
 			earlier.close();
 		}
-		let queue = Pending::default();
-		if state.closed.is_some() {
+		if closed {
 			queue.close();
 		}
-		state.acceptor = Acceptor::App(queue.clone());
 		Requests { queue }
 	}
 
@@ -1669,10 +1673,15 @@ struct PendingState {
 }
 
 impl Pending {
+	/// Refuse every queued token and every later one. Call it without the handle's lock,
+	/// which refusing a token takes.
 	fn close(&self) {
-		let mut state = self.state.lock();
-		state.closed = true;
-		state.requests.clear();
+		let refused = {
+			let mut state = self.state.lock();
+			state.closed = true;
+			std::mem::take(&mut state.requests)
+		};
+		drop(refused);
 	}
 
 	/// Queue the token for the application, or refuse it when closed.
@@ -1727,13 +1736,14 @@ pub(crate) enum Reply {
 /// The acceptor's side of one peer token's stream, shared with the driver.
 #[derive(Default)]
 pub(crate) struct Issue {
-	/// Replies for the driver to write, in order.
-	pub outbox: VecDeque<Reply>,
+	/// Replies for the driver to write, in order: at most a grant the peer has not taken yet
+	/// and the refusal ending it.
+	outbox: VecDeque<Reply>,
 	/// Request-token readers each observe the latest verdict independently.
 	latest: Option<Reply>,
 	revision: u64,
 	/// The app is done with the stream: the driver closes it once the outbox drains.
-	pub done: bool,
+	done: bool,
 	/// Why the stream ended on the peer's side, once it has.
 	pub peer: Option<Error>,
 	/// A request token's share of its request's slot, held while the application verifies it.
@@ -1757,14 +1767,44 @@ impl Issue {
 		}
 		self.revision += 1;
 		if self.scoped.is_some() {
-			self.outbox.push_back(reply);
+			self.queue(reply);
 		} else {
 			self.latest = Some(reply);
 		}
 	}
 
+	/// Queue a reply for the driver to write, unless the stream is done. It replaces a grant
+	/// still queued, which the peer never saw, so a peer withholding stream credit cannot
+	/// make the outbox grow.
+	pub(crate) fn queue(&mut self, reply: Reply) {
+		if self.done {
+			return;
+		}
+		match self.outbox.back_mut() {
+			Some(queued @ Reply::Grant(_)) => *queued = reply,
+			_ => self.outbox.push_back(reply),
+		}
+	}
+
+	/// The next reply for the driver to write.
+	pub(crate) fn next(&mut self) -> Option<Reply> {
+		self.outbox.pop_front()
+	}
+
+	/// Whether the driver has nothing to do until the acceptor replies again.
+	pub(crate) fn idle(&self) -> bool {
+		self.outbox.is_empty() && !self.done
+	}
+
+	/// The driver refused the token itself, as for a grant too large to encode: nothing
+	/// queued goes out, and whatever the token was granted leaves the scope.
+	pub(crate) fn refused(&mut self) {
+		self.outbox.clear();
+		self.finish();
+	}
+
 	/// The application is done with the token: its grant leaves the scope.
-	fn finish(&mut self) {
+	pub(crate) fn finish(&mut self) {
 		self.done = true;
 		if let Some((handle, id)) = &self.scoped {
 			handle.issue(*id, None);
@@ -2830,6 +2870,70 @@ mod tests {
 		let issue = serving.issue.read();
 		assert!(matches!(issue.outbox.front(), Some(Reply::Grant(_))));
 		assert!(handle.within_limit(Direction::Subscribe, "room"));
+	}
+
+	/// A grant the driver refuses to send, as one too large to encode, leaves the scope with
+	/// the AUTH_ERROR that replaces it.
+	#[test]
+	fn a_refused_grant_leaves_the_scope() {
+		let handle = Link::new(true);
+		handle.handle().authorize(&Grant::default());
+		let serving = Serving::new(handle.clone());
+		let request = Request::new(Bytes::from_static(b"token"), serving.issue.clone());
+		let issued = request.accept(grant(&["room"], &[]));
+		assert!(handle.allows(Direction::Subscribe, "room"));
+		serving.issue.lock().refused();
+		assert!(
+			!handle.allows(Direction::Subscribe, "room"),
+			"the refused grant still admits"
+		);
+		issued.update(grant(&["room"], &[]));
+		assert!(
+			!handle.allows(Direction::Subscribe, "room"),
+			"an update revived the refused grant"
+		);
+	}
+
+	/// Grants issued while the peer withholds the stream's credit replace the one still
+	/// queued, and a revocation replaces it too.
+	#[test]
+	fn a_blocked_stream_queues_one_grant() {
+		let handle = Link::new(true);
+		let serving = Serving::new(handle.clone());
+		let request = Request::new(Bytes::from_static(b"token"), serving.issue.clone());
+		let issued = request.accept(grant(&["0"], &[]));
+		for i in 1..100 {
+			issued.update(grant(&[&i.to_string()], &[]));
+		}
+		{
+			let issue = serving.issue.read();
+			assert_eq!(issue.outbox.len(), 1, "grants piled up");
+			assert!(matches!(issue.outbox.front(), Some(Reply::Grant(grant)) if grant.publish == patterns(&["99"])));
+		}
+		issued.revoke(SessionError::Unauthorized, "revoked");
+		let issue = serving.issue.read();
+		assert!(matches!(
+			issue.outbox.iter().collect::<Vec<_>>()[..],
+			[Reply::Refuse { .. }]
+		));
+	}
+
+	/// Handing the queue to a new acceptor refuses the tokens still queued without holding
+	/// the handle's lock, which refusing an AUTH token takes.
+	#[test]
+	fn a_new_acceptor_refuses_the_queue_without_deadlock() {
+		let handle = Link::new(true);
+		let _requests = handle.handle().requests();
+		let serving = Serving::new(handle.clone());
+		handle
+			.acceptor()
+			.unwrap()
+			.push(Request::new(Bytes::from_static(b"token"), serving.issue.clone()));
+		let _next = handle.handle().requests();
+		assert!(matches!(
+			serving.issue.read().outbox.front(),
+			Some(Reply::Refuse { .. })
+		));
 	}
 
 	/// A queued request token keeps its request's slot, so the peer's request credit bounds

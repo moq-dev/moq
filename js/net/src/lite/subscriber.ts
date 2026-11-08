@@ -523,8 +523,13 @@ export class Subscriber {
 			switch (this.version) {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02: {
-					// Receive ANNOUNCE_INIT first
-					const init = await race([AnnounceInit.decode(stream.reader, this.version), announced.closed]);
+					// Receive ANNOUNCE_INIT first. Each suffix takes an announce slot, so a set past
+					// what is left of the budget is refused before it is decoded.
+					const budget = this.#announces.available();
+					const init = await race([
+						AnnounceInit.decode(stream.reader, this.version, budget),
+						announced.closed,
+					]);
 					if (!(init instanceof AnnounceInit)) {
 						stream.close();
 						return;
@@ -576,8 +581,8 @@ export class Subscriber {
 			stopDrain = this.#goaway?.changed(() => drainAdvertised());
 
 			// Lite06+: announce ids. Each received `active` implicitly assigns the next
-			// per-stream ordinal, as does each `takeover`; `endedId`/`update`/`restart` reference
-			// it, and lite-07 bases copy from it. Tracked even for announces we skip as reflected, since the sender
+			// per-stream ordinal; `endedId`/`update`/`restart` reference it, and lite-07 bases
+			// copy from it. Tracked even for announces we skip as reflected, since the sender
 			// doesn't know we skipped.
 			const history = new AnnounceHistory();
 
@@ -664,23 +669,6 @@ export class Subscriber {
 						restart = true;
 						break;
 					}
-					case "takeover": {
-						// Continuity across the takeover is not kept here: a takeover at a new path
-						// surfaces as a start, and one at its predecessor's own path as a restart,
-						// as an older wire carries it.
-						const resolved = history.takeover(announce);
-						if (!Path.hasPrefix(resolved.previous, resolved.suffix)) {
-							throw new ProtocolViolation(`takeover of ${resolved.previous} at ${resolved.suffix}`);
-						}
-						path = Path.join(prefix, resolved.suffix);
-						active = true;
-						hops = resolved.hops;
-						cost = announce.cost;
-						instance = announce.instance;
-						epoch = announce.epoch;
-						restart = resolved.suffix === resolved.previous;
-						break;
-					}
 					case "skipped":
 						continue;
 				}
@@ -702,8 +690,7 @@ export class Subscriber {
 				// a duplicate means the same thing on both sides of it. Mirrors the branch the
 				// Rust announce loop takes before `start_announce`.
 				const duplicateIsUpdate = updateSupported(this.version) && !hasAnnounceId(this.version);
-				const starts = announce.status === "active" || (announce.status === "takeover" && !restart);
-				if (starts && !duplicateIsUpdate && advertised.has(path)) {
+				if (announce.status === "active" && !duplicateIsUpdate && advertised.has(path)) {
 					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
 

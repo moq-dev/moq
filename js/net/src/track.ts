@@ -47,7 +47,7 @@ import {
 import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
-import { checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
+import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
 	bounded,
 	type Holdings,
@@ -731,14 +731,11 @@ class TrackState {
 	// One past the highest group received, including evicted content.
 	received = new Signal(0n);
 	/**
-	 * The exclusive end, declared by {@link Producer.finishAt} or stamped by a clean close
-	 * at the head of the sequence after the highest produced. Mirrors
-	 * the Rust `end`.
+	 * The declared end, by {@link Producer.finishAt} or a clean close at the head of the
+	 * sequence after the highest produced, with the error the track ended with there. One
+	 * value, so a wake on it sees both. Mirrors the Rust `End`.
 	 */
-	end = new Signal<Position | undefined>(undefined);
-	// The error the track ended with at `end`, if it did not end cleanly: a reader reaching the
-	// end gets it instead of the end of stream. Set before `end`, so its wake sees it.
-	endError?: Error;
+	end = new Signal<End | undefined>(undefined);
 	// A wire subscription's pending tail still owes a group below the end, so reaching the
 	// end does not end readers yet. Mirrors the Rust `awaits_tail`.
 	owed = new Signal(false);
@@ -761,6 +758,30 @@ class TrackState {
 		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
 	}
 }
+
+// A track's declared end. Mirrors the Rust `End`.
+type End = {
+	// The exclusive end: no frame at or past it exists.
+	at: Position;
+	// The error the track ended with at `at`, if it did not end cleanly: a reader reaching the
+	// end gets it instead of the end of stream, while everything below stays readable.
+	error?: Error;
+	// A received end, declared ahead of the group streams below it that QUIC may deliver in any
+	// order: readers wait for a hole below it to fill, or for the track to close, rather than end
+	// at the boundary with groups still to arrive. Cleared once the subscription feeding the copy
+	// ends (see `hooks.cacheTrack`). Mirrors the Rust `End::tail`.
+	tail: boolean;
+};
+
+// The wire subscription feeding a received copy, and what it declared. Ending the subscription
+// drops it whole, so nothing it declared outlives it.
+type Wire = {
+	// How its start bounds the fills readers ask below it.
+	starts: FillStarts;
+	// The first group its live feed serves (see `hooks.startTrack`), unset until its START
+	// resolves it, null for a resolved-empty range, and the floor its SUBSCRIBE requested.
+	served?: { start?: bigint | null; requested?: bigint };
+};
 
 // Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
 // Producer closing its sinks races the Subscriber closing itself (the sink is only removed from
@@ -1032,17 +1053,9 @@ export class Producer {
 	// Only real objects or upstream metadata advance this, never the head of an empty group.
 	#objectLargest?: Position;
 
-	// A wire subscription declared the end ahead of the group streams below it, which QUIC
-	// may deliver in any order: readers wait for a hole below it to fill, or for the track
-	// to close, rather than end at the boundary with groups still to arrive.
-	#tailPending = false;
-	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), unset
-	// until its START resolves it, null for a resolved-empty range, and the requested floor.
-	#served?: { start?: bigint | null; requested?: bigint };
-	// Only copies fed by a wire subscription owe missing groups.
-	#subscribed = false;
-	// How the subscription's start bounds the fills readers ask below it.
-	#starts: FillStarts = {};
+	// The wire subscription feeding this copy, from `hooks.receiveTrack` until `hooks.cacheTrack`
+	// ends it: only a copy one feeds owes missing groups. Unset on a track's own publisher.
+	#wire?: Wire;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The sequences the live feed delivered, as a group: what a pending tail is
@@ -1104,10 +1117,14 @@ export class Producer {
 		hooks.requested = (producer) => producer.#state.update;
 		resubscribe = (producer) => producer.#updateSubscription();
 		hooks.cacheTrack = (producer) => {
-			producer.#subscribed = false;
-			producer.#served = undefined;
-			producer.#tailPending = false;
-			for (const state of [producer.#state, ...producer.#sinks]) state.owed.set(false);
+			producer.#wire = undefined;
+			// Nothing feeds the tail anymore, so readers end at the boundary.
+			const end = producer.#state.end.peek();
+			const untailed = end?.tail ? { ...end, tail: false } : undefined;
+			for (const state of [producer.#state, ...producer.#sinks]) {
+				if (untailed) state.end.set(untailed);
+				state.owed.set(false);
+			}
 			producer.#settle();
 		};
 		hooks.refuseLive = (producer, edge, error) => {
@@ -1120,24 +1137,23 @@ export class Producer {
 			}
 		};
 		fillEdge = (producer) =>
-			!producer.#subscribed && producer.#state.info.peek()?.ietf !== undefined
+			!producer.#wire && producer.#state.info.peek()?.ietf !== undefined
 				? producer.#state.largest.peek()?.group
 				: undefined;
 		hooks.receiveTrack = (producer, starts = {}) => {
-			producer.#subscribed = true;
-			producer.#starts = starts;
+			producer.#wire = { starts, served: producer.#wire?.served };
 		};
 		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
 		hooks.arrivingGroup = (producer, sequence) => {
 			const closed = producer.#cached.get(sequence)?.group.closed;
 			return closed?.peek() === undefined ? closed : undefined;
 		};
-		sourceStart = (producer) => producer.#served && producer.#feedStart();
+		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		startsOf = (producer) => producer.#bounds;
 		goneAt = (producer, sequence) => {
 			// Without a declared start, the first arrival stands in for it, as the tail's does.
-			const floor = producer.#served?.start ?? producer.#arrivals.first() ?? 0n;
+			const floor = producer.#wire?.served?.start ?? producer.#arrivals.first() ?? 0n;
 			if (sequence < floor) return floor;
 			const dropped = producer.#state.drops.peek().find((run) => run.start <= sequence && sequence < run.end);
 			return dropped?.end ?? producer.#arrivals.runEnd(sequence);
@@ -1165,8 +1181,9 @@ export class Producer {
 			for (const state of [producer.#state, ...producer.#sinks]) state.dropsAnchors.set(true);
 		};
 		hooks.startTrack = (producer, served) => {
+			if (!producer.#wire) throw new Error("only a wire subscription declares a start");
 			producer.#settle();
-			producer.#served = served;
+			producer.#wire.served = served;
 			producer.#owe();
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
@@ -1218,9 +1235,9 @@ export class Producer {
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
 		owedRuns = (producer, start, end) => {
-			if (!producer.#subscribed) return [];
+			if (!producer.#wire) return [];
 			const feed = producer.#feedStart();
-			const floor = feed === "pending" ? producer.#served?.requested : feed;
+			const floor = feed === "pending" ? producer.#wire.served?.requested : feed;
 			return producer.#landing({
 				start: max(start, floor ?? 0n),
 				end,
@@ -1251,8 +1268,8 @@ export class Producer {
 			if (first === undefined) return;
 			start = max(start, first);
 		}
-		start = max(start, this.#served?.start ?? 0n);
-		const declared = this.#state.end.peek();
+		start = max(start, this.#wire?.served?.start ?? 0n);
+		const declared = this.#state.end.peek()?.at;
 		const end = declared === undefined ? land.end : min(land.end, finalSequence(declared));
 		const at = now();
 		const limit = Nano.fromMilli(land.grace);
@@ -1497,7 +1514,6 @@ export class Producer {
 		sink.judged = this.#state.judged;
 
 		sink.received.set(this.#received);
-		sink.endError = this.#state.endError;
 		sink.end.set(this.#state.end.peek());
 		sink.owed.set(this.#state.owed.peek());
 		if (closed !== undefined) {
@@ -1791,7 +1807,7 @@ export class Producer {
 	// Refuse a write once the track is closed, or at or past its declared end.
 	#writable(sequence: bigint): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
-		const end = this.#state.end.peek();
+		const end = this.#state.end.peek()?.at;
 		if (end !== undefined && sequence >= finalSequence(end)) {
 			throw new Error(`sequence ${sequence} is at or past the track's end ${end.group}/${end.frame}`);
 		}
@@ -1799,7 +1815,7 @@ export class Producer {
 
 	// Cap a group the end cuts, so it never holds a frame past the end.
 	#cap(group: GroupProducer): void {
-		const end = this.#state.end.peek();
+		const end = this.#state.end.peek()?.at;
 		if (end !== undefined && end.frame !== 0 && end.group === group.sequence) hooks.limitGroup(group, end.frame);
 	}
 
@@ -1851,7 +1867,7 @@ export class Producer {
 	 */
 	skipGroups(start: bigint, end: bigint): void {
 		checkSequence(start);
-		checkSequence(end);
+		checkEnd(end);
 		this.#skipReceived(start, end);
 	}
 
@@ -1879,7 +1895,7 @@ export class Producer {
 
 	// Record a sequence this track's own publisher produced, for the next append to skip around.
 	#produce(sequence: bigint): void {
-		if (this.#subscribed || (this.#appended !== undefined && sequence < this.#appended)) return;
+		if (this.#wire || (this.#appended !== undefined && sequence < this.#appended)) return;
 		insertRun(this.#produced, sequence, sequence + 1n);
 	}
 
@@ -1972,28 +1988,30 @@ export class Producer {
 	 */
 	finishAt(end: Position, error?: Error): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
-		const declared = this.#state.end.peek();
+		const declared = this.#state.end.peek()?.at;
 		if (declared !== undefined) throw new Error(`track already ends at ${declared.group}/${declared.frame}`);
-		this.#declareEnd(end, error);
+		this.#declareEnd(end, error, false);
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
 	// boundary it falls just before. Either must carry the same error code. Mirrors the Rust
-	// `finish_at` on a `received()` copy.
+	// `finish_at` on a `received()` copy. Only a wire subscription owes a tail below the end: a
+	// FETCH's end leaves nothing in flight, as the Rust `set_end` a fill declares.
 	#endPending(end: Position, error?: Error): void {
-		// Before the end lands, so settling it already counts what the tail still owes.
-		this.#tailPending = true;
 		const declared = this.#state.end.peek();
 		const code = (err?: Error) => (err === undefined ? undefined : toStreamCode(err));
+		const tail = this.#wire !== undefined;
 		if (declared === undefined) {
-			this.finishAt(end, error);
-		} else if (code(this.#state.endError) !== code(error)) {
+			if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
+			this.#declareEnd(end, error, tail);
+		} else if (code(declared.error) !== code(error)) {
 			throw new ProtocolViolation(`conflicting track end error: ${error}`);
-		} else if (declared.group !== end.group || declared.frame !== end.frame) {
-			if (declared.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.group) {
+		} else if (declared.at.group !== end.group || declared.at.frame !== end.frame) {
+			if (declared.at.frame !== 0 || end.frame === 0 || finalSequence(end) !== declared.at.group) {
 				throw new ProtocolViolation(`conflicting track end: ${end.group}/${end.frame}`);
 			}
-			this.#declareEnd(end, error);
+			// A tail `cacheTrack` cleared stays cleared: no subscription feeds it anymore.
+			this.#declareEnd(end, error, declared.tail || tail);
 		}
 		this.#owe();
 	}
@@ -2018,9 +2036,9 @@ export class Producer {
 
 	// Tell every reader whether the pending tail still owes a group below the end.
 	#owe(): void {
-		if (!this.#tailPending) return;
 		const end = this.#state.end.peek();
-		const owed = end !== undefined && this.#owes(finalSequence(end));
+		if (!end?.tail) return;
+		const owed = this.#owes(finalSequence(end.at));
 		for (const state of [this.#state, ...this.#sinks]) state.owed.set(owed);
 		this.#settle();
 	}
@@ -2030,7 +2048,7 @@ export class Producer {
 	// write is still served, but the clean outcome stays final. Mirrors the Rust `latch_settled`.
 	#settle(): void {
 		if (this.#state.outcome.peek() === undefined && this.#settled())
-			this.#state.outcome.set(this.#state.endError ?? null);
+			this.#state.outcome.set(this.#state.end.peek()?.error ?? null);
 	}
 
 	// Whether the pending tail misses a sequence from where the feed starts up to `final`: one
@@ -2044,7 +2062,7 @@ export class Producer {
 	#feedStart(): bigint | "pending" | undefined {
 		const ranges = this.#state.update.peek()?.ranges;
 		const requested = ranges && wireSpan(ranges).start;
-		const served = this.#served;
+		const served = this.#wire?.served;
 		if (!served || served.requested !== requested) return requested;
 		if (served.start === null) return requested;
 		if (served.start !== undefined) return served.start;
@@ -2058,16 +2076,17 @@ export class Producer {
 	// name; and never on a wire whose fills cannot judge a group by that budget. Mirrors the
 	// Rust `Misses::judge`. Fetches are never bounded by it.
 	#fillFloor(named: bigint | undefined): bigint | undefined {
-		if (!this.#subscribed) return undefined;
+		const wire = this.#wire;
+		if (!wire) return undefined;
 		const feed = this.#feedStart();
-		const start = feed === "pending" ? this.#served?.requested : feed;
+		const start = feed === "pending" ? wire.served?.requested : feed;
 		if (start === undefined || start === 0n) return undefined;
-		if (this.#starts.fillsFromStart) return start;
+		if (wire.starts.fillsFromStart) return start;
 		// The START applies only while the demand keeps the floor it answered, as `#feedStart`.
 		const ranges = this.#state.update.peek()?.ranges;
-		const served = this.#served;
+		const served = wire.served;
 		const resolved =
-			this.#starts.resolvesStart === true &&
+			wire.starts.resolvesStart === true &&
 			typeof served?.start === "bigint" &&
 			served.requested === (ranges && wireSpan(ranges).start);
 		if (resolved) return undefined;
@@ -2075,14 +2094,14 @@ export class Producer {
 	}
 
 	#owes(final: bigint): boolean {
-		if (!this.#tailPending) return false;
+		if (!this.#state.end.peek()?.tail) return false;
 		const feed = this.#feedStart();
-		const floor = (feed === "pending" ? this.#served?.requested : feed) ?? this.#arrivals.first();
+		const floor = (feed === "pending" ? this.#wire?.served?.requested : feed) ?? this.#arrivals.first();
 		if (floor === undefined) return final > 0n;
 		return !this.#arrivals.covers(min(floor, final), final);
 	}
 
-	#declareEnd(end: Position, error: Error | undefined): void {
+	#declareEnd(end: Position, error: Error | undefined, tail: boolean): void {
 		const { group, frame } = end;
 		if (typeof group !== "bigint" || group < 0n || !Number.isSafeInteger(frame) || frame < 0) {
 			throw new RangeError(`invalid track end: ${group}/${frame}`);
@@ -2093,11 +2112,8 @@ export class Producer {
 		}
 		const cut = frame === 0 ? undefined : this.#cached.get(group)?.group;
 		if (cut) hooks.limitGroup(cut, frame);
-		end = { group, frame };
-		for (const state of [this.#state, ...this.#sinks]) {
-			state.endError = error;
-			state.end.set(end);
-		}
+		const declared: End = { at: { group, frame }, error, tail };
+		for (const state of [this.#state, ...this.#sinks]) state.end.set(declared);
 		this.#endLargest();
 	}
 
@@ -2115,7 +2131,7 @@ export class Producer {
 	#endLargest(): void {
 		this.#settle();
 		if (this.#state.largestEnded.peek() || this.#largestOpen) return;
-		const end = this.#state.end.peek();
+		const end = this.#state.end.peek()?.at;
 		if (end === undefined || !reaches(this.#received, this.#state.drops.peek(), finalSequence(end))) return;
 		for (const state of [this.#state, ...this.#sinks]) state.largestEnded.set(true);
 	}
@@ -2162,13 +2178,14 @@ export class Producer {
 	#close(abort: Error | undefined) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
-		if (abort && this.#tailPending) this.#arrivals.expire(now(), this.#grace());
+		if (abort && this.#state.end.peek()?.tail) this.#arrivals.expire(now(), this.#grace());
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
-		if (this.#state.outcome.peek() === undefined) this.#state.outcome.set(abort ?? this.#state.endError ?? null);
+		if (this.#state.outcome.peek() === undefined)
+			this.#state.outcome.set(abort ?? this.#state.end.peek()?.error ?? null);
 		// Closing a copy never supplies the missing tail of a group. Already finished groups
 		// ignore the abort and stay readable; unfinished ones retain their truncation cause.
 		const groupError =
@@ -2199,7 +2216,7 @@ export class Producer {
 	// abort over a group the tail still owed cut it off, so readers get the error rather than
 	// a clean end without it. Mirrors the Rust `is_settled`.
 	#settled(): boolean {
-		const end = this.#state.end.peek();
+		const end = this.#state.end.peek()?.at;
 		if (end === undefined) return false;
 		const final = finalSequence(end);
 		if (!reaches(this.#received, this.#state.drops.peek(), final) || this.#owes(final)) return false;
@@ -2264,8 +2281,9 @@ export class Subscriber {
 	// At most the narrowest budget in #skipped, so a read whose budget did not widen skips the scan.
 	#narrowest = Number.POSITIVE_INFINITY;
 	// This reader closed itself, so lowering its floor offers nothing: a producer's clean close
-	// alone leaves the cache readable, but the reader leaving must stay terminal.
-	#closed = false;
+	// alone leaves the cache readable, but the reader leaving must stay terminal. Leaving also
+	// settles the shared `#state.closed`, so a guard for either close reads that alone.
+	#left = false;
 	// What {@link largest} last reported, and whether it ended: moving the bounds afterwards
 	// does not bring it back.
 	#largestSeen?: Position;
@@ -2356,7 +2374,7 @@ export class Subscriber {
 			// stamped group's latest frame: walk back from the cap to the first one.
 			for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
 				const group = timeline[i];
-				if (group.closed.peek() instanceof Error || !this.#judges(group.sequence)) continue;
+				if (hooks.groupFailed(group) || !this.#judges(group.sequence)) continue;
 				const timestamp = hooks.groupTimestamp(group);
 				if (timestamp === undefined) continue;
 				presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
@@ -2410,7 +2428,7 @@ export class Subscriber {
 		for (let i = timelineIndex(timeline, sequence + 1n); i < timeline.length; i++) {
 			const successor = timeline[i];
 			if (end !== undefined && successor.sequence >= end) break;
-			if (successor.closed.peek() instanceof Error || !this.#judges(successor.sequence)) continue;
+			if (hooks.groupFailed(successor) || !this.#judges(successor.sequence)) continue;
 			if (counts(successor)) return successor;
 		}
 		return undefined;
@@ -2689,7 +2707,7 @@ export class Subscriber {
 		}
 		this.#narrowest = narrowest;
 		const producer = this.#state.producer;
-		if (producer && !this.#closed) reofferSequences(producer, this.#state, sequences);
+		if (producer && !this.#left) reofferSequences(producer, this.#state, sequences);
 	}
 
 	// Owe again every run this cursor gave up as stale, reported or not: an update reopens the
@@ -2730,7 +2748,7 @@ export class Subscriber {
 			for (const run of kept) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
 		}
 		const producer = this.#state.producer;
-		if (sequences.length > 0 && producer && !this.#closed) reofferSequences(producer, this.#state, sequences);
+		if (sequences.length > 0 && producer && !this.#left) reofferSequences(producer, this.#state, sequences);
 		return taken;
 	}
 
@@ -2860,7 +2878,7 @@ export class Subscriber {
 	// The parts of `[start, end)` this reader still reads: inside its cursor and window, not
 	// handed out, and not passed by the sequence cursor, which never goes back.
 	#reads(start: bigint, end: bigint): Run[] {
-		if (this.#closed || this.#state.closed.peek() !== undefined) return [];
+		if (this.#state.closed.peek() !== undefined) return [];
 		return this.#unread(start, end);
 	}
 
@@ -2886,7 +2904,7 @@ export class Subscriber {
 	// Whether this reader will still read group `sequence` once buffered: what it wants from a
 	// fill, judged even once the track closed.
 	#reading(sequence: bigint): boolean {
-		if (this.#closed) return false;
+		if (this.#left) return false;
 		const unread = this.#unread(sequence, sequence + 1n);
 		return unread.length > 0 && runGaps(this.#givenUp, sequence, sequence + 1n).length > 0;
 	}
@@ -2918,7 +2936,7 @@ export class Subscriber {
 	// the wakeup for when that changes. Mirrors the Rust `Misses::judge`.
 	#askFills(start: bigint, end: bigint, drift?: Drift): bigint | undefined {
 		const producer = this.#state.producer;
-		if (this.#resume || !producer || this.#closed) return undefined;
+		if (this.#resume || !producer || this.#left) return undefined;
 		const fills = fillsOf(producer);
 		// A fill already out can be joined even once its handler's handle closed.
 		if (fills.serving || fills.active) {
@@ -2963,7 +2981,7 @@ export class Subscriber {
 						const group = timeline[i];
 						if (group.sequence >= open.end) break;
 						// A failed copy holds nothing to read, so it is missed like an evicted one.
-						if (group.closed.peek() instanceof Error) continue;
+						if (hooks.groupFailed(group)) continue;
 						this.#askMiss(next, group.sequence, drift, asker);
 						next = group.sequence + 1n;
 					}
@@ -3124,9 +3142,9 @@ export class Subscriber {
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.subscriberEnd = (subscriber) =>
-			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek();
+			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek()?.at;
 		hooks.subscriberEndError = (subscriber) =>
-			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.endError;
+			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.end.peek()?.error;
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
@@ -3208,7 +3226,7 @@ export class Subscriber {
 						group.sequence >= start &&
 						(end === undefined || group.sequence < end) &&
 						!delivered.has(group.sequence) &&
-						!(group.closed.peek() instanceof Error),
+						!hooks.groupFailed(group),
 				);
 		hooks.spent = (subscriber, start, end, delivered) =>
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
@@ -3367,7 +3385,7 @@ export class Subscriber {
 	async finished(): Promise<Position> {
 		if (this.#resume) return this.#resume.finished();
 		for (;;) {
-			const end = this.#state.end.peek();
+			const end = this.#state.end.peek()?.at;
 			if (end !== undefined) return end;
 
 			const closed = this.#state.closed.peek();
@@ -3414,7 +3432,7 @@ export class Subscriber {
 		for (;;) {
 			const start = hooks.sourceStart(this);
 			if (start !== "pending") return start;
-			if (this.#closed || this.#state.closed.peek() !== undefined) return undefined;
+			if (this.#state.closed.peek() !== undefined) return undefined;
 			await this.#wait();
 		}
 	}
@@ -3531,7 +3549,7 @@ export class Subscriber {
 		this.#bound();
 		const { start } = this.#cursor.peek();
 		const producer = this.#state.producer;
-		if (!this.#resume && !this.#closed && producer && start < before.start) {
+		if (!this.#resume && !this.#left && producer && start < before.start) {
 			// The ordered cursor let go of what it passed below the old floor; the arrival
 			// cursor keeps it buffered, which this skips.
 			reofferCached(
@@ -3547,14 +3565,14 @@ export class Subscriber {
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
-		if (!this.#closed) {
-			const arrivals = this.#state.timeline.filter((group) => !(group.closed.peek() instanceof Error));
+		if (!this.#left) {
+			const arrivals = this.#state.timeline.filter((group) => !hooks.groupFailed(group));
 			this.#arrivals = arrivals.map((group) => ({
 				sequence: group.sequence,
 				arrived: hooks.groupArrived(group),
 			}));
 		}
-		this.#closed = true;
+		this.#left = true;
 		this.#state.waitingOrdered = false;
 		// Settle if we're first (the producer may already have); either way drop anything
 		// still buffered. Groups parked at the withRange cap deliberately outlive a clean
@@ -3673,8 +3691,8 @@ export class Subscriber {
 				continue;
 			}
 			groups.splice(index, 1);
-			const failed = group.closed.peek();
-			if (dispositions && failed instanceof Error) {
+			const failed = hooks.groupFailed(group);
+			if (dispositions && failed) {
 				// A group expired under this subscription's budget is a stale verdict.
 				const hole =
 					toStreamCode(failed) === StreamCode.Old
@@ -3822,7 +3840,7 @@ export class Subscriber {
 	// owes below it. Reader completion does not settle the tail: open streams remain
 	// accounted for by the wire layer, and an abort still wins on the next read.
 	#complete(): boolean {
-		const end = this.#state.end.peek();
+		const end = this.#state.end.peek()?.at;
 		return (
 			end !== undefined &&
 			reaches(this.#state.received.peek(), this.#state.drops.peek(), finalSequence(end)) &&
@@ -4008,7 +4026,7 @@ export class Subscriber {
 			this.#state.waitingOrdered = true;
 			return { kind: "idle" };
 		}
-		const end = this.#state.end.peek();
+		const end = this.#state.end.peek()?.at;
 		if (this.#exhausted()) return { kind: "done" };
 		if (
 			!this.#parked(groups) &&
