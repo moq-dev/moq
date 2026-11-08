@@ -1548,7 +1548,7 @@ mod tests {
 		let track = broadcast
 			.create_track("camera", catalog.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let producer = moq_video::encode::Producer::with_track(track.clone(), catalog.reserve(), rendition).unwrap();
+		let producer = moq_video::encode::Producer::new(track.clone(), catalog.reserve(), rendition).unwrap();
 		let shared = Shared::new(VideoEncoder {
 			encoder: Some(moq_video::encode::Sink::open(&encode).await.unwrap()),
 			producer,
