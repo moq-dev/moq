@@ -5000,9 +5000,7 @@ mod session_tests {
 		await_event(&mut follow, |event| {
 			matches!(
 				event,
-				moq_net::origin::RouteEvent::Restart(_)
-					| moq_net::origin::RouteEvent::Takeover { .. }
-					| moq_net::origin::RouteEvent::Start(_)
+				moq_net::origin::RouteEvent::Restart(_) | moq_net::origin::RouteEvent::Start(_)
 			)
 		});
 

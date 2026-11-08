@@ -1,4 +1,4 @@
-//! Lite-07 announce compression: an ANNOUNCE_START or ANNOUNCE_TAKEOVER may copy the
+//! Lite-07 announce compression: an ANNOUNCE_START may copy the
 //! head of a live announcement's path, naming that base by its distance back from the
 //! stream's next unassigned Announce ID.
 //!
@@ -87,19 +87,7 @@ impl AnnounceDecoder {
 		Ok(suffix)
 	}
 
-	/// An ANNOUNCE_TAKEOVER: resolve it like a start against the live `predecessor`,
-	/// returning the predecessor's suffix, then its own. One at the predecessor's own
-	/// suffix retires the predecessor, since a suffix holds one advertisement.
-	pub fn takeover(&mut self, predecessor: u64, suffix: PathRef) -> Result<(Path, Path), Error> {
-		let previous = self.live.suffix(predecessor)?.clone();
-		let suffix = self.start(suffix)?;
-		if suffix == previous {
-			self.live.suffixes.remove(&predecessor);
-		}
-		Ok((previous, suffix))
-	}
-
-	/// The id the last start or takeover assigned.
+	/// The id the last start assigned.
 	pub fn last(&self) -> u64 {
 		self.live.next.saturating_sub(1)
 	}
@@ -223,18 +211,6 @@ impl AnnounceEncoder {
 		(Some(id), path)
 	}
 
-	/// An ANNOUNCE_TAKEOVER of the live `predecessor`: like [`Self::start`], retiring
-	/// the predecessor when it holds the same suffix.
-	pub fn takeover(&mut self, predecessor: u64, suffix: Path) -> (u64, PathRef) {
-		let replaces = self.live.suffixes.get(&predecessor) == Some(&suffix);
-		let (id, path) = self.start(suffix);
-		let id = id.expect("a takeover is only sent on a version with announce ids");
-		if replaces {
-			self.end(predecessor);
-		}
-		(id, path)
-	}
-
 	/// An ANNOUNCE_END for a live `id`.
 	pub fn end(&mut self, id: u64) {
 		if !self.version.has_announce_compression() {
@@ -341,33 +317,6 @@ mod tests {
 		assert_eq!(suffix.as_str(), "b/x");
 	}
 
-	// A takeover assigns the next id like a start. Beneath its predecessor the predecessor
-	// stays live; at the predecessor's own suffix it retires, after bases resolve against it.
-	#[test]
-	fn takeover_assigns_an_id_and_retires_one_in_place() {
-		let mut decoder = AnnounceDecoder::default();
-		decoder.start(literal("pool")).unwrap();
-
-		let (previous, suffix) = decoder.takeover(0, path(1, 1, "p")).unwrap();
-		assert_eq!((previous.as_str(), suffix.as_str()), ("pool", "pool/p"));
-		assert_eq!(decoder.get(0).unwrap().as_str(), "pool");
-
-		// Id 2 at id 1's own suffix, copied from id 1 itself, which then retires.
-		let (previous, suffix) = decoder.takeover(1, path(1, 2, "")).unwrap();
-		assert_eq!((previous.as_str(), suffix.as_str()), ("pool/p", "pool/p"));
-		assert!(matches!(decoder.get(1), Err(Error::ProtocolViolation)));
-		assert!(matches!(
-			decoder.takeover(1, literal("pool/p/q")),
-			Err(Error::ProtocolViolation)
-		));
-		assert!(matches!(
-			decoder.takeover(9, literal("pool/p/q")),
-			Err(Error::ProtocolViolation)
-		));
-		assert_eq!(decoder.end(2).unwrap().as_str(), "pool/p");
-		assert_eq!(decoder.end(0).unwrap().as_str(), "pool");
-	}
-
 	#[test]
 	fn rejects_a_keep_longer_than_the_base() {
 		let mut decoder = AnnounceDecoder::default();
@@ -405,29 +354,6 @@ mod tests {
 		let size = wire.encode_bytes(VERSION).unwrap().len();
 		assert_eq!(decoder.start(wire).unwrap().as_str(), suffix);
 		(id.unwrap(), size)
-	}
-
-	// The encoder's takeover ids and bases agree with the decoder's, in place and beneath.
-	#[test]
-	fn encoder_takeover_decodes_to_its_input() {
-		let mut encoder = AnnounceEncoder::new(VERSION);
-		let mut decoder = AnnounceDecoder::default();
-		let (claim, _) = start(&mut encoder, &mut decoder, "pool");
-		let mut predecessor = claim;
-		for suffix in ["pool/p", "pool/p", "pool/p/q"] {
-			let (id, wire) = encoder.takeover(predecessor, Path::new(suffix).unwrap());
-			let (_, got) = decoder.takeover(predecessor, wire).unwrap();
-			assert_eq!(got.as_str(), suffix);
-			predecessor = id;
-		}
-		// Both sides retired the id replaced in place and kept the rest.
-		let (id, wire) = encoder.start(Path::new("other").unwrap());
-		decoder.start(wire).unwrap();
-		assert_eq!(id, Some(4));
-		assert!(matches!(decoder.end(1), Err(Error::ProtocolViolation)));
-		decoder.end(claim).unwrap();
-		decoder.end(2).unwrap();
-		decoder.end(3).unwrap();
 	}
 
 	#[test]
