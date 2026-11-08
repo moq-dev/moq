@@ -162,7 +162,8 @@ mod test {
 		assert_eq!(delivered.gaps(4..6), []);
 		assert_eq!(delivered.gaps(5..11), [6..9, 10..11]);
 		delivered.insert(u64::MAX - 1);
-		assert_eq!(delivered.gaps(u64::MAX - 2..u64::MAX), [u64::MAX - 2..u64::MAX - 1]);
+		let gaps = delivered.gaps(u64::MAX - 2..u64::MAX);
+		assert_eq!((gaps.len(), gaps.first()), (1, Some(&(u64::MAX - 2..u64::MAX - 1))));
 	}
 
 	#[test]
