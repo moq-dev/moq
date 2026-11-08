@@ -157,6 +157,8 @@ export class Connection implements Established {
 
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
 	#goaway = new Once<Drain>();
+	// Whether this side sent its own GOAWAY; see the wire view's `leave`.
+	#left = false;
 
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
@@ -217,7 +219,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
+			draining: () => this.#left || this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -259,10 +261,26 @@ export class Connection implements Established {
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			exclusive: false,
+			leave: () => this.#leave(),
 			auth: this.#auth,
 		});
 
 		void this.#run();
+	}
+
+	#leave(): void {
+		if (this.#left) return;
+		this.#left = true;
+		if (!hasGoaway(this.#version)) return;
+		const version = this.#version;
+		const send = async () => {
+			const stream = await Stream.open(this.#quic, { version });
+			await stream.writer.u53(StreamId.Goaway);
+			await new Goaway("").encode(stream.writer, version);
+			stream.writer.close();
+		};
+		// A session closing first has nothing left to tell.
+		send().catch((err: unknown) => console.debug("failed to send GOAWAY:", err));
 	}
 
 	/** Our tokens and grants; see {@link Established.auth}. */

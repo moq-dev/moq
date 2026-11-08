@@ -35,6 +35,7 @@ class FakeSession {
 		registerWire(this, {
 			consume: () => new BroadcastProducer().consume(),
 			exclusive: false,
+			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
 		this.closed = new Promise((resolve) => {

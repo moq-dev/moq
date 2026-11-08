@@ -97,6 +97,8 @@ export class Connection implements Established {
 
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
+	// Whether this side is moving to another session; see the wire view's `leave`.
+	#left = false;
 
 	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
@@ -189,7 +191,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
+			draining: () => this.#left || this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -232,6 +234,10 @@ export class Connection implements Established {
 			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
+			// Drained locally only: this compatibility layer sends no client GOAWAY.
+			leave: () => {
+				this.#left = true;
+			},
 			auth: this.#auth,
 		});
 

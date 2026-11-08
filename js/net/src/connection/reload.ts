@@ -13,9 +13,11 @@ import {
 	type ConnectProps,
 	connect,
 	normalizeVersions,
+	reachable,
 	type WebSocketProps,
 	type WebTransportProps,
 } from "./connect.ts";
+import { isWebTransportSupported } from "./browser.ts";
 import { parse } from "./endpoint.ts";
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
@@ -23,6 +25,18 @@ import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinne
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
 import { heldOf } from "./tokens.ts";
+
+/**
+ * The wait before a session on the WebSocket fallback first probes WebTransport, before jitter.
+ * Each failed probe doubles it, up to {@link PROBE_MAX}, matching moq-tokio.
+ */
+const PROBE_INITIAL = Milli(10_000);
+
+/** The longest wait between WebTransport probes, before jitter. */
+const PROBE_MAX = Milli(300_000);
+
+/** What a probe resolves to once WebTransport reaches the peer again. */
+const REACHABLE = Symbol("reachable");
 
 function sameTokens(a: readonly string[], b: readonly string[]): boolean {
 	return a.length === b.length && a.every((token, i) => token === b[i]);
@@ -593,9 +607,20 @@ export class Reload {
 
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
-					// torn down. Anything else is the peer's GOAWAY.
-					const ended = await effect.race(connection.closed, connection.draining);
-					if (ended === undefined) return;
+					// torn down. Anything else is the peer's GOAWAY, or WebTransport reachable
+					// again under a session on the WebSocket fallback.
+					const probing = new AbortController();
+					const raced = await effect
+						.race(connection.closed, connection.draining, this.#probe(connection, dialing, probing.signal))
+						.finally(() => probing.abort());
+					if (raced === undefined) return;
+					// Leaving the fallback is a GOAWAY of our own: the session drains as the
+					// predecessor while the replacement dials, which races with WebTransport's head start.
+					if (raced === REACHABLE) {
+						console.info("WebTransport reachable again; leaving the WebSocket fallback");
+						wireOf(connection).leave();
+					}
+					const ended = raced === REACHABLE ? { uri: "" } : raced;
 					if (ended === null || ended instanceof Error) {
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
@@ -661,6 +686,33 @@ export class Reload {
 				this.#retry(effect, connected, err);
 			}
 		});
+	}
+
+	/**
+	 * Resolve once WebTransport reaches `dialing` while `connection` runs on the WebSocket
+	 * fallback, probing on a jittered backoff from {@link PROBE_INITIAL} up to {@link PROBE_MAX}.
+	 * Never resolves for a session on another transport, where WebTransport is unsupported, or
+	 * once `signal` aborts.
+	 */
+	async #probe(connection: Established, dialing: URL, signal: AbortSignal): Promise<typeof REACHABLE> {
+		const never = new Promise<never>(() => {});
+		if (connection.transport !== "websocket" || !isWebTransportSupported()) return never;
+		try {
+			for (let delay = PROBE_INITIAL; ; delay = Milli(Math.min(delay * 2, PROBE_MAX))) {
+				await sleep(Nano.fromMilli(Milli(delay * (0.5 + Math.random() / 2))), { signal });
+				const props = {
+					tokens: this.tokens.peek(),
+					versions: this.versions,
+					webtransport: this.webtransport,
+					websocket: this.#redirect.peek() ? undefined : this.websocket,
+					timeout: this.timeout,
+				};
+				if (await reachable(dialing, props, signal)) return REACHABLE;
+			}
+		} catch {
+			// The sleep rejects once the session ends.
+			return never;
+		}
 	}
 
 	/**

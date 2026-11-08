@@ -324,9 +324,11 @@ type SessionProps = {
 
 /**
  * Servers (host and port) the WebSocket fallback dials where WebSocket won the last race, so the
- * next dial there skips QUIC's head start. Both transports still race, and a WebTransport win
- * deletes the entry, since UDP gets through again. Keyed like moq-tokio's: whether UDP reaches a
- * server does not depend on the path or query, which may hold a rotating credential.
+ * next dial there skips QUIC's head start. Both transports still race. The entry is provisional:
+ * a WebTransport win or {@link reachable} probe deletes it, since UDP gets through again, and so
+ * does the end of the WebSocket session that won, so a redial after an outage gives WebTransport
+ * its head start. Keyed like moq-tokio's: whether UDP reaches a server does not depend on the
+ * path or query, which may hold a rotating credential.
  */
 const websocketWon = new Set<string>();
 
@@ -387,6 +389,43 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 		pending.then(([conn]) => conn.abort()).catch(() => {});
 		// The caller's abort is teardown and wins over the timeout.
 		throw signal.aborted ? signal.reason : expired;
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+		disarm();
+	}
+}
+
+/**
+ * Whether WebTransport reaches `url` now, for a session on the WebSocket fallback deciding to move back.
+ *
+ * Opens a bare WebTransport session presenting what a dial would, with no MoQ handshake, and
+ * closes it at once. Reaching it clears the WebSocket win, so the next race gives WebTransport
+ * its head start. Resolves false on failure, after `props.timeout`, or once `signal` aborts.
+ *
+ * @internal
+ */
+export async function reachable(
+	url: URL,
+	props: Pick<ConnectProps, "tokens" | "versions" | "webtransport" | "websocket" | "timeout">,
+	signal: AbortSignal,
+): Promise<boolean> {
+	if (!isWebTransportSupported() || signal.aborted) return false;
+	const offered = offer(normalizeVersions(props));
+	const dialUrl = parse(credential(url, props.tokens ?? [], offered.setupToken).url).url;
+	const { promise: cancel, resolve } = Promise.withResolvers<void>();
+	const onAbort = () => resolve();
+	signal.addEventListener("abort", onAbort, { once: true });
+	const limit = props.timeout ?? DEFAULT_TIMEOUT;
+	const disarm = limit > 0 ? after(Nano.fromMilli(Milli(limit)), resolve) : () => {};
+	try {
+		const target = await resolveWebTransport(dialUrl, cancel, offered.alpns, props.webtransport);
+		const quic = target && (await dialWebTransport(target, cancel));
+		if (!quic) return false;
+		quic.close();
+		websocketWon.delete(websocketKey(props.websocket?.url ? new URL(props.websocket.url) : dialUrl));
+		return true;
+	} catch {
+		return false;
 	} finally {
 		signal.removeEventListener("abort", onAbort);
 		disarm();
@@ -484,6 +523,8 @@ async function connectInner(
 	if (session instanceof Session) {
 		console.debug(show(parse(url)), "connected via WebSocket");
 		websocketWon.add(server);
+		const forget = () => websocketWon.delete(server);
+		void session.closed.then(forget, forget);
 	} else {
 		console.debug(show(parse(url)), "connected via WebTransport");
 		websocketWon.delete(server);
