@@ -192,15 +192,20 @@ test("a fingerprint fetch slower than the hedge starts no second dial", async ()
 		return pair.client;
 	}
 	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+	const captured = captureConsole();
 
 	try {
 		const connecting = connect(server.url, { websocket: { enabled: false } });
 		await requested.promise;
 		await clock.advance(Nano.fromMilli(Milli(1_000)));
+		// The hedge logs inside its timer callback, so this catches it as deterministically as the
+		// clock; the dial/request counts below race connect() cancelling the hedge once one dial wins.
+		expect(captured.lines.filter((line) => line.includes("dialing a second"))).toEqual([]);
 		release.resolve();
 		const connection = await connecting;
 		connection.abort();
 	} finally {
+		captured.restore();
 		globalThis.WebTransport = original;
 		server.stop();
 	}
