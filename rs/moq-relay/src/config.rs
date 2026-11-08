@@ -397,8 +397,14 @@ impl Config {
 		let lan = false;
 		let clustered =
 			!self.cluster.connect.is_empty() || self.cluster.api.url.is_some() || self.cluster.node.is_some() || lan;
+		// An empty or all-slash name is no name: it publishes the shared unnamed path.
+		let named = self
+			.stats
+			.node
+			.as_deref()
+			.is_some_and(|node| moq_net::Path::new(node).is_ok_and(|node| !node.is_empty()));
 		anyhow::ensure!(
-			!self.stats.enabled || !clustered || self.stats.node.is_some(),
+			!self.stats.enabled || !clustered || named,
 			"--stats-enabled on a clustered relay requires --stats-node, so each node publishes its own stats"
 		);
 		Ok(())
@@ -410,8 +416,9 @@ impl Config {
 		if !self.cluster.lan.enabled {
 			return Ok(());
 		}
+		// Workers always bind QUIC, on the default address when `--listen` is unset.
 		anyhow::ensure!(
-			self.listen.serves_quic(),
+			self.listen.serves_quic() || self.runtime.workers().is_some(),
 			"--cluster-lan needs a QUIC listener (--listen) to advertise. See https://doc.moq.dev/bin/relay/cluster."
 		);
 		// A fingerprint is advertised only for a certificate generated or supplied in memory.
@@ -946,6 +953,10 @@ root = ["ca.pem"]
 		] {
 			refuse(&format!("[stats]\nenabled = true\n{cluster}"), "--stats-node");
 			resolve(&format!("[stats]\nenabled = true\nnode = \"a\"\n{cluster}"));
+			refuse(
+				&format!("[stats]\nenabled = true\nnode = \"\"\n{cluster}"),
+				"--stats-node",
+			);
 			resolve(cluster);
 		}
 		resolve("[stats]\nenabled = true\n");
@@ -966,6 +977,9 @@ root = ["ca.pem"]
 			"needs a QUIC listener",
 		);
 		refuse("[cluster.lan]\nenabled = true\n", "--cluster-node");
+		let workers = format!("{node}[listen.unix]\nbind = \"relay.sock\"\n[runtime]\nworkers = 1\n");
+		let config: Config = toml::from_str(&workers).expect("parse");
+		config.resolve().expect("workers serve QUIC on the default address");
 		let config: Config = toml::from_str(node).expect("parse");
 		config.resolve().expect("a node URL and the default QUIC listener");
 	}
