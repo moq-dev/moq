@@ -1,57 +1,38 @@
-# [M] moq-mux and moq-gst lifecycles
+# [M] TS and fMP4 export lifecycles
 
 ## Goal
 
-The lifecycles of moq-mux and moq-gst export and ingest are explicit state:
-export sources, TS and fMP4 export tracks and programs, the HLS segment
-window, the container consumer's startup, and the GStreamer sink and source
-pads. Each phase's data lives in its variant, and no `.expect()` or flag
-ordering stands in for a phase.
+The TS and fMP4 export lifecycles in moq-mux are explicit state: the TS
+export program and its tracks, the TS follower, passthrough, and group
+buffer, and the fMP4 export track. Each phase's data lives in its variant,
+and no `.expect()` or flag ordering stands in for a phase.
 
 ## Plan
 
 The shared decisions are in the [epic](/quest/m1/explicit-state/README.md).
 
-No confirmed bug is folded into this child. Reproduce these two first:
+No confirmed bug is folded into this child. Two suspected ones were checked
+and are not defects:
 
-- **fMP4 export** (`rs/moq-mux/src/container/fmp4/export.rs`): a track that
-  ends before it is ever described, while the catalog stays live, may keep
-  `init_ready()` false forever.
-- **TS export track** (`rs/moq-mux/src/container/ts/export.rs`):
-  - Withdrawing a track keeps its parked frames, so it can become both
-    `withdrawn` and `listed`.
-  - `finished` carries five meanings, and the "gone" predicate ANDs eight
-    conditions.
+- An fMP4 export track that ends before it is described, while the catalog
+  stays live, keeps `init_ready()` false. That wait is bounded: once other
+  tracks have media it fails at the init queue limit, naming the track.
+  Otherwise the live catalog can still move the rendition.
+- A withdrawn TS track whose parked frames already went out stays listed.
+  This is intended, and `revision_test.rs` covers it.
 
 Instances to redesign:
 
-- **TS export `Program`**: `catalog`, `catalog_ended`, `cataloged`,
-  `retired`, `left`, `psi`, and others. `resume` hand-resets six fields.
-- **`ExportSource`** (`container/source.rs`): `media`, `priority_control`,
-  `instance`, `live`, and `after` belong inside the `SourceState` variants.
-- **Container `Consumer`** (`container/consumer.rs`): the startup phase and
-  the `track`/`track_error` reader state. The JS twin is
-  `js/hang/src/container/consumer.ts`, whose `#checkMaxDelay` moves `#active`
-  without `#recordPresented`. Change both together.
-- **HLS** (`rs/moq-hls`):
-  - The segment window keeps `ended`, `cut`, and `failed`, and `push` after
-    `end()` isn't refused.
-  - Retiring a `Claim` takes two locks.
-  - The importer's `TrackState` generation fields.
-- **Catalog publish gate** (`catalog/producer.rs`): `Reservations` writes its
-  predicate twice, in two shapes.
-- **TS `Follower.refused`** belongs inside `Serving`. The TS `Passthrough`
-  start and clock, and the `GroupBuffer` content kind, also become explicit.
-- **moq-gst sink pads** (`rs/moq-gst/src/sink/request_pad.rs`, `pad.rs`,
-  `imp.rs`):
-  - The `ended` bool means something different from `Status::Ended`.
-  - `releasing` is cleared after removal.
-  - The element's `drained`/`lingering`/`eos_delivered` and the pad's
-    `reserved`/`track`/`catalog`/`caps`/`failed` encode phases.
-- **moq-gst source** `Entry`'s `reader`/`draining`.
-- **Others**:
-  - The RTMP `ServerSession`: the connected app name belongs inside
-    `SessionState::Connected`.
-  - The moq-webrtc ICE `Agent`: its failure isn't sticky.
-  - The p2p channel handout.
-  - The jitter `Track`.
+- **TS export `Program`** (`rs/moq-mux/src/container/ts/export.rs`):
+  `catalog`, `catalog_ended`, `cataloged`, `retired`, `left`, `psi`, and
+  others. `resume` hand-resets six fields.
+- **TS export track**: `finished` carries five meanings, and the "gone"
+  predicate ANDs eight conditions.
+- **TS `Follower.refused`** (`ts/follower.rs`) belongs inside `Serving`. The
+  TS `Passthrough` start and clock, and the `GroupBuffer` content kind, also
+  become explicit.
+- **fMP4 export track** (`rs/moq-mux/src/container/fmp4/export.rs`):
+  `source`, `described`, `finished`, `resume`, and `group_finished` encode
+  its phases. Land after
+  [moq-dev/moq#7916](https://github.com/moq-dev/moq/pull/7916), which
+  rewrites this file.

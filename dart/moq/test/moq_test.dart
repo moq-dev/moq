@@ -691,9 +691,10 @@ void main() {
     final pending = origin.consume().request(path: 'live/cam');
     final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
-    // A hidden job route answers nobody until it announces.
+    // A hidden job route answers nobody until it announces, under the instance its
+    // prefix route lends.
     final served = request.route(options: RouteOptions(hidden: true));
-    expect(served.instanceId(), isNot(dynamic.instanceId()));
+    expect(served.instanceId(), dynamic.instanceId());
     served.announce();
     await pending.timeout(timeout);
     // Closing the job's broadcast ends its route.

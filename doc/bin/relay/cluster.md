@@ -49,9 +49,11 @@ every frame once. A publisher whose groups restart, such as an encoder
 restarting from group 0, publishes under a new instance, which replaces the
 old broadcast instead of resuming it; the RTMP, SRT, and WHIP ingests mint one
 per connection. Among instances every relay ranks routes in [one
-order](/concept/identity#choosing-a-route), ending in a hash of the instance
-and the path, so the relays of a mesh agree on each path's stream and a pool's
-paths spread over its hosts. Seamless failover needs moq-lite 07 on every link
+order](/concept/identity#choosing-a-route), ending in a hash of the path with
+the route's origin node on moq-lite 07, or with the instance on older wires, so
+the relays of a mesh agree on each path's stream and a pool's paths spread over
+its hosts. On moq-lite 07 a path therefore stays on its host when the instance
+changes. Seamless failover needs moq-lite 07 on every link
 the route crosses. Over moq-lite 06 and older, or moq-transport, the receiving
 relay mints an instance per announcement, so failover onto such a route is
 announced as a restart. Viewers re-request on a restart, and a relay drops its
@@ -277,6 +279,12 @@ detection and shortest-path routing. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
 to pin it.
 
+A relay never dials its own `cluster.node`, so every relay can share one
+`cluster.connect` list or API response. Peer URLs that differ only in query,
+userinfo, fragment, or slashes name one peer and get one link. A relay
+refuses a session that declares its own Hop ID, which means a peer URL
+reaches the relay itself under another name, such as an IP for its hostname.
+
 ## Failure detection
 
 A peer that crashes or drops off the network sends no goodbye, so a relay only
@@ -296,7 +304,8 @@ own 30s deadline.
 Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
 `connect.tls.cert`/`key` on the dialer) or a **JWT** (inline `?jwt=` on a peer
 URL, `token` on a peer object, or a shared `cluster.token` file for every
-listed peer). The accepting relay admits a peer like any client, so a mesh
+listed peer, re-read on every dial so a rotated token applies at the next
+redial). The accepting relay admits a peer like any client, so a mesh
 needs an auth server that grants the cluster CA, such as
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer`. An
 accepted peer counts as a cluster peer only when its grant sets `peer: true`,
