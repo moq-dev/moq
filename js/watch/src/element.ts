@@ -223,13 +223,12 @@ export default class MoqWatch extends HTMLElement {
 	#captionsOverlay = new Signal<HTMLElement | undefined>(undefined);
 	#captionsOverlayEl?: HTMLDivElement;
 
-	// Set when the element is connected to the DOM.
-	#enabled = new Signal(false);
-	#connected = false;
+	// Whether the element is connected to a document.
+	#connected = new Signal(false);
+	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether clearing the last invalid attribute re-enables media: false when the page had
-	// already disabled the connection, so recovery does not override that.
-	#resume = false;
+	// Whether to connect and play: connected with every attribute valid.
+	#enabled = new Derived([this.#connected, this.#invalid], (connected, invalid) => connected && invalid.size === 0);
 	#reflecting = false;
 
 	/**
@@ -380,9 +379,7 @@ export default class MoqWatch extends HTMLElement {
 	// This wouldn't be so bad if there was a destructor for web components to clean up our effects.
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
-		this.#connected = true;
-		if (this.#invalid.peek().size) this.#resume = true;
-		else this.#enabled.set(true);
+		this.#connected.set(true);
 		this.style.display = "block";
 		this.style.position = "relative";
 
@@ -403,8 +400,7 @@ export default class MoqWatch extends HTMLElement {
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
-		this.#connected = false;
-		this.#enabled.set(false);
+		this.#connected.set(false);
 	}
 
 	/** Called by the browser when an observed attribute changes. */
@@ -436,24 +432,18 @@ export default class MoqWatch extends HTMLElement {
 				throw new Error(`Invalid attribute: ${exhaustive}`);
 			}
 		} catch (error) {
-			if (this.#invalid.peek().size === 0) this.#resume = this.#enabled.peek();
 			this.#invalid.update((previous) => new Set(previous).add(name));
-			this.#enabled.set(false);
 			throw error;
 		}
 	}
 
 	#accept(name: string) {
-		// Ordinary edits must preserve an explicitly disabled connection.
 		if (!this.#invalid.peek().has(name)) return;
 		this.#invalid.update((previous) => {
 			const next = new Set(previous);
 			next.delete(name);
 			return next;
 		});
-		if (this.#invalid.peek().size || !this.#resume) return;
-		this.#resume = false;
-		this.#enabled.set(this.#connected);
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {

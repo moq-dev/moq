@@ -6,7 +6,7 @@
  * @module
  */
 import * as Moq from "@moq/net";
-import { Effect, readonlys, Signal } from "@moq/signals";
+import { Derived, Effect, readonlys, Signal } from "@moq/signals";
 import * as Announce from "./announce";
 import * as Audio from "./audio";
 import { Broadcast } from "./broadcast";
@@ -141,9 +141,8 @@ export default class MoqPublish extends HTMLElement {
 		preview: new Signal<Preview.Mode>("source"),
 		// Which graphics API draws a <canvas> preview.
 		backend: new Signal<Preview.Backend>("auto"),
-		// When to advertise the broadcast: always, or only once a source is live. Undefined while the
-		// `announce` attribute is invalid, which never announces.
-		announce: new Signal<AnnounceMode | undefined>("source"),
+		// When to advertise the broadcast: always, or only once a source is live.
+		announce: new Signal<AnnounceMode>("source"),
 		// Whether to publish a stats track named in the catalog.
 		stats: new Signal(false),
 		// Where viewers may publish feedback, relative to the broadcast, or undefined to solicit none.
@@ -208,13 +207,12 @@ export default class MoqPublish extends HTMLElement {
 	#audioCapture = new Signal(false);
 	#eitherCapture = new Signal(false);
 
-	// Set when the element is connected to the DOM.
-	#enabled = new Signal(false);
+	// The document the element is connected to, if any.
 	#root = new Signal<Document | ShadowRoot | undefined>(undefined);
+	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether clearing the last invalid attribute re-enables media: false when the page had
-	// already disabled the connection, so recovery does not override that.
-	#resume = false;
+	// Whether to connect and capture: connected to a document with every attribute valid.
+	#enabled = new Derived([this.#root, this.#invalid], (root, invalid) => root !== undefined && invalid.size === 0);
 	#reflecting = false;
 
 	// Whether to advertise the broadcast, driven by the `announce` mode.
@@ -446,14 +444,11 @@ export default class MoqPublish extends HTMLElement {
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#root.set(this.getRootNode() as Document | ShadowRoot);
-		if (this.#invalid.peek().size) this.#resume = true;
-		else this.#enabled.set(true);
 	}
 
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#root.set(undefined);
-		this.#enabled.set(false);
 	}
 
 	/** Called by the browser when an observed attribute changes. */
@@ -477,25 +472,18 @@ export default class MoqPublish extends HTMLElement {
 				throw new Error(`Invalid attribute: ${exhaustive}`);
 			}
 		} catch (error) {
-			if (this.#invalid.peek().size === 0) this.#resume = this.#enabled.peek();
-			if (name === "announce") this.controls.announce.set(undefined);
 			this.#invalid.update((previous) => new Set(previous).add(name));
-			this.#enabled.set(false);
 			throw error;
 		}
 	}
 
 	#accept(name: string) {
-		// Ordinary edits must preserve an explicitly disabled connection.
 		if (!this.#invalid.peek().has(name)) return;
 		this.#invalid.update((previous) => {
 			const next = new Set(previous);
 			next.delete(name);
 			return next;
 		});
-		if (this.#invalid.peek().size || !this.#resume) return;
-		this.#resume = false;
-		this.#enabled.set(this.#root.peek() !== undefined);
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {
@@ -698,8 +686,8 @@ export default class MoqPublish extends HTMLElement {
 		this.#accept("backend");
 	}
 
-	/** When to announce the broadcast, mirrored by the `announce` attribute; undefined while that attribute is invalid. */
-	get announce(): AnnounceMode | undefined {
+	/** When to announce the broadcast, mirrored by the `announce` attribute. */
+	get announce(): AnnounceMode {
 		return this.controls.announce.peek();
 	}
 
