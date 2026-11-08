@@ -1,14 +1,11 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { supportCacheKey } from "../support-probe";
 import { decoderConfigKey } from "./config";
-
-// Bun cannot load the blob-URL worklet import the decoder pulls in.
-mock.module("./render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
-const { Source } = await import("./source");
+import { Source } from "./source";
 
 function config(codec: string, fields: Record<string, unknown> = {}): Catalog.AudioConfig {
 	return Catalog.AudioConfigSchema.parse({
@@ -28,7 +25,7 @@ function broadcast(renditions: Record<string, Catalog.AudioConfig>) {
 // Wait out the probe, then a tick for the effects its result wakes. A probe served wholly from
 // the cache sets and clears `pending` in one run, which notifies nothing, so start with a tick
 // that lets the rerun happen rather than waiting on a change that may never come.
-async function settled(source: InstanceType<typeof Source>): Promise<void> {
+async function settled(source: Source): Promise<void> {
 	await yieldNow();
 	while (source.pending.peek()) {
 		await source.pending.changed();
@@ -282,9 +279,10 @@ test("defaults to the decoder's probe when no supported input is given", async (
 	globals.AudioDecoder = {
 		isConfigSupported: async (c: AudioDecoderConfig) => ({ supported: c.codec === "opus", config: c }),
 	};
-	const source = new Source({ broadcast: broadcast({ mic: config("opus") }).broadcast });
+	const source = new Source({ broadcast: broadcast({ rejected: config("flac"), mic: config("opus") }).broadcast });
 	try {
 		await settled(source);
+		expect(Object.keys(source.out.available.peek())).toEqual(["mic"]);
 		expect(source.out.track.peek()).toBe("mic");
 	} finally {
 		source.close();

@@ -610,9 +610,12 @@ it("defaults to the decoder's probe when no supported input is given", async () 
 	globals.VideoDecoder = {
 		isConfigSupported: async (c: VideoDecoderConfig) => ({ supported: c.codec === "avc1.42e01e", config: c }),
 	};
-	const source = new Source({ broadcast: mockBroadcast({ cam: config("avc1.42e01e") }) });
+	const source = new Source({
+		broadcast: mockBroadcast({ rejected: config("avc1.640028"), cam: config("avc1.42e01e") }),
+	});
 	try {
 		await settle();
+		expect(Object.keys(source.out.available.peek())).toEqual(["cam"]);
 		expect(source.out.track.peek()).toBe("cam");
 	} finally {
 		source.close();

@@ -39,3 +39,9 @@ export function playbackIdentity(config: Catalog.VideoConfig): PlaybackIdentity 
 export function decoderConfigKey(config: Catalog.VideoConfig): string {
 	return JSON.stringify(playbackIdentity(config).decoder);
 }
+
+// Chrome configures a hardware H.264 decoder that then fails the first interlaced picture: field
+// coding only shows in the SPS, and Chrome falls back to software only when configure() fails.
+export function hardwareAcceleration(config: { interlaced?: boolean }): HardwareAcceleration | undefined {
+	return config.interlaced ? "prefer-software" : undefined;
+}

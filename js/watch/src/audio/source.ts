@@ -3,7 +3,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { SupportProbe } from "../support-probe";
-import { Decoder } from "./decoder";
+import { supported as decoderSupported } from "./supported";
 
 /** What the viewer wants from the audio rendition. */
 export type Target = {
@@ -94,7 +94,7 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
-		const supported = effect.get(this.in.supported) ?? Decoder.supported;
+		const supported = effect.get(this.in.supported) ?? decoderSupported;
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.audio?.renditions) ?? {};
