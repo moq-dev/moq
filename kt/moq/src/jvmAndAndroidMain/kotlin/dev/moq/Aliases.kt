@@ -116,7 +116,7 @@ typealias BroadcastRequests = uniffi.moq.MoqBroadcastRequests
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 
-/** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
+/** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or reject it. */
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
 
 /** A stream of the fills readers of one track need: runs of groups the cache lacks. */

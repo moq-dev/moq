@@ -454,9 +454,12 @@ mod tests {
 		let feed = demux.webrtc();
 		let divert = demux.divert();
 		let big = [0x80; 1024];
-		let share = CAPACITY / Queue::<Datagram>::SHARE / big.len();
-		for _ in 0..=share {
+		// Flood from one source until it is refused, which must happen before the queue fills.
+		for _ in 0..CAPACITY / big.len() {
 			split(&divert, &[(remote(1), &[&big])]);
+			if demux.counters().get(Discard::Overflow) > 0 {
+				break;
+			}
 		}
 		let overflow = demux.counters().get(Discard::Overflow);
 		assert!(overflow > 0);

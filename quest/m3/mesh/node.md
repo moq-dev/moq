@@ -23,6 +23,10 @@ CLI verbs, service install, and UI moved to Kixel. Carried over from it:
   `doc/bin/relay/auth.md#mesh-enrollment`. Pass the hostname as the default
   name.
 - Nothing is served unless the embedding application names it.
+- A LAN peer proves its enrollment with the coordinator token, or with a
+  [certificate credential](/quest/m3/mesh/cert-credentials.md) when the
+  embedding application supplies a trust store (decided 2026-11-07,
+  maintainer).
 
 Tests in network namespaces: two relay nodes enroll through `moq auth`, take
 the LAN link when they share a segment and the relay path otherwise, refuse
