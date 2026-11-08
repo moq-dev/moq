@@ -21,9 +21,9 @@ One JSON file per case in `lite/`, named for what it pins:
 - `version`: the negotiated version, by its handshake name (`moq-lite-01` to `moq-lite-07-wip`).
 - `message`: what the bytes are, length prefix and any type included:
   - `announce`: one announcement on the announce stream.
-  - `announce_init`: a lite-01/02 ANNOUNCE_INIT. `budget` is the announce slots left, unbounded when absent.
+  - `announce_init`: a lite-01/02 ANNOUNCE\_INIT. `budget` is the announce slots left, unbounded when absent.
   - `group`: a group stream header.
-  - `client_setup`: a `moql` CLIENT_SETUP. `server` is the one version the server accepts, and refusing to pick it refuses the case.
+  - `client_setup`: a `moql` CLIENT\_SETUP. `server` is the one version the server accepts, and refusing to pick it refuses the case.
 - `hex`: the input.
 - `expect`: `decoded`, where our own encoding of the decoded value must equal `hex`, so a case
   also pins the value, or `refused`, where the input is rejected without asking for more bytes.

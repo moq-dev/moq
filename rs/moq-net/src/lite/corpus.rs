@@ -33,7 +33,11 @@ enum Expect {
 }
 
 /// What a decode came to: our own encoding of what it decoded, as hex, or why it did not.
-fn outcome<T: Encode<V>, V: Copy + Into<Form>>(data: &[u8], version: V, decoded: Result<(T, usize), DecodeError>) -> String {
+fn outcome<T: Encode<V>, V: Copy + Into<Form>>(
+	data: &[u8],
+	version: V,
+	decoded: Result<(T, usize), DecodeError>,
+) -> String {
 	match decoded {
 		Ok((_, used)) if used != data.len() => format!("left {} bytes", data.len() - used),
 		Ok((value, _)) => match value.encode_bytes(version) {
@@ -78,7 +82,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(text: &str) -> Vec<u8> {
-	assert!(text.len() % 2 == 0, "odd hex length");
+	assert!(text.len().is_multiple_of(2), "odd hex length");
 	(0..text.len())
 		.step_by(2)
 		.map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("invalid hex"))

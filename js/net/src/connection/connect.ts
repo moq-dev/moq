@@ -13,9 +13,9 @@ import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
+import { parse, show } from "./endpoint.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
-import { parse, show } from "./endpoint.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
 import { inspect } from "./stats.ts";
@@ -755,7 +755,10 @@ async function connectWebTransport(
 		// Dev-only path: http:// can't be a real WebTransport origin, so we fetch the
 		// self-signed cert's hash over plain HTTP and pin it. Production uses https://
 		// and never reaches here. Keep this at debug so it doesn't read as a problem.
-		console.debug(show(parse(fingerprintUrl)), "performing an insecure fingerprint fetch; use https:// in production");
+		console.debug(
+			show(parse(fingerprintUrl)),
+			"performing an insecure fingerprint fetch; use https:// in production",
+		);
 
 		const fingerprint = await fetchFingerprint(fingerprintUrl, cancel);
 		if (!fingerprint) return undefined;

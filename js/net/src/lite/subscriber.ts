@@ -526,7 +526,10 @@ export class Subscriber {
 					// Receive ANNOUNCE_INIT first. Each suffix takes an announce slot, so a set past
 					// what is left of the budget is refused before it is decoded.
 					const budget = this.#announces.available();
-					const init = await race([AnnounceInit.decode(stream.reader, this.version, budget), announced.closed]);
+					const init = await race([
+						AnnounceInit.decode(stream.reader, this.version, budget),
+						announced.closed,
+					]);
 					if (!(init instanceof AnnounceInit)) {
 						stream.close();
 						return;
