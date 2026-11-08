@@ -236,7 +236,7 @@ in
           cfg.cluster.mode == "leaf"
           && cfg.cluster.certFile == null
           && cfg.cluster.tokenFile == null
-          && !lib.any (lib.hasInfix "jwt=") (lib.toList cfg.cluster.rootUrl)
+          && lib.any (url: builtins.match ".*[?&]jwt=[^&#].*" url == null) (lib.toList cfg.cluster.rootUrl)
         )
         "services.moq-relay: this leaf dials cluster.rootUrl with no credential, so its root admits it at most as an anonymous client; set cluster.certFile and cluster.keyFile (or cluster.tokenFile). The module no longer signs a cluster token.";
 
