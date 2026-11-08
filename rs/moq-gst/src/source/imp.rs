@@ -3328,17 +3328,16 @@ mod session_tests {
 		await_pad(&element, "audio_");
 
 		// A second update while the video drains, whose new audio pad proves it was acted on.
+		let (added, added_rx) = std::sync::mpsc::channel();
+		let handler = element.connect_pad_added(move |_, pad| {
+			let _ = added.send(pad.name().to_string());
+		});
 		{
 			let mut guard = catalog.modify().unwrap();
 			guard.audio.renditions.insert("audio2".to_string(), audio_rendition());
 		}
-		for _ in 0..100 {
-			if pads(&element, "audio_").len() == 2 {
-				break;
-			}
-			block(Duration::from_millis(50));
-		}
-		assert_eq!(pads(&element, "audio_").len(), 2, "the second update never landed");
+		while !added_rx.recv().expect("the element is alive").starts_with("audio_") {}
+		element.disconnect(handler);
 
 		// A reader the update cancelled still has to notice. It takes its pad with it when it does,
 		// so the wait is only ever served in full by one that is still reading.
