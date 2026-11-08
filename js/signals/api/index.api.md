@@ -1,7 +1,7 @@
 # `@moq/signals`
 
 ```ts
-import { Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 
 export class Computed<T> implements Getter<T | undefined> {
 	constructor(fn: (effect: Effect) => T);
@@ -44,15 +44,15 @@ export class Effect {
 	event(target: EventTarget, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
 	get<T>(signal: Getter<T>): T;
 	getAll<S extends readonly Getter<unknown>[]>(signals: [...S]): { [K in keyof S]: Exclude<GetterType<S[K]>, false | 0 | "" | null | undefined> } | undefined;
-	interval(fn: () => void, period: Nano): void;
+	interval(fn: () => void, period: Duration): void;
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void;
 	race<const T extends readonly unknown[]>(...values: T): Promise<Awaited<T[number]> | undefined>;
 	run(fn: (effect: Effect) => void): Dispose;
 	set<S extends Setter<unknown>>(signal: S, value: SetterType<S>, ...args: undefined extends SetterType<S> ? [cleanup?: SetterType<S>] : [cleanup: SetterType<S>]): void;
 	spawn(fn: () => Promise<void>): void;
 	subscribe<T>(signal: Getter<T>, fn: (value: T) => void): void;
-	timeout(fn: (effect: Effect) => void, duration: Nano): void;
-	timer(fn: () => void, duration: Nano): void;
+	timeout(fn: (effect: Effect) => void, duration: Duration): void;
+	timer(fn: () => void, duration: Duration): void;
 }
 
 export interface GetPromise<T> extends Getter<T | undefined>, PromiseLike<T> {}

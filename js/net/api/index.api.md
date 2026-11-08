@@ -1,9 +1,6 @@
 # `@moq/net`
 
 ```ts
-import { Instant } from "@moq/clock";
-import { Milli } from "@moq/clock";
-
 export namespace Announce {
 	export interface Announce {
 		captures: Path.Pattern[] | undefined;
@@ -36,7 +33,7 @@ export namespace Auth {
 		constructor(message?: string);
 	}
 	export interface Grant {
-		expires?: number;
+		expires?: Clock.Wall;
 		publish: Path.Patterns;
 		subscribe: Path.Patterns;
 	}
@@ -129,23 +126,25 @@ export namespace Broadcast {
 	};
 }
 
+export * as Clock from "@moq/clock";
+
 export namespace Connection {
 	export interface AcceptProps {
 		consume?: Origin.Producer;
 		implementation?: string;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
-		timeout?: Milli;
+		timeout?: Clock.Duration;
 		transport: WebTransport;
 		url: URL;
 		version?: number;
 	}
 	export type Backoff = {
-		healthy?: Milli;
-		initial?: Milli;
-		max?: Milli;
+		healthy?: Clock.Duration;
+		initial?: Clock.Duration;
+		max?: Clock.Duration;
 		multiplier?: number;
-		timeout?: Milli;
+		timeout?: Clock.Duration;
 	};
 	export interface CertificateHash {
 		algorithm?: "sha-256";
@@ -157,7 +156,7 @@ export namespace Connection {
 		implementation?: string;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
-		timeout?: Milli;
+		timeout?: Clock.Duration;
 		tokens?: readonly string[];
 		transport?: WebTransport;
 		url: URL;
@@ -167,7 +166,7 @@ export namespace Connection {
 		webtransport?: Connection.WebTransportProps;
 	}
 	export interface Drain {
-		readonly timeout?: Milli;
+		readonly timeout?: Clock.Duration;
 		readonly uri: string;
 	}
 	export interface Established {
@@ -189,12 +188,12 @@ export namespace Connection {
 		solicit?: boolean;
 	}
 	export interface Goaway {
-		handover?: Milli;
+		handover?: Clock.Duration;
 		redirect?: Connection.Redirect;
 	}
 	export interface Probe {
 		estimatedRecvRate?: number;
-		rtt?: Milli;
+		rtt?: Clock.Duration;
 	}
 	export interface Props {
 		consume?: Origin.Producer;
@@ -204,7 +203,7 @@ export namespace Connection {
 		publish?: Origin.Consumer;
 		share?: boolean;
 		signal?: never;
-		timeout?: Milli;
+		timeout?: Clock.Duration;
 		tokens?: readonly string[] | Signals.Signal<readonly string[]>;
 		transport?: never;
 		url?: URL | Signals.Signal<URL | undefined>;
@@ -222,12 +221,12 @@ export namespace Connection {
 		packetsLost?: number;
 		packetsReceived?: number;
 		packetsSent?: number;
-		rtt?: Milli;
+		rtt?: Clock.Duration;
 	}
 	export type Status = "connecting" | "connected" | "disconnected";
 	export type Transport = "webtransport" | "websocket" | "webrtc";
 	export interface WebSocketProps {
-		delay?: Milli;
+		delay?: Clock.Duration;
 		enabled?: boolean;
 		maxStreams?: number;
 		receiveWindow?: number;
@@ -303,8 +302,8 @@ export namespace Datagram {
 
 export namespace Error {
 	export class ConnectTimeout extends Error {
-		constructor(timeout: Milli);
-		readonly timeout: Milli;
+		constructor(timeout: Clock.Duration);
+		readonly timeout: Clock.Duration;
 	}
 	export class FrameTooLarge extends Error.Stream {
 		constructor(options?: {
@@ -365,7 +364,7 @@ export namespace Error {
 
 export namespace Frame {
 	export class Consumer {
-		get arrived(): Instant | undefined;
+		get arrived(): Clock.Instant | undefined;
 		readAll(): Promise<Uint8Array>;
 		readChunk(): Promise<Uint8Array | undefined>;
 		readonly sequence: number;
@@ -388,7 +387,7 @@ export namespace Frame {
 
 export namespace Group {
 	export class Consumer {
-		get arrived(): Instant;
+		get arrived(): Clock.Instant;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
@@ -410,7 +409,7 @@ export namespace Group {
 		} & Group.Frame | undefined;
 	}
 	export interface Frame {
-		arrived?: Instant;
+		arrived?: Clock.Instant;
 		payload: Uint8Array;
 		timestamp?: Time.Timestamp;
 	}
@@ -696,8 +695,8 @@ export namespace Track {
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
 	export interface Delay {
-		max?: Milli | null;
-		min?: Milli | null;
+		max?: Clock.Duration | null;
+		min?: Clock.Duration | null;
 	}
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
@@ -705,7 +704,7 @@ export namespace Track {
 		get wanted(): Signals.Getter<bigint | undefined>;
 	}
 	export interface FetchGroupOptions {
-		maxDelay?: Milli;
+		maxDelay?: Clock.Duration;
 		priority?: number;
 		signal?: AbortSignal;
 	}
@@ -716,7 +715,7 @@ export namespace Track {
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
 		isWanted(sequence: bigint): boolean;
-		get maxDelay(): Milli | null;
+		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
@@ -731,13 +730,13 @@ export namespace Track {
 	}
 	export interface Info {
 		compress?: boolean;
-		maxAge?: Milli;
+		maxAge?: Clock.Duration;
 		priority: number;
 		refresh?: number;
 		timescale?: Time.Timescale | null;
 	}
 	export interface InfoInit extends Partial<Omit<Track.Info, "maxAge">> {
-		maxAge?: Milli | null;
+		maxAge?: Clock.Duration | null;
 	}
 	export interface InfoOptions {
 		signal?: AbortSignal;

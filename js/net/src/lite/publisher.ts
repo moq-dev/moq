@@ -1,4 +1,4 @@
-import { Duration, Instant, now, sleep, yieldNow } from "@moq/clock";
+import { Duration, type Instant, now, sleep, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";

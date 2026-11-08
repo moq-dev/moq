@@ -1,4 +1,4 @@
-import { Wall, wall } from "@moq/clock";
+import { wall } from "@moq/clock";
 import * as jose from "jose";
 import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
@@ -247,7 +247,7 @@ async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Cla
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-	const now = wall().since(Wall.UNIX_EPOCH).asSecs();
+	const now = wall().asUnixMillis() / 1000;
 	if (claims.exp !== undefined && claims.exp <= now) throw new Error("Token has expired");
 	if (claims.nbf !== undefined && claims.nbf > now) throw new Error("Token is not yet valid");
 	ensureClaimsWithinScope(key, claims);

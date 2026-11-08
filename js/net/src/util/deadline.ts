@@ -1,4 +1,4 @@
-import { Duration, sleep } from "@moq/clock";
+import { type Duration, sleep } from "@moq/clock";
 import { race } from "@moq/signals";
 import { controlTimeout, error } from "../error.ts";
 import type { Stream } from "../stream.ts";
@@ -120,7 +120,7 @@ export class Deadline {
 			// Answered: the waiting is over, and nothing is left to reject.
 			if (why === undefined) return new Promise<never>(() => {});
 			if (why === "expired" && !done.aborted) {
-				throw new TimeoutError(`request timed out after ${this.#budget}ms`);
+				throw new TimeoutError(`request timed out after ${this.#budget}`);
 			}
 		}
 	}

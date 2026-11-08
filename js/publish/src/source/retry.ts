@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type Effect, Signal } from "@moq/signals";
 
 /**
@@ -68,7 +68,7 @@ export class Retry {
 		const wait = this.#wait;
 		if (wait !== undefined) {
 			this.#wait = undefined;
-			effect.timer(() => this.#rerun.update((rerun) => rerun + 1), Nano.fromMilli(Milli(wait)));
+			effect.timer(() => this.#rerun.update((rerun) => rerun + 1), Duration.millis(wait));
 			return false;
 		}
 
@@ -126,12 +126,9 @@ export class Retry {
 
 	/** The attempt produced a live track. Reruns the effect if it dies. */
 	succeeded(effect: Effect, track: MediaStreamTrack): void {
-		effect.timer(
-			() => {
-				this.#clear();
-			},
-			Nano.fromMilli(Milli(Retry.SETTLED)),
-		);
+		effect.timer(() => {
+			this.#clear();
+		}, Duration.millis(Retry.SETTLED));
 
 		effect.event(track, "ended", () => this.ended());
 	}

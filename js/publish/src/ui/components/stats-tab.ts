@@ -1,11 +1,11 @@
-import { Milli, Nano, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import { formatBitrate, formatFps, formatHz, graph, statCard, statLine } from "@moq/ui";
 import type MoqPublish from "../../element";
 import { audio as audioIcon, video as videoIcon, wifi as wifiIcon } from "../icons";
 
-const POLL = Nano.fromMilli(Milli(250));
+const POLL = Duration.millis(250);
 
 /** Show an active/idle pill: an encoder only runs (and uses bandwidth) while a viewer is subscribed. */
 function trackActive(parent: Effect, status: HTMLElement, active: Getter<boolean | undefined>) {
@@ -110,7 +110,7 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 
 	let prevFrames = 0;
 	let prevBytes = encoded();
-	const at = () => Nano.toMilli(Nano(now()));
+	const at = () => now().since(Instant.ZERO).asMillis();
 	let prevWhen = at();
 
 	parent.interval(() => {

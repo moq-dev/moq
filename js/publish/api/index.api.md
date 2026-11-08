@@ -9,7 +9,7 @@ export namespace Audio {
 	};
 	export interface AudioFrame {
 		channels: Float32Array[];
-		timestamp: Clock.Micro;
+		timestamp: Clock.Duration;
 	}
 	export class Capture {
 		constructor(props?: Audio.CaptureProps);
@@ -41,7 +41,7 @@ export namespace Audio {
 		close(): void;
 		codec: Signals.Signal<Audio.Codec>;
 		readonly in: Signals.Readonlys<Audio.EncoderInput>;
-		join: Signals.Signal<Clock.Milli>;
+		join: Signals.Signal<Clock.Duration>;
 		muted: Signals.Signal<boolean>;
 		readonly name: string;
 		readonly out: Signals.Readonlys<Audio.EncoderOutput>;
@@ -62,7 +62,7 @@ export namespace Audio {
 	};
 	export type EncoderProps = Signals.Inputs<Audio.EncoderInput> & {
 		codec?: Audio.Codec | Signals.Signal<Audio.Codec>;
-		join?: Clock.Milli | Signals.Signal<Clock.Milli>;
+		join?: Clock.Duration | Signals.Signal<Clock.Duration>;
 		muted?: boolean | Signals.Signal<boolean>;
 		volume?: number | Signals.Signal<number>;
 	};
@@ -75,7 +75,7 @@ export namespace Audio {
 	export type OpusConfig = {
 		bitrate?: number;
 		complexity?: number;
-		frameDuration?: Clock.Milli;
+		frameDuration?: Clock.Duration;
 		mime: "opus";
 		packetlossperc?: number;
 		useinbandfec?: boolean;
@@ -122,7 +122,7 @@ export class Broadcast {
 	readonly catalog: CatalogProducer;
 	close(): void;
 	readonly in: Signals.Readonlys<BroadcastInput>;
-	readonly join: Signals.Signal<Clock.Milli | undefined>;
+	readonly join: Signals.Signal<Clock.Duration | undefined>;
 	readonly net: Signals.Getter<Net.Broadcast.Producer | undefined>;
 	text(name: string): Rendition<Hang.Catalog.TextConfig>;
 	video(name: string): Rendition<Hang.Catalog.VideoConfig>;
@@ -137,7 +137,7 @@ export type BroadcastInput = {
 	echo: Signals.Getter<Net.Path.Relative | undefined>;
 	enabled: Signals.Getter<boolean>;
 	flip: Signals.Getter<boolean>;
-	maxAge: Signals.Getter<Clock.Milli | null | undefined>;
+	maxAge: Signals.Getter<Clock.Duration | null | undefined>;
 	name: Signals.Getter<Net.Path.Valid>;
 	onDemand: Signals.Getter<boolean | undefined>;
 	origin: Signals.Getter<Net.Origin.Table | undefined>;
@@ -210,7 +210,7 @@ export namespace Preview {
 export class Rendition<Config> {
 	close(): void;
 	readonly config: Signals.Signal<Config | undefined>;
-	readonly join: Signals.Signal<Clock.Milli | undefined>;
+	readonly join: Signals.Signal<Clock.Duration | undefined>;
 	readonly kind: Kind;
 	readonly name: string;
 	readonly stats: Signals.Signal<{
@@ -354,7 +354,7 @@ export namespace Video {
 		bitrateScale?: number;
 		codec?: string;
 		frameRate?: number;
-		join?: Clock.Milli;
+		join?: Clock.Duration;
 		maxBitrate?: number;
 		maxPixels?: number;
 		maxScale?: number;

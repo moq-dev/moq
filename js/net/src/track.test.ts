@@ -54,7 +54,7 @@ function manualTime(initial: number) {
 	return {
 		set: (ms: number) => clock.jump(to(ms)),
 		advance: (ms: number) => clock.advance(to(ms)),
-		stepWall: (ms: number) => clock.stepWall(Wall.UNIX_EPOCH.add(Duration.millis(ms))),
+		stepWall: (ms: number) => clock.stepWall(Wall.unixMillis(ms)),
 		installed,
 	};
 }

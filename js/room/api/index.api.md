@@ -18,7 +18,7 @@ import { Window } from "@moq/json";
 
 export namespace Chat {
 	export type Event = Window.Event<string>;
-	export const HISTORY: Clock.Nano;
+	export const HISTORY: Clock.Duration;
 	export const PRIORITY: 10;
 	export class Publisher {
 		constructor(track: Track.Producer);

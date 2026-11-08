@@ -1,4 +1,4 @@
-import { Duration } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import { race } from "@moq/signals";
 import { ConnectTimeout, error, fromClose, ProtocolViolation } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";

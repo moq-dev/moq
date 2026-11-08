@@ -1,4 +1,4 @@
-import { Duration, sleep } from "@moq/clock";
+import { type Duration, sleep } from "@moq/clock";
 
 /**
  * Run `fn` after `duration` on the installed clock, and return the call that cancels it.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { closeSync, fchmodSync, openSync, readFileSync, writeFileSync } from "node:fs";
-import { Wall, wall } from "@moq/clock";
+import { wall } from "@moq/clock";
 import { Command, Option } from "commander";
 import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
@@ -90,7 +90,7 @@ program
 
 			const exp = options.unbounded
 				? undefined
-				: (options.expires ?? Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs()) + (options.ttl ?? 3600));
+				: (options.expires ?? Math.floor(wall().asUnixMillis() / 1000) + (options.ttl ?? 3600));
 			const claims = ClaimsSchema.parse({
 				root: options.root,
 				...(options.publish && { publish: options.publish }),

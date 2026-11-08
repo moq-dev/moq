@@ -1,4 +1,3 @@
-
 // Implements the estimator in doc/concept/audio-jitter.md, which is normative. The design and
 // every constant come from WebRTC NetEq's underrun optimizer; this is written from the document,
 // not from NetEq's source.

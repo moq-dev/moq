@@ -5,7 +5,7 @@
  *
  * @module
  */
-import { Duration, type Instant } from "@moq/clock";
+import type { Duration, Instant } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Charge, Pool } from "./cache.ts";

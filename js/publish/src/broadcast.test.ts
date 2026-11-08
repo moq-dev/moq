@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -123,7 +123,7 @@ test("shared Rust stats names survive the publisher's report builder", async () 
 		});
 		try {
 			await settle();
-			await clock.advance(Nano.fromMilli(Milli(1000)));
+			await clock.advance(Duration.millis(1000));
 			const reported = (await consumer.latest())?.value.renditions ?? {};
 			expect(Object.keys(reported).sort()).toEqual(Object.keys(fixture.renditions ?? {}).sort());
 			expect(reported).toEqual(fixture.renditions ?? {});
@@ -534,7 +534,7 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 });
 
 test("changing maxAge publishes a new network broadcast", async () => {
-	const maxAge = new Signal<Milli | null | undefined>(Milli(1000));
+	const maxAge = new Signal<Duration | null | undefined>(Duration.millis(1000));
 	const broadcast = new Broadcast({
 		enabled: true,
 		origin: new Origin.Producer(),
@@ -546,17 +546,17 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	const before = broadcast.net.peek();
 
 	// A track's retention is fixed at creation, so the tracks move to a fresh broadcast.
-	maxAge.set(Milli(2000));
+	maxAge.set(Duration.millis(2000));
 	await settle();
 	const after = broadcast.net.peek();
 	expect(after).toBeDefined();
 	expect(after).not.toBe(before);
-	expect((await after?.track("video").info())?.maxAge).toBe(Milli(2000));
+	expect((await after?.track("video").info())?.maxAge).toEqual(Duration.millis(2000));
 
 	// Omitted is the media max age, and null is no publisher limit.
 	maxAge.set(undefined);
 	await settle();
-	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBe(Container.MAX_AGE);
+	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toEqual(Container.MAX_AGE);
 	maxAge.set(null);
 	await settle();
 	expect((await broadcast.net.peek()?.track("video").info())?.maxAge).toBeUndefined();
@@ -568,7 +568,7 @@ test("the catalog track takes the zero default max age", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	await settle();
 	const info = await broadcast.net.peek()?.track(Broadcast.CATALOG_TRACK).info();
-	expect(info?.maxAge).toBe(Milli.zero);
+	expect(info?.maxAge).toEqual(Duration.ZERO);
 	broadcast.close();
 });
 
@@ -594,7 +594,7 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 
 		// A reconnect past the idle cache window must still receive the live track's newest
 		// snapshot instead of waiting forever for an edit that may never come.
-		await clock.advance(Nano.fromMilli(Milli(60_000)));
+		await clock.advance(Duration.millis(60_000));
 		const second = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		expect((await second.latest())?.value.video).toBeDefined();
 		second.close();
@@ -917,7 +917,7 @@ test("stats names a track in the catalog and reports each listed rendition while
 	const clock = new Manual();
 	const installed = clock.install();
 	const stats = new Signal(false);
-	const probe = new Signal({ rtt: Milli(12.7) });
+	const probe = new Signal({ rtt: Duration.millis(12.7) });
 	const broadcast = new Broadcast({
 		enabled: true,
 		origin: new Origin.Producer(),
@@ -945,7 +945,7 @@ test("stats names a track in the catalog and reports each listed rendition while
 			schema: Stats.SnapshotSchema,
 		});
 		await settle();
-		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Duration.millis(1000));
 		// Sub-millisecond durations are floored on the wire.
 		expect((await consumer.latest())?.value as unknown).toEqual({
 			transport: { rtt: 12 },
@@ -976,13 +976,13 @@ test("an unsubscribed stats track writes nothing", async () => {
 		video.config.set(videoConfig);
 		video.stats.set({ frames: 1 });
 		await settle();
-		await clock.advance(Nano.fromMilli(Milli(3000)));
+		await clock.advance(Duration.millis(3000));
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer once connected");
 		const subscriber = net.track("stats.json").subscribe();
 		await settle();
-		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Duration.millis(1000));
 		// Nothing was written while nobody subscribed, so the first report opens the first group.
 		expect((await subscriber.recvGroup())?.sequence).toBe(0n);
 		subscriber.close();
@@ -1021,9 +1021,9 @@ test("echo solicits feedback in the catalog unless it walks above the root", asy
 test("the catalog declares the longest group as the join interval once it lists media", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("join.hang") });
 	const video = broadcast.video("video/hd");
-	video.join.set(Milli(2000));
+	video.join.set(Duration.millis(2000));
 	const audio = broadcast.audio("audio/data");
-	audio.join.set(Milli(20));
+	audio.join.set(Duration.millis(20));
 	broadcast.text("captions/en").config.set({ format: "vtt", container: { kind: "legacy" } } as Catalog.TextConfig);
 	await settle();
 
@@ -1049,15 +1049,15 @@ test("the join interval stays fixed for the network broadcast", async () => {
 	const name = new Signal(Path.from("fixed.hang"));
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name });
 	const video = broadcast.video("video");
-	video.join.set(Milli(2000));
+	video.join.set(Duration.millis(2000));
 	video.config.set(videoConfig);
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
 
 	// A longer GOP, from a config change or a later rendition, leaves the declared grid alone.
-	video.join.set(Milli(4000));
+	video.join.set(Duration.millis(4000));
 	const later = broadcast.video("video/later");
-	later.join.set(Milli(6000.5));
+	later.join.set(Duration.millis(6000.5));
 	later.config.set(videoConfig);
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
@@ -1072,14 +1072,14 @@ test("the join interval stays fixed for the network broadcast", async () => {
 test("an audio-only broadcast declares its join, and no join declares nothing", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("audio.hang") });
 	const audio = broadcast.audio("audio");
-	audio.join.set(Milli(0));
+	audio.join.set(Duration.millis(0));
 	audio.config.set(audioConfig);
 	await settle();
 	// A zero join is no positive spacing, so nothing is promised.
 	expect((await readCatalog(broadcast))?.media?.join).toBeUndefined();
 
 	// A later listing tries again once a duration is known.
-	audio.join.set(Milli(20));
+	audio.join.set(Duration.millis(20));
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(20));
 	broadcast.close();
@@ -1095,7 +1095,7 @@ test("an on-demand rendition declares the interval before encoding, and a media 
 		onDemand: true,
 	});
 	const video = broadcast.video("video");
-	video.join.set(Milli(2000));
+	video.join.set(Duration.millis(2000));
 	video.config.set(videoConfig);
 	await settle();
 	const net = broadcast.net.peek();

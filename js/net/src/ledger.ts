@@ -1,4 +1,4 @@
-import { Duration, Instant } from "@moq/clock";
+import { Duration, type Instant } from "@moq/clock";
 import * as btree from "sorted-btree";
 import { max, min } from "./util/sequence.ts";
 

@@ -18,7 +18,7 @@
  *
  * @module
  */
-import { Duration, Instant, now, sleepUntil } from "@moq/clock";
+import { Duration, type Instant, now, sleepUntil } from "@moq/clock";
 
 /** How long a group nobody reads or writes stays cached by default, matching Rust `cache::DEFAULT_EXPIRY`. */
 export const DEFAULT_EXPIRY = Duration.millis(30_000);

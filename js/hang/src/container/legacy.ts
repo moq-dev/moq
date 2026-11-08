@@ -21,7 +21,10 @@ export class Format implements ContainerFormat {
 	/** Write the final video frame's end timestamp before the group closes. */
 	finishGroup(group: Moq.Group.Producer, end?: Duration) {
 		if (this.kind !== "video" || end === undefined) return;
-		group.writeFrame({ payload: encodeFrame(new Uint8Array(), end), timestamp: Time.Timestamp.fromMicros(micros(end)) });
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array(), end),
+			timestamp: Time.Timestamp.fromMicros(micros(end)),
+		});
 	}
 
 	/** Return the video-frame or audio-source endpoint for an empty codec payload. */
@@ -151,7 +154,10 @@ export class Producer {
 
 		const group = this.#track.appendGroup();
 		group.writeFrame({
-			payload: this.#format.kind === "data" ? new Uint8Array() : encodeFrame(new Uint8Array(), Duration.micros(timestamp)),
+			payload:
+				this.#format.kind === "data"
+					? new Uint8Array()
+					: encodeFrame(new Uint8Array(), Duration.micros(timestamp)),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 		group.finish();
@@ -171,10 +177,7 @@ export class Producer {
 		) {
 			throw new Error("video group endpoint precedes its last frame");
 		}
-		end ??=
-			this.#end !== undefined && this.#interval !== undefined
-				? this.#end + this.#interval
-				: undefined;
+		end ??= this.#end !== undefined && this.#interval !== undefined ? this.#end + this.#interval : undefined;
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		this.#format.finishGroup(this.#group, this.#reordered || end === undefined ? undefined : Duration.micros(end));
 		this.#group.finish();

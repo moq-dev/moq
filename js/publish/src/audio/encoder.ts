@@ -24,18 +24,18 @@ import type { CodecMime, Kind } from "./types";
 import { sourceKind } from "./types";
 
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
-const OPUS_FRAME_DURATION = Milli(20);
+const OPUS_FRAME_DURATION = Duration.millis(20);
 // The only frame durations libopus (and so WebCodecs) will encode, in ms.
 const OPUS_FRAME_DURATIONS = [2.5, 5, 10, 20, 40, 60];
 const AAC_BITRATE_PER_CHANNEL = 64_000;
 const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame.
 // Long enough that a volume change doesn't click, short enough that a mute is silent almost at once.
-const FADE = Milli(50);
+const FADE = Duration.millis(50);
 
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
 
-import { Micro, Milli, Nano, now } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import { Backlog } from "./backlog";
 import { Framer } from "./framer";
 
@@ -69,9 +69,9 @@ export type OpusConfig = {
 	mime: "opus";
 
 	bitrate?: number; // bits/sec, defaults to channelCount * 32kbps
-	// The type carries the unit (ms): build with Milli(20). Opus takes exactly 2.5, 5, 10, 20,
+	// Build with Duration.millis(20). Opus takes exactly 2.5, 5, 10, 20,
 	// 40, or 60 ms, and defaults to 20.
-	frameDuration?: Milli;
+	frameDuration?: Duration;
 	complexity?: number; // 0-10, higher is better quality but more CPU
 	packetlossperc?: number; // 0-100, expected loss the encoder optimizes for
 	useinbandfec?: boolean; // in-band forward error correction
@@ -120,7 +120,7 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	codec?: Codec | Signal<Codec>;
 
 	// The time between join points: a frame opens a group once it is this far past the last one's start. Defaults to 20 ms.
-	join?: Milli | Signal<Milli>;
+	join?: Duration | Signal<Duration>;
 };
 
 /** Signals the encoder derives. */
@@ -182,7 +182,7 @@ export class Encoder {
 	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
 	 * join that is not a positive, finite duration refuses the rendition.
 	 */
-	join: Signal<Milli>;
+	join: Signal<Duration>;
 
 	/**
 	 * The capture supplying this rendition, or undefined while none is wired.
@@ -220,30 +220,30 @@ export class Encoder {
 	// The demand's max delay, past which retained audio is stale to every subscriber, or undefined
 	// for the retention alone. Replayed groups land as fresh arrivals, so only this cut keeps a
 	// rejoining live viewer from receiving all the retained audio before the live edge.
-	#budget: Micro | undefined;
+	#budget: Duration | undefined;
 
 	// The rendition's track and producer, kept across subscriber changes.
 	// `start` is the open group's first timestamp, undefined until a frame opens one.
-	#live: { track: Moq.Track.Producer; producer: Container.Legacy.Producer; start?: Micro } | undefined;
+	#live: { track: Moq.Track.Producer; producer: Container.Legacy.Producer; start?: Duration } | undefined;
 
 	// Where the next frame submitted to the AudioEncoder starts, i.e. the exclusive end of the
 	// newest one, where an epoch's discontinuity marker goes. Cleared once the marker is written.
-	#next: Micro | undefined;
+	#next: Duration | undefined;
 
 	// The newest epoch's marker. The AudioEncoder outlives a track gap too brief to skip a frame,
 	// so chunks it still held when the track went away surface after the resume; they sit below the
 	// marker and are dropped.
-	#floor: Micro | undefined;
+	#floor: Duration | undefined;
 
 	// The end of the newest retained frame replayed into the encoder. Chunks below it are history
 	// caught up behind the live edge, not frames written late, so they never raise the catalog delay.
-	#history: Micro | undefined;
+	#history: Duration | undefined;
 
 	// The last valid join, which #runConfig validates.
-	#join = Micro(20_000);
+	#join = Duration.micros(20_000);
 	// How far apart groups start under the resolved config, a whole number of frames, which the
 	// broadcast may declare as the catalog's join interval (see groupSpacing).
-	#spacing = new Signal<Milli | undefined>(undefined);
+	#spacing = new Signal<Duration | undefined>(undefined);
 
 	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
 	// config is coming until one reruns.
@@ -294,7 +294,7 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.muted = Signal.from(props?.muted ?? false);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
-		this.join = Signal.from(props?.join ?? Milli(20));
+		this.join = Signal.from(props?.join ?? Duration.millis(20));
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {
@@ -458,7 +458,7 @@ export class Encoder {
 
 			// Raw history needs a finite bound, so an unlimited max age keeps the media default's worth.
 			const maxAge = effect.get(broadcast.in.maxAge) ?? Container.MAX_AGE;
-			this.#encode(broadcast.order, format, Micro.fromMilli(maxAge), effect);
+			this.#encode(broadcast.order, format, maxAge, effect);
 		});
 
 		// A network track change ends the epoch; subscriber changes keep the same producer.
@@ -490,7 +490,7 @@ export class Encoder {
 			const demanded = !!track && effect.get(track.demand().wanted) !== undefined;
 			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
 			const max = track && effect.get(track.subscription)?.delay?.max;
-			this.#budget = max === undefined || max === null ? undefined : Micro.fromMilli(max);
+			this.#budget = max === undefined || max === null ? undefined : max;
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
 			this.#encoding = !!format && !!track && !fatal && (!onDemand || demanded);
 			effect.set(this.#out.active, enabled && this.#encoding, false);
@@ -538,12 +538,12 @@ export class Encoder {
 	// waiting on a probe.
 	#runConfig(effect: Effect): void {
 		const join = effect.get(this.join);
-		if (!Number.isFinite(join) || join <= 0) {
+		if (!(join instanceof Duration) || join.isZero()) {
 			// The broadcast reads every registered rendition's spacing, listed or not.
 			this.#spacing.set(undefined);
-			throw new Error(`audio join must be a finite number of ms greater than 0: ${join}`);
+			throw new Error(`audio join must be a Duration greater than 0: ${join}`);
 		}
-		this.#join = Micro.fromMilli(join);
+		this.#join = join;
 
 		const capture = effect.get(this.in.capture);
 		const captured = capture ? effect.get(capture.out.format) : undefined;
@@ -594,7 +594,7 @@ export class Encoder {
 				});
 				encoder.configure(encoderConfig);
 				const samples = Math.round(
-					(encoderConfig.sampleRate * (resolved.frameDuration ?? Micro(20_000))) / 1_000_000,
+					encoderConfig.sampleRate * (resolved.frameDuration ?? OPUS_FRAME_DURATION).asSecs(),
 				);
 				const frame = new AudioData({
 					format: "f32-planar",
@@ -675,8 +675,8 @@ export class Encoder {
 	// already covered by it.
 	#cut(end = this.#next): void {
 		if (end === undefined) return;
-		if (this.#next !== undefined && this.#next <= end) this.#next = undefined;
-		if (this.#floor !== undefined && end <= this.#floor) return;
+		if (this.#next?.le(end)) this.#next = undefined;
+		if (this.#floor !== undefined && end.le(this.#floor)) return;
 		// The epoch ends here even when no track is left to mark, so whatever the codec still owes for
 		// it stays off the next track.
 		this.#floor = end;
@@ -688,7 +688,7 @@ export class Encoder {
 
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
 	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
-	#encode(order: Order, format: Format, retention: Micro, effect: Effect): void {
+	#encode(order: Order, format: Format, retention: Duration, effect: Effect): void {
 		// The parent owns the config subscription before the async codec scope is opened.
 		const resolved = this.#config.peek();
 		if (!resolved) return;
@@ -724,7 +724,7 @@ export class Encoder {
 				// by the codec: Chrome and Firefox stamp input after a gap as if it were contiguous.
 				// Every browser emits one chunk per input, in order, so a codec that holds a chunk only
 				// delays its stamp, and a break needs no flush.
-				const owed: ({ timestamp: Micro } | { cut: Micro })[] = [];
+				const owed: ({ timestamp: Duration } | { cut: Duration })[] = [];
 				// Write the marker of every break the codec has caught up with.
 				const settle = () => {
 					for (let next = owed[0]; next && "cut" in next; next = owed[0]) {
@@ -752,16 +752,17 @@ export class Encoder {
 						}));
 
 						const live = this.#live;
-						if (live && (this.#floor === undefined || timestamp >= this.#floor)) {
+						if (live && (this.#floor === undefined || timestamp.ge(this.#floor))) {
 							// Every audio frame decodes on its own, so any of them can open a group: the
 							// first one at or past the minimum after the open group's start. Frames forward
 							// as they are written rather than waiting for the group to fill. A dropped
 							// group leaves a gap for the codec's PLC.
-							const keyframe = live.start === undefined || timestamp - live.start >= this.#join;
+							const keyframe =
+								live.start === undefined || timestamp.saturatingSub(live.start).ge(this.#join);
 							if (keyframe) live.start = timestamp;
 							live.producer.encode(frame, timestamp, keyframe);
-							const history = this.#history !== undefined && timestamp < this.#history;
-							if (!history && this.#estimator.write(timestamp, order, keyframe)) {
+							const history = this.#history !== undefined && timestamp.lt(this.#history);
+							if (!history && this.#estimator.write(timestamp.asMicros(), order, keyframe)) {
 								this.#estimate.set({ ...this.#estimator.estimate });
 							}
 						}
@@ -785,7 +786,7 @@ export class Encoder {
 				}
 
 				// Where the next frame starts if it continues the last one submitted, unset after a break.
-				let contiguous: Micro | undefined;
+				let contiguous: Duration | undefined;
 
 				// Disabled or muted: capture is dropped, while the retained audio stays reachable.
 				let paused = false;
@@ -793,18 +794,15 @@ export class Encoder {
 				let breakPending = false;
 
 				const backlog = new Backlog(retention, config.sampleRate);
-				const deadline = new Signal<Micro | undefined>(undefined);
-				const clock = () => Micro.fromNano(Nano(now()));
+				const deadline = new Signal<Duration | undefined>(undefined);
+				const clock = () => now().since(Instant.ZERO);
 				effect.run((timer) => {
 					const at = timer.get(deadline);
 					if (at === undefined) return;
-					timer.timer(
-						() => {
-							backlog.expire(clock());
-							deadline.set(backlog.deadline);
-						},
-						Nano.fromMicro(Micro(Math.max(0, at - clock()))),
-					);
+					timer.timer(() => {
+						backlog.expire(clock());
+						deadline.set(backlog.deadline);
+					}, at.saturatingSub(clock()));
 				});
 
 				// End the epoch where the submitted audio ends, once the codec has emitted all of it: a
@@ -820,8 +818,9 @@ export class Encoder {
 				// Timestamps round to whole microseconds, so a chunk's timestamp and the marker placed at
 				// the next frame's start agree exactly.
 				const submit = (data: AudioFrame) => {
-					const timestamp = Math.round(data.timestamp) as Micro;
-					if (contiguous !== undefined && timestamp !== contiguous) cut();
+					const micros = Math.round(data.timestamp.asMicros());
+					const timestamp = Duration.micros(micros);
+					if (contiguous !== undefined && !timestamp.eq(contiguous)) cut();
 
 					const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
 					const joined = new Float32Array(joinedLength);
@@ -836,7 +835,7 @@ export class Encoder {
 						sampleRate: config.sampleRate,
 						numberOfFrames: data.channels[0].length,
 						numberOfChannels: data.channels.length,
-						timestamp,
+						timestamp: micros,
 						data: joined,
 						transfer: [joined.buffer],
 					});
@@ -844,9 +843,11 @@ export class Encoder {
 					owed.push({ timestamp });
 					encoder.encode(frame);
 					frame.close();
-					contiguous = Math.round(
-						data.timestamp + (data.channels[0].length / config.sampleRate) * 1_000_000,
-					) as Micro;
+					contiguous = Duration.micros(
+						Math.round(
+							data.timestamp.asMicros() + (data.channels[0].length / config.sampleRate) * 1_000_000,
+						),
+					);
 					this.#next = contiguous;
 				};
 
@@ -953,7 +954,7 @@ type Resolved = {
 	catalog: Catalog.AudioConfig;
 
 	/** The exact encoded frame duration, or undefined for a codec whose frame is a fixed sample count. */
-	frameDuration?: Micro;
+	frameDuration?: Duration;
 };
 
 /**
@@ -990,7 +991,7 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 	const frameDuration = codec.frameDuration ?? OPUS_FRAME_DURATION;
 	// Check here rather than letting AudioEncoder.configure throw: by then the rendition has been
 	// advertised and requested, so the failure surfaces to a subscriber instead of the caller.
-	if (!OPUS_FRAME_DURATIONS.includes(frameDuration)) {
+	if (!OPUS_FRAME_DURATIONS.includes(frameDuration.asMillis())) {
 		throw new Error(`opus frame duration must be ${OPUS_FRAME_DURATIONS.join("/")} ms: ${frameDuration}`);
 	}
 
@@ -1003,7 +1004,7 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
 		},
-		frameDuration: Micro.fromMilli(frameDuration),
+		frameDuration: frameDuration,
 	};
 }
 
@@ -1012,10 +1013,10 @@ export function resolve(captured: Format, selected: Codec): Resolved {
  * open group's start, so groups are a whole number of frames apart, and at least one.
  * @internal
  */
-export function groupSpacing(join: Milli, resolved: Resolved): Milli {
-	const frame = resolved.frameDuration ?? (AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate;
-	const frames = Math.max(1, Math.ceil(Micro.fromMilli(join) / frame));
-	return Milli.fromMicro(Micro(frames * frame));
+export function groupSpacing(join: Duration, resolved: Resolved): Duration {
+	const frame = resolved.frameDuration?.asMicros() ?? (AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate;
+	const frames = Math.max(1, Math.ceil(join.asMicros() / frame));
+	return Duration.micros(frames * frame);
 }
 
 // The resolved config with the encoder settings and the probed decoder description, if the codec emitted one.
@@ -1051,7 +1052,7 @@ function createFramer(resolved: Resolved, sampleRate: number): Framer {
 	return new Framer({
 		sampleRate,
 		channels: config.numberOfChannels,
-		size: { duration: resolved.frameDuration ?? Micro.fromMilli(OPUS_FRAME_DURATION) },
+		size: { duration: resolved.frameDuration ?? OPUS_FRAME_DURATION },
 	});
 }
 
@@ -1112,7 +1113,7 @@ export function toEncoderConfig(resolved: Resolved, kind: Kind, opusOptions: Opu
 		// The exact duration, not the catalog's rounded jitter hint: WebCodecs rejects anything but
 		// 2.5/5/10/20/40/60 ms, so 2.5 has to arrive as 2500 µs rather than 3000.
 		if (resolved.frameDuration !== undefined) {
-			opus.frameDuration = resolved.frameDuration;
+			opus.frameDuration = resolved.frameDuration.asMicros();
 		}
 
 		if (Object.keys(opus).length > 0) {

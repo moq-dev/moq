@@ -1,4 +1,4 @@
-import { Duration, Elapsed, timeout } from "@moq/clock";
+import { type Duration, Elapsed, timeout } from "@moq/clock";
 
 export class TimeoutError extends Error {
 	constructor(message: string) {

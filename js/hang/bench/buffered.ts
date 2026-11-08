@@ -82,7 +82,11 @@ async function drain(player: Player, expected: number[]): Promise<number> {
 				gaps++;
 				continue;
 			}
-			if (read.kind !== "frame" || read.frame.timestamp.asMicros() !== want || read.frame.payload[0] !== PAYLOAD[0])
+			if (
+				read.kind !== "frame" ||
+				read.frame.timestamp.asMicros() !== want ||
+				read.frame.payload[0] !== PAYLOAD[0]
+			)
 				throw new Error("frame missing or reordered");
 			break;
 		}
@@ -91,7 +95,9 @@ async function drain(player: Player, expected: number[]): Promise<number> {
 }
 
 function ranges(player: Player): string {
-	return JSON.stringify(player.consumer.buffered.peek().map((r) => ({ start: r.start.asMillis(), end: r.end.asMillis() })));
+	return JSON.stringify(
+		player.consumer.buffered.peek().map((r) => ({ start: r.start.asMillis(), end: r.end.asMillis() })),
+	);
 }
 
 /** Return elapsed ns, the measured operations, gaps and warnings for one case. */

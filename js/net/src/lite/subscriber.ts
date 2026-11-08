@@ -1887,7 +1887,9 @@ export class Subscriber {
 						track,
 						priority,
 						maxDelay:
-							hasFetchMaxDelay(this.version) && maxDelay !== undefined ? Math.ceil(maxDelay.asMillis()) : undefined,
+							hasFetchMaxDelay(this.version) && maxDelay !== undefined
+								? Math.ceil(maxDelay.asMillis())
+								: undefined,
 						group: sequence,
 					}).encode(stream.writer, this.version);
 					// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
@@ -2040,7 +2042,8 @@ export class Subscriber {
 			// Lite-07 FETCH carries the budget; older ones leave it to the publisher's max age.
 			const budget = fill.maxDelay;
 			// Rounded up, since a budget shortened by rounding skips a group a reader still wants.
-			const maxDelay = hasFetchMaxDelay(this.version) && budget !== null ? Math.ceil(budget.asMillis()) : undefined;
+			const maxDelay =
+				hasFetchMaxDelay(this.version) && budget !== null ? Math.ceil(budget.asMillis()) : undefined;
 			try {
 				// Wait for the grant as a subscribe or fetch does; nobody waiting ends the wait.
 				while (

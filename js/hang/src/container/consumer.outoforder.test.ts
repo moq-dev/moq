@@ -75,7 +75,10 @@ async function drain(consumer: Consumer): Promise<[bigint, number | undefined][]
 // the budget. A group below that floor is never delivered and adds no gap. Mirrors Rust's
 // `startup_at_the_publishers_start_over_a_newer_first_arrival`.
 test("the head of the window arriving after the live edge is delivered first", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Duration.millis(30_000) });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		maxAge: Duration.millis(30_000),
+	});
 	const consumer = new Consumer(
 		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { absolute: 1n } }] }),
 		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
@@ -106,7 +109,10 @@ test("the head of the window arriving after the live edge is delivered first", a
 // loop consumes faster than the network delivers). Removing it at that instant silently truncates
 // its tail, so removal must wait for the group to finish.
 test("a head group still downloading is not truncated", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Duration.millis(30_000) });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		maxAge: Duration.millis(30_000),
+	});
 	const consumer = new Consumer(
 		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { absolute: 1n } }] }),
 		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
@@ -141,7 +147,10 @@ test("a head group still downloading is not truncated", async () => {
 // budget, or forever on an open track, for groups it never gets. Mirrors Rust's
 // `an_excluded_gap_between_ranges_does_not_stall`.
 test("an excluded gap between ranges does not stall", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Duration.millis(30_000) });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		maxAge: Duration.millis(30_000),
+	});
 	const consumer = new Consumer(
 		track.subscribe({
 			delay: { max: Duration.millis(10_000) },
@@ -162,13 +171,22 @@ test("an excluded gap between ranges does not stall", async () => {
 // which counts a newest group that held no frame yet, rather than wait under the budget for a group
 // below it that never comes. Mirrors Rust's `a_resolved_relative_floor_rises_to_the_publishers_start`.
 test("a resolved relative floor rises to the publisher's start", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Duration.millis(30_000) });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		maxAge: Duration.millis(30_000),
+	});
 	for (const sequence of [0n, 1n, 2n, 3n, 4n]) publish(track, sequence, Number(sequence) * 100);
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(10_000) }, ranges: [{ start: { relative: 0n } }] });
+	const subscriber = track.subscribe({
+		delay: { max: Duration.millis(10_000) },
+		ranges: [{ start: { relative: 0n } }],
+	});
 	expect(subscriber.floor()).toBe(4n);
 	// A session declares the publisher's start; a local track has none, so stand in for it.
 	subscriber.start = async () => 5n;
-	const consumer = new Consumer(subscriber, { format: new LegacyFormat("data"), delay: { max: Duration.millis(10_000) } });
+	const consumer = new Consumer(subscriber, {
+		format: new LegacyFormat("data"),
+		delay: { max: Duration.millis(10_000) },
+	});
 
 	publish(track, 5n, 500);
 	expect(await drain(consumer)).toEqual([[5n, 5]]);

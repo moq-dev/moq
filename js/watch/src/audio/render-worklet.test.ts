@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
 import type { Message, State } from "./render";
 
 // Load the real processor with only the browser registration boundary replaced. Each instance
@@ -40,7 +39,7 @@ try {
 function renderer() {
 	const render = new Render();
 	const send = (data: Message) => render.port.onmessage?.({ data } as MessageEvent<Message>);
-	send({ type: "init", channels: 1, rate: 1000, latency: Milli(100), buffered: true });
+	send({ type: "init", channels: 1, rate: 1000, latency: 100, buffered: true });
 	return {
 		send,
 		sent: render.sent,
@@ -55,10 +54,10 @@ function renderer() {
 describe("render dispatch", () => {
 	it("truncates the old track's tail without flushing the due prefix", () => {
 		const { send, read } = renderer();
-		send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(1)] });
+		send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(1)] });
 		expect([...read(50)]).toEqual(Array(50).fill(1));
-		send({ type: "truncate", timestamp: Micro(100_000) });
-		send({ type: "data", timestamp: Micro(100_000), data: [new Float32Array(20).fill(2)] });
+		send({ type: "truncate", timestamp: 100_000 });
+		send({ type: "data", timestamp: 100_000, data: [new Float32Array(20).fill(2)] });
 		const output = read(100);
 		// A short quantum fades its final 64 samples. The full prefix remains untouched and the
 		// retired tail is silent, so ignoring either message changes the output.
@@ -70,18 +69,18 @@ describe("render dispatch", () => {
 
 	it("echoes the applied reset epoch and anchors a replacement behind the previous timeline", () => {
 		const { send, read, sent } = renderer();
-		send({ type: "data", timestamp: Micro(10_000_000), data: [new Float32Array(200).fill(1)] });
+		send({ type: "data", timestamp: 10_000_000, data: [new Float32Array(200).fill(1)] });
 		read(20);
 		send({ type: "reset", epoch: 7 });
 		// Until it refills, no old samples may escape the reset.
 		expect([...read(20)]).toEqual(Array(20).fill(0));
-		send({ type: "data", timestamp: Micro(500_000), data: [new Float32Array(100).fill(2)] });
+		send({ type: "data", timestamp: 500_000, data: [new Float32Array(100).fill(2)] });
 		for (let i = 0; i < 3; i++) read(20);
 		expect(sent).toEqual([
 			{
 				type: "state",
 				epoch: 7,
-				timestamp: Micro(560_000),
+				timestamp: 560_000,
 				stalled: false,
 				anchored: true,
 				underruns: 0,
@@ -95,13 +94,13 @@ describe("render dispatch", () => {
 	// predate the park.
 	it("parks until the next floor update and echoes the park's epoch", () => {
 		const { send, read, sent } = renderer();
-		send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(1)] });
+		send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(1)] });
 		expect([...read(20)]).toEqual(Array(20).fill(1));
-		send({ type: "latency", latency: Milli(100), park: 3 });
+		send({ type: "latency", latency: 100, park: 3 });
 		expect([...read(20)]).toEqual(Array(20).fill(0));
-		send({ type: "data", timestamp: Micro(200_000), data: [new Float32Array(20).fill(2)] });
+		send({ type: "data", timestamp: 200_000, data: [new Float32Array(20).fill(2)] });
 		expect([...read(20)]).toEqual(Array(20).fill(0));
-		send({ type: "latency", latency: Milli(100) });
+		send({ type: "latency", latency: 100 });
 		// It fades back in on the parked audio, not the new data.
 		expect(read(20)[19]).toBe(1);
 		read(20);
@@ -109,7 +108,7 @@ describe("render dispatch", () => {
 			{
 				type: "state",
 				epoch: 3,
-				timestamp: Micro(60_000),
+				timestamp: 60_000,
 				stalled: false,
 				anchored: true,
 				underruns: 0,
@@ -120,11 +119,11 @@ describe("render dispatch", () => {
 
 	it("parks on a latency rise and preserves unread PCM", () => {
 		const { send, read } = renderer();
-		send({ type: "data", timestamp: Micro(0), data: [new Float32Array(100).fill(1)] });
+		send({ type: "data", timestamp: 0, data: [new Float32Array(100).fill(1)] });
 		expect([...read(20)]).toEqual(Array(20).fill(1));
-		send({ type: "latency", latency: Milli(200) });
+		send({ type: "latency", latency: 200 });
 		expect([...read(20)]).toEqual(Array(20).fill(0));
-		send({ type: "data", timestamp: Micro(100_000), data: [new Float32Array(120).fill(2)] });
+		send({ type: "data", timestamp: 100_000, data: [new Float32Array(120).fill(2)] });
 		const output = read(100);
 		expect(output[79]).toBe(1);
 		expect([...output.slice(80)]).toEqual(Array(20).fill(2));
@@ -136,8 +135,8 @@ describe("render dispatch", () => {
 it("fills a declared silence with comfort noise and counts no underrun", () => {
 	const { send, read, sent } = renderer();
 	const quiet = 0.0002;
-	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(quiet)] });
-	send({ type: "end", timestamp: Micro(200_000) });
+	send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(quiet)] });
+	send({ type: "end", timestamp: 200_000 });
 	for (let i = 0; i < 10; i++) expect(read(20)[0]).toBeCloseTo(quiet, 9);
 
 	const rms = (samples: Float32Array) => Math.sqrt(samples.reduce((sum, x) => sum + x * x, 0) / samples.length);
@@ -149,9 +148,9 @@ it("fills a declared silence with comfort noise and counts no underrun", () => {
 
 	// The next utterance refills before it plays, and the noise carries on meanwhile.
 	send({ type: "reset", epoch: 1, next: true });
-	send({ type: "data", timestamp: Micro(9_000_000), data: [new Float32Array(50).fill(1)] });
+	send({ type: "data", timestamp: 9_000_000, data: [new Float32Array(50).fill(1)] });
 	expect(rms(read(20))).toBeGreaterThan(0);
-	send({ type: "data", timestamp: Micro(9_050_000), data: [new Float32Array(50).fill(1)] });
+	send({ type: "data", timestamp: 9_050_000, data: [new Float32Array(50).fill(1)] });
 	read(20);
 	for (let i = 0; i < 3; i++) read(20);
 	expect(sent.at(-1)).toMatchObject({ underruns: 0, silent: false, stalled: false });
@@ -162,11 +161,11 @@ it("fills a declared silence with comfort noise and counts no underrun", () => {
 it("fills a declared silence between buffered utterances with comfort noise", () => {
 	const { send, read, sent } = renderer();
 	const quiet = 0.0002;
-	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(quiet)] });
-	send({ type: "end", timestamp: Micro(200_000) });
+	send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(quiet)] });
+	send({ type: "end", timestamp: 200_000 });
 	for (let i = 0; i < 9; i++) read(20);
 	send({ type: "reset", epoch: 1, next: true });
-	send({ type: "data", timestamp: Micro(400_000), data: [new Float32Array(200).fill(1)] });
+	send({ type: "data", timestamp: 400_000, data: [new Float32Array(200).fill(1)] });
 
 	const output = read(20);
 	expect(output[0]).toBeCloseTo(quiet, 9);
@@ -183,16 +182,16 @@ it("fills a declared silence between buffered utterances with comfort noise", ()
 
 it("caps comfort noise at -60 dBFS after loud audio", () => {
 	const { send, read } = renderer();
-	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(0.5)] });
-	send({ type: "end", timestamp: Micro(200_000) });
+	send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(0.5)] });
+	send({ type: "end", timestamp: 200_000 });
 	for (let i = 0; i < 10; i++) read(20);
 	expect(Math.max(...read(2000).map(Math.abs))).toBeLessThanOrEqual(0.001 * Math.sqrt(3));
 });
 
 it("adds no noise to a source that was already silent", () => {
 	const { send, read } = renderer();
-	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200)] });
-	send({ type: "end", timestamp: Micro(200_000) });
+	send({ type: "data", timestamp: 0, data: [new Float32Array(200)] });
+	send({ type: "end", timestamp: 200_000 });
 	for (let i = 0; i < 10; i++) read(20);
 	expect([...read(100)]).toEqual(Array(100).fill(0));
 });
@@ -200,13 +199,13 @@ it("adds no noise to a source that was already silent", () => {
 it("holds PCM without consuming it until the shared startup gate opens", () => {
 	const { send, read, sent } = renderer();
 	send({ type: "playing", playing: false, epoch: 0 });
-	send({ type: "data", timestamp: Micro(500_000), data: [new Float32Array(200).fill(1)] });
+	send({ type: "data", timestamp: 500_000, data: [new Float32Array(200).fill(1)] });
 	for (let i = 0; i < 5; i++) expect([...read(20)]).toEqual(Array(20).fill(0));
-	expect(sent[0]).toMatchObject({ timestamp: Micro(500_000), underruns: 0 });
+	expect(sent[0]).toMatchObject({ timestamp: 500_000, underruns: 0 });
 	send({ type: "playing", playing: true, epoch: 0 });
 	expect(read(100)[99]).toBe(1);
 	send({ type: "reset", epoch: 1, playing: false });
-	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(2)] });
+	send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(2)] });
 	send({ type: "playing", playing: true, epoch: 0 });
 	expect([...read(20)]).toEqual(Array(20).fill(0));
 	send({ type: "playing", playing: true, epoch: 1 });
@@ -215,8 +214,8 @@ it("holds PCM without consuming it until the shared startup gate opens", () => {
 
 it("clears comfort noise when the timeline resets", () => {
 	const { send, read } = renderer();
-	send({ type: "data", timestamp: Micro(0), data: [new Float32Array(200).fill(0.0002)] });
-	send({ type: "end", timestamp: Micro(200_000) });
+	send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(0.0002)] });
+	send({ type: "end", timestamp: 200_000 });
 	for (let i = 0; i < 10; i++) read(20);
 	expect(read(20).some((value) => value !== 0)).toBe(true);
 	send({ type: "reset", epoch: 1 });

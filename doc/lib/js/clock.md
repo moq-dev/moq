@@ -46,8 +46,8 @@ days, then gradually lose sub-microsecond precision. Compare instants only
 from the same clock. Rust and JS each own their origin: no instant may cross
 that boundary until the backend explicitly shares one.
 
-`Wall` is wall-clock time, separate from monotonic time: Unix milliseconds `ms`
-are `Wall.UNIX_EPOCH.add(Duration.millis(ms))`. Use it for dates, rather than
+`Wall` is wall-clock time, separate from monotonic time: `Wall.unixMillis(ms)`
+builds one from Unix milliseconds and `asUnixMillis()` reads them back exactly. Use it for dates, rather than
 measuring elapsed time. A new `Manual` starts at instant
 zero and 2025-01-01 UTC. `await advance()` moves both readings through each due
 timer deadline, draining tasks between deadlines, including timers those tasks

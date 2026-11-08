@@ -1,4 +1,4 @@
-import { Duration, now, sleep } from "@moq/clock";
+import { type Duration, now, sleep } from "@moq/clock";
 import { type GetPromise, Signal } from "@moq/signals";
 import { insertRun, type Run, runGaps } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";

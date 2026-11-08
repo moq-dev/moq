@@ -1,7 +1,7 @@
-import { Micro, type Second } from "@moq/clock";
+import { Duration, type Instant } from "@moq/clock";
 
 /**
- * Maps a file's presentation timeline onto our wall clock, repeating it forever.
+ * Maps a file's presentation timeline onto our clock, repeating it forever.
  *
  * One instance is shared by a file's audio and video so both restart at the same instant. Without
  * that they would drift apart by the difference between the two tracks' durations on every loop.
@@ -9,34 +9,33 @@ import { Micro, type Second } from "@moq/clock";
  * Not exported from `source/index.ts`: this is an implementation detail of the file source.
  */
 export class Timeline {
-	readonly #zero: Micro;
-	readonly #duration: Micro;
+	readonly #zero: Instant;
+	readonly #duration: Duration;
 
 	/**
-	 * Anchor a file of `duration` seconds at wall clock time `zero`.
+	 * Anchor a file of `duration` seconds at clock time `zero`.
 	 *
 	 * A file with no usable duration (unknown, zero, or infinite) can't be looped, only played once.
 	 */
-	constructor(zero: Micro, duration: number) {
+	constructor(zero: Instant, duration: number) {
 		this.#zero = zero;
-		this.#duration =
-			Number.isFinite(duration) && duration > 0 ? Micro.fromSecond(duration as Second) : (0 as Micro);
+		this.#duration = Number.isFinite(duration) && duration > 0 ? Duration.secs(duration) : Duration.ZERO;
 	}
 
 	/** Whether the file repeats rather than ending after one pass. */
 	get loops(): boolean {
-		return this.#duration > 0;
+		return !this.#duration.isZero();
 	}
 
-	/** When a file timestamp on the given pass should be published, on our wall clock. */
-	at(timestamp: Micro, loop: number): Micro {
-		return (this.#zero + timestamp + loop * this.#duration) as Micro;
+	/** When a file timestamp on the given pass should be published, on our clock. */
+	at(timestamp: Duration, loop: number): Instant {
+		return this.#zero.add(timestamp).add(this.#duration.mul(loop));
 	}
 
-	/** The file timestamp and pass due at the given wall clock time, the inverse of {@link at}. */
-	position(at: Micro): { timestamp: Micro; loop: number } {
-		const elapsed = Math.max(at - this.#zero, 0);
-		const loop = this.loops ? Math.floor(elapsed / this.#duration) : 0;
-		return { timestamp: (elapsed - loop * this.#duration) as Micro, loop };
+	/** The file timestamp and pass due at the given clock time, the inverse of {@link at}. */
+	position(at: Instant): { timestamp: Duration; loop: number } {
+		const elapsed = at.since(this.#zero);
+		const loop = this.loops ? Math.floor(elapsed.divDuration(this.#duration)) : 0;
+		return { timestamp: elapsed.sub(this.#duration.mul(loop)), loop };
 	}
 }

@@ -14,11 +14,14 @@ function setup(delay = BUDGET, warmup = 0, min = delay, max: number | null = del
 	const flush = () => clock.advance(Duration.ZERO);
 	const track = new Track.Producer("video");
 	// A null max delay sets no subscriber limit; an omitted one is zero.
-	const consumer = new Consumer(track.subscribe({ delay: { max: max === null ? null : Duration.millis(max + warmup) } }), {
-		format: new Format("video"),
-		delay: { min: Duration.millis(min), max: max === null ? null : Duration.millis(max) },
-		warmup: Duration.millis(warmup),
-	});
+	const consumer = new Consumer(
+		track.subscribe({ delay: { max: max === null ? null : Duration.millis(max + warmup) } }),
+		{
+			format: new Format("video"),
+			delay: { min: Duration.millis(min), max: max === null ? null : Duration.millis(max) },
+			warmup: Duration.millis(warmup),
+		},
+	);
 	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const reading = (async () => {
@@ -44,7 +47,9 @@ function setup(delay = BUDGET, warmup = 0, min = delay, max: number | null = del
 
 // Each frame as "<group>@<µs>".
 function frames(results: Read[]): string[] {
-	return results.flatMap((read) => (read.kind === "frame" ? [`${read.group}@${read.frame.timestamp.asMicros()}`] : []));
+	return results.flatMap((read) =>
+		read.kind === "frame" ? [`${read.group}@${read.frame.timestamp.asMicros()}`] : [],
+	);
 }
 
 function write(group: Group.Producer, timestamp: number) {

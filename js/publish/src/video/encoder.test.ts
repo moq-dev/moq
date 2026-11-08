@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano, sleep } from "@moq/clock";
+import { Duration, type Installed, Manual, sleep } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -14,7 +14,7 @@ import { type Config, Encoder } from "./encoder";
 const ANNEX_B = { byteLength: 4, copyTo: (dest: Uint8Array) => dest.set([0, 0, 0, 1]) };
 
 // How long a fake hardware probe takes on the installed clock.
-const PROBE = Nano.fromMilli(Milli(5));
+const PROBE = Duration.millis(5);
 
 let clock = new Manual();
 let installed: Installed | undefined;
@@ -610,8 +610,8 @@ test("software-only AV1 is refused even when explicitly requested", async () => 
 
 // Regression: only the codec probe and `maxScale` settled the encoder on failure, so a knob that broke
 // resolution later (a negative bitrate) held `<moq-publish>`'s announce forever.
-for (const invalid of [{ bitrateScale: -1 }, { join: Milli(0) }] satisfies Config[]) {
-	test(`an invalid knob settles the encoder without a config: ${JSON.stringify(invalid)}`, async () => {
+for (const invalid of [{ bitrateScale: -1 }, { join: Duration.millis(0) }] satisfies Config[]) {
+	test(`an invalid knob settles the encoder without a config: ${Object.keys(invalid)[0]}`, async () => {
 		using _videoEncoder = installFakeVideoEncoder();
 		const error = spyOn(console, "error").mockImplementation(() => {});
 		const capture = {
@@ -1394,7 +1394,7 @@ test.each([false, true])(
 			await recording.send(150);
 			expect(recording.keys).toEqual(onDemand ? [] : [0, 100]);
 
-			late = net.track("video").subscribe({ delay: { max: Milli(10_000) } });
+			late = net.track("video").subscribe({ delay: { max: Duration.millis(10_000) } });
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
 			await recording.send(200);
@@ -1438,7 +1438,7 @@ test("an on-demand rendition declares its join, and a media subscriber starts it
 		name: Moq.Path.from("join.hang"),
 		onDemand: true,
 	});
-	const config = new Signal<Config | undefined>({ join: Milli(3000) });
+	const config = new Signal<Config | undefined>({ join: Duration.millis(3000) });
 	const encoder = new Encoder("video", {
 		enabled: true,
 		broadcast,
@@ -1463,7 +1463,7 @@ test("an on-demand rendition declares its join, and a media subscriber starts it
 		expect(encoder.out.active.peek()).toBe(true);
 
 		// A later join leaves the declared grid alone for this broadcast.
-		config.set({ join: Milli(5000) });
+		config.set({ join: Duration.millis(5000) });
 		await settle();
 		expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(3000));
 	} finally {
@@ -1488,14 +1488,14 @@ test("the default join is the declared join interval", async () => {
 
 // The declared join interval is the longest group when media is first listed: a 3000ms join
 // declares 3000ms, and a live change at 2500ms, after a keyframe at 0, is held to it.
-async function liveInterval(changed: Milli): Promise<{ keys: number[]; interval?: number }> {
+async function liveInterval(changed: Duration): Promise<{ keys: number[]; interval?: number }> {
 	using recording = await installRecording();
 	const broadcast = new Broadcast({
 		enabled: true,
 		origin: new Moq.Origin.Producer(),
 		name: Moq.Path.from("interval.hang"),
 	});
-	const config = new Signal<Config | undefined>({ join: Milli(3000) });
+	const config = new Signal<Config | undefined>({ join: Duration.millis(3000) });
 	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never, config });
 	try {
 		await settle();
@@ -1512,11 +1512,11 @@ async function liveInterval(changed: Milli): Promise<{ keys: number[]; interval?
 
 test("a live join raise is capped at the declared join interval", async () => {
 	const capped = { keys: [0, 3000, 6000, 9000, 12000, 15000], interval: 3000 };
-	expect(await liveInterval(Milli(6000))).toEqual(capped);
-	// Infinite is not a valid Milli, but a config is not checked.
-	expect(await liveInterval(Number.POSITIVE_INFINITY as Milli)).toEqual(capped);
+	expect(await liveInterval(Duration.millis(6000))).toEqual(capped);
+	// Any raise past the declaration stops there, however large.
+	expect(await liveInterval(Duration.secs(3600))).toEqual(capped);
 	// Within the declaration, a cut applies as asked.
-	const cut = await liveInterval(Milli(1000));
+	const cut = await liveInterval(Duration.millis(1000));
 	expect(cut.interval).toBe(3000);
 	expect(cut.keys.slice(0, 4)).toEqual([0, 2500, 3500, 4500]);
 });
@@ -1526,9 +1526,7 @@ test("a join that is not a positive duration refuses the rendition", async () =>
 	const error = spyOn(console, "error").mockImplementation(() => {});
 	try {
 		// A live change at 2500ms stops the encoder already running there.
-		for (const join of [0, -1, Number.NaN]) {
-			expect((await liveInterval(join as Milli)).keys).toEqual([0]);
-		}
+		expect((await liveInterval(Duration.ZERO)).keys).toEqual([0]);
 	} finally {
 		error.mockRestore();
 	}

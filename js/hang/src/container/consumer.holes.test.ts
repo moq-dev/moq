@@ -24,7 +24,10 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 	})();
 	try {
 		const first = track.createGroup(0n);
-		first.writeFrame({ payload: encodeFrame(new Uint8Array([1]), Duration.micros(10_000)), timestamp: Time.Timestamp.now() });
+		first.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Duration.micros(10_000)),
+			timestamp: Time.Timestamp.now(),
+		});
 		first.finish();
 		await flush();
 		expect(results).toHaveLength(1);
@@ -73,7 +76,10 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 	const write = (sequence: bigint, timestamp?: number) => {
 		const group = track.createGroup(sequence);
 		group.writeFrame({
-			payload: timestamp === undefined ? new Uint8Array() : encodeFrame(new Uint8Array([1]), Duration.micros(timestamp)),
+			payload:
+				timestamp === undefined
+					? new Uint8Array()
+					: encodeFrame(new Uint8Array([1]), Duration.micros(timestamp)),
 			timestamp: Time.Timestamp.fromMicros(timestamp ?? 20_000),
 		});
 		group.finish();
@@ -212,7 +218,10 @@ test("a hole in a drained backlog is late from the earliest arrival past it, not
 		group.finish();
 	};
 	const first = track.createGroup(0n);
-	first.writeFrame({ payload: encodeFrame(new Uint8Array([1]), Duration.micros(0)), timestamp: Time.Timestamp.fromMicros(0) });
+	first.writeFrame({
+		payload: encodeFrame(new Uint8Array([1]), Duration.micros(0)),
+		timestamp: Time.Timestamp.fromMicros(0),
+	});
 	first.finish();
 	marker(5n);
 	await clock.advance(Duration.millis(900));
@@ -292,7 +301,11 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 		// The end, then the stopped encoder's final packet, as a native publisher writes them.
 		write(1n, [60_000, new Uint8Array()], [40_000]);
 		await flush();
-		expect(results).toEqual([frame(0n, 0), { kind: "end", group: 1n, end: Duration.micros(60_000) }, frame(1n, 40_000)]);
+		expect(results).toEqual([
+			frame(0n, 0),
+			{ kind: "end", group: 1n, end: Duration.micros(60_000) },
+			frame(1n, 40_000),
+		]);
 		write(3n, [60_060_000]);
 		await flush();
 		await clock.advance(Duration.millis(299));

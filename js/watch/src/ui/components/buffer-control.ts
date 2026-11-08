@@ -1,18 +1,19 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type { Effect } from "@moq/signals";
 import type { BufferedRanges } from "../..";
 import type MoqWatch from "../../element";
 
-const MIN_RANGE = Milli(0);
-const RANGE_STEP = Milli(10);
-const DEFAULT_MAX = Milli(4000);
+// In milliseconds, as the slider draws and steps them.
+const MIN_RANGE = 0;
+const RANGE_STEP = 10;
+const DEFAULT_MAX = 4000;
 const LABEL_WIDTH = 48;
 
 function drawRanges(
 	canvas: HTMLCanvasElement,
 	ranges: BufferedRanges,
-	timestamp: number | undefined,
-	max: Milli,
+	playhead: Duration | undefined,
+	max: number,
 	isBuffering: boolean,
 ) {
 	const ctx = canvas.getContext("2d");
@@ -33,7 +34,8 @@ function drawRanges(
 	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 	ctx.clearRect(0, 0, width, height);
 
-	if (timestamp === undefined) return;
+	if (playhead === undefined) return;
+	const timestamp = playhead.asMillis();
 
 	const padding = 2;
 	const rangeHeight = height - padding * 2;
@@ -42,8 +44,8 @@ function drawRanges(
 	for (let i = 0; i < ranges.length; i++) {
 		const range = ranges[i];
 		// Offsets from the playhead, negative for content already behind it.
-		const startMs = range.start - timestamp;
-		const endMs = range.end - timestamp;
+		const startMs = range.start.asMillis() - timestamp;
+		const endMs = range.end.asMillis() - timestamp;
 		const visibleStart = Math.max(0, startMs);
 		const visibleEnd = Math.min(endMs, max);
 
@@ -75,7 +77,7 @@ function drawRanges(
 	}
 }
 
-export function bufferControl(parent: Effect, watch: MoqWatch, max: Milli = DEFAULT_MAX): HTMLElement {
+export function bufferControl(parent: Effect, watch: MoqWatch, max: number = DEFAULT_MAX): HTMLElement {
 	const wrapper = document.createElement("div");
 	wrapper.className = "buffer";
 
@@ -128,7 +130,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Milli = DEFA
 	let hasInteracted = false;
 
 	parent.run((effect) => {
-		const delay = effect.get(watch.sync.out.delay);
+		const delay = effect.get(watch.sync.out.delay).asMillis();
 		const pct = (delay / max) * 100;
 		targetLine.style.left = `${pct}%`;
 		targetLabel.textContent = `${Math.round(delay)}ms`;
@@ -140,9 +142,8 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Milli = DEFA
 		const trackWidth = rect.width - LABEL_WIDTH;
 		const x = Math.max(0, Math.min(clientX - rect.left - LABEL_WIDTH, trackWidth));
 		const ms = (x / trackWidth) * max;
-		const snapped = Milli(Math.round(ms / RANGE_STEP) * RANGE_STEP);
-		const clamped = Milli(Math.max(MIN_RANGE, Math.min(max, snapped)));
-		watch.delay = clamped;
+		const snapped = Math.round(ms / RANGE_STEP) * RANGE_STEP;
+		watch.delay = Duration.millis(Math.max(MIN_RANGE, Math.min(max, snapped)));
 	};
 
 	const interact = () => {
@@ -180,8 +181,8 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Milli = DEFA
 		}
 		e.preventDefault();
 		interact();
-		const current = watch.sync.out.delay.peek();
-		const value = Milli(Math.max(MIN_RANGE, Math.min(max, current + delta)));
+		const current = watch.sync.out.delay.peek().asMillis();
+		const value = Duration.millis(Math.max(MIN_RANGE, Math.min(max, current + delta)));
 		watch.delay = value;
 	});
 

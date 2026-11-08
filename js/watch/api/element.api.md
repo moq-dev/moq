@@ -36,7 +36,7 @@ export default class extends HTMLElement {
 			volume: Signals.Signal<number>;
 		};
 		delay: Signals.Signal<Delay>;
-		lookahead: Signals.Signal<Clock.Milli>;
+		lookahead: Signals.Signal<Clock.Duration>;
 		paused: Signals.Signal<boolean>;
 		text: {
 			target: Signals.Signal<string | undefined>;
@@ -58,8 +58,8 @@ export default class extends HTMLElement {
 	readonly emitter: Audio.Emitter;
 	get follow(): boolean;
 	set follow(value: boolean);
-	get lookahead(): Clock.Milli;
-	set lookahead(value: Clock.Milli);
+	get lookahead(): Clock.Duration;
+	set lookahead(value: Clock.Duration);
 	get muted(): boolean;
 	set muted(value: boolean);
 	get name(): Net.Path.Valid;

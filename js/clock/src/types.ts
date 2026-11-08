@@ -290,8 +290,7 @@ export class Instant {
 /**
  * A point in wall-clock time, separate from monotonic time, mirroring `kio::clock::Wall`.
  *
- * Convert Unix milliseconds with `Wall.UNIX_EPOCH.add(Duration.millis(ms))` and back with
- * `wall.since(Wall.UNIX_EPOCH).asMillis()`.
+ * Convert Unix milliseconds exactly with `Wall.unixMillis(ms)` and back with `asUnixMillis()`.
  */
 export class Wall {
 	/** 1970-01-01T00:00:00Z. */
@@ -308,6 +307,16 @@ export class Wall {
 	static {
 		wallOf = (millis) => new Wall(checked(millis, "wall time"));
 		wallMillis = (at) => at[VALUE];
+	}
+
+	/** The time `millis` Unix milliseconds after the epoch; throws a `RangeError` before it or past the safe range. */
+	static unixMillis(millis: number): Wall {
+		return new Wall(checked(millis, "wall time"));
+	}
+
+	/** Unix milliseconds, exact: `since(Wall.UNIX_EPOCH)` goes through nanoseconds, which pass 2^53. */
+	asUnixMillis(): number {
+		return this[VALUE];
 	}
 
 	/** This time moved forward by `duration`. */
@@ -357,6 +366,7 @@ export class Wall {
 
 	/** The time as an ISO 8601 string, or Unix milliseconds past `Date`'s range. */
 	toString(): string {
+		// biome-ignore lint/style/noRestrictedGlobals: formats a time, never reads the host clock.
 		return this[VALUE] <= 8.64e15 ? new Date(this[VALUE]).toISOString() : `Wall(${this[VALUE]}ms)`;
 	}
 
@@ -365,7 +375,7 @@ export class Wall {
 		return refuse("Wall");
 	}
 
-	/** Refuses: serialize `since(Wall.UNIX_EPOCH)` with an explicit unit instead. */
+	/** Refuses: serialize `asUnixMillis()` instead. */
 	toJSON(): never {
 		return refuse("Wall");
 	}

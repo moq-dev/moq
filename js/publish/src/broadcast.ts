@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Report, Stats } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -62,7 +62,7 @@ export type BroadcastInput = {
 	 * shortens how far back a fetch can reach. A track's max age is fixed when it is created,
 	 * so changing this publishes a new network broadcast.
 	 */
-	maxAge: Getter<Milli | null | undefined>;
+	maxAge: Getter<Duration | null | undefined>;
 
 	/**
 	 * Whether to publish a stats track and name it in the catalog's `stats` section. Defaults to
@@ -102,8 +102,8 @@ function longestGroup(effect: Effect, renditions: ReadonlyMap<string, Rendition<
 	for (const rendition of renditions.values()) {
 		if (rendition.kind === "text") continue;
 		const hint = effect.get(rendition.join);
-		if (hint === undefined || !Number.isFinite(hint) || hint <= 0) continue;
-		longest = Math.max(longest ?? 0, Math.ceil(hint));
+		if (hint === undefined || hint.isZero()) continue;
+		longest = Math.max(longest ?? 0, Math.ceil(hint.asMillis()));
 	}
 	return longest === undefined ? undefined : Catalog.u53(longest);
 }
@@ -169,7 +169,7 @@ export class Broadcast {
 	 * the longest group any video or audio rendition promised when media was first listed. Fixed
 	 * for the network broadcast, so an encoder holds its groups within it. Undefined until declared.
 	 */
-	readonly join = new Signal<Milli | undefined>(undefined);
+	readonly join = new Signal<Duration | undefined>(undefined);
 
 	// Each catalog ID in the latest catalog fold, which seeds a new network broadcast's publication.
 	#listed = new Map<string, Listing>();
@@ -312,7 +312,7 @@ export class Broadcast {
 			publication.join = longestGroup(effect, renditions);
 		}
 		const join = publication?.join;
-		this.join.set(join === undefined ? undefined : Milli(join));
+		this.join.set(join === undefined ? undefined : Duration.millis(join));
 
 		this.catalog.mutate((catalog) => {
 			if (join !== undefined) {
@@ -396,7 +396,7 @@ export class Broadcast {
 			if (demand.get(watched)) demand.get(this.in.probe);
 		});
 
-		effect.interval(() => writer.update(this.#stats()), Nano.fromMilli(Milli(Report.INTERVAL)));
+		effect.interval(() => writer.update(this.#stats()), Duration.millis(Report.INTERVAL));
 	}
 
 	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.
@@ -407,7 +407,7 @@ export class Broadcast {
 			if (stats && rendition.config.peek() !== undefined) renditions[rendition.name] = stats;
 		}
 		const rtt = this.in.probe.peek()?.rtt;
-		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt) }, renditions };
+		return rtt === undefined ? { renditions } : { transport: { rtt: Math.floor(rtt.asMillis()) }, renditions };
 	}
 
 	// The names outside a publication's own that a replacement must avoid: every registered ID, and

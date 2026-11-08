@@ -1,4 +1,4 @@
-import { Duration, Instant, now, sleep } from "@moq/clock";
+import { Duration, type Instant, now, sleep } from "@moq/clock";
 import { Derived, Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";

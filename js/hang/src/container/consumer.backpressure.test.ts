@@ -228,7 +228,7 @@ test("Consumer charges a small view of a large wire frame the wire frame", async
 		const padding = new Uint8Array(60_000);
 		for (let i = 0; i < 8; i++) {
 			padded.writeFrame({
-				payload: encodeFrame(padding, Duration.micros((10_000 + i))),
+				payload: encodeFrame(padding, Duration.micros(10_000 + i)),
 				timestamp: Time.Timestamp.now(),
 			});
 		}
@@ -236,10 +236,16 @@ test("Consumer charges a small view of a large wire frame the wire frame", async
 
 		// The padded frames fill the max buffer behind the stalled group, which moves the cursor on to them.
 		// Charging only the one byte views, the buffer never fills and the reader waits on the stall.
-		expect(await within(consumer.next())).toMatchObject({ kind: "frame", frame: { timestamp: Duration.micros(0) } });
+		expect(await within(consumer.next())).toMatchObject({
+			kind: "frame",
+			frame: { timestamp: Duration.micros(0) },
+		});
 		expect(await within(consumer.next())).toMatchObject({ kind: "gap" });
 		for (let i = 0; i < 8; i++) {
-			expect(await within(consumer.next())).toMatchObject({ kind: "frame", frame: { timestamp: Duration.micros(10_000 + i) } });
+			expect(await within(consumer.next())).toMatchObject({
+				kind: "frame",
+				frame: { timestamp: Duration.micros(10_000 + i) },
+			});
 		}
 	} finally {
 		consumer.close();
@@ -268,8 +274,14 @@ test("Consumer stamps frames the max buffer held back with when they landed, not
 		// The reader is slow: nothing is read until well after both frames landed.
 		await clock.advance(Duration.millis(750));
 
-		expect(await consumer.next()).toMatchObject({ kind: "frame", frame: { timestamp: Duration.micros(0), arrival: Instant.ZERO } });
-		expect(await consumer.next()).toMatchObject({ kind: "frame", frame: { timestamp: Duration.micros(10_000), arrival: Instant.ZERO.add(Duration.millis(250)) } });
+		expect(await consumer.next()).toMatchObject({
+			kind: "frame",
+			frame: { timestamp: Duration.micros(0), arrival: Instant.ZERO },
+		});
+		expect(await consumer.next()).toMatchObject({
+			kind: "frame",
+			frame: { timestamp: Duration.micros(10_000), arrival: Instant.ZERO.add(Duration.millis(250)) },
+		});
 	} finally {
 		consumer.close();
 		track.close();
@@ -329,7 +341,10 @@ for (const maxBuffer of [0, 256]) {
 
 			expect(await consumer.next()).toMatchObject({ kind: "frame", frame: { timestamp: Duration.micros(0) } });
 			expect(await consumer.next()).toMatchObject({ kind: "gap" });
-			expect(await consumer.next()).toMatchObject({ kind: "frame", frame: { timestamp: Duration.micros(10_000) } });
+			expect(await consumer.next()).toMatchObject({
+				kind: "frame",
+				frame: { timestamp: Duration.micros(10_000) },
+			});
 		} finally {
 			consumer.close();
 			track.close();
@@ -358,7 +373,11 @@ test("Consumer moves past a stalled backlog group below the cursor once the max 
 		newer.finish();
 
 		expect(await consumer.next()).toMatchObject({ kind: "gap" });
-		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 4n, frame: { timestamp: Duration.micros(40_000) } });
+		expect(await consumer.next()).toMatchObject({
+			kind: "frame",
+			group: 4n,
+			frame: { timestamp: Duration.micros(40_000) },
+		});
 	} finally {
 		consumer.close();
 		track.close();
@@ -393,7 +412,11 @@ test("Consumer reads what a promoted head already holds before skipping it under
 
 		// Group 0 is skipped, but group 1 is read once promoted rather than skipped before its task runs.
 		expect(await consumer.next()).toMatchObject({ kind: "gap" });
-		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 1n, frame: { timestamp: Duration.micros(10_000) } });
+		expect(await consumer.next()).toMatchObject({
+			kind: "frame",
+			group: 1n,
+			frame: { timestamp: Duration.micros(10_000) },
+		});
 	} finally {
 		consumer.close();
 		track.close();
@@ -503,7 +526,11 @@ test("Consumer reads a finished marker group's end before skipping under pressur
 		// Group 0 is skipped, and group 1 declares its end before group 2 is read.
 		expect(await within(consumer.next())).toMatchObject({ kind: "gap" });
 		expect(await within(consumer.next())).toMatchObject({ kind: "end", group: 1n });
-		expect(await within(consumer.next())).toMatchObject({ kind: "frame", group: 2n, frame: { timestamp: Duration.micros(20_000) } });
+		expect(await within(consumer.next())).toMatchObject({
+			kind: "frame",
+			group: 2n,
+			frame: { timestamp: Duration.micros(20_000) },
+		});
 	} finally {
 		consumer.close();
 		track.close();
@@ -542,7 +569,11 @@ test("Consumer reads a group whose frame fails to read as cut short while the re
 		armed = true;
 
 		expect(await pending).toMatchObject({ kind: "gap" });
-		expect(await within(consumer.next())).toMatchObject({ kind: "frame", group: 1n, frame: { timestamp: Duration.micros(10_000) } });
+		expect(await within(consumer.next())).toMatchObject({
+			kind: "frame",
+			group: 1n,
+			frame: { timestamp: Duration.micros(10_000) },
+		});
 	} finally {
 		consumer.close();
 		track.close();

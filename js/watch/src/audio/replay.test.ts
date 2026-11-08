@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
 
@@ -46,7 +46,7 @@ describe("replay", () => {
 		expect(
 			await underruns(
 				paced(10, () => 30),
-				{ rate: RATE, config: CONFIG, delay: Milli(100), duration: observed(10) },
+				{ rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(10) },
 			),
 		).toBe(0);
 	});
@@ -55,13 +55,13 @@ describe("replay", () => {
 		// Five frames held and flushed at once: 80 ms of arrival spread.
 		const trace = paced(10, (i) => 30 + (4 - (i % 5)) * 20);
 		expect(
-			await underruns(trace, { rate: RATE, config: CONFIG, delay: Milli(40), duration: observed(10) }),
+			await underruns(trace, { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(10) }),
 		).toBeGreaterThan(50);
 		expect(
 			await underruns(trace, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(150),
+				delay: Duration.millis(150),
 				duration: observed(10),
 			}),
 		).toBe(0);
@@ -75,7 +75,7 @@ describe("replay", () => {
 			for await (const { underruns } of replay(arrivals, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: observed(10),
 			}))
 				last = underruns;
@@ -94,7 +94,7 @@ describe("replay", () => {
 			await underruns(trace, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(frame);
@@ -110,7 +110,7 @@ describe("replay", () => {
 			await underruns(trace, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(0);
@@ -124,7 +124,7 @@ describe("replay", () => {
 			{
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: 15_000,
 			},
 		)) {
@@ -162,7 +162,7 @@ describe("ingress diagnostics", () => {
 			for await (const quantum of replay(trace, {
 				rate: RATE,
 				config: CONFIG,
-				delay: Milli(100),
+				delay: Duration.millis(100),
 				duration: 300,
 				decodeAfter,
 			}))
@@ -175,8 +175,8 @@ describe("ingress diagnostics", () => {
 		expect(held).toEqual(
 			trace.map((entry) => ({
 				kind: "frame" as const,
-				timestamp: Milli(entry.timestamp),
-				arrival: Milli(entry.at),
+				timestamp: Duration.millis(entry.timestamp),
+				arrival: Instant.ZERO.add(Duration.millis(entry.at)),
 				late: false,
 			})),
 		);
@@ -228,7 +228,7 @@ describe("recorded frame durations", () => {
 		for await (const { output } of replay(trace, {
 			rate: RATE,
 			config: CONFIG,
-			delay: Milli(20),
+			delay: Duration.millis(20),
 			duration: 100,
 		}))
 			heard += output.filter((sample) => sample !== 0).length;

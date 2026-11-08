@@ -153,7 +153,8 @@ function ptsContiguous(end: number | undefined, nextStart: number | undefined): 
 function continues(prev: Group, next: Group | undefined): next is Group {
 	if (next === undefined) return false;
 	return (
-		next.consumer.sequence === prev.consumer.sequence + 1n || ptsContiguous(prev.end, next.frames.at(0)?.timestamp.asMicros())
+		next.consumer.sequence === prev.consumer.sequence + 1n ||
+		ptsContiguous(prev.end, next.frames.at(0)?.timestamp.asMicros())
 	);
 }
 

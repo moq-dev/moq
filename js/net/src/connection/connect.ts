@@ -710,7 +710,7 @@ async function hedgeWebTransport(
 		(err: unknown) => err instanceof Elapsed,
 	);
 	if (!hedge) return first;
-	console.debug(show(parse(url)), `WebTransport not open after ${WEBTRANSPORT_HEDGE}ms; dialing a second`);
+	console.debug(show(parse(url)), `WebTransport not open after ${WEBTRANSPORT_HEDGE}; dialing a second`);
 
 	const dials = [first, dialWebTransport(target, cancel)];
 	try {

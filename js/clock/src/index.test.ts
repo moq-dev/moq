@@ -31,9 +31,9 @@ function manual(): Manual {
 }
 // Read an instant or wall time as a plain number for assertions.
 const ns = (at: Instant): number => at.since(Instant.ZERO).asNanos();
-const ms = (at: Wall): number => at.since(Wall.UNIX_EPOCH).asMillis();
+const ms = (at: Wall): number => at.asUnixMillis();
 const instant = (nanos: number): Instant => Instant.ZERO.add(Duration.nanos(nanos));
-const unix = (millis: number): Wall => Wall.UNIX_EPOCH.add(Duration.millis(millis));
+const unix = (millis: number): Wall => Wall.unixMillis(millis);
 const START = ms(Manual.WALL_START);
 
 test("durations convert units and refuse to become numbers", () => {
@@ -65,6 +65,15 @@ test("durations convert units and refuse to become numbers", () => {
 		// @ts-expect-error a duration does not convert to a number
 		void (Duration.millis(1) as number);
 	}
+});
+
+test("wall time round-trips Unix milliseconds exactly", () => {
+	// Past 2^53 ns, a detour through a Duration since the epoch would round.
+	for (const millis of [0, 1_735_689_600_001, 4_102_444_800_123, Number.MAX_SAFE_INTEGER]) {
+		expect(Wall.unixMillis(millis).asUnixMillis()).toBe(millis);
+	}
+	expect(() => Wall.unixMillis(-1)).toThrow(RangeError);
+	expect(() => Wall.unixMillis(Number.NaN)).toThrow(RangeError);
 });
 
 test("manual reads and wall corrections share a clock without inventing elapsed time", () => {
