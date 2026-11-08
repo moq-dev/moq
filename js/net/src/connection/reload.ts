@@ -50,7 +50,10 @@ export type ReloadDelay = {
 	/** The multiplier for the delay after each failure (default: 2; below 1 keeps it constant). */
 	multiplier?: number;
 
-	/** The maximum delay (default: 5000ms; `null` leaves it uncapped). A cap below `initial` caps the first delay too. */
+	/**
+	 * The maximum delay (default: 5000ms; `null` leaves it uncapped; zero retries at once). A cap
+	 * below `initial` caps the first delay too.
+	 */
 	max?: Milli | null;
 
 	/**
@@ -64,7 +67,7 @@ export type ReloadDelay = {
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
-	 * (default: `null`, unlimited). Counts from the first dial, and restarts after a healthy session
+	 * (default: `null`, unlimited; zero gives up when the first attempt fails). Counts from the first dial, and restarts after a healthy session
 	 * outside a redirect loop, a URL change, or a disable/re-enable. It decides whether another
 	 * attempt starts and never cuts one that is running, so giving up can take up to one attempt
 	 * longer than the window; {@link ConnectProps.timeout} bounds each attempt. A peer that

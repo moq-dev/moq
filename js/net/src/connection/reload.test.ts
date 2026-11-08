@@ -1293,6 +1293,8 @@ const windows: [string, ReloadDelay, number, number][] = [
 	["an attempt under way finishes past the window", { initial: Milli(10), timeout: Milli(100) }, 110, 3],
 	// The first failure at 30 ms leaves 30 ms, less than the 50 ms wait, so it gives up at the deadline.
 	["a wait that reaches the deadline gives up there", { initial: Milli(50), timeout: Milli(60) }, 60, 1],
+	// Zero is a real bound, not "unlimited": the first failure at 30 ms gives up.
+	["a zero window gives up when the first attempt fails", { initial: Milli(10), timeout: Milli(0) }, 30, 1],
 ];
 for (const [name, delay, gaveUp, dials] of windows) {
 	test(`retry window: ${name}`, async () => {
@@ -1341,6 +1343,8 @@ const backoffs: [string, ReloadDelay, number[]][] = [
 	["a session past the healthy bar resets", { healthy: Milli(50) }, [10, 10, 10]],
 	["a null max leaves the delay uncapped", { initial: Milli(1000), multiplier: 4, max: null }, [1000, 4000, 16000]],
 	["a max below initial caps the first delay too", { max: Milli(5) }, [5, 5, 5]],
+	// Zero is a real cap, not "uncapped".
+	["a zero max retries at once", { max: Milli(0) }, [0, 0, 0]],
 	["a zero multiplier keeps the delay constant", { multiplier: 0 }, [10, 10, 10]],
 	["a fractional multiplier below 1 keeps the delay constant", { multiplier: 0.5 }, [10, 10, 10]],
 ];
