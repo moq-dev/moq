@@ -3,8 +3,9 @@
 ## Goal
 
 `js/net`'s "an update keeping the budget drops the stale groups again on
-lite-07" passes under `--rerun-each 200`. The reader's track ends cleanly
-after the producer finishes, never with a `Cancel` reset.
+lite-07" cannot flake. A reply still pending when the track finishes ends
+the reader's track cleanly, never with a `Cancel` reset, and the re-drop
+check does not depend on wall-clock time.
 
 ## Plan
 
@@ -21,12 +22,15 @@ reply while the producer finishes, so the clean end can lose to the reset.
 The test's 500 ms elapsed assert never ran.
 
 [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195), which landed
-after that run, changed how lite-07 replies yield on the write budget. First
-check whether main still fails under `--rerun-each 200`, and whether the
-unrelated-branch failures were the same reset. If main is clean, delete this
-quest. Otherwise fix the race in the publisher, so a reply blocked when the
-track ends cleanly still lets the end arrive as a FIN, with a test that fails
-without the fix. Moving the 500 ms wall-clock assert onto the `Manual` clock is
-optional hardening, since that assert has not failed.
+after that run, changed how lite-07 replies yield on the write budget, so it
+may already have cured this. A clean rerun sample cannot show that. Add a
+deterministic test that holds a reply pending on the write budget while the
+track finishes, and asserts the subscriber sees a clean end, not `Cancel`. If
+it passes on main, it lands as the regression test. If it fails, fix the race
+in the publisher so the end still arrives as a FIN.
+
+Also move the test's 500 ms elapsed assert onto the `Manual` clock, or an
+event-based check, so a CI pause cannot fail it, while a missing re-drop
+(which would wait out the 1.5 s grace) still does.
 
 Public API: none. Wire: none.

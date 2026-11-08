@@ -210,4 +210,4 @@ Public API: none. Wire: none.
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [moq-relay's forged-dial test waits for bob's endpoint](/quest/m0/test-flakes-2/forged-dial-announce.md) - `a_forged_dial_never_connects` requests bob's endpoint only after its announce reaches mallory, and its `#[ignore]` is removed
 - [moq-uring's qlog accounting test waits on the accounting](/quest/m0/test-flakes-2/qlog-staging-spin.md) - `an_open_trace_accounts_for_staging_and_close` waits for the accounting, not 10,000 spins
-- [js/net's widened max-age re-drop test ends cleanly, not with a reset](/quest/m0/test-flakes-2/widened-max-age-reset.md) - the lite-07 re-drop case passes under `--rerun-each 200`, its end never lost to a blocked reply's `Cancel` reset
+- [js/net's widened max-age re-drop test ends cleanly, not with a reset](/quest/m0/test-flakes-2/widened-max-age-reset.md) - a reply pending at the track's end yields a clean end, not a `Cancel` reset, and the re-drop check leaves the wall clock
