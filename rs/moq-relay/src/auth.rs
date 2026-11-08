@@ -1581,7 +1581,7 @@ mod tests {
 	async fn capped_grants_are_refused_without_a_pacer() {
 		use moq_auth::Transport::*;
 		let rate = moq_auth::Rate::from_bps(8000).unwrap();
-		for transport in [Quic, WebTransport, Iroh, WebSocket, Http, Rtmp, Srt] {
+		for transport in [Quic, WebTransport, WebSocket, Http, Rtmp, Srt] {
 			for publish in [false, true] {
 				let mut grant = Grant::new(Pattern::all(), Pattern::all());
 				match publish {

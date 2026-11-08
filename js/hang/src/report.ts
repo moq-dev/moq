@@ -22,17 +22,22 @@ const REFRESH = 8;
  * never leaves the process. It takes `@moq/net`'s zero default max age: a joiner reads only the
  * newest group, which starts with a full snapshot.
  */
-export class Writer<T> {
+export class Writer<T, I = T> {
 	/** The report track. */
 	readonly track: Moq.Track.Producer;
 
 	#producer: Json.Snapshot.Producer<T>;
+	#schema: z.ZodMiniType<T, I>;
 	#closed = false;
 
-	/** Create `name` on `broadcast`, validating each report against `schema` before it is written. */
-	constructor(broadcast: Moq.Broadcast.Producer, name: string, schema?: z.ZodMiniType<T>) {
+	/**
+	 * Create `name` on `broadcast`, parsing each report with `schema` before it is written, so a
+	 * publisher passes the schema's input (plain numbers) and readers get its output.
+	 */
+	constructor(broadcast: Moq.Broadcast.Producer, name: string, schema: z.ZodMiniType<T, I>) {
 		this.track = broadcast.createTrack(name, { priority: PRIORITY, compress: true, refresh: REFRESH });
-		this.#producer = new Json.Snapshot.Producer<T>({ track: this.track, schema });
+		this.#producer = new Json.Snapshot.Producer<T>({ track: this.track });
+		this.#schema = schema;
 	}
 
 	/**
@@ -40,10 +45,10 @@ export class Writer<T> {
 	 * unchanged value writes nothing. A track that refuses a write would refuse every later one, so it
 	 * is aborted with the cause, which its subscribers read.
 	 */
-	update(value: T): void {
+	update(value: I): void {
 		if (this.#closed || this.track.demand().wanted.peek() === undefined) return;
 		try {
-			this.#producer.update({ value });
+			this.#producer.update({ value: this.#schema.parse(value) });
 		} catch (err) {
 			console.warn("a report track failed; closing it", err);
 			this.#closed = true;
