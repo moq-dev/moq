@@ -31,7 +31,7 @@ pub use mp4_atom;
 /// any of it is staged. It matches the transport's per-group bound,
 /// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), which the rewritten sample must fit.
 /// Media samples stream into their frames and have no such bound.
-pub const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
 
 /// The largest metadata box body parsed on import or from received CMAF.
 ///
@@ -40,7 +40,7 @@ pub const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
 /// [`TrunEntry`](mp4_atom::TrunEntry)), so this keeps a parse within [`MAX_HELD_BYTES`].
 /// Counts and retained metadata-tree entries are checked separately, including entries that
 /// consume no bytes. Media payloads in `mdat` keep their transport-owned bound.
-pub const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
+const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
 
 /// The most samples parsed or planned for one CMAF fragment.
 ///
@@ -48,7 +48,7 @@ pub const MAX_METADATA_BYTES: usize = MAX_HELD_BYTES / 16;
 /// a sample, so a fragment at this bound plans within [`MAX_HELD_BYTES`]. A `moof` at
 /// [`MAX_METADATA_BYTES`] holds this many 16-byte `trun` entries. A shorter fragment is also held
 /// to one sample per metadata byte past the first 4,096.
-pub const MAX_FRAGMENT_SAMPLES: u64 = (MAX_METADATA_BYTES / 16) as u64;
+const MAX_FRAGMENT_SAMPLES: u64 = (MAX_METADATA_BYTES / 16) as u64;
 
 /// Samples a fragment may declare beyond one per byte of its metadata.
 ///
@@ -62,7 +62,7 @@ pub(crate) const FRAGMENT_SAMPLE_BASE: u64 = 4096;
 ///
 /// Each track costs about 16 KiB to parse and set up, and keeps its catalog entry and output
 /// state for as long as the import runs. Real files declare a handful.
-pub const MAX_TRACKS: usize = 256;
+const MAX_TRACKS: usize = 256;
 
 #[cfg(test)]
 mod export_test;
@@ -235,7 +235,7 @@ pub enum Error {
 	#[error("backwards per-track data offset is unsupported for streaming import")]
 	BackwardsDataOffset,
 
-	/// A metadata body exceeds [`MAX_METADATA_BYTES`] and is refused before parsing.
+	/// A metadata body over 2 MiB is refused before parsing.
 	#[error("{kind} declares {size} bytes, more than the {MAX_METADATA_BYTES} a metadata parser accepts")]
 	MetadataTooLarge {
 		/// The box type.
@@ -244,18 +244,19 @@ pub enum Error {
 		size: usize,
 	},
 
-	/// A text sample is rewritten whole, so one larger than [`MAX_HELD_BYTES`] is refused
-	/// before any of its bytes are staged.
+	/// A text sample is rewritten whole, so one larger than the transport's per-group bound,
+	/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), is refused before any of its bytes
+	/// are staged.
 	#[error("text sample of {0} bytes is more than the {MAX_HELD_BYTES} an importer holds")]
 	TextSampleTooLarge(usize),
 
-	/// A fragment declaring more than [`MAX_FRAGMENT_SAMPLES`], or more than one sample per byte
+	/// A fragment declaring more than 131,072 samples, or more than one sample per byte
 	/// of its metadata past a small base, is refused before parsing. A `trun` without per-sample
 	/// fields declares its count in four bytes, so the byte bound alone does not limit it.
 	#[error("moof declares {0} samples, more than a fragment of its size accepts")]
 	TooManySamples(u64),
 
-	/// A `moov` declaring more than [`MAX_TRACKS`] tracks is refused before any is created.
+	/// A `moov` declaring more than 256 tracks is refused before any is created.
 	#[error("moov declares {0} tracks, more than the {MAX_TRACKS} an importer accepts")]
 	TooManyTracks(usize),
 

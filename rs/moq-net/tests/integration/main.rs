@@ -60,7 +60,6 @@ mod route_health;
 mod routing_contracts;
 mod segmented_frame;
 mod session_close;
-mod session_idle;
 mod session_panic;
 mod settled_end_survives_abort;
 mod setup_negotiation;

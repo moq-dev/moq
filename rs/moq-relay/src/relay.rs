@@ -147,7 +147,7 @@ impl Relay {
 		// another relay. Only negotiated when both sides offer it, so other peers never see it.
 		config.listen.extensions.ietf = true;
 		config.connect.extensions.ietf = true;
-		// Name the relay ahead of its core unless the operator overrides it (empty omits it),
+		// Name the relay ahead of its core unless the embedder set a name (empty omits it),
 		// and dial cluster peers under the same name.
 		let implementation = config
 			.listen

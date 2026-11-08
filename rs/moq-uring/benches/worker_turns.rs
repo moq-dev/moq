@@ -15,7 +15,7 @@ mod support;
 	reason = "benchmarks measure themselves on the host clock"
 )]
 fn request_reply(c: &mut criterion::Criterion) {
-	use std::{net::UdpSocket, num::NonZeroUsize, time::Instant};
+	use std::{net::UdpSocket, time::Instant};
 
 	use criterion::Throughput;
 	use moq_uring::{Config, Worker, quic, udp};
@@ -30,92 +30,88 @@ fn request_reply(c: &mut criterion::Criterion) {
 	let mut group = c.benchmark_group("worker_request_reply");
 	for connections in [1, 16] {
 		for bytes in [64, 256 * 1024] {
-			for passes in [1, 4] {
-				let mut config = Config::default();
-				config.passes = NonZeroUsize::new(passes).unwrap();
-				let mut worker = Worker::new(config).expect("worker");
-				let handle = worker.handle();
-				let socket = || {
-					handle
-						.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
-						.expect("socket")
-				};
-				let server = quic::Endpoint::new(
-					quic::endpoint::Config::default().with_server(quic::server::Config::new(tls.clone())),
-					socket(),
-				)
-				.expect("server");
-				let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket()).expect("client");
-				let mut dial = quic::client::Config::default();
-				dial.alpn = vec![ALPN.to_owned()];
-				dial.verify = false;
-				for _ in 0..connections {
-					let server = server.clone();
-					handle.spawn(async move {
-						let conn = server.accept().await.expect("accept");
-						let (mut send, mut recv) = conn.accept_bi().await.expect("stream");
-						let reply = bytes::Bytes::from(vec![0x5a; bytes]);
-						let mut request = [0; 64];
-						while recv.read_exact(&mut request).await.is_ok() {
-							send.write_all(reply.clone()).await.expect("reply");
-						}
-					});
-				}
-				let (mut streams, _held) = worker
-					.block_on(async {
-						let mut streams = Vec::new();
-						let mut held = Vec::new();
-						for _ in 0..connections {
-							let conn = client
-								.connect(&dial, server.local_addr(), "localhost")
-								.await
-								.expect("dial");
-							streams.push(conn.open_bi(Default::default()).await.expect("stream"));
-							held.push(conn);
-						}
-						(streams, held)
-					})
-					.expect("worker");
-				let id = format!("connections-{connections}/bytes-{bytes}/passes-{passes}");
-				group.throughput(Throughput::Bytes((connections * (64 + bytes)) as u64));
-				let mut reply = vec![0; bytes];
-				let completed = kio::Queue::bounded(1);
-				group.bench_function(id.clone(), |b| {
-					b.iter_custom(|rounds| {
-						let mut running = std::mem::take(&mut streams);
-						let mut answer = std::mem::take(&mut reply);
-						let done = completed.clone();
-						handle.spawn(async move {
-							for _ in 0..rounds {
-								for (send, _) in &mut running {
-									send.write_all(&[0xa5; 64][..]).await.expect("request");
-								}
-								for (_, recv) in &mut running {
-									recv.read_exact(&mut answer).await.expect("reply");
-								}
-							}
-							done.try_push((running, answer)).expect("complete");
-						});
-						let before = handle.metrics().snapshot();
-						let start = Instant::now();
-						(streams, reply) = worker
-							.block_on(kio::wait(|waiter| completed.poll_pop(waiter)))
-							.expect("worker")
-							.expect("measurement");
-						let elapsed = start.elapsed();
-						let after = handle.metrics().snapshot();
-						assert!(reply.iter().all(|byte| *byte == 0x5a));
-						eprintln!(
-							"{id} rounds={rounds} turns={} passes={} enters={} rx_datagrams={}",
-							after.turns - before.turns,
-							after.passes - before.passes,
-							after.enters - before.enters,
-							after.rx_datagrams - before.rx_datagrams,
-						);
-						elapsed
-					});
+			let mut worker = Worker::new(Config::default()).expect("worker");
+			let handle = worker.handle();
+			let socket = || {
+				handle
+					.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+					.expect("socket")
+			};
+			let server = quic::Endpoint::new(
+				quic::endpoint::Config::default().with_server(quic::server::Config::new(tls.clone())),
+				socket(),
+			)
+			.expect("server");
+			let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket()).expect("client");
+			let mut dial = quic::client::Config::default();
+			dial.alpn = vec![ALPN.to_owned()];
+			dial.verify = false;
+			for _ in 0..connections {
+				let server = server.clone();
+				handle.spawn(async move {
+					let conn = server.accept().await.expect("accept");
+					let (mut send, mut recv) = conn.accept_bi().await.expect("stream");
+					let reply = bytes::Bytes::from(vec![0x5a; bytes]);
+					let mut request = [0; 64];
+					while recv.read_exact(&mut request).await.is_ok() {
+						send.write_all(reply.clone()).await.expect("reply");
+					}
 				});
 			}
+			let (mut streams, _held) = worker
+				.block_on(async {
+					let mut streams = Vec::new();
+					let mut held = Vec::new();
+					for _ in 0..connections {
+						let conn = client
+							.connect(&dial, server.local_addr(), "localhost")
+							.await
+							.expect("dial");
+						streams.push(conn.open_bi(Default::default()).await.expect("stream"));
+						held.push(conn);
+					}
+					(streams, held)
+				})
+				.expect("worker");
+			let id = format!("connections-{connections}/bytes-{bytes}");
+			group.throughput(Throughput::Bytes((connections * (64 + bytes)) as u64));
+			let mut reply = vec![0; bytes];
+			let completed = kio::Queue::bounded(1);
+			group.bench_function(id.clone(), |b| {
+				b.iter_custom(|rounds| {
+					let mut running = std::mem::take(&mut streams);
+					let mut answer = std::mem::take(&mut reply);
+					let done = completed.clone();
+					handle.spawn(async move {
+						for _ in 0..rounds {
+							for (send, _) in &mut running {
+								send.write_all(&[0xa5; 64][..]).await.expect("request");
+							}
+							for (_, recv) in &mut running {
+								recv.read_exact(&mut answer).await.expect("reply");
+							}
+						}
+						done.try_push((running, answer)).expect("complete");
+					});
+					let before = handle.metrics().snapshot();
+					let start = Instant::now();
+					(streams, reply) = worker
+						.block_on(kio::wait(|waiter| completed.poll_pop(waiter)))
+						.expect("worker")
+						.expect("measurement");
+					let elapsed = start.elapsed();
+					let after = handle.metrics().snapshot();
+					assert!(reply.iter().all(|byte| *byte == 0x5a));
+					eprintln!(
+						"{id} rounds={rounds} turns={} passes={} enters={} rx_datagrams={}",
+						after.turns - before.turns,
+						after.passes - before.passes,
+						after.enters - before.enters,
+						after.rx_datagrams - before.rx_datagrams,
+					);
+					elapsed
+				});
+			});
 		}
 	}
 	group.finish();

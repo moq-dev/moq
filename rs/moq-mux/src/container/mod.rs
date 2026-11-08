@@ -31,7 +31,7 @@ pub mod mkv;
 pub mod mp4;
 pub mod ts;
 
-pub use consumer::{Consumer, DEFAULT_MAX_BUFFER, Playout};
+pub use consumer::{Consumer, Playout};
 pub use group::GroupConsumer;
 pub use producer::Producer;
 pub(crate) use source::{ExportSource, Resume};
