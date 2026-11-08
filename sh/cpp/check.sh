@@ -11,6 +11,13 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
 fi
 
+# Both configure and build need the cache session for CMake's compiler launchers.
+# Keep Visual Studio builds on plain CMake, as on the Windows platform job.
+cmake_command=(cmake)
+if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]] && command -v mbx >/dev/null 2>&1; then
+    cmake_command=(mbx exec cmake)
+fi
+
 ffi_dir=""
 archive=""
 if [[ $# -gt 0 ]]; then
@@ -64,8 +71,8 @@ if [[ -n "$archive" ]]; then
     fi
 else
     prefix="$PWD/$build/prefix"
-    cmake -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$ffi_dir"
-    cmake --build "$build/package" --config Release
+    "${cmake_command[@]}" -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$ffi_dir"
+    "${cmake_command[@]}" --build "$build/package" --config Release
     rm -rf "$prefix"
     cmake --install "$build/package" --config Release --prefix "$prefix"
 fi
@@ -74,8 +81,8 @@ run() {
     if [[ -x "$1/$2" ]]; then "$1/$2"; else "$1/Release/$2.exe"; fi
 }
 for std in 17 23; do
-    cmake -S moq/test -B "$build/test-$std" -DCMAKE_BUILD_TYPE= -DCMAKE_CXX_STANDARD="$std" -DCMAKE_PREFIX_PATH="$prefix"
-    cmake --build "$build/test-$std" --config Release --parallel
+    "${cmake_command[@]}" -S moq/test -B "$build/test-$std" -DCMAKE_BUILD_TYPE= -DCMAKE_CXX_STANDARD="$std" -DCMAKE_PREFIX_PATH="$prefix"
+    "${cmake_command[@]}" --build "$build/test-$std" --config Release --parallel
     run "$build/test-$std" probe
 done
 # The C++23 probe over the C++17 bindings.

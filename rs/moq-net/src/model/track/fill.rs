@@ -1060,17 +1060,6 @@ impl Fill {
 			.map(drop)
 	}
 
-	/// Poll until a run's next group may be written: at once until a reader of the track lost
-	/// a group to eviction, then as [`Self::poll_paced`]. An unpaced run moves at its source's
-	/// speed, which is fine while every reader keeps up.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_run_paced(&self, waiter: &kio::Waiter) -> Poll<()> {
-		if self.inner.state.read().evictions == 0 {
-			return Poll::Ready(());
-		}
-		self.poll_paced(waiter)
-	}
-
 	/// Refuse every group still owed with `err`, which says nothing about whether the source
 	/// has them, so nothing is recorded dropped.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]

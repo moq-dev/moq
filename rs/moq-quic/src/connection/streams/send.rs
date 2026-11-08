@@ -7,7 +7,7 @@ use thiserror::Error;
 use tracing::trace;
 
 use super::{StreamsState, schedule::Slot};
-use crate::connection::{ConnectionTag, State as ConnState, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
+use crate::connection::{ConnectionTag, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
 use crate::{StreamId, VarInt, frame};
 
 #[derive(Debug)]
@@ -17,8 +17,6 @@ pub(super) struct Send {
 	pub(super) pending: SendBuffer,
 	pub(super) priority: i64,
 	pub(super) slot: Slot,
-	/// Whether a frame containing a FIN bit must be transmitted, even if we don't have any new data
-	pub(super) fin_pending: bool,
 	/// Value of `max_data` for which a `STREAM_DATA_BLOCKED` frame was most recently queued
 	///
 	/// A new frame is only queued once the peer has raised the limit.
@@ -39,7 +37,6 @@ impl Send {
 			pending: SendBuffer::new(),
 			priority: 0,
 			slot: Slot::default(),
-			fin_pending: false,
 			data_blocked_limit: None,
 			stop_reason: None,
 			notify: None,
@@ -56,8 +53,10 @@ impl Send {
 		if let Some(error_code) = self.stop_reason {
 			Err(Error::Stopped(error_code))
 		} else if self.state == SendState::Ready {
-			self.state = SendState::DataSent { finish_acked: false };
-			self.fin_pending = true;
+			self.state = SendState::DataSent {
+				finish_acked: false,
+				fin_pending: true,
+			};
 			Ok(())
 		} else {
 			Err(Error::Closed)
@@ -101,7 +100,7 @@ impl Send {
 		}
 		match self.state {
 			SendState::ResetSent { error_code, .. } => Some(End::Reset(error_code)),
-			SendState::DataSent { finish_acked: true } if self.pending.is_fully_acked() => Some(End::Finished),
+			SendState::DataSent { finish_acked: true, .. } if self.pending.is_fully_acked() => Some(End::Finished),
 			_ => None,
 		}
 	}
@@ -120,7 +119,6 @@ impl Send {
 		debug_assert!(reliable_size <= self.pending.offset());
 		let final_size = self.pending.offset();
 		self.pending.truncate(reliable_size);
-		self.fin_pending = false;
 		let send = at || self.pending.is_fully_acked();
 		self.state = ResetSent {
 			final_size,
@@ -240,7 +238,7 @@ impl Send {
 	pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
 		self.pending.ack(frame.offsets);
 		match &mut self.state {
-			SendState::DataSent { finish_acked } => {
+			SendState::DataSent { finish_acked, .. } => {
 				*finish_acked |= frame.fin;
 				*finish_acked && self.pending.is_fully_acked()
 			}
@@ -295,7 +293,7 @@ impl Send {
 	}
 
 	pub(super) fn is_pending(&self) -> bool {
-		self.pending.has_unsent_data() || self.fin_pending
+		self.pending.has_unsent_data() || matches!(self.state, SendState::DataSent { fin_pending: true, .. })
 	}
 
 	pub(super) fn is_writable(&self) -> bool {
@@ -308,7 +306,11 @@ pub(super) enum SendState {
 	/// Sending new data
 	Ready,
 	/// Stream was finished; now sending retransmits only
-	DataSent { finish_acked: bool },
+	DataSent {
+		finish_acked: bool,
+		/// A frame with the FIN bit is due, even without new data
+		fin_pending: bool,
+	},
 	/// Reset by the application, while data below `reliable_size` is still delivered
 	///
 	/// The peer gets RESET_STREAM_AT, or, without it, a RESET_STREAM `held` until it has
@@ -331,23 +333,19 @@ pub struct Stream<'a> {
 	pub(crate) id: StreamId,
 	pub(crate) state: &'a mut StreamsState,
 	pub(crate) pending: &'a mut Retransmits,
-	pub(crate) conn_state: &'a ConnState,
+	/// The connection ended, so nothing more is written
+	pub(crate) closed: bool,
 }
 
 impl<'a> Stream<'a> {
 	/// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
 	#[cfg(any(test, feature = "fuzz"))]
-	pub(crate) fn new(
-		id: StreamId,
-		state: &'a mut StreamsState,
-		pending: &'a mut Retransmits,
-		conn_state: &'a ConnState,
-	) -> Self {
+	pub(crate) fn new(id: StreamId, state: &'a mut StreamsState, pending: &'a mut Retransmits, closed: bool) -> Self {
 		Self {
 			id,
 			state,
 			pending,
-			conn_state,
+			closed,
 		}
 	}
 
@@ -357,7 +355,7 @@ impl<'a> Stream<'a> {
 	/// splits off without copying. Fails with [`Error::Blocked`] when nothing fits;
 	/// [`Self::poll_write`] waits for room instead.
 	pub fn write(&mut self, data: &mut impl Buf) -> Result<usize, Error> {
-		if self.conn_state.is_closed() {
+		if self.closed {
 			trace!(%self.id, "write blocked; connection draining");
 			return Err(Error::Blocked);
 		}
@@ -543,7 +541,7 @@ impl<'a> Stream<'a> {
 			},
 		};
 		match acked {
-			Ok(false) if self.conn_state.is_closed() => Err(Error::Closed),
+			Ok(false) if self.closed => Err(Error::Closed),
 			acked => acked,
 		}
 	}

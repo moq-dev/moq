@@ -3894,9 +3894,12 @@ impl Producer {
 	/// there. Those sequences are then final: creating one is refused. Appending alone never
 	/// leaves such a gap; one left by out-of-order [`Self::create_group`] calls is what it names.
 	///
-	/// The broadcast remembers nothing of an earlier producer of the name, so a replacement
-	/// starts at 0. Since a name always means the same content, a replacement continues past
-	/// its predecessor's groups with [`Self::create_group`].
+	/// The same broadcast, track, and group sequence always name the same content, and nothing
+	/// checks it: the broadcast remembers nothing of an earlier producer of the name, so a
+	/// replacement starts at 0. A recreated track, or a restarted publisher keeping its
+	/// instance, continues past its predecessor's groups with [`Self::create_group`], or uses
+	/// a new track name or instance. Reusing a sequence only corrupts this broadcast for its
+	/// readers. Datagram sequences name no cached content and are exempt.
 	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		let sequence = state.next_sequence()?;

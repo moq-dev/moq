@@ -26,9 +26,9 @@ publish = false
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 aws-lc-rs = { version = "1" }
-base16ct = { version = "1", default-features = false, features = ["alloc"] }
 base64-2b5c6dc72f624058 = { package = "base64", version = "0.23" }
 base64-3c51e837cfc5589a = { package = "base64", version = "0.22" }
+base64ct = { version = "1", default-features = false, features = ["alloc"] }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
@@ -89,13 +89,12 @@ ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "s
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
 rand = { version = "0.8" }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
-rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
-sec1 = { version = "0.8", features = ["ctutils", "pem", "std", "subtle"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
@@ -135,9 +134,9 @@ zeroize = { version = "1", features = ["derive"] }
 [build-dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 aws-lc-rs = { version = "1" }
-base16ct = { version = "1", default-features = false, features = ["alloc"] }
 base64-2b5c6dc72f624058 = { package = "base64", version = "0.23" }
 base64-3c51e837cfc5589a = { package = "base64", version = "0.22" }
+base64ct = { version = "1", default-features = false, features = ["alloc"] }
 bytemuck = { version = "1", default-features = false, features = ["derive", "extern_crate_alloc", "min_const_generics"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
@@ -203,13 +202,12 @@ proptest = { version = "1", default-features = false, features = ["handle-panics
 quote = { version = "1" }
 rand = { version = "0.8" }
 rand_chacha = { version = "0.3", default-features = false, features = ["std"] }
-rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem"] }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
 reqwest = { version = "0.13", default-features = false, features = ["gzip", "http2", "json", "rustls", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
-sec1 = { version = "0.8", features = ["ctutils", "pem", "std", "subtle"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }

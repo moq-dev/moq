@@ -225,7 +225,7 @@ mod tests {
 			.route("output", moq_net::origin::RouteOptions::hidden())
 			.expect("create output broadcast");
 		let output_consumer = output.broadcast().consume();
-		let client = Client::new(client::Config::default());
+		let client = Client::new(client::Config::default()).unwrap();
 		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
 		let fill = output.broadcast().clone();
 		let viewer = tokio::spawn(async move { client.subscribe(url, fill).await });
@@ -285,7 +285,7 @@ mod tests {
 		);
 		let (address, http) = serve(app).await;
 
-		let client = Client::new(client::Config::default());
+		let client = Client::new(client::Config::default()).unwrap();
 		let url = format!("http://{address}/whip/ingested").parse().expect("WHIP URL");
 		let source = origin.consume();
 		let broadcast = source.request("source", None).await.unwrap();
@@ -354,7 +354,7 @@ mod tests {
 		origin: &moq_net::origin::Producer,
 		address: std::net::SocketAddr,
 	) -> tokio::task::JoinHandle<crate::Result<()>> {
-		let client = Client::new(client::Config::default());
+		let client = Client::new(client::Config::default()).unwrap();
 		let url = format!("http://{address}/whip/ingested").parse().expect("WHIP URL");
 		let source = origin.consume();
 		let broadcast = source.request("source", None).await.unwrap();
@@ -518,7 +518,7 @@ mod tests {
 			);
 		let (address, http) = serve(app).await;
 
-		let client = Client::new(client::Config::default());
+		let client = Client::new(client::Config::default()).unwrap();
 		// Credentials in the dialed URLs must never reach the client's connect logs.
 		let whip = format!("http://user:pass@{address}/whip/ingested?jwt=canary-7f3e")
 			.parse()

@@ -29,4 +29,3 @@ Public API: none. Wire: none.
 
 - [CI cost and latency](/quest/m0/ci/README.md) - where the nightly budget lives
 - [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) - fixes the moq-sock overread a cmsg target would hit
-- [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the media parser targets beside these, and the bugs they found

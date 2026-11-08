@@ -1,6 +1,7 @@
 /** Sweep retained groups and subscribers for one group published through a track and received. */
 
 import { Milli } from "@moq/clock";
+import { DEFAULT_EXPIRY } from "../src/cache.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
 import { Timescale, Timestamp } from "../src/time.ts";
 import { Producer, type Subscriber } from "../src/track.ts";
@@ -16,8 +17,6 @@ const holds = [
 ] as const;
 type Hold = (typeof holds)[number];
 const groups = 100;
-// Matches the private idle window and Rust cache::DEFAULT_EXPIRY.
-const CACHE_WINDOW_MS = 30_000;
 const reps = 7;
 // Publishing a group must not cost more as the retained window grows, or a guard or cache pass
 // has gone back to scanning every retained group. The sweep spans 60x, so a scan lands well past
@@ -61,7 +60,7 @@ async function measure(
 	let sequence = 0;
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.
 	const publish = (close: boolean) => {
-		clock += held > 0 ? 1 : CACHE_WINDOW_MS / retained;
+		clock += held > 0 ? 1 : DEFAULT_EXPIRY / retained;
 		const group = producer.createGroup(BigInt(sequence));
 		group.writeFrame({ payload, timestamp: Timestamp.fromMillis(sequence++) });
 		if (close) group.finish();
@@ -114,7 +113,7 @@ async function measure(
 	producer.finish();
 	producer.close();
 	// Ending the track releases the newest group too; idle cleanup reclaims the cache.
-	clock += CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8 + 1;
+	clock += 2 * DEFAULT_EXPIRY;
 	const idleStart = now();
 	const replay = producer.subscribe({ delay: { max: window } });
 	if (replay.tryRecvGroup()) throw new Error("idle cache entries were retained");

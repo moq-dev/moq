@@ -8,7 +8,7 @@ description: SRT contribution and playback
 `moq import srt` accepts SRT pushes (`--listen`) or pulls from a remote SRT
 source (`--connect`); `moq export srt` serves SRT to players or pushes to a
 remote. The payload is MPEG-TS, so the same codecs and behavior as
-[`import ts`](/bin/cli) apply: H.264/H.265 video and AAC, MP2, AC-3, E-AC-3, or
+[`import ts`](/bin/ts) apply: H.264/H.265 video and AAC, MP2, AC-3, E-AC-3, or
 Opus audio. A damaged unit is dropped and the session stays up; video resumes at its
 next keyframe, freezing for up to one GOP.
 
@@ -33,10 +33,8 @@ return or a replacement on the same connection, as they do for
 [`export ts`](/bin/cli#retention-and-latency).
 
 A multi-program feed is refused unless `--program`
-picks one: `--program 2` imports program 2 alone, and `--program all`
-publishes each program as its own broadcast (`event.hang` becomes
-`event/1.hang`, `event/2.hang`, and so on), following the PAT as programs
-join and leave.
+picks one, as for [`import ts`](/bin/ts#programs-and-changes). SRT has no
+passthrough mode.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import srt --listen '[::]:9000' --program all

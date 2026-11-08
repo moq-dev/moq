@@ -6,6 +6,7 @@
 
 import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
 import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import * as cache from "./cache.ts";
 import { Delivered } from "./delivered.ts";
 import {
 	GroupTooLarge,
@@ -43,7 +44,7 @@ import {
 	staleHole,
 	type TrackRequestOptions,
 } from "./internal.ts";
-import { CACHE_EXPIRY, grace, Ledger } from "./ledger.ts";
+import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
@@ -76,12 +77,6 @@ function taken(read: () => Recv, ended: () => undefined): GroupConsumer | undefi
 		if (recv.kind !== "drop") return undefined;
 	}
 }
-
-// Media delay.max only bounds how far behind the live edge a reader may fall.
-const CACHE_WINDOW = Nano.fromMilli(CACHE_EXPIRY);
-
-// The cache scans at most this many times per idle cache window.
-const PRUNE_SLICES = 8;
 
 // The unset priority, the midpoint of the signed range: moq-lite carries it as 128 and
 // moq-transport as 127, one urgency on both.
@@ -814,12 +809,13 @@ function after(a: Position, b: Position): boolean {
 }
 
 // A source group retained in the producer cache, with the mirror handed to each sink
-// so eviction can drop them together.
+// so eviction can drop them together, and what it all bills the cache pool.
 // `arrived` is when the group joined this track, which its mirrors age a predecessor from.
 // `bound` is its first frame's timestamp once checked to fit between its neighbors', which
 // bounds theirs; `unverified` marks one accepted below the eviction watermark instead.
 type CachedGroup = {
 	group: GroupProducer;
+	charge: cache.Charge;
 	mirrors: Map<TrackState, GroupConsumer>;
 	arrived: Instant;
 	bound?: Timestamp;
@@ -1015,11 +1011,12 @@ export class Producer {
 	// must not see them. The wire's aggregate, `#state.update`, keeps them.
 	#live = new Signal<Subscription | undefined>(undefined);
 
-	// Recently written source groups, retained for replay to late subscribers and
-	// pruned once idle for longer than the cache window. Each entry tracks the mirror
-	// it handed to every sink so eviction can drop them too: otherwise a slow consumer
-	// that never reads would pin old groups (and their frame bytes) forever.
-	#cache: CachedGroup[] = [];
+	// Recently written source groups, in arrival order, retained for replay to late subscribers
+	// until the cache pool evicts them, for its budget or once idle. A set, so evicting a run of
+	// them is linear. Each entry tracks the mirror it handed to every sink so eviction can drop
+	// them too: otherwise a slow consumer that never reads would pin old groups (and their frame
+	// bytes) forever.
+	#cache = new Set<CachedGroup>();
 	// The same entries by sequence, so a write finds a duplicate without a scan.
 	#cached = new Map<bigint, CachedGroup>();
 	// The cached groups' checked starts, sorted by sequence, so a first frame finds its
@@ -1029,16 +1026,9 @@ export class Producer {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	#evicted?: Start;
-	// When the cache was last scanned. See #prune.
-	#pruned = Number.NEGATIVE_INFINITY;
-	// When the track closed, which restarts the former newest group's idle window. See #prune.
-	#closedAt = Number.NEGATIVE_INFINITY;
-
-	// Wakeup for the next entry due to age out. Writes settle retention inline, but a
-	// publisher that stalls stops writing, so without this an abandoned group (and any
-	// reader parked in it) would wait for a write that never comes.
-	#pruneTimer?: AbortController;
-	#pruneTimerAt = 0;
+	// This track's account against its broadcast's cache pool (a pool of its own when it has no
+	// broadcast), which bills the cached groups and evicts them under its budget and idle window.
+	#account: cache.Track<CachedGroup>;
 
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
@@ -1091,9 +1081,31 @@ export class Producer {
 			closed: () => this.#state.closed.peek() !== undefined,
 			released: this.#state.closed,
 		});
+		this.#account = this.#openAccount(new cache.Pool({ expiry: cache.DEFAULT_EXPIRY }));
+	}
+
+	// Open this track's account against `pool`, evicting through this producer's cache.
+	#openAccount(pool: cache.Pool): cache.Track<CachedGroup> {
+		return new cache.Track(pool, {
+			protects: (entry) => this.#protects(entry),
+			edge: () => {
+				const entry = this.#edgeEntry();
+				return entry && this.#protects(entry) ? entry : undefined;
+			},
+			evict: (entry, reason) => {
+				this.#evict(entry, reason);
+				this.#uncache(entry, true);
+			},
+			shed: (entry, debt, cap) => hooks.shedGroup(entry.group, debt, cap, entry.mirrors.values()),
+			settle: () => this.#settle(),
+		});
 	}
 
 	static {
+		hooks.poolTrack = (producer, pool) => {
+			if (!producer.#account.empty) throw new Error("track already caches groups");
+			producer.#account = producer.#openAccount(pool);
+		};
 		hooks.subscribing = (producer) => producer.#subscribing;
 		hooks.requested = (producer) => producer.#state.update;
 		resubscribe = (producer) => producer.#updateSubscription();
@@ -1195,6 +1207,8 @@ export class Producer {
 				return undefined;
 			}
 			hooks.arriveGroup(mirror, entry.arrived);
+			// A cache hit is an access: the group outranks those nobody read.
+			entry.charge.refresh();
 			return mirror;
 		};
 		reofferCached = (producer, sink, start, end, offer) => {
@@ -1478,6 +1492,7 @@ export class Producer {
 						// A group its recovery moved to another copy no longer reads this one.
 						if (hooks.readsMirrored(mirror)) hooks.releaseGroupReader(mirror, abort);
 						entry.mirrors.delete(sink);
+						entry.charge.sub(cache.MIRROR_OVERHEAD);
 					}
 				}
 				for (const group of sink.groups.peek()) hooks.releaseGroupReader(group, abort);
@@ -1485,7 +1500,8 @@ export class Producer {
 			});
 		}
 
-		this.#prune();
+		// Full, unlike a write's bounded scan, so the subscriber gets no group already idled out.
+		this.#evictExpired(true);
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 		sink.drops.set(this.#state.drops.peek());
 		sink.judged = this.#state.judged;
@@ -1522,6 +1538,7 @@ export class Producer {
 		const dst = entry.group.mirror();
 		hooks.arriveGroup(dst, entry.arrived);
 		if (entry.unverified) hooks.unverifyGroup(dst);
+		if (!entry.mirrors.has(sink)) entry.charge.bill(cache.MIRROR_OVERHEAD);
 		entry.mirrors.set(sink, dst);
 		if (sink.reads?.(dst.sequence) === false) hooks.groupReads(dst, false);
 		timelineInsert(sink.timeline, dst);
@@ -1531,18 +1548,20 @@ export class Producer {
 		sink.groups.mutate((groups) => bufferInsert(groups, dst));
 	}
 
-	// Drop a cached group's mirror from every sink so no consumer can pin it.
-	#evict(entry: CachedGroup): void {
+	// Drop a cached group's mirror from every sink so no consumer can pin it, the cache pool
+	// having reclaimed it for its bytes (`evicted`) or for idling (`expired`).
+	#evict(entry: CachedGroup, reason: "evicted" | "expired" = "expired"): void {
 		// Reclaiming a group the publisher never closed ends it as the gap it is, before
 		// the mirrors below would otherwise report a clean finish to a reader that had
 		// drained it. The usual case, an already-closed group aging out, keeps its own
 		// terminal state.
-		if (!entry.group.isClosed) {
-			const evicted = new TooFarBehind();
-			EVICTED.add(evicted);
-			entry.group.abort(evicted);
-		}
-		const mirrors = [...entry.mirrors.values()].filter((mirror) => hooks.evictGroup(mirror));
+		const lost =
+			reason === "evicted"
+				? new StreamError(StreamCode.Evicted, { message: "group evicted from the cache" })
+				: new TooFarBehind();
+		EVICTED.add(lost);
+		if (!entry.group.isClosed) entry.group.abort(lost);
+		const mirrors = [...entry.mirrors.values()].filter((mirror) => hooks.evictGroup(mirror, lost));
 		this.#unlink(entry);
 		for (const mirror of mirrors) mirror.close();
 	}
@@ -1558,14 +1577,17 @@ export class Producer {
 			const index = timelineIndex(sink.timeline, mirror.sequence);
 			if (sink.timeline[index] === mirror) sink.timeline.splice(index, 1);
 		}
+		entry.charge.sub(entry.mirrors.size * cache.MIRROR_OVERHEAD);
 		entry.mirrors.clear();
 	}
 
-	// Take a cached group out of the cache lookups.
+	// Take a cached group out of the cache lookups, releasing what it billed the pool.
 	#uncache(entry: CachedGroup, evicted = false): void {
-		this.#cache.splice(this.#cache.indexOf(entry), 1);
+		this.#cache.delete(entry);
 		this.#cached.delete(entry.group.sequence);
 		this.#unbound(entry, evicted);
+		this.#account.remove(entry);
+		hooks.chargeGroup(entry.group, undefined);
 	}
 
 	// The starts a first frame of group `sequence` must fall between: the nearest checked
@@ -1616,14 +1638,21 @@ export class Producer {
 		}
 	}
 
+	// The cached group at the newest sequence written, if still cached.
+	#edgeEntry(): CachedGroup | undefined {
+		const latest = this.#state.latest;
+		return latest === undefined ? undefined : this.#cached.get(latest);
+	}
+
 	// The newest group remains replayable while the track is live, even after the group
 	// closes: a catalog can publish one snapshot for the broadcast's whole lifetime. An
 	// aborted one holds nothing worth replaying, so it ages out like any other.
-	#edge(): GroupProducer | undefined {
-		const latest = this.#state.latest;
-		if (latest === undefined) return undefined;
-		const group = this.#cached.get(latest)?.group;
-		return group?.closed.peek() instanceof Error ? undefined : group;
+	#protects(entry: CachedGroup): boolean {
+		return (
+			this.#state.closed.peek() === undefined &&
+			entry.group.sequence === this.#state.latest &&
+			!(entry.group.closed.peek() instanceof Error)
+		);
 	}
 
 	// The newest frame in the cache, as {@link Subscriber.largest} reads it from a sink:
@@ -1663,86 +1692,33 @@ export class Producer {
 		return this.#state.largest.peek();
 	}
 
-	// Evict cached groups idle for longer than the cache window. Idle means nothing
-	// written, so an abandoned open group ages out instead of pinning its buffer (and
-	// any reader parked in it) forever.
-	//
-	// Scans at most once per slice of the window, so a track publishing faster than that
-	// evicts a run of groups per scan instead of scanning everything to evict one per
-	// write. A group can outlive the window by up to one slice.
-	#prune(): void {
-		const at = now();
-		const slice = CACHE_WINDOW / PRUNE_SLICES;
-		if (at < this.#pruned + slice) {
-			// Something may have come due since the last scan, so make sure another follows.
-			this.#wake(this.#pruned + slice);
-			return;
-		}
-		this.#pruned = at;
-
-		const cutoff = at - CACHE_WINDOW;
-		const edge = this.#edge();
-		const live = this.#state.closed.peek() === undefined;
-
-		let oldest: number | undefined;
-		const retained: CachedGroup[] = [];
-		for (const entry of this.#cache) {
-			// Once the track closes, the former edge ages from the close instead, so close()
-			// never reclaims a group its subscribers have yet to drain.
-			const activity =
-				entry.group === edge ? Math.max(entry.group.activity, this.#closedAt) : entry.group.activity;
-			if (entry.group === edge && live) {
-				retained.push(entry);
-			} else if (activity >= cutoff) {
-				retained.push(entry);
-				if (oldest === undefined || activity < oldest) oldest = activity;
-			} else {
-				this.#cached.delete(entry.group.sequence);
-				this.#unbound(entry, true);
-				this.#evict(entry);
-			}
-		}
-		const evicted = retained.length < this.#cache.length;
-		this.#cache = retained;
-		// An evicted group below the end no longer holds it open, as in Rust.
-		if (evicted) this.#settle();
-
-		// Replace the wakeup with one for the next entry due to age out. Writes settle
-		// retention inline, so this only has to cover the case no write follows. Cheap to
-		// over-arm: an entry written since is retained and re-armed.
-		this.#pruneTimer?.abort();
-		this.#pruneTimer = undefined;
-		if (oldest !== undefined) this.#wake(Math.max(oldest + CACHE_WINDOW, at + slice));
+	// Accrue and pay the cache pool's eviction debt for what this track wrote.
+	#chargeDebt(): void {
+		if (this.#account.chargeDebt()) this.#settle();
 	}
 
-	// Arm the prune wakeup for `at`, unless one is already armed sooner. Kept after a close,
-	// until the cache empties, so what the track left behind still ages out.
-	#wake(at: number): void {
-		if (this.#pruneTimer !== undefined && this.#pruneTimerAt <= at) return;
-		this.#pruneTimer?.abort();
-
-		const timer = new AbortController();
-		// A cache prune is never a reason to hold a Node/Bun process open.
-		void sleepUntil(Instant(at), { signal: timer.signal, ref: false }).then(
-			() => {
-				// The wakeup can already be queued when a sooner one replaces it.
-				if (timer.signal.aborted) return;
-				this.#pruneTimer = undefined;
-				this.#prune();
-			},
-			() => {},
-		);
-		this.#pruneTimer = timer;
-		this.#pruneTimerAt = at;
+	// Evict the groups idle past the pool's window: every one when `full`, else a bounded scan.
+	#evictExpired(full: boolean): void {
+		if (this.#account.evictExpired(full)) this.#settle();
 	}
 
 	// Retain a source group and fan it out to every live sink; its frame 0 is checked
 	// against this track when it lands.
 	#publish(group: GroupProducer): void {
+		// Before the group is cached, so the write creating it can never evict it.
+		this.#chargeDebt();
 		this.#settle();
-		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
+		const entry: CachedGroup = {
+			group,
+			charge: this.#account.charge(),
+			mirrors: new Map<TrackState, GroupConsumer>(),
+			arrived: now(),
+		};
+		hooks.chargeGroup(group, entry.charge);
 		this.#undrop(group.sequence);
 		group.closed.then((closed) => {
+			// An aborted live edge is no longer protected, so it may expire like any other.
+			if (closed instanceof Error) this.#account.demote(entry);
 			if (!(closed instanceof Error) || HOLES.has(toStreamCode(closed))) return;
 			// A re-created group already replaced this one.
 			const current = this.#cached.get(group.sequence);
@@ -1758,13 +1734,17 @@ export class Producer {
 				return () => this.#record(entry, start, late);
 			});
 		}
-		this.#cache.push(entry);
+		this.#cache.add(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#fills.arrived(group.sequence);
 		this.#advance(group.sequence, true);
 		this.#arrive(group.sequence);
 		this.#produce(group.sequence);
+		// A newer group demotes the live edge to an evictable one.
+		const edge = this.#edgeEntry();
 		this.#state.latest = max(this.#state.latest ?? 0n, group.sequence);
+		if (edge && edge !== entry && !this.#protects(edge)) this.#account.demote(edge);
+		this.#account.insert(entry);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
@@ -1781,7 +1761,7 @@ export class Producer {
 		});
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
-		this.#prune();
+		this.#evictExpired(false);
 	}
 
 	// Record a written sequence. It raises the largest too, at the head of an empty group, so
@@ -1841,9 +1821,12 @@ export class Producer {
 	 * sequences are then final: creating one throws {@link Skipped}. Appending alone never leaves
 	 * such a gap; one left by out-of-order {@link createGroup} calls is what it names.
 	 *
-	 * The broadcast remembers nothing of an earlier producer of the name, so a replacement
-	 * starts at 0. Since a name always means the same content, a replacement continues past
-	 * its predecessor's groups with {@link createGroup}.
+	 * The same broadcast, track, and group sequence always name the same content, and nothing
+	 * checks it: the broadcast remembers nothing of an earlier producer of the name, so a
+	 * replacement starts at 0. A recreated track, or a restarted publisher keeping its instance,
+	 * continues past its predecessor's groups with {@link createGroup}, or uses a new track name
+	 * or instance. Reusing a sequence only corrupts this broadcast for its readers. Datagram
+	 * sequences name no cached content and are exempt.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
 	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
@@ -2192,7 +2175,7 @@ export class Producer {
 		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
-		const open = this.#cache.filter((entry) => entry.group.closed.peek() === undefined);
+		const open = [...this.#cache].filter((entry) => entry.group.closed.peek() === undefined);
 		closeTrackState(this.#state, abort);
 		if (this.#state.outcome.peek() === undefined)
 			this.#state.outcome.set(abort ?? this.#state.end.peek()?.error ?? null);
@@ -2211,8 +2194,14 @@ export class Producer {
 			closeTrackState(sink, abort);
 		}
 		this.#sinks.clear();
-		this.#closedAt = now();
-		this.#prune();
+		// The former live edge becomes evictable too, its idle window restarted, so the close
+		// never reclaims a group its subscribers have yet to drain.
+		const edge = this.#edgeEntry();
+		if (edge) {
+			edge.charge.recordWrite();
+			this.#account.demote(edge);
+		}
+		this.#evictExpired(true);
 	}
 
 	// Whether the declared end was reached, the pending tail owes nothing below it, and every
@@ -2224,7 +2213,8 @@ export class Producer {
 		if (end === undefined) return false;
 		const final = finalSequence(end);
 		if (!reaches(this.#received, this.#state.drops.peek(), final) || this.#owes(final)) return false;
-		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
+		for (const { group } of this.#cache) if (group.sequence < final && group.closed.peek() !== null) return false;
+		return true;
 	}
 
 	/** Append a frame as its own single-frame group. */
@@ -2553,8 +2543,10 @@ export class Subscriber {
 	}
 
 	#guard(group: GroupConsumer): GroupConsumer {
-		// Handed out, it is read, whatever this reader judged it while buffered.
+		// Handed out, it is read, whatever this reader judged it while buffered. Taking it is the
+		// cache access buffering it is not, as in Rust: it restarts the group's idle window.
 		hooks.groupReads(group, true);
+		hooks.refreshGroup(group);
 		const held: Superseded = {};
 		hooks.onShedRead(group, () => {
 			if (this.#state.latest === group.sequence && this.#state.producer) hooks.joinProducer(this.#state.producer);
