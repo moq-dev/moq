@@ -569,8 +569,8 @@ impl Key {
 
 				// rind refuses a `d` whose public key is not this `x` and `y`.
 				let point = [&[0x04][..], x.as_slice(), y.as_slice()].concat();
-				let pair = EcdsaKeyPair::from_private_key_and_public_key(algorithm, d, &point)
-					.map_err(crate::Error::crypto)?;
+				let pair =
+					EcdsaKeyPair::from_scalar_and_public_key(algorithm, d, &point).map_err(crate::Error::crypto)?;
 				EncodingKey::from_ec_der(pair.to_pkcs8().as_ref())
 			}
 			KeyMaterial::OKP {

@@ -705,6 +705,8 @@ impl Driver {
 			// connection after this turn's checks still re-polls us.
 			waiter.register(&mut state.driver);
 		}
+		// Every packet this turn seals pays one DIT toggle rather than one per rind call.
+		let _dit = moq_crypto::cpu::Dit::hold();
 
 		loop {
 			self.endpoint_events();
