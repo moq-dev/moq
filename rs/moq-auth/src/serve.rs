@@ -762,7 +762,10 @@ async fn guard(
 		.headers()
 		.get(axum::http::header::AUTHORIZATION)
 		.and_then(|value| value.to_str().ok())
-		.and_then(|value| value.strip_prefix("Basic "))
+		// RFC 7235 auth schemes are case-insensitive.
+		.and_then(|value| value.split_once(' '))
+		.filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Basic"))
+		.map(|(_, encoded)| encoded)
 		.and_then(|encoded| base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok())
 		.and_then(|decoded| {
 			let colon = decoded.iter().position(|&byte| byte == b':')?;
@@ -1076,6 +1079,20 @@ mod tests {
 		client.connect(request("/demo")).await.unwrap();
 		let client = Client::new(format!("http://{addr}/").parse().unwrap(), None).unwrap();
 		client.connect(request("/demo")).await.unwrap_err();
+
+		// The scheme matches case-insensitively.
+		use base64::Engine;
+		let credentials = base64::engine::general_purpose::STANDARD.encode("relay:hunter2:x");
+		for scheme in ["basic", "BASIC", "Basic", "Bearer"] {
+			let status = http
+				.get(format!("http://{addr}/mesh/keys"))
+				.header(reqwest::header::AUTHORIZATION, format!("{scheme} {credentials}"))
+				.send()
+				.await
+				.unwrap()
+				.status();
+			assert_eq!(status == StatusCode::UNAUTHORIZED, scheme == "Bearer", "{scheme}");
+		}
 	}
 
 	#[tokio::test]
