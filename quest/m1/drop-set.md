@@ -35,7 +35,9 @@ of copying, bill each run (`RUN_OVERHEAD`) and each entry of their expiry index
 lowest runs after the cold groups, and the expiry scan forgets a run given up
 longer than the pool's idle window ago (rounded up to a quarter of it), so a
 pool with no byte target still bounds the set. A shed or forgotten run is
-unknown again. A JS reader's own fill refusals stay its own (`refused`).
+unknown again. A local track keeps its runs from its newest group up, which
+its declared end relies on (`kept_drops`); only a received copy's peer can
+fragment drops, and all of those are reclaimable. A JS reader's own fill refusals stay its own (`refused`).
 `DropCursor::next`, the JS wire cursor, and `Misses::unknown` fold in only the
 runs changed since they last looked (`drops_changes`, `DropSet::since`), and
 check a folded run against the set before reporting it, so a drop costs each

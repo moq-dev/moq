@@ -294,6 +294,7 @@ test("a drop flood stays within the pool", () => {
 	const capacity = 64 * cache.RUN_OVERHEAD;
 	const pool = new cache.Pool({ capacity });
 	const producer = pooled(pool);
+	hooks.receiveTrack(producer);
 	const reader = producer.subscribe({ delay: { max: null } });
 	const reported: bigint[] = [];
 	for (let run = 0n; run < runs; run++) {
@@ -323,20 +324,25 @@ test("the sweep forgets runs past the idle window", async () => {
 	await withClock(async (clock) => {
 		const pool = new cache.Pool({ expiry: Milli(1_000) });
 		const producer = pooled(pool);
+		hooks.receiveTrack(producer);
+		// A local track keeps what it skipped above its newest group, which its end relies on.
+		const local = pooled(pool, "local");
+		local.skipGroups(5n, 10n);
 		hooks.dropTrackGroups(producer, 0n, 1n, old());
 		hooks.dropTrackGroups(producer, 2n, 3n, old());
 		await clock.advance(500);
 		hooks.dropTrackGroups(producer, 4n, 5n, old());
 		// Each run and its expiry are billed.
-		expect(pool.used).toBe(3 * (cache.RUN_OVERHEAD + cache.BORN_OVERHEAD));
+		expect(pool.used).toBe(4 * (cache.RUN_OVERHEAD + cache.BORN_OVERHEAD));
 
 		// The sweep at 1.5 s forgets the first two, given up at 0 s.
 		await clock.advance(1_000);
 		expect(dropsHeld(producer)).toEqual([4n]);
-		expect(pool.used).toBe(cache.RUN_OVERHEAD + cache.BORN_OVERHEAD);
+		expect(pool.used).toBe(2 * (cache.RUN_OVERHEAD + cache.BORN_OVERHEAD));
 
 		await clock.advance(1_000);
 		expect(dropsHeld(producer)).toEqual([]);
-		expect(pool.used).toBe(0);
+		expect(dropsHeld(local)).toEqual([5n]);
+		expect(pool.used).toBe(cache.RUN_OVERHEAD + cache.BORN_OVERHEAD);
 	});
 });

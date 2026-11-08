@@ -1454,16 +1454,33 @@ impl TrackState {
 		if !self.drops_expired(now) {
 			return;
 		}
+		let kept = self.kept_drops();
 		let expired: Vec<_> = self
 			.drops_born
 			.iter()
-			.filter(|(_, expires)| now >= **expires)
-			.map(|(run, _)| run.clone())
+			.filter(|(run, expires)| now >= **expires && run.start < kept)
+			.map(|(run, _)| run.start..run.end.min(kept))
 			.collect();
 		for run in expired {
 			self.change_drops(run, None);
 		}
-		self.drops_oldest = self.drops_born.iter().map(|(_, expires)| *expires).min();
+		self.drops_oldest = self
+			.drops_born
+			.iter()
+			.filter(|(run, _)| run.start < kept)
+			.map(|(_, expires)| *expires)
+			.min();
+	}
+
+	/// Where the runs a reclaim may forget end: every run on a received copy, whose tail
+	/// decides its end, but only those below a local track's edge, since one above it is what
+	/// lets its declared end be reached (see [`Self::reaches`]). A local producer gives up only
+	/// what it chose to.
+	fn kept_drops(&self) -> u64 {
+		match self.anchors.received() {
+			true => u64::MAX,
+			false => self.edge(),
+		}
 	}
 
 	/// Forget the lowest runs of the drop set until the debt is paid or `cap` bytes are
@@ -1471,8 +1488,14 @@ impl TrackState {
 	/// them by its budget, or fills them by range.
 	fn shed_drops(&mut self, cap: u64) -> u64 {
 		let mut paid = 0u64;
+		let kept = self.kept_drops();
 		while self.debt > 0 && paid < cap {
-			let Some(run) = self.drops.first_range_value().map(|(run, _)| run.clone()) else {
+			let Some(run) = self
+				.drops
+				.first_range_value()
+				.map(|(run, _)| run.start..run.end.min(kept))
+				.filter(|run| !run.is_empty())
+			else {
 				break;
 			};
 			let billed = self.drops_bill.size();
@@ -23690,7 +23713,11 @@ mod test {
 	#[test]
 	fn the_sweep_forgets_runs_past_the_expiry_window() {
 		let producer = track_producer("test", Info::timed());
+		producer.received();
 		let pool = producer.broadcast.pool.clone();
+		// A local track keeps what it skipped above its newest group, which its end relies on.
+		let local = track_producer_pooled("local", pool.clone());
+		local.skip_groups(5..10);
 		let used = pool.used();
 		producer.drop_groups(0..1, StreamError::Old);
 		producer.drop_groups(2..3, StreamError::Old);
@@ -23716,6 +23743,7 @@ mod test {
 		pool.sweep();
 		assert!(producer.state.read().drops.is_empty());
 		assert_eq!(pool.used(), used);
+		assert!(local.state.read().skipped(5), "a local skip above the edge stays");
 	}
 
 	/// A drop-only flood of disjoint runs bills the pool and sheds its lowest runs to stay
@@ -23726,6 +23754,8 @@ mod test {
 		const RUNS: u64 = 1000;
 		let capacity = 64 * (RUN_OVERHEAD + BORN_OVERHEAD);
 		let (producer, pool) = pooled_producer(capacity);
+		// A peer's drops, which a received copy holds.
+		producer.received();
 		let waiter = kio::Waiter::noop();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		let mut reported = Vec::new();

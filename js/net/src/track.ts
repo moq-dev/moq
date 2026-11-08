@@ -1166,11 +1166,12 @@ export class Producer {
 	// them by range.
 	#shedDrops(debt: number, cap: number): number {
 		let paid = 0;
+		const kept = this.#keptDrops();
 		while (paid < debt && paid < cap) {
 			const run = this.#state.drops.all[0];
-			if (!run) break;
+			if (!run || run.start >= kept) break;
 			const billed = this.#dropsBilled;
-			this.#setDrops(run.start, run.end);
+			this.#setDrops(run.start, min(run.end, kept));
 			paid += billed - this.#dropsBilled;
 		}
 		return paid;
@@ -1180,14 +1181,23 @@ export class Producer {
 	// only once its oldest run is due, which a quarter of the window separates from the next.
 	#expireDrops(now: number): boolean {
 		if (this.#dropsOldest === undefined || now < this.#dropsOldest) return false;
+		const kept = this.#keptDrops();
 		const expired = this.#dropsBorn.all
-			.filter((run) => now >= run.expires)
-			.map(({ start, end }) => ({ start, end }));
+			.filter((run) => now >= run.expires && run.start < kept)
+			.map(({ start, end }) => ({ start, end: min(end, kept) }));
 		for (const run of expired) this.#setDrops(run.start, run.end);
 		this.#dropsOldest = undefined;
-		for (const run of this.#dropsBorn.all)
-			this.#dropsOldest = Math.min(this.#dropsOldest ?? run.expires, run.expires);
+		for (const run of this.#dropsBorn.all) {
+			if (run.start < kept) this.#dropsOldest = Math.min(this.#dropsOldest ?? run.expires, run.expires);
+		}
 		return expired.length > 0;
+	}
+
+	// Where the runs a reclaim may forget end: every run on a received copy, but only those below
+	// a local track's edge, since one above it is what lets its declared end be reached (see
+	// `reaches`). A local producer gives up only what it chose to. Mirrors the Rust `kept_drops`.
+	#keptDrops(): bigint {
+		return this.#wire ? UNBOUNDED : this.#received;
 	}
 
 	static {
