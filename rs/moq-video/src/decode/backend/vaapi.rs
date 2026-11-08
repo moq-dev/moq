@@ -71,14 +71,22 @@ pub(crate) const NAME: &str = "vaapi";
 
 pub(crate) struct Vaapi {
 	decoder: Decoder,
-	/// Whether pictures are handed out as DMA-BUFs rather than downloaded, from
-	/// [`Config::output`]. Cleared if the driver turns out not to export, so a
-	/// host that decodes but cannot share what it decoded loses the fast path
-	/// rather than the stream.
-	exporting: bool,
-	/// Whether a picture has ever come back as a descriptor, which is what
-	/// settles the question above. See [`Vaapi::exported`].
-	has_exported: bool,
+	export: Export,
+}
+
+/// Whether pictures are handed out as DMA-BUFs rather than downloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Export {
+	/// [`Config::output`] asked for shared pictures, and none has come back yet,
+	/// so a failure is read as the driver being unable to export. See
+	/// [`Vaapi::exported`].
+	Trying,
+	/// A picture has come back as a descriptor, which settles it.
+	Exporting,
+	/// Downloaded: asked for, or the driver turned out not to export, so a host
+	/// that decodes but cannot share what it decoded loses the fast path rather
+	/// than the stream.
+	Downloading,
 }
 
 impl Vaapi {
@@ -130,23 +138,23 @@ impl Vaapi {
 			Output::Cpu => false,
 			Output::Render => cfg!(feature = "render"),
 		};
+		let export = match exporting {
+			true => Export::Trying,
+			false => Export::Downloading,
+		};
 		tracing::info!(
 			decoder = NAME,
 			codec = stream.codec.label(),
 			exporting,
 			"opened decoder"
 		);
-		Ok(Box::new(Self {
-			decoder,
-			exporting,
-			has_exported: false,
-		}))
+		Ok(Box::new(Self { decoder, export }))
 	}
 
 	/// Decodes one access unit into GPU-resident frames, or `None` once the
 	/// driver has shown it will not export.
 	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Result<Vec<Frame>, Error>> {
-		if !self.exporting {
+		if self.export == Export::Downloading {
 			return None;
 		}
 
@@ -157,7 +165,7 @@ impl Vaapi {
 	/// The same for the stream's tail, so a track that ends does not switch to
 	/// downloading for its last few pictures.
 	fn flush_shared(&mut self) -> Option<Result<Vec<Frame>, Error>> {
-		if !self.exporting {
+		if self.export == Export::Downloading {
 			return None;
 		}
 
@@ -184,13 +192,17 @@ impl Vaapi {
 			Ok(frames) => {
 				// An access unit whose pictures are all still in the DPB proves
 				// nothing about exporting, so only a non-empty answer counts.
-				self.has_exported |= !frames.is_empty();
+				if !frames.is_empty() {
+					self.export = Export::Exporting;
+				}
 				Ok(frames)
 			}
-			Err(err) if self.has_exported => Err(Error::Codec(err.context("VAAPI decode to a shared surface"))),
+			Err(err) if self.export == Export::Exporting => {
+				Err(Error::Codec(err.context("VAAPI decode to a shared surface")))
+			}
 			Err(err) => {
 				tracing::warn!(%err, "VAAPI cannot hand out decoded surfaces; downloading them instead");
-				self.exporting = false;
+				self.export = Export::Downloading;
 				Ok(Vec::new())
 			}
 		}

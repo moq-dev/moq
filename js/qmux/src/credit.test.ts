@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { Credit } from "./credit.ts";
+import { Credit, StreamLimit, Window } from "./credit.ts";
+import { VarInt } from "./varint.ts";
 
 /** Settle a claim() to its value or its rejection error, without leaking an
  *  unhandled rejection. */
@@ -89,5 +90,63 @@ describe("Credit.close reason propagation", () => {
 		credit.close(); // reason-less close after a reasoned one
 
 		expect(await settle(credit.claim(1n))).toBe(first);
+	});
+});
+
+describe("Credit.wait abort", () => {
+	test("an abort after the wake but before the wait resumes rejects", async () => {
+		const credit = new Credit(0n);
+		const controller = new AbortController();
+		const reason = new Error("stopped");
+		const wait = settle(credit.wait(controller.signal));
+		credit.increaseMax(10n);
+		controller.abort(reason);
+		expect(await wait).toBe(reason);
+	});
+});
+
+describe("Window", () => {
+	test("holds the peer to the limit it was sent, not one still pending", () => {
+		const window = new Window(100n, () => {});
+		window.receiveTo(60n);
+		window.release(60n);
+		expect(window.max).toBe(160n);
+		expect(window.allows(120n)).toBe(false);
+		expect(window.takePending()).toBe(true);
+		expect(window.allows(120n)).toBe(true);
+	});
+
+	test("never advertises past a varint", () => {
+		const window = new Window(VarInt.MAX, () => {});
+		window.receiveTo(VarInt.MAX);
+		window.release(VarInt.MAX);
+		// Already at the largest limit a frame can carry, so no update is owed.
+		expect(window.takePending()).toBe(false);
+		expect(window.max).toBe(VarInt.MAX);
+	});
+});
+
+describe("StreamLimit", () => {
+	test("a slot held back returns once the peer opens up to the limit", () => {
+		let pending = 0;
+		const limit = new StreamLimit(10n, () => pending++);
+		expect(limit.open(1n)).toBe(true);
+		limit.close();
+		// Plenty of headroom, so the slot waits.
+		expect(pending).toBe(0);
+		expect(limit.open(9n)).toBe(true);
+		expect(pending).toBe(1);
+		expect(limit.takePending()).toBe(true);
+		expect(limit.max).toBe(11n);
+	});
+
+	test("holds the peer to the limit it was sent, not one still pending", () => {
+		const limit = new StreamLimit(1n, () => {});
+		expect(limit.open(0n)).toBe(true);
+		limit.close();
+		expect(limit.max).toBe(2n);
+		expect(limit.open(1n)).toBe(false);
+		expect(limit.takePending()).toBe(true);
+		expect(limit.open(1n)).toBe(true);
 	});
 });

@@ -1,7 +1,6 @@
 //! AES-128-CCM-8 cipher implementation using the RustCrypto `ccm` crate.
 //!
-//! Used by the aws-lc-rs backend since aws-lc-rs does not expose CCM in its
-//! high-level API.
+//! Backs the rind provider's PSK suite, since rind has no AES-CCM.
 
 use ccm::aead::AeadInOut;
 use ccm::aead::KeyInit;

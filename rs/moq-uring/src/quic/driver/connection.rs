@@ -60,26 +60,29 @@ pub(crate) struct State {
 	/// they queue wakes the driver's `poll_transmit`.
 	driver: kio::WaiterList,
 
-	/// The terminal error as the handle's `poll_closed` reports it, set exactly
-	/// once: moq-quic's reason, published by the driver (a local close only once
-	/// staged, see `Driver::publish_close`), or the driver's own failure, which
-	/// moq-quic cannot take and so overrides its reason everywhere.
+	/// How far the connection's end has reached the handles' `poll_closed`.
 	///
 	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a
 	/// local close as soon as it is asked for. Only the driver knows when the
 	/// CONNECTION_CLOSE is staged on the socket, which moq-quic cannot see, and
 	/// a caller may stop driving the worker the moment `poll_closed` resolves,
 	/// so publishing earlier would leave the packet unsent.
-	closed: Option<Error>,
+	end: End,
 	closed_waiters: kio::WaiterList,
+}
 
-	/// The socket died under us: the driver stops where it stands rather than
-	/// waiting out a drain it could never transmit.
-	dead: bool,
-
-	/// The close this side asked for, as moq-quic reported it, until the driver
-	/// has put it on the wire.
-	local_close: Option<Error>,
+/// The connection's terminal error as its handles see it, set once.
+enum End {
+	/// `poll_closed` pends: the connection is open, or this side closed it and the
+	/// driver has yet to stage the CONNECTION_CLOSE (see `Driver::publish_close`).
+	Open,
+	/// moq-quic's reason, published by the driver, which runs out the drain.
+	Closed(Error),
+	/// Failed from outside (the socket died, or the worker dropped the driver): the
+	/// driver stops where it stands rather than wait out a drain it could never
+	/// transmit. Its reason wins over moq-quic's, which cannot take it, unless one
+	/// was already published.
+	Dead(Error),
 }
 
 impl State {
@@ -87,20 +90,42 @@ impl State {
 		Self {
 			active: None,
 			driver: kio::WaiterList::new(),
-			closed: None,
+			end: End::Open,
 			closed_waiters: kio::WaiterList::new(),
-			dead: false,
-			local_close: None,
 		}
 	}
 
-	/// Terminate with `err` (the first one wins) and wake the closed waiters and
-	/// the driver: an externally failed driver has to notice.
-	fn fail(&mut self, err: Error) {
-		self.active.take();
-		if self.closed.is_none() {
-			self.closed = Some(err);
+	/// The published terminal error, if any.
+	fn published(&self) -> Option<&Error> {
+		match &self.end {
+			End::Open => None,
+			End::Closed(err) | End::Dead(err) => Some(err),
 		}
+	}
+
+	/// Publish `err` (the first one wins), waking the closed waiters and the driver.
+	///
+	/// Only the first wakes anyone: the driver checks on every poll, and waking itself
+	/// again for an end already published would spin it through the drain.
+	fn publish(&mut self, err: Error) {
+		if let End::Open = self.end {
+			self.end = End::Closed(err);
+			self.ended();
+		}
+	}
+
+	/// Fail from outside with `err`, unless a reason was already published, and
+	/// stop the driver: an externally failed driver has to notice.
+	fn kill(&mut self, err: Error) {
+		self.end = match std::mem::replace(&mut self.end, End::Open) {
+			End::Open => End::Dead(err),
+			End::Closed(err) | End::Dead(err) => End::Dead(err),
+		};
+		self.ended();
+	}
+
+	fn ended(&mut self) {
+		self.active.take();
 		self.driver.wake();
 		self.closed_waiters.wake();
 	}
@@ -113,7 +138,7 @@ impl Inner {
 	/// Unlike the handle's `poll_closed`, a local close counts from the moment it
 	/// was asked for, as moq-quic's stream waits already fail by then.
 	pub(crate) fn closed(&self) -> Option<Error> {
-		if let Some(err) = &self.state.borrow().closed {
+		if let Some(err) = self.state.borrow().published() {
 			return Some(err.clone());
 		}
 		self.conn.borrow().error().cloned().map(Error::from)
@@ -152,11 +177,7 @@ impl Inner {
 	/// every handle parked in it; they then report `err`, which wins.
 	pub(crate) fn fail(&self, err: Error) {
 		let reason = err.to_string();
-		{
-			let mut state = self.state.borrow_mut();
-			state.dead = true;
-			state.fail(err);
-		}
+		self.state.borrow_mut().kill(err);
 		self.conn
 			.borrow_mut()
 			.close(self.owner.now(), VarInt::from_u32(0), reason);
@@ -389,7 +410,6 @@ pub(crate) fn launch(
 		endpoint,
 		key,
 		deadline: owner.timer(),
-		close_staged: false,
 		turn: 0,
 		trains: 0,
 	};
@@ -592,7 +612,7 @@ fn recv_datagram(shared: &Shared, waiter: &kio::Waiter) -> Poll<Result<Bytes, Er
 /// Wait for the published terminal error, which a local close reaches only once staged.
 fn poll_closed(shared: &Shared, waiter: &kio::Waiter) -> Poll<Error> {
 	let mut state = shared.state.borrow_mut();
-	if let Some(err) = &state.closed {
+	if let Some(err) = state.published() {
 		return Poll::Ready(err.clone());
 	}
 	waiter.register(&mut state.closed_waiters);
@@ -667,10 +687,6 @@ struct Driver {
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
 	deadline: crate::Timer,
-	/// A CONNECTION_CLOSE has been handed to the socket. Not implied by a
-	/// flush that came back empty: moq-quic paces the close like any other packet,
-	/// so it can sit behind a pacing timer after the application asked for it.
-	close_staged: bool,
 	/// The worker turn `trains` counts in.
 	turn: u64,
 	/// Trains staged this turn.
@@ -685,7 +701,8 @@ struct Driver {
 /// in its waits.
 impl Drop for Driver {
 	fn drop(&mut self) {
-		if self.shared.state.borrow().closed.is_none() {
+		let open = matches!(self.shared.state.borrow().end, End::Open);
+		if open {
 			self.shared
 				.fail(Error::Io(crate::shared::Shared::gone_error().to_string()));
 		}
@@ -698,7 +715,7 @@ impl Driver {
 			let mut state = self.shared.state.borrow_mut();
 			// The endpoint fails the connection from outside when its socket
 			// dies; there is nothing left to drain it through.
-			if state.dead {
+			if let End::Dead(_) = state.end {
 				return Poll::Ready(());
 			}
 			// Register for ingress first: a datagram the endpoint feeds the
@@ -712,7 +729,7 @@ impl Driver {
 			self.endpoint_events();
 			self.check_lost(waiter);
 
-			if self.shared.state.borrow().dead {
+			if matches!(self.shared.state.borrow().end, End::Dead(_)) {
 				return Poll::Ready(());
 			}
 			// A closed connection still owes the peer its CONNECTION_CLOSE
@@ -728,9 +745,6 @@ impl Driver {
 			if let Poll::Ready(err) = self.flush(waiter) {
 				self.shared.fail(err);
 				return Poll::Ready(());
-			}
-			if self.close_staged {
-				self.publish_close();
 			}
 
 			// Arm, *then* poll: the poll is what registers the waiter, so
@@ -772,16 +786,10 @@ impl Driver {
 	/// `poll_closed` resolves has at least handed the packet over.
 	fn check_lost(&mut self, waiter: &kio::Waiter) {
 		let lost = self.shared.conn.borrow_mut().poll_closed(waiter);
-		let Poll::Ready(reason) = lost else {
-			return;
-		};
-		let mut state = self.shared.state.borrow_mut();
-		if state.closed.is_some() || state.local_close.is_some() {
-			return;
-		}
-		match reason {
-			reason @ moq_quic::connection::Error::LocallyClosed { .. } => state.local_close = Some(reason.into()),
-			reason => state.fail(reason.into()),
+		if let Poll::Ready(reason) = lost
+			&& !matches!(reason, moq_quic::connection::Error::LocallyClosed { .. })
+		{
+			self.shared.state.borrow_mut().publish(reason.into());
 		}
 	}
 
@@ -793,9 +801,9 @@ impl Driver {
 	/// fire-and-forget, so a worker torn down in the same breath can still
 	/// take the packet with it and leave the peer to idle out.
 	fn publish_close(&mut self) {
-		let mut state = self.shared.state.borrow_mut();
-		if let Some(err) = state.local_close.take() {
-			state.fail(err);
+		let reason = self.shared.conn.borrow().error().cloned();
+		if let Some(reason) = reason {
+			self.shared.state.borrow_mut().publish(reason.into());
 		}
 	}
 
@@ -879,7 +887,47 @@ impl Driver {
 		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
 		}
-		self.close_staged |= closing;
+		// Staged, not implied by a flush that came back empty: moq-quic paces the close like
+		// any other packet, so it can sit behind a pacing timer after it was asked for.
+		if closing {
+			self.publish_close();
+		}
 		Poll::Ready(Ok(()))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::Arc;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+	use std::task::{Wake, Waker};
+
+	use super::{Error, State};
+
+	struct Wakes(AtomicUsize);
+
+	impl Wake for Wakes {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+
+	/// The driver parks on the end and republishes it on every poll, so only the first publish
+	/// may wake it, or a remote close spins it through the drain.
+	#[test]
+	fn an_end_published_again_wakes_nobody() {
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let mut state = State::new();
+
+		let driver = kio::Waiter::new(Waker::from(wakes.clone()));
+		driver.register(&mut state.driver);
+		state.publish(Error::TimedOut);
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+
+		let driver = kio::Waiter::new(Waker::from(wakes.clone()));
+		driver.register(&mut state.driver);
+		state.publish(Error::TimedOut);
+		assert_eq!(wakes.0.load(Ordering::Relaxed), 1, "woke the driver again");
+		assert!(matches!(state.published(), Some(Error::TimedOut)));
 	}
 }

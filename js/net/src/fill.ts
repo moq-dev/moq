@@ -16,7 +16,7 @@ import { NotFound } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { insertRun, NO_MAX_DELAY, runGaps } from "./internal.ts";
 import type { Info, Order } from "./track.ts";
-import { checkSequence, max, min } from "./util/sequence.ts";
+import { checkEnd, checkSequence, max, min } from "./util/sequence.ts";
 
 // A half-open run of group sequences, as `internal.ts` has it, kept local so the published
 // declarations never reach the package internals.
@@ -533,7 +533,7 @@ export class Fill {
 	 */
 	dropGroups(start: bigint, end: bigint): void {
 		checkSequence(start);
-		checkSequence(end);
+		checkEnd(end);
 		fillOps.drop(this.#state, this.#pending, start, end);
 	}
 
@@ -544,7 +544,7 @@ export class Fill {
 	 */
 	refuseGroups(start: bigint, end: bigint, error: Error): void {
 		checkSequence(start);
-		checkSequence(end);
+		checkEnd(end);
 		fillOps.refuse(this.#state, this.#pending, start, end, error);
 	}
 

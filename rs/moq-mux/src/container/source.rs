@@ -58,15 +58,39 @@ impl VideoTransform {
 /// A subscription that resolves on first poll, then the live consumer.
 enum SourceState {
 	/// Waiting for the target broadcast (the catalog broadcast, or a cross-broadcast
-	/// reference) to resolve; the track (by name) is subscribed once it does.
-	Requesting(crate::Binding, String),
+	/// reference) to resolve; [`Target::track`] is subscribed once it does.
+	Requesting { binding: crate::Binding, start: Start },
 	/// Waiting for the subscription to resolve (blocks on the publisher's SUBSCRIBE_OK).
-	Subscribing(kio::Pending<moq_net::track::Subscribing>),
+	Subscribing {
+		pending: Box<kio::Pending<moq_net::track::Subscribing>>,
+		media: HangContainer,
+		live: bool,
+		instance: Option<moq_net::broadcast::Consumer>,
+	},
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
-	/// the `Subscribing` variant (clippy `large_enum_variant`).
-	Active(Box<Consumer<HangContainer>>),
-	/// The sibling instance it read went, and its rendition with it.
+	/// the other variants (clippy `large_enum_variant`).
+	Active(Box<Active>),
+	/// The track ended, the sibling instance it read went, or the source was stopped.
 	Ended,
+}
+
+/// How a source subscribes, fixed before its first poll.
+struct Start {
+	/// Wire format the consumer decodes.
+	media: HangContainer,
+	/// Start at the newest group, rather than the oldest the max delay still reaches.
+	live: bool,
+	/// Read only groups after this one, so a resubscription skips groups already read.
+	after: Option<u64>,
+}
+
+/// A resolved subscription.
+struct Active {
+	consumer: Consumer<HangContainer>,
+	/// Keeps the subscription's priority registered while it reads.
+	_priority: crate::source::Priority,
+	/// The sibling broadcast the rendition reads: its end ends the rendition.
+	instance: Option<moq_net::broadcast::Consumer>,
 }
 
 /// The track a source reads: its broadcast's path, the instance that broadcast must have, and
@@ -88,9 +112,15 @@ impl Target {
 		})
 	}
 
-	fn request(&self, source: &crate::Source) -> SourceState {
-		let binding = source.request_path(&self.path, self.instance.as_ref());
-		SourceState::Requesting(binding, self.track.clone())
+	fn request(&self, source: &crate::Source, media: HangContainer) -> SourceState {
+		SourceState::Requesting {
+			binding: source.request_path(&self.path, self.instance.as_ref()),
+			start: Start {
+				media,
+				live: false,
+				after: None,
+			},
+		}
 	}
 }
 
@@ -118,16 +148,9 @@ pub(crate) struct ExportSource {
 	/// The rendition's ID in the catalog.
 	name: String,
 	source: crate::Source,
-	priority_control: Option<crate::source::Priority>,
 	target: Target,
 	state: SourceState,
-	/// Wire format, consumed when the subscription resolves into a consumer.
-	media: Option<HangContainer>,
 	max_delay: std::time::Duration,
-	/// Start at the newest group, rather than the oldest the max delay still reaches.
-	live: bool,
-	/// Read only groups after this one, so a resubscription skips groups already read.
-	after: Option<u64>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available - from the catalog
@@ -155,8 +178,6 @@ pub(crate) struct ExportSource {
 	delivered: Option<u64>,
 	/// Set while continuing another source, until the first sync frame past what it delivered.
 	splice: Option<Splice>,
-	/// The sibling broadcast the rendition reads, once resolved: its end ends the rendition.
-	instance: Option<moq_net::broadcast::Consumer>,
 }
 
 impl ExportSource {
@@ -280,13 +301,9 @@ impl ExportSource {
 		Self {
 			name: name.to_string(),
 			source: source.clone(),
-			priority_control: None,
-			state: target.request(source),
+			state: target.request(source, media),
 			target,
-			media: Some(media),
 			max_delay,
-			live: false,
-			after: None,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -301,7 +318,6 @@ impl ExportSource {
 			latest: None,
 			delivered: None,
 			splice: None,
-			instance: None,
 		}
 	}
 
@@ -340,9 +356,9 @@ impl ExportSource {
 	/// that still does fails with [`Error::RenditionRewound`](crate::Error::RenditionRewound).
 	pub(crate) fn resuming(mut self, resume: &Resume) -> Self {
 		if resume.target == self.target {
-			self.after = resume.group;
+			self.start().after = resume.group;
 		} else {
-			self.live = true;
+			self.start().live = true;
 			self.splice = resume.latest.map(|read| Splice { read, group: None });
 		}
 		self.latest = resume.latest;
@@ -354,15 +370,24 @@ impl ExportSource {
 	/// hop drops each group a newer one supersedes, and raising it later cannot recover the
 	/// groups that follow the edge.
 	pub fn live(mut self) -> Self {
-		self.live = true;
+		self.start().live = true;
 		self
+	}
+
+	/// The subscription options a builder sets. Each builder consumes a source no poll has
+	/// moved out of [`SourceState::Requesting`], since only the constructors hand one out.
+	fn start(&mut self) -> &mut Start {
+		match &mut self.state {
+			SourceState::Requesting { start, .. } => start,
+			_ => unreachable!("configured after polling"),
+		}
 	}
 
 	/// The group sequence of the last frame read, or None until the subscription resolves.
 	/// Meaningful only once a frame was read.
 	pub(crate) fn group(&self) -> Option<u64> {
 		match &self.state {
-			SourceState::Active(consumer) => Some(consumer.group()),
+			SourceState::Active(active) => Some(active.consumer.group()),
 			_ => None,
 		}
 	}
@@ -451,7 +476,7 @@ impl ExportSource {
 	/// Receive group handles and wait for all input bytes while frame delivery is backpressured.
 	pub fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		match &mut self.state {
-			SourceState::Active(consumer) => consumer.poll_received(waiter),
+			SourceState::Active(active) => active.consumer.poll_received(waiter),
 			SourceState::Ended => Poll::Ready(()),
 			_ => Poll::Pending,
 		}
@@ -504,73 +529,75 @@ impl ExportSource {
 
 	/// Read the track's normalized media or a clean group boundary.
 	fn poll_track(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
-		if matches!(self.state, SourceState::Ended) {
-			return Poll::Ready(Ok(None));
-		}
-
 		// Resolve a cross-broadcast reference into a broadcast before subscribing.
-		if matches!(self.state, SourceState::Requesting(..)) {
-			let (broadcast, name, sibling) = {
-				let SourceState::Requesting(pending, name) = &self.state else {
-					unreachable!("just matched Requesting");
-				};
-				(ready!(pending.poll_broadcast(waiter))?, name.clone(), pending.sibling())
-			};
-			if sibling {
-				self.instance = Some(broadcast.clone());
-			}
+		if let SourceState::Requesting { binding, start } = &self.state {
+			let broadcast = ready!(binding.poll_broadcast(waiter))?;
+			let instance = binding.sibling().then(|| broadcast.clone());
 			let mut subscription = moq_net::track::Subscription::default()
 				.with_delay(moq_net::track::Delay::default().with_max(self.max_delay));
-			if let Some(after) = self.after {
+			if let Some(after) = start.after {
 				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
-			let track = match broadcast.track(&name) {
+			let track = match broadcast.track(&self.target.track) {
 				Ok(track) => track,
-				Err(_) if self.instance_ended(waiter) => return self.end(),
+				Err(_) if instance.as_ref().is_some_and(|i| i.poll_closed(waiter).is_ready()) => return self.end(),
 				Err(err) => return Poll::Ready(Err(err.into())),
 			};
-			self.state = SourceState::Subscribing(track.subscribe(self.source.subscription(subscription)));
+			let pending = Box::new(track.subscribe(self.source.subscription(subscription)));
+			let SourceState::Requesting { start, .. } = std::mem::replace(&mut self.state, SourceState::Ended) else {
+				unreachable!("just matched Requesting");
+			};
+			self.state = SourceState::Subscribing {
+				pending,
+				media: start.media,
+				live: start.live,
+				instance,
+			};
 		}
 
 		// Resolve the subscription before reading any frames.
-		if matches!(self.state, SourceState::Subscribing(_)) {
-			// Scope the `pending` borrow so it ends before we touch `self.media`/`self.state`.
-			let track = {
-				let SourceState::Subscribing(pending) = &self.state else {
-					unreachable!("just matched Subscribing");
-				};
-				match pending.poll_ok(waiter) {
-					Poll::Ready(Ok(track)) => track,
-					Poll::Ready(Err(_)) | Poll::Pending if self.instance_ended(waiter) => return self.end(),
-					Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
-					Poll::Pending => return Poll::Pending,
+		if let SourceState::Subscribing { pending, instance, .. } = &self.state {
+			let track = match pending.poll_ok(waiter) {
+				Poll::Ready(Ok(track)) => track,
+				Poll::Ready(Err(_)) | Poll::Pending
+					if instance.as_ref().is_some_and(|i| i.poll_closed(waiter).is_ready()) =>
+				{
+					return self.end();
 				}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+				Poll::Pending => return Poll::Pending,
 			};
-			let media = self
-				.media
-				.take()
-				.expect("media present until the subscription resolves");
-			self.priority_control = Some(self.source.control(track.control())?);
+			let priority = self.source.control(track.control())?;
+			let SourceState::Subscribing {
+				media, live, instance, ..
+			} = std::mem::replace(&mut self.state, SourceState::Ended)
+			else {
+				unreachable!("just matched Subscribing");
+			};
 			let consumer = Consumer::new(track, media);
-			let consumer = match self.live {
+			let consumer = match live {
 				true => consumer.live(),
 				false => consumer,
 			};
-			self.state = SourceState::Active(Box::new(consumer));
+			self.state = SourceState::Active(Box::new(Active {
+				consumer,
+				_priority: priority,
+				instance,
+			}));
 		}
 
 		loop {
 			// Scope the consumer borrow to the poll so `self.transform` /
 			// `self.refresh_description` can borrow `self` afterwards.
 			let (frame, arrived) = {
-				let SourceState::Active(consumer) = &mut self.state else {
-					unreachable!("subscription resolved into an Active consumer");
+				let SourceState::Active(active) = &mut self.state else {
+					return Poll::Ready(Ok(None));
 				};
+				let consumer = &mut active.consumer;
 				let item = match consumer.poll_item(waiter) {
 					Poll::Ready(Ok(item)) => item,
 					// Only an orderly shutdown of the instance is its end: malformed media or a
-					// failed transport still fails the export. The field, not `instance_ended`, so
-					// the borrow stays off the consumer.
+					// failed transport still fails the export.
 					Poll::Ready(Err(crate::Error::Moq(
 						moq_net::Error::Cancel
 						| moq_net::Error::Closed
@@ -579,7 +606,7 @@ impl ExportSource {
 						| moq_net::Error::Session(moq_net::SessionError::Cancel),
 					)))
 					| Poll::Pending
-						if self
+						if active
 							.instance
 							.as_ref()
 							.is_some_and(|instance| instance.poll_closed(waiter).is_ready()) =>
@@ -630,11 +657,7 @@ impl ExportSource {
 						self.cuts += u64::from(std::mem::take(&mut self.open));
 						return Poll::Ready(Ok(Some(Event::Cut { observed })));
 					}
-					None => {
-						self.priority_control = None;
-						self.finish_ends();
-						return Poll::Ready(Ok(None));
-					}
+					None => return self.end(),
 				}
 			};
 
@@ -669,29 +692,29 @@ impl ExportSource {
 		}
 	}
 
-	/// Whether the sibling broadcast this rendition reads has stopped serving, registering
-	/// `waiter` for when it does. Its track stalling or failing then is that instance's end,
-	/// which ends the rendition rather than the export once what it delivered is read; following
-	/// the instance that replaces it is the export's own call.
-	fn instance_ended(&self, waiter: &kio::Waiter) -> bool {
-		self.instance
-			.as_ref()
-			.is_some_and(|instance| instance.poll_closed(waiter).is_ready())
-	}
-
 	/// Release a replaced instance's subscription while keeping its resolved metadata.
 	pub(crate) fn stop(&mut self) {
 		self.finish_ends();
 		self.state = SourceState::Ended;
-		self.priority_control = None;
-		self.instance = None;
 	}
 
-	/// End the rendition with its instance.
+	/// Whether the sibling broadcast this rendition reads has stopped serving.
+	#[cfg(test)]
+	fn instance_ended(&self, waiter: &kio::Waiter) -> bool {
+		let instance = match &self.state {
+			SourceState::Subscribing { instance, .. } => instance.as_ref(),
+			SourceState::Active(active) => active.instance.as_ref(),
+			_ => None,
+		};
+		instance.is_some_and(|instance| instance.poll_closed(waiter).is_ready())
+	}
+
+	/// End the rendition: its track ended, or the sibling instance it read went. Its track
+	/// stalling or failing then is that instance's end, which ends the rendition rather than the
+	/// export once what it delivered is read; following the instance that replaces it is the
+	/// export's own call.
 	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
-		self.finish_ends();
-		self.state = SourceState::Ended;
-		self.priority_control = None;
+		self.stop();
 		Poll::Ready(Ok(None))
 	}
 
@@ -760,7 +783,7 @@ pub(crate) fn codec_dimensions(
 	Ok(dimensions.filter(|(width, height)| *width > 0 && *height > 0))
 }
 
-/// The picture size the last SPS in a length-prefixed sample declares, for an H.264 or H.265 track
+/// The picture size the last (for H.265, base-layer) SPS in a length-prefixed sample declares, for an H.264 or H.265 track
 /// that keeps its parameter sets in band beside its config record (avc3, hev1): the record fixes the
 /// NAL length size, while any keyframe may redefine the size. `None` for any other track, or a
 /// sample carrying no SPS.
@@ -774,13 +797,13 @@ pub(crate) fn in_band_dimensions(
 		VideoCodec::H265(h265) if h265.in_band => (true, crate::codec::h265::hvcc_params(description)?.0),
 		_ => return Ok(None),
 	};
-	let is_sps = |header: u8| match h265 {
-		false => header & 0x1f == 7,
-		true => (header >> 1) & 0x3f == 33,
+	let is_sps = |nal: &[u8]| match h265 {
+		false => nal[0] & 0x1f == 7,
+		true => (nal[0] >> 1) & 0x3f == 33 && crate::codec::h265::is_base_layer(nal),
 	};
 	let Some(sps) = crate::codec::annexb::length_prefixed_nals(payload, length_size)?
 		.map_while(|nal| nal.ok())
-		.filter(|nal| nal.first().is_some_and(|&header| is_sps(header)))
+		.filter(|nal| !nal.is_empty() && is_sps(nal))
 		.last()
 	else {
 		return Ok(None);
@@ -1355,14 +1378,15 @@ mod tests {
 			.produce()
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		let consumer = Consumer::new(
-			track.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
-			),
-			HangContainer::Legacy(crate::container::Kind::Audio),
+		let subscribed = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
 		);
-		export.state = SourceState::Active(Box::new(consumer));
+		export.state = SourceState::Active(Box::new(Active {
+			_priority: export.source.control(subscribed.control()).unwrap(),
+			consumer: Consumer::new(subscribed, HangContainer::Legacy(crate::container::Kind::Audio)),
+			instance: None,
+		}));
 		(track, export)
 	}
 

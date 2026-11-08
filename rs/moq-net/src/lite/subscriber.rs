@@ -649,9 +649,8 @@ impl Subscriber {
 				)?;
 			}
 			lite::AnnounceBroadcast::Skipped | lite::AnnounceBroadcast::Synced => {}
-			// Only lite-07 carries the route layer and takeovers, which `routed` handles above.
-			lite::AnnounceBroadcast::Takeover { .. }
-			| lite::AnnounceBroadcast::RouteStart { .. }
+			// Only lite-07 carries the route layer, which `routed` handles above.
+			lite::AnnounceBroadcast::RouteStart { .. }
 			| lite::AnnounceBroadcast::RouteUpdate { .. }
 			| lite::AnnounceBroadcast::RouteHold { .. }
 			| lite::AnnounceBroadcast::RouteEnd { .. }
@@ -3102,7 +3101,7 @@ impl kio::Task for DatagramServe {
 			self.state,
 			DatagramState::Ending { .. } | DatagramState::Finish { .. } | DatagramState::Done
 		) && self.gate.poll_denied(waiter).is_ready()
-			&& self.closed.poll_closed(waiter).is_pending()
+			&& self.closed.poll_ending(waiter).is_pending()
 		{
 			tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name(), "datagrams no longer authorized");
 			self.abort(Error::Unauthorized);
@@ -9689,7 +9688,7 @@ impl Announced {
 			return false;
 		}
 		// An error means the prefix is outside our origin's scope, so don't serve it.
-		match subscriber.origin.forward(&path, route.clone(), None) {
+		match subscriber.origin.forward(&path, route.clone()) {
 			Ok(dynamic) => {
 				self.attach(path, route, dynamic);
 				true
@@ -10865,7 +10864,7 @@ impl kio::Task for TrackServeRun {
 		// its tracks end.
 		if !matches!(self.state, TrackRunState::Ending { .. } | TrackRunState::Finish { .. })
 			&& self.gate.poll_denied(waiter).is_ready()
-			&& self.serve.subscriber.session.clone().poll_closed(waiter).is_pending()
+			&& self.serve.subscriber.session.poll_ending(waiter).is_pending()
 		{
 			self.revoke();
 			return Poll::Ready(());
