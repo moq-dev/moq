@@ -214,7 +214,7 @@ pub(crate) struct Bounds {
 	pub end: Option<u64>,
 }
 
-/// Shared group state. Model-visible so [`frame`] handles can observe the abort flag
+/// Shared group state. Model-visible so [`frame`] handles can observe its outcome
 /// while streaming a partial frame.
 #[derive(Default)]
 pub(super) struct GroupState {
@@ -266,14 +266,10 @@ pub(super) struct GroupState {
 	// How the track judged the start against its neighbors' when frame 0 landed.
 	origin: Origin,
 
-	// Once finalized, the total number of frames the group will ever contain. Recorded
-	// at finish so the count outlives an abort that clears the cache.
-	pub(super) fin: Option<usize>,
-
-	// The error that caused the group to be aborted, if any. Mirrored into
-	// `Alive::aborted`, so [`Producer::abort`] stays the only writer: anything else
-	// setting this would leave track scans reading a group as live.
-	pub(super) abort: Option<Error>,
+	// How the group ended, if it did. The finished count outlives an abort that frees the
+	// cache. Mirrored into `Alive::fall` by the one abort path, `Handle::commit_abort`:
+	// anything else ending it would leave track scans reading a group as live.
+	pub(super) outcome: Outcome,
 
 	// The readers that could resume this group on another route. A release that is no
 	// cache policy moves the frames to them rather than dropping them.
@@ -285,6 +281,51 @@ pub(super) struct GroupState {
 
 	// How far readers got, which each frame entering the log is measured against.
 	pace: Arc<Pace>,
+}
+
+/// How far a group got toward its end; each step replaces the last.
+#[derive(Clone, Debug, Default)]
+pub(super) enum Outcome {
+	/// Frames may still be written.
+	#[default]
+	Open,
+	/// Finished with this many frames.
+	Finished(usize),
+	/// Finished with this many frames, then aborted to free its cache: a reader that took
+	/// every frame got the whole group, and one short of it gets the error.
+	Released(usize, Error),
+	/// Aborted before it finished.
+	Aborted(Error),
+}
+
+impl Outcome {
+	/// The total number of frames, once finished.
+	pub(super) fn frames(&self) -> Option<usize> {
+		match self {
+			Self::Finished(frames) | Self::Released(frames, _) => Some(*frames),
+			Self::Open | Self::Aborted(_) => None,
+		}
+	}
+
+	/// The error the group was aborted with, before or after it finished.
+	pub(super) fn error(&self) -> Option<&Error> {
+		match self {
+			Self::Released(_, err) | Self::Aborted(err) => Some(err),
+			Self::Open | Self::Finished(_) => None,
+		}
+	}
+}
+
+/// Why a group was aborted, as track scans read it without taking the group lock.
+enum Fall {
+	/// Freed by cache policy (`Old`, `Timeout`, `Evicted`), or after it finished: it aged
+	/// out of a cache rather than failed.
+	Released,
+	/// Given up deliberately: a reader cancelling, a lagged copy, or the upstream's own
+	/// cache policy. It failed, but readers never see a cut.
+	Abandoned,
+	/// The publisher gave it up with this error.
+	Cut(Error),
 }
 
 /// The frames a copy of a group holds, from where it starts, which a successor copy of
@@ -807,7 +848,7 @@ impl GroupState {
 			false => plain.is_some_and(|plain| plain.shed_past(index)),
 		};
 		if shed {
-			return Err(self.abort.clone().unwrap_or(Error::Evicted));
+			return Err(self.outcome.error().cloned().unwrap_or(Error::Evicted));
 		}
 		Ok(())
 	}
@@ -958,10 +999,10 @@ impl GroupState {
 	/// carrying the debt over as a whole group does. A compressed group's plain copy sheds
 	/// its front the same way.
 	fn shed(&mut self, debt: u64, cap: u64) -> u64 {
-		if self.abort.is_some() {
+		if self.outcome.error().is_some() {
 			return 0;
 		}
-		let last = match self.fin {
+		let last = match self.outcome.frames() {
 			Some(_) => self.committed(),
 			None => self.committed().saturating_sub(1),
 		};
@@ -983,7 +1024,7 @@ impl GroupState {
 			&& freed < cap
 			&& freed < debt
 		{
-			freed += flate.plain.shed(debt - freed, cap - freed, self.fin.is_none());
+			freed += flate.plain.shed(debt - freed, cap - freed, self.outcome.frames().is_none());
 		}
 		freed
 	}
@@ -1020,7 +1061,7 @@ impl GroupState {
 
 	/// Whether the first frame opened, or the group ended without one.
 	fn started(&self) -> bool {
-		!matches!(self.timeline, Timeline::Empty) || self.fin.is_some() || self.abort.is_some()
+		!matches!(self.timeline, Timeline::Empty) || self.outcome.frames().is_some() || self.outcome.error().is_some()
 	}
 
 	/// The bytes the in-flight frame declared but has not written yet, which its open
@@ -1083,13 +1124,13 @@ impl GroupState {
 		let from = flate.plain.len.load(Ordering::Acquire).min(last + 1);
 		// The slices the plain copy needs next were shed before it inflated them.
 		if from <= last && from < self.held() {
-			return Err(self.abort.clone().unwrap_or(Error::Evicted));
+			return Err(self.outcome.error().cloned().unwrap_or(Error::Evicted));
 		}
 		Ok(Inflate {
 			release: flate
 				.release
 				.clone()
-				.ok_or_else(|| self.abort.clone().unwrap_or(Error::Dropped))?,
+				.ok_or_else(|| self.outcome.error().cloned().unwrap_or(Error::Dropped))?,
 			plain: flate.plain.clone(),
 			from,
 			keep: first,
@@ -1160,11 +1201,11 @@ impl GroupState {
 	/// that already consumed every frame is missing nothing, so it gets the clean end of
 	/// group; one that fell short sees the abort rather than a silently truncated stream.
 	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
-		match (self.fin, &self.abort) {
-			(Some(total), Some(err)) if index < total => Poll::Ready(Err(err.clone())),
-			(Some(_), _) => Poll::Ready(Ok(())),
-			(None, Some(err)) => Poll::Ready(Err(err.clone())),
-			(None, None) => {
+		match &self.outcome {
+			Outcome::Released(total, err) if index < *total => Poll::Ready(Err(err.clone())),
+			Outcome::Finished(_) | Outcome::Released(..) => Poll::Ready(Ok(())),
+			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
+			Outcome::Open => {
 				// Waiting on frames the writer has yet to commit, wherever the reader skipped
 				// to, so it holds the writer back from none of them.
 				if index >= self.committed() {
@@ -1178,10 +1219,10 @@ impl GroupState {
 	/// The group's outcome once final: `Ok` once finished, which a later abort only frees
 	/// the cache of, or the abort error.
 	fn poll_outcome(&self) -> Poll<Result<()>> {
-		match (self.fin, &self.abort) {
-			(Some(_), _) => Poll::Ready(Ok(())),
-			(None, Some(err)) => Poll::Ready(Err(err.clone())),
-			(None, None) => Poll::Pending,
+		match &self.outcome {
+			Outcome::Finished(_) | Outcome::Released(..) => Poll::Ready(Ok(())),
+			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
+			Outcome::Open => Poll::Pending,
 		}
 	}
 
@@ -1343,13 +1384,13 @@ impl GroupState {
 		let head = handoff.as_ref().and_then(|_| self.head());
 		let shared = self.content.is_some();
 		if let Some(flate) = &mut self.flate {
-			flate.release(self.abort.clone().unwrap_or(Error::Dropped), shared);
+			flate.release(self.outcome.error().cloned().unwrap_or(Error::Dropped), shared);
 		}
 		self.front = VecDeque::new();
 		self.evict_log(self.log.end());
 		self.partial = None;
 		if let Some(content) = self.content.take() {
-			content.detach(self.abort.clone().unwrap_or(Error::Dropped));
+			content.detach(self.outcome.error().cloned().unwrap_or(Error::Dropped));
 		}
 		self.cache = 0;
 		self.charge.clear();
@@ -1383,7 +1424,7 @@ impl Drop for GroupState {
 }
 
 fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>> {
-	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	state.write().map_err(|r| r.outcome.error().cloned().unwrap_or(Error::Dropped))
 }
 
 /// Writes frames to a group in order.
@@ -1461,29 +1502,23 @@ impl Fate {
 	/// Whether the group was aborted other than by cache policy (`Old`, `Timeout`,
 	/// `Evicted`): it failed or was given up, rather than aged out of a cache.
 	pub(super) fn failed(&self) -> bool {
-		self.0.failed.load(Ordering::Acquire)
+		matches!(self.0.fall.get(), Some(Fall::Abandoned | Fall::Cut(_)))
 	}
 }
 
 struct Alive {
-	// Monotone mirror of `GroupState::abort` for track scans that already hold the
-	// track lock. A stale false only hands out a group that is concurrently aborting;
-	// true is stored after the abort exists, so it can never hide a live group.
+	// Monotone mirror of an aborted `GroupState::outcome`, with why, for track scans that
+	// already hold the track lock. Set once, whole: an unset one only hands out a group
+	// that is concurrently aborting, and it is set after the outcome, so it can never hide
+	// a live group. Readable through [`Fate`] once the group is gone.
 	//
 	// Only ever read on its own. A decision that pairs the abort with something else
 	// out of `GroupState` has to read both under one guard, or the two halves can
 	// straddle the abort: see `Handle::live_first_frame`.
-	aborted: AtomicBool,
+	fall: OnceLock<Fall>,
 	// Set once frame 0's rewind check ran, so later writes skip the track lock it takes. A
 	// stale false only takes that lock once more.
 	checked: AtomicBool,
-	// The abort's error when it was the publisher giving the group up rather than cache
-	// policy (`Old`, `Timeout`, `Evicted`). Set before `aborted`, under the same rules, so
-	// a track scan learns why without taking the group lock.
-	cut: OnceLock<Error>,
-	// Set before `aborted` when the abort was not cache policy: the group failed or was given
-	// up rather than aged out of a cache. Read through [`Fate`] once the group is gone.
-	failed: AtomicBool,
 	// Monotone mirror of `GroupState::started` for the first frame or the finish, set after
 	// the group lock is released and before the track is told: a track scan reading a stale
 	// false judges the group frameless until that wake re-judges it.
@@ -1504,7 +1539,7 @@ struct Alive {
 impl Drop for Producer {
 	fn drop(&mut self) {
 		if let Ok(state) = self.handle.state.write() {
-			if state.fin.is_some() || state.abort.is_some() {
+			if !matches!(state.outcome, Outcome::Open) {
 				return;
 			}
 			tracing::warn!(
@@ -1578,7 +1613,7 @@ impl Producer {
 	#[cfg(feature = "async")]
 	pub(crate) fn set_end_object(&self, fields: super::object::Fields) -> Result<()> {
 		let mut state = modify(&self.handle.state)?;
-		if state.fin.is_some() || state.relay.as_ref().is_some_and(|relay| relay.end_object.is_some()) {
+		if state.outcome.frames().is_some() || state.relay.as_ref().is_some_and(|relay| relay.end_object.is_some()) {
 			return Err(Error::MalformedTrack);
 		}
 		let bytes = fields.heap();
@@ -1621,10 +1656,8 @@ impl Producer {
 			(state.log.reader(), state.pace.clone())
 		};
 		let alive = Arc::new(Alive {
-			aborted: AtomicBool::new(false),
+			fall: OnceLock::new(),
 			checked: AtomicBool::new(false),
-			cut: OnceLock::new(),
-			failed: AtomicBool::new(false),
 			started: AtomicBool::new(false),
 			access,
 			log,
@@ -1698,7 +1731,7 @@ impl Producer {
 		let mut state = modify(&self.handle.state)?;
 		// Every write advances `next_index` past `offset`, so this is "nothing written
 		// yet".
-		if state.fin.is_some() || state.next_index != state.offset || index < state.offset {
+		if state.outcome.frames().is_some() || state.next_index != state.offset || index < state.offset {
 			return Err(Error::Closed);
 		}
 		state.offset = index;
@@ -1742,7 +1775,7 @@ impl Producer {
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
 		let mut state = modify(&self.handle.state)?;
-		if state.fin.is_some() {
+		if state.outcome.frames().is_some() {
 			return Err(Error::Closed);
 		}
 		debug_assert!(state.partial.is_none(), "a frame is already open");
@@ -1828,7 +1861,7 @@ impl Producer {
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
 		let mut state = modify(&self.handle.state)?;
-		if state.fin.is_some() {
+		if state.outcome.frames().is_some() {
 			return Err(Error::Closed);
 		}
 		debug_assert!(state.partial.is_none(), "a frame is already open");
@@ -2000,7 +2033,7 @@ impl Producer {
 			.as_ref()
 			.and_then(|track| track.neighbors(self.handle.info.sequence));
 		let mut state = modify(&self.handle.state)?;
-		if state.fin.is_some() {
+		if state.outcome.frames().is_some() {
 			return Err(Error::Closed);
 		}
 		debug_assert!(state.partial.is_none(), "a frame is already open");
@@ -2196,7 +2229,7 @@ impl Producer {
 		let mut state = modify(&self.handle.state)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let fin = state.next_index;
-		state.fin = Some(fin);
+		state.outcome = Outcome::Finished(fin);
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
 		if let Some(flate) = &mut state.flate {
@@ -2334,7 +2367,7 @@ impl Handle {
 		let index = reader.cursor.index;
 		let state = self.state.read();
 		// Frames adopted below the log sit off this copy's pace scale.
-		if state.abort.is_some() || (index as u64) < state.log.base() {
+		if state.outcome.error().is_some() || (index as u64) < state.log.base() {
 			return false;
 		}
 		// A plain read of a compressed copy inflates its frame from every slice since the
@@ -2375,7 +2408,7 @@ impl Handle {
 	// Sessions cancel an unfinished FETCH while its writer belongs to its data stream.
 	pub(crate) fn abort_open(&self, err: Error) {
 		if let Ok(state) = self.state.write()
-			&& state.fin.is_none()
+			&& state.outcome.frames().is_none()
 		{
 			self.commit_abort(state, err);
 		}
@@ -2389,7 +2422,7 @@ impl Handle {
 		let Ok(mut state) = self.state.write() else {
 			return Ok(None);
 		};
-		if state.abort.is_some() {
+		if state.outcome.error().is_some() {
 			return Ok(None);
 		}
 		if let Some(content) = &state.content {
@@ -2511,7 +2544,7 @@ impl Handle {
 		let same_form = head.compressed == state.flate.is_some();
 		// A copy that shed its front holds no run from `offset` for the head to precede.
 		let shed = state.held() != offset;
-		if state.abort.is_some() || state.sparse() || !same_form || shed || head.start >= offset || !reaches {
+		if state.outcome.error().is_some() || state.sparse() || !same_form || shed || head.start >= offset || !reaches {
 			return;
 		}
 		let count = offset - head.start;
@@ -2638,18 +2671,19 @@ impl Handle {
 
 	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
 		let policy = matches!(err, Error::Old | Error::Timeout | Error::Evicted);
-		// A finished group's outcome is settled: an abort only releases its cache, so it
-		// neither failed nor was cut.
-		let settled = guard.fin.is_some();
 		// Cache policy frees the frames, as does an oversized group whichever write found
 		// it; a copy that failed or was given up lends them on.
 		let salvage = !policy && !matches!(err, Error::GroupTooLarge);
-		// A reset carrying a policy code is the upstream's cache policy, a cancel is a reader
-		// no longer wanting the group, and a fill refused as unfetchable abandons backfill:
-		// deliberate holes, never a cut readers see. The publisher giving the group up is.
-		let cut = !settled
-			&& !policy
-			&& !matches!(
+		let fall = match guard.outcome {
+			// A finished group's outcome is settled: an abort only releases its cache, so it
+			// neither failed nor was cut.
+			Outcome::Finished(_) => Fall::Released,
+			_ if policy => Fall::Released,
+			// A reset carrying a policy code is the upstream's cache policy, a cancel is a
+			// reader no longer wanting the group, and a fill refused as unfetchable abandons
+			// backfill: deliberate holes, never a cut readers see. The publisher giving the
+			// group up is.
+			_ if matches!(
 				err,
 				Error::Cancel
 					| Error::Lagged | Error::Stream(
@@ -2658,15 +2692,19 @@ impl Handle {
 						| StreamError::DeliveryTimeout
 						| StreamError::TooFarBehind
 				)
-			);
-		if cut {
-			let _ = self.alive.cut.set(err.clone());
-		}
-		if !settled && !policy {
-			self.alive.failed.store(true, Ordering::Release);
-		}
-		guard.abort = Some(err);
-		self.alive.aborted.store(true, Ordering::Release);
+			) =>
+			{
+				Fall::Abandoned
+			}
+			_ => Fall::Cut(err.clone()),
+		};
+		let cut = matches!(fall, Fall::Cut(_));
+		guard.outcome = match guard.outcome {
+			Outcome::Finished(frames) => Outcome::Released(frames, err),
+			_ => Outcome::Aborted(err),
+		};
+		// After the outcome exists, so a scan reading the mirror never hides a live group.
+		let _ = self.alive.fall.set(fall);
 		guard.release(salvage);
 		guard.close();
 		self.cache.aborted(self.sequence, cut);
@@ -2680,7 +2718,7 @@ impl Handle {
 	/// concurrent abort can still read as live for the length of [`Self::abort`],
 	/// which hands out a group whose consumer then surfaces the abort.
 	pub(crate) fn is_aborted(&self) -> bool {
-		self.alive.aborted.load(Ordering::Acquire)
+		self.alive.fall.get().is_some()
 	}
 
 	/// Why the publisher gave this group up, once it did, rather than cache policy
@@ -2688,7 +2726,10 @@ impl Handle {
 	///
 	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
 	pub(super) fn cut_error(&self) -> Option<&Error> {
-		self.alive.cut.get()
+		match self.alive.fall.get()? {
+			Fall::Cut(err) => Some(err),
+			Fall::Released | Fall::Abandoned => None,
+		}
 	}
 
 	/// This group as [`Detached`], for the track to end once it stops caching it.
@@ -2710,7 +2751,7 @@ impl Handle {
 	/// Whether a transport-bounded copy may answer these requested frames.
 	pub(super) fn covers(&self, frames: Bounds) -> bool {
 		let state = self.state.read();
-		state.abort.is_none()
+		state.outcome.error().is_none()
 			&& state.offset as u64 <= frames.start
 			&& match (state.range_end, frames.end) {
 				(None, _) => true,
@@ -2727,14 +2768,14 @@ impl Handle {
 	/// Whether the writer finished this copy, which a transport bound may end short of the
 	/// group's end.
 	pub(super) fn is_settled(&self) -> bool {
-		self.state.read().fin.is_some()
+		self.state.read().outcome.frames().is_some()
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.
 	pub(crate) fn is_finished(&self) -> bool {
 		{
 			let state = self.state.read();
-			state.fin.is_some() && state.range_end.is_none()
+			state.outcome.frames().is_some() && state.range_end.is_none()
 		}
 	}
 
@@ -2749,7 +2790,7 @@ impl Handle {
 	/// ([`Self::is_aborted`]) is for scans that ask about the abort alone.
 	pub(super) fn live_first_frame(&self) -> Option<usize> {
 		let state = self.state.read();
-		state.abort.is_none().then_some(state.offset)
+		state.outcome.error().is_none().then_some(state.offset)
 	}
 
 	/// One past the last frame committed to an unfinished group, when that is past its
@@ -2765,7 +2806,7 @@ impl Handle {
 	/// tail, and the count outlives the released cache.
 	pub(super) fn resume_frame(&self) -> Option<usize> {
 		let state = self.state.read();
-		if (state.fin.is_some() && state.range_end.is_none()) || state.sparse() {
+		if (state.outcome.frames().is_some() && state.range_end.is_none()) || state.sparse() {
 			return None;
 		}
 		(state.committed() > state.offset).then_some(state.committed())
@@ -2889,7 +2930,7 @@ impl Handle {
 			return false;
 		}
 		let Some(first) = state.entry(0) else {
-			return state.abort.is_none() && state.held() > 0;
+			return state.outcome.error().is_none() && state.held() > 0;
 		};
 		let first = first.frame.payload.len() as u64;
 		state.cache.saturating_sub(first) > first.saturating_mul(ratio.into())
@@ -3016,7 +3057,7 @@ impl Handle {
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
 	fn abort_reason(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		self.state.read().outcome.error().cloned().unwrap_or(Error::Dropped)
 	}
 }
 
@@ -3094,7 +3135,7 @@ impl Demand {
 	}
 
 	fn abort_reason(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		self.state.read().outcome.error().cloned().unwrap_or(Error::Dropped)
 	}
 }
 
@@ -3946,7 +3987,7 @@ impl Consumer {
 	/// how many this consumer has read. The final total once the group is finished.
 	pub fn frame_count(&self) -> usize {
 		let state = self.cursor.state.read();
-		state.fin.unwrap_or(state.next_index)
+		state.outcome.frames().unwrap_or(state.next_index)
 	}
 
 	/// The next frame, as a consumer for chunked reading.
@@ -3999,7 +4040,7 @@ impl Consumer {
 	/// nothing more. A range cap ends only this reader, and can be raised, so it keeps it.
 	fn release_if_finished(&self) {
 		if let Some(expiry) = &self.expiry
-			&& self.cursor.state.read().fin.is_some()
+			&& self.cursor.state.read().outcome.frames().is_some()
 		{
 			expiry.ended();
 		}
@@ -4208,7 +4249,7 @@ impl Consumer {
 	fn shed_next(&self) -> bool {
 		let state = self.cursor.state.read();
 		let index = self.cursor.index;
-		if state.abort.is_some() || state.sparse() || index < state.offset {
+		if state.outcome.error().is_some() || state.sparse() || index < state.offset {
 			return false;
 		}
 		index < state.held() || state.plain(self.cursor.raw).is_some_and(|plain| plain.shed_past(index))
@@ -4367,7 +4408,7 @@ impl Cursor {
 		}
 
 		let state = self.state.read();
-		state.abort.is_none() && state.fin.is_none_or(|fin| self.index < fin)
+		state.outcome.error().is_none() && state.outcome.frames().is_none_or(|fin| self.index < fin)
 	}
 
 	/// Content this cursor has neither returned nor already counted in a prefetch batch.
@@ -4396,7 +4437,7 @@ impl Cursor {
 		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
 			Ok(res) => res,
 			// We try to clone abort just in case the function forgot to check for terminal state.
-			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+			Err(state) => Err(state.outcome.error().cloned().unwrap_or(Error::Dropped)),
 		})
 	}
 
@@ -4580,7 +4621,7 @@ impl Cursor {
 			Ok(Ok(Some(job))) => self.prefetch.inflate(&job, index, stats)?,
 			Ok(Ok(None)) => {}
 			Ok(Err(err)) => return Poll::Ready(Err(err)),
-			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+			Err(state) => return Poll::Ready(Err(state.outcome.error().cloned().unwrap_or(Error::Dropped))),
 		}
 
 		// The refill already updated the eviction rank under the group lock.
@@ -5539,7 +5580,7 @@ mod test {
 		}
 		{
 			let state = producer.handle.state.read();
-			assert!(state.abort.is_none());
+			assert!(state.outcome.error().is_none());
 			assert_eq!(state.offset, 0);
 			assert!((48 - 32..48 - 30).contains(&state.held()), "held from {}", state.held());
 		}
@@ -5567,7 +5608,7 @@ mod test {
 		let state = producer.handle.state.read();
 		assert!(state.held() > 0, "the front was shed");
 		assert!(state.slots() <= MAX_CACHE_BYTES, "{} bytes of slots", state.slots());
-		assert!(state.abort.is_none());
+		assert!(state.outcome.error().is_none());
 	}
 
 	/// Batches of empty frames count their new slots too, so they shed the front as
@@ -5593,7 +5634,7 @@ mod test {
 			"{} bytes of slots",
 			state.slots()
 		);
-		assert!(state.abort.is_none());
+		assert!(state.outcome.error().is_none());
 	}
 
 	/// A frame count past the old 8192-frame cap is held whole while it fits the tail.
@@ -5609,7 +5650,7 @@ mod test {
 		let state = producer.handle.state.read();
 		assert_eq!(state.offset, 0);
 		assert_eq!(state.entries(0, usize::MAX).count(), 10_000);
-		assert!(state.abort.is_none());
+		assert!(state.outcome.error().is_none());
 	}
 
 	/// Pool debt sheds a group's front, keeping an open group's newest frame for the

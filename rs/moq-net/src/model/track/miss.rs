@@ -623,7 +623,7 @@ impl Misses {
 		let bound = bound.filter(|_| state.unfed).and_then(|end| end.checked_sub(1));
 		// The feed's start is unknown until the serving session resolves it, and readers
 		// take nothing from a cache that does not reflect the feed.
-		if state.start_pending || !state.readable() && bound.is_none() {
+		if matches!(state.start, super::Start::Pending(_)) || !state.readable() && bound.is_none() {
 			return asks;
 		}
 		// A received stale run this reader cannot trust is still asked for, though nothing above
@@ -646,7 +646,7 @@ impl Misses {
 			key.2,
 			Some(newest),
 			state.live_floor,
-			state.start_sequence,
+			state.start.sequence(),
 			state.drops_revision,
 		);
 		let ended = state.nothing_arrives();
@@ -901,13 +901,15 @@ impl Misses {
 			self.deferred.remove(run.clone());
 			self.judged.insert(run.clone());
 		}
-		let start = state.start_sequence.unwrap_or(0);
+		let start = state.start.sequence().unwrap_or(0);
 		// Below a start its publisher resolved from a budget, which an update may have changed
 		// in flight, every older group is history a fill may still find. A feed that began at
 		// the live edge or the floor the copy asked for leaves older groups as history only a
 		// reader naming them asked for.
 		let unasked = state.fills_from_start
-			|| !state.start_resolved && state.received && named.is_none_or(|named| named >= start);
+			|| !matches!(state.start, super::Start::Resolved(_))
+				&& state.anchors.received()
+				&& named.is_none_or(|named| named >= start);
 		if unasked && start > 0 {
 			candidates.remove(0..start);
 		}
