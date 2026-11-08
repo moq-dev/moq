@@ -83,7 +83,7 @@ impl Version {
 	/// Whether the client's SETUP can carry its connection credential (see
 	/// `Client::with_token`, behind the `async` feature). Every moq-transport draft can;
 	/// moq-lite gained it in lite-07, so older versions need the credential in the URL.
-	pub fn has_setup_token(self) -> bool {
+	pub(crate) fn has_setup_token(self) -> bool {
 		match self {
 			Self::Lite(version) => version.has_auth(),
 			Self::Ietf(_) => true,

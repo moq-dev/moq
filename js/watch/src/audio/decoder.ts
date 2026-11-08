@@ -116,6 +116,18 @@ const EMPTY: Stats = { bytesReceived: 0, underruns: 0, late: 0, errors: 0, stall
 // What a decode attempt reads, and where its counts go.
 type Attempt = { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid; key: Key };
 
+// The newest container consumer, the path it reads, and its codec, whose estimate a replacement
+// continues.
+type Consumed = { path: Moq.Path.Valid; codec: string; consumer: Container.Consumer };
+
+// What the decoder does with the selected rendition. Only a running rendition counts a stall.
+type Phase =
+	| { kind: "stopped" }
+	// Decoding the rendition at `key` into the ring, which an underrun or a stall is counted against.
+	| { kind: "running"; key: Key; consumer?: Consumed }
+	// The source failed to decode, and stays failed until another source is selected.
+	| { kind: "failed"; failure: Failure };
+
 /**
  * Downloads audio from a track and emits it to an AudioContext.
  *
@@ -164,10 +176,6 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Milli | undefined>(undefined);
 
-	// The newest container consumer, the path it reads, and its codec, whose estimate a replacement
-	// continues.
-	#consumer?: { path: Moq.Path.Valid; codec: string; consumer: Container.Consumer };
-
 	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
 	#subscribeMaxDelay = new Signal<Milli>(Milli.zero);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
@@ -187,14 +195,11 @@ export class Decoder {
 	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
-	#failed?: Failure;
+	#phase = new Signal<Phase>({ kind: "stopped" });
+	readonly #running: Computed<boolean>;
 
 	// What each rendition delivered, for the feedback a viewer reports.
 	#tally = new Tally();
-	// The rendition decoding into the ring, which an underrun or a stall is counted against.
-	#playing?: Key;
-	// Whether audio played since the decoder was enabled, so the wait for the first is no stall.
-	#played = false;
 
 	// The catalog fields that require a replacement subscription or decoder.
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
@@ -239,6 +244,7 @@ export class Decoder {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
 		});
+		this.#running = this.#signals.computed((effect) => effect.get(this.#phase).kind === "running");
 		this.#idle = this.#signals.computed((effect) => {
 			if (effect.get(this.source.out.config) !== undefined) return false;
 			const ring = effect.get(this.#ring);
@@ -281,25 +287,26 @@ export class Decoder {
 		}));
 	}
 
-	// Count each stall once audio has played, and how long it lasted. A disabled decoder waits for
-	// audio again: resuming is a startup, not a stall.
+	// Count each stall once audio has played, and how long it lasted. Each run of the decoder waits
+	// for its first audio, which is a startup, not a stall; a rendition swap keeps the run going.
 	#runStalls(effect: Effect): void {
-		if (!effect.get(this.in.enabled)) {
-			this.#played = false;
-			return;
-		}
-		if (!effect.get(this.#out.stalled)) {
-			this.#played = true;
-			return;
-		}
-		const key = this.#playing;
-		if (!this.#played || !key) return;
+		if (!effect.get(this.#running)) return;
 
-		const end = this.#tally.stall(key);
-		this.#count(undefined, {}, (stats) => ({ stalls: stats.stalls + 1 }));
-		effect.cleanup(() => {
-			const duration = end();
-			this.#count(undefined, {}, (stats) => ({ stalled: Milli(stats.stalled + duration) }));
+		let played = false;
+		effect.run((inner) => {
+			if (!inner.get(this.#out.stalled)) {
+				played = true;
+				return;
+			}
+			const phase = this.#phase.peek();
+			if (!played || phase.kind !== "running") return;
+
+			const end = this.#tally.stall(phase.key);
+			this.#count(undefined, {}, (stats) => ({ stalls: stats.stalls + 1 }));
+			inner.cleanup(() => {
+				const duration = end();
+				this.#count(undefined, {}, (stats) => ({ stalled: Milli(stats.stalled + duration) }));
+			});
 		});
 	}
 
@@ -395,15 +402,17 @@ export class Decoder {
 			if (end !== undefined) ring.end((end - this.#terminal.delay) as Micro);
 			effect.set(this.#ring, ring);
 
-			// Mirror ring state (timestamp/stalled) onto our public signals.
+			// Mirror ring state (timestamp/stalled) onto our public signals, until the ring closes.
 			effect.run((inner) => {
 				const ts = Milli.fromMicro(inner.get(ring.timestamp));
 				this.#out.timestamp.set(ts);
 				this.#trimDecodeBuffered(ts);
 			});
+			effect.cleanup(() => this.#out.timestamp.set(undefined));
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled) && !inner.get(ring.silent));
 			});
+			effect.cleanup(() => this.#out.stalled.set(true));
 			// Each ring counts from zero, so add only what this one counted to the cumulative stats.
 			let counted = 0;
 			effect.run((inner) => {
@@ -411,7 +420,9 @@ export class Decoder {
 				const added = underruns - counted;
 				counted = underruns;
 				if (added <= 0) return;
-				this.#count(this.#playing, { underruns: added }, (stats) => ({ underruns: stats.underruns + added }));
+				const phase = this.#phase.peek();
+				const key = phase.kind === "running" ? phase.key : undefined;
+				this.#count(key, { underruns: added }, (stats) => ({ underruns: stats.underruns + added }));
 			});
 
 			effect.set(this.#out.root, worklet);
@@ -465,55 +476,52 @@ export class Decoder {
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast. A stopped decoder resolves it only to
 		// tell whether a failure's source is still selected.
+		const phase = this.#phase.peek();
 		const active =
-			broadcast && track && identity && (running || this.#failed)
+			broadcast && track && identity && (running || phase.kind === "failed")
 				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.instance)
 				: undefined;
 		const key = identity && JSON.stringify(identity);
 
 		// A failure belongs to its source: selecting another clears it, even while muted or paused.
-		const failed = this.#failed;
-		const selected = broadcast && failed ? effect.get(broadcast.out.active)?.closed : undefined;
-		if (failed && failureMoved(failed, { broadcast: selected, media: active?.closed, track, identity: key })) {
-			this.#failed = undefined;
-			this.#out.error.set(undefined);
+		if (phase.kind === "failed") {
+			const selected = broadcast ? effect.get(broadcast.out.active)?.closed : undefined;
+			if (failureMoved(phase.failure, { broadcast: selected, media: active?.closed, track, identity: key })) {
+				this.#phase.set({ kind: "stopped" });
+				this.#out.error.set(undefined);
+			}
 		}
 
-		if (!running || !broadcast || !track || !identity) {
+		// A source that already failed waits for another.
+		if (!running || !broadcast || !track || !identity || !active || !key || this.#phase.peek().kind === "failed") {
 			this.#retire();
 			return;
 		}
 
 		const config = identity.decoder;
 
-		if (!active || !key) {
-			this.#retire();
-			return;
-		}
-
-		// This source already failed; wait for another.
-		if (this.#failed) {
-			this.#retire();
-			return;
-		}
 		// Closing this effect releases both its container reader and track subscription.
 		const failure = new Signal<Error | undefined>(undefined);
 		const rendition: Key = { path: broadcast.in.name.peek(), id: track };
-		this.#playing = rendition;
+		// A swap keeps the outgoing consumer, whose estimate the replacement may continue.
+		this.#phase.set({
+			kind: "running",
+			key: rendition,
+			consumer: phase.kind === "running" ? phase.consumer : undefined,
+		});
 		let attempt: Effect | undefined;
 		effect.run((inner) => {
 			const error = inner.get(failure);
 			if (!error) return;
 			this.#count(rendition, { errors: 1 }, (stats) => ({ errors: stats.errors + 1 }));
-			this.#failed = {
+			this.#out.error.set(error);
+			attempt?.close();
+			this.#retire({
 				broadcast: broadcast.out.active.peek()?.closed,
 				media: active.closed,
 				track,
 				identity: key,
-			};
-			this.#out.error.set(error);
-			attempt?.close();
-			this.#retire();
+			});
 		});
 
 		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring and a
@@ -795,7 +803,9 @@ export class Decoder {
 		format: Container.Format,
 		{ config, path }: { config: DecoderConfig; path: Moq.Path.Valid },
 	): { consumer: Container.Consumer; read: Signal<Queued> } {
-		const outgoing = this.#consumer;
+		const phase = this.#phase.peek();
+		if (phase.kind !== "running") throw new Error("audio: a consumer opened outside a running rendition");
+		const outgoing = phase.consumer;
 		const continues = outgoing?.path === path;
 		const consumer = new Container.Consumer(sub, {
 			format,
@@ -804,7 +814,7 @@ export class Decoder {
 			predecessor: continues ? outgoing.consumer : undefined,
 		});
 		effect.cleanup(() => consumer.close());
-		this.#consumer = { path, codec: config.codec, consumer };
+		this.#phase.set({ ...phase, consumer: { path, codec: config.codec, consumer } });
 
 		// Opus states its duration only per packet, so the same codec continuing keeps the outgoing
 		// one until the first packet refines it. Anything else starts from the codec's own constant.
@@ -843,9 +853,11 @@ export class Decoder {
 		return { consumer, read };
 	}
 
-	// No consumer replaces the outgoing one, so its estimate stops holding the buffer open.
-	#retire(): void {
-		this.#consumer = undefined;
+	// Leave the running phase, failed or stopped; a stop keeps an earlier failure. No consumer
+	// replaces the outgoing one, so its estimate stops holding the buffer open.
+	#retire(failure?: Failure): void {
+		if (failure) this.#phase.set({ kind: "failed", failure });
+		else if (this.#phase.peek().kind === "running") this.#phase.set({ kind: "stopped" });
 		this.#measured.set(undefined);
 		// Its arrivals stop holding the clock's reference.
 		this.#track.reset();

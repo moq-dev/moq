@@ -36,6 +36,14 @@ function startupSpan(ranges: Container.BufferedRanges, first: Milli): { start: M
 	return { start: first, end: Milli(first + duration) };
 }
 
+// The rendition #runPending chose, or the failure that stopped its source until another is selected.
+// A selected rendition is pending until it replaces the active one, and stays selected on screen.
+type Selection = { kind: "none" } | { kind: "selected"; rendition: Rendition } | { kind: "failed"; failure: Failure };
+
+// One run of the active rendition's playback. A poster may show while it starts, and only a picture
+// that played and then froze is a stall.
+type Playback = "starting" | "playing" | "stalled";
+
 /** Signals the decoder reads. */
 export type DecoderInput = {
 	/** Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output. */
@@ -128,12 +136,9 @@ export class Decoder {
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
-	// The current track running, held so we can cancel it when the new track is ready.
+	// The rendition on screen, held so we can cancel it when the selected one is ready.
 	#active = new Signal<Rendition | undefined>(undefined);
-	// The rendition preparing to replace the active one, with the catalog of the broadcast it
-	// subscribed to. One value so a later source that reuses the track name still notifies:
-	// the name alone would compare equal, and the jitter effect would keep the previous catalog.
-	#pending = new Signal<{ track: string; catalog: Getter<Catalog.Root | undefined> } | undefined>(undefined);
+	#selection = new Signal<Selection>({ kind: "none" });
 	// The active track's arrival estimate from its container consumer.
 	#spread = new Signal<Milli | undefined>(undefined);
 	// The path of the media the last rendition read, and its instance. Every handle to one instance
@@ -142,13 +147,9 @@ export class Decoder {
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
-	#selected?: Rendition;
-	#failed?: Failure;
 
 	// What each rendition delivered, for the feedback a viewer reports.
 	#tally = new Tally();
-	// Whether a picture played since the decoder was enabled, so the wait for the first one is no stall.
-	#played = false;
 
 	#clearCurrentFrame(): void {
 		this.#out.frame.update((prev) => {
@@ -224,36 +225,50 @@ export class Decoder {
 		};
 		const activeTrack = effect.get(this.#active);
 		const active = floor(activeTrack?.track, activeTrack?.catalog);
-		const pendingTrack = effect.get(this.#pending);
+		const pendingTrack = this.#pending(effect.get(this.#selection), activeTrack);
 		const pending = floor(pendingTrack?.track, pendingTrack?.catalog);
 		effect.set(this.#out.jitter, switchJitter({ active, pending }));
 	}
 
+	// The selected rendition still preparing to replace `active`.
+	#pending(selection: Selection, active: Rendition | undefined): Rendition | undefined {
+		return selection.kind === "selected" && selection.rendition !== active ? selection.rendition : undefined;
+	}
+
 	#runPending(effect: Effect): void {
-		this.#selected = undefined;
 		const enabled = effect.get(this.in.enabled);
 		const broadcast = effect.get(this.source.in.broadcast);
 		const track = effect.get(this.source.out.track);
 		const identity = effect.get(this.#identity);
+		const selection = this.#selection.peek();
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast. A disabled decoder resolves it only to
 		// tell whether a failure's source is still selected.
 		const active: Moq.Broadcast.Consumer | undefined =
-			broadcast && track && identity && (enabled || this.#failed)
+			broadcast && track && identity && (enabled || selection.kind === "failed")
 				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.instance)
 				: undefined;
 		const key = identity && JSON.stringify(identity);
 
-		// A failure belongs to its source: selecting another clears it, even while disabled.
-		const failed = this.#failed;
-		const selected = broadcast && failed ? effect.get(broadcast.out.active)?.closed : undefined;
-		if (failed && failureMoved(failed, { broadcast: selected, media: active?.closed, track, identity: key })) {
-			this.#failed = undefined;
+		// A failure belongs to its source: selecting another clears it, even while disabled. Without a
+		// latched failure, any error shown is an outgoing rendition's, which a selection change clears.
+		if (selection.kind !== "failed") {
 			this.#out.error.set(undefined);
+		} else {
+			const selected = broadcast ? effect.get(broadcast.out.active)?.closed : undefined;
+			if (failureMoved(selection.failure, { broadcast: selected, media: active?.closed, track, identity: key })) {
+				this.#selection.set({ kind: "none" });
+				this.#out.error.set(undefined);
+			}
 		}
+		// Nothing is selected without a source, but a failure stays latched.
+		const deselect = () => {
+			if (this.#selection.peek().kind === "selected") this.#selection.set({ kind: "none" });
+		};
 
 		if (!enabled || !broadcast || !track || !identity) {
+			deselect();
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
 			this.#active.set(undefined);
@@ -269,6 +284,7 @@ export class Decoder {
 		}
 
 		if (!active || !key) {
+			deselect();
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
 			this.#clock.reset();
@@ -278,7 +294,7 @@ export class Decoder {
 		}
 
 		// This source already failed; wait for another.
-		if (this.#failed) return;
+		if (this.#selection.peek().kind === "failed") return;
 
 		// A republish of the media this rendition reads (the catalog's own broadcast, or the one a
 		// `broadcast` override names) is another instance, whose timeline starts over. Waiting for
@@ -294,8 +310,7 @@ export class Decoder {
 		const outgoing = this.#active.peek();
 		const predecessor = outgoing?.broadcast.path === active.path ? outgoing : undefined;
 
-		// Start a new pending effect.
-		let pending: Rendition | undefined = new Rendition({
+		const rendition = new Rendition({
 			sync: this.sync,
 			clock: this.#clock,
 			broadcast: active,
@@ -309,27 +324,30 @@ export class Decoder {
 			catalog: broadcast.out.catalog,
 			predecessor,
 		});
-		this.#selected = pending;
+		this.#selection.set({ kind: "selected", rendition });
+		// Whether the rendition is still waiting to replace the active one: neither promoted nor failed.
+		const pending = () => this.#pending(this.#selection.peek(), this.#active.peek()) === rendition;
+
 		effect.run((inner) => {
-			if (!pending) {
+			if (!pending()) {
 				inner.close(); // Promoted tracks are observed by their active lifetime.
 				return;
 			}
-			const error = inner.get(pending.error);
+			const error = inner.get(rendition.error);
 			if (!error) return;
-			this.#recordError(pending, error);
-			pending.close();
-			pending = undefined;
-			this.#pending.set(undefined);
+			this.#recordError(rendition, error);
+			rendition.close();
 			// With no active rendition left, nothing holds video's timeline.
 			if (!this.#active.peek()) this.#clock.reset();
 		});
-		effect.set(this.#pending, { track, catalog: broadcast.out.catalog });
 
-		effect.cleanup(() => pending?.close());
+		// Once promoted, #runActive closes it.
+		effect.cleanup(() => {
+			if (this.#active.peek() !== rendition) rendition.close();
+		});
 
 		effect.run((effect) => {
-			if (!pending) {
+			if (!pending()) {
 				effect.close();
 				return;
 			}
@@ -337,18 +355,15 @@ export class Decoder {
 			const current = effect.get(this.#active);
 			if (current && !republished) {
 				// A zero timestamp is a rendered frame, not a missing one.
-				const pendingTimestamp = effect.get(pending.timestamp);
+				const pendingTimestamp = effect.get(rendition.timestamp);
 				if (pendingTimestamp === undefined) return;
 
 				// Hold off until the new rendition has caught up to the picture it's replacing.
 				if (!caughtUp({ playhead: pendingTimestamp, active: effect.get(current.timestamp) })) return;
 			}
 
-			// Upgrade the pending track to active.
-			// #runActive will be in charge of it now.
-			this.#active.set(pending);
-			this.#pending.set(undefined);
-			pending = undefined;
+			// Promote the rendition; #runActive will be in charge of it now.
+			this.#active.set(rendition);
 
 			// This effect is done; close it to avoid a useless re-run.
 			effect.close();
@@ -372,7 +387,7 @@ export class Decoder {
 			this.#recordError(active, error);
 			this.#active.set(undefined);
 			// A pending replacement carries video's timeline on; its parked frames must stay.
-			if (!this.#pending.peek()) this.#clock.reset();
+			if (!this.#pending(this.#selection.peek(), undefined)) this.#clock.reset();
 			this.#clearCurrentFrame();
 		});
 
@@ -382,11 +397,9 @@ export class Decoder {
 			const frame = inner.get(active.frame);
 			if (!frame) return; // A promoted track holds the previous picture until its first frame.
 			if (active.error.peek()) return;
-			this.#played = true;
-			if (this.#selected === active) {
-				this.#failed = undefined;
-				this.#out.error.set(undefined);
-			}
+			// The selected rendition playing clears an outgoing one's failure.
+			const selection = this.#selection.peek();
+			if (selection.kind === "selected" && selection.rendition === active) this.#out.error.set(undefined);
 			this.#out.timestamp.set(Milli.fromMicro(frame.timestamp as Micro));
 			this.#out.interlaced.set(active.config.interlaced);
 			this.#out.frame.update((prev) => {
@@ -398,17 +411,22 @@ export class Decoder {
 		effect.proxy(this.#spread, active.spread);
 	}
 
+	// Only the selected rendition's failure stops its source. An outgoing one's shows until the
+	// selected rendition plays, and never replaces the selected one's.
 	#recordError(track: Rendition, error: Error): void {
 		this.#tally.count(track.key, { errors: 1 });
 		this.#out.stats.update((stats) => ({ ...(stats ?? EMPTY), errors: (stats?.errors ?? 0) + 1 }));
-		// An outgoing failure must not replace the selected rendition's failure latch.
-		if (track !== this.#selected && this.#selected?.error.peek()) return;
-		this.#failed = {
-			broadcast: this.source.in.broadcast.peek()?.out.active.peek()?.closed,
-			media: track.broadcast.closed,
-			track: track.track,
-			identity: track.identity,
-		};
+		const selection = this.#selection.peek();
+		if (selection.kind === "failed") return;
+		if (selection.kind === "selected" && selection.rendition === track) {
+			const failure: Failure = {
+				broadcast: this.source.in.broadcast.peek()?.out.active.peek()?.closed,
+				media: track.broadcast.closed,
+				track: track.track,
+				identity: track.identity,
+			};
+			this.#selection.set({ kind: "failed", failure });
+		}
 		this.#out.error.set(error);
 	}
 
@@ -432,8 +450,11 @@ export class Decoder {
 	}
 
 	#runBuffering(effect: Effect): void {
-		const enabled = effect.get(this.in.enabled);
-		if (!enabled) return;
+		// A disabled decoder is not waiting for anything.
+		if (!effect.get(this.in.enabled)) {
+			this.#out.stalled.set(false);
+			return;
+		}
 
 		const frame = effect.get(this.#out.frame);
 		if (!frame) {
@@ -448,25 +469,34 @@ export class Decoder {
 		}, Nano.fromMilli(BUFFERING));
 	}
 
-	// Count each stall once a picture has played, and how long it lasted, against the rendition on
-	// screen. A disabled decoder waits for a new picture again: resuming is a startup, not a stall.
+	// Count each stall, and how long it lasted, against the rendition on screen. Each active rendition
+	// starts a run, and disabling the decoder clears it: the wait for its first picture on the clock
+	// is a startup even while a poster shows, and so is a restarted timeline's.
 	#runStalls(effect: Effect): void {
-		if (!effect.get(this.in.enabled)) {
-			this.#played = false;
-			return;
-		}
-		if (!effect.get(this.#out.stalled) || !this.#played) return;
-		const active = this.#active.peek();
+		const active = effect.get(this.#active);
 		if (!active) return;
 
-		const end = this.#tally.stall(active.key);
-		this.#out.stats.update((stats) => ({ ...(stats ?? EMPTY), stalls: (stats?.stalls ?? 0) + 1 }));
-		effect.cleanup(() => {
-			const duration = end();
-			this.#out.stats.update((stats) => ({
-				...(stats ?? EMPTY),
-				stalled: Milli((stats?.stalled ?? 0) + duration),
-			}));
+		const playback = new Signal<Playback>("starting");
+		effect.run((inner) => {
+			// Undefined while the picture is only a poster, as it is again once the timeline restarts.
+			if (inner.get(active.timestamp) === undefined) {
+				playback.set("starting");
+				return;
+			}
+			playback.set("playing");
+			inner.timer(() => playback.set("stalled"), Nano.fromMilli(BUFFERING));
+		});
+		effect.run((inner) => {
+			if (inner.get(playback) !== "stalled") return;
+			const end = this.#tally.stall(active.key);
+			this.#out.stats.update((stats) => ({ ...(stats ?? EMPTY), stalls: (stats?.stalls ?? 0) + 1 }));
+			inner.cleanup(() => {
+				const duration = end();
+				this.#out.stats.update((stats) => ({
+					...(stats ?? EMPTY),
+					stalled: Milli((stats?.stalled ?? 0) + duration),
+				}));
+			});
 		});
 	}
 

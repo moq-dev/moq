@@ -154,13 +154,11 @@ export * as Net from "@moq/net";
 
 export namespace Report {
 	export const INTERVAL: 1000;
-	export const PRIORITY: -128;
 	export class Writer<T> {
 		constructor(broadcast: Net.Broadcast.Producer, name: string, schema?: ZodMiniType<T>);
 		finish(): void;
 		readonly track: Net.Track.Producer;
 		update(value: T): void;
-		get wanted(): boolean;
 	}
 }
 

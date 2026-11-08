@@ -64,7 +64,7 @@ pub unsafe extern "C" fn moq_publish_datagrams_insert(producer: u32, datagram: *
 		let timestamp = unsafe { ffi::parse_timestamp(datagram.timestamp)? };
 		State::lock().publish.datagrams_insert(
 			producer,
-			moq_net::Datagram {
+			moq_net::datagram::Datagram {
 				sequence: datagram.sequence,
 				timestamp,
 				payload: bytes::Bytes::copy_from_slice(payload),

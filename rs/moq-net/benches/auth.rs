@@ -187,8 +187,8 @@ fn renewal(c: &mut Criterion) {
 							let mut auths = Vec::new();
 							for route in 0..routes {
 								auths.push([
-									handle.add(format!("a/{route}")).await.unwrap().0,
-									handle.add(format!("b/{route}")).await.unwrap().0,
+									handle.add(format!("a/{route}")).await.unwrap(),
+									handle.add(format!("b/{route}")).await.unwrap(),
 								]);
 							}
 							auths
@@ -356,7 +356,7 @@ fn shared_requests(c: &mut Criterion) {
 					let auths = runtime.block_on(async {
 						let mut auths = Vec::new();
 						for token in 0..tokens {
-							auths.push(client.auth().add(format!("token/{token}")).await.unwrap().0);
+							auths.push(client.auth().add(format!("token/{token}")).await.unwrap());
 						}
 						auths
 					});

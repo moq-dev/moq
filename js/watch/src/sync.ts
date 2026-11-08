@@ -1,5 +1,5 @@
 import { Milli, Nano, now, sleep } from "@moq/clock";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 /**
  * How far playback trails the live edge.
@@ -84,6 +84,14 @@ export type Part = {
 	floor?: number;
 };
 
+/**
+ * Where the clock's current timeline stands. `idle` has not played and holds nothing back: it is
+ * unanchored, or anchored with no buffered startup. `starting` holds the media consumers until every
+ * startup span fills. `playing` has played, so turning on a lookahead does not start it over.
+ * @internal
+ */
+export type Phase = "idle" | "starting" | "playing";
+
 const wall = (): Milli => Nano.toMilli(Nano(now()));
 
 /** The state a {@link Sync} and its track handles share. @internal */
@@ -99,8 +107,9 @@ export class Clock {
 	};
 
 	readonly parts = new Signal<Part[]>([]);
-	readonly playing = new Signal(true);
-	started = false;
+	readonly phase = new Signal<Phase>("idle");
+	// Whether the media consumers are released.
+	readonly playing = new Derived([this.phase], (phase) => phase !== "starting");
 
 	// Bumped by every `reset()`. A frame that waited across a bump belongs to the previous timeline,
 	// even when the next frame restores the same reference value.
@@ -208,9 +217,8 @@ export class Clock {
 	unanchor(): void {
 		this.epoch.update((epoch) => epoch + 1);
 		this.floor = undefined;
-		this.started = false;
 		this.owner = undefined;
-		this.playing.set(!this.out.buffered.peek());
+		this.phase.set(this.out.buffered.peek() ? "starting" : "idle");
 		this.out.reference.set(undefined);
 	}
 
@@ -290,7 +298,7 @@ export class Clock {
 				this.out.reference.changed(wake),
 				this.epoch.changed(wake),
 				this.closed.changed(wake),
-				this.playing.changed(wake),
+				this.phase.changed(wake),
 				part.epoch.changed(wake),
 			];
 			if (signal) {
@@ -401,23 +409,22 @@ export class Sync {
 			return span === undefined ? [] : [{ part, span }];
 		});
 		if (!buffered || spans.length === 0) {
-			clock.playing.set(true);
+			clock.phase.set(reference === undefined ? "idle" : "playing");
 			return;
 		}
-		if (clock.started) return;
+		if (clock.phase.peek() === "playing") return;
 		const ready = spans.flatMap(({ part, span }) => (span ? [{ part, span }] : []));
 		if (
 			reference === undefined ||
 			ready.length !== spans.length ||
 			ready.some(({ span }) => span.end - span.start < delay)
 		) {
-			clock.playing.set(false);
+			clock.phase.set("starting");
 			return;
 		}
 		// The track with the earliest opening holds the reference it anchors.
 		const earliest = ready.reduce((a, b) => (b.span.start < a.span.start ? b : a));
 		const first = earliest.span.start;
-		clock.started = true;
 		clock.owner = earliest.part;
 		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
 		// Every track's own anchor moves by the same offset, keeping the gaps between tracks that
@@ -427,7 +434,7 @@ export class Sync {
 			if (part.anchor !== undefined) part.anchor += anchored - reference;
 		}
 		clock.out.reference.set(anchored);
-		clock.playing.set(true);
+		clock.phase.set("playing");
 	}
 
 	#runInstant(effect: Effect): void {
