@@ -1401,10 +1401,16 @@ mod tests {
 			let mut key = times[0];
 			for (&micros, &cut) in times.iter().zip(log.iter()).skip(1) {
 				if cut {
-					assert!(micros - key + 16_667 >= 1_000_000, "the group at {key}us closed at {micros}us");
+					assert!(
+						micros - key + 16_667 >= 1_000_000,
+						"the group at {key}us closed at {micros}us"
+					);
 					key = micros;
 				} else {
-					assert!(micros - key < 1_000_000, "the group at {key}us holds a frame at {micros}us");
+					assert!(
+						micros - key < 1_000_000,
+						"the group at {key}us holds a frame at {micros}us"
+					);
 				}
 			}
 		}
@@ -1429,7 +1435,9 @@ mod tests {
 		// past half a frame.
 		let jitter = [0, 8_000, -8_000, 5_000, -5_000];
 		for i in 0..120u64 {
-			let micros = (i * 33_333).checked_add_signed(jitter[i as usize % jitter.len()]).unwrap();
+			let micros = (i * 33_333)
+				.checked_add_signed(jitter[i as usize % jitter.len()])
+				.unwrap();
 			encoder.encode(&gray_at(micros)).unwrap();
 		}
 
