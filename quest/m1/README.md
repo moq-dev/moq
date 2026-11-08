@@ -48,7 +48,6 @@ moves what remains of them once their claims merge.
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
-- [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 - [A macOS camera delivers frames the renderer imports](/quest/m1/camera-nv12-macos.md) - AVFoundation capture asks for NV12, so a camera whose native format is `2vuy` reaches the renderer
 - [Encoders keyframe by time, not frame count](/quest/m1/keyframe-by-time.md) - groups stay within the declared join interval when a source's frame rate drifts from the configured one
