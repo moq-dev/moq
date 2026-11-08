@@ -1,5 +1,5 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
-import { Manual, Micro, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { type Group, Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
@@ -11,13 +11,13 @@ function setup(delay = BUDGET, warmup = 0, min = delay, max: number | null = del
 	const clock = new Manual();
 	const installed = clock.install();
 	// Drain the in-memory readers and their continuations without moving time.
-	const flush = () => clock.advance(Nano.zero);
+	const flush = () => clock.advance(Duration.ZERO);
 	const track = new Track.Producer("video");
 	// A null max delay sets no subscriber limit; an omitted one is zero.
-	const consumer = new Consumer(track.subscribe({ delay: { max: max === null ? null : Milli(max + warmup) } }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: max === null ? null : Duration.millis(max + warmup) } }), {
 		format: new Format("video"),
-		delay: { min: Milli(min), max: max === null ? null : Milli(max) },
-		warmup: Milli(warmup),
+		delay: { min: Duration.millis(min), max: max === null ? null : Duration.millis(max) },
+		warmup: Duration.millis(warmup),
 	});
 	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -44,12 +44,12 @@ function setup(delay = BUDGET, warmup = 0, min = delay, max: number | null = del
 
 // Each frame as "<group>@<µs>".
 function frames(results: Read[]): string[] {
-	return results.flatMap((read) => (read.kind === "frame" ? [`${read.group}@${read.frame.timestamp}`] : []));
+	return results.flatMap((read) => (read.kind === "frame" ? [`${read.group}@${read.frame.timestamp.asMicros()}`] : []));
 }
 
 function write(group: Group.Producer, timestamp: number) {
 	group.writeFrame({
-		payload: encodeFrame(new Uint8Array([1]), Micro(timestamp)),
+		payload: encodeFrame(new Uint8Array([1]), Duration.micros(timestamp)),
 		timestamp: Time.Timestamp.now(),
 	});
 }
@@ -99,10 +99,10 @@ test("a quiet track starts within one reach", async () => {
 	const { clock, track, results, flush } = setup(200, 300);
 	group(track, 5n, [5_000_000]);
 	await flush();
-	await clock.advance(Nano.fromMilli(Milli(BUDGET - 50)));
+	await clock.advance(Duration.millis(BUDGET - 50));
 	expect(frames(results)).toEqual([]);
 
-	await clock.advance(Nano.fromMilli(Milli(50)));
+	await clock.advance(Duration.millis(50));
 	expect(frames(results)).toEqual(["5@5000000"]);
 });
 
@@ -145,10 +145,10 @@ test("a min delay past the max delay reaches only the max delay", async () => {
 	const { clock, track, results, flush } = setup(200, 0, 2_000);
 	group(track, 5n, [5_000_000]);
 	await flush();
-	await clock.advance(Nano.fromMilli(Milli(150)));
+	await clock.advance(Duration.millis(150));
 	expect(frames(results)).toEqual([]);
 
-	await clock.advance(Nano.fromMilli(Milli(50)));
+	await clock.advance(Duration.millis(50));
 	expect(frames(results)).toEqual(["5@5000000"]);
 });
 

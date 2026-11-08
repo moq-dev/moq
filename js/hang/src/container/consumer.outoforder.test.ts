@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { type Installed, Manual, Micro, Milli, Nano } from "@moq/clock";
+import { Duration, type Installed, Manual } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -19,7 +19,7 @@ afterEach(() => {
 
 /** Flush the consumer's readers without moving time, then return what `read` settled with, or "pending". */
 async function poll<T>(read: Promise<T>): Promise<T | "pending"> {
-	const flushed = clock.advance(Nano.zero);
+	const flushed = clock.advance(Duration.ZERO);
 	try {
 		return await Promise.race([read, flushed.then(() => "pending" as const)]);
 	} finally {
@@ -35,7 +35,7 @@ async function nextFrame(consumer: Consumer) {
 	}
 }
 
-function encodeLegacyFrame(timestamp: Micro, payload: Uint8Array): Uint8Array {
+function encodeLegacyFrame(timestamp: number, payload: Uint8Array): Uint8Array {
 	const tsBytes = Varint.encode(timestamp);
 	const data = new Uint8Array(tsBytes.byteLength + payload.byteLength);
 	data.set(tsBytes, 0);
@@ -46,7 +46,7 @@ function encodeLegacyFrame(timestamp: Micro, payload: Uint8Array): Uint8Array {
 /** Write one frame into an open group: `millis` on the timeline, tagged `tag`. */
 function publishFrame(group: Group.Producer, millis: number, tag: number) {
 	group.writeFrame({
-		payload: encodeLegacyFrame(Micro.fromMilli(millis as Milli), new Uint8Array([tag])),
+		payload: encodeLegacyFrame(millis * 1000, new Uint8Array([tag])),
 		timestamp: Time.Timestamp.fromMillis(millis),
 	});
 }
@@ -75,16 +75,16 @@ async function drain(consumer: Consumer): Promise<[bigint, number | undefined][]
 // the budget. A group below that floor is never delivered and adds no gap. Mirrors Rust's
 // `startup_at_the_publishers_start_over_a_newer_first_arrival`.
 test("the head of the window arriving after the live edge is delivered first", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Duration.millis(30_000) });
 	const consumer = new Consumer(
-		track.subscribe({ delay: { max: Milli(5000) }, ranges: [{ start: { absolute: 1n } }] }),
-		{ format: new LegacyFormat("data"), delay: { max: 5000 as Milli } },
+		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { absolute: 1n } }] }),
+		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
 	);
 
 	// The live edge lands first, and delivery waits for the floor rather than starting there.
 	publish(track, 3n, 30);
 	const waiting = consumer.next();
-	await clock.advance(Nano.fromMilli(Milli(4_999)));
+	await clock.advance(Duration.millis(4_999));
 	expect(await poll(waiting)).toBe("pending");
 
 	// The window's head follows, and a reordered group below the floor with it.
@@ -106,10 +106,10 @@ test("the head of the window arriving after the live edge is delivered first", a
 // loop consumes faster than the network delivers). Removing it at that instant silently truncates
 // its tail, so removal must wait for the group to finish.
 test("a head group still downloading is not truncated", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Duration.millis(30_000) });
 	const consumer = new Consumer(
-		track.subscribe({ delay: { max: Milli(5000) }, ranges: [{ start: { absolute: 1n } }] }),
-		{ format: new LegacyFormat("data"), delay: { max: 5000 as Milli } },
+		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { absolute: 1n } }] }),
+		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
 	);
 
 	// The live edge group arrives first (still open), and the head after it, one frame at a time.
@@ -141,13 +141,13 @@ test("a head group still downloading is not truncated", async () => {
 // budget, or forever on an open track, for groups it never gets. Mirrors Rust's
 // `an_excluded_gap_between_ranges_does_not_stall`.
 test("an excluded gap between ranges does not stall", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Duration.millis(30_000) });
 	const consumer = new Consumer(
 		track.subscribe({
-			delay: { max: Milli(10_000) },
+			delay: { max: Duration.millis(10_000) },
 			ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }, { start: { absolute: 10n } }],
 		}),
-		{ format: new LegacyFormat("data"), delay: { max: 10_000 as Milli } },
+		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(10_000) } },
 	);
 	for (const sequence of [0n, 5n, 10n]) publish(track, sequence, Number(sequence) * 100);
 
@@ -162,13 +162,13 @@ test("an excluded gap between ranges does not stall", async () => {
 // which counts a newest group that held no frame yet, rather than wait under the budget for a group
 // below it that never comes. Mirrors Rust's `a_resolved_relative_floor_rises_to_the_publishers_start`.
 test("a resolved relative floor rises to the publisher's start", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Milli(30_000) });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: Duration.millis(30_000) });
 	for (const sequence of [0n, 1n, 2n, 3n, 4n]) publish(track, sequence, Number(sequence) * 100);
-	const subscriber = track.subscribe({ delay: { max: Milli(10_000) }, ranges: [{ start: { relative: 0n } }] });
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(10_000) }, ranges: [{ start: { relative: 0n } }] });
 	expect(subscriber.floor()).toBe(4n);
 	// A session declares the publisher's start; a local track has none, so stand in for it.
 	subscriber.start = async () => 5n;
-	const consumer = new Consumer(subscriber, { format: new LegacyFormat("data"), delay: { max: 10_000 as Milli } });
+	const consumer = new Consumer(subscriber, { format: new LegacyFormat("data"), delay: { max: Duration.millis(10_000) } });
 
 	publish(track, 5n, 500);
 	expect(await drain(consumer)).toEqual([[5n, 5]]);

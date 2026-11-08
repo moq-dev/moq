@@ -1,12 +1,12 @@
 /** Sweep buffered groups, frames per group, publishers and players through the container consumer. */
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Consumer } from "../src/container/consumer.ts";
 import { Format } from "../src/container/legacy.ts";
 
 // Far past every fixture's span, so only the burst case skips anything.
-const HOLD = Milli(1_000_000_000);
+const HOLD = Duration.millis(1_000_000_000);
 // One group per second at 30 fps.
 const FRAME_US = 33_333;
 const GROUP_US = 1_000_000;
@@ -82,7 +82,7 @@ async function drain(player: Player, expected: number[]): Promise<number> {
 				gaps++;
 				continue;
 			}
-			if (read.kind !== "frame" || read.frame.timestamp !== want || read.frame.payload[0] !== PAYLOAD[0])
+			if (read.kind !== "frame" || read.frame.timestamp.asMicros() !== want || read.frame.payload[0] !== PAYLOAD[0])
 				throw new Error("frame missing or reordered");
 			break;
 		}
@@ -91,7 +91,7 @@ async function drain(player: Player, expected: number[]): Promise<number> {
 }
 
 function ranges(player: Player): string {
-	return JSON.stringify(player.consumer.buffered.peek());
+	return JSON.stringify(player.consumer.buffered.peek().map((r) => ({ start: r.start.asMillis(), end: r.end.asMillis() })));
 }
 
 /** Return elapsed ns, the measured operations, gaps and warnings for one case. */
@@ -129,7 +129,7 @@ async function measure(
 					const reads = players.map((player) => player.consumer.next());
 					for (const source of sources) source.writeFrame(wire(i, frame));
 					for (const read of await Promise.all(reads))
-						if (read?.kind !== "frame" || read.frame.timestamp !== timestamp(i, frame))
+						if (read?.kind !== "frame" || read.frame.timestamp.asMicros() !== timestamp(i, frame))
 							throw new Error("frame missing or reordered");
 				}
 				for (const source of sources) source.finish();
@@ -161,7 +161,7 @@ async function measure(
 
 		if (scenario === "burst") {
 			// The budget drops to nothing, so the next arrival makes every older group too stale to keep.
-			delay.set({ max: Milli.zero });
+			delay.set({ max: Duration.ZERO });
 			start = performance.now();
 			const sources = tracks.map((track) => track.createGroup(BigInt(groups)));
 			await arrive(sources, players, groups, 0);
@@ -173,7 +173,7 @@ async function measure(
 				if (player.received.slice(0, groups).some((group) => !group.isClosed))
 					throw new Error("skipped group left open");
 				const read = await player.consumer.next();
-				if (read?.kind !== "frame" || read.frame.timestamp !== timestamp(groups, 0))
+				if (read?.kind !== "frame" || read.frame.timestamp.asMicros() !== timestamp(groups, 0))
 					throw new Error("newest frame missing");
 			}
 			return { ns: elapsed, ops: groups * players.length, gaps, warnings };
