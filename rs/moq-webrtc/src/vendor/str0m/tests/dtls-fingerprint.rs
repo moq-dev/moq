@@ -75,7 +75,7 @@ fn connect_with_provider(expected: impl Fn(&[u8]) -> Fingerprint, provider: Cryp
 }
 
 fn reference_sha1(data: &[u8]) -> [u8; 20] {
-	aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY, data)
+	rind::digest::digest(&rind::digest::legacy::SHA1, data)
 		.as_ref()
 		.try_into()
 		.unwrap()

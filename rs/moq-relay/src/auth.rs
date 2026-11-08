@@ -1798,14 +1798,14 @@ mod tests {
 	fn a_peer_reports_its_lineage_to_the_listener_root() {
 		let root_key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
 		let mut root_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		root_params.serial_number = Some(1u64.into());
 		root_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
 		let root = root_params.self_signed(&root_key).unwrap();
 		let issuer = rcgen::Issuer::new(root_params, root_key);
 		let key = rind_rcgen::KeyPair::generate(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
-		let leaf = rcgen::CertificateParams::new(vec!["edge0.invalid".to_string()])
-			.unwrap()
-			.signed_by(&key, &issuer)
-			.unwrap();
+		let mut leaf = rcgen::CertificateParams::new(vec!["edge0.invalid".to_string()]).unwrap();
+		leaf.serial_number = Some(2u64.into());
+		let leaf = leaf.signed_by(&key, &issuer).unwrap();
 
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("root.pem");
