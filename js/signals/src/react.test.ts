@@ -193,3 +193,18 @@ test("useValue sees a write between render and subscribe", async () => {
 	expect(seen.at(-1)).toBe(2);
 	await act(async () => root.unmount());
 });
+
+test("useValue reads a silent write when its parent re-renders", async () => {
+	const signal = new Signal(0);
+	const seen: number[] = [];
+	const View = ({ source }: { source: Signal<number>; tick: number }) => {
+		seen.push(useValue(source));
+		return null;
+	};
+
+	const root = await mount(createElement(View, { source: signal, tick: 0 }));
+	signal.set(1, false);
+	await act(async () => root.render(createElement(View, { source: signal, tick: 1 })));
+	expect(seen.at(-1)).toBe(1);
+	await act(async () => root.unmount());
+});

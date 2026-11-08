@@ -11,31 +11,27 @@ import type { Getter, Signal } from "./index";
 export function useValue<T>(signal: Getter<T>): T {
 	// React compares snapshots by identity, which misses an in-place `mutate()` and loops on a
 	// readable whose `peek()` builds a new object per call. Snapshot a version bumped per
-	// delivery instead, and render the delivered value.
+	// delivery instead, and read the value itself at render.
 	const store = useMemo(() => {
-		let value = signal.peek();
 		let version = 0;
 		return {
+			rendered: undefined as T | undefined,
 			subscribe(callback: () => void) {
-				// Catch a write between the render's peek and this subscription.
-				const latest = signal.peek();
-				if (!Object.is(latest, value)) {
-					value = latest;
-					version++;
-				}
-				return signal.subscribe((next) => {
-					value = next;
+				// Catch a write between the render's read and this subscription.
+				if (!Object.is(signal.peek(), store.rendered)) version++;
+				return signal.subscribe(() => {
 					version++;
 					callback();
 				});
 			},
 			version: () => version,
-			value: () => value,
 		};
 	}, [signal]);
 
 	useSyncExternalStore(store.subscribe, store.version, store.version);
-	return store.value();
+	const value = signal.peek();
+	store.rendered = value;
+	return value;
 }
 
 /** Reads and writes a signal as a `[value, setValue]` pair, like `useState`. */
