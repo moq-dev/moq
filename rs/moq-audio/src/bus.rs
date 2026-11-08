@@ -717,17 +717,18 @@ impl Mix {
 	/// source per block rather than a second sum. A strip listed twice is
 	/// removed once. Keeps this mix alive while it lives.
 	pub fn minus<'a>(&self, strips: impl IntoIterator<Item = &'a Strip>) -> Minus {
+		// Collected before locking the mixer, since the caller's iterator may lock it.
+		let mut seen = HashSet::new();
+		let excluded: Vec<Strip> = strips
+			.into_iter()
+			.filter(|strip| seen.insert(key(strip)))
+			.cloned()
+			.collect();
 		let (id, history, level) = match self.shared.bus.upgrade() {
 			Some(bus) => {
 				let id = bus.next.fetch_add(1, Ordering::Relaxed);
 				let mut mixer = bus.mixer.lock().unwrap();
 				let (output, history, level) = Output::new(mixer.closed);
-				let mut seen = HashSet::new();
-				let excluded = strips
-					.into_iter()
-					.filter(|strip| seen.insert(key(strip)))
-					.cloned()
-					.collect();
 				mixer.minuses.push(MinusState {
 					id,
 					parent: self.shared.slot,
@@ -1286,8 +1287,13 @@ mod tests {
 		for strip in [&host_strip, &camera_strip, &screen_strip, &music_strip] {
 			program.route(strip);
 		}
-		// Listing a strip twice removes it once.
-		let guest_return = program.minus([&camera_strip, &screen_strip, &camera_strip]);
+		// Listing a strip twice removes it once, and the strips may come from an
+		// iterator that reads the bus.
+		let guest_return = program.minus(
+			[&camera_strip, &screen_strip, &camera_strip]
+				.into_iter()
+				.filter(|strip| program.routes(strip)),
+		);
 		let mut minus_reader = guest_return.reader();
 		let mut program_reader = program.reader();
 
