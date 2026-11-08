@@ -936,10 +936,10 @@ fn a_reset_stream_keeps_its_header() {
 	client.join().expect("client thread");
 }
 
-/// A stream opened with no connection credit left still delivers its header
-/// when reset, rather than a plain reset of a stream the peer cannot place.
+/// A stream reset before its header fits the connection's credit carried nothing, so it
+/// goes out as a plain reset the peer drops unseen, and the next stream arrives intact.
 #[test]
-fn a_reset_stream_keeps_its_header_without_credit() {
+fn a_stream_reset_before_its_header_fits_never_reaches_the_session() {
 	use std::task::Poll;
 
 	let Some(mut worker) = worker() else { return };
@@ -963,18 +963,14 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 					.with_protocol(PROTO);
 			let session = crate::support::web_connect(request, transport).await.expect("connect");
 
-			// Reading the filler returns the credit the reset stream waits on.
+			// Reading the filler returns the credit the last stream waits on.
 			let mut filler = session.accept_uni().await.expect("accept_uni");
 			read_all(&mut filler).await;
 
 			let accept = kio::clock::timeout(std::time::Duration::from_secs(5), session.accept_uni());
-			let mut recv = accept.await.expect("the reset stream arrives").expect("accept_uni");
-			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
-			assert!(
-				matches!(err, moq_tokio::quic::web::recv::Error::Reset(7)),
-				"got {err:?}"
-			);
-			// Only now, so the close cannot overtake the reset stream.
+			let mut recv = accept.await.expect("the last stream arrives").expect("accept_uni");
+			assert_eq!(read_all(&mut recv).await, PAYLOAD);
+			// Only now, so the close cannot overtake the last stream.
 			session.close(CLOSE_CODE, CLOSE_REASON);
 			session.closed().await;
 		});
@@ -1003,6 +999,11 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 				.await
 				.expect("open_uni");
 			send.reset(7);
+
+			let last = kio::wait(|waiter| session.poll_open_uni(waiter, Default::default()))
+				.await
+				.expect("open_uni");
+			write_finish(last, PAYLOAD).await;
 
 			kio::wait(|waiter| session.poll_closed(waiter)).await;
 		})
