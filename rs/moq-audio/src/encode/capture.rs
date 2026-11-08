@@ -67,6 +67,9 @@ pub enum Status {
 	Failed,
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
+	/// The [`Driver`] or its [`run`](Driver::run) future was dropped before it
+	/// finished, cancelling the track.
+	Cancelled,
 }
 
 /// A snapshot of a capture publication's lifecycle.
@@ -265,6 +268,9 @@ impl Drop for Driver {
 		if let Some(producer) = self.producer.take() {
 			producer.abort(moq_net::Error::Cancel);
 		}
+		// A no-op once `run` closed the state on its own terminal status.
+		publish_state(&self.state, Status::Cancelled, None);
+		publish_level(&self.level, Level::default());
 	}
 }
 
@@ -909,11 +915,18 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn dropping_an_unfinished_driver_cancels_its_track() {
-		let Fixture { driver, broadcast, .. } = fixture(false);
+		let Fixture {
+			driver,
+			broadcast,
+			publication,
+			..
+		} = fixture(false);
 		let mut track = subscribe(&broadcast, Duration::ZERO).await;
 		drop(driver);
 		let error = track.read().await.unwrap_err();
 		assert!(format!("{error:?}").contains("Cancel"), "{error:?}");
+		assert_eq!(publication.state().status(), Status::Cancelled);
+		assert!(publication.is_finished());
 	}
 
 	#[tokio::test(start_paused = true)]

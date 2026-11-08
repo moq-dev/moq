@@ -329,6 +329,9 @@ pub enum Status {
 	Failed,
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
+	/// The [`Driver`] or its [`run`](Driver::run) future was dropped before it
+	/// finished, cancelling the capture.
+	Cancelled,
 }
 
 /// A snapshot of a capture publication's lifecycle.
@@ -489,6 +492,8 @@ impl<E: CatalogExt> Drop for Driver<E> {
 		if let Some(track) = self.track.take() {
 			let _ = track.abort(moq_net::Error::Cancel);
 		}
+		// A no-op once `run` closed the state on its own terminal status.
+		publish_status(&self.state, Status::Cancelled);
 	}
 }
 
@@ -2138,8 +2143,9 @@ mod tests {
 				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
 				run.abort();
 				assert!(run.await.unwrap_err().is_cancelled());
-				// Dropping the driver's future closes the publication.
+				// Dropping the driver's future cancels the publication.
 				assert!(publication.is_finished());
+				assert_eq!(publication.state().status(), Status::Cancelled);
 			})
 			.await
 		}
