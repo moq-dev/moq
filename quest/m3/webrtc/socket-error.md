@@ -1,4 +1,4 @@
-# [S] A failed client socket ends a WebRTC session with an error
+# [M] A failed client socket ends a WebRTC session with an error
 
 ## Goal
 
@@ -6,8 +6,10 @@ When the UDP socket under a moq-webrtc client session fails to receive,
 `Client::publish` and `Client::subscribe` end with `Error::Io` carrying the
 socket's `io::Error`, instead of `Ok` as if the peer had disconnected. A
 `p2p` connection that fails this way hands its opener `p2p::Error::Io` before
-its channel opens, and fails the MoQ session over an opened channel with
-`qmux::Error::Io`, instead of `Closed`. A peer disconnect still ends `Ok`.
+its channel opens, including an opener that asks after the failure, and fails
+the MoQ session over an opened channel with `qmux::Error::Io`, instead of
+`Closed`. A peer disconnect still ends `Ok`. The first cause wins: a peer
+close that lands before the socket fails stays a close.
 
 ## Plan
 
@@ -40,8 +42,12 @@ failures to cover it. `io::Error::new(err.kind(), err)` rebuilds an owned error
 from the `Arc` that keeps its kind and source. Once `p2p`'s channel has opened,
 the driver drops the channel's `Inbox`, which its `Reader` reads as
 `qmux::Error::Closed`. On a socket failure the driver instead pushes
-`Err(qmux::Error::Io(arc))` into that `Inbox` first, since `Inbox::push`
-already carries errors. `Agent::next` judges the establishment deadline before
+`Err(qmux::Error::Io(arc))` into that `Inbox` before it drops the `Inbox` or
+the outbox, since `Inbox::push` already carries errors, so a pending write
+cannot end the MoQ session with `Closed` first. A `p2p` opener that asks after
+the driver exited gets `Closed` from the dropped command channel today, whatever
+the cause. The driver leaves its terminal error where the handle reads it once
+the channel is gone, which fixes it for every cause, not only the socket. `Agent::next` judges the establishment deadline before
 it reads the inbound queue, so a socket error queued just before that deadline
 would surface as `Timeout`: read a queued socket error first, since it is the
 cause. Don't match on error kinds to decide which errors are fatal (AGENTS.md).
@@ -52,7 +58,9 @@ must not end every session on the socket. It is out of scope. Do check whether
 the client reader has the same transient case. On Windows an unconnected UDP
 socket reports an ICMP port unreachable as `WSAECONNRESET` unless
 `SIO_UDP_CONNRESET` is off. If tokio leaves it on, a client's ICE check to a
-dead candidate ends the session today. Turn it off when the socket is bound,
+dead candidate ends the session today. Linux reports ICMP errors on an
+unconnected UDP socket only with `IP_RECVERR`, which nothing here sets, so there
+a receive error is the socket failing. Turn it off when the socket is bound,
 as a known platform capability, rather than ignoring that error at runtime.
 
 Reproducing test, failing on main first. On Linux, a connected UDP socket
@@ -61,9 +69,11 @@ receive, with no rate limit on loopback. Connect a socket to a closed loopback
 port, send once, and feed the socket to `ice::reader` and an agent, as
 `agent.rs`'s `unpolled` fixture does. Then assert that the agent and the
 session end with the socket error, not `Closed` or `Ok`. Also assert that a
-`p2p` opener still waiting gets `p2p::Error::Io` with the underlying error, that
-an opened `p2p` channel's reader returns `qmux::Error::Io`, and that an error
-queued past the establishment deadline still wins over `Timeout`. Keep the
+`p2p` opener gets `p2p::Error::Io` with the underlying error whether it asked
+before or after the failure. With a channel opened between two peers and a
+write pending, failing one side's socket ends its MoQ session with
+`qmux::Error::Io`. An error queued past the establishment deadline still wins
+over `Timeout`. Keep the
 existing peer-disconnect path asserting `Ok`.
 
 Public API: none. The errors map to existing `Io` variants, and the new
