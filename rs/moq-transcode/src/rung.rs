@@ -149,7 +149,7 @@ struct Writing(Option<moq_net::group::Producer>);
 
 impl Writing {
 	fn finish(mut self) -> moq_net::Result<()> {
-		self.0.take().expect("owned group").finish()
+		self.0.take().expect("owned group").finish().map(drop)
 	}
 
 	fn abort(mut self, err: moq_net::Error) -> moq_net::Result<()> {
@@ -217,7 +217,8 @@ pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future
 		// to count, so finishing then would reject the very group it was fetching.
 		match (live, fetches) {
 			(Ok(Ended::Finished), Ok(())) => {
-				producer.finish()?;
+				// Released with `serving`, the last clone, which then no longer aborts it.
+				drop(producer.finish()?);
 				serving.0 = None;
 				Ok(())
 			}

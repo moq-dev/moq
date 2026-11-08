@@ -92,7 +92,7 @@ mod tests {
 		origin: &moq_net::origin::Producer,
 	) -> (
 		moq_net::broadcast::Producer,
-		(moq_net::origin::Route, moq_net::track::Producer),
+		(moq_net::origin::Route, moq_net::track::Finished),
 	) {
 		let route = origin.route(PATH, moq_net::origin::RouteOptions::default()).unwrap();
 		let info = moq_net::track::Info::default().with_max_age(hang::container::MAX_AGE);
@@ -102,7 +102,7 @@ mod tests {
 			group.write_frame(None, bytes::Bytes::from_static(b"frame")).unwrap();
 			group.finish().unwrap();
 		}
-		track.finish().unwrap();
+		let track = track.finish().unwrap();
 		(route.broadcast().clone(), (route, track))
 	}
 

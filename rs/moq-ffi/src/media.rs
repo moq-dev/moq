@@ -1625,7 +1625,7 @@ mod read_tests {
 			write(5, 5_000_000);
 			write(4, 4_700_000);
 			write(3, 4_400_000);
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			let mut micros = Vec::new();
 			while let Some(read) = reader.next().await.unwrap() {
 				if let MoqMediaRead::Frame { frame } = read {
@@ -1730,7 +1730,7 @@ mod read_tests {
 			panic!("end is not EOF")
 		};
 		assert_eq!(frame.payload, b"resumed");
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(reader.next().await.unwrap().is_none());
 		reader.cancel();
 		assert!(matches!(reader.next().await, Err(MoqError::Cancelled)));

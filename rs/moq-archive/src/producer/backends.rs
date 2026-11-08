@@ -65,7 +65,7 @@ fn path<S: ObjectStore>(store: &Store<S>, track: &str, name: &str) -> Path {
 async fn finish(tracks: &mut [track::Producer]) {
 	for track in tracks {
 		while track.subscription_changed().await.unwrap().is_none() {}
-		track.finish().unwrap();
+		drop(track.clone().finish().unwrap());
 	}
 }
 

@@ -1075,12 +1075,11 @@ impl<E: CatalogExt> Producer<E> {
 		if let Some(err) = &state.closed {
 			return Err(err.clone());
 		}
-		let result = self
-			.outputs
-			.hang
-			.finish()
-			.map_err(crate::Error::from)
-			.and_then(|_| self.outputs.msf_track.finish().map_err(crate::Error::from));
+		let result = self.outputs.hang.finish().map_err(crate::Error::from).and_then(|_| {
+			// The shared outputs keep their own clone, whose appends the end refuses.
+			let msf = self.outputs.msf_track.clone().finish();
+			msf.map(drop).map_err(crate::Error::from)
+		});
 		match result {
 			Ok(()) => {
 				state.closed = Some(moq_net::Error::Closed.into());

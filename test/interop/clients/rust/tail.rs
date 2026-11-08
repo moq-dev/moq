@@ -168,6 +168,8 @@ async fn main() -> anyhow::Result<()> {
 					.connect(url)
 					.established()
 					.await?;
+				// Held until the reader acknowledged the end, as the producer was.
+				let mut _finished = None;
 				if let Some(mut group) = head {
 					ensure!(
 						commands.next_line().await?.as_deref() == Some("late tail"),
@@ -184,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
 						}
 						group.finish()?;
 					}
-					track.finish()?;
+					_finished = Some(track.finish()?);
 				} else if !cached {
 					let mut demand = track.demand();
 					while demand.wanted_changed().await?.is_none() {}

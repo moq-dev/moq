@@ -296,7 +296,7 @@ mod test {
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
 
 		group.abort(moq_net::Error::Old).unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 
@@ -1128,7 +1128,7 @@ mod test {
 			.unwrap();
 		let mut group = track.append_group().unwrap();
 		let mut consumer = Consumer::<Value>::new(track.consume(), consumer::Config::default());
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 
 		// Track is finished but the open group is empty: pending, not end-of-stream.

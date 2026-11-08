@@ -232,7 +232,7 @@ async fn run(relay: bool, js_publishes: bool) {
 		expect_line(&mut lines, "received").await;
 		audio.finish();
 		events.finish();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		drop(child.stdin.take());
 		assert!(child.wait().await.unwrap().success(), "JS subscriber failed");
 	}

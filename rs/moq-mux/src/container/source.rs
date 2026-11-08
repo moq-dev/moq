@@ -1184,7 +1184,7 @@ mod tests {
 		for sequence in 4..8 {
 			write(sequence);
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		while let Some(Some(timestamp)) = read().await {
 			timestamps.push(timestamp);
 		}
@@ -1275,7 +1275,7 @@ mod tests {
 			while let Some(Some(timestamp)) = read().await {
 				timestamps.push(timestamp);
 			}
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			while let Some(Some(timestamp)) = read().await {
 				timestamps.push(timestamp);
 			}
@@ -1385,7 +1385,7 @@ mod tests {
 		group(2, 40_000).finish().unwrap();
 		let cut = group(3, 60_000);
 		group(4, 80_000).finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		let waiter = kio::Waiter::noop();
 		let read = |export: &mut ExportSource| {
@@ -1413,7 +1413,7 @@ mod tests {
 			wire.write(&mut group, &[raw_frame(timestamp, payload, true)]).unwrap();
 			group.finish().unwrap();
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(
 			export.poll_event(&waiter),
@@ -1464,7 +1464,7 @@ mod tests {
 			wire.write(&mut group, &frames).unwrap();
 			group.finish().unwrap();
 		}
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let waiter = kio::Waiter::noop();
 		for (timestamp, generation) in [(0, 0), (40_000, 0), (100_000, 1)] {
 			let Poll::Ready(Ok(Some(frame))) = export.poll_read(&waiter) else {

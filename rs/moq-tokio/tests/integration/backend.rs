@@ -668,7 +668,7 @@ async fn quic_client_close_drains_finished_track() {
 				.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
 				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
-			track.finish().expect("failed to finish track");
+			let _track = track.finish().expect("failed to finish track");
 
 			let mut close = Box::pin(connection.close());
 			assert!(futures::FutureExt::now_or_never(close.as_mut()).is_none());
@@ -810,7 +810,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 				.write_frame(moq_tokio::moq_net::Timestamp::ZERO, payload)
 				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
-			track.finish().expect("failed to finish track");
+			let _track = track.finish().expect("failed to finish track");
 
 			connection.close().await.expect("the close drains");
 			client.close().await;

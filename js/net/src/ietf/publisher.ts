@@ -890,7 +890,9 @@ export class Publisher {
 						timescale,
 						priority: datagramPriority,
 					}).then(
-						() => datagramTrack?.finish(),
+						() => {
+							datagramTrack?.finish();
+						},
 						(err: unknown) => {
 							if (datagramTrack) datagramTrack.abort(error(err));
 							else console.debug(`stopping datagrams on this subscription: ${reason(err)}`);

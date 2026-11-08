@@ -212,7 +212,7 @@ quests that require them.
 - [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - the catalog's new `warmup` contract is settled before the cut publishes it
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
 - [moq auth serve bounds what a leaked token or public caller can do](/quest/m2/auth-serve-policy.md) - tokens need an `exp` unless the operator opts out, and a public listener authenticates relays
-- [Finishing a producer returns a Finished handle](/quest/m2/finished-handle.md) - `finish(self)` consumes moq-net's and the media crates' producers, so appending after finish doesn't compile
+- [Finishing a media producer returns a Finished handle](/quest/m2/finished-handle.md) - `finish(self)` consumes the media crates' producers, as it does moq-net's, so appending after finish doesn't compile
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; browser padding is parked in m3 (held in m2 by open claims; moves to m3)
 - [Finish the milestone re-cut](/quest/m2/recut-held.md) - claim-held epics move to the milestone their kind and priority give them once their claims merge

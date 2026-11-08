@@ -227,7 +227,7 @@ mod tests {
 		let mut g1 = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_length_prefixed(&mut g1, 33_000, &[p_slice]);
 		g1.finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// Consumer side: run the exporter.
 		let consumer = broadcast.consume();
@@ -335,7 +335,7 @@ mod tests {
 			let nals: &[&[u8]] = &[&[0x67, 0x42, 0, 0x1f], &[0x68, 0xce], &[0x65, 0x88]];
 			write_length_prefixed(&mut group, 0, nals);
 			group.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			let consumer = broadcast.consume();
 			let mut exporter = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)));
 			let result = exporter.next().await;

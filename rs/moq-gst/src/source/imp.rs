@@ -3236,7 +3236,7 @@ mod session_tests {
 
 		// End the served rendition and the broadcast, which answers for the reserved one.
 		catalog.finish().unwrap();
-		video.finish().unwrap();
+		let _video = video.finish().unwrap();
 		broadcast.close();
 
 		// No shutdown is sent: the run has to end on the media draining alone.
@@ -3489,7 +3489,7 @@ mod session_tests {
 
 		// Everything ends while listed, so the run ends on its own with the pads held.
 		producer.finish().unwrap();
-		audio.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
@@ -3619,7 +3619,7 @@ mod session_tests {
 		);
 
 		// The run ends only once every reader drains, a replaying one included.
-		audio.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 
@@ -3715,7 +3715,7 @@ mod session_tests {
 
 		// The run ends only once every reader drains, a replaying one included.
 		again.finish().unwrap();
-		audio.finish().unwrap();
+		let _audio = audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 

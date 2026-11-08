@@ -839,7 +839,7 @@ mod tests {
 		consumer.reader(Lane::Min).track.set_delay(Delay::default());
 		write(12, &[3000]);
 		write(13, &[4000, 3800, 3900, 4100]);
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		got.clear();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			got.push(frame.timestamp.as_micros());
@@ -1410,7 +1410,7 @@ mod tests {
 		let (broadcast, mut track) = live_track();
 		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
 		group(&mut track, 1, &[4, 5]).finish().unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 
 		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
 		// decoders read them all.

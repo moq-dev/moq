@@ -4665,7 +4665,7 @@ impl Producer {
 /// Dropping it releases this handle like dropping a [`Producer`]: once no clone is left, the
 /// track leaves its broadcast's listing as finished, so a new reader can no longer find it.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// # fn cannot_append(track: moq_net::track::Finished) {
 /// let _ = track.append_group();
 /// # }
@@ -10923,11 +10923,7 @@ mod test {
 	fn a_range_reads_only_its_groups() {
 		let producer = track_producer("test", None);
 		let _groups: Vec<_> = (3..8)
-			.map(|sequence| {
-				let group = framed(&producer, sequence, 8);
-				let group = group.finish().unwrap();
-				group
-			})
+			.map(|sequence| framed(&producer, sequence, 8).finish().unwrap())
 			.collect();
 		let _wide = producer.subscribe(replay());
 		let range = Range {
@@ -15520,6 +15516,37 @@ mod test {
 		assert!(producer.clone().finish().is_ok());
 		assert!(producer.clone().finish().is_err());
 		assert!(producer.append_group().is_err());
+	}
+
+	/// The handle `finish` returns still fills an older group below the end, refuses one at or
+	/// past it, and ends its readers cleanly once the late group finishes.
+	#[test]
+	#[cfg(feature = "async")]
+	fn finished_track_fills_a_late_group_below_its_end() {
+		let producer = track_producer("test", Info::timed());
+		let mut ordered = producer.subscribe(replay()).ordered();
+		producer
+			.create_group(group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		let finished = producer.finish().unwrap();
+		assert!(matches!(
+			finished.create_group(group::Info { sequence: 2 }),
+			Err(Error::Closed)
+		));
+
+		let mut late = finished.create_group(group::Info { sequence: 0 }).unwrap();
+		late.write_frame(Timestamp::ZERO, &b"late"[..]).unwrap();
+		let late = late.finish().unwrap();
+		assert_eq!(late.frame_count(), 1);
+		let first = ordered.next_group().now_or_never().expect("group 0").unwrap().unwrap();
+		assert_eq!(first.sequence, 0);
+		let second = ordered.next_group().now_or_never().expect("group 1").unwrap().unwrap();
+		assert_eq!(second.sequence, 1);
+		let done = ordered.next_group().now_or_never().expect("end").unwrap();
+		assert!(done.is_none(), "the finished track ends after its late group");
+		assert!(finished.closed().now_or_never().expect("settled").is_ok());
 	}
 
 	#[test]

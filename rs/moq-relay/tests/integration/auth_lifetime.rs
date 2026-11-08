@@ -895,7 +895,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			group
 				.write_frame(moq_net::Timestamp::ZERO, b"media".as_ref())
 				.expect("write frame");
-			group.finish().expect("finish group");
+			let group = group.finish().expect("finish group");
 			assert_eq!(group.sequence, sequence);
 		};
 		for (index, sub) in subs.iter_mut().enumerate() {

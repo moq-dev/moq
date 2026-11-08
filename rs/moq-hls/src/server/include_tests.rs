@@ -295,7 +295,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 		.update(moq_net::Timed::from(&value).at(Timestamp::ZERO))
 		.unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
-	include.video.finish().unwrap();
+	let _video = include.video.finish().unwrap();
 	let held = server
 		.router()
 		.oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
@@ -303,7 +303,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 		.unwrap();
 	assert_eq!(held.status(), StatusCode::OK);
 	frames(&next, 3);
-	next.finish().unwrap();
+	let _next = next.finish().unwrap();
 	drop(held);
 	let deadline = kio::clock::now() + Duration::from_secs(10);
 	let ended = loop {

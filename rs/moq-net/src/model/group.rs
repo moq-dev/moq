@@ -2398,7 +2398,7 @@ impl Producer {
 ///
 /// Dropping it leaves the group finished.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// # fn cannot_write(group: moq_net::group::Finished) {
 /// group.write_frame(None, b"late".as_slice()).unwrap();
 /// # }
@@ -2416,7 +2416,7 @@ impl std::ops::Deref for Finished {
 }
 
 impl Finished {
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn handle(&self) -> Handle {
 		self.handle.clone()
 	}
@@ -5238,8 +5238,7 @@ mod test {
 			.map(|sequence| {
 				let mut group = track.create_group(Info { sequence }).unwrap();
 				group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
-				let group = group.finish().unwrap();
-				group
+				group.finish().unwrap()
 			})
 			.collect();
 		subscriber.set_range(..0);

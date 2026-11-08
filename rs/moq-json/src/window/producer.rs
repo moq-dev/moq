@@ -184,7 +184,7 @@ impl<T> Inner<T> {
 	}
 
 	fn cut(&mut self) -> Result<()> {
-		let Some(mut group) = self.track.group.take() else {
+		let Some(group) = self.track.group.take() else {
 			return Ok(());
 		};
 		// The group closes either way, so reset first: a `finish` error must not leave the encoder
@@ -298,7 +298,7 @@ impl Track {
 	/// Close the open group and write the header as the first frame of a new one.
 	fn write_header(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 
@@ -326,12 +326,13 @@ impl Track {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
-		// Another handle may have declared the end already, which stands.
+		// Another handle may have declared the end already, which stands. This shared state
+		// keeps its own clone, whose appends the end refuses.
 		if self.inner.finished().is_none() {
-			self.inner.finish()?;
+			drop(self.inner.clone().finish()?);
 		}
 		Ok(())
 	}

@@ -1315,9 +1315,10 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"v0".as_ref())
 		.expect("write frame");
-	if !open {
-		group.finish().expect("finish group");
-	}
+	let (mut group, _finished) = match open {
+		true => (Some(group), None),
+		false => (None, Some(group.finish().expect("finish group"))),
+	};
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("[::]:0".parse().unwrap());
@@ -1389,6 +1390,8 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 				assert_eq!(read(&mut reading, &ctx).await, format!("v{frame}"), "{ctx}");
 			}
 			group
+				.as_mut()
+				.expect("open")
 				.write_frame(moq_net::Timestamp::ZERO, update.as_bytes())
 				.expect("write frame");
 		} else {

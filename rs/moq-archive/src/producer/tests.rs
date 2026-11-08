@@ -169,7 +169,7 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
 	settle().await;
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 
@@ -225,7 +225,7 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 
 	// The lost group arriving too late stays a gap.
 	group(&video, 1, &[(1000, "b")]);
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	let stored = objects(&store, "video", true).await;
@@ -261,7 +261,7 @@ async fn a_fresh_track_waits_for_a_group_below_its_first_arrival() {
 
 	// Group 0 arriving after that is too late.
 	group(&video, 0, &[(0, "a")]);
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	assert_eq!(objects(&store, "video", true).await.len(), 1);
@@ -286,7 +286,7 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
 	settle().await;
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 
@@ -334,7 +334,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	);
 
 	open.finish().unwrap();
-	data.finish().unwrap();
+	let _data = data.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	assert_eq!(end(&store, "data").await, Some(End::Finish(At { group: 1, frame: 0 })));
@@ -365,7 +365,7 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	next.write_frame(None, "f").unwrap();
 	next.finish().unwrap();
 	settle().await;
-	data.finish().unwrap();
+	let _data = data.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 
@@ -408,7 +408,7 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	open.write_frame(ms(100), "b").unwrap();
 	open.finish().unwrap();
 	settle().await;
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	assert_eq!(
@@ -449,8 +449,8 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	timed_group.finish().unwrap();
 	untimed_group.finish().unwrap();
 	settle().await;
-	video.finish().unwrap();
-	data.finish().unwrap();
+	let _video = video.finish().unwrap();
+	let _data = data.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 
@@ -506,7 +506,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	partial.write_frame(ms(600), "d").unwrap();
 	partial.finish().unwrap();
 	settle().await;
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 
@@ -532,7 +532,7 @@ async fn changed_properties_fail_the_resume() {
 	group(&video, 0, &[(0, "a")]);
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
-	video.finish().unwrap();
+	let video = video.finish().unwrap();
 	drop(video);
 	broadcast.close();
 	finished(task).await;
@@ -606,7 +606,7 @@ async fn track_names_stay_one_segment_through_a_resume() {
 	let task = spawn(&store, &broadcast, config());
 	for track in &tracks {
 		subscribed(track).await;
-		track.finish().unwrap();
+		drop(track.clone().finish().unwrap());
 	}
 	broadcast.close();
 	finished(task).await;
@@ -643,7 +643,7 @@ async fn a_dvr_prunes_superseded_objects_after_its_window_and_grace() {
 	// The newest stored object is always kept.
 	assert_eq!(names(objects(&store, "video", true).await), [2]);
 
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	assert_eq!(names(objects(&store, "video", true).await), [2, 3]);
@@ -664,8 +664,8 @@ async fn a_track_added_mid_recording_is_recorded() {
 	subscribed(&audio).await;
 	group(&audio, 0, &[(0, "a")]);
 	settle().await;
-	video.finish().unwrap();
-	audio.finish().unwrap();
+	let _video = video.finish().unwrap();
+	let _audio = audio.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 
@@ -693,7 +693,7 @@ async fn a_datagram_track_is_not_recorded() {
 	group(&video, 0, &[(0, "a")]);
 	settle().await;
 	datagrams.finish();
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 
@@ -772,7 +772,7 @@ async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 	subscribed(&first).await;
 	group(&first, 0, &[(0, "a")]);
 	group(&first, 1, &[(1000, "b")]);
-	first.finish().unwrap();
+	let first = first.finish().unwrap();
 	settle().await;
 	drop(first);
 	settle().await;
@@ -816,7 +816,7 @@ async fn a_re_added_track_is_stored_under_its_own_properties() {
 	settle().await;
 	assert!(objects(&store, "video", true).await.is_empty());
 
-	second.finish().unwrap();
+	let _second = second.finish().unwrap();
 	broadcast.close();
 	let err = kio::clock::timeout(Duration::from_secs(1000), task)
 		.await
@@ -848,7 +848,7 @@ async fn a_stopped_producer_writes_no_marker() {
 	sleep(SECOND).await;
 	task.abort();
 	let _ = task.await;
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 
 	assert_eq!(objects(&store, "video", true).await.len(), 1);
@@ -888,11 +888,11 @@ async fn a_track_that_ended_unseen_leaves_the_broadcast_open() {
 	let _ = task.await;
 
 	// Audio ends while nothing records, so the resume never sees how.
-	audio.finish().unwrap();
+	let audio = audio.finish().unwrap();
 	drop(audio);
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
-	video.finish().unwrap();
+	let _video = video.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	assert!(end(&store, "video").await.is_some());
@@ -967,8 +967,8 @@ async fn a_stalled_put_holds_only_its_track() {
 	assert!(objects(&store, "video", true).await.is_empty());
 
 	store.inner().release();
-	video.finish().unwrap();
-	audio.finish().unwrap();
+	let _video = video.finish().unwrap();
+	let _audio = audio.finish().unwrap();
 	broadcast.close();
 	finished(task).await;
 	assert_eq!(objects(&store, "video", true).await.len(), 1);

@@ -652,7 +652,7 @@ mod tests {
 		source.priority(0).unwrap();
 		assert_eq!(first.subscription(), preferences);
 		assert_eq!(late.subscription(), preferences);
-		track.finish().unwrap();
+		drop(track.clone().finish().unwrap());
 		source.priority(-1).unwrap(); // A closed track has no priority left to change.
 		drop((held, late_held));
 		assert!(source.priority.lock().unwrap().controls.is_empty());

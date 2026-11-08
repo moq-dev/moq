@@ -517,7 +517,7 @@ impl<T: Serialize> Snapshot<T> {
 			if self.largest.is_some_and(|largest| sequence <= largest) {
 				return Ok(None);
 			}
-			if let Some(mut group) = self.group.take() {
+			if let Some(group) = self.group.take() {
 				group.finish()?;
 			}
 			self.group = Some(self.track.create_group(moq_net::group::Info { sequence })?);
@@ -544,10 +544,11 @@ impl<T: Serialize> Snapshot<T> {
 	}
 
 	fn finish(&mut self) -> moq_json::Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
-		Ok(self.track.finish()?)
+		// The output keeps its own clone, whose appends the end refuses.
+		Ok(self.track.clone().finish().map(drop)?)
 	}
 }
 

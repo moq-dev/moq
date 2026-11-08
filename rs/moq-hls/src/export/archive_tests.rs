@@ -173,7 +173,7 @@ impl Recording {
 	async fn finish(mut self) -> Store<Counting> {
 		self.catalog.finish().unwrap();
 		for source in self.sources.values_mut() {
-			source.media.finish().unwrap();
+			drop(source.media.clone().finish().unwrap());
 		}
 		self.stored().await;
 		self.broadcast.close();

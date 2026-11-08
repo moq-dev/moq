@@ -69,7 +69,7 @@ async fn routing(version: &str, cluster: bool) {
 	let mut group = track.append_group().unwrap();
 	group.write_frame(None, &b"conformance"[..]).unwrap();
 	group.finish().unwrap();
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	let mut received = subscription.recv_group().await.unwrap().unwrap();
 	assert_eq!(received.sequence, 0);
 	assert_eq!(
