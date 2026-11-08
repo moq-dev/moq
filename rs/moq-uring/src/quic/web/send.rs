@@ -9,7 +9,6 @@ use std::{
 use bytes::Buf;
 
 use super::Handles;
-use crate::quic::Error as SessionError;
 use crate::quic::driver::send;
 
 /// A stream that can be used to send bytes. See [`crate::quic::send::Stream`].
@@ -55,12 +54,12 @@ impl Stream {
 			send::Error::Stopped(code) => match self.close.decode_stream_code(code) {
 				Some(code) => Error::Stopped(code),
 				None => match self.close.session_gone(code) {
-					Some(err) => Error::SessionError(err),
+					Some(err) => Error::Session(err),
 					None => Error::InvalidStopped(code),
 				},
 			},
 			e => match Error::from(e) {
-				Error::SessionError(e) => Error::SessionError(self.close.map(e)),
+				Error::Session(e) => Error::Session(self.close.map(e)),
 				e => e,
 			},
 		}
@@ -138,14 +137,26 @@ impl Stream {
 		self.reset_mut(code);
 	}
 
-	pub(super) fn poll_header(&mut self, waiter: &kio::Waiter, header: &mut bytes::Bytes) -> Poll<Result<(), Error>> {
+	/// Write the WebTransport header of a stream being opened, failing as the session would.
+	pub(super) fn poll_header(
+		&mut self,
+		waiter: &kio::Waiter,
+		header: &mut bytes::Bytes,
+	) -> Poll<Result<(), super::Error>> {
+		let State::Open(stream) = &mut self.state else {
+			unreachable!("a stream is open until its header is written");
+		};
 		while header.has_remaining() {
-			let result = std::task::ready!(self.open()?.poll_write_buf(waiter, header));
-			result.map_err(|err| self.map_error(err))?;
+			if let Err(err) = std::task::ready!(stream.poll_write_buf(waiter, header)) {
+				let gone = match &err {
+					send::Error::Stopped(code) => self.close.session_gone(*code),
+					_ => None,
+				};
+				return Poll::Ready(Err(gone.unwrap_or_else(|| self.close.map(err.into()))));
+			}
 		}
-		let offset = self.open()?.offset();
-		let code = self.close.encode_stream_code(0);
-		self.open()?.set_drop_reset(Some(offset), code);
+		let offset = stream.offset();
+		stream.set_drop_reset(Some(offset), self.close.encode_stream_code(0));
 		self.header = self.close.web.as_ref().map(|_| offset);
 		Poll::Ready(Ok(()))
 	}
@@ -244,6 +255,13 @@ impl moq_net::transport::poll::SendStream for Stream {
 			Err(err) => Err(err),
 		})
 	}
+	fn acknowledged(&self) -> Option<bool> {
+		Some(match &self.state {
+			State::Open(stream) => stream.acknowledged(),
+			State::Finished(stream) => stream.acknowledged(),
+			State::Reset(_) => false,
+		})
+	}
 }
 
 impl moq_net::transport::poll::SendGroup for send::Group {
@@ -307,7 +325,7 @@ pub enum Error {
 
 	/// The session carrying the stream failed.
 	#[error("session error: {0}")]
-	SessionError(#[from] SessionError),
+	Session(#[from] super::Error),
 
 	/// The stream was already finished or reset.
 	#[error("stream closed")]
@@ -321,9 +339,9 @@ impl From<crate::quic::send::Error> for Error {
 				Some(code) => Error::Stopped(code),
 				None => Error::InvalidStopped(code),
 			},
-			crate::quic::send::Error::Connection(e) => Error::SessionError(e),
+			crate::quic::send::Error::Connection(e) => Error::Session(e.into()),
 			// Only datagrams fail otherwise, and they report a session error.
-			e => Error::SessionError(e.into()),
+			e => Error::Session(e.into()),
 		}
 	}
 }
@@ -331,12 +349,12 @@ impl From<crate::quic::send::Error> for Error {
 impl moq_net::transport::Error for Error {
 	fn close_kind(&self) -> moq_net::transport::CloseKind {
 		match self {
-			Self::SessionError(e) => e.close_kind(),
+			Self::Session(e) => e.close_kind(),
 			_ => moq_net::transport::CloseKind::Transport,
 		}
 	}
 	fn session_error(&self) -> Option<(u32, String)> {
-		if let Error::SessionError(e) = self {
+		if let Error::Session(e) = self {
 			return e.session_error();
 		}
 

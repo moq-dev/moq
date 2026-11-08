@@ -100,10 +100,10 @@ pub enum Error {
 		encoder: crate::Color,
 	},
 
-	/// The group configuration can't be honored by any backend (the message
-	/// says why).
-	#[error("invalid group configuration: {0}")]
-	InvalidGop(String),
+	/// [`encode::Config::join`](crate::encode::Config::join) is zero, which opens
+	/// no group.
+	#[error("a join of zero opens no group")]
+	ZeroJoin,
 
 	/// GPU rendering failure: building the pipeline, importing a frame's surface
 	/// as a texture, or the device itself.

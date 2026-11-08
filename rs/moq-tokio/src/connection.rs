@@ -12,7 +12,7 @@ use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthPro
 use moq_net::kio;
 use moq_net::reconnect::{Action, Verdict};
 
-use crate::abort::AbortOnDrop;
+use crate::abort::Detached;
 use crate::connect::Endpoint;
 use crate::{Addrs, Client, Error};
 
@@ -93,14 +93,9 @@ pub struct Backoff {
 	///
 	/// A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	/// failed attempt, so a peer that accepts and then drops every session still escalates
-	/// the delay and exhausts the timeout.
-	#[usage(
-		name = "connect-backoff-healthy",
-		long,
-		env = "MOQ_CONNECT_BACKOFF_HEALTHY",
-		setting = "connect.backoff.healthy"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// the delay and exhausts the timeout. Set by the embedding binary, not configured.
+	#[usage(skip)]
+	#[serde(skip)]
 	pub healthy: Option<crate::cli::Duration>,
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s; zero retries forever.
@@ -372,6 +367,7 @@ impl Goaway {
 	}
 
 	/// The policy these knobs configure, with each unset one at its default.
+	#[cfg(any(feature = "_transport", test))]
 	pub(crate) fn resolve(&self) -> moq_net::reconnect::Goaway {
 		let mut goaway = moq_net::reconnect::Goaway::default();
 		goaway.redirect = self.redirect.into();
@@ -773,7 +769,7 @@ pub struct Connection {
 /// The connection loop, shared by every [`Connection`] clone and aborted when the
 /// last one drops.
 struct Task {
-	handle: AbortOnDrop,
+	handle: Detached,
 	/// A graceful close retains the loop's resources while its sessions drain.
 	running: std::sync::Weak<Running>,
 	closed: CloseGuard,
@@ -786,7 +782,7 @@ struct Running {
 
 /// Serializes [`Connection::abort`] and [`Connection::close`] against the loop publishing a fresh session.
 ///
-/// Aborting a tokio task doesn't interrupt it before its next yield, so a redial
+/// Aborting the task doesn't interrupt it before its next yield, so a redial
 /// completing in that window would otherwise hand [`Shared::connected`] a session
 /// that `abort` had already looked for and missed, and it would be closed by the
 /// refcount drop instead of carrying the caller's error code to the peer. Both
@@ -827,7 +823,7 @@ impl Connection {
 
 		let running = std::sync::Arc::new(Running { shared });
 		let task_running = std::sync::Arc::downgrade(&running);
-		let task = crate::runtime::spawn(async move {
+		let task = Detached::spawn(async move {
 			let shared = &running.shared;
 			let reconnect = !client.policy.once;
 			// Isolated inside `shared`, so a panic still records a terminal error
@@ -848,7 +844,7 @@ impl Connection {
 		});
 		Self {
 			task: std::sync::Arc::new(Task {
-				handle: AbortOnDrop::new(task),
+				handle: task,
 				running: task_running,
 				closed,
 			}),
@@ -1382,14 +1378,12 @@ mod tests {
 		parsed.backoff.initial = Some((Duration::from_secs(7)).into());
 		parsed.backoff.multiplier = 5;
 		parsed.backoff.max = Some((Duration::from_secs(11)).into());
-		parsed.backoff.healthy = Some((Duration::from_secs(2)).into());
 		parsed.backoff.timeout = Some((Duration::ZERO).into());
 		parsed.update_from(&[]);
 
 		assert_eq!(parsed.backoff.initial, Some((Duration::from_secs(7)).into()));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Some((Duration::from_secs(11)).into()));
-		assert_eq!(parsed.backoff.healthy, Some((Duration::from_secs(2)).into()));
 		assert_eq!(parsed.backoff.timeout(), Duration::ZERO, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the policy's defaults.
@@ -2070,7 +2064,7 @@ mod tests {
 				break;
 			}
 			if let Some(added) = added.take() {
-				token = Some(added.await.unwrap().expect("granted").0);
+				token = Some(added.await.unwrap().expect("granted"));
 			}
 			let mut grant = token.as_ref().unwrap().grant();
 			while grant.peek() != Some(moq_net::auth::Grant::all()) {
@@ -2639,14 +2633,6 @@ mod duration_tests {
 		max,
 		"--connect-backoff-max",
 		|c: &Backoff| c.max(),
-		|d| d
-	);
-	crate::cli::duration::test_config_duration!(
-		healthy_set_in_code_beats_parser_default,
-		Backoff,
-		healthy,
-		"--connect-backoff-healthy",
-		|c: &Backoff| c.resolve().healthy,
 		|d| d
 	);
 	crate::cli::duration::test_config_duration!(

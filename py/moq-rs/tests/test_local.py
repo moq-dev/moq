@@ -21,6 +21,21 @@ async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
         pass
 
 
+async def polled() -> None:
+    """Return once every task started before this call has polled its native call
+    and taken any result that call had ready.
+
+    Native calls poll inline, so each task's first step makes its first poll. The
+    loop then hands back results in order, so a native call that is ready at
+    once, started after the others, finishes after theirs.
+    """
+    await asyncio.sleep(0)
+    track = moq.BroadcastProducer().publish_track("polled")
+    consumer = track.consume()
+    track.write_frame(b"ready")
+    assert await consumer.read_frame() is not None
+
+
 async def routes(announced: moq.AnnounceConsumer):
     """Yield each route that makes its path present, skipping absences."""
     async for event in announced:
@@ -134,7 +149,7 @@ async def test_datagram_tracks_have_independent_sequences_and_priority():
 async def test_broadcast_consumer_closed_resolves_on_close():
     broadcast = moq.BroadcastProducer()
     closed = asyncio.create_task(broadcast.consume().closed())
-    await asyncio.sleep(0.01)
+    await polled()
     assert not closed.done()
     broadcast.close()
     await asyncio.wait_for(closed, 5)
@@ -558,7 +573,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
     dynamic = track.requests()
     pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
     fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
-    assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
+    assert (fill.start, fill.end) == (moq.Position(group=7, frame=0), 8)
     assert fill.priority == 11
     assert fill.wanted() == 7
     assert fill.is_wanted(7)
@@ -620,9 +635,9 @@ async def test_json_window_roundtrip():
 
     for n in range(3):
         event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-        assert event == moq.json.Timed(moq.json.WindowPush(n, {"n": n}), moq.Timestamp(n * 1_000, 1_000_000))
+        assert event == moq.json.Timed(moq.json.WindowEventPush(n, {"n": n}), moq.Timestamp(n * 1_000, 1_000_000))
     event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert event == moq.json.Timed(moq.json.WindowPop(range(0, 2)), moq.Timestamp(3_000, 1_000_000))
+    assert event == moq.json.Timed(moq.json.WindowEventPop(range(0, 2)), moq.Timestamp(3_000, 1_000_000))
 
     producer.finish()
     with pytest.raises(moq.Error.Closed):
@@ -641,10 +656,10 @@ async def test_json_window_cut_restates_the_window():
     producer.pop(1, moq.Timestamp(3, 1_000))
     events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(4)]
     assert events == [
-        moq.json.WindowPush(0, {"n": 0}),
-        moq.json.WindowPush(1, {"n": 1}),
-        moq.json.WindowPush(2, {"n": 2}),
-        moq.json.WindowPop(range(0, 1)),
+        moq.json.WindowEventPush(0, {"n": 0}),
+        moq.json.WindowEventPush(1, {"n": 1}),
+        moq.json.WindowEventPush(2, {"n": 2}),
+        moq.json.WindowEventPop(range(0, 1)),
     ]
 
     producer.cut()
@@ -660,7 +675,7 @@ async def test_json_window_cut_restates_the_window():
 
     # The restated records were already delivered, so the reader sees only the new one.
     event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert event.value == moq.json.WindowPush(3, {"n": 3})
+    assert event.value == moq.json.WindowEventPush(3, {"n": 3})
     producer.finish()
 
 
@@ -682,9 +697,9 @@ async def test_json_window_skips_records_outside_the_checkpoint():
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(3)]
     assert events == [
-        moq.json.WindowSkip(range(0, 3)),
-        moq.json.WindowPush(3, {"n": 3}),
-        moq.json.WindowPush(4, {"n": 4}),
+        moq.json.WindowEventSkip(range(0, 3)),
+        moq.json.WindowEventPush(3, {"n": 3}),
+        moq.json.WindowEventPush(4, {"n": 4}),
     ]
 
     producer.finish()
@@ -1479,7 +1494,7 @@ async def test_read_frame_skips_empty_group_on_open_track():
     track.append_group().finish()
 
     read = asyncio.create_task(consumer.read_frame())
-    await asyncio.sleep(0.05)
+    await polled()
     assert not read.done(), "empty group must not end an open track"
 
     track.write_frame(b"after-empty", moq.Timestamp(1_000, 1_000_000))
@@ -1513,7 +1528,7 @@ async def test_read_frame_keeps_group_across_cancelled_call():
 
     group = track.append_group()
     read = asyncio.create_task(consumer.read_frame())
-    await asyncio.sleep(0.05)
+    await polled()
     assert not read.done()
     read.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1594,9 +1609,6 @@ def test_encode_audio_with_opus_object():
         broadcast.close()
 
 
-@pytest.mark.skip(
-    reason="flaky under load: the first read can stall past 5 s; see quest/m0/test-flakes-2/audio-playout-delay.md"
-)
 async def test_audio_consumer_reports_its_playout_delay():
     """A fixed playout delay is reported back as is; an estimated one moves as frames are read."""
     origin = moq.OriginProducer()
@@ -1616,10 +1628,13 @@ async def test_audio_consumer_reports_its_playout_delay():
     catalog = await asyncio.wait_for(moq.media.catalog(broadcast_consumer), timeout=5.0)
     rendition = catalog.audio["mic"]
 
+    # No max delay: a zero one skips a group once its successor is a warmup old by the wall
+    # clock, so a read that late starts on the second frame, and its warmup trims all the audio
+    # left. This test reads every frame it wrote, however late.
     def output(delay: timedelta | None) -> moq.audio.DecoderOutput:
         if delay is None:
-            return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
-        fixed = moq.Delay(min=delay)
+            return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=moq.Delay(max=None))
+        fixed = moq.Delay(min=delay, max=None)
         return moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32, delay=fixed, estimate=False)
 
     fixed = await moq.audio.Consumer.subscribe(broadcast_consumer, "mic", rendition, output(timedelta(milliseconds=80)))

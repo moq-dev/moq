@@ -97,7 +97,7 @@ enum Msg {
 	Batch {
 		id: Id,
 		changes: Vec<(Path, Option<Item>)>,
-		floors: BTreeMap<Path, Rev>,
+		floor: Option<Rev>,
 		interest: u32,
 	},
 	Request {
@@ -387,9 +387,9 @@ impl Sim {
 			Msg::Batch {
 				id,
 				changes,
-				floors,
+				floor,
 				interest,
-			} => router.batch(from, id, changes, floors, interest),
+			} => router.batch(from, id, changes, floor, interest),
 			Msg::Request { id, seqno } => router.request(from, id, seqno),
 		}
 		self.stats.delivered += 1;
@@ -468,12 +468,7 @@ impl Sim {
 						self.stats.route_msgs += 1;
 						(to, Msg::Route { id, reach })
 					}
-					Out::Batch {
-						to,
-						id,
-						changes,
-						floors,
-					} => {
+					Out::Batch { to, id, changes, floor } => {
 						self.stats.claim_msgs += 1;
 						self.stats.claim_items += changes.len();
 						let interest = self.nodes[to].interest();
@@ -482,7 +477,7 @@ impl Sim {
 							Msg::Batch {
 								id,
 								changes,
-								floors,
+								floor,
 								interest,
 							},
 						)
@@ -526,7 +521,7 @@ impl Sim {
 				let origin = self.source(event.id).unwrap_or(event.id);
 				let since = event.item.since;
 				let withdrawn = self
-					.truth(origin, event.claim.as_str(), self.revision(origin))
+					.covering(origin, &event.claim, self.revision(origin))
 					.is_none_or(|item| item.since != since);
 				self.events.push(SimEvent {
 					node,
@@ -618,6 +613,39 @@ impl Sim {
 			.and_then(|change| change.item)
 	}
 
+	/// The origin's most specific claim at or above `claim` as of revision `rev`:
+	/// what a stream answering `claim` presents there.
+	pub fn covering(&self, id: Id, claim: &Path, rev: Rev) -> Option<Item> {
+		let history = self.history.get(&id)?;
+		let ancestors: BTreeSet<&Path> = history
+			.iter()
+			.map(|change| &change.claim)
+			.filter(|known| within(claim, known))
+			.collect();
+		ancestors
+			.into_iter()
+			.rev()
+			.filter_map(|known| self.truth(id, known.as_str(), rev))
+			.next()
+	}
+
+	/// The origin's claims as of revision `rev` as a stream answering `prefix`
+	/// presents them.
+	pub fn presented(&self, id: Id, prefix: &Path, rev: Rev) -> BTreeMap<Path, Item> {
+		let claims: BTreeSet<&Path> = (self.history.get(&id).into_iter().flatten())
+			.map(|change| &change.claim)
+			.filter(|claim| within(claim, prefix))
+			.collect();
+		let mut out: BTreeMap<Path, Item> = claims
+			.into_iter()
+			.filter_map(|claim| Some((claim.clone(), self.truth(id, claim.as_str(), rev)?)))
+			.collect();
+		if let Some(item) = self.covering(id, prefix, rev) {
+			out.entry(prefix.clone()).or_insert(item);
+		}
+		out
+	}
+
 	pub fn revision(&self, id: Id) -> Rev {
 		self.history
 			.get(&id)
@@ -635,10 +663,11 @@ impl Sim {
 					continue;
 				};
 				checked.insert((node, key));
-				let claims: BTreeSet<&Path> = self.history[&id].iter().map(|change| &change.claim).collect();
-				if let Some(claim) = view.items.keys().find(|claim| !claims.contains(claim)) {
-					return Err(format!("node {node} holds {key}'s {claim} with no origin history"));
-				}
+				// A floor's region presents the most specific claim covering it.
+				let claims: BTreeSet<&Path> = (self.history[&id].iter().map(|change| &change.claim))
+					.chain(view.items.keys())
+					.chain(view.floors.keys())
+					.collect();
 				for claim in claims {
 					let Some(rev) = view.as_of(claim) else {
 						if view.items.contains_key(claim) {
@@ -647,7 +676,10 @@ impl Sim {
 						continue;
 					};
 					let known = view.items.get(claim).copied();
-					let truth = self.truth(id, claim.as_str(), rev);
+					let truth = match view.floors.contains_key(claim) {
+						true => self.covering(id, claim, rev),
+						false => self.truth(id, claim.as_str(), rev),
+					};
 					if known != truth {
 						return Err(format!(
 							"node {node} holds {key}'s {claim} as {known:?} at revision {rev}, where the origin had {truth:?}"

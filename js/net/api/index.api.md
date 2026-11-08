@@ -1,11 +1,8 @@
 # `@moq/net`
 
 ```ts
-import { $ZodBranded } from "zod/v4/core";
 import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
-import { ZodMiniBigInt } from "zod/mini";
-import { infer } from "zod/mini";
 
 export namespace Announce {
 	export interface Announce {
@@ -299,13 +296,6 @@ export namespace Datagram {
 		readonly name: string;
 		get priority(): Signals.Getter<number | undefined>;
 	}
-	export class Request {
-		accept(properties?: Partial<Datagram.Info>): Datagram.Producer;
-		get closed(): Signals.GetPromise<Error | null>;
-		get name(): string;
-		get priority(): Signals.Getter<number | undefined>;
-		reject(error: Error): void;
-	}
 	export function rescale(info: {
 		timescale?: Time.Timescale | null;
 	}, timestamp: Time.Timestamp | undefined): Time.Timestamp | undefined;
@@ -348,6 +338,10 @@ export namespace Error {
 		});
 		readonly code: SessionCode;
 	}
+	export class Skipped extends Error {
+		constructor(sequence: bigint);
+		readonly sequence: bigint;
+	}
 	export class Stream extends Error {
 		constructor(code: StreamCode, options?: Error.StreamOptions);
 		readonly code: StreamCode;
@@ -369,6 +363,29 @@ export namespace Error {
 	}
 }
 
+export namespace Frame {
+	export class Consumer {
+		get arrived(): Instant | undefined;
+		readAll(): Promise<Uint8Array>;
+		readChunk(): Promise<Uint8Array | undefined>;
+		readonly sequence: number;
+		readonly size: number;
+		readonly timestamp: Time.Timestamp | undefined;
+	}
+	export interface Info {
+		size: number;
+		timestamp?: Time.Timestamp;
+	}
+	export class Producer {
+		abort(error: Error): void;
+		finish(): void;
+		get remaining(): number;
+		readonly size: number;
+		readonly timestamp: Time.Timestamp | undefined;
+		write(chunk: Uint8Array): void;
+	}
+}
+
 export namespace Group {
 	export class Consumer {
 		get arrived(): Instant;
@@ -377,7 +394,7 @@ export namespace Group {
 		get done(): boolean;
 		get frameCount(): number;
 		get isClosed(): boolean;
-		nextFrame(): Promise<Group.FrameConsumer | undefined>;
+		nextFrame(): Promise<Frame.Consumer | undefined>;
 		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
@@ -397,26 +414,6 @@ export namespace Group {
 		payload: Uint8Array;
 		timestamp?: Time.Timestamp;
 	}
-	export class FrameConsumer {
-		get arrived(): Instant | undefined;
-		readAll(): Promise<Uint8Array>;
-		readChunk(): Promise<Uint8Array | undefined>;
-		readonly sequence: number;
-		readonly size: number;
-		readonly timestamp: Time.Timestamp | undefined;
-	}
-	export interface FrameInfo {
-		size: number;
-		timestamp?: Time.Timestamp;
-	}
-	export class FrameProducer {
-		abort(error: Error): void;
-		finish(): void;
-		get remaining(): number;
-		readonly size: number;
-		readonly timestamp: Time.Timestamp | undefined;
-		write(chunk: Uint8Array): void;
-	}
 	export interface Info {
 		sequence: bigint;
 	}
@@ -425,7 +422,7 @@ export namespace Group {
 		abort(error: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
-		createFrame(info: Group.FrameInfo): Group.FrameProducer;
+		createFrame(info: Frame.Info): Frame.Producer;
 		finish(): void;
 		get isClosed(): boolean;
 		readonly sequence: bigint;
@@ -435,8 +432,6 @@ export namespace Group {
 		from?: number;
 	}
 }
-
-export const IMPLEMENTATION: string;
 
 export namespace Instance {
 	export type Valid = string & {
@@ -465,8 +460,6 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
 	}
-	export type Hop = infer<typeof Origin.HopSchema>;
-	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
 	export class Producer implements Origin.Table {
 		constructor();
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -515,10 +508,9 @@ export namespace Origin {
 		withdraw(): void;
 	}
 	export interface RouteInfo {
-		readonly auth?: Auth.Credential;
+		readonly anonymous: boolean;
 		readonly cost: Origin.Cost;
-		readonly epoch?: bigint;
-		readonly hops: readonly Origin.Hop[];
+		readonly hops: readonly bigint[];
 		readonly instance?: Instance.Valid;
 	}
 	export interface RouteOptions {
@@ -532,12 +524,10 @@ export namespace Origin {
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 	}
-	export function isAnonymous(route: Origin.RouteInfo): boolean;
 }
 
 export namespace Path {
 	export { InvalidPattern } from "@moq/pattern";
-	export const MAX_BYTES: 4096;
 	export const MAX_PARTS: 32;
 	export { Pattern } from "@moq/pattern";
 	export { Patterns } from "@moq/pattern";
@@ -590,6 +580,41 @@ export type SessionCode = number & {
 };
 
 export * as Signals from "@moq/signals";
+
+export namespace Socket {
+	export class Endpoint {
+		constructor(origin: Origin.Producer, prefix: Path.Valid, id: string);
+		acceptTcp(options?: Socket.Options): Promise<Socket.Incoming<Socket.TcpStream>>;
+		acceptTrack(options?: Socket.Options): Promise<Socket.Incoming<Socket.TrackStream>>;
+		close(): void;
+		get closed(): Signals.GetPromise<Error | null>;
+		dialTcp(peer: string, options?: Socket.Options): Promise<Socket.TcpStream>;
+		dialTrack(peer: string, info?: Track.InfoInit, options?: Socket.Options): Promise<Socket.TrackStream>;
+		readonly id: string;
+		readonly prefix: Path.Valid;
+	}
+	export class Incoming<S extends Socket.TcpStream | Socket.TrackStream> {
+		accept(...args: S extends Socket.TcpStream ? [options?: Socket.Options] : [info?: Track.InfoInit, options?: Socket.Options]): Promise<S>;
+		readonly peer: string;
+		reject(): void;
+		readonly session: string;
+	}
+	export interface Options {
+		signal?: AbortSignal;
+	}
+	export class TcpStream {
+		readonly consumer: Group.Consumer;
+		readonly peer: string;
+		readonly producer: Group.Producer;
+		readonly session: string;
+	}
+	export class TrackStream {
+		readonly consumer: Track.Subscriber;
+		readonly peer: string;
+		readonly producer: Track.Producer;
+		readonly session: string;
+	}
+}
 
 export const StreamCode: ((code: number) => StreamCode) & {
 	readonly Cancel: StreamCode;
@@ -758,6 +783,7 @@ export namespace Track {
 		readonly name: string;
 		get priority(): number;
 		requests(): Track.Requests;
+		skipGroups(start: bigint, end: bigint): void;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		writeFrame(frame: Group.Frame): void;
@@ -784,11 +810,14 @@ export namespace Track {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		finished(): Promise<Track.Position>;
+		floor(): bigint | undefined;
 		info(): Promise<Track.Info>;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
+		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
+		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryRecvGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
@@ -820,40 +849,5 @@ export namespace Varint {
 	export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
 	export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
 	export function size(v: number): number;
-}
-
-export namespace socket {
-	export class Endpoint {
-		constructor(origin: Origin.Producer, prefix: Path.Valid, id: string);
-		acceptTcp(options?: socket.Options): Promise<socket.Incoming<socket.TcpStream>>;
-		acceptTrack(options?: socket.Options): Promise<socket.Incoming<socket.TrackStream>>;
-		close(): void;
-		get closed(): Signals.GetPromise<Error | null>;
-		dialTcp(peer: string, options?: socket.Options): Promise<socket.TcpStream>;
-		dialTrack(peer: string, info?: Track.InfoInit, options?: socket.Options): Promise<socket.TrackStream>;
-		readonly id: string;
-		readonly prefix: Path.Valid;
-	}
-	export class Incoming<S extends socket.TcpStream | socket.TrackStream> {
-		accept(...args: S extends socket.TcpStream ? [options?: socket.Options] : [info?: Track.InfoInit, options?: socket.Options]): Promise<S>;
-		readonly peer: string;
-		reject(): void;
-		readonly session: string;
-	}
-	export interface Options {
-		signal?: AbortSignal;
-	}
-	export class TcpStream {
-		readonly consumer: Group.Consumer;
-		readonly peer: string;
-		readonly producer: Group.Producer;
-		readonly session: string;
-	}
-	export class TrackStream {
-		readonly consumer: Track.Subscriber;
-		readonly peer: string;
-		readonly producer: Track.Producer;
-		readonly session: string;
-	}
 }
 ```

@@ -23,7 +23,7 @@ export interface GameConfig {
 	/** The origin the game broadcast arrives in; the connection feeds it. */
 	origin: Moq.Origin.Producer;
 	/** This viewer's socket endpoint, under {@link gamePrefix}, which dials the game's. */
-	endpoint: Moq.socket.Endpoint;
+	endpoint: Moq.Socket.Endpoint;
 	/** Shared signal tracking which game is currently expanded. */
 	expanded: Moq.Signals.Signal<string | undefined>;
 	/** MoQ path prefix for game broadcasts (e.g. "anon/boy/game"). */
@@ -72,7 +72,7 @@ export class Game {
 
 	/** The session currently expanded, shared by every game on the page. */
 	readonly expanded: Moq.Signals.Signal<string | undefined>;
-	readonly #endpoint: Moq.socket.Endpoint;
+	readonly #endpoint: Moq.Socket.Endpoint;
 
 	/** Whether the pointer is over this game's tile. */
 	readonly hovered = new Moq.Signals.Signal(false);
@@ -140,7 +140,7 @@ export class Game {
 			broadcast: this.broadcast,
 			target: this.#target,
 			supported: Watch.Video.Decoder.supported,
-			probe: connection.probe,
+			rate: new Moq.Signals.Derived([connection.probe], (probe) => probe?.estimatedRecvRate),
 		});
 		this.#signals.cleanup(() => this.videoSource.close());
 
@@ -320,7 +320,7 @@ export class Game {
 
 		// One session per activation: a reload or an idle timeout ends it, and the next input dials a new one.
 		const abort = new AbortController();
-		const stream = new Moq.Signals.Signal<Moq.socket.TrackStream | undefined>(undefined);
+		const stream = new Moq.Signals.Signal<Moq.Socket.TrackStream | undefined>(undefined);
 		effect.cleanup(() => {
 			abort.abort();
 			const open = stream.peek();
@@ -330,7 +330,7 @@ export class Game {
 		});
 
 		effect.spawn(async () => {
-			let open: Moq.socket.TrackStream;
+			let open: Moq.Socket.TrackStream;
 			try {
 				open = await this.#endpoint.dialTrack(this.sessionId, undefined, { signal: abort.signal });
 			} catch (err) {
@@ -354,7 +354,7 @@ export class Game {
 		effect.run(this.#runCommands.bind(this, stream));
 	}
 
-	#runCommands(stream: Moq.Signals.Signal<Moq.socket.TrackStream | undefined>, effect: Moq.Signals.Effect) {
+	#runCommands(stream: Moq.Signals.Signal<Moq.Socket.TrackStream | undefined>, effect: Moq.Signals.Effect) {
 		const open = effect.get(stream);
 		if (!open) return;
 

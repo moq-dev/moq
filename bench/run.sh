@@ -13,6 +13,16 @@ set -euo pipefail
 # `--fanout` counts the chat fan-out's instructions per delivered group on one thread,
 # for each BENCH_BASE revision and the current tree, independent of host load.
 
+# Reuse the paired relay suite without repeating unrelated Criterion measurements.
+RELAY_ONLY=false
+if [[ ${1:-} == --relay ]]; then
+    RELAY_ONLY=true
+    shift
+    if (($# > 1)) || [[ ${1:-} == --* ]]; then
+        printf 'usage: run.sh --relay [BASE]\n' >&2
+        exit 2
+    fi
+fi
 MODE=${1:-}
 ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
 if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
@@ -185,6 +195,10 @@ case $MODE in
         RUNTIME_WORKERS=$((10#$RUNTIME_WORKERS))
         ;;
     *)
+        if (($# > 1)); then
+            printf 'usage: run.sh [BASE], or run.sh --relay [BASE]\n' >&2
+            exit 2
+        fi
         BASE=$MODE
         # Video stays on QUIC; chat (per-message cost) and fanout (per-byte cost) sweep the transports.
         RELAY_CASES=(quic/video)
@@ -200,7 +214,11 @@ esac
 ROOT=$(git rev-parse --show-toplevel)
 # shellcheck source=bench/lock.sh
 source "$ROOT/bench/lock.sh"
-bench_lock "$0" "$@"
+if [[ $RELAY_ONLY == true ]]; then
+    bench_lock "$0" --relay "$@"
+else
+    bench_lock "$0" "$@"
+fi
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target/bench}
 if [[ $TARGET != /* ]]; then
     TARGET=$ROOT/$TARGET
@@ -282,7 +300,11 @@ STDOUT_PID=$!
 exec 2> >(tee "$RUN/stderr.log" >&4)
 STDERR_PID=$!
 
-python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+METADATA_MODE=$MODE
+if [[ $RELAY_ONLY == true ]]; then METADATA_MODE=--relay; fi
+python3 "$ROOT/bench/metadata.py" "$RUN" "$BASE" "$METADATA_MODE" "${RUNTIME_WORKERS:-}" "$ROUNDS"
+# Record external load before this session's builds and measurements add their own.
+if [[ -r /proc/loadavg ]]; then cat /proc/loadavg >"$RUN/loadavg-start.txt"; fi
 cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
 
@@ -447,6 +469,8 @@ unavailable() {
 # Measure the selected targets in quick mode. With a base, run each target's base build
 # beside it, alternating which goes first, then confirm the screen's worst slowdowns.
 # A failed current target fails the run; the base only marks its targets unavailable.
+# A base build byte-identical to the current one is not run: the runner's own drift
+# measured identical builds up to 12% apart, so comparing them can only raise false alarms.
 measure_criterion() {
     local current=$RUN/criterion-current.targets base=$RUN/criterion-base.targets
     local key side targets index=0 status=0
@@ -474,9 +498,13 @@ measure_criterion() {
             for key in "${targets[@]}"; do unavailable "$key" "base build failed"; done
         fi
     fi
+    : >"$RUN/paired-identical.txt"
     for key in "${targets[@]}"; do
-        local order=(current)
-        if [[ -n $(target_line "$base" "$key") ]]; then
+        local order=(current) base_line
+        base_line=$(target_line "$base" "$key")
+        if [[ -n $base_line ]] && cmp -s "$(target_line "$current" "$key" | cut -f3)" "$(cut -f3 <<<"$base_line")"; then
+            printf '%s\n' "$key" >>"$RUN/paired-identical.txt"
+        elif [[ -n $base_line ]]; then
             if ((index++ % 2)); then order=(current base); else order=(base current); fi
         fi
         for side in "${order[@]}"; do
@@ -497,23 +525,40 @@ measure_criterion() {
 
 # One quick run per side can land on noise, so each slowdown the screen flags is
 # re-measured in alternating rounds with the comparison settings before it can fail.
+# Round sides stop starting after CONFIRM_SECONDS, worst slowdown first, so a group of slow
+# cases cannot push the Nightly leg past its timeout. A case cut off mid-rounds is left out
+# of confirm.tsv, so it and every later case stay unconfirmed.
+CONFIRM_SECONDS=300
 confirm_criterion() {
-    local key benchmark round side index=0
-    python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/confirm.tsv" || return 1
+    local key benchmark round side index=0 deadline=$((SECONDS + CONFIRM_SECONDS))
+    python3 "$ROOT/bench/compare.py" --criterion-screen "$RUN" >"$RUN/screen.tsv" || return 1
+    : >"$RUN/confirm.tsv"
     while IFS=$'\t' read -r key benchmark; do
         index=$((index + 1))
+        # compare.py ignores every case of an unavailable target, so its rounds would only spend the budget.
+        if [[ -f $RUN/paired-unavailable.tsv ]] &&
+            awk -F'\t' -v target="$key" '$1 == target { found = 1 } END { exit !found }' "$RUN/paired-unavailable.tsv"; then
+            printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
+            continue
+        fi
         for ((round = 1; round <= ROUNDS; round++)); do
             local order=(base current)
             if ((round % 2 == 0)); then order=(current base); fi
             for side in "${order[@]}"; do
+                if ((SECONDS >= deadline)); then
+                    printf 'Confirmation budget of %ds spent; later slowdowns stay unconfirmed\n' "$CONFIRM_SECONDS"
+                    break 3
+                fi
                 if ! criterion_exec "$RUN/criterion-$side.targets" "$RUN/confirm/$index/round-$round/$side" "$key" \
                     "${CRITERION_ARGS[@]}" "$benchmark" --exact; then
                     unavailable "$key" "confirmation failed"
+                    printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
                     continue 3
                 fi
             done
         done
-    done <"$RUN/confirm.tsv"
+        printf '%s\t%s\n' "$key" "$benchmark" >>"$RUN/confirm.tsv"
+    done <"$RUN/screen.tsv"
     python3 "$ROOT/bench/compare.py" --criterion-paired "$RUN"
 }
 
@@ -743,7 +788,7 @@ run_audio_comparison() {
     printf 'Building relay and audio load generator...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+    HOST_CMD=("$LOAD_BIN" host)
 
     printf '\nAudio grouping: 50 / 400 fps, 200-byte frames, per-packet / 20 / 100 / 200 ms groups\n'
     printf 'shape\trecv-fps\tp99-ms\tCPU\tRSS-MiB\n'
@@ -798,7 +843,7 @@ generate_certificate() {
 
 # The runtime matrix and profiling use identical feature selection and support checks.
 build_workers() {
-    local checkout=$1 target=$2 profile=$3 features=moq-relay/io-uring,moq-bench/uring
+    local checkout=$1 target=$2 profile=$3 features=moq-relay/io-uring
     if [[ ${4:-} == heap ]]; then
         features+=,moq-relay/jemalloc
     fi
@@ -812,9 +857,18 @@ build_workers() {
     )
 }
 
+# Support is the host's, not a revision's, so the current tree's probe answers for
+# every revision. Takes the current tree's target directory and Cargo profile.
 check_uring() {
     printf 'Checking io_uring support...\n'
-    if ! "$1/moq-bench-uring-check"; then
+    (
+        # Read just this tree's configuration, as build_workers does, so the probe
+        # lands where its workers do.
+        cd /
+        CARGO_TARGET_DIR=$1 cargo --config "$ROOT/.cargo/config.toml" build --manifest-path "$ROOT/Cargo.toml" \
+            --locked --quiet --profile "$2" -p moq-uring --no-default-features --features _probe
+    )
+    if ! "$1/$2/moq-uring-probe"; then
         printf 'worker benchmarks need Linux 6.12+ with io_uring permitted by the host\n' >&2
         return 1
     fi
@@ -829,8 +883,8 @@ run_runtime_comparison() {
 
     build_workers "$ROOT" "$CURRENT_TARGET" release
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
-    check_uring "$CURRENT_TARGET/release"
+    HOST_CMD=("$LOAD_BIN" host)
+    check_uring "$CURRENT_TARGET" release
 
     local -a runtimes=(tokio-shared tokio-workers io-uring-workers)
     local round workload offset index runtime
@@ -867,7 +921,7 @@ run_shard_sweep() {
     printf 'Building relay and load generator...\n'
     CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+    HOST_CMD=("$LOAD_BIN" host)
 
     local cpus workload connections shards label
     cpus=$(usable_cpus)
@@ -938,20 +992,20 @@ run_profiles() {
     local label checkout target
     local -a revisions=(current)
     if [[ -n $BASE ]]; then revisions=(base current); fi
+    if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
+        check_uring "$CURRENT_TARGET/profile" profiling
+    fi
     for mode in $PROFILE_MODES; do
         # The current generator and sampler drive both revisions, including old bases
         # whose own harness cannot select the io_uring runtime.
         build_workers "$ROOT" "$CURRENT_TARGET/profile" profiling "$mode"
         LOAD_BIN=$CURRENT_TARGET/profile/profiling/moq-bench
-        HOST_BIN=$CURRENT_TARGET/profile/profiling/moq-bench-host
+        HOST_CMD=("$LOAD_BIN" host)
         for label in "${revisions[@]}"; do
             checkout=$ROOT target=$CURRENT_TARGET/profile
             if [[ $label == base ]]; then
                 checkout=$WORKTREE target=$BASE_TARGET/profile
                 build_workers "$checkout" "$target" profiling "$mode"
-            fi
-            if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
-                check_uring "$target/profiling"
             fi
             run_profile "$mode" "$label" "$target/profiling/moq-relay"
         done
@@ -1005,7 +1059,7 @@ revision_checkout() {
 # sampler drive every relay, including old bases whose own harness cannot select
 # the io_uring runtime: BENCH_GENERATOR's, or else the current tree's.
 run_instructions() {
-    local label sha round index next generator built
+    local label sha round index next generator
     # Measured revisions, then what gets built: those plus a generator measured nowhere.
     local -a labels=() targets=() checkouts=()
     for sha in ${BASES[@]+"${BASES[@]}"}; do
@@ -1031,8 +1085,6 @@ run_instructions() {
             build_targets+=("$generator")
         fi
     fi
-    LOAD_BIN=$generator/profiling/moq-bench
-    HOST_BIN=$generator/profiling/moq-bench-host
 
     mkdir -p "$RUN/build"
     QUEUED_BUILDS=() QUEUED_LOGS=()
@@ -1050,10 +1102,16 @@ run_instructions() {
         fi
         tail -n 1 "$RUN/build/${build_labels[$index]}.log"
     done
+    LOAD_BIN=$generator/profiling/moq-bench
+    HOST_CMD=("$LOAD_BIN" host)
+    # A generator pinned before the sampler became `moq-bench host` built it as its
+    # own binary. Only a pinned generator's sha-keyed target is free of artifacts
+    # left by an older working tree.
+    if [[ -n $GENERATOR && -x $generator/profiling/moq-bench-host ]]; then
+        HOST_CMD=("$generator/profiling/moq-bench-host")
+    fi
     if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
-        for built in "${build_targets[@]}"; do
-            check_uring "$built/profiling"
-        done
+        check_uring "${targets[-1]}" profiling
     fi
     for ((round = 1; round <= ROUNDS; round++)); do
         for ((index = 0; index < ${#labels[@]}; index++)); do
@@ -1267,9 +1325,11 @@ elif [[ -n $BASE ]]; then
         python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE_COMMIT" comparison-base
     )
 
-    printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
-    compare_criterion "$WORKTREE" "$ROOT"
-    report_set_changes
+    if [[ $RELAY_ONLY == false ]]; then
+        printf 'Criterion comparison: %s (%s) versus current\n' "$BASE" "$BASE_COMMIT"
+        compare_criterion "$WORKTREE" "$ROOT"
+        report_set_changes
+    fi
 
     printf '\nBuilding relay binaries...\n'
     (
@@ -1279,15 +1339,17 @@ elif [[ -n $BASE ]]; then
     cp "$BASE_TARGET/release/moq-relay" "$RUN/moq-relay-base"
     chmod +x "$RUN/moq-relay-base"
 else
-    printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
-    run_criterion "$ROOT" --discard-baseline
+    if [[ $RELAY_ONLY == false ]]; then
+        printf 'Criterion current: %s\n' "$(git rev-parse --short HEAD)"
+        run_criterion "$ROOT" --discard-baseline
+    fi
     printf '\nBuilding relay binaries...\n'
 fi
 generate_certificate
 
 CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
 LOAD_BIN=$CURRENT_TARGET/release/moq-bench
-HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+HOST_CMD=("$LOAD_BIN" host)
 
 if [[ -n $BASE ]]; then
     printf '\nRelay workloads: paired base/current\n'

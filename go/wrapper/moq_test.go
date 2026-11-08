@@ -738,8 +738,8 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fill.StartGroup() != 7 || fill.EndGroup() != 8 || fill.Priority() != 11 {
-		t.Fatalf("unexpected fill: start=%d end=%d priority=%d", fill.StartGroup(), fill.EndGroup(), fill.Priority())
+	if fill.Start() != (moq.Position{Group: 7, Frame: 0}) || fill.End() != 8 || fill.Priority() != 11 {
+		t.Fatalf("unexpected fill: start=%+v end=%d priority=%d", fill.Start(), fill.End(), fill.Priority())
 	}
 	if wanted := fill.Wanted(); wanted == nil || *wanted != 7 {
 		t.Fatalf("unexpected fill: wanted=%v", wanted)
@@ -1255,10 +1255,10 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 }
 
 // TestRecvGroupCancelRace exercises the core bridge.Call path under -race:
-// the native RecvGroup runs on an internal goroutine while ctx expiry triggers a
+// the native RecvGroup runs on an internal goroutine while ctx ending triggers a
 // concurrent Cancel on the same consumer. No group is ever written, so each read
-// blocks until its short ctx fires. The race detector flags any unsynchronized
-// access between the in-flight call and the cancel.
+// blocks until the cancel. The race detector flags any unsynchronized access
+// between the in-flight call and the cancel.
 func TestRecvGroupCancelRace(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
@@ -1280,11 +1280,9 @@ func TestRecvGroupCancelRace(t *testing.T) {
 		wg.Add(1)
 		go func(c *moq.TrackConsumer) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-			defer cancel()
-			// Returns ctx.Err() once the deadline fires; we only care that it
-			// returns without a data race or panic.
-			_, _ = c.RecvGroup(ctx)
+			// Returns ctx.Err(); we only care that it returns without a data
+			// race or panic.
+			_, _ = c.RecvGroup(newCancelOnWait())
 		}(consumer)
 	}
 	wg.Wait()
@@ -1431,7 +1429,7 @@ func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
 	case <-waitCtx.Done():
 		t.Fatal("SubscribeTrack did not return after its context was cancelled")
 	}
-	_ = pending.Abort(0)
+	_ = pending.Reject(0)
 
 	resolved := make(chan error, 1)
 	go func() {
@@ -1474,10 +1472,8 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if err := untilWanted(ctx, demand, true); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("untilWanted error = %v, want context.DeadlineExceeded", err)
+	if err := untilWanted(newCancelOnWait(), demand, true); !errors.Is(err, context.Canceled) {
+		t.Fatalf("untilWanted error = %v, want context.Canceled", err)
 	}
 
 	readCtx, readCancel := context.WithTimeout(context.Background(), testTimeout)
@@ -1572,7 +1568,7 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 
 	runtime.KeepAlive(pending)
 	for _, request := range pending {
-		_ = request.Abort(0)
+		_ = request.Reject(0)
 	}
 }
 
@@ -1934,6 +1930,24 @@ func ts(us uint64) *moq.Timestamp { return &moq.Timestamp{Value: us, Scale: 1_00
 func timedInfo() *moq.TrackInfo {
 	scale := uint64(1_000_000)
 	return &moq.TrackInfo{Timescale: &scale}
+}
+
+// cancelOnWait is a context that cancels itself the moment a call starts
+// waiting on it, so the cancel always lands on a call already in flight.
+type cancelOnWait struct {
+	context.Context
+	once   sync.Once
+	cancel context.CancelFunc
+}
+
+func newCancelOnWait() *cancelOnWait {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cancelOnWait{Context: ctx, cancel: cancel}
+}
+
+func (c *cancelOnWait) Done() <-chan struct{} {
+	c.once.Do(c.cancel)
+	return c.Context.Done()
 }
 
 // untilWanted blocks until some subscriber wants the track, or none does.

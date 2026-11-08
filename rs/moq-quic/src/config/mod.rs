@@ -25,5 +25,5 @@ pub enum ConfigError {
 	MaxUdpPayloadSize,
 	/// This CPU lacks a feature that rind, the transport's cryptography, requires
 	#[error(transparent)]
-	UnsupportedCpu(#[from] moq_crypto::provider::UnsupportedCpu),
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }

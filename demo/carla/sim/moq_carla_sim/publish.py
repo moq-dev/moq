@@ -1,19 +1,22 @@
 """MoQ wiring: video and status out, driver control in.
 
-The broadcast layout is the one `demo/carla/README.md` documents and the web
-player speaks:
+The layout is the one `demo/carla/README.md` documents and the web player
+speaks:
 
     carla/{truck}/{camera}.hang              video (sd, hd) + status
-    viewer/carla/{truck}/{driverId}          control
+    carla/.server/{truck}                    the truck's server socket endpoint
+    carla/.client/{id}                       each driver's client socket endpoint
 """
 
 from __future__ import annotations
 
 import asyncio
-import itertools
+import contextlib
+import json
 import logging
 import math
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import moq
@@ -98,8 +101,6 @@ class Status:
     estop_by: str | None
     autonomous: bool
     driver: str | None
-    sequence: int | None
-    media_pipeline: dict[str, list[dict[str, Any]]]
     location: str | None
     map_name: str | None
     telemetry: Telemetry | None
@@ -128,7 +129,6 @@ def status_payload(status: Status) -> dict[str, Any]:
         "capabilities": ["respawn"],
         "autonomy": "autonomous" if status.autonomous else "manual",
         "estopped": status.estopped,
-        "media_pipeline": status.media_pipeline,
     }
     # Omitted rather than null when absent; the player reads a missing field
     # as unset.
@@ -136,8 +136,6 @@ def status_payload(status: Status) -> dict[str, Any]:
         payload["driver"] = status.driver
     if status.estop_by is not None:
         payload["estop_by"] = status.estop_by
-    if status.sequence is not None:
-        payload["sequence"] = status.sequence
     if status.location is not None:
         payload["location"] = status.location
     if status.map_name is not None:
@@ -215,7 +213,7 @@ class StatusPublisher:
 
 
 # The player's pipeline stages. Anything else a driver sends is dropped, so an
-# anonymous lease holder cannot grow the status the truck echoes.
+# anonymous lease holder cannot grow the reply the truck echoes.
 TIMESTAMP_LABELS = ("received", "decoded", "rendered")
 
 
@@ -235,8 +233,8 @@ def _parse_timestamps(raw: Any) -> tuple[TimestampEntry, ...]:
     return tuple(entries.values())
 
 
-def parse_command(driver_id: str, message: Any, instance: str | None = None) -> Command | None:
-    """Turn one `control` track message from a driver run into a Command.
+def parse_command(driver_id: str, message: Any, session: str) -> Command | None:
+    """Turn one control message from a driver's session into a Command.
 
     Returns None for anything unrecognized. A driver is an untrusted publisher,
     so a malformed message is dropped here rather than reaching the gate: the
@@ -262,7 +260,7 @@ def parse_command(driver_id: str, message: Any, instance: str | None = None) -> 
         return Command(
             kind="drive",
             driver_id=driver_id,
-            instance=instance,
+            session=session,
             sequence=sequence,
             state=DriveState(
                 steering=_number(message.get("steering")),
@@ -274,7 +272,7 @@ def parse_command(driver_id: str, message: Any, instance: str | None = None) -> 
         )
 
     if kind in ("estop", "reset_estop", "respawn"):
-        return Command(kind=kind, driver_id=driver_id, instance=instance, sequence=sequence, timestamps=timestamps)
+        return Command(kind=kind, driver_id=driver_id, session=session, sequence=sequence, timestamps=timestamps)
 
     return None
 
@@ -295,114 +293,124 @@ def _number_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-async def watch_drivers(
-    client: moq.Client,
-    prefix: str,
-    commands: asyncio.Queue[Command],
-) -> None:
-    """Discover driver broadcasts at `{prefix}/{driverId}` and fan their commands in.
+# Every endpoint the trucks and their drivers talk through sits under this
+# prefix: a truck's as `{prefix}/.server/{truck}`, a driver's as `{prefix}/.client/{id}`.
+SOCKET_PREFIX = "carla"
 
-    Runs until cancelled. Each driver path the listing reports present gets its own
-    task, so one slow or stuck driver cannot hold up the others. That task follows
-    the path across the driver's runs, one publisher instance each; a run that
-    another takes over, or whose path goes absent, ends, and with it its lease.
+# How far a control may fall behind the newest before it is skipped: one player
+# heartbeat, by which time a newer control has superseded it. Within it, a burst
+# arrives whole and in order, so a reset never loses to the drive right after it.
+CONTROL_DELAY = timedelta(milliseconds=250)
+
+
+class Drivers:
+    """A truck's server socket endpoint: accepts each driver's session, fans its
+    controls into the command queue, and answers the driver on the same session.
+
+    Each driver dials from a client endpoint of its own, one `track` session per lease,
+    whose messages are one control per group. Replies go back the same way, so a
+    driver's acknowledgements never reach anyone else.
     """
-    drivers: dict[str, asyncio.Task[None]] = {}
 
+    def __init__(self, truck: str, commands: asyncio.Queue[Command]) -> None:
+        self._truck = truck
+        self._commands = commands
+        # Keyed like the lease, by driver and session, since a dialer picks its own session id.
+        self._replies: dict[tuple[str, str], moq.TrackProducer] = {}
+
+    @property
+    def path(self) -> str:
+        """Where the truck's server endpoint is announced."""
+        return f"{SOCKET_PREFIX}/.server/{self._truck}"
+
+    def reply(self, command: Command, message: dict[str, Any]) -> None:
+        """Send `message` on the session that carried `command`, if it is still open.
+
+        A session that has just ended is not an error: its pump is already on
+        its way to releasing the lease.
+        """
+        if command.session is None:
+            return
+        producer = self._replies.get((command.driver_id, command.session))
+        if producer is None:
+            return
+        try:
+            producer.write_frame(json.dumps(message, separators=(",", ":")).encode())
+        # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
+        except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
+            log.info("%s: reply failed: %s", self._truck, err)
+
+    async def run(self, origin: moq.OriginProducer) -> None:
+        """Accept drivers until cancelled, each session in a task of its own,
+        so one slow or stuck driver cannot hold up the others."""
+        sessions: set[asyncio.Task[None]] = set()
+        try:
+            async with moq.socket.Endpoint(origin, SOCKET_PREFIX, self._truck) as endpoint:
+                while True:
+                    incoming = await endpoint.accept_track()
+                    task = asyncio.create_task(self._serve(incoming), name=f"driver:{incoming.peer}")
+                    sessions.add(task)
+                    task.add_done_callback(sessions.discard)
+        finally:
+            for task in sessions:
+                task.cancel()
+            await asyncio.gather(*sessions, return_exceptions=True)
+
+    async def _serve(self, incoming: moq.socket.IncomingTrack) -> None:
+        """Feed one driver session's controls into the command queue.
+
+        Emits `driver_left` once the session was open, however it ends, so the
+        gate releases a lease even when the session fails. Cancellation is the
+        exception: that is the truck shutting down, whose gate no longer reads
+        the queue, so waiting to enqueue there would hang the shutdown.
+        """
+        driver = incoming.peer
+        try:
+            stream = await incoming.accept()
+        # A dial forged in another endpoint's name fails here, as does one whose
+        # dialer gave up first; neither ever reached the gate.
+        except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
+            log.info("driver %s not accepted: %s", driver, err)
+            return
+
+        session = stream.session
+        key = (driver, session)
+        if key in self._replies:
+            # It would share the open session's lease and replies; refuse it.
+            log.info("driver %s dialed a session id it already has open", driver)
+            stream.producer.finish()
+            return
+        stream.consumer.update(moq.Subscription(delay=moq.Delay(max=CONTROL_DELAY), order=moq.Order.ASCENDING))
+        self._replies[key] = stream.producer
+        log.info("driver %s connected", driver)
+        try:
+            while (frame := await stream.consumer.read_frame()) is not None:
+                command = parse_command(driver, _decode(frame.payload), session)
+                if command is not None:
+                    await self._commands.put(command)
+        except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
+            log.info("driver %s session ended: %s", driver, err)
+        finally:
+            del self._replies[key]
+            # Closes this side too; a session the peer reset has nothing left to close.
+            with contextlib.suppress(moq.Error):  # pyright: ignore[reportGeneralTypeIssues]
+                stream.producer.finish()
+            log.info("driver %s disconnected", driver)
+        await self._commands.put(Command(kind="driver_left", driver_id=driver, session=session))
+
+
+def _decode(payload: bytes) -> Any:
+    """One control message, or None for bytes that are not JSON, which parse_command drops."""
     try:
-        async with client.announced(prefix, filter="*") as announced:
-            async for event in announced:
-                # Both variants carry `announce`; uniffi's stubs type only the enum.
-                path = event.announce.prefix  # pyright: ignore[reportAttributeAccessIssue]
-                driver_id = path.removeprefix(prefix + "/")
-                # The filter admits one segment below the prefix; anything else
-                # is a route that only overlaps it, not a driver's broadcast.
-                if driver_id == path or not driver_id or "/" in driver_id:
-                    continue
-                if isinstance(event, moq.AnnounceEventAbsent):
-                    task = drivers.pop(driver_id, None)
-                    if task is not None:
-                        task.cancel()
-                    continue
-                drivers[driver_id] = asyncio.create_task(
-                    _follow_driver(driver_id, client, path, commands),
-                    name=f"driver:{driver_id}",
-                )
-    finally:
-        for task in drivers.values():
-            task.cancel()
-
-
-# Names each driver run for the lease. The bindings hand out a run's broadcast
-# without its route instance, and a process-wide count keeps a run's late
-# `driver_left` from releasing a later run of the same driver.
-_runs = itertools.count(1)
-
-
-async def _follow_driver(
-    driver_id: str,
-    client: moq.Client,
-    path: str,
-    commands: asyncio.Queue[Command],
-) -> None:
-    """Pump each run of one driver in turn, ending a run once another takes over or it goes offline."""
-    run: asyncio.Task[None] | None = None
-    try:
-        async with client.follow(path) as following:
-            while True:
-                try:
-                    broadcast = await following.available()
-                # A refusal leaves the follow waiting for another run; only shutdown ends it.
-                except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
-                    if moq.is_shutdown(err):
-                        raise
-                    log.info("driver %s refused: %s", driver_id, err)
-                    continue
-                if run is not None:
-                    run.cancel()
-                    run = None
-                if broadcast is None:
-                    continue
-                instance = str(next(_runs))
-                run = asyncio.create_task(
-                    _pump_driver(driver_id, instance, broadcast, commands),
-                    name=f"driver:{driver_id}:{instance}",
-                )
-    # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
-    except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
-        log.info("driver %s follow ended: %s", driver_id, err)
-    finally:
-        if run is not None:
-            run.cancel()
-
-
-async def _pump_driver(
-    driver_id: str,
-    instance: str,
-    broadcast: moq.BroadcastConsumer,
-    commands: asyncio.Queue[Command],
-) -> None:
-    """Feed one driver run's `control` track into the command queue.
-
-    Always emits `driver_left` on the way out, however it leaves, so the gate
-    releases a lease even when the track ends abnormally.
-    """
-    log.info("driver %s connected (run %s)", driver_id, instance)
-    try:
-        control = moq.json.SnapshotConsumer(broadcast, "control")
-        async for message in control:
-            command = parse_command(driver_id, message.value, instance)
-            if command is not None:
-                await commands.put(command)
-    # uniffi's stubs declare the error a plain class; at runtime it is an Exception.
-    except moq.Error as err:  # pyright: ignore[reportGeneralTypeIssues]
-        log.info("driver %s track ended: %s", driver_id, err)
-    finally:
-        log.info("driver %s disconnected (run %s)", driver_id, instance)
-        await commands.put(Command(kind="driver_left", driver_id=driver_id, instance=instance))
+        return json.loads(payload)
+    except ValueError:
+        return None
 
 
 __all__ = [
+    "CONTROL_DELAY",
+    "SOCKET_PREFIX",
+    "Drivers",
     "StatusPublisher",
     "Collision",
     "Motion",
@@ -411,5 +419,4 @@ __all__ = [
     "Telemetry",
     "parse_command",
     "status_payload",
-    "watch_drivers",
 ]

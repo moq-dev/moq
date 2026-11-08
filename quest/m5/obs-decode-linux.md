@@ -14,7 +14,3 @@ At least one supported Linux hardware decoder delivers frames to OBS without CPU
 ## Required
 
 - [Video source replacement](/quest/m3/obs-moq-video/source.md) - native frame contract and fallback lifecycle
-
-## Related
-
-- [VAAPI encode and decode](/quest/m1/video-vaapi.md) - owns remaining VAAPI decode and native surface gaps; avoid a duplicate backend implementation

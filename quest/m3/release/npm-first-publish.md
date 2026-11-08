@@ -1,18 +1,14 @@
-# [XS] Claim the new @moq npm and JSR names
+# [XS] Claim the new @moq npm names
 
 ## Goal
 
-`@moq/clock`, `@moq/libav`, and `@moq/video` exist on npm, and
-the two with JSR packages exist on JSR, each with trusted publishing
-attached to `moq-dev/moq`. The cut's release workflow can then publish
+`@moq/clock`, `@moq/libav`, `@moq/ui`, and `@moq/video` exist on npm, each with trusted
+publishing attached to `moq-dev/moq` and the `npm` Environment. The cut's release workflow can then publish
 their real versions. A maintainer does this by hand. Delete this quest once
 the checks pass:
 
-- `npm view @moq/<name>` resolves for all three, and the package settings show
-  the `moq-dev/moq` trusted publisher.
-- `https://api.jsr.io/scopes/moq/packages/<name>` returns 200 for `clock`
-  and `video`, each linked to the repository. `@moq/libav` sets
-  `"jsr": false`.
+- `npm view @moq/<name>` resolves for all four, and the package settings show
+  the `moq-dev/moq` trusted publisher with Environment `npm`.
 
 ## Plan
 
@@ -22,7 +18,9 @@ publish, auth, signals, and more) now depends on `@moq/clock`. npm trusted
 publishing attaches only to an existing package, so without this the cut's
 publish fails on these names and still publishes dependents that can't
 install. [moq-dev/moq#6243](https://github.com/moq-dev/moq/pull/6243) raised
-it for `@moq/libav` alone.
+it for `@moq/libav` alone. `@moq/ui`, which `@moq/watch` and `@moq/publish`
+keep external, joined the list on 2026-11-06, when the final API audit found
+it still returned 404.
 
 Decided 2026-10-22 (maintainer): publish a minimal `0.0.0` placeholder
 (README only) per name to claim it, then attach the trusted publisher. The
@@ -42,6 +40,9 @@ it clears with the same publication.
 `@moq/p2p` is out of scope: it is private with no release script, so the cut
 does not publish it. [Watch opts in](/quest/m4/p2p/watch.md) owns its first
 publication, including claiming its names.
+
+Decided 2026-11-06 (maintainer, /quest-unblock): JSR is dropped (every `@moq` JSR
+package was archived on 2026-11-07), so no JSR names are claimed.
 
 Public API: none. Wire: none.
 

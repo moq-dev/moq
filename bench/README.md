@@ -151,6 +151,12 @@ transports, for example to compare only WebSocket against a base:
 nix develop --command just bench origin/main ws
 ```
 
+To repeat only the relay measurements, using the same builds, alternating rounds,
+sampler and comparison report, run `just bench-relay origin/release quic`.
+Linux suites retain one `/proc/loadavg` snapshot before builds and measurements;
+this is host context, not a claim that every measurement window was quiet.
+This omits all Criterion measurements.
+
 Every relay serves QUIC and plain WebSocket on its port; `wss://`, `tcp://`, and
 `tls://` get their own listener on the port two above it. A base revision must
 accept the listener a case needs, so pass the transports it has: a relay without
@@ -218,10 +224,9 @@ come from Linux interfaces. The default worker count is the number of logical
 CPUs the run may use.
 
 `moq-uring`'s `worker_turns` target also measures QUIC request/reply on one
-worker, sweeping 1 or 16 connections against 64 B or 256 KiB replies with
-1 or 4 task passes. It prints rounds and counter deltas for turns, passes,
-enters and received datagrams, so counts per round can be compared alongside
-timing. The existing nightly `rust-shared` group runs these cases.
+worker, sweeping 1 or 16 connections against 64 B or 256 KiB replies. It
+prints rounds and counter deltas for turns, passes, enters and received
+datagrams, so counts per round can be compared alongside timing. The existing nightly `rust-shared` group runs these cases.
 
 ```bash
 nix develop --command cargo bench --locked -p moq-uring --bench worker_turns -- worker_request_reply
@@ -840,7 +845,9 @@ The table includes these measurements:
   (`just gh nightly rust-test`) run in release builds, one at a time, under
   nextest's `bench` profile, which keeps each test's output in a JUnit report;
   their series are named by package and test path, such as
-  `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`.
+  `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`. A test with no runnable
+  path prints only `# benchmark skipped: REASON`; the report omits that capability
+  skip while rejecting an empty table or missing measurements.
 - Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
   bundles the [size report](../sh/size/README.md) measures, recorded even on a
   night its growth check fails. Release build times stay out.
@@ -894,34 +901,42 @@ Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
 `rust-extra` and `rust-uring`) also build the previous scheduled Nightly's commit beside their
 own, on the same runner, so night-to-night runner variance drops out. Each
 built target runs once per side in the trend's quick mode, alternating which
-side goes first; the current side is the trend point. A case more than 10%
-slower in that screen reruns, worst first and at most 20 per group, in three
-alternating rounds with the BASE comparison's settings (1 s warmup, 2 s
-measurement, 30 samples). A case whose rounds are all slower with a median
-beyond 10% is a confirmed regression and fails its job after the upload, so the
-Alert workflow posts the failed Nightly. A target the base cannot build or run
-fails the job too, rather than passing uncompared; a bench target the base does
-not have yet is only reported as new. `rust-shared` is report-only for now: its
-confirmed regressions show on the site but do not fail the job, until the
-build bias below is fixed.
+side goes first; the current side is the trend point. A target whose base
+executable is byte-identical to the current one is not compared: it is listed
+as the same build, since only noise could tell them apart. A case more than 10%
+slower in that screen reruns, worst first, at most 20 per run and none started
+after five minutes of rounds, in three alternating rounds with the BASE
+comparison's settings (1 s warmup, 2 s measurement, 30 samples). A case whose
+rounds are all slower with a median beyond 10% is a confirmed regression and
+fails its job after the upload, so the Alert workflow posts the failed Nightly.
+A target the base cannot build or run fails the job too, rather than passing
+uncompared; a bench target the base does not have yet is only reported as new.
 
 Runs on the hosted runner set these numbers. In four A/A runs of the
-`rust-shared`, `rust-extra` and `rust-uring` groups, and two of `rust-relay`,
-1 to 9% of cases crossed 10% either way in the screen, at most 17 of them
-slower in one group. The rounds rejected all but one:
+`rust-shared`, `rust-extra` and `rust-uring` groups, two of `rust-relay` and
+one of `rust-bench`, 1 to 9% of cases crossed 10% either way in the screen, at
+most 21 of them slower in one group. The rounds rejected all but one:
 `wire_decode/padded/packets_64` at +12%, which read +2% in the next A/A run.
-A run whose base cut one case's work by a quarter failed with that case alone
-at +35%; its rounds also agreed, at medians of +9.3 to +9.7%, on `stats/tick`
-cases whose source was identical on both sides. Separate builds of the same
-source can measure up to 12% apart, so the threshold cannot go lower until
-that bias is fixed.
-`rust-bench` is not calibrated yet: its paired leg outlasts its hour.
+Both sides of an A/A run build byte-identical executables, so that +12% was
+the runner drifting under one side's processes: its base read 51.4 µs in every
+sample, while its current side read 51 µs in its first sample and 56 to 63 µs
+after, in each of the three rounds. Byte-identical copies of one executable,
+and padding the strings each process reads, moved no case more than 2% on the
+same runner, so neither the build nor the file's placement explains it, and
+such targets are not compared. A run whose base cut one case's work by a
+quarter failed with that case alone at +35%; its rounds also agreed, at
+medians of +9.3 to +9.7%, on `stats/tick` cases whose source was identical
+on both sides. Unlike the A/A drift, both sides held steady there, each
+sample of one side the same shape as the other's. Whether those executables
+differed went unrecorded; a run that compares a target confirms they did.
+Drift that size keeps the threshold at 10%.
 
 The table page shows tonight's comparison above the trend: confirmed
 regressions, targets not compared, cases faster in the screen, slowdowns the
 rounds rejected or the budget skipped, and the rest. `bench/paired.json` on the
 site holds every case. A dispatched Nightly's `bench-base` input compares
-against another revision; its own commit gives an A/A run.
+against another revision. Its own commit gives an A/A run, which shows only
+that both sides build the same executables, since those are not compared.
 
 Reproduce a paired group locally against any revision; `previous-nightly`
 resolves the last scheduled Nightly's commit through `gh`:

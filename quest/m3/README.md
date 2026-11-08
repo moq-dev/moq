@@ -43,8 +43,10 @@ federation) land.
 - [JS announced coalescing](/quest/m3/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m3/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`
 - [Release execution](/quest/m3/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m2
+- [Vendored code has every upstream fix it needs](/quest/m3/vendor-sync/README.md) - the next cycle's vendor sync, which the cut moves under the m2 cut gate
 - [Release pull requests read the R2 Rust cache](/quest/m3/mbx-r2-release-cache.md) - after the cut brings the platform Rust cache to `release`
 - [Binary release publishers run on their tag](/quest/m3/release-tag-publishers.md) - after the cut brings the workflows to `release`
+- [Relays split horizon per session](/quest/m3/route-split-horizon.md) - a relay never advertises a route back over the session it came from
 - [crates.io trusts the workflow](/quest/m3/crates-trusted-publisher.md) - maintainer action: the crates the cut first-publishes by token get a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m3/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [One policy for oversized container metadata](/quest/m3/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
@@ -59,6 +61,7 @@ federation) land.
 - [Plan: watch worker](/quest/m3/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m3/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
+- [H.265 encodes respect the encoder's minimum size](/quest/m3/h265-min-width.md) - an H.265 encode below AMD's 384-wide minimum is skipped by `Kind::Auto`, and the error names it
 - [VA-API encodes an external Vulkan image](/quest/m3/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
 - [C++ FFI reuse](/quest/m3/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
 - [OBS native codecs](/quest/m3/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
@@ -87,7 +90,7 @@ federation) land.
 - [A moq-transport group head fills its hole in place](/quest/m3/ietf-fill-refill.md) - fills and joining FETCHes write into the tail's group, deleting the `Fill` handoff
 - [One port](/quest/m3/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [WebSocket caps](/quest/m3/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
-- [moq-rtc pacing](/quest/m3/rtc-pacing.md) - a capped WHEP viewer never receives more than its cap plus burst, NACK resends included
+- [moq-webrtc pacing](/quest/m3/rtc-pacing.md) - a capped WHEP viewer never receives more than its cap plus burst, NACK resends included
 - [SRT rate handle](/quest/m3/srt-rate-handle.md) - a per-connection cap paces SRT pulls, retransmits included, and closes SRT publishers past it
 - [One port on the io_uring workers](/quest/m3/uring-demux.md) - `moq-uring`'s workers host the UDP demux, so a ring relay keeps WebRTC media and SRT on its QUIC port
 - [Synced data playback](/quest/m3/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
@@ -114,7 +117,7 @@ federation) land.
 - [The remaining library spawns](/quest/m3/spawn-audit.md) - every async spawn left in a library crate becomes a polled `kio::Tasks` child or is listed with why it stays
 - [DVR rewind](/quest/m3/archive-dvr.md) - follow-on capability after the release contract is stable
 - [Publisher timeliness at relay ingest](/quest/m3/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable
-- [The relay refuses a cluster peer it cannot dial](/quest/m3/relay-undialable-peers.md) - moq-tokio reports the schemes it can dial, and the relay refuses an undialable peer at startup instead of retrying forever
+- [The relay refuses a cluster peer it cannot dial](/quest/m3/relay-undialable-peers.md) - moq-tokio reports the schemes it can dial and names the missing feature when one can't, and the relay refuses an undialable peer at startup instead of retrying forever
 - [moq-transport finish interop](/quest/m3/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [JS joining FETCH](/quest/m3/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
 - [An Absolute join never races an older-history FETCH](/quest/m3/ietf-absolute-join-race.md) - reproduce #7680's suspected collision on main, then fix it or keep the test and delete
@@ -138,9 +141,9 @@ federation) land.
 - [moq-hls exposes each rendition's bound source](/quest/m3/hls-rendition-source.md) - playlists and segments report the source path and instance they read, so a cache can key on the source
 - [The memory bench finishes at 1 MiB frames](/quest/m3/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
 - [Audio's Latest start reaches back](/quest/m3/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
-- [moq-lite tails count drops](/quest/m3/lite-tail-drop-count.md) - SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
+- [moq-lite tails count drops](/quest/m3/lite-tail-drop-count.md) - SUBSCRIBE_SKIP and SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
 - [Audio track changes are gapless](/quest/m3/gapless-audio-switch.md) - no silence beyond a frame on audio format or rendition changes, enforced by media QA
-- [We own our WebRTC stack](/quest/m3/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
+- [We own our WebRTC stack](/quest/m3/webrtc/README.md) - one moq-webrtc crate holds the gateway, its ICE module, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [PUBLISH_DONE says why](/quest/m3/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
 - [A revoked announce resets instead of FINning](/quest/m3/announce-revoke-reset.md) - a PUBLISH_NAMESPACE revoked after its OK resets with INTERNAL_ERROR, per draft-22 §6.4.2.3
 - [moq repair refuses a live recording](/quest/m3/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair mp4` off a file still being written
@@ -180,8 +183,11 @@ federation) land.
 - [Bandwidth reservations ignore in-process readers](/quest/m3/reservation-local-readers.md) - a local recorder no longer counts as uplink demand
 - [Container export starts apart from its skip budget](/quest/m3/export-live-start.md) - fMP4 and MP4 export start at the live edge and report sample counts
 - [MP4 export trims exactly at both ends](/quest/m3/mp4-export-window.md) - a presentation window with no lead-in and no presented tail
+- [Container export ends cleanly when its broadcast closes](/quest/m3/export-close.md) - every container export returns `None` when its instance closes, whichever signal arrives first
 - [Audio capture opens a format the mix accepts](/quest/m3/audio-capture-negotiate.md) - multichannel and odd-rate devices capture, with discrete input selection
 - [A mix-minus removes several sources](/quest/m3/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
 - [Bus writes land at a bus position](/quest/m3/bus-positioned-write.md) - callers sync audio to video without copying the bus's private latency
 - [moq-mux imports a regular MP4](/quest/m3/mp4-import.md) - non-fragmented MP4, `moov` first or last
 - [An audio encoder flushes without ending its track](/quest/m3/audio-encode-flush.md) - a clip's last partial frame is heard while the source stays live
+- [Padding probes from the browser](/quest/m3/probe-padding.md) - parked: the maintainer doubts padding is the right way for a browser to probe
+- [JS rung disable](/quest/m3/probe-rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding; parked with it

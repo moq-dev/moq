@@ -15,6 +15,9 @@ import { makeRendition } from "./rendition-internal";
 // outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
 const VIDEO_REFRESH = 2;
 
+// The stats track, named in the catalog's `stats` section while stats are on. Matches moq-cli's.
+const STATS_TRACK = "stats.json";
+
 /**
  * Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
  * whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
@@ -98,7 +101,7 @@ function longestGroup(effect: Effect, renditions: ReadonlyMap<string, Rendition<
 	let longest: number | undefined;
 	for (const rendition of renditions.values()) {
 		if (rendition.kind === "text") continue;
-		const hint = effect.get(rendition.joinInterval);
+		const hint = effect.get(rendition.join);
 		if (hint === undefined || !Number.isFinite(hint) || hint <= 0) continue;
 		longest = Math.max(longest ?? 0, Math.ceil(hint));
 	}
@@ -117,16 +120,13 @@ export class Broadcast {
 	/** The catalog track name served to subscribers. */
 	static readonly CATALOG_TRACK = Catalog.TRACK;
 
-	/** The stats track name, named in the catalog's `stats` section while {@link BroadcastInput.stats} is set. */
-	static readonly STATS_TRACK = "stats.json";
-
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
 
 	/**
 	 * The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	 * `video`/`audio` sections and `media.join` are folded from the registered renditions (see
-	 * {@link Rendition.joinInterval}); an application adds its own
+	 * {@link Rendition.join}); an application adds its own
 	 * root sections (e.g. `scte35`) by locking it too.
 	 */
 	readonly catalog = new CatalogProducer();
@@ -382,7 +382,7 @@ export class Broadcast {
 		const writer = report();
 
 		this.catalog.mutate((catalog) => {
-			catalog.stats = { track: Broadcast.STATS_TRACK };
+			catalog.stats = { track: STATS_TRACK };
 		});
 		effect.cleanup(() =>
 			this.catalog.mutate((catalog) => {
@@ -474,7 +474,7 @@ export class Broadcast {
 		// Created on first use and kept with the broadcast, like a rendition's track.
 		let stats: Report.Writer<Stats.Snapshot> | undefined;
 		const report = () => {
-			stats ??= new Report.Writer(broadcast, Broadcast.STATS_TRACK, Stats.SnapshotSchema);
+			stats ??= new Report.Writer(broadcast, STATS_TRACK, Stats.SnapshotSchema);
 			return stats;
 		};
 		effect.cleanup(() => stats?.finish());

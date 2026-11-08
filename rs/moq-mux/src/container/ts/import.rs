@@ -243,9 +243,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	described: bool,
 	/// Carried PIDs already warned about a TS-scrambled packet.
 	scrambled: HashSet<u16>,
-	/// Whether [`finish`](Self::finish) or [`abort`](Self::abort) ended the input, even if finishing
-	/// failed part way.
-	finished: bool,
+	/// Whether input is still accepted: [`finish`](Self::finish) or [`abort`](Self::abort) ends it.
+	input: crate::container::Input,
 }
 
 impl<E: catalog::Catalog> Import<E> {
@@ -322,7 +321,7 @@ impl<E: catalog::Catalog> Import<E> {
 			alone: false,
 			described: false,
 			scrambled: HashSet::new(),
-			finished: false,
+			input: crate::container::Input::Open,
 		}
 	}
 
@@ -426,7 +425,11 @@ impl<E: catalog::Catalog> Import<E> {
 	/// half a group's bytes. A PAT naming another `transport_stream_id` or program number
 	/// restarts too, at that PAT. Every later call repeats the restart; [`finish`](Self::finish)
 	/// ends the instance before the step.
+	///
+	/// Input after [`finish`](Self::finish) is refused with [`Finished`](crate::Error::Finished),
+	/// or with the cause of a finish that failed.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		self.input.check()?;
 		let mut demux = std::mem::take(&mut self.demux);
 		let result = self.decode_with(&mut demux, data);
 		self.demux = demux;
@@ -1903,12 +1906,33 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// Flush any buffered PES and finish every track.
+	///
+	/// A finish that fails aborts every track with the cause, and later calls return it again.
+	/// A finish that succeeded is final: calling it again does nothing.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
+		match &self.input {
+			crate::container::Input::Open => {}
+			crate::container::Input::Finished => return Ok(()),
+			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => {
+				return Err(err.clone().into());
+			}
+		}
+		let result = self.end();
+		match &result {
+			Ok(()) => self.input = crate::container::Input::Finished,
+			// The copy keeps the whole chain in its message, since only the first report can move the
+			// original.
+			Err(err) => self.fail(crate::Error::from(anyhow::anyhow!("{err:#}"))),
+		}
+		result
+	}
+
+	/// Flush the input and finish every track, stopping at the first failure.
+	fn end(&mut self) -> anyhow::Result<()> {
 		// A step still being judged never completed: what it held routes as read.
-		if !self.finished && self.steps.settle() {
+		if self.steps.settle() {
 			self.decode(&[])?;
 		}
-		self.finished = true;
 		self.demux.finish();
 		for pid in self.headers.keys().copied().collect::<Vec<_>>() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated at end of input"))?;
@@ -2023,7 +2047,14 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Unlike a drop, this leaves the tracks' HLS records to the catalog, whose abort fails them
 	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
-		self.finished = true;
+		self.fail(err.into());
+	}
+
+	/// Abort every track with `cause`, which later calls report, and release the catalog: nothing
+	/// is left to wait for.
+	pub(super) fn fail(&mut self, cause: crate::Error) {
+		let err = cause.reason();
+		self.input = crate::container::Input::Failed(cause);
 		for stream in std::mem::take(&mut self.streams).into_values() {
 			stream.abort(err.clone());
 		}
@@ -2035,13 +2066,15 @@ impl<E: catalog::Catalog> Import<E> {
 			super::si::Capture::new(self.broadcast.clone(), self.catalog.clone()),
 		);
 		si.abort(err);
+		self.mux_rate_reservation = None;
+		self.initial_reservation = None;
 	}
 }
 
 impl<E: catalog::Catalog> Drop for Import<E> {
 	/// End the input unless it already ended.
 	fn drop(&mut self) {
-		if !self.finished
+		if matches!(self.input, crate::container::Input::Open)
 			&& let Err(err) = self.finish()
 		{
 			tracing::warn!(%err, "failed to finish a dropped TS import");
@@ -5837,10 +5870,11 @@ pub(super) mod test {
 		let exporter = crate::container::ts::export_test::open_ts(
 			crate::source::announced(&consumer).await,
 			crate::catalog::CatalogFormat::Hang,
+			RECORDING_MAX_AGE,
 		)
 		.await
 		.unwrap();
-		let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
+		let mut exporter = exporter.with_replay();
 		let mut ts = Vec::new();
 		while let Ok(Some(frame)) = kio::clock::timeout(RECORDING_MAX_AGE * 3, exporter.next())
 			.await
@@ -8633,7 +8667,6 @@ pub(super) mod test {
 			if clock == "none" {
 				let err = import.finish().unwrap_err();
 				assert!(err.to_string().contains("without a media timestamp"), "{clock}: {err}");
-				assert_eq!(import.sections[&0x21].held.len(), 1);
 			} else {
 				import.finish().unwrap();
 				assert!(import.sections[&0x21].held.is_empty());
@@ -8641,6 +8674,64 @@ pub(super) mod test {
 			}
 			assert!(!import.published, "{clock}: no publication without an anchor");
 		}
+	}
+
+	/// A finish that fails is final: every track aborts with the cause rather than staying open,
+	/// and later calls report it instead of finishing again or accepting input.
+	#[tokio::test]
+	async fn a_failed_finish_aborts_every_track() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&synth_pmt(
+				&[
+					(StreamType::Mpeg2Video, PCR_PID),
+					(StreamType::Dts8ChannelLosslessAudio, 0x21),
+				],
+				true,
+			))
+			.unwrap();
+		import.decode(&pcr_packet(PCR_PID, 27_000_000)).unwrap();
+		// A section no media timestamp ever places.
+		import.decode(&packet(true, 0, 0, &CUE)).unwrap();
+		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+		let mut track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+
+		let err = import.finish().unwrap_err();
+		assert!(err.to_string().contains("without a media timestamp"), "{err}");
+		let ended = kio::clock::timeout(Duration::from_millis(50), track.recv_group())
+			.await
+			.expect("the track ends");
+		assert!(ended.is_err(), "the track aborts rather than finishing");
+
+		let retried = import.finish().unwrap_err();
+		assert!(retried.to_string().contains("without a media timestamp"), "{retried}");
+		let refused = import.decode(&pcr_packet(PCR_PID, 54_000_000)).unwrap_err();
+		assert!(refused.to_string().contains("without a media timestamp"), "{refused}");
+	}
+
+	/// Input after a finish that succeeded is refused, as every importer refuses it.
+	#[test]
+	fn input_after_finish_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import.finish().unwrap();
+		import.finish().unwrap();
+		let err = import.decode(&pcr_packet(PCR_PID, 27_000_000)).unwrap_err();
+		assert!(
+			matches!(err.downcast_ref::<crate::Error>(), Some(crate::Error::Finished)),
+			"{err}"
+		);
 	}
 
 	#[test]
@@ -9604,12 +9695,13 @@ pub(super) mod test {
 					None => baseline = Some(observed.clone()),
 					Some(expected) => assert_eq!(&observed, expected, "{kind:?} {layout}"),
 				}
-				let mut export =
-					crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-						.await
-						.unwrap()
-						.with_delay(Duration::from_secs(30))
-						.with_replay();
+				let mut export = crate::container::ts::export_test::open_export(
+					crate::source::announced(&consumer).await,
+					Duration::from_secs(30),
+				)
+				.await
+				.unwrap()
+				.with_replay();
 				let mut ts = Vec::new();
 				while let Ok(frame) = kio::clock::timeout(Duration::from_secs(100), export.next()).await {
 					let Some(frame) = frame.unwrap() else {
@@ -10239,11 +10331,13 @@ pub(super) mod test {
 			"the first group ends at the break, one frame after its last picture"
 		);
 
-		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-			.await
-			.unwrap()
-			.with_delay(Duration::from_secs(30))
-			.with_replay();
+		let mut exporter = crate::container::ts::export_test::open_export(
+			crate::source::announced(&consumer).await,
+			Duration::from_secs(30),
+		)
+		.await
+		.unwrap()
+		.with_replay();
 		let mut ts = Vec::new();
 		while let Ok(res) = kio::clock::timeout(Duration::from_secs(100), exporter.next()).await {
 			let Some(frame) = res.expect("the exporter must take the open GOP after the break") else {
@@ -11037,11 +11131,11 @@ pub(super) mod test {
 		// groups and their boundary. Queued media is drained on its deadlines, without
 		// generating output through an arbitrary silence before feeding the next phase.
 		let delay = std::time::Duration::from_millis((RESET_LEAP_TICKS + RESET_PES * RESET_PES_TICKS) / 90);
-		let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
-			.await
-			.unwrap()
-			.with_delay(delay)
-			.with_replay();
+		let mut exporter =
+			crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await, delay)
+				.await
+				.unwrap()
+				.with_replay();
 		// A discontinuity before anything went out moves no clock, so the media before the
 		// boundary goes out first, as it would live.
 		let (frames, before_flags) = exported_discontinuities(&mut exporter).await;

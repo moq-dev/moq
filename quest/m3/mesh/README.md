@@ -50,12 +50,19 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
   process declares fresh.
 - Addressing is announcement: each node publishes under `mesh/<id>/...`, and
   reaching an ID is subscribing there. There is no separate directory.
+- Certificates can stand in for the token (decided 2026-11-07, maintainer,
+  Kixel's planning): a downstream mesh that must admit and evict devices
+  with no internet issues long-lived certificates from its own signers, and
+  [certificate credentials](/quest/m3/mesh/cert-credentials.md) checks them
+  against a trust store it supplies. The coordinator's token stays the
+  default for `moq auth`.
 - The token is the binding: enrollment proves the device key, then the
   coordinator issues a grant to publish `mesh/<id>/**` and subscribe
-  `mesh/**`, plus publish on its own [socket](/quest/m1/socket/README.md)
-  endpoint, `.socket/<id>`, so it can dial and accept under its own id
-  (amended 2026-11-01, 2026-11-03 when sockets became endpoints, and
-  2026-11-04 when the segment became `.socket`). Relays need no new check. Membership is the coordinator's
+  `mesh/**`, plus publish on its own [socket](/doc/concept/socket.md)
+  endpoints, `.server/<id>` and `.client/<id>`, so it can accept and dial
+  under its own id (amended 2026-11-01, 2026-11-03 when sockets became
+  endpoints, and 2026-11-06 when endpoints split into server and client
+  roles). Relays need no new check. Membership is the coordinator's
   token only; a Tailnet-Lock analog was declined.
 - Protection is per broadcast, with levels that nest: identity (the token
   only), authentication (per-frame Ed25519 signatures, the default), and
@@ -95,6 +102,8 @@ the third, and survives a relay restart.
 - [Byte streams](/quest/m3/stream/README.md) - lossless TCP-level streams over MoQ
 - [Endpoint API](/quest/m3/mesh/endpoint.md) - an iroh-shaped `Endpoint` that connects to an endpoint ID and service and accepts byte streams
 - [Mesh relay node](/quest/m3/mesh/node.md) - a relay node enrolls into a mesh, dials its relays, and admits only enrolled LAN peers
+- [Mesh enrollment is bounded and revocation takes effect](/quest/m3/mesh/device-bounds.md) - a reusable key enrolls at most its own use budget and a revoked device loses access within a bounded time
+- [Certificate credentials](/quest/m3/mesh/cert-credentials.md) - a certificate chain and a proof signature stand in for a JWT, checked against a trust store the application swaps live
 - [Address hints](/quest/m3/mesh/addr.md) - nodes publish their addresses on mesh tracks and dial each other directly where mDNS cannot find them
 - [Sparse overlay](/quest/m3/mesh/overlay.md) - each node keeps about log N deterministic direct links, forwards for the rest, and falls back to relays across a partition
 - [JS mesh enrollment client](/quest/m3/mesh/js-enroll.md) - `@moq/auth` enrolls and refreshes from JS like `moq_auth::mesh::Client`

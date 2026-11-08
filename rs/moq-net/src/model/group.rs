@@ -907,11 +907,25 @@ impl GroupState {
 			self.pace.shed(shed);
 			let heap = kio::log::Writer::<Entry>::HEAP;
 			let before = self.log.heap().max(heap);
-			self.log.evict(end as u64);
+			self.evict_log(end as u64);
 			freed += charged + (before - self.log.heap().max(heap)) as u64;
 		}
 		self.charge.sub(freed);
 		freed
+	}
+
+	/// Evict the log below `end`, letting go of each frame's canonical content now.
+	///
+	/// The log drops an evicted entry only once epoch reclamation runs, which reads on any
+	/// other thread can hold back, so content billed until its last holder drops would stay
+	/// billed that long, past the eviction that was meant to free it.
+	fn evict_log(&mut self, end: u64) {
+		for index in self.log.base()..end.min(self.log.end()) {
+			let entry = self.log.get(index).expect("committed below the end");
+			let owner = entry.owner.lock().unwrap_or_else(PoisonError::into_inner).take();
+			drop(owner);
+		}
+		self.log.evict(end);
 	}
 
 	/// Shed the oldest committed frames until `extra` more bytes fit the live tail
@@ -1332,7 +1346,7 @@ impl GroupState {
 			flate.release(self.abort.clone().unwrap_or(Error::Dropped), shared);
 		}
 		self.front = VecDeque::new();
-		self.log.evict(self.log.end());
+		self.evict_log(self.log.end());
 		self.partial = None;
 		if let Some(content) = self.content.take() {
 			content.detach(self.abort.clone().unwrap_or(Error::Dropped));
@@ -5487,6 +5501,7 @@ mod test {
 	}
 
 	/// `count` frames of 1 MiB, each naming its index and incompressible.
+	#[cfg(feature = "async")]
 	fn mebibytes(count: usize) -> Vec<Bytes> {
 		let mut seed = 0x9e37_79b9_7f4a_7c15u64;
 		(0..count)
@@ -5602,11 +5617,14 @@ mod test {
 	#[test]
 	fn debt_sheds_the_front_but_not_the_newest_frame() {
 		let mut producer = Info { sequence: 0 }.produce();
-		for frame in mebibytes(4) {
-			producer.write_frame(Timestamp::ZERO, frame).unwrap();
+		// Small frames keep Miri's per-byte cost down; shedding is per frame, not per byte.
+		for index in 0..4u8 {
+			producer
+				.write_frame(Timestamp::ZERO, Bytes::from(vec![index; 1024]))
+				.unwrap();
 		}
 		let freed = producer.handle.shed(u64::MAX, u64::MAX);
-		assert!(freed >= 3 << 20, "freed {freed}");
+		assert!(freed >= 3 * 1024, "freed {freed}");
 		assert_eq!(producer.handle.state.read().held(), 3);
 
 		producer.finish().unwrap();

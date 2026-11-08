@@ -18,6 +18,7 @@ import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
@@ -277,8 +278,8 @@ export interface ConnectProps {
 	auth?: Auth.Handle;
 
 	/**
-	 * The implementation this side advertises in SETUP. Defaults to {@link IMPLEMENTATION};
-	 * a wrapper prepends its own token, like `my-app/1.0 moq-net-js/0.4.2`. Empty sends nothing.
+	 * The implementation this side advertises in SETUP, a User-Agent style product token such as
+	 * `my-app/1.0`. Defaults to this library's, like `moq-net-js/0.4.2`. Empty sends nothing.
 	 */
 	implementation?: string;
 
@@ -525,7 +526,7 @@ async function connectTransport(
 	});
 
 	try {
-		return await Promise.race([terminal, negotiate(url, session, wiring, setup)]);
+		return await Promise.race([terminal, inspect(session).then(() => negotiate(url, session, wiring, setup))]);
 	} catch (failure) {
 		// We refused the peer's SETUP and already closed with the code that says why.
 		if (failure instanceof ProtocolViolation) throw failure;

@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { type Installed, Instant, Manual, Milli, Nano, now } from "@moq/clock";
+import { type Installed, Instant, Manual, Milli, Nano } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import { GRACE as TAIL_GRACE_MS } from "./ledger.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair, textFrame } from "./mock.ts";
+import { createMockTransportPair, driveUntil, manual, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Tail } from "./tail.ts";
@@ -87,6 +87,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 // declared an end past the groups it produced, and the Stream Count lets the subscriber stop
 // waiting for streams at once.
 test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", async (alpn) => {
+	using clock = manual();
 	const { video, reader, close } = await session(alpn);
 	try {
 		video.writeFrame(textFrame("0"));
@@ -95,15 +96,17 @@ test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", asy
 		video.finishAt({ group: 4n, frame: 0 });
 		video.writeFrame(textFrame("1"));
 		video.writeFrame(textFrame("2"));
-		const ended = now();
+		const ended = clock.now();
 		video.finish();
 		video.close();
 
-		expect(await readAll(reader)).toEqual(["1", "2"]);
+		const read = readAll(reader);
+		await driveUntil(clock, reader.closed);
+		// Every counted stream arrived, so nothing waited out the grace.
+		expect(Nano.toMilli(Instant.durationSince(clock.now(), ended))).toBeLessThan(TAIL_GRACE_MS);
+		expect(await read).toEqual(["1", "2"]);
 		expect(await reader.closed).toBeNull();
 		expect(await reader.finished()).toEqual({ group: 4n, frame: 0 });
-		// Every counted stream arrived, so nothing waited out the grace.
-		expect(Nano.toMilli(Instant.durationSince(now(), ended))).toBeLessThan(TAIL_GRACE_MS);
 	} finally {
 		close();
 	}

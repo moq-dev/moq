@@ -136,6 +136,13 @@ class TrackProducer:
         """Create a group with an explicit sequence number."""
         return GroupProducer(self._inner.create_group(sequence))
 
+    def skip_groups(self, start: int, end: int) -> None:
+        """Declare that groups ``start`` up to the exclusive ``end`` will never be produced.
+
+        Readers move past them, and creating a group there then fails.
+        """
+        self._inner.skip_groups(start, end)
+
     def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
         """Write a single-frame group with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
@@ -174,7 +181,7 @@ class TrackRequest:
 
     Accept it for raw writes, hand it to :class:`~moq.media.Requested` for :meth:`~moq.media.TrackProducer.audio`
     or :meth:`~moq.media.TrackProducer.video` to publish media (the importer
-    accepts it), or abort it to reject the subscriber.
+    accepts it), or reject it to fail the subscriber.
     """
 
     def __init__(self, inner: MoqTrackRequest) -> None:
@@ -200,38 +207,35 @@ class TrackRequest:
         """Create a fetch handler before accepting this requested track."""
         return TrackRequests(self._inner.requests())
 
-    def abort(self, error_code: int) -> None:
+    def reject(self, error_code: int) -> None:
         """Reject the request with an application error code."""
-        self._inner.abort(error_code)
+        self._inner.reject(error_code)
 
 
 class Fill:
     """A run of groups readers miss, for a :class:`TrackRequests` to serve.
 
-    Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
-    :meth:`wanted` names what is still owed, in the fill's order. Dropping the fill names
+    Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest, one
+    group at a time as :meth:`wanted_changed` yields them; :meth:`wanted` names what is still
+    owed, in the fill's order. Dropping the fill names
     whatever is left as dropped while a reader still wants it; once nobody does, it is
     withdrawn, so stop serving it once :meth:`wanted` is ``None``. Stop serving a single group
-    when :meth:`unwanted` returns for it, and move on to :meth:`wanted`.
+    when :meth:`unwanted` returns for it, and move on to :meth:`wanted`. Serve the fills you
+    take concurrently: each waits on its own readers.
     """
 
     def __init__(self, inner: MoqFill) -> None:
         self._inner = inner
 
     @property
-    def start_group(self) -> int:
-        """The first group to fill."""
-        return self._inner.start_group()
+    def start(self) -> Position:
+        """The first group to fill, and the frame within it to start from."""
+        return self._inner.start()
 
     @property
-    def start_frame(self) -> int:
-        """The frame within the first group to start from."""
-        return self._inner.start_frame()
-
-    @property
-    def end_group(self) -> int:
+    def end(self) -> int:
         """The exclusive end group."""
-        return self._inner.end_group()
+        return self._inner.end()
 
     @property
     def priority(self) -> int:
@@ -251,18 +255,24 @@ class Fill:
     def wanted(self) -> int | None:
         """The next group still owed in the fill's order.
 
-        ``None`` once every group is answered or no reader waits on the fill.
+        ``None`` once every group is answered or no reader waits on the fill. It does not wait
+        for the readers; :meth:`wanted_changed` does.
         """
         return self._inner.wanted()
 
     async def wanted_changed(self) -> int | None:
-        """Wait for ``wanted`` to change and return it. The first call returns at once."""
+        """The next group to serve, once every group this fill accepted reached a reader.
+
+        Returns ``wanted`` once it changed and a reader picked up what was served, as it next
+        reads. ``None``, once the fill is done, never waits; the first call returns at once
+        unless an accepted group has yet to reach a reader.
+        """
         return await self._inner.wanted_changed()
 
     def accept(self, sequence: int) -> GroupProducer:
         """Insert group ``sequence`` and return a producer for it.
 
-        The first group starts at :attr:`start_frame`, so its frames keep their indices.
+        The first group starts at :attr:`start`'s frame, so its frames keep their indices.
         """
         return GroupProducer(self._inner.accept(sequence))
 

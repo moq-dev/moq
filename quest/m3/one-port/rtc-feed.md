@@ -2,7 +2,7 @@
 
 ## Goal
 
-`moq-rtc`'s server serves WHIP and WHEP media from a socket it is fed rather
+`moq-webrtc`'s server serves WHIP and WHEP media from a socket it is fed rather
 than one it binds: datagrams arrive from the demux's WebRTC hook, replies go
 out through the shared socket, ICE candidates advertise the shared address,
 and every 4-tuple ICE selects is pinned to WebRTC in the demux's flow table.
@@ -11,9 +11,9 @@ Binding its own socket keeps working unchanged.
 ## Plan
 
 Decided 2026-10-05: this is upstream's work, reversing the 2026-09-30
-narrowing that left `Mux::feed` to the embedder. `moq-rtc` is an upstream,
+narrowing that left `Mux::feed` to the embedder. `moq-webrtc` is an upstream,
 generic crate, so every embedder of the one-port demux gets WebRTC without
-reaching into its internals. A standalone `moq-rtc` quest was rejected: the
+reaching into its internals. A standalone `moq-webrtc` quest was rejected: the
 work only matters beside the demux, so it ships in this line.
 
 Decided 2026-10-05: the API is a socket choice in the server config plus a
@@ -37,22 +37,22 @@ pub enum Socket {
 }
 ```
 
-Build on `moq-ice` (split out in #5702) rather than beside it.
-`moq_ice::Socket { udp, locals, inbound }` already separates the advertised
+Build on moq-webrtc's ICE module (split out in #5702) rather than beside it.
+moq-webrtc's `ice::Socket { udp, locals, inbound }` already separates the advertised
 host candidates (`locals`, from `ice_candidates`) from the bound address and
 takes routed datagrams on its `Inbound` queue, and the server mux
-(`rs/moq-rtc/src/server/mux.rs`) already routes its own `recv_from` loop
+(`rs/moq-webrtc/src/server/mux.rs`) already routes its own `recv_from` loop
 into per-session `Inbound`s. What is left is the send side and the mux's
-read loop: `moq_ice::Socket`'s `udp: Arc<UdpSocket>` becomes
-`Arc<dyn Transmit>` (`Transmit` lives in `moq-ice`, and `UdpSocket`
+read loop: moq-webrtc's `ice::Socket`'s `udp: Arc<UdpSocket>` becomes
+`Arc<dyn Transmit>` (`Transmit` lives in moq-webrtc's ICE module, and `UdpSocket`
 implements it, so the bound case behaves as today), and a fed mux routes
 datagrams from the demux hook instead of reading a bound socket. Adapt the
 sketch above to that: `advertised` is `ice_candidates`, and `recv` feeds
 the mux's existing router. Address-family mapping follows the real socket,
 not the advertisement: a dual-stack socket bound to `[::]` may advertise a
 public IPv4 address, so the `Transmit` impl owns the IPv4-mapped conversion
-`moq-ice` applies today. Received and pinned addresses use the same
-`moq_ice::canonical` form the demux's flow table keys on, or no pin ever
+moq-webrtc's ICE module applies today. Received and pinned addresses use the same
+moq-webrtc's `ice::canonical` form the demux's flow table keys on, or no pin ever
 matches.
 When ICE selects a pair, the remote address goes out on `pinned`, so the
 demux routes that tuple to WebRTC before any SRT test (see the
@@ -63,7 +63,7 @@ unpin message or idle expiry in the flow table, as SRT's pins have.
 The demux side has landed: `moq_tokio::quic::demux::WebRtc` (from
 `Demux::webrtc`, or `moq_relay::Relay::webrtc` for an embedded relay) yields
 ICE checks and responses, DTLS, and RTP as `Datagram`s whose `remote` is already in
-`moq_ice::canonical` form, sends a `Transmit` from the shared port (mapping an
+moq-webrtc's `ice::canonical` form, sends a `Transmit` from the shared port (mapping an
 IPv4 destination for an AF_INET6 socket), and pins a remote with `pin`, which
 returns a guard that releases the pin on drop. So the fed `Socket` takes a
 `WebRtc` rather than the channels in the sketch, and the mux holds a `Pin` per

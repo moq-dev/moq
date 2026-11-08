@@ -16,14 +16,29 @@ use crate::transport::poll::SendGroup as _;
 use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
-	DecodeError, Error, Timescale, Timestamp,
-	coding::{Encode as _, Encoder, Stream, Writer},
+	DecodeError, Error, StreamError, Timescale, Timestamp,
+	coding::{Encode as _, Encoder, Stream, StreamCodes as _, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
 };
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
+
+/// The REQUEST_ERROR refusing a SUBSCRIBE with `err`. Its Retry Interval is `retry` when an
+/// upstream refusal asked for one, and derived from `err` otherwise.
+fn subscribe_refusal<'a>(
+	err: &Error,
+	reason: &'a str,
+	version: Version,
+	retry: Option<Duration>,
+) -> ietf::RequestError<'a> {
+	let mut error = ietf::RequestError::refuse(err, request::Kind::Subscribe, reason, version);
+	if let Some(retry) = retry {
+		error.retry_interval = u64::try_from(retry.as_millis()).unwrap_or(u64::MAX);
+	}
+	error
+}
 
 /// Leave only the publisher's max age when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
@@ -102,13 +117,14 @@ fn track_properties(
 
 /// The rendezvous cap is zero, but asking to wait still makes a missing publisher a timeout.
 /// Once the broadcast resolves, a missing track is the publisher's answer and stays DOES_NOT_EXIST.
-fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
-	let missing = match &error {
+/// `None` when `error` stands.
+fn rendezvous_error(error: &Error, requested: bool, resolved: bool) -> Option<Error> {
+	let missing = match error {
 		Error::Unroutable | Error::Stream(crate::StreamError::Unroutable) => true,
 		Error::NotFound | Error::Stream(crate::StreamError::NotFound) => !resolved,
 		_ => false,
 	};
-	if requested && missing { Error::Timeout } else { error }
+	(requested && missing).then_some(Error::Timeout)
 }
 
 #[cfg_attr(
@@ -801,8 +817,9 @@ struct SubscriptionUpdates {
 
 /// How an admitted subscription came out of serving.
 enum Subscribed {
-	/// It never started, refused with this reason and error before SUBSCRIBE_OK.
-	Refused(String, Error),
+	/// It never started, refused with this reason and error before SUBSCRIBE_OK, and the
+	/// Retry Interval an upstream refusal asked for.
+	Refused(String, Error, Option<Duration>),
 	/// The subscriber withdrew it, or the session closed, before SUBSCRIBE_OK.
 	Withdrawn,
 	/// It was served, and opened this many group streams.
@@ -1141,7 +1158,7 @@ impl SubscribeServe {
 							request.grant = Some(grant);
 							request.admitted()
 						}
-						Err(refusal) => request.refuse(&refusal.error, &refusal.reason)?,
+						Err(refusal) => request.refuse(&refusal.error, &refusal.reason, None)?,
 					};
 				}
 				SubscribeState::Release => {
@@ -1218,7 +1235,7 @@ impl SubscribeRequest {
 			_ => None,
 		};
 		if token.is_none() && !gate.allows() {
-			return self.refuse(&Error::Unauthorized, "not granted");
+			return self.refuse(&Error::Unauthorized, "not granted", None);
 		}
 		// Legal requests we can't honor are refused one at a time, never by closing the
 		// session. Serving a Range Filter unfiltered would deliver objects the subscriber
@@ -1261,10 +1278,12 @@ impl SubscribeRequest {
 		SubscribeState::Serve(Box::new(Serving::new(&self.publisher, &self.msg)))
 	}
 
-	/// Refuse the request with `err`, delivering its REQUEST_ERROR next.
-	fn refuse(&mut self, err: &Error, reason: &str) -> Result<SubscribeState, Error> {
+	/// Refuse the request with `err`, delivering its REQUEST_ERROR next, as
+	/// [`subscribe_refusal`] words it.
+	fn refuse(&mut self, err: &Error, reason: &str, retry: Option<Duration>) -> Result<SubscribeState, Error> {
+		let error = subscribe_refusal(err, reason, self.publisher.version, retry);
 		let stream = self.stream.as_mut().expect("open until PUBLISH_DONE");
-		let deliver = self.publisher.reject_subscribe(&mut stream.writer, err, reason)?;
+		let deliver = self.publisher.reject_subscribe(&mut stream.writer, &error)?;
 		Ok(SubscribeState::Refuse(deliver))
 	}
 
@@ -1334,7 +1353,7 @@ impl SubscribeRequest {
 				}
 			}
 			Ok(Ok(Subscribed::Served(served, streams))) => self.publish_done(served, streams, retain),
-			Ok(Ok(Subscribed::Refused(reason, err))) => self.refuse(&err, &reason)?,
+			Ok(Ok(Subscribed::Refused(reason, err, retry))) => self.refuse(&err, &reason, retry)?,
 			// Nobody is left to answer.
 			Ok(Ok(Subscribed::Withdrawn)) => SubscribeState::Release,
 			Ok(Err(err)) => return Err(err),
@@ -1343,7 +1362,7 @@ impl SubscribeRequest {
 					let streams = opened.load(Ordering::Relaxed);
 					self.publish_done(Served::Track(Err(refusal.error)), streams, retain)
 				}
-				None => self.refuse(&refusal.error, &refusal.reason)?,
+				None => self.refuse(&refusal.error, &refusal.reason, None)?,
 			},
 		})
 	}
@@ -1385,12 +1404,16 @@ impl SubscribeRequest {
 	}
 }
 
+/// Why subscribing to a track failed, with the Retry Interval an upstream refusal asked for.
+type Failed = (Error, Option<Duration>);
+
 /// An admitted SUBSCRIBE's serve, which ends however its authority does: dropping it
 /// releases everything it holds upstream.
 struct Serving {
 	resuming: bool,
 	datagrams: Option<crate::datagram::Consumer>,
-	stream_error: Option<Error>,
+	/// Why subscribing to the track failed.
+	stream_error: Option<Failed>,
 	/// The filter the SUBSCRIBE asked for, which every saved join boundary follows.
 	///
 	/// Draft-22 replaced joining FETCH with subscription fills. Older drafts save the same
@@ -1472,8 +1495,11 @@ impl Serving {
 	/// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in the model,
 	/// through the tagged `origin::Consumer` the broadcast resolves from.
 	fn poll(&mut self, waiter: &kio::Waiter, request: &mut SubscribeRequest) -> Poll<Result<Subscribed, Error>> {
-		let refused = |err: Error, rendezvous, resolved| {
-			Subscribed::Refused(err.to_string(), rendezvous_error(err, rendezvous, resolved))
+		// An upstream's refusal goes on with the Retry Interval it asked for, unless the
+		// rendezvous answers in its place.
+		let refused = |err: Error, rendezvous, resolved, retry| match rendezvous_error(&err, rendezvous, resolved) {
+			Some(timeout) => Subscribed::Refused(err.to_string(), timeout, None),
+			None => Subscribed::Refused(err.to_string(), err, retry),
 		};
 		let version = request.publisher.version;
 		loop {
@@ -1485,7 +1511,7 @@ impl Serving {
 						// The reason is the origin's, not ours: a dynamic router refusing on
 						// authorization or a drain says so, and only an unroutable path means the
 						// broadcast is not here.
-						Err(err) => return Poll::Ready(Ok(refused(err, request.msg.rendezvous, false))),
+						Err(err) => return Poll::Ready(Ok(refused(err, request.msg.rendezvous, false, None))),
 						Ok(None) => return Poll::Ready(Ok(Subscribed::Withdrawn)),
 					};
 					self.datagrams = serving_datagrams(request, &broadcast);
@@ -1504,7 +1530,7 @@ impl Serving {
 							Ok(track) => {
 								subscribe.poll(waiter, &request.publisher, stream, track, &request.msg, &request.lapse)
 							}
-							Err(err) => Poll::Ready(Some(Err(err.clone()))),
+							Err(err) => Poll::Ready(Some(Err((err.clone(), None)))),
 						}
 					};
 					let mut selected = match result {
@@ -1559,13 +1585,13 @@ impl Serving {
 					}
 					let Some((mut serve, edge)) = selected else {
 						if self.datagrams.is_none()
-							&& let Some(err) = &self.stream_error
+							&& let Some((err, retry)) = &self.stream_error
 						{
 							if self.resuming {
-								self.step = Self::resume_failed(request, err.clone())?;
+								self.step = Self::resume_failed(request, err.clone(), *retry)?;
 								continue;
 							}
-							return Poll::Ready(Ok(refused(err.clone(), request.msg.rendezvous, true)));
+							return Poll::Ready(Ok(refused(err.clone(), request.msg.rendezvous, true, *retry)));
 						}
 						return Poll::Pending;
 					};
@@ -1603,7 +1629,7 @@ impl Serving {
 					let properties =
 						match track_properties(serve.track.info(), request.msg.properties_wanted, version, flate) {
 							Ok(properties) => properties,
-							Err(err) => return Poll::Ready(Ok(Subscribed::Refused(err.to_string(), err))),
+							Err(err) => return Poll::Ready(Ok(Subscribed::Refused(err.to_string(), err, None))),
 						};
 					request.save_join(self.filter, edge.largest, &cache, &serve.ranking);
 
@@ -1802,12 +1828,16 @@ impl Serving {
 		Ok(Some(self.ended(served)))
 	}
 
-	/// Fail the update resuming the subscription with `err`, flushing its answer next.
-	fn resume_failed(request: &mut SubscribeRequest, err: Error) -> Result<ServingStep, Error> {
+	/// Fail the update resuming the subscription with `err`, flushing its answer next. Its
+	/// Retry Interval is `retry` when an upstream refusal asked for one.
+	fn resume_failed(
+		request: &mut SubscribeRequest,
+		err: Error,
+		retry: Option<Duration>,
+	) -> Result<ServingStep, Error> {
+		let error = subscribe_refusal(&err, "resume failed", request.publisher.version, retry);
 		let stream = request.stream.as_mut().expect("open until PUBLISH_DONE");
-		request
-			.publisher
-			.buffer_subscribe_error(&mut stream.writer, &err, "resume failed")?;
+		stream.writer.buffer_message(ietf::RequestError::ID, &error)?;
 		Ok(ServingStep::ResumeFailed(err))
 	}
 
@@ -1855,7 +1885,7 @@ impl SubscribeTrack {
 		track: &track::Consumer,
 		msg: &ietf::Subscribe<'_>,
 		lapse: &Lapse,
-	) -> Poll<Option<Result<(TrackServe, LiveEdge), Error>>> {
+	) -> Poll<Option<Result<(TrackServe, LiveEdge), Failed>>> {
 		let setup = wait!(Setup => publisher.poll_until_withdrawn(
 			stream,
 			super::request_stream::fin_cancels(publisher.version),
@@ -1900,7 +1930,7 @@ impl SubscribeTrack {
 		let mut subscribed: track::Subscriber = match answer {
 			// A peer reads the end of the subscription as the track's.
 			Some(Ok(found)) => found.parked(),
-			Some(Err(err)) => return Poll::Ready(Some(Err(err))),
+			Some(Err(err)) => return Poll::Ready(Some(Err((err, subscribing.retry())))),
 			None => return Poll::Ready(None),
 		};
 
@@ -2724,7 +2754,7 @@ impl Publisher {
 			withdrawal: Default::default(),
 			runtime,
 			session,
-			self_origin: origin.hop(),
+			self_origin: crate::Hop::from(origin.hop()),
 			// Serving the peer is not a local reader asking to discover anything.
 			origin: origin.serving(),
 			control,
@@ -3311,10 +3341,9 @@ impl Publisher {
 	fn reject_subscribe(
 		&self,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
-		err: &Error,
-		reason: &str,
+		error: &ietf::RequestError<'_>,
 	) -> Result<super::request_stream::Deliver, Error> {
-		self.buffer_subscribe_error(writer, err, reason)?;
+		writer.buffer_message(ietf::RequestError::ID, error)?;
 		Ok(super::request_stream::Deliver::new())
 	}
 
@@ -5926,10 +5955,9 @@ impl ForwardNamespaces {
 				}
 				let refusal = update
 					.refused
-					.map(|error| ietf::RequestError {
-						error_code: request::to_code(&error, request::Kind::SubscribeNamespace, version),
-						reason_phrase: "namespace update refused".into(),
-						retry_interval: 0,
+					.map(|error| {
+						let kind = request::Kind::SubscribeNamespace;
+						ietf::RequestError::refuse(&error, kind, "namespace update refused", version)
 					})
 					.or_else(|| {
 						update
@@ -7094,6 +7122,10 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		inner.follow(waiter);
 		inner.stream.poll_closed(waiter)
 	}
+
+	fn acknowledged(&self) -> Option<bool> {
+		self.inner.lock().unwrap().stream.acknowledged()
+	}
 }
 
 /// Write one group's frames in the negotiated draft's FETCH object layout.
@@ -7674,7 +7706,12 @@ impl GroupServe {
 		}
 		// The current rank, so a move while parked applies to the stream as it opens.
 		let _ = self.rank.poll_moved(waiter);
-		let stream = match ready!(self.session.poll_open_uni(&mut self.open, waiter, self.rank.options())) {
+		let stream = match ready!(self.session.poll_open_group(
+			&mut self.open,
+			waiter,
+			self.rank.options(),
+			self.version.encode_stream_code(&StreamError::TooFarBehind),
+		)) {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;
@@ -9208,7 +9245,7 @@ mod serve_tests {
 
 	/// The same, over `session`.
 	fn serve_session(version: Version, info: crate::track::Info, session: ScriptedSession) -> Serve {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast.broadcast().create_track("video", info).unwrap();
 
@@ -9476,6 +9513,8 @@ mod serve_tests {
 		messages: Vec<(u64, std::ops::RangeInclusive<usize>)>,
 		/// PUBLISH_DONE's Status Code and Stream Count.
 		publish_done: Option<(u64, u64)>,
+		/// The last REQUEST_ERROR's Error Code and Retry Interval.
+		request_error: Option<(u64, u64)>,
 		/// Each data stream and the position where it was closed, if it was.
 		data: std::collections::BTreeMap<usize, Option<usize>>,
 	}
@@ -9503,6 +9542,7 @@ mod serve_tests {
 
 			let mut messages = Vec::new();
 			let mut publish_done = None;
+			let mut request_error = None;
 			let mut offset = 0;
 			while offset < bytes.len() {
 				let mut rest = &bytes[offset..];
@@ -9514,12 +9554,19 @@ mod serve_tests {
 						.unwrap();
 					publish_done = Some((done.status_code, done.stream_count));
 				}
+				if id == ietf::RequestError::ID {
+					let error =
+						ietf::RequestError::decode(&mut Decoder::new(&bytes[body..end], version.into()), version)
+							.unwrap();
+					request_error = Some((error.error_code, error.retry_interval));
+				}
 				messages.push((id, written_at[offset]..=written_at[end - 1]));
 				offset = end;
 			}
 			Self {
 				messages,
 				publish_done,
+				request_error,
 				data,
 			}
 		}
@@ -11189,7 +11236,8 @@ mod serve_tests {
 	/// "does not exist" value, 0x10, not 0x4 (MALFORMED_AUTH_TOKEN): a peer told the wrong
 	/// one re-authenticates instead of waiting for the announcement. The reply is encoded here rather than matched by code alone, so
 	/// a value slipping outside the draft's table cannot pass, and the reason phrase is the
-	/// origin's own, which is what carries a refusal the registry has no value for.
+	/// origin's own, which is what carries a refusal the registry has no value for. The
+	/// publisher may still come up, so the refusal invites a retry.
 	#[kio::test]
 	async fn a_missing_broadcast_is_refused_with_the_draft_s_code() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
@@ -11218,7 +11266,7 @@ mod serve_tests {
 					.encode(&ietf::RequestError {
 						error_code,
 						reason_phrase: Error::Unroutable.to_string().into(),
-						retry_interval: 0,
+						retry_interval: crate::auth::RETRY_INITIAL.as_millis() as u64,
 					})
 					.await
 					.unwrap();
@@ -11446,7 +11494,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn track_status_narrowed_while_answering_is_reset() {
 		for version in ALL_VERSIONS {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let _track = broadcast.broadcast().create_track("video", None).unwrap();
 			settle().await;
@@ -12306,7 +12354,7 @@ mod serve_tests {
 		};
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (filter, history) in [(Filter::Unfiltered, 0), (zero, 1)] {
-				let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+				let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 				let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 				let track = broadcast
 					.broadcast()
@@ -13228,7 +13276,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_kept_join_ends_with_its_token_while_publish_done_waits() {
 		for version in JOINING_DRAFTS {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let track = broadcast
 				.broadcast()
@@ -14259,7 +14307,7 @@ mod serve_tests {
 	/// The info a relay behind a moq-lite hop with the `ietf` extension learns of a track
 	/// published with `info`.
 	async fn across_a_hop(info: track::Info) -> track::Info {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let _track = broadcast.broadcast().create_track("video", info).unwrap();
 		let (downstream, _sessions) = crate::lite::ietf::test_hop(&upstream, "room", [true, true]).await;
@@ -14893,7 +14941,7 @@ mod serve_tests {
 	#[kio::test]
 	async fn a_standalone_fetch_narrowed_while_responding_stops() {
 		for version in FETCH_DRAFTS {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let track = broadcast
 				.broadcast()
@@ -14992,7 +15040,7 @@ mod serve_tests {
 					group_id: 0,
 				},
 			] {
-				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+				let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 				let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 				let track = broadcast
 					.broadcast()
@@ -15126,7 +15174,7 @@ mod serve_tests {
 			.map(|end| (version, end))
 		}) {
 			let token = end != JoinEnd::Ended;
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 			let track = broadcast
 				.broadcast()
@@ -15460,7 +15508,7 @@ mod serve_tests {
 	}
 
 	async fn revoked_while(version: Version, parked: Parked) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
 				Some(
@@ -15631,7 +15679,7 @@ mod serve_tests {
 	}
 
 	async fn withdrawn_during(version: Version, setup: Setup, kind: request::Kind) {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let session = ScriptedSession::new(Vec::new());
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
@@ -15779,6 +15827,223 @@ mod serve_tests {
 			"{version} {setup:?}: answered a withdrawn request"
 		);
 		drop(claim);
+	}
+
+	/// Who refuses the track a request asks for.
+	enum Refuser {
+		/// The origin, with this error.
+		Local(Error),
+		/// An upstream moq-transport publisher, relayed: its REQUEST_ERROR's (code, Retry Interval).
+		Upstream(u64, u64),
+	}
+
+	/// A `kind` request whose track `refuser` refuses, as the REQUEST_ERROR the publisher
+	/// writes: (code, Retry Interval).
+	async fn refused_track(version: Version, kind: request::Kind, refuser: Refuser) -> (u64, u64) {
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+		let route = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+		let mut requests = route.broadcast().requests();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let publisher = Publisher::new(
+			crate::time::sim(),
+			crate::driver::Transport::new(ScriptedSession::new(Vec::new())),
+			origin.consume(),
+			Control::new(false),
+			None,
+			peer_setup,
+			version,
+		);
+		let session = ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
+			.await
+			.unwrap();
+		let mut serving: std::pin::Pin<Box<dyn Future<Output = Result<(), Error>>>> = match kind {
+			request::Kind::Subscribe => {
+				Box::pin(publisher.run_subscribe_stream(stream, subscribe(Filter::NextObject, None)))
+			}
+			request::Kind::Fetch => {
+				let (namespace, track) = (crate::Path::from_static("room"), "video".into());
+				let fetch_type = match version {
+					Version::Draft18 => FetchType::Standalone {
+						namespace,
+						track,
+						start: Location { group: 0, object: 0 },
+						end: Location { group: 0, object: 1 },
+					},
+					_ => FetchType::Filtered {
+						namespace,
+						track,
+						filter: Filter::Unfiltered,
+					},
+				};
+				let msg = ietf::Fetch {
+					authorization_token: None,
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type,
+					range_filters: false,
+					fill_timeout: false,
+					properties_wanted: true,
+				};
+				Box::pin(publisher.run_fetch_stream(stream, msg))
+			}
+			request::Kind::TrackStatus => Box::pin(publisher.run_track_status_stream(
+				stream,
+				ietf::TrackStatus {
+					authorization_token: None,
+					request_id: RequestId(REQUEST_ID),
+					track_namespace: crate::Path::from_static("room"),
+					track_name: "video".into(),
+					properties_wanted: true,
+				},
+			)),
+			kind => unreachable!("{kind:?} asks for no track"),
+		};
+		let rejecting = async move {
+			let request = requests.requested_track().await.unwrap();
+			match refuser {
+				Refuser::Local(err) => request.reject(err),
+				Refuser::Upstream(error_code, retry_interval) => {
+					let (mut upstream, _tasks) = super::super::subscriber::refusing_upstream(
+						version,
+						ietf::RequestError {
+							error_code,
+							reason_phrase: "upstream".into(),
+							retry_interval,
+						},
+					)
+					.await;
+					upstream
+						.run_subscribe(crate::Path::from_static("room"), requests, None, request)
+						.await;
+				}
+			}
+		};
+		futures::pin_mut!(rejecting);
+		if let futures::future::Either::Right((res, _)) = futures::future::select(rejecting, serving.as_mut()).await {
+			panic!("{version} {kind:?}: ended unasked: {res:?}");
+		}
+		kio::clock::timeout(std::time::Duration::from_secs(10), async {
+			while session.log.writes.lock().unwrap().is_empty() && futures::poll!(serving.as_mut()).is_pending() {
+				kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version} {kind:?}: the refusal never went out"));
+
+		let wire = session.log.writes.lock().unwrap().clone();
+		let mut buf = Decoder::new(&wire, version.into());
+		assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version} {kind:?}");
+		let error = ietf::RequestError::decode(&mut buf, version).unwrap();
+		(error.error_code, error.retry_interval)
+	}
+
+	/// A refused track invites a retry on every request for it when asking again may pass,
+	/// and asks the peer never to retry a verdict.
+	#[kio::test]
+	async fn a_track_refusal_that_may_pass_invites_a_retry() {
+		let retry = crate::auth::RETRY_INITIAL.as_millis() as u64;
+		for version in ALL_VERSIONS {
+			for kind in [
+				request::Kind::Subscribe,
+				request::Kind::Fetch,
+				request::Kind::TrackStatus,
+			] {
+				for (err, expected) in [
+					(Error::GoingAway, (0x6, retry)),
+					(Error::NotFound, (0x10, 0)),
+					(Error::Unauthorized, (0x1, 0)),
+				] {
+					let case = format!("{version} {kind:?} {err:?}");
+					assert_eq!(
+						refused_track(version, kind, Refuser::Local(err)).await,
+						expected,
+						"{case}"
+					);
+				}
+			}
+		}
+	}
+
+	/// A relay refuses its reader with the Retry Interval its upstream's refusal asked for,
+	/// where deriving one from the code would differ: DOES_NOT_EXIST reads as `NotFound`,
+	/// which derives "never retry", and GOING_AWAY derives a retry the upstream declined.
+	#[kio::test]
+	async fn a_relay_forwards_an_upstream_refusal_s_retry_interval() {
+		for version in ALL_VERSIONS {
+			for refusal in [(0x10, 5000), (0x6, 0)] {
+				let relayed = refused_track(
+					version,
+					request::Kind::Subscribe,
+					Refuser::Upstream(refusal.0, refusal.1),
+				);
+				assert_eq!(relayed.await, refusal, "{version}");
+			}
+		}
+	}
+
+	/// A relay refuses a resume with the Retry Interval its upstream's refusal of the resumed
+	/// track asked for, where `NotFound` would derive "never retry".
+	#[kio::test]
+	async fn a_relay_forwards_a_resume_refusal_s_retry_interval() {
+		for version in ALL_VERSIONS {
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
+			let route = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
+			let mut requests = route.broadcast().requests();
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+			let session = ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(session.clone()),
+				origin.consume(),
+				Control::new(false),
+				None,
+				peer_setup,
+				version,
+			);
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut serve = std::pin::pin!(
+				publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+			);
+
+			// The first subscription is served, then paused, which drops its track.
+			let request = {
+				let asked = std::pin::pin!(requests.requested_track());
+				match futures::future::select(asked, serve.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request.unwrap(),
+					futures::future::Either::Right((res, _)) => panic!("{version}: ended unasked: {res:?}"),
+				}
+			};
+			let track = request.accept(crate::track::Info::timed());
+			serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !log.trail().is_empty()).await;
+			session.push(&forward_update(version, 4, false));
+			serve_until(serve.as_mut(), "the pause", || track.subscription().is_none()).await;
+			track.abort(Error::Cancel).unwrap();
+			settle().await;
+
+			// The resume asks for the track again, which the upstream refuses.
+			session.push(&forward_update(version, 6, true));
+			let request = {
+				let asked = std::pin::pin!(requests.requested_track());
+				match futures::future::select(asked, serve.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request.unwrap(),
+					futures::future::Either::Right((res, _)) => panic!("{version}: ended before the resume: {res:?}"),
+				}
+			};
+			request.refuse(Error::NotFound, std::time::Duration::from_millis(5000));
+			let _ = kio::clock::timeout(std::time::Duration::from_secs(1), serve)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: outlived its refusal"));
+			assert_eq!(Wire::read(&log, version).request_error, Some((0x10, 5000)), "{version}");
+		}
 	}
 
 	/// A resume subscribes again as a new SUBSCRIBE does, so a subscriber withdrawing the
@@ -16164,7 +16429,7 @@ mod serve_tests {
 	/// [`serve_with_auth`] over a given session, such as one that finishes the stream after
 	/// its script.
 	fn serve_on(version: Version, auth: crate::auth::Link, session: ScriptedSession) -> Serve {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let track = broadcast
 			.broadcast()
@@ -17777,7 +18042,7 @@ mod tests {
 	/// the assertions.
 	async fn echo_harness(assigned: crate::Hop) -> (Publisher, origin::Consumer, Vec<crate::model::AnnounceProducer>) {
 		let other = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -17837,7 +18102,7 @@ mod tests {
 	async fn anonymous_chain_is_forwarded_with_zero_and_not_echoed() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let r1 = crate::Hop::new(9).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let publisher = Publisher::new(
 			crate::time::sim(),
@@ -17907,7 +18172,7 @@ mod tests {
 	#[kio::test]
 	async fn a_declared_zero_chain_is_not_advertised_back() {
 		let assigned = crate::Hop::new(777).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		let publisher = Publisher::new(
@@ -17944,7 +18209,7 @@ mod tests {
 	/// leave the peer waiting on a message that never comes.
 	#[kio::test]
 	async fn the_ok_counts_only_what_is_advertised() {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		let session = SinkSession::gated_bi(kio::Producer::new(true).consume());
 		let log = session.log.clone();
@@ -18024,7 +18289,7 @@ mod tests {
 	async fn namespace_follows_route_eligibility_changes() {
 		let assigned = crate::Hop::new(777).unwrap();
 		let clean_publisher = crate::Hop::new(778).unwrap();
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -18131,7 +18396,7 @@ mod tests {
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin
 			.announce("lonely-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -18205,7 +18470,7 @@ mod tests {
 	async fn a_peer_that_declared_nothing_is_told_unsolicited() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _local = origin
 			.announce("local-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -18251,7 +18516,7 @@ mod tests {
 	#[kio::test]
 	async fn publish_namespace_withdraws_by_reset() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let local = origin
 				.announce("local-cam", crate::origin::RouteInfo::default())
 				.unwrap();
@@ -18317,7 +18582,7 @@ mod tests {
 	async fn a_counted_publish_namespace_ok_is_a_violation() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _local = origin
 			.announce("local-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -18410,7 +18675,7 @@ mod tests {
 			hidden,
 			scoped,
 		} = case;
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
 		let _stats = origin
 			.announce(".stats/node", crate::origin::RouteInfo::default())
@@ -18559,7 +18824,7 @@ mod tests {
 	#[kio::test]
 	async fn a_non_solicit_subscribe_namespace_carries_namespace() {
 		for version in [Version::Draft18] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let early = origin
 				.announce("early-cam", crate::origin::RouteInfo::default())
 				.unwrap();
@@ -18654,7 +18919,7 @@ mod tests {
 	async fn a_parked_open_still_lets_a_namespace_be_withdrawn() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let first = origin
 			.announce("first-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -18739,7 +19004,7 @@ mod tests {
 	async fn a_namespace_that_stops_being_advertisable_stops_being_deferred() {
 		let assigned = crate::Hop::new(777).unwrap();
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 
 		// A route that already passed through us must never be forwarded: `select`
 		// wants nothing, which is what the peer already holds.
@@ -18781,7 +19046,7 @@ mod tests {
 	async fn a_route_change_still_waits_out_a_refusal() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		// One instance, so the second route re-prices the instance rather than restart it.
 		let instance = crate::Instance::random();
 		let cam = origin
@@ -18885,7 +19150,7 @@ mod tests {
 		// Forward the update at once: the hold is not what this checks.
 		let origin = crate::origin::Config {
 			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce();
 		// One instance, so the warm route re-prices the instance rather than restart it.
@@ -18967,7 +19232,7 @@ mod tests {
 	async fn a_counted_update_ok_is_a_violation() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let instance = crate::Instance::random();
 		let _cold = origin
 			.announce(
@@ -19052,7 +19317,7 @@ mod tests {
 		// Forward the update at once: the hold is not what this checks.
 		let origin = crate::origin::Config {
 			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
@@ -19165,7 +19430,7 @@ mod tests {
 	fn unheld_origin() -> crate::origin::Producer {
 		crate::origin::Config {
 			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce()
 	}
@@ -19668,7 +19933,7 @@ mod tests {
 		// Forward the restart at once: the hold is not what this checks.
 		let origin = crate::origin::Config {
 			update_hold: Duration::ZERO,
-			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
+			..crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 		}
 		.produce();
 		let _old = origin
@@ -19723,7 +19988,7 @@ mod tests {
 	async fn a_refused_update_is_re_advertised_fresh() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let instance = crate::Instance::random();
 		let _cold = origin
 			.announce(
@@ -19802,7 +20067,7 @@ mod tests {
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _first = origin
 			.announce("first-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -20005,7 +20270,7 @@ mod tests {
 	#[kio::test]
 	async fn an_advertisement_without_credit_is_retried_and_spends_no_id() {
 		for version in [Version::Draft18] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _cam = origin
 				.announce("lonely-cam", crate::origin::RouteInfo::default())
 				.unwrap();
@@ -20057,7 +20322,7 @@ mod tests {
 	async fn an_advertisement_waiting_for_send_capacity_is_retried_on_its_own() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin
 			.announce("lonely-cam", crate::origin::RouteInfo::default())
 			.unwrap();
@@ -20124,7 +20389,7 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
-		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 

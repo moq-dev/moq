@@ -87,6 +87,29 @@ asyncio.run(main())
    GroupConsumer
 ```
 
+## Bandwidth
+
+A session's estimates, split among what shares the connection: an `Allocator`
+divides the send estimate among tracks, which a `RateControl` turns into each sender's
+`RateTarget`, and `Viewers` divides the receive estimate among watched broadcasts,
+whose ceilings summed ask the peer to probe for more.
+
+```{eval-rst}
+.. currentmodule:: moq
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Allocator
+   Reservation
+   RateControl
+   RateTarget
+   BandwidthConsumer
+   Viewers
+   Viewer
+```
+
 ## Native codecs
 
 ```{eval-rst}
@@ -131,6 +154,7 @@ Every importer takes a broadcast; single-track imports choose a `Named` or `Requ
    TrackStreamProducer
    ContainerProducer
    ContainerInit
+   VideoInit
    Timebase
    TrackConsumer
    GroupConsumer

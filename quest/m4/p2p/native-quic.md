@@ -7,7 +7,7 @@ selected by their applications connect directly across a NAT: ICE finds a
 path through host and server-reflexive candidates, then a `moq-quic`
 connection runs over the nominated pair, with each side's certificate pinned
 by the fingerprint the other sent in its offer or answer. A pair with a
-browser still uses a data channel (`moq_tokio::webrtc`).
+browser still uses a data channel (`moq_webrtc::p2p`).
 
 ## Plan
 
@@ -16,14 +16,14 @@ Decided with the maintainer on 2026-10-13:
 - No iroh. It brings its own discovery and relaying beside the relay, which
   this line rejects; native pairs use the same STUN and ICE as browsers, with
   the relay as rendezvous and fallback.
-- ICE is str0m's standalone sans-IO agent, the `is` crate (0.11, already in
-  the lockfile through str0m; str0m re-exports it as `str0m::ice`). Gather
-  candidates with `moq_tokio::webrtc`'s host gathering, `.local` resolution,
-  and the STUN Binding client in `moq-ice`; don't copy them. The first two
-  are private to the data channel transport today, so move them into
-  `moq-ice` rather than export them from `moq-tokio`. Decided 2026-10-30 (maintainer): `moq-ice`,
-  the data-channel transport, and a vendored `is` all move into
-  `moq-webrtc` ([rename](/quest/m2/webrtc-rename.md)); take them from there.
+- ICE is str0m's standalone sans-IO agent, the `is` crate, vendored in
+  moq-webrtc beside str0m (`rs/moq-webrtc/src/vendor/is`). Gather
+  candidates with `moq_webrtc::p2p`'s host gathering, `.local` resolution,
+  and the STUN Binding client in moq-webrtc's ICE module; don't copy them. The first two
+  are private to the data channel transport today, so move them into the
+  ICE module. Decided 2026-10-30 (maintainer): the ICE driver, the
+  data-channel transport, and a vendored `is` all live in `moq-webrtc`;
+  take them from there.
 - QUIC is `moq-quic`, fed datagrams from the nominated pair.
 - Authentication: each side generates a self-signed certificate and sends
   its SHA-256 fingerprint in its offer or answer, as DTLS fingerprints ride

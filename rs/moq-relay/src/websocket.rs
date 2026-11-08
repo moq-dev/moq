@@ -28,8 +28,6 @@ pub(crate) async fn serve_ws(
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	admission: Option<Extension<crate::listener::Admission>>,
 	Extension(versions): Extension<moq_net::Versions>,
-	Extension(extensions): Extension<moq_net::setup::Extensions>,
-	Extension(crate::web::Implementation(implementation)): Extension<crate::web::Implementation>,
 	State(state): State<Arc<WebState>>,
 	mut request: Request,
 ) -> axum::response::Result<Response> {
@@ -59,20 +57,12 @@ pub(crate) async fn serve_ws(
 		uri.path_and_query().map_or("/", |value| value.as_str())
 	))
 	.map_err(|_| StatusCode::BAD_REQUEST)?;
-	let mut server = moq_net::Server::new()
-		.with_versions(versions)
-		.with_extensions(extensions);
-	if let Some(implementation) = implementation {
-		server = server.with_implementation(implementation);
-	}
-	let mut options = moq_tokio::websocket::Options::new(url, server, active);
+	let mut options = moq_tokio::websocket::Options::new(url, state.server.clone(), active);
 	options.link.remote = Some(remote);
 	options.link.alpn = Some(protocol.clone());
 	options.link.server_name = server_name.map(|Extension(ServerName(name))| name);
 	options.identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);
-	// The listener reads `None` as no deadline; `Options` reads it as the default.
-	options.timeout = Some(state.timeout.unwrap_or_default());
 	options.quic = state.quic.clone();
 
 	let upgrade = hyper::upgrade::on(&mut request);
@@ -492,6 +482,7 @@ mod tests {
 					let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
 					let (session, driver) = qmux::ws::Upgraded::new(socket, &wire)
 						.accept()
+						.await
 						.expect("the upgrade selected a QMux subprotocol");
 					tokio::spawn(driver);
 					let _ = tx.send(Observed {
@@ -700,11 +691,12 @@ mod tests {
 		let activity = moq_net::server::Activity::default();
 		let mut options = moq_tokio::websocket::Options::new(
 			"ws://localhost/".parse().unwrap(),
-			moq_net::Server::new().with_versions(moq_net::Versions::all()),
+			moq_net::Server::new()
+				.with_versions(moq_net::Versions::all())
+				.with_timeout(None),
 			activity.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		options.timeout = Some(Duration::ZERO);
 		let server = tokio::spawn(moq_tokio::websocket::accept(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			options,
@@ -719,6 +711,7 @@ mod tests {
 			&alpn,
 		)
 		.connect()
+		.await
 		.unwrap();
 		tokio::spawn(driver);
 
@@ -752,11 +745,12 @@ mod tests {
 		let activity = moq_net::server::Activity::default();
 		let mut options = moq_tokio::websocket::Options::new(
 			"ws://localhost/".parse().unwrap(),
-			moq_net::Server::new().with_versions(moq_net::Versions::all()),
+			moq_net::Server::new()
+				.with_versions(moq_net::Versions::all())
+				.with_timeout(Some(timeout)),
 			activity.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		options.timeout = Some(timeout);
 		let start = kio::clock::now();
 		let server = tokio::spawn(moq_tokio::websocket::accept(
 			Pipe::new(server_incoming, server_to_client, Arc::new(AtomicBool::new(false))),
@@ -769,6 +763,7 @@ mod tests {
 			&alpn,
 		)
 		.connect()
+		.await
 		.unwrap();
 		tokio::spawn(driver);
 

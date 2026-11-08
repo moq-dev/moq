@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
+import { Manual, Milli, Nano, Wall, yieldNow } from "@moq/clock";
 import { race } from "@moq/signals";
-import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks } from "./internal.ts";
+import { hooks, skipHole, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { authoredInfo, infoDefaults, rescale, Subscription, Producer as TrackProducer } from "./track.ts";
@@ -685,7 +685,7 @@ test("a bounded read ends once its window is read, unless a cap or a wire publis
 	// Groups 3 and 4 may still arrive.
 	expect(hooks.tryRecvGroup(reader, false)).toEqual({ kind: "idle" });
 
-	hooks.dropTrackGroups(producer, 3n, 4n, DROPPED);
+	hooks.dropTrackGroups(producer, 3n, 4n, { error: DROPPED });
 	producer.createGroup(4n).finish();
 	expect(read(reader)).toEqual([4n]);
 	expect(hooks.tryRecvGroup(reader, false)).toEqual({ kind: "done" });
@@ -864,7 +864,7 @@ test("a drop a time end settles over is reported", () => {
 	});
 	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group", group: { sequence: 0n } });
 	// Past the cap while group 0 has yet to start.
-	hooks.dropTrackGroups(producer, 1n, 2n, DROPPED);
+	hooks.dropTrackGroups(producer, 1n, 2n, { error: DROPPED });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
 	zero.writeFrame(textFrame("0", Timestamp.fromMillis(0)));
 	producer.createGroup(2n).writeFrame(textFrame("2", Timestamp.fromMillis(2000)));
@@ -2459,8 +2459,8 @@ test("readFrame does not livelock when a sole group finishes before the next arr
 	const g0 = producer.appendGroup();
 	g0.finish();
 
-	// The next group arrives via a macrotask; if the reader livelocks on microtasks it never runs.
-	void sleep(Nano.fromMilli(Milli(10))).then(() => {
+	// The next group arrives in a later host task; if the reader livelocks on microtasks it never runs.
+	void yieldNow().then(() => {
 		const g1 = producer.appendGroup();
 		g1.writeFrame(textFrame("hello"));
 		g1.finish();
@@ -3311,7 +3311,7 @@ const DROPPED = new StreamError(StreamCode.NotFound, { message: "dropped" });
 test("explicit and producer-cut drops survive outside the group cache", async () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
-	hooks.dropTrackGroups(producer, 3n, 4n, DROPPED);
+	hooks.dropTrackGroups(producer, 3n, 4n, { error: DROPPED });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 3n, end: 4n, error: DROPPED });
 
 	const group = producer.createGroup(4n);
@@ -3360,7 +3360,7 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 	expect(group?.sequence).toBe(3n);
 	expect(await group?.readString()).toBe("3");
 	const cut = new StreamError(StreamCode(70), { message: "cut" });
-	hooks.dropTrackGroups(producer, 3n, 5n, cut);
+	hooks.dropTrackGroups(producer, 3n, 5n, { error: cut });
 	// Settled by the drop itself, not a later reset; the finished group stays whole.
 	await expect(group?.readString()).rejects.toBe(cut);
 	const whole = await reader.recvGroup();
@@ -3375,7 +3375,7 @@ test("an upstream drop ends a group still arriving with its error", async () => 
 test("a drop below the window is reported once the window lowers to it", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } }).withRange({ start: { included: 5n } });
-	hooks.dropTrackGroups(producer, 2n, 3n, DROPPED);
+	hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
 
 	reader.withRange({ start: { included: 0n } });
@@ -3406,7 +3406,7 @@ test("a re-created cut group is served, not dropped", async () => {
 test("a reported drop still allows a late group, handed out once", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
-	hooks.dropTrackGroups(producer, 2n, 4n, DROPPED);
+	hooks.dropTrackGroups(producer, 2n, 4n, { error: DROPPED });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2n, end: 4n, error: DROPPED });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
 	producer.createGroup(3n).finish();
@@ -3419,15 +3419,155 @@ test("a reported drop still allows a late group, handed out once", () => {
 	producer.close();
 });
 
+test("a received stale drop settles only the readers it covers", () => {
+	const producer = new TrackProducer("video").accept({ maxAge: null });
+	const reader = (max: number, start: bigint, end?: bigint) =>
+		producer.subscribe({
+			delay: { max: Milli(max) },
+			ranges: [{ start: { absolute: start }, end: end === undefined ? undefined : { absolute: end } }],
+		});
+	const covering = reader(500, 0n);
+	const narrower = reader(100, 0n);
+	const wider = reader(5000, 0n);
+	const capped = reader(500, 0n, 4n);
+	const above = reader(500, 3n);
+	const stale = staleHole(500);
+	hooks.dropTrackGroups(producer, 1n, 3n, stale);
+	const skip = skipHole();
+	hooks.dropTrackGroups(producer, 3n, 4n, skip);
+	const dropped = (subscriber: typeof covering) => {
+		const runs: [bigint, bigint, boolean][] = [];
+		for (let run = hooks.tryDrop(subscriber); run; run = hooks.tryDrop(subscriber))
+			runs.push([run.start, run.end, run.skip === true]);
+		return runs;
+	};
+	const settled: [bigint, bigint, boolean][] = [
+		[1n, 3n, false],
+		[3n, 4n, true],
+	];
+	expect(dropped(covering)).toEqual(settled);
+	// A narrower budget is settled too.
+	expect(dropped(narrower)).toEqual(settled);
+	// A wider budget waits, a capped range may judge otherwise, and a range above the run lacks it.
+	for (const subscriber of [wider, capped, above]) expect(dropped(subscriber)).toEqual([[3n, 4n, true]]);
+	for (const subscriber of [covering, narrower, wider, capped, above]) subscriber.close();
+	producer.finish();
+	producer.close();
+});
+
+test("a superseded stale run is unknown again, and its group is handed out", () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ delay: { max: Milli(500) }, ranges: [{ start: { absolute: 0n } }] });
+	hooks.dropTrackGroups(producer, 1n, 2n, staleHole(500));
+	hooks.supersedeStale(producer, undefined);
+	expect(hooks.tryDrop(reader)).toBeUndefined();
+	producer.createGroup(1n).finish();
+	const recv = hooks.tryRecvGroup(reader, true);
+	expect(recv.kind === "group" ? recv.group.sequence : recv).toBe(1n);
+	if (recv.kind === "group") recv.group.close();
+	reader.close();
+	producer.finish();
+	producer.close();
+});
+
+test("superseding withdraws a partly reported stale run", () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ delay: { max: Milli(500) }, ranges: [{ start: { absolute: 0n } }] });
+	hooks.dropTrackGroups(producer, 4n, 5n, { error: DROPPED });
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 4n, end: 5n });
+	hooks.dropTrackGroups(producer, 3n, 7n, staleHole(500));
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 3n, end: 4n, stale: 500 });
+	hooks.supersedeStale(producer, undefined);
+	// 5 and 6 are unknown again.
+	expect(hooks.tryDrop(reader)).toBeUndefined();
+	reader.close();
+	producer.finish();
+	producer.close();
+});
+
+// A received stale run a reader reported and the relay's own update then superseded is unknown
+// again: the reader's update owes it until the upstream serves or drops it again, rather than
+// dropping it again as if the reader had judged it stale itself. Mirrors Rust.
+test("a superseded received stale report stays owed after an update", () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ delay: { max: Milli(500) }, ranges: [{ start: { absolute: 0n } }] });
+	hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 1n, end: 3n, stale: 500 });
+	hooks.supersedeStale(producer, undefined);
+	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
+	expect(hooks.tryDrop(reader)).toBeUndefined();
+	// The upstream drops it again under the new terms: reported again.
+	hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
+	expect(hooks.tryDrop(reader)).toMatchObject({ start: 1n, end: 3n, stale: 500 });
+	reader.close();
+	producer.finish();
+	producer.close();
+});
+
+test("a received stale run settles a bounded reader only through the judged ranges", () => {
+	const producer = new TrackProducer("video").accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const bounded = (max: number) =>
+		producer.subscribe({
+			delay: { max: Milli(max) },
+			ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		});
+	const wider = bounded(5000);
+	const matching = bounded(500);
+	// The upstream judged its own range of 0..2 under 500ms.
+	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
+	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
+	// A wider budget still wants the groups, however the feed accounted for them.
+	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
+	expect(hooks.tryDrop(matching)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
+	expect(hooks.tryRecvGroup(matching, false)).toEqual({ kind: "done" });
+	// Judged against an open range, a capped reader may see an older edge.
+	hooks.supersedeStale(producer, undefined);
+	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
+	const capped = bounded(500);
+	expect(hooks.tryDrop(capped)).toBeUndefined();
+	producer.createGroup(0n).finish();
+	const recv = hooks.tryRecvGroup(wider, false);
+	expect(recv.kind === "group" ? recv.group.sequence : recv).toBe(0n);
+	if (recv.kind === "group") recv.group.close();
+	for (const reader of [wider, matching, capped]) reader.close();
+	producer.finish();
+	producer.close();
+});
+
+test("a superseded stale run leaves a bounded reader waiting, and a later reader judges it too", () => {
+	const producer = new TrackProducer("video").accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const bounded = (max: number) =>
+		producer.subscribe({
+			delay: { max: Milli(max) },
+			ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		});
+	const wider = bounded(5000);
+	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
+	producer.createGroup(2n).finish();
+	hooks.dropTrackGroups(producer, 0n, 2n, staleHole(500));
+	// A reader added after the verdict judges it against the same judged ranges.
+	const later = bounded(500);
+	expect(hooks.tryDrop(later)).toMatchObject({ start: 0n, end: 2n, stale: 500 });
+	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
+	// New terms make the groups unknown again: still wanted, never proven delivered.
+	hooks.supersedeStale(producer, [{ start: 0n, end: 2n }]);
+	expect(hooks.tryRecvGroup(wider, false)).toEqual({ kind: "idle" });
+	for (const reader of [wider, later]) reader.close();
+	producer.finish();
+	producer.close();
+});
+
 test("a wide drop is held and reported as one run", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
-	hooks.dropTrackGroups(producer, 2n, 2n ** 40n, DROPPED);
+	hooks.dropTrackGroups(producer, 2n, 2n ** 40n, { error: DROPPED });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2n, end: 2n ** 40n, error: DROPPED });
 
 	// A wider drop reports only what this cursor has not reported yet, with its own error.
 	const wider = new StreamError(StreamCode.Old, { message: "old" });
-	hooks.dropTrackGroups(producer, 1n, 2n ** 40n + 2n, wider);
+	hooks.dropTrackGroups(producer, 1n, 2n ** 40n + 2n, { error: wider });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 1n, end: 2n, error: wider });
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({
 		kind: "drop",
@@ -3447,12 +3587,9 @@ test("adjacent drops with the same code merge into one run", () => {
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
 	// Each DROP decodes to its own error, so runs must merge by code, not identity.
 	for (let sequence = 2n; sequence < 5n; sequence++) {
-		hooks.dropTrackGroups(
-			producer,
-			sequence,
-			sequence + 1n,
-			new StreamError(StreamCode.NotFound, { message: "dropped" }),
-		);
+		hooks.dropTrackGroups(producer, sequence, sequence + 1n, {
+			error: new StreamError(StreamCode.NotFound, { message: "dropped" }),
+		});
 	}
 	const recv = hooks.tryRecvGroup(reader, true);
 	expect(recv.kind === "drop" ? [recv.start, recv.end, recv.error] : recv).toEqual([2n, 5n, DROPPED]);
@@ -3798,6 +3935,8 @@ test("replay and backlogs deliver sparse out-of-order arrivals ascending without
 // pending, so lower groups may still arrive behind a higher one.
 function pendingTail(end: bigint, maxDelay = Milli(60_000)) {
 	const producer = new TrackProducer("test");
+	// A received copy, whose groups arrive in any order.
+	hooks.receiveTrack(producer);
 	const reader = producer.subscribe({ delay: { max: maxDelay } });
 	hooks.startTrack(producer, { start: 0n });
 	hooks.endTrack(producer, { group: end, frame: 0 });
@@ -4039,7 +4178,7 @@ for (const abort of [false, true]) {
 		const next = reader.recvGroup();
 		expect(await settled(next)).toBe(false);
 
-		hooks.dropTrackGroups(producer, 0n, 2n, DROPPED);
+		hooks.dropTrackGroups(producer, 0n, 2n, { error: DROPPED });
 		if (abort) producer.abort(new Error("dropped"));
 		expect(await next).toBeUndefined();
 		if (abort) expect(await reader.closed).toBeNull();
@@ -4285,4 +4424,241 @@ test("an errored end keeps its history", async () => {
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(0n);
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(1n);
 	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
+});
+
+// Creating a group says nothing about the gap it leaves: groups may be created out of order. An
+// append says the producer will not go back, so it skips every hole below it that was never
+// produced, replacing a drop already given and reported. A received copy's groups arrive in any
+// order, so its gap is not skipped. Mirrors Rust.
+test("an append skips the holes created groups left below it", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ maxAge: null });
+	const reader = producer.subscribe({ delay: { max: null } });
+	const drain = () => {
+		const got: unknown[] = [];
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
+			else throw new Error(`unexpected ${next.kind}`);
+		}
+		return got;
+	};
+	producer.createGroup(0n).finish();
+	hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED });
+	producer.createGroup(4n).finish();
+	expect(drain()).toEqual([[2n, 3n, false], 0n, 4n]);
+
+	producer.appendGroup().finish();
+	expect(drain()).toEqual([[1n, 4n, true], 5n]);
+
+	// The next append only names what was left since this one.
+	producer.createGroup(7n).finish();
+	producer.appendGroup().finish();
+	expect(drain()).toEqual([[6n, 7n, true], 7n, 8n]);
+
+	const copy = new TrackProducer("test");
+	hooks.receiveTrack(copy);
+	copy.accept({ maxAge: null });
+	const late = copy.subscribe({ delay: { max: null } });
+	copy.createGroup(0n).finish();
+	copy.createGroup(2n).finish();
+	copy.appendGroup().finish();
+	expect(hooks.tryRecvGroup(late, true)).toMatchObject({ kind: "group" });
+	expect(hooks.tryRecvGroup(late, true)).toMatchObject({ kind: "group" });
+	expect(hooks.tryRecvGroup(late, true)).toMatchObject({ kind: "group" });
+	expect(hooks.tryRecvGroup(late, true)).toEqual({ kind: "idle" });
+});
+
+// A late group created out of order reaches a reader, since creating a group skips nothing.
+test("a late local group reaches a reader, since creating out of order skips nothing", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ maxAge: null });
+	producer.createGroup(0n).finish();
+	producer.createGroup(2n).finish();
+	const reader = producer.subscribe({ delay: { max: null }, order: "ascending" });
+	producer.createGroup(1n).finish();
+	const got: bigint[] = [];
+	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) got.push(group.sequence);
+	expect(got).toEqual([0n, 1n, 2n]);
+});
+
+// Declared skips up to the end settle it, as written groups would: an open-range reader ends after
+// the groups below, and the track's outcome resolves. Mirrors the Rust `TrackState::reaches`.
+test("declared skips up to the end settle the track", async () => {
+	const producer = new TrackProducer("test");
+	producer.accept({});
+	const reader = producer.subscribe({ delay: { max: null }, order: "ascending" });
+	producer.createGroup(0n).finish();
+	// Group 0's finish settles first, so only the skip can reach the end.
+	await yieldNow();
+	producer.finishAt({ group: 3n, frame: 0 });
+	expect(producer.closed.peek()).toBeUndefined();
+	producer.skipGroups(1n, 3n);
+	expect(producer.closed.peek()).toBeNull();
+	expect((await reader.recvGroup())?.sequence).toBe(0n);
+	expect(await reader.recvGroup()).toBeUndefined();
+	reader.close();
+});
+
+// A skip is final: creating at a sequence an append or skipGroups skipped throws, and a later drop
+// leaves it skipped, while a dropped sequence may be created again. skipGroups leaves cached
+// sequences alone and replaces every drop, final or stale. Mirrors Rust.
+test("creating a skipped sequence throws Skipped", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({});
+	producer.createGroup(0n).finish();
+	producer.createGroup(3n).finish();
+	producer.appendGroup().finish();
+	expect(() => producer.createGroup(1n)).toThrow(Skipped);
+
+	producer.skipGroups(5n, 7n);
+	expect(() => producer.createGroup(6n)).toThrow(Skipped);
+	// No skip below group 0.
+	expect(() => producer.skipGroups(-1n, 1n)).toThrow(RangeError);
+	// The next sequence, 5, was skipped too.
+	expect(() => producer.appendGroup()).toThrow(Skipped);
+	// A later drop leaves a skipped sequence skipped.
+	expect(hooks.dropTrackGroups(producer, 1n, 2n, { error: DROPPED })).toEqual([]);
+	expect(() => producer.createGroup(1n)).toThrow(Skipped);
+	// A dropped sequence may be created again.
+	hooks.dropTrackGroups(producer, 9n, 10n, { error: DROPPED });
+	producer.createGroup(9n).finish();
+
+	const other = new TrackProducer("test");
+	other.accept({});
+	const reader = other.subscribe({ delay: { max: null } });
+	other.createGroup(1n).finish();
+	hooks.dropTrackGroups(other, 3n, 4n, { error: DROPPED });
+	hooks.dropTrackGroups(other, 4n, 5n, staleHole(1000));
+	other.skipGroups(0n, 5n);
+	hooks.supersedeStale(other, undefined);
+	const drops: unknown[] = [];
+	for (let next = hooks.tryRecvGroup(reader, true); next.kind !== "idle"; next = hooks.tryRecvGroup(reader, true)) {
+		if (next.kind === "drop") drops.push([next.start, next.end, next.skip === true]);
+	}
+	expect(drops).toEqual([
+		[0n, 1n, true],
+		[2n, 5n, true],
+	]);
+});
+
+// A skip after a drop already reported goes out again, replacing it, while a reader that moved past
+// the drop is handed nothing again; a skip already reported is not reported twice, and a later drop
+// leaves it skipped. Mirrors Rust.
+test("a skip is reported over a reported drop", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ maxAge: null });
+	const reader = producer.subscribe({ delay: { max: null } });
+	const drain = () => {
+		const got: unknown[] = [];
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
+			else throw new Error(`unexpected ${next.kind}`);
+		}
+		return got;
+	};
+	producer.createGroup(0n).finish();
+	hooks.dropTrackGroups(producer, 1n, 3n, { error: DROPPED });
+	hooks.dropTrackGroups(producer, 4n, 5n, { error: DROPPED });
+	producer.createGroup(5n).finish();
+	expect(drain()).toEqual([[1n, 3n, false], [4n, 5n, false], 0n, 5n]);
+
+	// Group 0 arrived, so the skip leaves it; both drops and the gap between become one skip.
+	expect(hooks.skipTrackGroups(producer, 0n, 5n)).toEqual([{ start: 0n, end: 1n }]);
+	expect(drain()).toEqual([[1n, 5n, true]]);
+
+	expect(hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED })).toEqual([]);
+	expect(drain()).toEqual([]);
+	expect(() => producer.createGroup(2n)).toThrow(Skipped);
+	reader.close();
+	producer.close();
+});
+
+// A received stale run is judged from where it meets the reader's span, as Rust clips it: a reader
+// asking only its suffix, through every group the upstream's range named, is settled by that suffix.
+test("a received stale run settles the suffix a narrower range asks for", () => {
+	const producer = new TrackProducer("video").accept({});
+	hooks.receiveTrack(producer);
+	hooks.supersedeStale(producer, [{ start: 0n, end: 10n }]);
+	const reader = producer.subscribe({
+		delay: { max: Milli(500) },
+		ranges: [{ start: { absolute: 5n }, end: { absolute: 10n } }],
+	});
+	hooks.dropTrackGroups(producer, 0n, 10n, staleHole(500));
+	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 5n, end: 10n, stale: 500 });
+	expect(hooks.tryDrop(reader)).toBeUndefined();
+	reader.close();
+	producer.close();
+});
+
+// Skips are kept and reported as runs: a huge skipGroups or append gap costs one run and one
+// report, whatever its length. Mirrors Rust.
+test("a huge skip costs one run", () => {
+	const FAR = 1n << 61n;
+	for (const append of [false, true]) {
+		const producer = new TrackProducer("test");
+		producer.accept({ maxAge: null });
+		const reader = producer.subscribe({ delay: { max: null } });
+		producer.createGroup(0n).finish();
+		if (append) {
+			producer.createGroup(FAR).finish();
+			producer.appendGroup().finish();
+		} else {
+			producer.skipGroups(1n, FAR);
+			producer.createGroup(FAR).finish();
+		}
+		const got: unknown[] = [];
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
+		}
+		const groups = append ? [0n, FAR, FAR + 1n] : [0n, FAR];
+		expect(got.filter((entry) => typeof entry === "bigint")).toEqual(groups);
+		expect(got.filter((entry) => typeof entry !== "bigint")).toEqual([[1n, FAR, true]]);
+	}
+});
+
+// A group stale at the track's max age bound is final under any budget, yet an update that reopens
+// its stale drop must report it again rather than leave it owed: no skip offers it again. Mirrors
+// Rust.
+test("reopening stale drops reports again what is stale at the max age bound", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(1500) });
+	const reader = producer.subscribe({ delay: { max: Milli(1500) } });
+	const drain = () => {
+		const got: unknown[] = [];
+		for (
+			let next = hooks.tryRecvGroup(reader, true);
+			next.kind !== "idle";
+			next = hooks.tryRecvGroup(reader, true)
+		) {
+			if (next.kind === "group") got.push(next.group.sequence);
+			else if (next.kind === "drop") got.push([next.start, next.end, next.stale]);
+		}
+		return got;
+	};
+	putGroup(producer, 0n, 0);
+	expect(drain()).toEqual([0n]);
+	for (const [sequence, millis] of [
+		[1n, 1000],
+		[2n, 2000],
+		[3n, 3000],
+		[4n, 6000],
+	] as const)
+		putGroup(producer, sequence, millis);
+	expect(drain()).toEqual([[1n, 2n, 1500], [2n, 3n, 1500], 3n, 4n]);
+	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
+	expect(drain()).toEqual([[1n, 3n, 1500]]);
 });

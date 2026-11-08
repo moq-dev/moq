@@ -65,15 +65,19 @@ The cut:
   treat a longer SETUP as a protocol violation" stays. The lite-07 changelog
   names that rejection, not only the cap.
 
-Decided 2026-10-20 (maintainer): [Drop set](/quest/m1/drop-set.md) joins
-Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Nothing
+Decided 2026-10-20 (maintainer): the drop set joined Required, because it
+changes lite-07's SUBSCRIBE_DROP. That wire work, SUBSCRIBE_SKIP and the
+`Update` number on SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP, landed in
+[moq-dev/moq#7670](https://github.com/moq-dev/moq/pull/7670); what remains of
+the drop set is memory accounting with no wire change, so it no longer gates
+the cut. Nothing
 else from the auth line gates the cut: its lite-07 wire work, the SETUP Token
 parameter, has landed, and the rest is API work that does not block the rename.
 
 The archive line's TRACKS request (a per-broadcast track listing that
 replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/6158)
 and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
-type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
+type for the browser [padding probes](/quest/m3/probe-padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
 Decided 2026-10-30 (maintainer, on
 [moq-dev/moq#7390](https://github.com/moq-dev/moq/pull/7390)): those probes
@@ -110,13 +114,11 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 ## Required
 
 - [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - the job's route inherits the claim's instance, with no new wire message
 - [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
-- [Datagram tracks](/quest/m1/datagram-tracks/README.md) - lite-07 subscribes to datagram tracks through their own request, and datagrams carry their own sequence
 
 ## Related
 

@@ -183,6 +183,7 @@ class Criterion(unittest.TestCase):
                     ("t/a", "added"): (None, 10),
                     ("t/a", "dropped"): (10, None),
                     ("t/broken", "base failed"): (None, 10),
+                    ("t/rebuilt", "same build"): (None, 10),
                 },
             )
             (root / "confirm.tsv").write_text("t/a\tregressed\nt/a\tnoisy\nt/a\ttied\n")
@@ -192,6 +193,7 @@ class Criterion(unittest.TestCase):
             # A tied round is not slower, even with a median past the threshold.
             self.confirm(root, 3, tied, [(100, 100), (100, 130), (100, 125)])
             (root / "paired-unavailable.tsv").write_text("t/broken\tbase run failed\n")
+            (root / "paired-identical.txt").write_text("t/rebuilt\n")
             result = compare.criterion_paired(root)
         verdicts = {case["id"]: case["verdict"] for case in result["cases"]}
         self.assertEqual(
@@ -206,6 +208,7 @@ class Criterion(unittest.TestCase):
                 "added": "new",
                 "dropped": "removed",
                 "base failed": "unavailable",
+                "same build": "identical",
             },
         )
         regression = next(case for case in result["cases"] if case["id"] == "regressed")

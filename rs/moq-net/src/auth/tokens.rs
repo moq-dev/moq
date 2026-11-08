@@ -67,9 +67,8 @@ pub struct EmptyToken;
 /// ones on the live session at once, withdrawing the ones they replace only after every new
 /// one has its answer, so the grant never narrows in between.
 ///
-/// A reconnect loop builds each session on [`handle`](Self::handle), calls
-/// [`dial`](Self::dial) before each dial and [`connected`](Self::connected) once it
-/// succeeds, and aborts the handle when it gives up.
+/// [`Reconnect::with_tokens`](crate::Reconnect::with_tokens) presents them on every dial,
+/// whose sessions are built on [`handle`](Self::handle); aborting the handle ends the policy.
 ///
 /// Cheap to clone; every clone shares one set.
 #[derive(Clone)]
@@ -78,13 +77,13 @@ pub struct Tokens {
 }
 
 /// What one dial presents, from [`Tokens::dial`].
-pub struct Dial {
+pub(crate) struct Dial {
 	/// The URL to dial, carrying the connection credential in its query when an offered
 	/// version has no SETUP token.
-	pub url: Url,
+	pub(crate) url: Url,
 	/// The connection credential for [`Client::with_token`](crate::Client::with_token), unless
 	/// the URL brought its own.
-	pub token: Option<crate::setup::Token>,
+	pub(crate) token: Option<crate::setup::Token>,
 	generation: u64,
 }
 
@@ -161,7 +160,7 @@ impl Tokens {
 
 	/// Decide what a dial to `url` offering `versions` presents, and hold every other token in
 	/// band on the session it builds. Call it before each dial.
-	pub fn dial(&self, url: &Url, versions: &crate::Versions) -> Dial {
+	pub(crate) fn dial(&self, url: &Url, versions: &crate::Versions) -> Dial {
 		let mut state = self.handle.state.lock();
 		state.record();
 		let configured = state.configured.as_mut().expect("built by Tokens::new");
@@ -182,7 +181,7 @@ impl Tokens {
 	/// connected, whose own answer to the connection credential then counts. A session built
 	/// on another handle answers nothing here.
 	#[cfg(feature = "async")]
-	pub fn connected(&self, session: &crate::Session) {
+	pub(crate) fn connected(&self, session: &crate::Session) {
 		if session.auth().state.same_channel(&self.handle.state) {
 			self.connect(session.credential());
 		}
@@ -209,7 +208,7 @@ impl Tokens {
 
 	/// Whether the tokens changed since `dial` read them, so a refusal of its credential earns
 	/// another dial.
-	pub fn changed(&self, dial: &Dial) -> bool {
+	pub(crate) fn changed(&self, dial: &Dial) -> bool {
 		let state = self.handle.state.read();
 		state.configured.as_ref().expect("built by Tokens::new").generation != dial.generation
 	}

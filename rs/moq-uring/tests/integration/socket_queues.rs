@@ -42,8 +42,10 @@
 //! just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
 //! ```
 //!
-//! `SOCKET_QUEUES_RUNS` sets the rounds (3 by default); each round runs every
-//! cell once, so repeated cells interleave rather than run back to back.
+//! Each sweep axis is a separate, serial test so the full grid does not exceed
+//! nextest's per-test hang budget. `SOCKET_QUEUES_RUNS` sets the rounds (3 by
+//! default); each round runs every cell of that axis on both paths, so repeated
+//! cells interleave rather than run back to back.
 
 #![expect(
 	clippy::disallowed_methods,
@@ -232,9 +234,27 @@ fn cells() -> Vec<Cell> {
 	cells
 }
 
-#[test]
-#[ignore = "benchmark: run explicitly; prints a table"]
-fn benchmark_socket_queues() {
+mod benchmark_socket_queues {
+	macro_rules! axes {
+		($($axis:ident),+ $(,)?) => {
+			pub(super) const AXES: &[&str] = &[$(stringify!($axis)),+];
+
+			$(
+				#[test]
+				#[ignore = "benchmark: run explicitly; prints a table"]
+				fn $axis() {
+					super::benchmark(stringify!($axis));
+				}
+			)+
+		};
+	}
+
+	axes!(
+		default, queue, stall, pool, workers, flows, gso, contend, overload, path
+	);
+}
+
+fn benchmark(axis: &str) {
 	let runs = std::env::var("SOCKET_QUEUES_RUNS")
 		.ok()
 		.map(|runs| runs.parse::<usize>().expect("SOCKET_QUEUES_RUNS is a count"))
@@ -243,6 +263,10 @@ fn benchmark_socket_queues() {
 		true => vec![Path::Tokio, Path::Uring],
 		false => vec![Path::Tokio],
 	};
+	if axis == "pool" && !paths.contains(&Path::Uring) {
+		println!("# benchmark skipped: io_uring is unavailable; Tokio has no receive pool");
+		return;
+	}
 
 	print_host();
 	println!(
@@ -251,6 +275,13 @@ fn benchmark_socket_queues() {
 		 goodput_mbps,rx_cpu_us_per_dgram"
 	);
 	let cells = cells();
+	assert!(
+		cells
+			.iter()
+			.all(|cell| benchmark_socket_queues::AXES.contains(&cell.axis)),
+		"every cell's axis must have a benchmark test"
+	);
+	let cells: Vec<_> = cells.into_iter().filter(|cell| cell.axis == axis).collect();
 	for run in 0..runs {
 		for path in &paths {
 			for cell in &cells {
@@ -401,6 +432,16 @@ fn drops(sockets: &[UdpSocket]) -> io::Result<Vec<u32>> {
 		.iter()
 		.map(|socket| meminfo(socket.as_raw_fd()).map(|mem| mem[SK_MEMINFO_DROPS]))
 		.collect()
+}
+
+/// Whether any member still has datagrams waiting in its queue.
+fn queued(sockets: &[UdpSocket]) -> io::Result<bool> {
+	for socket in sockets {
+		if meminfo(socket.as_raw_fd())?[SK_MEMINFO_RMEM_ALLOC] != 0 {
+			return Ok(true);
+		}
+	}
+	Ok(false)
 }
 
 /// Datagrams the host dropped before any socket saw them, because a CPU's
@@ -762,18 +803,16 @@ fn measure(path: Path, cell: Cell) -> anyhow::Result<Result> {
 	let snmp_before = snmp_rcvbuf_errors();
 	let (sent, send_dropped) = send(cell, target)?;
 
-	// Drain: wait out the path's queue, then until nothing more arrives.
+	// Drain: wait out the path's queue, which the shaper releases on the host clock,
+	// then until every member's queue is empty. The workers have read everything
+	// then, so stopping them below accounts for every datagram they took.
 	if cell.pattern == Pattern::Shaped {
 		std::thread::sleep(PATH_QUEUE * 2);
 	}
-	let mut last = u64::MAX;
-	loop {
-		std::thread::sleep(Duration::from_millis(100) + cell.stall);
-		let now = delivered.load(Ordering::Relaxed);
-		if now == last {
-			break;
-		}
-		last = now;
+	let deadline = now_ns() + Duration::from_secs(60).as_nanos() as u64;
+	while queued(&monitors)? {
+		anyhow::ensure!(now_ns() < deadline, "the workers never drained their queues");
+		std::thread::sleep(Duration::from_millis(1));
 	}
 	sampling.store(false, Ordering::Relaxed);
 	let peak_queue = sampler.join().expect("sampler");
@@ -800,7 +839,6 @@ fn measure(path: Path, cell: Cell) -> anyhow::Result<Result> {
 		rcvbuf,
 		sent,
 		send_dropped,
-		delivered: delivered.load(Ordering::Relaxed),
 		socket_drops,
 		backlog_drops: backlog,
 		path_drops,
@@ -821,6 +859,8 @@ fn measure(path: Path, cell: Cell) -> anyhow::Result<Result> {
 		result.rx_cpu += worker.cpu;
 		result.enobufs += worker.enobufs;
 	}
+	// Read once every worker has stopped, so a batch still being processed counts.
+	result.delivered = delivered.load(Ordering::Relaxed);
 	contention.store(true, Ordering::Relaxed);
 	for spinner in spinners {
 		spinner.join().expect("spinner");

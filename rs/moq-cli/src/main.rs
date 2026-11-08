@@ -903,12 +903,12 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_delay = rtmp.delay.into();
+				let delay = rtmp.delay.into();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
-					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_delay));
+					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, delay));
 				} else if let Some(url) = rtmp.endpoint.connect {
-					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, max_delay));
+					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, delay));
 				}
 			}
 			ExportSink::Srt(srt) => {
@@ -1611,8 +1611,9 @@ mod tests {
 	}
 
 	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn tcp_only_moq_side_starts_a_server() {
+		kio::clock::host_time();
 		let invocation = Invocation::try_parse_from([
 			"moq",
 			"--listen-tcp-bind",
@@ -1645,6 +1646,8 @@ mod tests {
 			panic!("start TCP-only server: {err:#}");
 		}
 
+		// The paused clock moves only once every task parks, so the server has settled into
+		// accepting rather than exiting.
 		assert!(
 			kio::clock::timeout(std::time::Duration::from_millis(50), tasks.join_next())
 				.await

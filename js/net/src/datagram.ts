@@ -187,7 +187,10 @@ export class Producer {
 	}
 }
 
-/** A datagram track requested on demand, waiting for its publisher's answer. */
+/**
+ * A datagram track requested on demand, waiting for its publisher's answer.
+ * @internal Wire layers only.
+ */
 export class Request {
 	#producer: Producer;
 	#pending: Set<Request>;
@@ -246,6 +249,11 @@ export class Consumer {
 		consume = (name, state, cursor, priority) => new Consumer(name, state, cursor, priority);
 		hooks.datagramPriority = (consumer) => consumer.#priority;
 		hooks.datagramClosed = (consumer) => consumer.#closed;
+		hooks.datagramSameTrack = (a, b) => a.#state === b.#state;
+		hooks.observeDatagramConsumer = (consumer) => {
+			if (consumer.#closed.peek() !== undefined) throw new Error("datagram consumer is closed");
+			return consume(consumer.name, consumer.#state, consumer.#cursor, null);
+		};
 	}
 
 	/** The track's publisher properties, once accepted. */

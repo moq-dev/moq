@@ -33,7 +33,9 @@ flights:
   prefix is transferred once per flight. Carrying the inflater's state from the
   cached copy, and keeping refresh or `Evicted` for compressed groups, were
   rejected.
-- Paced batch fills are [their own quest](/quest/m2/unbounded-groups/paced-batch-fills.md).
+- Paced batch fills were their own quest, landed in
+  [moq-dev/moq#8017](https://github.com/moq-dev/moq/pull/8017): `Fill::wanted_changed`
+  yields the next group only once a reader picked up the one before.
 - No cap on concurrent flights per group: memory is bounded by each flight's
   tail and pool debt, and the cost of more flights is upstream transfer.
   Revisit with relay evidence.
@@ -178,7 +180,7 @@ the model layer (maintainer, 2026-10-30).
 
 ## Required
 
-- [Paced batch fills](/quest/m2/unbounded-groups/paced-batch-fills.md) - fills that write a batch of groups stop evicting their own earlier groups before the reader takes them
 - [Byte holes](/quest/m2/unbounded-groups/byte-holes.md) - segments inside a frame shed like front frames and flights start at `(frame, byte)` on the current lite wip; the frame cap goes
 - [JS byte holes](/quest/m2/unbounded-groups/js-byte-holes.md) - `@moq/net` mirrors the byte-offset wire and continues a frame cut off mid-way
 - [Compressed frames have no size cap and inflate as a bounded stream](/quest/m2/unbounded-groups/compressed-stream.md) - A compressed frame of any size publishes and is received in Rust and `@moq/net`, like a plain one
+- [Remove FETCH-run pacing](/quest/m2/unbounded-groups/fetch-run-unpaced.md) - a moq-transport FETCH run is no longer held at group boundaries for a slow reader, matching lite-07

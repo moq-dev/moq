@@ -243,8 +243,8 @@ pub struct Snapshot {
 	/// Drive-loop turns, including the final poll that completes the root future.
 	pub turns: u64,
 	/// Passes over the woken tasks. A turn runs passes until one wakes nothing
-	/// or [`crate::Config::passes`] have run, so this over `turns` is the
-	/// passes a turn takes, and how close the budget is to binding.
+	/// or four have run, so this over `turns` is the passes a turn takes, and
+	/// how close that budget is to binding.
 	pub passes: u64,
 	/// Enters forced by a full submission queue.
 	pub sq_full_enters: u64,

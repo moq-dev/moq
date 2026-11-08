@@ -413,7 +413,7 @@ impl MoqBroadcastRequests {
 	/// Returns a [`MoqTrackRequest`]: accept it for raw writes with
 	/// [`MoqTrackRequest::accept`], publish media onto it with
 	/// [`crate::media::MoqMediaTrackProducer::audio`], or reject it with
-	/// [`MoqTrackRequest::abort`]. The requesting subscriber stays pending until then.
+	/// [`MoqTrackRequest::reject`]. The requesting subscriber stays pending until then.
 	///
 	/// Returns an error once the broadcast is closed or aborted.
 	pub async fn requested_track(&self) -> Result<Arc<MoqTrackRequest>, MoqError> {
@@ -478,10 +478,12 @@ impl MoqTrackRequests {
 /// A run of groups readers miss, mirroring [`moq_net::track::Fill`].
 ///
 /// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
-/// for the rest; [`wanted`](Self::wanted) names what is still owed, in the fill's order. Releasing
+/// for the rest, one group at a time as [`wanted_changed`](Self::wanted_changed) yields them;
+/// [`wanted`](Self::wanted) names what is still owed, in the fill's order. Releasing
 /// it names whatever is left as dropped while a reader still wants it; once nobody does, it is
 /// withdrawn, so stop serving it once [`wanted`](Self::wanted) is null. Stop serving a single
-/// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next.
+/// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next. Serve the
+/// fills you take concurrently: each waits on its own readers.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
 	inner: moq_net::track::Fill,
@@ -498,18 +500,13 @@ impl MoqFill {
 
 #[uniffi::export]
 impl MoqFill {
-	/// The first group to fill.
-	pub fn start_group(&self) -> u64 {
-		self.inner.start().group
-	}
-
-	/// The frame within the first group to start from.
-	pub fn start_frame(&self) -> u64 {
-		self.inner.start().frame
+	/// The first group to fill, and the frame within it to start from.
+	pub fn start(&self) -> MoqPosition {
+		self.inner.start().into()
 	}
 
 	/// The exclusive end group.
-	pub fn end_group(&self) -> u64 {
+	pub fn end(&self) -> u64 {
 		self.inner.end()
 	}
 
@@ -530,12 +527,15 @@ impl MoqFill {
 	}
 
 	/// The next group still owed in the fill's order, or null once every group is answered or
-	/// no reader waits on the fill.
+	/// no reader waits on the fill. It does not wait for the readers; `wanted_changed` does.
 	pub fn wanted(&self) -> Option<u64> {
 		self.inner.wanted()
 	}
 
-	/// Wait for `wanted` to change and return the new value. The first call returns at once.
+	/// The next group to serve: `wanted` once it changed and every group this fill accepted
+	/// reached a reader, which picks it up when it next reads. Null, once the fill is done,
+	/// never waits; the first call returns at once unless an accepted group has yet to reach a
+	/// reader. Serve one group per call, so the fill writes no faster than its readers read.
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
 		// Polled in place: a cancelled call left unfreed must not advance the
 		// watcher and swallow the change the next call waits for.
@@ -545,7 +545,7 @@ impl MoqFill {
 	}
 
 	/// Insert group `sequence` and return a producer for filling it. The first group starts
-	/// at [`start_frame`](Self::start_frame), so its frames keep their indices.
+	/// at [`start`](Self::start)'s frame, so its frames keep their indices.
 	pub fn accept(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let group = self.inner.accept(sequence, None)?;
@@ -580,7 +580,7 @@ impl MoqFill {
 ///
 /// Mirrors [`moq_net::track::Request`]: [`accept`](Self::accept) it to start producing raw
 /// frames, hand it to [`crate::media::MoqMediaTrackProducer::audio`] to publish media,
-/// or [`abort`](Self::abort) it to reject the waiting subscriber.
+/// or [`reject`](Self::reject) it to fail the waiting subscriber.
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequest {
 	inner: std::sync::Mutex<Option<moq_net::track::Request>>,
@@ -649,7 +649,7 @@ impl MoqTrackRequest {
 	}
 
 	/// Reject the request with an application error code, failing the waiting subscriber.
-	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
+	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let request = self.take()?;
 		request.reject(moq_net::Error::App(error_code));
@@ -798,6 +798,19 @@ impl MoqTrackProducer {
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
 		let group = raw.create_group(moq_net::group::Info { sequence })?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
+	}
+
+	/// Declare that groups `start` up to the exclusive `end` will never be produced.
+	///
+	/// Readers waiting on them move past without ending, and a relay forwards the skip. A
+	/// skip is final: creating a group there is then refused. A group already written keeps
+	/// what it is. [`append_group`](Self::append_group) skips the gap below it on its own.
+	pub fn skip_groups(&self, start: u64, end: u64) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let guard = self.inner.lock().unwrap();
+		let raw = guard.as_ref().ok_or(MoqError::Closed)?;
+		raw.skip_groups(start..end);
+		Ok(())
 	}
 
 	/// Write `frame` as a single-frame group.

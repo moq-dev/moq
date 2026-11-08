@@ -1,37 +1,20 @@
 [package]
 name = "moq-bench"
-description = "Media over QUIC - Load generator for benchmarking relays"
+description = "Media over QUIC - Load generator and host sampler for benchmarking relays"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-publish = false
-# `cargo run -p moq-bench` means the load generator; the sampler needs --bin.
-default-run = "moq-bench"
-
 [[bin]]
 name = "moq-bench"
 path = "src/main.rs"
-doc = false
-
-# Host-side resource sampler, run next to the process under test (see src/host.rs).
-[[bin]]
-name = "moq-bench-host"
-path = "src/host.rs"
-doc = false
-
-# io_uring capability probe used before the runtime benchmark matrix.
-[[bin]]
-name = "moq-bench-uring-check"
-path = "src/uring.rs"
-required-features = ["uring"]
 doc = false
 
 [features]
@@ -39,7 +22,6 @@ default = ["quic", "websocket", "tcp"]
 quic = ["moq-tokio/quic"]
 # Qmux over TCP: `tcp://`, and `tls://`.
 tcp = ["moq-tokio/tcp"]
-uring = ["dep:moq-uring"]
 websocket = ["moq-tokio/websocket"]
 
 [dependencies]
@@ -60,7 +42,6 @@ usage-rs = { workspace = true, features = ["completions", "config"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 # The sampler's sock_diag dump.
 libc = { workspace = true }
-moq-uring = { workspace = true, optional = true }
 procfs = "0.18"
 
 [dev-dependencies]

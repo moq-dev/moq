@@ -371,18 +371,19 @@ pub enum Error {
 	#[error("broadcast path contains a navigation segment")]
 	NavigationSegment,
 
-	/// A path was spelled with a leading, trailing, or doubled `/`.
-	#[error("path contains an empty segment")]
-	EmptySegment,
-
-	/// A path was spelled with a `\` before anything but `\` or `/`.
-	#[error(r"path contains a `\` that escapes neither `\` nor `/`")]
-	InvalidEscape,
+	/// A string is not a valid path, such as one with an empty segment.
+	#[error(transparent)]
+	Path(crate::path::Error),
 
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
 	Duplicate,
+
+	/// A group was created at a sequence its track declared skipped: a skip says the
+	/// sequence will never be produced, so it is final. See `track::Producer::skip_groups`.
+	#[error("sequence was skipped")]
+	Skipped,
 
 	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
 	/// by either side, as `Session::closed` reports it. Not a failure.
@@ -594,6 +595,41 @@ impl Error {
 			_ => Self::Transport(err.to_string()),
 		}
 	}
+
+	/// Whether asking again may succeed: the route failed to deliver rather than judging what
+	/// it carried, which would repeat on every attempt. Mirrors `routeFailed` in
+	/// `js/net/src/resume.ts`.
+	pub(crate) fn retryable(&self) -> bool {
+		self.unroutable() || self.transient()
+	}
+
+	/// Whether a source lost its route to the content: only another route continues it.
+	pub(crate) fn unroutable(&self) -> bool {
+		matches!(self, Self::Unroutable | Self::Stream(StreamError::Unroutable))
+	}
+
+	/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
+	/// route instead: asking it again can replace the withdrawal's cause with a refusal.
+	pub(crate) fn transient(&self) -> bool {
+		matches!(
+			self,
+			Self::Transport(_)
+				| Self::IdleTimeout
+				| Self::Session(_)
+				| Self::GoingAway
+				| Self::GoawayTimeout
+				| Self::Dropped
+				| Self::Closed
+				| Self::Cancel
+				| Self::Stream(
+					StreamError::Session(_)
+						| StreamError::Internal
+						| StreamError::Cancel
+						| StreamError::GoingAway
+						| StreamError::ControlTimeout
+				)
+		)
+	}
 }
 
 /// Preserve the session registry when carrying a protocol error.
@@ -642,14 +678,14 @@ impl From<&Error> for SessionError {
 			| Error::UnexpectedMessage
 			| Error::UnexpectedStream
 			| Error::Duplicate
+			| Error::Skipped
 			| Error::Decode(_)
 			| Error::Encode(_)
 			| Error::WrongSize
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
 			| Error::NavigationSegment
-			| Error::EmptySegment
-			| Error::InvalidEscape => Self::ProtocolViolation,
+			| Error::Path(_) => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
@@ -712,8 +748,7 @@ impl From<&Error> for StreamError {
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
 			| Error::NavigationSegment
-			| Error::EmptySegment
-			| Error::InvalidEscape
+			| Error::Path(_)
 			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so
@@ -727,6 +762,7 @@ impl From<&Error> for StreamError {
 			| Error::UnknownAlpn(_)
 			| Error::TooManyRequests
 			| Error::Duplicate
+			| Error::Skipped
 			| Error::GoawayTimeout
 			| Error::ProtocolViolation
 			| Error::UnexpectedMessage => Self::Session(SessionError::from(err)),

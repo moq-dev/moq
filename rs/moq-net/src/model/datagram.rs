@@ -119,7 +119,8 @@ impl Info {
 	}
 
 	/// Produce a standalone datagram track with this info, outside any broadcast.
-	pub fn produce(self, name: impl Into<Arc<str>>) -> Producer {
+	#[cfg(test)]
+	pub(crate) fn produce(self, name: impl Into<Arc<str>>) -> Producer {
 		Producer::new(name.into(), Some(self))
 	}
 }
@@ -378,7 +379,8 @@ impl Producer {
 	}
 
 	/// Whether this is the same track as `other`.
-	pub fn is_clone(&self, other: &Self) -> bool {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 }
@@ -586,8 +588,22 @@ impl Consumer {
 		}
 	}
 
+	/// Another consumer at the same position that adds no demand, until its priority is set.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn observe(&self) -> Self {
+		let slot = self.slot.map(|_| self.state.lock().priorities.insert(None));
+		Self {
+			name: self.name.clone(),
+			state: self.state.clone(),
+			slot,
+			cursor: self.cursor,
+			stats: self.stats.clone(),
+		}
+	}
+
 	/// Whether this reads the same track as `other`.
-	pub fn is_clone(&self, other: &Self) -> bool {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 }

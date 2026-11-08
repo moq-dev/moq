@@ -14,7 +14,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, StreamError, Timescale, Timestamp, Version, broadcast, datagram, origin};
+use moq_net::{Error, StreamError, Timescale, Timestamp, Version, broadcast, datagram, origin};
 use support::datagram_priority;
 use support::harness::{MockPair, peer_with_latency};
 
@@ -23,7 +23,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const TRACK: &str = "audio";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -97,7 +97,7 @@ impl Chain {
 	}
 }
 
-async fn recv(consumer: &mut datagram::Consumer) -> Result<Option<moq_net::Datagram>, Error> {
+async fn recv(consumer: &mut datagram::Consumer) -> Result<Option<moq_net::datagram::Datagram>, Error> {
 	kio::clock::timeout(TIMEOUT, consumer.recv())
 		.await
 		.expect("recv timeout")
@@ -498,6 +498,60 @@ async fn an_old_subscriber_reaches_a_datagram_track_through_a_lite07_relay() {
 	assert_eq!(datagram.timestamp, Some(millis(4)));
 }
 
+/// A relay's upstream datagram subscription outlives its last demanding reader while an old
+/// subscriber's stream subscription still forwards the datagrams passively, parking rather
+/// than spinning, and ends once that subscription goes too. Lite-07 upstream asks on a
+/// Datagrams Stream, lite-06 upstream shares the stream track's subscription.
+#[kio::test]
+async fn a_relayed_datagram_track_parks_while_only_passive_readers_remain() {
+	for upstream in ["moq-lite-07-wip", "moq-lite-06"] {
+		let chain = Chain::new(&[upstream, "moq-lite-06"]).await;
+		let _track = chain
+			.publication
+			.broadcast()
+			.create_track(TRACK, moq_net::track::Info::default().with_timescale(Timescale::MILLI))
+			.unwrap();
+		let producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
+
+		// The relay's own reader is the only demand on its upstream datagram subscription.
+		let relay = chain.nodes[1].consume();
+		kio::clock::timeout(TIMEOUT, support::announced(&relay, "room"))
+			.await
+			.expect("announce timeout");
+		let relayed = kio::clock::timeout(TIMEOUT, relay.request("room", None))
+			.await
+			.expect("resolve timeout")
+			.unwrap();
+		let mut reader = relayed.datagrams(TRACK).unwrap();
+		reader.set_priority(1);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, Some(1)))
+			.await
+			.unwrap_or_else(|_| panic!("{upstream}: the request never reached the publisher"));
+		kio::clock::timeout(TIMEOUT, reader.info())
+			.await
+			.expect("info timeout")
+			.unwrap();
+
+		// The old subscriber's stream subscription joins the relay's datagram track passively.
+		let subscriber = kio::clock::timeout(TIMEOUT, chain.remote().await.track(TRACK).unwrap().subscribe(None))
+			.await
+			.expect("subscribe timeout")
+			.unwrap();
+
+		drop(reader);
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		assert!(
+			producer.priority().is_some(),
+			"{upstream}: a passive reader keeps the subscription"
+		);
+
+		drop(subscriber);
+		kio::clock::timeout(TIMEOUT, datagram_priority(&producer, None))
+			.await
+			.unwrap_or_else(|_| panic!("{upstream}: the subscription outlived its last reader"));
+	}
+}
+
 /// An old hop answers a datagram lookup for every stream track it carries, so a relay serving
 /// an old subscriber keeps a stream track's name a stream track, though that relayed answer
 /// may arrive before the stream track's.
@@ -691,51 +745,6 @@ async fn a_stream_tracks_datagram_sent_between_its_answer_and_end_arrives() {
 			"{version}"
 		);
 		assert_eq!(chain.pairs[0].server.stats().datagrams_unrouted, Some(0), "{version}");
-	}
-}
-
-/// A track's end waits for the subscriber to read the datagrams queued with it, so a flood
-/// that keeps its receive queue full delays the end. Meanwhile the track keeps its stream, and
-/// the session stays busy, so the peer's stream credit bounds the ends a flood can leave queued.
-#[kio::test]
-async fn a_track_ended_under_a_datagram_flood_keeps_its_stream() {
-	use moq_net::transport::poll::Session as _;
-
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
-		let chain = Chain::new(&[version]).await;
-		let producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
-		let mut consumer = chain.consume(&producer, 1).await;
-		// Each names no subscription, so the subscriber reads and drops it. The queue holds 1024.
-		let flood = || {
-			for _ in 0..512 {
-				let _ = chain.pairs[0]
-					.client_transport
-					.send_datagram(b"x"[..].into(), Default::default());
-			}
-		};
-		flood();
-		producer.finish();
-		for _ in 0..32 {
-			flood();
-			// One turn for the session's tasks, which read at most a budget each.
-			let mut turned = false;
-			kio::wait(|waiter| {
-				if std::mem::replace(&mut turned, true) {
-					return std::task::Poll::Ready(());
-				}
-				waiter.waker().wake_by_ref();
-				std::task::Poll::Pending
-			})
-			.await;
-			assert!(
-				chain.pairs[0].server.poll_idle(&kio::Waiter::noop()).is_pending(),
-				"{version}: the track released its stream before its end applied"
-			);
-		}
-		assert!(recv(&mut consumer).await.unwrap().is_none(), "{version}");
-		kio::clock::timeout(TIMEOUT, chain.pairs[0].server.idle())
-			.await
-			.unwrap_or_else(|_| panic!("{version}: the track never released its stream"));
 	}
 }
 

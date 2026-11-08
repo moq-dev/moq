@@ -62,17 +62,14 @@ pub struct Config {
 	pub playlist: Url,
 
 	/// Republish each fMP4 fragment whole as CMAF instead of splitting it into one Legacy frame per
-	/// sample. See [`fmp4::Import::with_passthrough`](moq_mux::container::fmp4::Import::with_passthrough).
-	pub passthrough: bool,
+	/// sample. See [`fmp4::Import::with_cmaf`](moq_mux::container::fmp4::Import::with_cmaf).
+	pub cmaf: bool,
 }
 
 impl Config {
 	/// Create an import configuration for `playlist`.
 	pub fn new(playlist: Url) -> Self {
-		Self {
-			playlist,
-			passthrough: false,
-		}
+		Self { playlist, cmaf: false }
 	}
 }
 
@@ -218,9 +215,7 @@ impl Fetcher {
 
 		// reqwest reads rustls's process default and panics without one, so install rind's
 		// unless the host already chose a provider.
-		let _ = rind_rustls::default_provider()
-			.map_err(Error::unsupported_cpu)?
-			.install_default();
+		moq_crypto::provider::install_default()?;
 
 		let client = Client::builder()
 			.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
@@ -369,17 +364,17 @@ struct Sink {
 	/// fragment's arrival.
 	timebase: moq_mux::catalog::Timebase,
 	/// Republish fragments whole rather than unwrapping their samples.
-	passthrough: bool,
+	cmaf: bool,
 }
 
 impl Sink {
-	fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, passthrough: bool) -> Self {
+	fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cmaf: bool) -> Self {
 		let timebase = catalog.timebase();
 		Self {
 			broadcast,
 			catalog,
 			timebase,
-			passthrough,
+			cmaf,
 		}
 	}
 
@@ -390,7 +385,7 @@ impl Sink {
 		// only covers the tracks this init segment declares.
 		Fmp4::new(self.broadcast.clone(), self.timebase.reserve())
 			.with_select(select.clone())
-			.with_passthrough(self.passthrough)
+			.with_cmaf(self.cmaf)
 	}
 }
 
@@ -720,7 +715,7 @@ impl Import {
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let fetcher = Fetcher::new(&cfg)?;
 		Ok(Self {
-			sink: Sink::new(broadcast, catalog, cfg.passthrough),
+			sink: Sink::new(broadcast, catalog, cfg.cmaf),
 			fetcher,
 			playlist: cfg.playlist,
 			video: Vec::new(),
@@ -2110,7 +2105,7 @@ mod tests {
 	/// retries the step within its backoff budget.
 	#[tokio::test]
 	async fn a_refused_segment_recovers_through_a_new_importer() {
-		for passthrough in [false, true] {
+		for cmaf in [false, true] {
 			let dir = temp_dir();
 			write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
 			let playlist =
@@ -2119,7 +2114,7 @@ mod tests {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 			let mut cfg = Config::new(Url::from_file_path(dir.join("media.m3u8")).unwrap());
-			cfg.passthrough = passthrough;
+			cfg.cmaf = cmaf;
 			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
 			import.init().await.unwrap();
 			let previous = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
@@ -2305,7 +2300,7 @@ mod tests {
 	/// Exercise the playlist/map path with real fMP4 produced by the exporter's muxer.
 	///
 	/// The second segment, stamped `after_us`, follows a 5 s one behind the playlist `tags`.
-	async fn discontinuity(video: bool, passthrough: bool, tags: &str, after_us: u64) -> Discontinuity {
+	async fn discontinuity(video: bool, cmaf: bool, tags: &str, after_us: u64) -> Discontinuity {
 		let dir = temp_dir();
 		let muxer = synth(video);
 		write_synth(&dir, &muxer, "", &[5_000_000, after_us]);
@@ -2314,7 +2309,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let sink = Sink::new(broadcast, catalog.clone(), passthrough);
+		let sink = Sink::new(broadcast, catalog.clone(), cmaf);
 		let mut track = TrackState::new(
 			if video { "video" } else { "audio" }.to_string(),
 			Url::from_file_path(dir.join("media.m3u8")).unwrap(),
@@ -2384,8 +2379,8 @@ mod tests {
 	#[tokio::test]
 	async fn forward_discontinuity_preserves_source_time_and_identity() {
 		for video in [false, true] {
-			for passthrough in [false, true] {
-				let case = discontinuity(video, passthrough, DISCONTINUITY, 7_000_000).await;
+			for cmaf in [false, true] {
+				let case = discontinuity(video, cmaf, DISCONTINUITY, 7_000_000).await;
 				case.result.unwrap();
 				assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 				assert_eq!(case.before, case.after);
@@ -2400,16 +2395,16 @@ mod tests {
 	const DISCONTINUITY: &str = "#EXT-X-DISCONTINUITY\n";
 
 	/// A timestamp reset under the same init segment is refused as a rewind, unwrapped or
-	/// passthrough, with or without the discontinuity the source should have signalled, and
+	/// CMAF, with or without the discontinuity the source should have signalled, and
 	/// without publishing anything for it: the track keeps its media and its name, and no group
 	/// (not even an aborted one) opens for the refused segment.
 	#[tokio::test]
 	async fn timestamp_reset_is_refused() {
 		for video in [false, true] {
-			for passthrough in [false, true] {
+			for cmaf in [false, true] {
 				for tags in [DISCONTINUITY, ""] {
-					let case = discontinuity(video, passthrough, tags, 0).await;
-					let label = format!("video={video} passthrough={passthrough} tags={tags:?}");
+					let case = discontinuity(video, cmaf, tags, 0).await;
+					let label = format!("video={video} cmaf={cmaf} tags={tags:?}");
 					assert!(
 						matches!(
 							case.result,
@@ -2482,9 +2477,9 @@ mod tests {
 	#[tokio::test]
 	async fn changed_map_discontinuity_publishes_a_fresh_identity() {
 		for video in [false, true] {
-			for passthrough in [false, true] {
+			for cmaf in [false, true] {
 				for after_us in [0, 7_000_000] {
-					let case = discontinuity(video, passthrough, CHANGED_MAP, after_us).await;
+					let case = discontinuity(video, cmaf, CHANGED_MAP, after_us).await;
 					case.result.unwrap();
 					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 					assert_ne!(case.before, case.after);
@@ -2495,15 +2490,14 @@ mod tests {
 		}
 	}
 
-	/// Every frame timestamp `name` carries so far, in microseconds.
+	/// Every frame timestamp `name` carries so far, in microseconds, without waiting for more.
 	async fn stamps(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u128> {
 		let replay = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
 		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
-		let wait = std::time::Duration::from_millis(100);
 		let mut out = Vec::new();
-		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(wait, track.recv_group()).await {
-			while let Ok(Ok(Some(frame))) = kio::clock::timeout(wait, group.read_frame()).await {
+		while let Poll::Ready(Ok(Some(mut group))) = track.poll_recv_group(&kio::Waiter::noop()) {
+			while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&kio::Waiter::noop()) {
 				out.push(frame.timestamp.unwrap().as_micros());
 			}
 		}
@@ -2534,8 +2528,9 @@ mod tests {
 	/// The import's timebase never withholds the catalog, and an importer replacing a rendition on a
 	/// new `EXT-X-MAP` after that catalog is out shifts by the same offset as the first one: none,
 	/// since the first placed the clock. A fresh offset would shift it by its own arrival.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_replacement_importer_keeps_the_offset() {
+		kio::clock::host_time();
 		let (init, fragments) = fmp4_parts(2);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();

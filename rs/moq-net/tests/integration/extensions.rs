@@ -9,7 +9,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version, origin, setup::Extensions};
+use moq_net::{Version, origin, setup::Extensions};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
@@ -22,7 +22,7 @@ const MOQT: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 const AUTH: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -132,11 +132,10 @@ async fn a_declined_auth_extension_is_not_negotiated() {
 				assert_eq!(session.auth().grant().peek(), None, "{context}");
 				// Only a request that names it can carry the token, so it resolves at once with
 				// a grant that stays unknown.
-				let (added, answer) = kio::clock::timeout(SETTLE, session.auth().add("token"))
+				let added = kio::clock::timeout(SETTLE, session.auth().add("token"))
 					.await
 					.unwrap_or_else(|_| panic!("{context}: add never resolved"))
 					.unwrap_or_else(|err| panic!("{context}: {err:?}"));
-				assert_eq!(answer, moq_net::auth::Answer::Requests, "{context}");
 				assert_eq!(added.grant().peek(), None, "{context}");
 				assert_eq!(session.auth().grant().peek(), None, "{context}");
 			}

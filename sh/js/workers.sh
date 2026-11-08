@@ -4,8 +4,8 @@
 #
 # These Workers have lockfiles outside the Bun workspace, so `just js check`
 # never installs or builds them. Every tracked lockfile but the workspace's is
-# one, so a new Worker can't fall out of the check; infra/mbx only drives
-# wrangler's CLI and has no bundle to build.
+# one, so a new Worker can't fall out of the check; infra/mbx and infra/corpus
+# only drive wrangler's CLI and have no bundle to build.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"

@@ -13,14 +13,14 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Client, Hop, Server, Session, Version, origin};
+use moq_net::{Client, Server, Session, Version, origin};
 use support::harness::{now, spawn};
 use support::mock::{MockSession, create_mock_session_pair};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }

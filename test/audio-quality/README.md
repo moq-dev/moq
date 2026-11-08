@@ -129,7 +129,7 @@ just test push-to-talk
 ```
 
 This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
-page. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
+page, and the native `moq play` as a second listener. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
 frames. A release mutes the publisher, which sends nothing until the next press while its rendition
 stays enabled, so the listener keeps its subscription and plays comfort noise in between. The
 listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
@@ -137,6 +137,18 @@ alternating two and three seconds: the first after the warmup's five-second mute
 intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
 local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
 measured belongs to the media pipeline rather than the path.
+
+The native listener, `moq play --video off --delay 300ms --metrics native.ndjson`, joins on its own
+WebTransport session to the same relay while the publisher talks, plays into a private null sink
+([`../lib/pulse.py`](../lib/pulse.py)) as the [native rows](#native-rows) do, and must exit cleanly
+on Ctrl-C. It is held to the epic's correctness checks, not its latency budget. Its metrics add what
+a mute needs: `utterances`, the media timestamp each resume after a declared silence starts from,
+and `comfort`, the device time filled with comfort noise. Each press must resume on its head frame's
+timestamp, so a lost head (which would resume one frame later) fails. The native clock is placed on
+the page's by those resumes, each less its head's container write. Each separated press's mute,
+from its release to the next press, must play comfort noise, and from the first press on the
+speaker must report no gap or stall. Each press in `summary.json` carries its `native` result
+beside the browser's, and `native` sums them.
 
 `presses.json` records captured chunks at each press, WebCodecs encoder and decoder inputs and
 outputs, container writes, frame arrivals before reordering, and audible output onsets. Publisher,
@@ -165,14 +177,16 @@ it: `capture` (worklet delivery and framing, after the media the frame still nee
 `packetization` (that media, placed on the media clock by the newest chunk captured before the
 press), `encode` (codec and container write), `network` (write to arrival, through the relay),
 `decode` (arrival to decoded PCM), `jitter_buffer` (the head's PCM to the first PCM that fills the
-playout delay), `render` (that PCM to the render onset: the worklet hand-off and the context's
-render callback), and `device`, as the stages below name them. `spread` is how far an utterance's frames
+playout delay in effect as it lands, which each press reports as `delay`), `render` (that PCM to the render onset: the worklet hand-off and the context's
+render callback), and `device`, as the stages below name them. The onset is placed on the render
+clock, which a context rendering in large callbacks runs up to one callback ahead of the page, so
+there `render` can be negative and `device` larger by as much. `spread` is how far an utterance's frames
 stray from a steady arrival: the latest arrival relative to its media timestamp minus the earliest,
 which on this ideal path is the capture graph's cadence and what `"auto"`'s jitter estimate measures.
-`latency` and `path` give each one's min, median and max.
+`latency`, `path` and `delay` give each one's min, median and max.
 
-The command prints `latency`, `path`, the completeness counts, and `playback`'s underruns and
-stalls, and keeps its run directory even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
+The command prints `latency`, `path`, `delay`, the completeness counts, `playback`'s underruns and
+stalls, and `native`, and keeps its run directory even when it passes (set `HARNESS_KEEP=0` to drop it). Nightly runs it and keeps the raw evidence
 alongside the audio quality rows.
 
 ## Traces

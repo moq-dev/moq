@@ -75,7 +75,7 @@ impl<'de> serde::Deserialize<'de> for Bind {
 }
 
 /// How long an accepted connection has to finish its handshake, unless overridden by `--listen-timeout`.
-pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = moq_net::server::DEFAULT_TIMEOUT;
 
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
@@ -146,14 +146,10 @@ pub struct Config {
 	pub extensions: moq_net::setup::Extensions,
 
 	/// The implementation to advertise in SETUP, as space-separated `name/version`
-	/// product tokens. Defaults to the binary's own; empty advertises nothing.
-	#[usage(
-		name = "listen-implementation",
-		long = "listen-implementation",
-		env = "MOQ_LISTEN_IMPLEMENTATION",
-		setting = "listen.implementation"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// product tokens. `None` advertises [`moq_net::IMPLEMENTATION`]; empty advertises
+	/// nothing. Set by the embedding binary, not configured.
+	#[usage(skip)]
+	#[serde(skip)]
 	pub implementation: Option<String>,
 
 	/// Maximum time for one accepted connection to finish its handshake: the
@@ -1040,7 +1036,7 @@ pub struct Forward {
 
 impl Forward {
 	/// Whether any forwarding setting is present.
-	pub fn configured(&self) -> bool {
+	pub(crate) fn configured(&self) -> bool {
 		self.bind.is_some() || self.key.is_some() || self.peers.is_some()
 	}
 }

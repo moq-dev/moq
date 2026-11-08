@@ -69,7 +69,7 @@ pub struct Client<S = TcpStream> {
 	app: String,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping.
-	max_delay: Duration,
+	delay: Duration,
 	/// Max age declared on the media tracks [`pull`](Self::pull) publishes, or `None` for
 	/// no publisher limit.
 	max_age: Option<Duration>,
@@ -88,6 +88,7 @@ impl Client<TcpStream> {
 	/// For `rtmps://` or any other transport, establish the stream yourself and use
 	/// [`with_stream`](Self::with_stream) instead.
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
+		moq_crypto::cpu::check()?;
 		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
 			let stream = TcpStream::connect(addr).await?;
 			crate::server::configure_socket(&stream, addr);
@@ -107,6 +108,7 @@ impl<S: Stream> Client<S> {
 	/// The bring-your-own-transport entry point: establish the connection (and, for
 	/// `rtmps://`, the TLS handshake) yourself, then hand the stream here.
 	pub async fn with_stream(stream: S, app: &str) -> Result<Self> {
+		moq_crypto::cpu::check()?;
 		kio::clock::timeout(
 			crate::server::REQUEST_TIMEOUT,
 			Self::with_stream_config(stream, app, None),
@@ -173,7 +175,7 @@ impl<S: Stream> Client<S> {
 			session,
 			work,
 			app: app.to_string(),
-			max_delay: crate::DEFAULT_MAX_DELAY,
+			delay: crate::DEFAULT_DELAY,
 			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			linger: moq_mux::Linger::DEFAULT,
@@ -186,8 +188,8 @@ impl<S: Stream> Client<S> {
 	///
 	/// The publish (egress) direction only; [`pull`](Self::pull) takes
 	/// [`with_max_age`](Self::with_max_age) instead.
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
+	pub fn with_delay(mut self, delay: Duration) -> Self {
+		self.delay = delay;
 		self
 	}
 
@@ -201,7 +203,7 @@ impl<S: Stream> Client<S> {
 	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
-	/// someone else declared, and takes [`with_max_delay`](Self::with_max_delay) instead.
+	/// someone else declared, and takes [`with_delay`](Self::with_delay) instead.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -259,7 +261,7 @@ impl<S: Stream> Client<S> {
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
-		let mut export = FlvExport::new(source, catalog).with_delay(self.max_delay);
+		let mut export = FlvExport::new(source, catalog).with_delay(self.delay);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 
@@ -548,7 +550,7 @@ fn is_status_failure(code: &str) -> bool {
 /// handshake read can also carry the first RTMP chunks, so those `remaining_bytes`
 /// must be fed to the session or chunk parsing desyncs.
 async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Client)?;
+	let mut handshake = Handshake::new(PeerType::Client);
 	let p0_p1 = handshake
 		.generate_outbound_p0_and_p1()
 		.map_err(|e| anyhow::anyhow!("rtmp handshake p0/p1: {e:?}"))?;
@@ -664,7 +666,7 @@ mod tests {
 				session,
 				work: VecDeque::new(),
 				app: "live".into(),
-				max_delay: crate::DEFAULT_MAX_DELAY,
+				delay: crate::DEFAULT_DELAY,
 				max_age: None,
 				bandwidth: Default::default(),
 				linger: Duration::ZERO,
@@ -710,7 +712,7 @@ mod tests {
 			session,
 			work,
 			app: "live".into(),
-			max_delay: crate::DEFAULT_MAX_DELAY,
+			delay: crate::DEFAULT_DELAY,
 			max_age: None,
 			bandwidth: Default::default(),
 			linger: Duration::ZERO,

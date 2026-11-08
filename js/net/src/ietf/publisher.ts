@@ -21,12 +21,13 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import type { Hop, RouteInfo } from "../hop.ts";
+import type { Hop, WireRoute } from "../hop.ts";
 import { finalSequence, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
+import { routeFailed } from "../resume.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import {
@@ -48,7 +49,7 @@ import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
-import { requestReason } from "./error.ts";
+import { type RequestCondition, requestReason, SubscribeRefused } from "./error.ts";
 import { type Fetch, FetchHeader, FetchOk, type FetchType } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import { MAX_AGE_PARAMETER } from "./max_age.ts";
@@ -89,7 +90,7 @@ const RETRY_BASE = 100;
 const RETRY_MAX = 5000;
 
 /** Cluster parameters for one snapshot: the advertised hops, then our own id last. */
-function clusterFor(base: Cluster.Advert | undefined, route: RouteInfo): Cluster.Advert | undefined {
+function clusterFor(base: Cluster.Advert | undefined, route: WireRoute): Cluster.Advert | undefined {
 	if (!base) return undefined;
 	const self = base.hops.at(-1);
 	if (self === undefined) return undefined;
@@ -309,6 +310,40 @@ interface RunFill {
 
 	/** The subscription's data stream count, which PUBLISH_DONE reports. */
 	streams: StreamCount;
+}
+
+// The condition a request that failed for `err` is refused with, mirroring Rust's `to_code`: a
+// verdict stays one, so the peer is never invited to retry it.
+function refusedAs(err: Error): RequestCondition {
+	if (err instanceof SubscribeRefused) return err.condition;
+	if (err instanceof SessionError) {
+		switch (err.code) {
+			case SessionCode.Unauthorized:
+				return "unauthorized";
+			case SessionCode.Expired:
+				return "expired";
+			case SessionCode.Timeout:
+				return "timeout";
+			case SessionCode.Version:
+			case SessionCode.Unsupported:
+				return "not_supported";
+		}
+	} else if (err instanceof StreamError) {
+		switch (err.code) {
+			case StreamCode.Unauthorized:
+				return "unauthorized";
+			case StreamCode.DeliveryTimeout:
+				return "timeout";
+			case StreamCode.MalformedTrack:
+				return "malformed_track";
+			case StreamCode.GoingAway:
+				return "going_away";
+			case StreamCode.NotFound:
+			case StreamCode.Unroutable:
+				return "does_not_exist";
+		}
+	}
+	return "internal";
 }
 
 /**
@@ -553,7 +588,12 @@ export class Publisher {
 		try {
 			const info = await resolve().catch(async (err) => {
 				if (left.signal.aborted) request.abort(cancel);
-				else await request.refuse("subscribe", this.#failed(err, rendezvous, true));
+				else {
+					const refusal = this.#failed(err, rendezvous, true);
+					// An upstream's refusal goes on with the Retry Interval it asked for.
+					if (err instanceof SubscribeRefused) refusal.retryInterval = err.retryInterval;
+					await request.refuse("subscribe", refusal);
+				}
 				return undefined;
 			});
 			if (!info) return;
@@ -591,7 +631,9 @@ export class Publisher {
 					if (!this.#gate.allows(name)) throw unauthorized(name);
 				} catch (err) {
 					if (left.signal.aborted) return;
-					await refuseUpdate(request.writer, version, "subscribe", this.#failed(err));
+					const refusal = this.#failed(err);
+					if (err instanceof SubscribeRefused) refusal.retryInterval = err.retryInterval;
+					await refuseUpdate(request.writer, version, "subscribe", refusal);
 					await this.#publishFailed(request, streams);
 					request.close();
 					return;
@@ -1273,6 +1315,7 @@ export class Publisher {
 					version: this.#session.version,
 					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned, excluded.promise]),
+					group: true,
 				});
 			} finally {
 				opened.resolve();
@@ -1983,7 +2026,7 @@ export class Publisher {
 	/**
 	 * The extension parameters an advertisement of `route` carries.
 	 */
-	#params(route: RouteInfo): AdvertParams {
+	#params(route: WireRoute): AdvertParams {
 		return { cluster: clusterFor(this.#advert, route) };
 	}
 
@@ -1992,7 +2035,7 @@ export class Publisher {
 	 * is logged and skipped: a peer that wants none of this rejects each one and stays
 	 * connected.
 	 */
-	async #advertise(path: Path.Valid, requests: Requests, route: RouteInfo): Promise<Answer> {
+	async #advertise(path: Path.Valid, requests: Requests, route: WireRoute): Promise<Answer> {
 		const params = this.#params(route);
 		const auth = this.#carry(route.auth);
 		const requestId = await this.#session.nextRequestId();
@@ -2708,16 +2751,18 @@ export class Publisher {
 		}
 	}
 
-	/** What a request that failed to resolve is refused with. */
+	/**
+	 * What a request that failed to resolve is refused with. A missing publisher a rendezvous
+	 * waited for is a timeout, which, like Rust's `rendezvous_error`, invites no retry.
+	 */
 	#failed(err: unknown, wait = false, resolved = false): Refusal {
 		const e = error(err);
-		const condition =
-			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
-				? wait && (!resolved || e.code === StreamCode.Unroutable)
-					? "timeout"
-					: "does_not_exist"
-				: "internal";
-		return { condition, reasonPhrase: reason(e) };
+		const reasonPhrase = reason(e);
+		const missing =
+			e instanceof StreamError &&
+			(e.code === StreamCode.Unroutable || (e.code === StreamCode.NotFound && !resolved));
+		if (wait && missing) return { condition: "timeout", reasonPhrase };
+		return { condition: refusedAs(e), reasonPhrase, retryable: routeFailed(e) };
 	}
 
 	/**

@@ -266,7 +266,7 @@ pub struct Server {
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
-		rind::cpu::check().map_err(std::io::Error::other)?;
+		moq_crypto::cpu::check()?;
 		let listener = TcpListener::bind(addr).await?;
 
 		Ok(Self {
@@ -496,6 +496,7 @@ pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 /// `play`. The handshake must finish in five seconds; wrap the call in
 /// [`kio::clock::timeout`] to also bound the wait for a publish or play request.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
+	moq_crypto::cpu::check()?;
 	Ok(accept_until_request(stream, peer).await?)
 }
 
@@ -766,8 +767,8 @@ pub struct Play<S = Conn> {
 	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one; see [`with_max_delay`](Self::with_max_delay).
-	max_delay: Duration,
+	/// one; see [`with_delay`](Self::with_delay).
+	delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -799,8 +800,8 @@ impl<S: Stream> Play<S> {
 
 	/// Set the FLV release delay and stalled-group budget.
 	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
+	pub fn with_delay(mut self, delay: Duration) -> Self {
+		self.delay = delay;
 		self
 	}
 
@@ -889,7 +890,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.max_delay)
+			.with_delay(self.delay)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -1221,7 +1222,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_delay: crate::DEFAULT_MAX_DELAY,
+							delay: crate::DEFAULT_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1470,7 +1471,7 @@ async fn feed_input<S: Stream>(
 /// Perform the RTMP server handshake, returning any leftover bytes that followed
 /// the client's final handshake packet (the start of the chunk stream).
 async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::Result<Vec<u8>> {
-	let mut handshake = Handshake::new(PeerType::Server)?;
+	let mut handshake = Handshake::new(PeerType::Server);
 	let mut buffer = [0u8; 4096];
 	loop {
 		let n = stream.read(&mut buffer).await?;
@@ -1952,7 +1953,7 @@ mod tests {
 
 	/// The client half of the RTMP handshake, returning the bytes read past it.
 	async fn client_handshake<S: Stream>(stream: &mut S) -> Vec<u8> {
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2033,7 +2034,7 @@ mod tests {
 		media: tokio::sync::mpsc::UnboundedSender<Media>,
 	) {
 		// Handshake.
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2121,7 +2122,7 @@ mod tests {
 			None
 		}
 
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await
@@ -2799,6 +2800,7 @@ mod tests {
 	/// until it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_publish() {
+		kio::clock::host_time();
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
 		let origin = moq_tokio::origin::spawn();
@@ -2882,7 +2884,7 @@ mod tests {
 		let mut stream = TcpStream::connect(addr).await.unwrap();
 
 		// Client handshake.
-		let mut handshake = Handshake::new(PeerType::Client).unwrap();
+		let mut handshake = Handshake::new(PeerType::Client);
 		stream
 			.write_all(&handshake.generate_outbound_p0_and_p1().unwrap())
 			.await

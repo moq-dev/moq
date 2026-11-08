@@ -13,9 +13,9 @@ Decided in the 2026-10-10 audit: H.264 lands first and owns the shared warmup
 measurement and catalog mutation. H.265 reuses it rather than implementing
 that machinery in parallel.
 
-- `rs/moq-mux/src/codec/h265/split.rs`: parse `PrefixSeiNut` payloads for
+- `rs/moq-mux/src/codec/h265/split.rs`: parse `NalType::PREFIX_SEI` payloads for
   payload type 6 (`recovery_point`: `recovery_poc_cnt`, `exact_match_flag`,
-  `broken_link_flag`). `scuffle-h265` does not parse SEI, so walk the
+  `broken_link_flag`). No H.265 SEI is parsed for it yet, so walk the
   payload-type and payload-size bytes by hand the way the H.264 helper does:
   skip the two-byte NAL header, strip emulation-prevention bytes first, bound
   the walk to the RBSP, and reject a truncated `se(v)` rather than emitting a

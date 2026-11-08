@@ -229,7 +229,7 @@ impl Connection {
 	/// or among the ungrouped streams without a group.
 	///
 	/// Never blocks: a full buffer drops the oldest datagram of the lowest-priority group,
-	/// see [`moq_quic::Datagrams::send`]. A [`Bytes`] payload, or a chain of them, is queued
+	/// see [`moq_quic::connection::Datagrams::send`]. A [`Bytes`] payload, or a chain of them, is queued
 	/// without copying.
 	///
 	/// # Panics
@@ -708,9 +708,6 @@ impl Driver {
 
 		loop {
 			self.endpoint_events();
-			// Handles wait on moq-quic itself, so its events go unread; drain them
-			// so the queue stays empty.
-			while self.shared.conn.borrow_mut().poll().is_some() {}
 			self.check_lost(waiter);
 
 			if self.shared.state.borrow().dead {

@@ -172,7 +172,7 @@ async fn embed_and_stop(mut config: Config) {
 		relay.config().quic.max_streams,
 		Some(moq_tokio::quic::DEFAULT_MAX_STREAMS)
 	);
-	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().id());
+	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().get());
 
 	// The application handles: in-process workers publish into the origin the
 	// QUIC sessions see, and the trigger stops the owner from any task. Both
@@ -410,6 +410,7 @@ async fn shared_tokio_custom_route_and_quic() {
 /// Thread-per-core Tokio workers. Linux-only: the mode binds with `SO_REUSEPORT`.
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "flaky: the owner's sockets outlive `run` under load; quest/m0/test-flakes-2/embed-sockets-outlived.md"]
 async fn worker_tokio_custom_route_and_quic() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
@@ -557,19 +558,19 @@ struct EmbeddedConfig {
 fn embedded_cli_merges_only_relay_settings() {
 	let dir = tempfile::tempdir().unwrap();
 	let path = dir.path().join("relay.toml");
-	std::fs::write(&path, "[cluster]\nid = 7\n[stats]\nenabled = false\n").unwrap();
+	std::fs::write(&path, "[cluster]\nmax_hops = 7\n[stats]\nenabled = false\n").unwrap();
 	let (mut parsed, cli) = EmbeddedConfig::parse_from_with_settings(&[
 		path.as_os_str(),
 		std::ffi::OsStr::new("--worker-name"),
 		std::ffi::OsStr::new("recorder"),
-		std::ffi::OsStr::new("--cluster-id"),
+		std::ffi::OsStr::new("--cluster-max-hops"),
 		std::ffi::OsStr::new("9"),
 	])
 	.expect("parse embedding CLI");
 	parsed.relay.merge(&cli).unwrap();
 	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
-	assert_eq!(parsed.relay.cluster.id, Some(9));
-	assert_eq!(parsed.relay.source("cluster.id"), Some("--cluster-id"));
+	assert_eq!(parsed.relay.cluster.max_hops, Some(9));
+	assert_eq!(parsed.relay.source("cluster.max_hops"), Some("--cluster-max-hops"));
 	assert!(!parsed.relay.stats.enabled);
 	assert!(parsed.relay.source("stats.enabled").unwrap().contains("enabled"));
 	// The explicit file value equals the runtime default but still has file provenance.

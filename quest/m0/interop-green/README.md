@@ -62,8 +62,8 @@ showed more causes, fixed in this quest's own PR:
 
 The P2P data-channel test timed out in 41668668824 and again in
 [42062226837](https://github.com/moq-dev/moq/actions/runs/42062226837)
-(2026-11-05); [its quest](/quest/m0/test-flakes-2/p2p-data-channel.md) under
-test flakes owns it.
+(2026-11-05): Chromium dropped the accepting side's first record, sent before
+its SCTP stream opened. The accepting side now waits to hear the dialer first.
 
 Scheduled run
 [41863118968](https://github.com/moq-dev/moq/actions/runs/41863118968)
@@ -72,5 +72,34 @@ case, P2P, and wire-compat. Its only failure was the fallback audio stall
 above, on `moq-lite-07-wip` in Chromium, which the IETF22 fallback quest
 owns. Scheduled run 42062226837 (2026-11-05) failed only P2P and the same
 fallback audio stall in Chromium (`audioStalled:true`).
+
+Scheduled run
+[42245660435](https://github.com/moq-dev/moq/actions/runs/42245660435)
+(2026-11-06, at 01d4edbe59, before the P2P fix
+[moq-dev/moq#8001](https://github.com/moq-dev/moq/pull/8001) merged) had no
+media, P2P, or fallback failure. It failed three deterministic steps, fixed in
+this quest's PR:
+
+- Harness regressions: `staging.test.py` stubbed only the examples
+  `interop.sh` runs itself, but `interop-socket-js` is built there and run
+  only by `socket.sh` since
+  [moq-dev/moq#7884](https://github.com/moq-dev/moq/pull/7884). The fixture
+  now stubs every example in the build list.
+- Subscription termination: `just test bare-fin` built moq-net's lib tests
+  without the `async` feature its tests need, a configuration no other job
+  compiles, so dead code under it broke the build. The recipe now enables
+  `async`.
+- Wire-compat: moq-cli 0.14.13 and moq-relay 0.17.13 made the
+  `moq-lite-07-wip` planned break stale again; remeasured, with the same 16
+  cells failing.
+
+Scheduled run
+[42382888974](https://github.com/moq-dev/moq/actions/runs/42382888974)
+(2026-11-07, at b98833c40a, after those fixes landed) failed only Harness
+regressions: `publish-ui.browser.ts`'s invalid-attribute check still tested
+moq-watch's `buffer`, which
+[moq-dev/moq#8057](https://github.com/moq-dev/moq/pull/8057) renamed to
+`lookahead`. Fixed in this quest's PR: the case tests `lookahead`, and a new
+check confirms `buffer` reports its rename and recovers once removed.
 
 Public API: none. Wire: none.

@@ -140,14 +140,6 @@ pub enum Error {
 	#[error("grant asks to be revalidated at no interval")]
 	ZeroRevalidate,
 
-	/// No ES256 or EdDSA key is available to sign or verify a peer grant.
-	#[error("peer grants need an ES256 or EdDSA key")]
-	NoPeerKey,
-
-	/// A peer grant's presenter key carries private material.
-	#[error("a peer grant's presenter key must be public")]
-	PrivatePresenter,
-
 	/// The grant's expiry has passed.
 	#[error("grant has already expired")]
 	GrantExpired,
@@ -213,8 +205,8 @@ pub enum Error {
 	MeshState(String),
 
 	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
-	#[error("unsupported CPU: {0}")]
-	UnsupportedCpu(String),
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's
@@ -242,11 +234,6 @@ impl Error {
 	/// A crypto backend's error, converted by hand so its crate stays out of this crate's API.
 	pub(crate) fn crypto(err: impl std::error::Error) -> Self {
 		Self::Crypto(message(err))
-	}
-
-	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
-	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
-		Self::UnsupportedCpu(err.to_string())
 	}
 }
 

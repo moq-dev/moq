@@ -1,4 +1,4 @@
-# TS fidelity and recovery
+# [M] TS fidelity and recovery
 
 ## Goal
 
@@ -117,25 +117,9 @@ Decided 2026-11-04 (maintainer, design review of
   ends, and the initial reservation releases at the first PTS. This is
   independent of the handoff.
 
-Decided 2026-11-05 (maintainer, /quest-complete, for
-[moq-dev/moq#7785](https://github.com/moq-dev/moq/pull/7785)): ✅ cross-track
-loss coalescing keeps only each track's last loss. A slower track can flag
-outage A again after a faster track resumed A and then B (three flags for
-two outages); state stays bounded by the track count, and the extra flag
-lands where loss happened. Not chosen: keeping every loss until all tracks
-pass it (unbounded while a track stalls); collapsing losses older than the
-release point minus the delay (more code, and assumes muxing in release
-order). Reversed the same day: the planned
-[PCR jump flag](/quest/m1/ts-reliability/pcr-jump-flag.md) removes the
-per-track loss tracking.
-
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
-
-## Required
-
-- [The TS export flags a PCR only where its clock jumps](/quest/m1/ts-reliability/pcr-jump-flag.md) - a padded skip goes out unflagged; a schedule that skips slots flags the jump
 
 ## Related
 

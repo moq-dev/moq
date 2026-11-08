@@ -118,7 +118,7 @@ test("shared Rust stats names survive the publisher's report builder", async () 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer");
 		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
-			track: net.track(Broadcast.STATS_TRACK),
+			track: net.track("stats.json"),
 			schema: Stats.SnapshotSchema,
 		});
 		try {
@@ -936,12 +936,12 @@ test("stats names a track in the catalog and reports each listed rendition while
 
 		stats.set(true);
 		await settle();
-		expect((await readCatalog(broadcast))?.stats).toEqual({ track: Broadcast.STATS_TRACK });
+		expect((await readCatalog(broadcast))?.stats).toEqual({ track: "stats.json" });
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer once connected");
 		const consumer = new Json.Snapshot.Consumer<Stats.Snapshot>({
-			track: net.track(Broadcast.STATS_TRACK),
+			track: net.track("stats.json"),
 			schema: Stats.SnapshotSchema,
 		});
 		await settle();
@@ -980,7 +980,7 @@ test("an unsubscribed stats track writes nothing", async () => {
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected a network producer once connected");
-		const subscriber = net.track(Broadcast.STATS_TRACK).subscribe();
+		const subscriber = net.track("stats.json").subscribe();
 		await settle();
 		await clock.advance(Nano.fromMilli(Milli(1000)));
 		// Nothing was written while nobody subscribed, so the first report opens the first group.
@@ -1021,9 +1021,9 @@ test("echo solicits feedback in the catalog unless it walks above the root", asy
 test("the catalog declares the longest group as the join interval once it lists media", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("join.hang") });
 	const video = broadcast.video("video/hd");
-	video.joinInterval.set(Milli(2000));
+	video.join.set(Milli(2000));
 	const audio = broadcast.audio("audio/data");
-	audio.joinInterval.set(Milli(20));
+	audio.join.set(Milli(20));
 	broadcast.text("captions/en").config.set({ format: "vtt", container: { kind: "legacy" } } as Catalog.TextConfig);
 	await settle();
 
@@ -1049,15 +1049,15 @@ test("the join interval stays fixed for the network broadcast", async () => {
 	const name = new Signal(Path.from("fixed.hang"));
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name });
 	const video = broadcast.video("video");
-	video.joinInterval.set(Milli(2000));
+	video.join.set(Milli(2000));
 	video.config.set(videoConfig);
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
 
 	// A longer GOP, from a config change or a later rendition, leaves the declared grid alone.
-	video.joinInterval.set(Milli(4000));
+	video.join.set(Milli(4000));
 	const later = broadcast.video("video/later");
-	later.joinInterval.set(Milli(6000.5));
+	later.join.set(Milli(6000.5));
 	later.config.set(videoConfig);
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
@@ -1069,17 +1069,17 @@ test("the join interval stays fixed for the network broadcast", async () => {
 	broadcast.close();
 });
 
-test("an audio-only broadcast declares its group duration, and no duration declares nothing", async () => {
+test("an audio-only broadcast declares its join, and no join declares nothing", async () => {
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("audio.hang") });
 	const audio = broadcast.audio("audio");
-	audio.joinInterval.set(Milli(0));
+	audio.join.set(Milli(0));
 	audio.config.set(audioConfig);
 	await settle();
-	// Every frame its own group: the spacing is a frame, unknown up front, so nothing is promised.
+	// A zero join is no positive spacing, so nothing is promised.
 	expect((await readCatalog(broadcast))?.media?.join).toBeUndefined();
 
 	// A later listing tries again once a duration is known.
-	audio.joinInterval.set(Milli(20));
+	audio.join.set(Milli(20));
 	await settle();
 	expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(20));
 	broadcast.close();
@@ -1095,7 +1095,7 @@ test("an on-demand rendition declares the interval before encoding, and a media 
 		onDemand: true,
 	});
 	const video = broadcast.video("video");
-	video.joinInterval.set(Milli(2000));
+	video.join.set(Milli(2000));
 	video.config.set(videoConfig);
 	await settle();
 	const net = broadcast.net.peek();

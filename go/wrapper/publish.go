@@ -134,9 +134,9 @@ func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
 	return &TrackProducer{inner: inner}, nil
 }
 
-// Abort rejects the request with an application error code.
-func (r *TrackRequest) Abort(errorCode uint16) error {
-	return r.inner.Abort(errorCode)
+// Reject rejects the request with an application error code.
+func (r *TrackRequest) Reject(errorCode uint16) error {
+	return r.inner.Reject(errorCode)
 }
 
 // TrackDemand watches the group a published track's subscribers want next.
@@ -203,6 +203,12 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 		return nil, err
 	}
 	return &GroupProducer{inner: inner}, nil
+}
+
+// SkipGroups declares that groups start up to the exclusive end will never be
+// produced, so readers move past them. Creating a group there then fails.
+func (t *TrackProducer) SkipGroups(start, end uint64) error {
+	return t.inner.SkipGroups(start, end)
 }
 
 // WriteFrame writes frame as a single-frame group.
@@ -317,28 +323,25 @@ func (d *TrackRequests) Cancel() {
 
 // Fill is a run of groups readers miss, for a TrackRequests to serve.
 //
-// Accept each group you have and DropGroups the rest; Wanted names what is still
-// owed, in the fill's order. Releasing the fill names whatever is left as dropped
+// Accept each group you have and DropGroups the rest, one group at a time as
+// WantedChanged returns them; Wanted names what is still owed, in the fill's
+// order. Releasing the fill names whatever is left as dropped
 // while a reader still wants it; once nobody does, it is withdrawn, so stop
 // serving it once Wanted is nil. Stop serving a single group when Unwanted
-// returns for it, and move on to Wanted.
+// returns for it, and move on to Wanted. Serve the fills you take
+// concurrently: each waits on its own readers.
 type Fill struct {
 	inner *ffi.MoqFill
 }
 
-// StartGroup is the first group to fill.
-func (f *Fill) StartGroup() uint64 {
-	return f.inner.StartGroup()
+// Start is the first group to fill, and the frame within it to start from.
+func (f *Fill) Start() Position {
+	return f.inner.Start()
 }
 
-// StartFrame is the frame within the first group to start from.
-func (f *Fill) StartFrame() uint64 {
-	return f.inner.StartFrame()
-}
-
-// EndGroup is the exclusive end group.
-func (f *Fill) EndGroup() uint64 {
-	return f.inner.EndGroup()
+// End is the exclusive end group.
+func (f *Fill) End() uint64 {
+	return f.inner.End()
 }
 
 // Priority is the most urgent delivery priority among the readers waiting on it.
@@ -358,18 +361,22 @@ func (f *Fill) Order() Order {
 }
 
 // Wanted is the next group still owed in the fill's order, or nil once every
-// group is answered or no reader waits on the fill.
+// group is answered or no reader waits on the fill. It does not wait for the
+// readers; WantedChanged does.
 func (f *Fill) Wanted() *uint64 {
 	return f.inner.Wanted()
 }
 
-// WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
+// WantedChanged blocks until Wanted changed and every group this fill accepted
+// reached a reader, which picks it up when it next reads, and returns it. Nil,
+// once the fill is done, never waits; the first call returns at once unless an
+// accepted group has yet to reach a reader.
 func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
 	return f.inner.WantedChanged(ctx)
 }
 
 // Accept inserts group sequence and returns a producer for it. The first group
-// starts at StartFrame, so its frames keep their indices.
+// starts at Start's frame, so its frames keep their indices.
 func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
 	inner, err := f.inner.Accept(sequence)
 	if err != nil {

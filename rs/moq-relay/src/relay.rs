@@ -147,14 +147,14 @@ impl Relay {
 		// another relay. Only negotiated when both sides offer it, so other peers never see it.
 		config.listen.extensions.ietf = true;
 		config.connect.extensions.ietf = true;
-		// Name the relay ahead of its core unless the operator overrides it (empty omits it),
+		// Name the relay ahead of its core unless the embedder set a name (empty omits it),
 		// and dial cluster peers under the same name.
 		let implementation = config
 			.listen
 			.implementation
 			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
 			.clone();
-		config.connect.implementation = Some(implementation.clone());
+		config.connect.implementation = Some(implementation);
 		let resolved_config = Box::new(config.clone());
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -185,9 +185,7 @@ impl Relay {
 
 		// Every listener shares admission ownership before its workers can accept.
 		let (shutdown_trigger, shutdown) = shutdown::Observer::new(drain_timeout);
-		let server_versions = config.listen.versions();
 		let handshake_timeout = config.listen.resolved_timeout();
-		let server_extensions = config.listen.extensions;
 
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
@@ -334,10 +332,7 @@ impl Relay {
 		let (ready, _) = tokio::sync::watch::channel(Startup::Starting);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
-			.with_versions(server_versions)
-			.with_extensions(server_extensions)
-			.with_implementation(implementation)
-			.with_timeout(handshake_timeout)
+			.with_listen(&config.listen)
 			.with_quic(&config.quic)
 			.with_sessions(sessions.clone())
 			.with_tls_acceptor(server.tls_acceptor());

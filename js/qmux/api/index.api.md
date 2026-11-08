@@ -5,7 +5,12 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 	protocol?: string;
 }
 
+export interface BidirectionalStream extends WebTransportBidirectionalStream {
+	readonly writable: SendStream;
+}
+
 export interface Config {
+	handshakeTimeout?: number | null;
 	idleTimeout?: number | null;
 	maxDatagramFrameSize?: bigint | null;
 	maxRecordSize?: bigint;
@@ -20,9 +25,20 @@ export interface InstallOptions {
 	versions?: Record<string, Version | Version[] | null>;
 }
 
+export interface SendStream extends WritableStream<Uint8Array> {
+	getStats(): Promise<SendStreamStats>;
+	sendOrder: number;
+}
+
 export type SendStreamOptions = WebTransportSendStreamOptions & {
 	waitUntilAvailable?: boolean;
 };
+
+export interface SendStreamStats {
+	bytesAcknowledged: number;
+	bytesSent: number;
+	bytesWritten: number;
+}
 
 export class SessionError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
 	constructor(message: string, options?: {
@@ -38,11 +54,6 @@ export interface SessionOptions extends WebTransportOptions {
 	requireProtocol?: boolean;
 	sendBufferSize?: number;
 	versions?: Record<string, Version | Version[] | null>;
-}
-
-export interface StreamCredit {
-	available: bigint;
-	blocked: boolean;
 }
 
 export class StreamError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
@@ -109,19 +120,18 @@ export default class implements WebTransport {
 	}): void;
 	readonly closed: Promise<WebTransportCloseInfo>;
 	get congestionControl(): WebTransportCongestionControl;
-	createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream>;
-	createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>>;
+	createBidirectionalStream(options?: SendStreamOptions): Promise<BidirectionalStream>;
+	createUnidirectionalStream(options?: SendStreamOptions): Promise<SendStream>;
 	get datagrams(): WebTransportDatagramDuplexStream;
 	getStats(): Promise<{
 		datagrams: {};
 	}>;
-	readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
+	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
 	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
 	get protocol(): string;
 	readonly ready: Promise<void>;
 	get reliability(): "reliable-only";
 	setSendBufferSize(bytes: number): void;
-	streamCredit(dir: "uni" | "bi"): StreamCredit;
 }
 
 export function install(options?: InstallOptions): boolean;

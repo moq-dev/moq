@@ -26,6 +26,7 @@ mod diff;
 mod merge;
 mod refresh;
 pub mod snapshot;
+mod state;
 pub mod stream;
 mod strict;
 pub mod window;

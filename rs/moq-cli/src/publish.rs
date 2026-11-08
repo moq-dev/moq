@@ -7,8 +7,8 @@ use moq_mux::container::{flv, fmp4, ts};
 pub enum PublishFormat {
 	/// Raw AVC (H.264) Annex B elementary stream.
 	Avc3,
-	/// Fragmented MP4 (CMAF), republished whole as CMAF when `passthrough`.
-	Fmp4 { passthrough: bool },
+	/// Fragmented MP4 (CMAF), republished whole as CMAF when `cmaf`.
+	Fmp4 { cmaf: bool },
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
 	Ts { program: Option<u16> },
 	/// MPEG-TS published whole, paced on `pcr_pid` when given rather than the PMT's clock.
@@ -427,9 +427,9 @@ impl Publish {
 					import: Box::new(import),
 				}
 			}
-			PublishFormat::Fmp4 { passthrough } => {
+			PublishFormat::Fmp4 { cmaf } => {
 				let timebase = catalog.timebase();
-				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_passthrough(*passthrough);
+				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_cmaf(*cmaf);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
@@ -1323,9 +1323,10 @@ pub(crate) mod tests {
 	async fn open_export(
 		source: moq_mux::Source,
 		format: CatalogFormat,
+		delay: Duration,
 	) -> moq_mux::Result<Export<moq_mux::catalog::Consumer<tscat::Ext>>> {
 		let catalog = source.catalog::<tscat::Ext>(format).await?;
-		Ok(Export::new(source, catalog))
+		Ok(Export::new(source, catalog, delay))
 	}
 
 	/// Drain an exporter, concatenating every frame's payload until output stops. The
@@ -1431,10 +1432,9 @@ pub(crate) mod tests {
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
 		drain(
-			open_export(resolved(&origin, "cli").await, CatalogFormat::Hang)
+			open_export(resolved(&origin, "cli").await, CatalogFormat::Hang, RECORDING_MAX_AGE)
 				.await
-				.unwrap()
-				.with_delay(RECORDING_MAX_AGE),
+				.unwrap(),
 		)
 		.await
 	}
@@ -1500,10 +1500,9 @@ pub(crate) mod tests {
 		// Subscribe side: the same catalog stream `run_ts` selects, re-emitting the
 		// ancillary streams verbatim.
 		let output = drain(
-			open_export(resolved(&origin, "cli").await, format)
+			open_export(resolved(&origin, "cli").await, format, RECORDING_MAX_AGE)
 				.await
-				.unwrap()
-				.with_delay(RECORDING_MAX_AGE),
+				.unwrap(),
 		)
 		.await;
 
@@ -2126,8 +2125,8 @@ pub(crate) mod tests {
 		for (format, input) in [
 			(PublishFormat::Ts { program: None }, TS),
 			(PublishFormat::TsPassthrough { pcr_pid: None }, TS),
-			(PublishFormat::Fmp4 { passthrough: false }, FMP4),
-			(PublishFormat::Fmp4 { passthrough: true }, FMP4),
+			(PublishFormat::Fmp4 { cmaf: false }, FMP4),
+			(PublishFormat::Fmp4 { cmaf: true }, FMP4),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
@@ -2380,10 +2379,13 @@ pub(crate) mod tests {
 				instance.restart(&republish, restart, &mut log).unwrap();
 			}
 			if follower.is_none() && instance.pending.is_none() {
-				let export = open_export(resolved(&origin, "demo").await, CatalogFormat::Hang)
-					.await
-					.unwrap()
-					.with_delay(Duration::from_secs(1));
+				let export = open_export(
+					resolved(&origin, "demo").await,
+					CatalogFormat::Hang,
+					Duration::from_secs(1),
+				)
+				.await
+				.unwrap();
 				follower = Some(
 					ts::Follower::new(export)
 						.unwrap()

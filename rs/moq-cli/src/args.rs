@@ -555,7 +555,7 @@ impl MoqSide {
 
 	/// The cluster this process publishes and subscribes on, with the driver that
 	/// must run for as long as it serves. Built once; the origin is its origin, whose
-	/// Hop ID is random per run unless `--cluster-id` names the node.
+	/// Hop ID is random per run.
 	pub fn cluster(&self) -> anyhow::Result<(moq_relay::cluster::Cluster, moq_relay::cluster::Driver)> {
 		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
@@ -891,9 +891,7 @@ impl ImportSource {
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
-			Self::Fmp4(args) => PublishFormat::Fmp4 {
-				passthrough: args.passthrough,
-			},
+			Self::Fmp4(args) => PublishFormat::Fmp4 { cmaf: args.cmaf },
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
 			},
@@ -951,8 +949,8 @@ impl ImportSource {
 pub struct Fmp4Import {
 	/// Publish each fragment whole as CMAF instead of splitting it into one frame per sample.
 	/// Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
-	#[usage(long = "cmaf")]
-	pub passthrough: bool,
+	#[usage(long)]
+	pub cmaf: bool,
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.
@@ -1591,8 +1589,8 @@ mod tests {
 				panic!("expected import")
 			};
 			match &import.source {
-				ImportSource::Fmp4(args) => assert!(args.passthrough),
-				ImportSource::Hls(args) => assert!(args.passthrough),
+				ImportSource::Fmp4(args) => assert!(args.cmaf),
+				ImportSource::Hls(args) => assert!(args.cmaf),
 				_ => panic!("expected fragment input"),
 			}
 		}
@@ -2682,7 +2680,7 @@ mod tests {
 			("--cluster-api-url", "https://api.example/peers", "--cluster-api-url"),
 			("--cluster-node", "https://self.example", "--cluster-node"),
 			("--cluster-token", "cluster.jwt", "--cluster-token"),
-			("--cluster-id", "1", "--cluster-id"),
+			("--cluster-max-hops", "8", "--cluster-max-hops"),
 			("--cluster-tier", "internal", "--cluster-tier"),
 		] {
 			let cli = Invocation::try_parse_from(["moq", flag, value, "auth", "generate"]).unwrap();
