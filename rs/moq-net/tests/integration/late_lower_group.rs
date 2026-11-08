@@ -147,7 +147,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 	write_group(&track, 1);
 	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 
 	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
@@ -180,7 +180,7 @@ async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 	write_group(&track, 1);
 	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
@@ -280,7 +280,7 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	// Idle time lets the merged demand reach the publisher before the lower group exists.
 	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 
 	let mut live_read = vec![(1, 4)];
 	live_read.extend(read_all(&mut live).await);

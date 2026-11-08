@@ -494,7 +494,7 @@ fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
 	for _ in 0..frames {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
-	group.finish().unwrap();
+	let group = group.finish().unwrap();
 	group.sequence
 }
 
@@ -1122,8 +1122,7 @@ impl<B: Backend> Room<B> {
 			let group = writing.get_or_insert_with(|| self.cluster.tracks[broadcast].append_group().unwrap());
 			group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
 			if last {
-				group.finish().unwrap();
-				*writing = None;
+				writing.take().expect("written above").finish().unwrap();
 			}
 		}
 		if last {

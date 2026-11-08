@@ -34,7 +34,7 @@ use crate::{
 pub type Target = fn(&[u8]) -> bool;
 
 /// Build a cached group with optional private object fields for model benchmarks.
-pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
+pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Finished) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	// Object properties come from a moq-transport publisher, whose draft serialized them.
 	let info = track::Info {
@@ -78,8 +78,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		frame.write(payload.clone()).unwrap();
 		group = frame.finish().unwrap();
 	}
-	group.finish().unwrap();
-	(broadcast, track, group)
+	(broadcast, track, group.finish().unwrap())
 }
 
 /// A private frame batch for the model's batch read and write benchmarks.
@@ -1778,7 +1777,7 @@ impl FrameRecv {
 				if let std::task::Poll::Ready(res) = received {
 					res.unwrap();
 					let stream = slot.take().unwrap();
-					let mut group = stream.frame.finish().unwrap();
+					let group = stream.frame.finish().unwrap();
 					group.finish().unwrap();
 					open -= 1;
 				}
@@ -1884,11 +1883,9 @@ impl GroupRecv {
 		Ok(())
 	}
 
-	/// Finish the group, returning its producer, which keeps it cached until dropped or aborted.
-	pub fn finish(mut self) -> crate::Result<group::Producer> {
-		let mut group = self.group.take().ok_or(crate::Error::Closed)?;
-		group.finish()?;
-		Ok(group)
+	/// Finish the group, which stays cached until dropped or aborted.
+	pub fn finish(mut self) -> crate::Result<group::Finished> {
+		self.group.take().ok_or(crate::Error::Closed)?.finish()
 	}
 }
 

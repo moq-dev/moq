@@ -284,7 +284,7 @@ async fn ietf_fetch_keeps_the_stored_form() {
 					.unwrap();
 			}
 			group.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			broadcast.announce().unwrap();
 			let origin = produce_origin(2);
 			let mut options = MockConnectOptions::new(version.parse().unwrap());

@@ -568,7 +568,7 @@ impl Model {
 		let Some(copy) = &publisher.routes[slot] else {
 			return;
 		};
-		if copy.groups.contains_key(&(GROUPS - 1)) && copy.track.finish().is_ok() {
+		if copy.groups.contains_key(&(GROUPS - 1)) && copy.track.finish_shared().is_ok() {
 			publisher.ended = true;
 		}
 	}

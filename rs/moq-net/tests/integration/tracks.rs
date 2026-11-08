@@ -86,7 +86,7 @@ async fn a_session_lists_its_peers_tracks() {
 	assert_eq!(next(&mut tracks).await, "+b");
 	drop(a);
 	assert_eq!(next(&mut tracks).await, "-a");
-	b.finish().unwrap();
+	let b = b.finish().unwrap();
 	drop(b);
 	assert_eq!(next(&mut tracks).await, "~b", "TRACKS_FINISH, not TRACKS_REMOVE");
 
@@ -191,7 +191,7 @@ async fn a_relay_shares_its_upstream_listing() {
 	assert_eq!(next(&mut one).await, "+b");
 	assert_eq!(next(&mut two).await, "+b");
 
-	a.finish().unwrap();
+	let a = a.finish().unwrap();
 	drop(a);
 	assert_eq!(next(&mut one).await, "~a");
 	assert_eq!(next(&mut two).await, "~a");

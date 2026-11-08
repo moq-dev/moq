@@ -125,7 +125,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			// group is whole, so it must be cached as such rather than cancelled.
 			const LATENCY: Duration = Duration::from_millis(100);
 			_pairs.last().unwrap().client_transport.set_latency(LATENCY);
-			group.finish().unwrap();
+			let group = group.finish().unwrap();
 			kio::clock::sleep(LATENCY).await;
 			drop(fetched);
 			kio::clock::sleep(Duration::from_secs(1)).await;
@@ -195,7 +195,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	group
 		.write_frame(Timestamp::ZERO, Bytes::from_static(b"segment"))
 		.unwrap();
-	group.finish().unwrap();
+	let group = group.finish().unwrap();
 	let mut fetched = waiting.await.unwrap();
 	assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"segment");
 	drop(fetched);

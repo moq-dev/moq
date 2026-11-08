@@ -340,7 +340,7 @@ async fn draft18_a_join_reaching_a_finished_track_keeps_its_head() {
 		.expect("no subscriber appeared");
 	// Kept alive, as a publisher draining its session does: a finished track whose producer
 	// is gone lets its cache reclaim the head, and that FETCH is refused.
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	let _track = track;
 
 	let (frames, err) = kio::clock::timeout(TIMEOUT, reader)
@@ -390,7 +390,7 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 
 		// Out of stream credit, so the marker cannot open.
 		pair.server_transport.withhold_unis();
-		track.finish().unwrap();
+		let _finished = track.clone().finish().unwrap();
 		kio::clock::sleep(GRACE / 10).await;
 		assert!(
 			track.subscription().is_some(),
@@ -446,7 +446,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 			.expect("no subscriber appeared");
 
 		track.finish_at(moq_net::track::Position::group(2), None).unwrap();
-		let mut groups = [track.append_group().unwrap(), track.append_group().unwrap()];
+		let groups = [track.append_group().unwrap(), track.append_group().unwrap()];
 		// Paused time advances only once every task is idle: both headers and the end
 		// have reached the subscriber, ahead of any frame.
 		kio::clock::sleep(GRACE / 10).await;
@@ -455,7 +455,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 			"{version}: the track ended before its groups showed"
 		);
 
-		for group in &mut groups {
+		for mut group in groups {
 			group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
 			group.finish().unwrap();
 		}

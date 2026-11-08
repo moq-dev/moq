@@ -731,7 +731,7 @@ async fn a_stream_tracks_datagram_sent_between_its_answer_and_end_arrives() {
 		let mut producer = datagrams.accept(timed());
 		producer.append(millis(1), &b"only"[..]).unwrap();
 		producer.finish();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		let mut subscriber = (&mut subscribing)
 			.await
 			.expect("subscribe panicked")

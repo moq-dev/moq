@@ -97,7 +97,7 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 			None => break,
 		}
 	}
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 	Ok(read)
 }
 
@@ -221,5 +221,5 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 		.expect("group timeout")
 		.unwrap();
 	assert_eq!(group.map(|group| group.sequence), Some(5));
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 }
