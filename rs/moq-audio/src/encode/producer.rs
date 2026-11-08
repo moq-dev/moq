@@ -495,14 +495,14 @@ impl Producer {
 			encoder.reset();
 			self.in_flight.clear();
 		}
-		let packets = encoder.encode(samples)?;
+		encoder.encode(samples)?;
 		self.in_flight.push_back(timestamp);
-		self.publish_packets(packets)
+		self.publish_ready()
 	}
 
-	/// Publish what the codec returned, each packet stamped with the frame it pairs with.
-	fn publish_packets(&mut self, packets: Vec<Encoded>) -> Result<(), Error> {
-		for packet in packets {
+	/// Publish every packet the codec has ready, each stamped with the frame it pairs with.
+	fn publish_ready(&mut self) -> Result<(), Error> {
+		while let Some(packet) = self.codec.get_mut()?.receive()? {
 			let Some(timestamp) = self.in_flight.pop_front() else {
 				return Err(Error::Codec(format!(
 					"{} returned more packets than it was given frames",
@@ -736,8 +736,8 @@ impl Producer {
 		self.publish_full_frames(anchor_us)?;
 		// What the codec still holds came from full frames, so it goes out at their stamps, leaving
 		// the terminal drain's packets to start where the source's partial tail does.
-		let held = self.codec.get_mut()?.flush()?;
-		self.publish_packets(held)?;
+		self.codec.get_mut()?.flush()?;
+		self.publish_ready()?;
 		if !self.in_flight.is_empty() {
 			return Err(Error::Codec(format!(
 				"{} kept {} packet(s) past its flush",

@@ -2,7 +2,7 @@
 //!
 //! Each call that produces packets keeps them on the encoder handle, readable by index with
 //! [moq_audio_encoder_packet] or [moq_video_encoder_packet] until the next such call or the
-//! handle is freed. Publish them with [crate::moq_publish_audio] or [crate::moq_publish_video]
+//! handle is freed; [moq_audio_encoder_receive] keeps the one packet it writes the same way. Publish them with [crate::moq_publish_audio] or [crate::moq_publish_video]
 //! and [crate::moq_publish_media_frame].
 
 use std::time::Duration;
@@ -69,14 +69,13 @@ impl AudioEncoder {
 	}
 
 	fn keep(&mut self, packets: impl IntoIterator<Item = moq_audio::encode::Encoded>) -> Result<i32, Error> {
-		self.packets = packets
-			.into_iter()
-			.map(|packet| Packet {
-				payload: packet.payload,
-				timestamp: None,
-				keyframe: false,
-			})
-			.collect();
+		// Reuses the buffer, since every received packet passes through it.
+		self.packets.clear();
+		self.packets.extend(packets.into_iter().map(|packet| Packet {
+			payload: packet.payload,
+			timestamp: None,
+			keyframe: false,
+		}));
 		count(&self.packets)
 	}
 }
@@ -226,9 +225,8 @@ pub extern "C" fn moq_audio_encoder_bitrate(encoder: u32, bitrate: u64) -> i32 {
 /// Encode one frame of interleaved f32 PCM, exactly [moq_audio_encoder_frame_size] samples
 /// per channel.
 ///
-/// Returns the number of packets now ready, read with [moq_audio_encoder_packet], or a negative
-/// code on failure: zero while a pipelining codec holds the frame, or several when it releases
-/// earlier ones.
+/// Returns zero, or a negative code on failure. Read the frame's packet with
+/// [moq_audio_encoder_receive], which a pipelining codec readies only after later frames.
 ///
 /// # Safety
 /// - `pcm` must point at `pcm_len` floats.
@@ -237,21 +235,46 @@ pub unsafe extern "C" fn moq_audio_encoder_encode(encoder: u32, pcm: *const f32,
 	ffi::enter(move || {
 		let pcm = unsafe { ffi::parse_slice(pcm, pcm_len)? };
 		with(encoder, audio, |audio| {
-			let packets = audio.encoder()?.encode(pcm)?;
-			audio.keep(packets)
+			audio.encoder()?.encode(pcm)?;
+			Ok(0)
 		})
 	})
 }
 
-/// Drain the packets the codec still holds, without padding, keeping the encoder open.
+/// Pop the oldest ready packet into `dst`; call until it returns zero after each
+/// [moq_audio_encoder_encode] or [moq_audio_encoder_flush].
 ///
-/// Returns their count, read with [moq_audio_encoder_packet], or a negative code.
+/// Returns one when it wrote a packet, zero while the codec holds the rest, or a negative code.
+/// `payload` borrows the encoder until its next call or [moq_audio_encoder_free]; `timestamp`
+/// is NULL and `keyframe` false, since the codec stamps nothing.
+///
+/// # Safety
+/// - `dst` must point at a writable [moq_frame].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_audio_encoder_receive(encoder: u32, dst: *mut moq_frame) -> i32 {
+	ffi::enter(move || {
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		with(encoder, audio, |audio| {
+			let Some(ready) = audio.encoder()?.receive()? else {
+				return Ok(0);
+			};
+			audio.keep([ready])?;
+			packet(&audio.packets, 0, dst)?;
+			Ok(1)
+		})
+	})
+}
+
+/// Mark the end of input, so [moq_audio_encoder_receive] returns every packet the codec still
+/// holds, without padding or closing the encoder.
+///
+/// Returns zero, or a negative code.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_audio_encoder_flush(encoder: u32) -> i32 {
 	ffi::enter(move || {
 		with(encoder, audio, |audio| {
-			let packets = audio.encoder()?.flush()?;
-			audio.keep(packets)
+			audio.encoder()?.flush()?;
+			Ok(0)
 		})
 	})
 }
@@ -288,8 +311,7 @@ pub unsafe extern "C" fn moq_audio_encoder_finish(
 	})
 }
 
-/// Read packet `index` from the last [moq_audio_encoder_encode], [moq_audio_encoder_flush], or
-/// [moq_audio_encoder_finish].
+/// Read packet `index` from the last [moq_audio_encoder_finish].
 ///
 /// `payload` borrows the encoder until its next call or [moq_audio_encoder_free]; `timestamp`
 /// is NULL and `keyframe` false, since the codec stamps nothing. Returns zero, or a negative

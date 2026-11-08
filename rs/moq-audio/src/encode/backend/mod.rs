@@ -30,19 +30,20 @@ pub(crate) mod stub;
 /// for the config's layout; a codec with another native order reorders it here.
 ///
 /// Every frame becomes exactly one packet, in submission order, but a codec that
-/// pipelines (MediaCodec, AudioToolbox) may hand it back on a later call: the
+/// pipelines (MediaCodec, AudioToolbox) may hold it past later submissions: the
 /// producer stamps each packet with the frame it pairs with by that order.
 ///
 /// Unwind safe because the published `Encoder` that boxes it is.
 pub(crate) trait Backend: Send + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
-	/// Submit exactly one frame of the codec's frame size, returning the packets
-	/// now ready: none while the codec holds this frame, or several when it
-	/// releases earlier ones.
-	fn encode(&mut self, pcm: &[f32]) -> Result<Vec<Encoded>, Error>;
+	/// Submit exactly one frame of the codec's frame size.
+	fn encode(&mut self, pcm: &[f32]) -> Result<(), Error>;
 
-	/// Return every packet the codec still holds, leaving it ready for the next
-	/// frame.
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error>;
+	/// Pop the oldest packet that is ready, or `None` while the codec holds the rest.
+	fn receive(&mut self) -> Result<Option<Encoded>, Error>;
+
+	/// Mark the end of input, so [`receive`](Self::receive) returns every packet
+	/// the codec still holds. The next frame submitted starts new input.
+	fn flush(&mut self) -> Result<(), Error>;
 
 	/// Drop codec history, held packets included, so the next frame codes as if
 	/// it were the first.
@@ -172,12 +173,16 @@ mod tests {
 	struct Fake(&'static str);
 
 	impl Backend for Fake {
-		fn encode(&mut self, _pcm: &[f32]) -> Result<Vec<Encoded>, Error> {
-			Ok(vec![Encoded::new(bytes::Bytes::new())])
+		fn encode(&mut self, _pcm: &[f32]) -> Result<(), Error> {
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-			Ok(Vec::new())
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(None)
+		}
+
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
 		}
 
 		fn reset(&mut self) {}

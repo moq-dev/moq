@@ -1932,7 +1932,8 @@ mod tests {
 		assert_eq!(decoder.layout().channels(), 6);
 		let mut decoded_samples = false;
 		for packet in &packets {
-			for decoded in decoder.decode(packet).expect("decode the published opus packet") {
+			decoder.decode(packet).expect("decode the published opus packet");
+			while let Some(decoded) = decoder.receive().expect("receive the decoded opus packet") {
 				assert_eq!(decoded.samples.len() % 6, 0);
 				decoded_samples |= !decoded.samples.is_empty();
 			}

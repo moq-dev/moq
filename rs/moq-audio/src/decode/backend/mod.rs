@@ -28,19 +28,20 @@ mod symphonia;
 /// An opened decoder: packets in, interleaved `f32` PCM out.
 ///
 /// Output comes back in stream order, but a codec that pipelines (MediaCodec)
-/// may return a packet's samples from a later call.
+/// may hold a packet's samples past later submissions.
 ///
 /// Unwind safe because the published `Decoder` that boxes it is.
 pub(crate) trait Backend: Send + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
-	/// Submit one packet, returning the samples now ready as interleaved samples
-	/// at [`sample_rate`](Self::sample_rate) and [`layout`](Self::layout),
-	/// untrimmed: none while the codec holds this packet, or several when it
-	/// releases earlier ones.
-	fn decode(&mut self, packet: &[u8]) -> Result<Vec<Decoded>, Error>;
+	/// Submit one packet.
+	fn decode(&mut self, packet: &[u8]) -> Result<(), Error>;
 
-	/// Return every output the codec still holds, leaving it ready for the next
-	/// packet.
-	fn flush(&mut self) -> Result<Vec<Decoded>, Error>;
+	/// Pop the oldest ready output, interleaved at [`sample_rate`](Self::sample_rate)
+	/// and [`layout`](Self::layout) and untrimmed, or `None` while the codec holds the rest.
+	fn receive(&mut self) -> Result<Option<Decoded>, Error>;
+
+	/// Mark the end of input, so [`receive`](Self::receive) returns every output
+	/// the codec still holds. The next packet submitted starts new input.
+	fn flush(&mut self) -> Result<(), Error>;
 
 	/// Drop codec history, held output included, after a discontinuity, so the
 	/// next packet does not predict from audio that is no longer adjacent.
@@ -151,21 +152,21 @@ fn select(catalog: &AudioConfig, candidates: Vec<&Candidate>) -> Result<Box<dyn 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Activity;
 
 	/// Opens anything it advertises and reports which candidate it came from.
 	struct Stub(&'static str);
 
 	impl Backend for Stub {
-		fn decode(&mut self, _packet: &[u8]) -> Result<Vec<Decoded>, Error> {
-			Ok(vec![Decoded {
-				samples: Vec::new(),
-				activity: Activity::Active,
-			}])
+		fn decode(&mut self, _packet: &[u8]) -> Result<(), Error> {
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<Decoded>, Error> {
-			Ok(Vec::new())
+		fn receive(&mut self) -> Result<Option<Decoded>, Error> {
+			Ok(None)
+		}
+
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
 		}
 
 		fn reset(&mut self) -> Result<(), Error> {

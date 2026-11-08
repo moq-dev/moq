@@ -9429,10 +9429,11 @@ class FfiConverterMoqAudioConsumer {
 }
 
 abstract class MoqAudioEncoderInterface {
-  List<MoqAudioPacket> encode({required List<double> pcm});
+  void encode({required List<double> pcm});
   MoqAudioEncoderFinished finish({required List<double> pcm});
-  List<MoqAudioPacket> flush();
+  void flush();
   int frameSize();
+  MoqAudioPacket? receive();
   void setBitrate({required int bitrate});
   MoqAudioInit trackInit();
 }
@@ -9484,16 +9485,14 @@ class MoqAudioEncoder implements MoqAudioEncoderInterface {
     }
   }
 
-  List<MoqAudioPacket> encode({required List<double> pcm}) {
-    return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqaudioencoder_encode(
+  void encode({required List<double> pcm}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqaudioencoder_encode(
         uniffiClonePointer(),
         FfiConverterSequenceDouble32.lower(pcm),
         status,
-      ),
-      FfiConverterSequenceMoqAudioPacket.lift,
-      moqExceptionErrorHandler,
-    );
+      );
+    }, moqExceptionErrorHandler);
   }
 
   MoqAudioEncoderFinished finish({required List<double> pcm}) {
@@ -9508,15 +9507,13 @@ class MoqAudioEncoder implements MoqAudioEncoderInterface {
     );
   }
 
-  List<MoqAudioPacket> flush() {
-    return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqaudioencoder_flush(
+  void flush() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqaudioencoder_flush(
         uniffiClonePointer(),
         status,
-      ),
-      FfiConverterSequenceMoqAudioPacket.lift,
-      moqExceptionErrorHandler,
-    );
+      );
+    }, moqExceptionErrorHandler);
   }
 
   int frameSize() {
@@ -9526,6 +9523,17 @@ class MoqAudioEncoder implements MoqAudioEncoderInterface {
         status,
       ),
       FfiConverterUInt64.lift,
+      moqExceptionErrorHandler,
+    );
+  }
+
+  MoqAudioPacket? receive() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqaudioencoder_receive(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterOptionalMoqAudioPacket.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -17341,6 +17349,53 @@ class FfiConverterOptionalMoqAnnounceEvent {
   }
 }
 
+class FfiConverterOptionalMoqAudioPacket {
+  static MoqAudioPacket? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqAudioPacket.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqAudioPacket?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqAudioPacket.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqAudioPacket?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqAudioPacket? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqAudioPacket.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqAudioPacket? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqAudioPacket.allocationSize(value),
+    );
+    FfiConverterOptionalMoqAudioPacket.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqAudioPacket? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqAudioPacket.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqAudioRead {
   static MoqAudioRead? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqAudioRead.read(buf.asUint8List()).value;
@@ -19773,10 +19828,10 @@ external Pointer<Void> uniffi_moq_ffi_fn_constructor_moqaudioencoder_new(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<
-  RustBuffer Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
->(assetId: _uniffiAssetId)
-external RustBuffer uniffi_moq_ffi_fn_method_moqaudioencoder_encode(
+@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqaudioencoder_encode(
   Pointer<Void> ptr,
   RustBuffer pcm,
   Pointer<RustCallStatus> uniffiStatus,
@@ -19791,10 +19846,10 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqaudioencoder_finish(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external RustBuffer uniffi_moq_ffi_fn_method_moqaudioencoder_flush(
+external void uniffi_moq_ffi_fn_method_moqaudioencoder_flush(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -19803,6 +19858,14 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqaudioencoder_flush(
   assetId: _uniffiAssetId,
 )
 external int uniffi_moq_ffi_fn_method_moqaudioencoder_frame_size(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqaudioencoder_receive(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -23311,6 +23374,9 @@ external int uniffi_moq_ffi_checksum_method_moqaudioencoder_flush();
 external int uniffi_moq_ffi_checksum_method_moqaudioencoder_frame_size();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqaudioencoder_receive();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqaudioencoder_set_bitrate();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -24171,16 +24237,19 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_next() != 7650) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_encode() != 18180) {
+  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_encode() != 12465) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioencoder_finish() != 24341) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_flush() != 64556) {
+  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_flush() != 43516) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioencoder_frame_size() != 37264) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_receive() != 46467) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioencoder_set_bitrate() != 10667) {

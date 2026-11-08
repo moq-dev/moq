@@ -3,6 +3,8 @@
 
 use symphonia_core::codecs::audio::AudioDecoder;
 
+use std::collections::VecDeque;
+
 use super::Backend;
 use crate::decode::Decoded;
 use crate::{Activity, Error, Layout, aac};
@@ -14,6 +16,8 @@ pub(super) struct Symphonia {
 	sample_rate: u32,
 	layout: Layout,
 	adts: bool,
+	/// Outputs submitted but not yet received, which reuse their slots across calls.
+	ready: VecDeque<Decoded>,
 }
 
 impl Symphonia {
@@ -60,12 +64,13 @@ impl Symphonia {
 			sample_rate,
 			layout: Layout::from_channels(channel_count as u32)?,
 			adts: catalog.description.is_none() && !matches!(catalog.container, hang::catalog::Container::Cmaf { .. }),
+			ready: VecDeque::new(),
 		}))
 	}
 }
 
 impl Backend for Symphonia {
-	fn decode(&mut self, packet: &[u8]) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 		let packet = if self.adts {
 			let header =
 				moq_mux::codec::aac::adts::Header::parse(packet).map_err(|err| Error::Decode(format!("aac: {err}")))?;
@@ -99,19 +104,25 @@ impl Backend for Symphonia {
 
 		let mut samples = Vec::new();
 		decoded.copy_to_vec_interleaved(&mut samples);
-		Ok(vec![Decoded {
+		self.ready.push_back(Decoded {
 			samples,
 			activity: Activity::Active,
-		}])
+		});
+		Ok(())
 	}
 
-	/// Symphonia returns each packet's samples from the call that submits it.
-	fn flush(&mut self) -> Result<Vec<Decoded>, Error> {
-		Ok(Vec::new())
+	fn receive(&mut self) -> Result<Option<Decoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	/// Symphonia readies each packet's samples as soon as it is submitted.
+	fn flush(&mut self) -> Result<(), Error> {
+		Ok(())
 	}
 
 	fn reset(&mut self) -> Result<(), Error> {
 		self.inner.reset();
+		self.ready.clear();
 		Ok(())
 	}
 

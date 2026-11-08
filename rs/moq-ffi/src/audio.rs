@@ -335,19 +335,28 @@ impl MoqAudioEncoder {
 		Ok(())
 	}
 
-	/// Encode one codec-sized interleaved f32 PCM frame, returning the packets now ready: none
-	/// while a pipelining codec holds the frame, or several when it releases earlier ones.
-	pub fn encode(&self, pcm: Vec<f32>) -> Result<Vec<MoqAudioPacket>, MoqError> {
+	/// Submit one codec-sized interleaved f32 PCM frame, whose packet `receive` returns.
+	pub fn encode(&self, pcm: Vec<f32>) -> Result<(), MoqError> {
 		let mut guard = self.inner.lock().unwrap();
-		let packets = guard.as_mut().ok_or(MoqError::Closed)?.encode(&pcm)?;
-		Ok(audio_packets(packets))
+		guard.as_mut().ok_or(MoqError::Closed)?.encode(&pcm)?;
+		Ok(())
 	}
 
-	/// Return every packet the codec still holds, without padding or closing the encoder.
-	pub fn flush(&self) -> Result<Vec<MoqAudioPacket>, MoqError> {
+	/// Pop the oldest ready packet, or none while the codec holds the rest; call until none.
+	pub fn receive(&self) -> Result<Option<MoqAudioPacket>, MoqError> {
 		let mut guard = self.inner.lock().unwrap();
-		let packets = guard.as_mut().ok_or(MoqError::Closed)?.flush()?;
-		Ok(audio_packets(packets))
+		let packet = guard.as_mut().ok_or(MoqError::Closed)?.receive()?;
+		Ok(packet.map(|packet| MoqAudioPacket {
+			data: packet.payload.to_vec(),
+		}))
+	}
+
+	/// Mark the end of input, so `receive` returns every packet the codec still holds,
+	/// without padding or closing the encoder.
+	pub fn flush(&self) -> Result<(), MoqError> {
+		let mut guard = self.inner.lock().unwrap();
+		guard.as_mut().ok_or(MoqError::Closed)?.flush()?;
+		Ok(())
 	}
 
 	/// Drain the encoder, optionally padding one final partial frame.
@@ -856,9 +865,11 @@ mod tests {
 		};
 		let encoder = MoqAudioEncoder::new(output).unwrap();
 		let samples = encoder.frame_size().unwrap() as usize * 2;
-		let packets = encoder.encode(vec![0.0; samples]).unwrap();
-		assert!(packets.len() == 1 && !packets[0].data.is_empty());
-		assert!(encoder.flush().unwrap().is_empty(), "libopus holds nothing");
+		encoder.encode(vec![0.0; samples]).unwrap();
+		assert!(!encoder.receive().unwrap().unwrap().data.is_empty());
+		assert!(encoder.receive().unwrap().is_none(), "one packet per frame");
+		encoder.flush().unwrap();
+		assert!(encoder.receive().unwrap().is_none(), "libopus holds nothing");
 		encoder.finish(Vec::new()).unwrap();
 		assert!(matches!(encoder.frame_size(), Err(MoqError::Closed)));
 	}
@@ -897,7 +908,8 @@ mod tests {
 		let encoder = MoqAudioEncoder::new(opus_output(None)).unwrap();
 		encoder.set_bitrate(32_000).unwrap();
 		let samples = encoder.frame_size().unwrap() as usize * 2;
-		assert!(!encoder.encode(vec![0.0; samples]).unwrap()[0].data.is_empty());
+		encoder.encode(vec![0.0; samples]).unwrap();
+		assert!(!encoder.receive().unwrap().unwrap().data.is_empty());
 		encoder.finish(Vec::new()).unwrap();
 		assert!(matches!(encoder.set_bitrate(64_000), Err(MoqError::Closed)));
 		assert!(matches!(encoder.track_init(), Err(MoqError::Closed)));

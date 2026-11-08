@@ -105,43 +105,63 @@ impl Decoder {
 		self.delay_remaining
 	}
 
-	/// Decode one packet into interleaved `f32` PCM, returning zero or more
-	/// outputs in stream order, each with its codec activity.
+	/// Submit one packet, whose interleaved `f32` PCM [`receive`](Self::receive)
+	/// returns.
 	///
-	/// A codec that pipelines holds a packet's samples and returns them from a
-	/// later call, alongside that call's own; libopus, PCM, and symphonia return
-	/// exactly one output per packet. Call [`flush`](Self::flush) after the last
-	/// packet for whatever is still held.
+	/// A codec that pipelines holds a packet's samples past later packets;
+	/// libopus, PCM, and symphonia ready exactly one output per packet at once.
+	/// Call [`flush`](Self::flush) after the last packet for whatever is still held.
 	///
 	/// An empty Opus packet marks one lost packet and conceals as much audio as the
 	/// last packet that decoded held, so a lost 20 ms packet yields 20 ms. It is
 	/// refused with [`Error::Decode`] before any packet has decoded, since there is
 	/// no length to conceal. Loss during DTX remains classified as DTX, while loss
 	/// during active audio remains active.
-	pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<Decoded>, Error> {
-		let decoded = self.backend.decode(packet)?;
-		Ok(self.trim(decoded))
+	pub fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
+		self.backend.decode(packet)
 	}
 
-	/// Return every output the codec is still holding, once the stream has ended
-	/// or before a boundary its output has to respect, leaving the decoder ready
-	/// for the packets that follow.
-	pub fn flush(&mut self) -> Result<Vec<Decoded>, Error> {
-		let decoded = self.backend.flush()?;
-		Ok(self.trim(decoded))
-	}
-
-	/// Trim whatever startup delay is left off the front of `decoded`, in order.
-	fn trim(&mut self, mut decoded: Vec<Decoded>) -> Vec<Decoded> {
+	/// Pop the oldest ready output in stream order, with its codec activity and
+	/// any startup delay left trimmed off, or `None` while the codec holds the rest.
+	///
+	/// Call until `None` after each [`decode`](Self::decode) or [`flush`](Self::flush).
+	pub fn receive(&mut self) -> Result<Option<Decoded>, Error> {
+		let Some(mut output) = self.backend.receive()? else {
+			return Ok(None);
+		};
 		let channels = self.backend.layout().channels() as usize;
-		for output in &mut decoded {
-			let trim = self.delay_remaining.min(output.samples.len() / channels);
-			if trim > 0 {
-				output.samples.drain(..trim * channels);
-				self.delay_remaining -= trim;
-			}
+		let trim = self.delay_remaining.min(output.samples.len() / channels);
+		if trim > 0 {
+			output.samples.drain(..trim * channels);
+			self.delay_remaining -= trim;
 		}
-		decoded
+		Ok(Some(output))
+	}
+
+	/// Mark the end of input, once the stream has ended or before a boundary its
+	/// output has to respect, so [`receive`](Self::receive) returns every output
+	/// the codec still holds. Packets decoded afterwards start new input.
+	pub fn flush(&mut self) -> Result<(), Error> {
+		self.backend.flush()
+	}
+
+	/// Submit `packet` and take every output it readied.
+	#[cfg(test)]
+	pub(crate) fn decode_all(&mut self, packet: &[u8]) -> Result<Vec<Decoded>, Error> {
+		self.decode(packet)?;
+		self.ready()
+	}
+
+	/// Flush and take every output the codec held.
+	#[cfg(test)]
+	pub(crate) fn flush_all(&mut self) -> Result<Vec<Decoded>, Error> {
+		self.flush()?;
+		self.ready()
+	}
+
+	#[cfg(test)]
+	fn ready(&mut self) -> Result<Vec<Decoded>, Error> {
+		std::iter::from_fn(|| self.receive().transpose()).collect()
 	}
 }
 
@@ -178,35 +198,40 @@ pub(crate) mod tests {
 
 	/// Decodes each byte to one mono sample of its value, and pipelines like a
 	/// platform decoder: it holds every other packet's output and releases it with
-	/// the next, so calls alternate between no output and two.
+	/// the next, so submissions alternate between readying no output and two.
 	struct Pipelined {
 		held: Option<Decoded>,
+		ready: std::collections::VecDeque<Decoded>,
 	}
 
 	/// Frames of startup delay [`Pipelined`] declares.
 	const PIPELINED_DELAY: usize = 3;
 
 	impl Backend for Pipelined {
-		fn decode(&mut self, packet: &[u8]) -> Result<Vec<Decoded>, Error> {
+		fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 			let output = Decoded {
 				samples: packet.iter().map(|&byte| f32::from(byte)).collect(),
 				activity: crate::Activity::Active,
 			};
-			Ok(match self.held.take() {
-				Some(held) => vec![held, output],
-				None => {
-					self.held = Some(output);
-					Vec::new()
-				}
-			})
+			match self.held.take() {
+				Some(held) => self.ready.extend([held, output]),
+				None => self.held = Some(output),
+			}
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<Decoded>, Error> {
-			Ok(self.held.take().into_iter().collect())
+		fn receive(&mut self) -> Result<Option<Decoded>, Error> {
+			Ok(self.ready.pop_front())
+		}
+
+		fn flush(&mut self) -> Result<(), Error> {
+			self.ready.extend(self.held.take());
+			Ok(())
 		}
 
 		fn reset(&mut self) -> Result<(), Error> {
 			self.held = None;
+			self.ready.clear();
 			Ok(())
 		}
 
@@ -229,7 +254,10 @@ pub(crate) mod tests {
 
 	fn pipelined() -> Decoder {
 		Decoder {
-			backend: Box::new(Pipelined { held: None }),
+			backend: Box::new(Pipelined {
+				held: None,
+				ready: Default::default(),
+			}),
 			delay: PIPELINED_DELAY,
 			delay_remaining: PIPELINED_DELAY,
 		}
@@ -245,33 +273,33 @@ pub(crate) mod tests {
 	#[test]
 	fn held_output_is_trimmed_in_order_and_flushed() {
 		let mut decoder = pipelined();
-		assert!(decoder.decode(&[1, 1]).unwrap().is_empty());
+		assert!(decoder.decode_all(&[1, 1]).unwrap().is_empty());
 		assert_eq!(decoder.delay_remaining(), PIPELINED_DELAY, "nothing emerged to trim");
 
 		// Three frames of delay take all of the first output and one of the second.
-		assert_eq!(samples(decoder.decode(&[2, 2]).unwrap()), [vec![], vec![2.0]]);
+		assert_eq!(samples(decoder.decode_all(&[2, 2]).unwrap()), [vec![], vec![2.0]]);
 		assert_eq!(decoder.delay_remaining(), 0);
 
-		assert!(decoder.decode(&[3, 3]).unwrap().is_empty());
-		assert_eq!(samples(decoder.flush().unwrap()), [vec![3.0, 3.0]]);
-		assert!(decoder.flush().unwrap().is_empty());
+		assert!(decoder.decode_all(&[3, 3]).unwrap().is_empty());
+		assert_eq!(samples(decoder.flush_all().unwrap()), [vec![3.0, 3.0]]);
+		assert!(decoder.flush_all().unwrap().is_empty());
 
-		assert!(decoder.decode(&[4]).unwrap().is_empty());
-		assert_eq!(samples(decoder.decode(&[5]).unwrap()), [vec![4.0], vec![5.0]]);
+		assert!(decoder.decode_all(&[4]).unwrap().is_empty());
+		assert_eq!(samples(decoder.decode_all(&[5]).unwrap()), [vec![4.0], vec![5.0]]);
 	}
 
 	/// A reset drops held output and reapplies the startup delay to what follows.
 	#[test]
 	fn reset_drops_held_output() {
 		let mut decoder = pipelined();
-		assert!(decoder.decode(&[1; 4]).unwrap().is_empty());
-		assert_eq!(samples(decoder.decode(&[2; 4]).unwrap()), [vec![1.0], vec![2.0; 4]]);
-		assert!(decoder.decode(&[3; 4]).unwrap().is_empty());
+		assert!(decoder.decode_all(&[1; 4]).unwrap().is_empty());
+		assert_eq!(samples(decoder.decode_all(&[2; 4]).unwrap()), [vec![1.0], vec![2.0; 4]]);
+		assert!(decoder.decode_all(&[3; 4]).unwrap().is_empty());
 
 		decoder.reset().unwrap();
-		assert!(decoder.flush().unwrap().is_empty());
-		assert!(decoder.decode(&[4; 4]).unwrap().is_empty());
-		assert_eq!(samples(decoder.flush().unwrap()), [vec![4.0]]);
+		assert!(decoder.flush_all().unwrap().is_empty());
+		assert!(decoder.decode_all(&[4; 4]).unwrap().is_empty());
+		assert_eq!(samples(decoder.flush_all().unwrap()), [vec![4.0]]);
 	}
 
 	/// The published `Decoder` was unwind safe before it boxed a backend; keep it so.
@@ -291,7 +319,7 @@ pub(crate) mod tests {
 
 		let decoded: Vec<Vec<f32>> = AAC_FRAMES
 			.iter()
-			.map(|frame| crate::single(decoder.decode(frame).unwrap()).samples)
+			.map(|frame| crate::single(decoder.decode_all(frame).unwrap()).samples)
 			.collect();
 
 		// AAC-LC frames are 1024 samples each, whatever the packet size.
@@ -350,8 +378,8 @@ pub(crate) mod tests {
 					packet.extend_from_slice(&[0, 0]);
 				}
 				packet.extend_from_slice(frame);
-				let got = crate::single(adts.decode(&packet).unwrap()).samples;
-				let expected = crate::single(raw.decode(frame).unwrap()).samples;
+				let got = crate::single(adts.decode_all(&packet).unwrap()).samples;
+				let expected = crate::single(raw.decode_all(frame).unwrap()).samples;
 				assert!(got == expected, "ADTS framing changed decoded PCM");
 				for altered in [2, 3, 6] {
 					let mut invalid = packet.clone();
@@ -382,7 +410,7 @@ pub(crate) mod tests {
 		};
 		let mut decoder = Decoder::new(&catalog, &Config::default()).unwrap();
 		assert_eq!(
-			crate::single(decoder.decode(AAC_FRAMES[0]).unwrap()).samples.len(),
+			crate::single(decoder.decode_all(AAC_FRAMES[0]).unwrap()).samples.len(),
 			1024
 		);
 	}
@@ -412,7 +440,7 @@ pub(crate) mod tests {
 				let pcm: Vec<f32> = (packet * frames..(packet + 1) * frames)
 					.map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin() * 0.5)
 					.collect();
-				crate::single(encoder.encode(&pcm).unwrap()).payload
+				crate::single(encoder.encode_all(&pcm).unwrap()).payload
 			})
 			.collect()
 	}
@@ -441,10 +469,10 @@ pub(crate) mod tests {
 
 			// The pre-skip is 48 kHz samples, trimmed once.
 			assert_eq!(
-				crate::single(decoder.decode(&packets[0]).unwrap()).samples.len(),
+				crate::single(decoder.decode_all(&packets[0]).unwrap()).samples.len(),
 				960 - 312
 			);
-			assert_eq!(crate::single(decoder.decode(&packets[1]).unwrap()).samples.len(), 960);
+			assert_eq!(crate::single(decoder.decode_all(&packets[1]).unwrap()).samples.len(), 960);
 		}
 	}
 
@@ -463,12 +491,12 @@ pub(crate) mod tests {
 		assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
 
 		for packet in &packets {
-			crate::single(decoder.decode(packet).unwrap());
+			crate::single(decoder.decode_all(packet).unwrap());
 		}
-		assert_eq!(crate::single(decoder.decode(&[]).unwrap()).samples.len(), 960);
+		assert_eq!(crate::single(decoder.decode_all(&[]).unwrap()).samples.len(), 960);
 
 		// Concealment doesn't change the length: the next loss is the same size.
-		assert_eq!(crate::single(decoder.decode(&[]).unwrap()).samples.len(), 960);
+		assert_eq!(crate::single(decoder.decode_all(&[]).unwrap()).samples.len(), 960);
 	}
 
 	#[test]
@@ -480,11 +508,11 @@ pub(crate) mod tests {
 			let mut decoder = Decoder::new(&opus_catalog(head), &Config::default()).unwrap();
 			let mut last = Vec::new();
 			for packet in &packets {
-				last = crate::single(decoder.decode(packet).unwrap()).samples;
+				last = crate::single(decoder.decode_all(packet).unwrap()).samples;
 			}
 			// A reset after loss keeps the gain.
 			decoder.reset().unwrap();
-			let reset = crate::single(decoder.decode(&packets[4]).unwrap()).samples;
+			let reset = crate::single(decoder.decode_all(&packets[4]).unwrap()).samples;
 			(rms(&last), rms(&reset))
 		};
 
@@ -538,7 +566,7 @@ pub(crate) mod tests {
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 24_000, 1);
 		let mut decoder = Decoder::new(&catalog, &Config::default()).unwrap();
 		assert_eq!(decoder.sample_rate(), 48_000);
-		assert_eq!(crate::single(decoder.decode(&packets[0]).unwrap()).samples.len(), 960);
+		assert_eq!(crate::single(decoder.decode_all(&packets[0]).unwrap()).samples.len(), 960);
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 6);
 		assert!(matches!(

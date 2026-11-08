@@ -443,16 +443,16 @@ impl Encoder {
 		}
 	}
 
-	/// Encode one frame of interleaved `f32` PCM at [`codec_rate`](Self::codec_rate),
-	/// returning zero or more packets.
+	/// Submit one frame of interleaved `f32` PCM at [`codec_rate`](Self::codec_rate),
+	/// whose packet [`receive`](Self::receive) returns.
 	///
-	/// A codec that pipelines holds a frame's packet and returns it from a later
-	/// call, alongside that call's own; libopus and PCM return exactly one.
+	/// A codec that pipelines holds the packet past later frames; libopus and
+	/// PCM ready it at once.
 	///
 	/// `pcm.len()` must equal `frame_size() * codec_channels()`. The
 	/// [`Producer`](super::Producer) handles format conversion and resampling
 	/// before calling this; for direct use, the caller does the same.
-	pub fn encode(&mut self, pcm: &[f32]) -> Result<Vec<Encoded>, Error> {
+	pub fn encode(&mut self, pcm: &[f32]) -> Result<(), Error> {
 		let expected = self.frame_size * self.codec_channels() as usize;
 		if pcm.len() != expected {
 			return Err(Error::Misaligned {
@@ -460,18 +460,25 @@ impl Encoder {
 				expected: expected * std::mem::size_of::<f32>(),
 			});
 		}
-		let encoded = self.backend.encode(pcm)?;
+		self.backend.encode(pcm)?;
 		self.started = true;
-		Ok(encoded)
+		Ok(())
 	}
 
-	/// Return every packet the codec is still holding, leaving the encoder ready
-	/// for the frames that follow.
+	/// Pop the oldest ready packet, or `None` while the codec holds the rest.
+	///
+	/// Call until `None` after each [`encode`](Self::encode) or [`flush`](Self::flush).
+	pub fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		self.backend.receive()
+	}
+
+	/// Mark the end of input, so [`receive`](Self::receive) returns every packet
+	/// the codec still holds. Frames encoded afterwards start new input.
 	///
 	/// Pads nothing, so the codec's lookahead stays inside it: reach for this at a
 	/// boundary the packets have to respect, and for [`finish`](Self::finish) at
 	/// the end of the stream.
-	pub fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+	pub fn flush(&mut self) -> Result<(), Error> {
 		self.backend.flush()
 	}
 
@@ -479,8 +486,8 @@ impl Encoder {
 	/// returning every packet needed to drain codec lookahead.
 	///
 	/// `pcm` is interleaved at [`codec_rate`](Self::codec_rate), may be empty,
-	/// and must contain at most one frame. The packets start with any the codec
-	/// held from earlier [`encode`](Self::encode) calls. Silence added here only drains
+	/// and must contain at most one frame. The packets start with any not yet
+	/// [received](Self::receive) from earlier [`encode`](Self::encode) calls. Silence added here only drains
 	/// audio already supplied; [`Finish::discard_padding`] reports how much of
 	/// the decoded tail is artificial and must not count as source duration.
 	/// Consuming the encoder prevents encoding across the artificial terminal
@@ -505,7 +512,6 @@ impl Encoder {
 		}
 
 		let source_frames = pcm.len() / channels;
-		let mut packets = Vec::new();
 		let padding = if pcm.is_empty() {
 			0
 		} else {
@@ -513,13 +519,13 @@ impl Encoder {
 			frame.extend_from_slice(pcm);
 			frame.resize(frame_samples, 0.0);
 			let padding = (frame_samples - pcm.len()) / channels;
-			packets.extend(self.encode(&frame)?);
+			self.encode(&frame)?;
 			padding
 		};
 
 		if !self.started {
 			return Ok(Finish {
-				packets,
+				packets: self.collect()?,
 				discard_padding: 0,
 			});
 		}
@@ -529,12 +535,13 @@ impl Encoder {
 		let silence = vec![0.0; frame_samples];
 		let silent_frames = drain.div_ceil(self.frame_size);
 		for _ in 0..silent_frames {
-			packets.extend(self.encode(&silence)?);
+			self.encode(&silence)?;
 		}
-		packets.extend(self.backend.flush()?);
+		self.backend.flush()?;
+		let packets = self.collect()?;
 
 		// Counted in frames submitted here rather than packets returned, which
-		// include any the codec held from earlier calls.
+		// include any not yet received from earlier calls.
 		let drained = usize::from(!pcm.is_empty()) + silent_frames;
 		let discard_padding = drained
 			.saturating_mul(self.frame_size)
@@ -545,6 +552,25 @@ impl Encoder {
 			packets,
 			discard_padding,
 		})
+	}
+
+	/// Every packet ready now, oldest first.
+	fn collect(&mut self) -> Result<Vec<Encoded>, Error> {
+		std::iter::from_fn(|| self.receive().transpose()).collect()
+	}
+
+	/// Submit `pcm` and take every packet it readied.
+	#[cfg(test)]
+	pub(crate) fn encode_all(&mut self, pcm: &[f32]) -> Result<Vec<Encoded>, Error> {
+		self.encode(pcm)?;
+		self.collect()
+	}
+
+	/// Flush and take every packet the codec held.
+	#[cfg(test)]
+	pub(crate) fn flush_all(&mut self) -> Result<Vec<Encoded>, Error> {
+		self.flush()?;
+		self.collect()
 	}
 
 	/// hang catalog entry describing this encoder's output stream.
@@ -617,12 +643,12 @@ mod tests {
 
 		let frame = sine(440.0, 48_000, 2, enc.frame_size());
 		for _ in 0..5 {
-			let pkt = crate::single(enc.encode(&frame).unwrap());
-			let _ = crate::single(dec.decode(&pkt.payload).unwrap());
+			let pkt = crate::single(enc.encode_all(&frame).unwrap());
+			let _ = crate::single(dec.decode_all(&pkt.payload).unwrap());
 		}
 
-		let pkt = crate::single(enc.encode(&frame).unwrap());
-		let decoded = crate::single(dec.decode(&pkt.payload).unwrap());
+		let pkt = crate::single(enc.encode_all(&frame).unwrap());
+		let decoded = crate::single(dec.decode_all(&pkt.payload).unwrap());
 		assert_eq!(decoded.samples.len(), frame.len());
 
 		let energy_in: f32 = frame.iter().map(|s| s * s).sum();
@@ -656,7 +682,7 @@ mod tests {
 			let mut enc = Encoder::new(&config).unwrap();
 			assert_eq!(enc.frame_size(), samples);
 
-			let packet = crate::single(enc.encode(&vec![0.0f32; samples]).unwrap());
+			let packet = crate::single(enc.encode_all(&vec![0.0f32; samples]).unwrap());
 			// SAFETY: a non-empty packet from the encoder above; the TOC is its first byte.
 			let coded = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(packet.payload.as_ptr(), 48_000) };
 			assert_eq!(coded as usize, samples, "{millis} ms packet");
@@ -693,13 +719,13 @@ mod tests {
 		let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
 		let frame = vec![0.0; enc.frame_size() * enc.codec_channels() as usize];
 
-		let first = crate::single(dec.decode(&crate::single(enc.encode(&frame).unwrap()).payload).unwrap());
+		let first = crate::single(dec.decode_all(&crate::single(enc.encode_all(&frame).unwrap()).payload).unwrap());
 		assert_eq!(
 			first.samples.len(),
 			(enc.frame_size() - enc.backend.delay()) * enc.codec_channels() as usize
 		);
 
-		let second = crate::single(dec.decode(&crate::single(enc.encode(&frame).unwrap()).payload).unwrap());
+		let second = crate::single(dec.decode_all(&crate::single(enc.encode_all(&frame).unwrap()).payload).unwrap());
 		assert_eq!(second.samples.len(), frame.len());
 	}
 
@@ -722,7 +748,7 @@ mod tests {
 		})
 		.unwrap();
 		let frame = vec![0.0; enc.frame_size()];
-		crate::single(enc.encode(&frame).unwrap());
+		crate::single(enc.encode_all(&frame).unwrap());
 
 		// Three 120-frame packets are required to push out 312 frames.
 		let packets = enc.finish(&[]).unwrap();
@@ -735,13 +761,13 @@ mod tests {
 		let mut enc = Encoder::new(&Config::new(48_000, Layout::Mono)).unwrap();
 		let mut old = vec![0.0; enc.frame_size()];
 		old[enc.frame_size() - 1] = 1.0;
-		crate::single(enc.encode(&old).unwrap());
+		crate::single(enc.encode_all(&old).unwrap());
 
 		enc.reset();
 		let next = vec![0.0; enc.frame_size()];
-		let actual = crate::single(enc.encode(&next).unwrap());
+		let actual = crate::single(enc.encode_all(&next).unwrap());
 		let mut decoder = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
-		let decoded = crate::single(decoder.decode(&actual.payload).unwrap());
+		let decoded = crate::single(decoder.decode_all(&actual.payload).unwrap());
 		let peak = decoded
 			.samples
 			.iter()
@@ -796,8 +822,8 @@ mod tests {
 		let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
 		let input = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
 
-		let packet = crate::single(enc.encode(&input).unwrap());
-		let output = crate::single(dec.decode(&packet.payload).unwrap());
+		let packet = crate::single(enc.encode_all(&input).unwrap());
+		let output = crate::single(dec.decode_all(&packet.payload).unwrap());
 
 		assert_eq!(output.samples, input);
 	}
@@ -822,7 +848,7 @@ mod tests {
 			.unwrap();
 			let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
 			let input = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
-			let output = crate::single(dec.decode(&crate::single(enc.encode(&input).unwrap()).payload).unwrap());
+			let output = crate::single(dec.decode_all(&crate::single(enc.encode_all(&input).unwrap()).payload).unwrap());
 			assert_eq!(output.samples, input, "{layout:?}");
 		}
 	}
@@ -898,7 +924,7 @@ mod tests {
 		let input = [0.1, 0.2, 0.3].repeat(encoder.frame_size());
 		let output = crate::single(
 			decoder
-				.decode(&crate::single(encoder.encode(&input).unwrap()).payload)
+				.decode_all(&crate::single(encoder.encode_all(&input).unwrap()).payload)
 				.unwrap(),
 		);
 
@@ -1049,7 +1075,7 @@ mod tests {
 		let mut enc = stub(&aac(Layout::Mono)).unwrap();
 		assert_eq!(enc.folded_delay(), backend::stub::DELAY);
 		assert!(
-			enc.encode(&[0.0; 1024]).unwrap().is_empty(),
+			enc.encode_all(&[0.0; 1024]).unwrap().is_empty(),
 			"the stub holds its first frame"
 		);
 
@@ -1073,23 +1099,23 @@ mod tests {
 	fn held_packets_come_back_in_order() {
 		let mut enc = stub(&aac(Layout::Mono)).unwrap();
 		let frame = [0.0; 1024];
-		assert!(enc.encode(&frame).unwrap().is_empty());
-		assert_eq!(indices(&enc.encode(&frame).unwrap()), [0, 1]);
-		assert!(enc.encode(&frame).unwrap().is_empty());
-		assert_eq!(indices(&enc.flush().unwrap()), [2]);
-		assert!(enc.flush().unwrap().is_empty());
+		assert!(enc.encode_all(&frame).unwrap().is_empty());
+		assert_eq!(indices(&enc.encode_all(&frame).unwrap()), [0, 1]);
+		assert!(enc.encode_all(&frame).unwrap().is_empty());
+		assert_eq!(indices(&enc.flush_all().unwrap()), [2]);
+		assert!(enc.flush_all().unwrap().is_empty());
 
-		assert!(enc.encode(&frame).unwrap().is_empty());
-		assert_eq!(indices(&enc.encode(&frame).unwrap()), [3, 4]);
+		assert!(enc.encode_all(&frame).unwrap().is_empty());
+		assert_eq!(indices(&enc.encode_all(&frame).unwrap()), [3, 4]);
 	}
 
 	/// A held packet belongs to the epoch that submitted it, so a reset drops it.
 	#[test]
 	fn reset_drops_held_packets() {
 		let mut enc = stub(&aac(Layout::Mono)).unwrap();
-		assert!(enc.encode(&[0.0; 1024]).unwrap().is_empty());
+		assert!(enc.encode_all(&[0.0; 1024]).unwrap().is_empty());
 		enc.reset();
-		assert!(enc.flush().unwrap().is_empty());
+		assert!(enc.flush_all().unwrap().is_empty());
 	}
 
 	/// The padding counts the frames the drain submitted, not the held packets it
@@ -1097,7 +1123,7 @@ mod tests {
 	#[test]
 	fn finish_padding_ignores_held_packets() {
 		let mut enc = stub(&aac(Layout::Mono)).unwrap();
-		assert!(enc.encode(&[0.0; 1024]).unwrap().is_empty());
+		assert!(enc.encode_all(&[0.0; 1024]).unwrap().is_empty());
 
 		// 100 source frames pad 924; the remaining 1188 frames of delay take two more.
 		let finish = enc.finish(&[0.0; 100]).unwrap();
