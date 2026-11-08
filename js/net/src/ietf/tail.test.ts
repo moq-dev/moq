@@ -4,7 +4,7 @@ import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
-import { createMockTransportPair, driveUntil, manual } from "../mock.ts";
+import { createMockTransportPair, manual } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
@@ -116,8 +116,7 @@ test("a group stream that arrives after PUBLISH_DONE is delivered", async () => 
 		expect(await reader.recvGroup()).toBeUndefined();
 		expect(await reader.closed).toBeNull();
 	})();
-	await driveUntil(clock, read);
-	await read;
+	await clock.drive(read);
 	// The Stream Count was met, so nothing waited out the grace.
 	expect(Nano.toMilli(Instant.durationSince(clock.now(), started))).toBeLessThan(GRACE);
 });
