@@ -16,7 +16,7 @@
  */
 import { strict as assert } from "node:assert";
 import { createInterface } from "node:readline";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
 
@@ -233,7 +233,7 @@ try {
 				// `late` names no start, joining the latest group as a player does: group 0, whose
 				// head predates the subscription.
 				const track = broadcast.track("tail").subscribe({
-					delay: { max: Milli(drop ? 60_000 : 5000) },
+					delay: { max: Duration.millis(drop ? 60_000 : 5000) },
 					...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
 				});
 				if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");

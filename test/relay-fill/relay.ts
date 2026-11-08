@@ -7,7 +7,7 @@
 // `fetches` reports how many downstream FETCHes the relay forwarded upstream.
 import assert from "node:assert/strict";
 import { createInterface } from "node:readline";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual } from "@moq/clock";
 import Session from "@moq/qmux";
 import { DEFAULT_EXPIRY } from "../../js/net/src/cache.ts";
 import { connect } from "../../js/net/src/connection/connect.ts";
@@ -73,7 +73,7 @@ try {
 		assert.equal(line, "evict", `unknown command: ${line}`);
 		// Past the cache window and the sweep that trails it by up to half a window, so the
 		// copy has evicted what nobody touched.
-		await clock.advance(Nano.fromMilli(Milli(2 * DEFAULT_EXPIRY)));
+		await clock.advance(DEFAULT_EXPIRY.mul(2));
 		console.log("evicted");
 	}
 } finally {
