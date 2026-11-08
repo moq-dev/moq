@@ -34,9 +34,9 @@
 	"devDependencies": {
 		"@types/bun": "^1.4.4",
 		"esbuild": "^0.28.2",
-		"solid-js": "^1.9.17",
+		"solid-js": "^1.9.18",
 		"typescript": "7.0.2",
 		"vite": "^8.3.5",
-		"vite-plugin-solid": "^2.11.14"
+		"vite-plugin-solid": "^2.11.15"
 	}
 }

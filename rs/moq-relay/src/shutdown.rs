@@ -118,6 +118,7 @@ impl Signals {
 
 /// The sessions a drain is waiting on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tally {
 	/// Served sessions whose closure has not yet been observed by supervision.
 	pub open: usize,
@@ -127,6 +128,7 @@ pub struct Tally {
 
 /// How the drain ended, including sessions cut by its deadline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Drained {
 	/// Sessions still open at the deadline that were force-closed.
 	pub forced: usize,
