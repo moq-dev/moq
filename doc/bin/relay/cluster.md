@@ -277,6 +277,12 @@ detection and shortest-path routing. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
 to pin it.
 
+A relay never dials its own `cluster.node`, so every relay can share one
+`cluster.connect` list or API response. Peer URLs that differ only in query,
+userinfo, fragment, or slashes name one peer and get one link. A relay
+refuses a session that declares its own Hop ID, which means a peer URL
+reaches the relay itself under another name, such as an IP for its hostname.
+
 ## Failure detection
 
 A peer that crashes or drops off the network sends no goodbye, so a relay only
@@ -296,7 +302,8 @@ own 30s deadline.
 Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
 `connect.tls.cert`/`key` on the dialer) or a **JWT** (inline `?jwt=` on a peer
 URL, `token` on a peer object, or a shared `cluster.token` file for every
-listed peer). The accepting relay admits a peer like any client, so a mesh
+listed peer, re-read on every dial so a rotated token applies at the next
+redial). The accepting relay admits a peer like any client, so a mesh
 needs an auth server that grants the cluster CA, such as
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer`. An
 accepted peer counts as a cluster peer only when its grant sets `peer: true`,
