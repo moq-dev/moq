@@ -2,9 +2,9 @@
 //
 // Builds a library around the real render worklet, capture worklet, and capture worker, installs it
 // into an app, bundles the app with each bundler, and loads every script in Chromium. Default mode
-// uses blob: URLs with no CSP, and hosted mode serves the copied assets under a strict CSP, where the
-// libav polyfill must also load its worker and wasm from them. A control run of blob: URLs under that
-// CSP must fail, proving the CSP applies. The bundlers are pinned in this package's manifest, so the
+// uses blob: URLs with no CSP. Hosted modes serve each package's assets from its own directory under a
+// strict CSP, and the libav polyfill loads its worker and wasm from watch's or publish's. A control run
+// of blob: URLs under that CSP must fail, proving the CSP applies. The bundlers are pinned in this package's manifest, so the
 // lockfile decides their versions.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { build } from "vite";
+import { libav as libavPlugin } from "../../js/common/vite-plugin-libav";
 import { worklet } from "../../js/common/vite-plugin-worklet";
 
 const root = mkdtempSync(join(tmpdir(), "worklet-matrix-"));
@@ -39,15 +40,20 @@ try {
 			`export { default as render } from "${js}/watch/src/audio/render-worklet.ts?worklet";`,
 			`export { default as capture } from "${js}/publish/src/audio/capture-worklet.ts?worklet";`,
 			`export { default as worker } from "${js}/publish/src/video/capture-worker.ts?worklet";`,
-			`export { assets } from "${js}/hang/src/assets.ts";`,
+			`export { assets as watchAssets, hosted as watchHosted } from "${js}/watch/src/assets.ts";`,
+			`export { assets as publishAssets, hosted as publishHosted } from "${js}/publish/src/assets.ts";`,
 			`export { polyfill } from "${js}/hang/src/util/libav.ts";`,
 		].join("\n"),
 	);
+	for (const name of libav) {
+		mkdirSync(dirname(join(root, "node_modules", name)), { recursive: true });
+		symlinkSync(dirname(Bun.resolveSync(`${name}/package.json`, js)), join(root, "node_modules", name));
+	}
 	await build({
 		configFile: false,
 		root,
 		logLevel: "silent",
-		plugins: [worklet()],
+		plugins: [worklet(), libavPlugin()],
 		build: {
 			outDir: lib,
 			lib: { entry: join(root, "lib.js"), formats: ["es"], fileName: "index" },
@@ -55,18 +61,15 @@ try {
 			rolldownOptions: { external: [...libav] },
 		},
 	});
-	for (const name of libav) {
-		mkdirSync(dirname(join(root, "node_modules", name)), { recursive: true });
-		symlinkSync(dirname(Bun.resolveSync(`${name}/package.json`, js)), join(root, "node_modules", name));
-	}
 	// Check the completed Vite build before consumer bundlers or Chromium can spawn children.
 	const children = spawnSync("pgrep", ["-l", "-P", String(process.pid)], { encoding: "utf8" });
 	assert.equal(children.status, 1, children.error?.message ?? (children.stdout || children.stderr));
-	assert.deepEqual(readdirSync(join(lib, "assets")).sort(), [
-		"capture-worker.js",
-		"capture-worklet.js",
-		"render-worklet.js",
-	]);
+	const wasm = readdirSync(join(js, "libav/dist")).filter((name) => name.includes(".wasm."));
+	assert.equal(wasm.length, 2);
+	assert.deepEqual(
+		readdirSync(join(lib, "assets")).sort(),
+		["capture-worker.js", "capture-worklet.js", "render-worklet.js", ...wasm].sort(),
+	);
 	const chunks = readdirSync(lib)
 		.filter((name) => name.endsWith(".js"))
 		.map((name) => ({ name, code: readFileSync(join(lib, name), "utf8") }));
@@ -88,28 +91,32 @@ try {
 
 	writeFileSync(
 		join(root, "main.js"),
-		`import { render, capture, worker, assets, polyfill } from "worklet-lib";
-const base = location.search.includes("hosted") ? new URL("/moq/", location.href) : undefined;
+		`import { render, capture, worker, watchAssets, watchHosted, publishAssets, publishHosted, polyfill } from "worklet-lib";
+const query = new URLSearchParams(location.search);
+if (query.has("hosted")) {
+	watchAssets("/watch/");
+	publishAssets("/publish/");
+}
 window.result = (async () => {
 	const context = new AudioContext();
 	try {
-		await context.audioWorklet.addModule(await render(base));
-		await context.audioWorklet.addModule(await capture(base));
+		await context.audioWorklet.addModule(await render(watchHosted.url));
+		await context.audioWorklet.addModule(await capture(publishHosted.url));
 		new AudioWorkletNode(context, "render");
 		new AudioWorkletNode(context, "capture", { numberOfOutputs: 0 });
-		const spawned = new Worker(await worker(base));
+		const spawned = new Worker(await worker(publishHosted.url));
 		const ready = await new Promise((resolve, reject) => {
 			spawned.onmessage = (event) => resolve(event.data.type);
 			spawned.onerror = () => reject(new Error("capture worker failed to load"));
 		});
 		spawned.terminate();
 		if (ready !== "ready") return ready;
-		if (base) {
+		if (query.has("hosted")) {
 			// Bundlers move the libav module away from its worker and wasm, so only hosted mode finds them.
-			assets(base);
 			delete window.AudioDecoder;
 			delete window.AudioEncoder;
-			if (!(await polyfill())) return "libav polyfill failed";
+			const hosted = query.get("libav") === "publish" ? publishHosted : watchHosted;
+			if (!(await polyfill(hosted.url))) return "libav polyfill failed";
 		}
 		return "ok";
 	} catch (error) {
@@ -145,10 +152,13 @@ window.result = (async () => {
 		for (const [name, bundle] of Object.entries(bundlers)) {
 			await bundle();
 			const out = join(root, "out", name);
-			mkdirSync(join(out, "moq"));
-			cpSync(join(lib, "assets"), join(out, "moq"), { recursive: true });
-			for (const name of readdirSync(join(js, "libav/dist")).filter((name) => name.includes(".wasm."))) {
-				cpSync(join(js, "libav/dist", name), join(out, "moq", name));
+			// Each package's assets/ in its own directory, as @moq/watch and @moq/publish ship them.
+			for (const [dir, files] of [
+				["watch", ["render-worklet.js", ...wasm]],
+				["publish", ["capture-worklet.js", "capture-worker.js", ...wasm]],
+			] as const) {
+				mkdirSync(join(out, dir));
+				for (const name of files) cpSync(join(lib, "assets", name), join(out, dir, name));
 			}
 
 			const server = Bun.serve({
@@ -170,7 +180,8 @@ window.result = (async () => {
 			try {
 				for (const [mode, query, expected] of [
 					["default", "", true],
-					["hosted", "?hosted&csp", true],
+					["hosted, watch libav", "?hosted&libav=watch&csp", true],
+					["hosted, publish libav", "?hosted&libav=publish&csp", true],
 					["control", "?csp", false],
 				] as const) {
 					const tab = await browser.newPage();
@@ -183,7 +194,7 @@ window.result = (async () => {
 						.catch((error) => String(error));
 					await tab.close();
 					failed ||= (result === "ok") !== expected;
-					console.log(`${name.padEnd(13)} ${mode.padEnd(8)} ${result}`);
+					console.log(`${name.padEnd(13)} ${mode.padEnd(22)} ${result}`);
 				}
 			} finally {
 				server.stop(true);

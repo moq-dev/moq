@@ -1,5 +1,4 @@
 import { type Micro, Nano, now } from "@moq/clock";
-import { hostedAssets } from "@moq/hang";
 import * as Util from "@moq/hang/util";
 import {
 	type Computed,
@@ -11,6 +10,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { hosted } from "../assets";
 import { Fanout } from "../fanout";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
@@ -227,7 +227,7 @@ export class Capture {
 			// synchronously on Chrome (Firefox/Safari report "suspended").
 			try {
 				const ok = await effect.race(
-					CaptureWorklet(hostedAssets()).then(async (url) => {
+					CaptureWorklet(hosted.url).then(async (url) => {
 						await context.audioWorklet.addModule(url);
 						return true;
 					}),

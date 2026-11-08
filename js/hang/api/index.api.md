@@ -199,8 +199,4 @@ export namespace Stats {
 		rtt: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 	}, $strip>;
 }
-
-export function assets(url: string | URL): void;
-
-export function hostedAssets(): URL | undefined;
 ```

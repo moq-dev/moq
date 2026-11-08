@@ -13,7 +13,7 @@ await Polyfill.load({ LibAV, polyfill: true });
 
 Most apps never import this directly: `@moq/hang`'s `Util.Libav.polyfill()` does.
 
-It loads a worker and WebAssembly from beside its own module, a path app bundlers may not keep. A page under a strict CSP copies `*.wasm.*` into the directory it passes to `@moq/hang`'s `assets()` instead.
+It loads a worker and WebAssembly from beside its own module, a path app bundlers may not keep. `@moq/watch` and `@moq/publish` ship both in their `assets/`, so a page under a strict CSP that hosts those and calls their `assets()` points the polyfill at its own copies.
 
 ## Building
 

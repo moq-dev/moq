@@ -54,10 +54,9 @@ Each remote member owns a `Watch.Player` and starts muted. Display video with
 `member.player` for the full pipeline. `Chat` adds a text chat track with a
 short retained history.
 
-Under a CSP that refuses `blob:`, copy the files described for
-[watch](/lib/js/watch#strict-csp) and [publish](/lib/js/publish#strict-csp)
-into one directory, then call `Watch.assets()` or `Publish.assets()` once: both
-are the same `@moq/hang` setting.
+Under a CSP that refuses `blob:`, host the worklets and worker as described
+for [watch](/lib/js/watch#strict-csp) and [publish](/lib/js/publish#strict-csp),
+then call both `Watch.assets()` and `Publish.assets()`.
 
 The native twin is [`moq-room`](/lib/rs/moq-room).
 

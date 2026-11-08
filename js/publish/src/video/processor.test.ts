@@ -95,7 +95,7 @@ Object.defineProperty(globalThis, "VideoFrame", { configurable: true, writable: 
 Object.defineProperty(globalThis, "Worker", { configurable: true, writable: true, value: FakeWorker });
 
 const { TrackProcessor, workerSupported } = await import("./processor.ts");
-const { assets } = await import("@moq/hang");
+const { assets } = await import("../assets.ts");
 
 test("captures through the worker, transferring a clone", async () => {
 	supported = true;

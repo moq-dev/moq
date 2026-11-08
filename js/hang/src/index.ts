@@ -9,7 +9,6 @@
 export * as Net from "@moq/net";
 /** Re-export of {@link https://www.npmjs.com/package/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
-export { assets, hostedAssets } from "./assets";
 /** The catalog schema describing a broadcast's tracks. */
 export * as Catalog from "./catalog";
 /** Per-frame container formats, with consumers and producers to read and write them. */

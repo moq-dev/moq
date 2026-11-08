@@ -277,6 +277,5 @@ changes with the package. `@moq/room` and `@moq/boy` play through
 `@moq/watch`, so this one call covers them.
 
 A browser without `AudioDecoder` decodes through the libav polyfill, which
-loads its worker and WebAssembly from the same directory: copy
-`node_modules/@moq/libav/*.wasm.*` there too, and allow `'wasm-unsafe-eval'` in
-`script-src`.
+loads its worker and WebAssembly from the same directory (they are among
+`assets/*`), so also allow `'wasm-unsafe-eval'` in `script-src`.

@@ -428,5 +428,5 @@ export namespace Video {
 	export function normalizeSource(source: Video.StreamTrack | Video.SourceConfig): Video.SourceConfig;
 }
 
-export { assets } from "@moq/hang";
+export function assets(url: string | URL): void;
 ```

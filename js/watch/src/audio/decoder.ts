@@ -1,5 +1,4 @@
 import { Micro, Milli, type Second, type Wall } from "@moq/clock";
-import { hostedAssets } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -16,6 +15,7 @@ import {
 	Signal,
 } from "@moq/signals";
 import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
+import { hosted } from "../assets";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
@@ -371,7 +371,7 @@ export class Decoder {
 			// `context.state`, because `AudioContext.close()` only flips `.state` to "closed" synchronously
 			// on Chrome (Firefox/Safari report "suspended").
 			const loaded = await effect.race(
-				RenderWorklet(hostedAssets()).then(async (url) => {
+				RenderWorklet(hosted.url).then(async (url) => {
 					await context.audioWorklet.addModule(url);
 					return true;
 				}),
@@ -576,7 +576,7 @@ export class Decoder {
 		const { consumer, read } = this.#consume(effect, sub, format, { config, path });
 
 		spawnFatal(effect, failure, async () => {
-			const loaded = await Util.Libav.polyfill();
+			const loaded = await Util.Libav.polyfill(hosted.url);
 			if (!loaded) return; // cancelled
 
 			const decoder = new AudioDecoder({
@@ -669,7 +669,7 @@ export class Decoder {
 		const { consumer, read } = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
 		spawnFatal(effect, failure, async () => {
-			const loaded = await Util.Libav.polyfill();
+			const loaded = await Util.Libav.polyfill(hosted.url);
 			if (!loaded) return; // cancelled
 
 			const decoder = new AudioDecoder({
@@ -1072,7 +1072,7 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	}
 	// Install the WebCodecs polyfill before probing, since playback would decode through it where
 	// AudioDecoder is missing (Node, Bun, older browsers). Loads nothing where WebCodecs audio is native.
-	await Util.Libav.polyfill();
+	await Util.Libav.polyfill(hosted.url);
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
 		description,

@@ -1,10 +1,14 @@
-import { hostedAssets } from "../assets";
 import { objectType } from "./aac";
 
 let loading: Promise<boolean> | undefined;
 
-/** Load the libav WebCodecs polyfill (Opus, plus AAC decoding) if AudioEncoder/AudioDecoder are missing. Resolves true once available. */
-export async function polyfill(): Promise<boolean> {
+/**
+ * Load the libav WebCodecs polyfill (Opus, plus AAC decoding) if AudioEncoder/AudioDecoder are missing. Resolves true once available.
+ *
+ * Its worker and wasm load from `base`, the calling package's hosted directory, or from beside libav's own module when undefined.
+ * The first call's `base` wins, since the page shares one polyfill.
+ */
+export async function polyfill(base?: URL): Promise<boolean> {
 	// The library installs its own globals before its load resolves, so once loading, every caller
 	// waits for it rather than seeing those globals and using an AudioDecoder that refuses AAC.
 	if (loading !== undefined) return await loading;
@@ -12,11 +16,11 @@ export async function polyfill(): Promise<boolean> {
 		return true;
 	}
 
-	loading = load();
+	loading = load(base);
 	return await loading;
 }
 
-async function load(): Promise<boolean> {
+async function load(base: URL | undefined): Promise<boolean> {
 	// Whether the browser decodes natively, read before the imports yield to anything that installs one.
 	const native = globalThis.AudioDecoder;
 	console.warn("using libav WebCodecs polyfill; performance may be degraded");
@@ -29,8 +33,7 @@ async function load(): Promise<boolean> {
 	]);
 	// libav.js otherwise loads its worker and wasm beside its own module, a path consumer bundlers move.
 	// It joins `base` and the file name with "/", so drop the trailing one.
-	const hosted = hostedAssets();
-	const libavOptions = hosted ? { base: hosted.href.slice(0, -1) } : {};
+	const libavOptions = base ? { base: base.href.slice(0, -1) } : {};
 	await libav.load({ LibAV, polyfill: true, libavOptions });
 	if (native) return true;
 
