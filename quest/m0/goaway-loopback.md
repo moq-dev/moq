@@ -4,7 +4,9 @@
 
 A GOAWAY from a non-local relay cannot steer a `redirect: "follow"` client,
 and the tokens it carries, to a loopback, private, or link-local address,
-whatever spelling the URI uses. Rust's `is_local` judges a non-special
+whatever literal spelling the URI uses. A hostname that resolves to such
+an address is out of scope: classifying DNS results would race the dial's
+own lookup. Rust's `is_local` judges a non-special
 scheme's host the way the native dial resolves it, as js/net's typed endpoint
 does since [moq-dev/moq#8222](https://github.com/moq-dev/moq/pull/8222), and
 both fixes reach the `release` line in its next patch.

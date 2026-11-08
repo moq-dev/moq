@@ -19,8 +19,9 @@ layer-0 AUD, so each view becomes its own frame.
 
 - First find out whether that stream conforms. If x265 is wrong, report it
   (with the [upstream reports](/quest/m4/upstream-reports.md)) and make the
-  splitter refuse a stream whose next "access unit" holds only
-  enhancement-layer slices, instead of adding a heuristic.
+  splitter refuse that specific violation with an error naming it, instead
+  of adding a heuristic. Annex F allows an access unit with no layer-0
+  picture, so the refusal never rejects those by itself.
 - If it conforms, frame by what the spec says starts an access unit and add
   the x265 `--aud` fixture beside #8199's.
 

@@ -2,8 +2,9 @@
 
 ## Goal
 
-Every JSON corpus a Rust crate and a JS package both replay lives in that
-crate's `fixtures/` directory, so a contributor finds them in one place.
+Every JSON corpus a Rust crate and a JS package both replay, except the
+audio jitter corpora under `doc/concept/`, lives in that crate's `fixtures/`
+directory, so a contributor finds them in one place.
 `rs/moq-auth/tests/corpus.json` moves to `rs/moq-auth/fixtures/`, matching
 `rs/moq-net/fixtures/lite.json`, `rs/hang/fixtures/`, and
 `rs/moq-msf/fixtures/`.

@@ -59,9 +59,10 @@ which covers only NVIDIA.
     ([moq-dev/vaapi#11](https://github.com/moq-dev/vaapi/pull/11)).
   - Not chosen: dropping either gap.
 - Added 2026-11-08 (maintainer, approved follow-up): moq-vaapi's own
-  tests return early too. `rs/moq-vaapi/src/encode.rs` (6),
-  `decode.rs` (17), and `vpp.rs` (3) print "skipping: no VA-API display"
-  and pass, so a host without libva or a driver reports them green. Give
+  tests return early too. `rs/moq-vaapi/src/encode.rs`, `decode.rs`, and
+  `vpp.rs` print "skipping: ..." and pass when there is no VA-API display,
+  no encoder or decoder for the codec, no VPP entrypoint, or no
+  ffmpeg/ffprobe, so a host without libva or a driver reports them green. Give
   them the same `#[ignore = "requires ..."]` treatment and run them in
   `just rs gpu` per render node.
 

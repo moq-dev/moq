@@ -23,8 +23,10 @@ On `main`: `Backoff::max()` documents "zero leaves the delay uncapped" and
 `timeout()` "zero meaning unlimited" (`rs/moq-tokio/src/connection.rs`);
 `connect::Resolved.timeout` is a `Duration` whose `--connect-timeout` says
 "zero disables this duration" (`rs/moq-tokio/src/connect.rs`); the handover
-knob says the same; and `quic::Resolved.idle_timeout` turns zero into `None`
-only when it builds the transport (`rs/moq-tokio/src/quic.rs`). Audit the
+knob says the same; and `quic::Resolved.idle_timeout` is a `Duration` passed to the transport as
+`Some(resolved.idle_timeout)` (`Some(0)` is QUIC's "no idle timeout"), with
+zero turned into `None` only in `Resolved::keep_alive_interval`
+(`rs/moq-tokio/src/quic.rs`); making the field `Option` replaces both. Audit the
 other `Resolved` structs for the same pattern while there.
 
 Public API: moq-tokio's resolved fields and accessors become `Option`.
