@@ -7901,12 +7901,12 @@ mod serve_group_test {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, Version::Lite07).unwrap();
 			buf = &buf[size..];
 			match msg {
-				lite::SubscribeResponse::Skip(skip) => skips.push(skip.groups),
+				lite::SubscribeResponse::Skip(skip) => skips.push((skip.groups.start, skip.groups.end)),
 				lite::SubscribeResponse::Drop(_) => drops += 1,
 				_ => {}
 			}
 		}
-		assert_eq!((skips, drops), (vec![1..FAR], 0));
+		assert_eq!((skips, drops), (vec![(1, FAR)], 0));
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
