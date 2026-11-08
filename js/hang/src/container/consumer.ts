@@ -566,7 +566,6 @@ export class Consumer {
 
 			const age = max - min;
 			if (age <= threshold) break;
-			const successor = this.#groups[1].start;
 			if (this.#edge === undefined) {
 				// Until the reader warms, a group may cover the start's reach though it began before it.
 				// Before the first item, a backlog that landed whole starts within the budget, so only
@@ -574,17 +573,20 @@ export class Consumer {
 				// past that point. Rust's start skip, in `Consumer::poll_event_once`, measures the same.
 				// `max` is the live edge of the groups left, so this stays O(1) per skip.
 				if (this.#warming()) {
+					const successor = this.#groups[1].start;
 					if (successor === undefined) break;
 					const target = this.#startTarget(this.#reach(this.#delay.peek()), max);
 					if (target !== undefined && successor > target) break;
 				}
-			} else if (successor === undefined || max - successor < threshold) {
-				// Once reading began, the head is stale only once its successor starts a whole budget
-				// behind the newest content: everything the head and any missing group after it could
-				// still present ends there. Its own first frame is no bound, since the skip moves the
-				// cursor past every missing group in between, which a group arriving below it then never
-				// delivers. Mirrors Rust's skip of a blocking group.
-				break;
+			} else {
+				// Once reading began, the head is stale only once the first stamped group past it starts a
+				// whole budget behind the newest content: everything the head and any group between could
+				// still present ends there. Its own first frame is no bound, since the skip moves the cursor
+				// past every missing group in between, which a group arriving below it then never delivers.
+				// An unstamped group between ages out on a later pass, as the head. Mirrors Rust's skip of
+				// a blocking group, which measures from `poll_next_group`.
+				const successor = this.#groups.find((group, i) => i > 0 && group.start !== undefined)?.start;
+				if (successor === undefined || max - successor < threshold) break;
 			}
 
 			this.#groups.shift();

@@ -314,6 +314,9 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 // presentation left off is a budget behind it, but the missing groups end where it starts, so they
 // may still play: skipping the hole would drop them on arrival, below the cursor.
 test("a newest-first flush past a hole delivers the groups landing behind its newest", async () => {
+	// Time stands still while the flush lands, so only the timestamps can prove the hole.
+	const clock = new Manual();
+	const installed = clock.install();
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 		format: new Format("audio"),
@@ -354,5 +357,6 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 		track.finish();
 		track.close();
 		await reading;
+		installed.close();
 	}
 });

@@ -226,3 +226,33 @@ test("a blocking group is kept until its successor starts a budget behind the ne
 		warn.mockRestore();
 	}
 });
+
+// A group with no frame says nothing about the timeline, so the age bound is the first stamped group
+// past the head, and the unstamped one between ages out with it.
+test("a blocking group ages out past an unstamped successor", async () => {
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const track = new Track.Producer("tone");
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
+		format: new Format("data"),
+		delay: { max: Milli(150) },
+	});
+	const sent = Time.Timestamp.now();
+	try {
+		const blocking = track.createGroup(0n);
+		blocking.writeFrame({ payload: Varint.encode(0), timestamp: sent });
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
+		track.createGroup(1n).finish();
+		const later = track.createGroup(2n);
+		for (const timestamp of [1_000_000, 2_000_000])
+			later.writeFrame({ payload: Varint.encode(timestamp), timestamp: sent });
+		await flush();
+		expect(await consumer.next()).toMatchObject({ kind: "gap" });
+		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 2n });
+		blocking.finish();
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		warn.mockRestore();
+	}
+});
