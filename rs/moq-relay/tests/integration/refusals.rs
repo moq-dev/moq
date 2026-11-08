@@ -279,7 +279,10 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	relay
 		.stats
 		.tier(Tier::new(moq_net::Path::from_static("gateway")))
-		.refuse(moq_net::Path::from_static("tenant"), RefusalKind::Forbidden);
+		.refuse(moq_net::stats::Refusal::new(
+			moq_net::Path::from_static("tenant"),
+			RefusalKind::Forbidden,
+		));
 	assert_eq!(
 		relay.refused("forbidden").await,
 		1,
@@ -414,7 +417,7 @@ async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
 		assert_eq!(relay.refused("expired").await, 1);
 		assert_eq!(relay.refused("refused").await, 0);
 		let mut report = moq_net::stats::Report::default();
-		relay.stats.report(&mut report);
+		relay.stats.report(&mut report, moq_net::time::Instant::now());
 		assert_eq!(report.sessions.len(), 1);
 		let entry = &report.sessions[0];
 		assert_eq!(entry.tier.as_str(), tier.unwrap_or(""));

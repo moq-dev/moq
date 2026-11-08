@@ -3259,14 +3259,14 @@ class MoqTrackInfo {
   final bool maxAgeUnlimited;
   final int? refresh;
   final int? timescale;
-  final bool compress;
+  final MoqCompression? compression;
   MoqTrackInfo({
     this.priority = 0,
     this.maxAge = null,
     this.maxAgeUnlimited = false,
     this.refresh = null,
     this.timescale = null,
-    this.compress = false,
+    this.compression = null,
   });
 }
 
@@ -3302,11 +3302,11 @@ class FfiConverterMoqTrackInfo {
     );
     final timescale = timescale_lifted.value;
     new_offset += timescale_lifted.bytesRead;
-    final compress_lifted = FfiConverterBool.read(
+    final compression_lifted = FfiConverterOptionalMoqCompression.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final compress = compress_lifted.value;
-    new_offset += compress_lifted.bytesRead;
+    final compression = compression_lifted.value;
+    new_offset += compression_lifted.bytesRead;
     return LiftRetVal(
       MoqTrackInfo(
         priority: priority,
@@ -3314,7 +3314,7 @@ class FfiConverterMoqTrackInfo {
         maxAgeUnlimited: maxAgeUnlimited,
         refresh: refresh,
         timescale: timescale,
-        compress: compress,
+        compression: compression,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -3327,7 +3327,7 @@ class FfiConverterMoqTrackInfo {
         FfiConverterBool.allocationSize(value.maxAgeUnlimited) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
-        FfiConverterBool.allocationSize(value.compress) +
+        FfiConverterOptionalMoqCompression.allocationSize(value.compression) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -3356,8 +3356,8 @@ class FfiConverterMoqTrackInfo {
       value.timescale,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterBool.write(
-      value.compress,
+    new_offset += FfiConverterOptionalMoqCompression.write(
+      value.compression,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset - buf.offsetInBytes;
@@ -3369,7 +3369,7 @@ class FfiConverterMoqTrackInfo {
         FfiConverterBool.allocationSize(value.maxAgeUnlimited) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
-        FfiConverterBool.allocationSize(value.compress) +
+        FfiConverterOptionalMoqCompression.allocationSize(value.compression) +
         0;
   }
 }
@@ -8575,6 +8575,40 @@ class AbsentMoqAnnounceEvent extends MoqAnnounceEvent {
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;
+  }
+}
+
+enum MoqCompression { deflate }
+
+class FfiConverterMoqCompression {
+  static LiftRetVal<MoqCompression> read(Uint8List buf) {
+    final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
+    switch (index) {
+      case 1:
+        return LiftRetVal(MoqCompression.deflate, 4);
+      default:
+        throw UniffiInternalError(
+          UniffiInternalError.unexpectedEnumCase,
+          "Unable to determine enum variant",
+        );
+    }
+  }
+
+  static MoqCompression lift(RustBuffer buffer) {
+    return FfiConverterMoqCompression.read(buffer.asUint8List()).value;
+  }
+
+  static RustBuffer lower(MoqCompression input) {
+    return toRustBuffer(createUint8ListFromInt(input.index + 1));
+  }
+
+  static int allocationSize(MoqCompression _value) {
+    return 4;
+  }
+
+  static int write(MoqCompression value, Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
+    return 4;
   }
 }
 
@@ -17567,6 +17601,53 @@ class FfiConverterOptionalMoqCatalog {
     }
     buf[0] = 1;
     return FfiConverterMoqCatalog.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
+class FfiConverterOptionalMoqCompression {
+  static MoqCompression? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqCompression.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqCompression?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqCompression.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqCompression?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqCompression? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqCompression.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqCompression? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqCompression.allocationSize(value),
+    );
+    FfiConverterOptionalMoqCompression.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqCompression? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqCompression.write(
           value,
           Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
         ) +

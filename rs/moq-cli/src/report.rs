@@ -49,7 +49,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 		// once they outweigh eight snapshots.
 		let info = moq_net::track::Info::default()
 			.with_priority(PRIORITY)
-			.with_compress(true)
+			.with_compression(moq_net::track::Compression::Deflate)
 			.with_refresh(8);
 		let track = broadcast.create_track(name, info)?;
 		Ok(Self {

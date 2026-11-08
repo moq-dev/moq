@@ -1567,7 +1567,10 @@ impl Cluster {
 			)));
 		}
 
-		let stats = self.stats.tier(token.tier.clone()).session(&token.label);
+		let stats = self
+			.stats
+			.tier(token.tier.clone())
+			.session(moq_net::stats::SessionInfo::new(&token.label));
 		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = ?token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
@@ -2208,7 +2211,10 @@ impl Cluster {
 		};
 		// The link is one presence across reconnects: each session it dials records how it
 		// ended, and the last one to end decides whether the link failed.
-		let stats = self.stats.tier(self.cluster_tier()).session(Path::empty());
+		let stats = self
+			.stats
+			.tier(self.cluster_tier())
+			.session(moq_net::stats::SessionInfo::new(Path::empty()));
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)

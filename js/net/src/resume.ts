@@ -129,7 +129,7 @@ function copyFailed(copy: Copy): boolean {
 // listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
 // lite versions still match. `ietf` is compared, like Rust's moq-transport `properties`.
 const INFO_FIELDS = Object.keys({
-	compress: true,
+	compression: true,
 	timescale: true,
 	maxAge: true,
 	priority: true,

@@ -501,7 +501,7 @@ export class Broadcast {
 					timescale: Moq.Time.Timescale.MILLI,
 					priority: Catalog.PRIORITY.catalog,
 					// Catalog JSON is small and repetitive.
-					compress: true,
+					compression: "deflate",
 				});
 				effect.cleanup(() => {
 					track.finish();

@@ -120,6 +120,13 @@ export interface Position {
 }
 
 /**
+ * How a track's frames are compressed, mirroring the Rust `track::Compression`: `"deflate"` makes
+ * each group one DEFLATE stream (draft-lcurley-moq-flate), which suits small, repetitive frames
+ * like JSON.
+ */
+export type Compression = "none" | "deflate";
+
+/**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
  *
  * A producer declares these once from an {@link InfoInit} (via {@link Request.accept} or
@@ -127,8 +134,8 @@ export interface Position {
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
 export interface Info {
-	/** Compress frame payloads per group on lite-07; other sessions receive plain frames. Defaults to false. */
-	compress?: boolean;
+	/** How frame payloads are compressed per group on lite-07; other sessions receive plain frames. Defaults to `"none"`. */
+	compression?: Compression;
 	/**
 	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
 	 * which mean the same) for an untimed track, whose frames carry no timestamp.
@@ -231,11 +238,11 @@ function priorityValue(value: number): number {
  * {@link InfoInit} at {@link Producer.accept} instead, where an omitted `maxAge` is zero.
  */
 export function infoDefaults(info: Partial<Info> = {}): Info {
-	if (info.compress !== undefined && typeof info.compress !== "boolean")
-		throw new TypeError("compress must be a boolean");
+	if (info.compression !== undefined && info.compression !== "none" && info.compression !== "deflate")
+		throw new TypeError(`unknown compression: ${info.compression}`);
 	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
 	return {
-		compress: info.compress ?? false,
+		compression: info.compression ?? "none",
 		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityValue(info.priority ?? DEFAULT_PRIORITY),
@@ -1356,7 +1363,7 @@ export class Producer {
 		try {
 			for (const { group } of this.#cache) {
 				hooks.bindGroupTimed(group, resolved);
-				hooks.bindGroupCompression(group, resolved.compress ?? false);
+				hooks.bindGroupCompression(group, resolved.compression === "deflate");
 			}
 		} catch (err) {
 			this.abort(err instanceof Error ? err : new Error(String(err)));
@@ -1777,7 +1784,7 @@ export class Producer {
 		const info = this.#state.info.peek();
 		if (info) {
 			hooks.bindGroupTimed(group, info);
-			hooks.bindGroupCompression(group, info.compress ?? false);
+			hooks.bindGroupCompression(group, info.compression === "deflate");
 		}
 	}
 

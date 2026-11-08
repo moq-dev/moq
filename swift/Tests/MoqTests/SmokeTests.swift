@@ -511,7 +511,8 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let producer = try Json.SnapshotProducer<Status>(
             broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
+            track: try broadcast.publishTrack(
+                name: "status", info: TrackInfo(timescale: 1_000_000, compression: .deflate)))
         let consumer = try Json.SnapshotConsumer<Status>(
             broadcast: try broadcast.consume(), name: "status")
 
@@ -562,7 +563,8 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.WindowProducer<Event>(
-            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compress: true)))
+            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compression: .deflate))
+        )
         let consumer = try Json.WindowConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "log"))
 

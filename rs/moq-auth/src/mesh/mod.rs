@@ -42,7 +42,10 @@ pub use coordinator::*;
 const PROOF_CONTEXT: &[u8] = b"moq-mesh-enroll-00";
 
 /// The length of a challenge in bytes.
-#[cfg_attr(not(feature = "serve"), allow(dead_code, reason = "only the coordinator issues challenges"))]
+#[cfg_attr(
+	not(feature = "serve"),
+	allow(dead_code, reason = "only the coordinator issues challenges")
+)]
 pub(crate) const CHALLENGE_LEN: usize = 32;
 
 const SIGNATURE_LEN: usize = 64;

@@ -677,19 +677,12 @@ impl RouteOptions {
 	/// The highest epoch wins over every older one of the instance, cheaper or not.
 	/// Naming an instance grants nothing: publishing still needs the path's grant.
 	///
-	/// A [minted](Instance::is_minted) instance names no stream, so routing under one fails
-	/// with [`Error::Unsupported`].
+	/// Do not start a named instance with `~`: that marks one a relay minted
+	/// ([`Instance::is_minted`]), which moq-crypto's signing refuses to bind and a catalog's instance
+	/// check skips.
 	pub fn with_instance(mut self, instance: Instance, epoch: u64) -> Self {
 		self.instance = Some((instance, epoch));
 		self
-	}
-
-	/// Refuse a named instance a relay minted for one announcement: it names no stream.
-	fn refuse_minted(&self) -> Result<(), Error> {
-		match self.instance.as_ref().is_some_and(|(instance, _)| instance.is_minted()) {
-			true => Err(Error::Unsupported),
-			false => Ok(()),
-		}
 	}
 
 	/// The route metadata these options advertise, under `instance` at `epoch`.
@@ -2383,8 +2376,14 @@ impl Producer {
 	}
 
 	/// Whether a moq-lite-07 session publishing through a consumer of this handle (and
-	/// of any handle derived from it) carries its peer's traffic to other origins; see
-	/// [`Consumer::with_proxy`], which overrides it for one consumer.
+	/// of any handle derived from it) carries its peer's traffic to other origins: off,
+	/// the peer is sent only the routes to this node's own claims; on, the routes it
+	/// learned from other peers too.
+	///
+	/// A relay turns it on for every session. An application publishing its own
+	/// broadcasts leaves it off, so a peer never routes through it to reach anyone
+	/// else. Older versions advertise everything either way, since their hop chains
+	/// cannot tell this node's claims from what it forwards.
 	pub fn with_proxy(mut self, proxy: bool) -> Self {
 		self.proxy = proxy;
 		self
@@ -2505,7 +2504,6 @@ impl Producer {
 	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
 	/// [`Path::MAX_PARTS`] or [`Path::MAX_BYTES`], [`Error::InvalidPath`] if it holds a segment no
 	/// pattern can spell (`*` or `**`), [`Error::NavigationSegment`] for a literal `.` or `..`,
-	/// [`Error::Unsupported`] if `options` names a [minted](Instance::is_minted) instance,
 	/// or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
 	pub fn route(&self, path: impl TryInto<Path, Error: Into<Error>>, options: RouteOptions) -> Result<Route, Error> {
@@ -2525,7 +2523,6 @@ impl Producer {
 	/// An exact route at the absolute `full` path, answering `request` on its first
 	/// announce when it is a job's.
 	fn exact(&self, full: Path, options: RouteOptions, request: Option<Request>) -> Result<Route, Error> {
-		options.refuse_minted()?;
 		publish_path(&full)?;
 		if !self.scope.permits(&full) || !self.scope.publishes(&full) {
 			return Err(Error::Unauthorized);
@@ -2741,14 +2738,12 @@ impl Producer {
 	/// for as long as the returned [`Route`] (and every clone) lives, unless withdrawn.
 	///
 	/// The prefix must overlap this producer's pattern scope. Individual requests
-	/// remain authoritative and are refused when they do not match the scope. Fails with
-	/// [`Error::Unsupported`] if `options` names a [minted](Instance::is_minted) instance.
+	/// remain authoritative and are refused when they do not match the scope.
 	pub fn route_prefix(
 		&self,
 		prefix: impl TryInto<Path, Error: Into<Error>>,
 		options: RouteOptions,
 	) -> Result<Route, Error> {
-		options.refuse_minted()?;
 		let (instance, epoch) = options.instance.clone().unwrap_or_else(|| (Instance::random(), 0));
 		let info = options.info(&instance, epoch);
 		let advertised = !options.hidden;
@@ -7290,22 +7285,8 @@ impl Consumer {
 		node
 	}
 
-	/// Whether a moq-lite-07 session publishing through this handle (and any handle
-	/// derived from it) carries its peer's traffic to other origins: off, the peer is
-	/// sent only the routes to this node's own claims; on, the routes it learned from
-	/// other peers too.
-	///
-	/// A relay turns it on for every session. An application publishing its own
-	/// broadcasts leaves it off, so a peer never routes through it to reach anyone
-	/// else. Older versions advertise everything either way, since their hop chains
-	/// cannot tell this node's claims from what it forwards.
-	pub fn with_proxy(mut self, proxy: bool) -> Self {
-		self.proxy = proxy;
-		self
-	}
-
-	/// Whether this handle carries its peer's traffic to other origins; see
-	/// [`Self::with_proxy`].
+	/// Whether this handle carries its peer's traffic to other origins, taken from
+	/// the [`Producer::with_proxy`] it was consumed from.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn proxy(&self) -> bool {
 		self.proxy
@@ -9417,7 +9398,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(stats::Tier::default())
-					.session(crate::Path::from_static("p1")),
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("p1"))),
 			)
 			.with_hidden(true);
 
@@ -9426,7 +9407,7 @@ mod tests {
 		project.request(".svc/foo", None).await.expect("resolves");
 
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
 		let paths: Vec<_> = report
 			.traffic
 			.iter()
@@ -9450,7 +9431,7 @@ mod tests {
 		let consumer = producer.consume().with_stats(
 			registry
 				.tier(stats::Tier::default())
-				.session(crate::Path::from_static("viewer")),
+				.session(crate::stats::SessionInfo::new(crate::Path::from_static("viewer"))),
 		);
 		let broadcast = consumer.request("room/alice", None).await.expect("resolves");
 		let bytes = || -> u64 {
@@ -10639,7 +10620,7 @@ mod tests {
 		let producer = origin(1).produce().with_stats(
 			registry
 				.tier(stats::Tier::default())
-				.session(crate::Path::from_static("root")),
+				.session(crate::stats::SessionInfo::new(crate::Path::from_static("root"))),
 		);
 		let announces = || {
 			registry
@@ -12484,28 +12465,6 @@ mod tests {
 		let served = broadcast::Info::new().produce();
 		request.serve(&served);
 		pending.await.expect("resolves");
-	}
-
-	/// A minted instance names no stream, so no route takes one.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_route_refuses_a_minted_instance() {
-		let producer = origin(1).produce();
-		let consumer = producer.consume();
-		let minted = RouteOptions::default().with_instance(Instance::minted(), 0);
-		assert!(matches!(
-			producer.route("room/bob", minted.clone()),
-			Err(Error::Unsupported)
-		));
-		assert!(matches!(
-			producer.route_prefix("lobby", minted.clone()),
-			Err(Error::Unsupported)
-		));
-
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
-		let mut pending = Box::pin(consumer.request("room/alice", None));
-		assert!((&mut pending).now_or_never().is_none());
-		assert!(matches!(queued(&claim).await.route(minted), Err(Error::Unsupported)));
 	}
 
 	#[kio::test]
@@ -15935,7 +15894,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(stats::Tier::default())
-					.session(Path::from_static("project")),
+					.session(crate::stats::SessionInfo::new(Path::from_static("project"))),
 			);
 		let mut selected = consumer.routes();
 		selected.expect_next_active("cam.chat").await;
@@ -15963,13 +15922,13 @@ mod tests {
 		let mut group = reader.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"frame");
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
 		assert_eq!(report.traffic.len(), 1);
 		assert_eq!(report.traffic[0].path.as_str(), "project/cam.chat");
 		assert_eq!(report.traffic[0].publisher.announces_started, 1);
 		assert_eq!(report.traffic[0].publisher.bytes, 5);
 		drop(selected);
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
 		assert_eq!(report.traffic[0].publisher.announces_ended, 1);
 
 		// Discovery of a request still sees a covering route that enumeration omits.

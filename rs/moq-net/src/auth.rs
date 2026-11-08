@@ -85,8 +85,10 @@ pub(crate) enum Answer {
 /// What a peer lets this side do, in this side's own paths.
 ///
 /// The paths are relative to the session's root, the same paths the session
-/// announces and subscribes with. `Grant::default()` grants nothing.
+/// announces and subscribes with. `Grant::default()` grants nothing; set the
+/// fields on it to grant more.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Grant {
 	/// The broadcasts this side may publish to the peer.
 	pub publish: Patterns,

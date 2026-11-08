@@ -147,16 +147,16 @@ pub struct Info {
 	/// It breaks ties between subscriptions of equal subscriber priority. Reported in
 	/// TRACK_INFO (Lite05+).
 	pub priority: i8,
-	/// Whether frames are DEFLATE compressed per group, so later frames compress against
-	/// earlier ones in the same group. Defaults to `false`.
+	/// How frames are compressed per group, so later frames compress against earlier ones in
+	/// the same group. Defaults to [`Compression::None`].
 	///
 	/// Writers and readers see plain frames either way: the producer compresses each
 	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer or a
 	/// moq-transport peer negotiating the Flate extension receives the compressed
-	/// bytes and the flag. Other sessions receive one shared inflated copy per group,
+	/// bytes and the codec. Other sessions receive one shared inflated copy per group,
 	/// unless a sealed compression declaration makes that fallback unsupported.
 	/// Worth it for small, repetitive payloads like JSON; wasted on media.
-	pub compress: bool,
+	pub compression: Compression,
 	/// The ratio of a group's bytes after its first frame to the first frame past which a
 	/// joining subscriber asks for a new group, or `None` (the default) to never ask.
 	///
@@ -192,7 +192,7 @@ impl PartialEq for Info {
 			timescale,
 			max_age,
 			priority,
-			compress,
+			compression,
 			refresh,
 			properties,
 			unchecked: _,
@@ -200,13 +200,25 @@ impl PartialEq for Info {
 		*timescale == other.timescale
 			&& *max_age == other.max_age
 			&& *priority == other.priority
-			&& *compress == other.compress
+			&& *compression == other.compression
 			&& *refresh == other.refresh
 			&& *properties == other.properties
 	}
 }
 
 impl Eq for Info {}
+
+/// How a track's frames are compressed, with the values TRACK_INFO's `Compression` field
+/// carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Compression {
+	/// Frames travel as written.
+	#[default]
+	None = 0,
+	/// Each group is one DEFLATE stream (draft-lcurley-moq-flate).
+	Deflate = 1,
+}
 
 /// An authored track's defaults: untimed, a zero [`max_age`](Info::max_age) (the live edge only),
 /// priority 0, uncompressed, never asking for a refresh.
@@ -216,7 +228,7 @@ impl Default for Info {
 			timescale: None,
 			max_age: Some(Duration::ZERO),
 			priority: DEFAULT_PRIORITY,
-			compress: false,
+			compression: Compression::None,
 			refresh: None,
 			properties: None,
 			unchecked: false,
@@ -248,10 +260,15 @@ impl Info {
 		self
 	}
 
-	/// Set whether frames are DEFLATE compressed per group, returning `self` for chaining.
-	pub fn with_compress(mut self, compress: bool) -> Self {
-		self.compress = compress;
+	/// Set how frames are compressed per group, returning `self` for chaining.
+	pub fn with_compression(mut self, compression: Compression) -> Self {
+		self.compression = compression;
 		self
+	}
+
+	/// Whether frames are compressed at all.
+	pub(crate) fn compressed(&self) -> bool {
+		self.compression != Compression::None
 	}
 
 	/// Set the [`refresh`](Self::refresh) ratio, returning `self` for chaining.
@@ -3298,7 +3315,7 @@ impl TrackState {
 		let mut group = group::Producer::new(group::Info { sequence }, info.clone(), self.cache.clone());
 		// A compressed flight inflates from frame 0 with a decoder of its own, so it keeps
 		// its own content rather than the cached copy's, whose inflated copy is further on.
-		if !info.compress {
+		if !info.compressed() {
 			if let Some(content) = self.content_for_copy(sequence)? {
 				group.handle().share_content(content);
 			}
@@ -3362,7 +3379,7 @@ pub(super) enum Board {
 /// before it, and its riders skip to their frame.
 pub(super) fn board(track: &kio::Producer<TrackState>, reader: &group::Consumer) -> Option<Board> {
 	let state = track.read();
-	let compress = state.info.as_ref()?.compress;
+	let compress = state.info.as_ref()?.compressed();
 	if let Some((copy, flight)) = state.ride(reader, false)
 		&& let Some(copy) = copy.try_consume()
 	{
@@ -5598,13 +5615,13 @@ impl Consumer {
 		{
 			let state = state.read();
 			if state.lookup.get(&sequence).is_none_or(Slot::is_aborted)
-				|| state.info.as_ref().is_none_or(|info| info.compress)
+				|| state.info.as_ref().is_none_or(|info| info.compressed())
 			{
 				request.options.frame_start = 0;
 			}
 			// A compressed stream needs the entire dictionary; an unknown track is conservative
 			// until TRACK_INFO has told the relay which representation it will receive.
-			if state.info.as_ref().is_none_or(|info| info.compress) {
+			if state.info.as_ref().is_none_or(|info| info.compressed()) {
 				request.end = None;
 			}
 		}
@@ -19124,7 +19141,7 @@ mod test {
 			pool: pool.clone(),
 			..Default::default()
 		});
-		let producer = Producer::new(broadcast, "test", Info::timed().with_compress(true));
+		let producer = Producer::new(broadcast, "test", Info::timed().with_compression(Compression::Deflate));
 		let frame = bytes::Bytes::from(vec![0u8; 256 * 1024]);
 		let groups = 16;
 		for _ in 0..groups {
@@ -24653,7 +24670,7 @@ mod test {
 			}
 			frame.finish().unwrap()
 		}
-		let info = Info::timed().with_compress(true);
+		let info = Info::timed().with_compression(Compression::Deflate);
 		let reference = track_producer("reference", info.clone());
 		let mut source = reference.create_group(group::Info { sequence: 0 }).unwrap();
 		let expected: Vec<_> = (0..9)
@@ -25017,7 +25034,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_compressed_flight_starts_at_frame_0_and_its_rider_skips_ahead() {
-		let producer = track_producer("test", Info::default().with_compress(true));
+		let producer = track_producer("test", Info::default().with_compression(Compression::Deflate));
 		let requests = producer.requests();
 		let mut live = producer.append_group().unwrap();
 		let mut reader = live.consume();

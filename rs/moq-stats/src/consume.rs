@@ -227,7 +227,7 @@ mod tests {
 		let ctx = producer
 			.registry()
 			.tier(tier)
-			.session(moq_net::Path::new(label).unwrap());
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::new(label).unwrap()));
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 

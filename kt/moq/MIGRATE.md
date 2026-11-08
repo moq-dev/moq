@@ -102,7 +102,7 @@ A fixed audio playout delay `d` is `delay = Delay(min = d, max = ...)` with `est
 ### Compression moves to the track
 
 `dev.moq.flate` is removed: publish opaque bytes on a `TrackProducer`.
-`SnapshotConfig` and `WindowConfig` lose `compression`, and `StreamConfig` is removed. Publish the track with `TrackInfo(compress = true)` instead.
+`SnapshotConfig` and `WindowConfig` lose `compression`, and `StreamConfig` is removed. Publish the track with `TrackInfo(compression = Compression.DEFLATE)` instead.
 `StreamProducer` drops its config argument, and `StreamConsumer` and `WindowConsumer` take only the track. `SnapshotConsumer` takes the broadcast and track name; see the entry above.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))

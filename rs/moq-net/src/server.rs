@@ -1838,7 +1838,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(Default::default())
-					.session(crate::Path::from_static("room")),
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 			);
 		let Err(err) = request.ok().await else {
 			panic!("a reply the peer never took completed");
@@ -1888,7 +1888,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(Default::default())
-					.session(crate::Path::from_static("room")),
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 			);
 		request.expired().await;
 		assert_eq!(kio::clock::now(), start + std::time::Duration::from_secs(5));
@@ -1980,7 +1980,7 @@ mod tests {
 			.with_stats(
 				registry
 					.tier(Default::default())
-					.session(crate::Path::from_static("room")),
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 			);
 		let abandoned = kio::clock::timeout(std::time::Duration::from_secs(1), request.ok()).await;
 		assert!(abandoned.is_err(), "a reply the peer never took completed");
@@ -2028,7 +2028,7 @@ mod tests {
 				.with_stats(
 					registry
 						.tier(Default::default())
-						.session(crate::Path::from_static("room")),
+						.session(crate::stats::SessionInfo::new(crate::Path::from_static("room"))),
 				)
 				.close(err.clone());
 			let failures = registry.snapshot().sessions()[0].1.sessions_failed;

@@ -494,7 +494,7 @@ impl<E: CatalogExt> Producer<E> {
 		// priority. Leaving it at the default would rank a subscriber reading MSF
 		// below every media track on a relay's upstream leg. It stays uncompressed: MSF is
 		// read by other implementations, which hang's compression decisions don't cover.
-		let msf_info = hang::Catalog::default_track_info().with_compress(false);
+		let msf_info = hang::Catalog::default_track_info().with_compression(moq_net::track::Compression::None);
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
@@ -991,7 +991,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// catalog entry and removes the entry when the returned handle drops. The catalog key is
 	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with a
 	/// [`timescale`](moq_net::track::Info::timescale), since every write is stamped on the
-	/// broadcast clock, and with [`compress`](moq_net::track::Info::compress) set: JSON is small and
+	/// broadcast clock, and with [`compression`](moq_net::track::Info::compression) set: JSON is small and
 	/// repetitive.
 	///
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
@@ -1823,8 +1823,16 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
 		let track = catalog.outputs.hang_track.consume();
-		assert!(catalog.outputs.hang_track.info().compress, "catalog.json is compressed");
-		assert!(!catalog.outputs.msf_track.info().compress, "the MSF catalog is not");
+		assert_eq!(
+			catalog.outputs.hang_track.info().compression,
+			moq_net::track::Compression::Deflate,
+			"catalog.json is compressed"
+		);
+		assert_eq!(
+			catalog.outputs.msf_track.info().compression,
+			moq_net::track::Compression::None,
+			"the MSF catalog is not"
+		);
 		let mut consumer = Consumer::new(track);
 
 		{
@@ -1912,7 +1920,7 @@ mod test {
 		catalog
 			.modify()
 			.unwrap()
-			.set_section("big", "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1).into())
+			.set_section("big", "x".repeat(crate::jitter::MAX_BYTES + 1).into())
 			.unwrap();
 
 		assert!(matches!(
@@ -1941,7 +1949,7 @@ mod test {
 
 		let mut guard = catalog.modify().unwrap();
 		guard
-			.set_section("big", "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1).into())
+			.set_section("big", "x".repeat(crate::jitter::MAX_BYTES + 1).into())
 			.unwrap();
 		assert!(matches!(
 			guard.commit(),

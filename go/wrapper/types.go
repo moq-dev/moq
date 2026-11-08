@@ -71,6 +71,8 @@ type (
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
+	// Compression is how a track's frames are compressed on the wire: CompressionDeflate.
+	Compression = ffi.MoqCompression
 	// Position is a location within a track: a group sequence and a frame index in it.
 	Position = ffi.MoqPosition
 	// VideoDecoderOutput configures what a video.Consumer delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
@@ -160,6 +162,12 @@ const (
 	OrderAscending = ffi.MoqOrderAscending
 	// OrderDescending sends the newest first, so congestion sheds the backlog rather than the live edge.
 	OrderDescending = ffi.MoqOrderDescending
+)
+
+// Compression values: how a track's frames are compressed on the wire.
+const (
+	// CompressionDeflate makes each group one DEFLATE stream, which suits small, repetitive frames like JSON.
+	CompressionDeflate = ffi.MoqCompressionDeflate
 )
 
 // ConnectionPhase values: the lifecycle of a client session's connection.

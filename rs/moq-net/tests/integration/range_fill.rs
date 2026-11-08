@@ -26,7 +26,7 @@ fn origin(hop: u64, pool: Option<cache::Pool>) -> moq_net::origin::Producer {
 	}
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// The publisher's groups, one per second, with no publisher max age.

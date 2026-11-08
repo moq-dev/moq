@@ -2413,7 +2413,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 	let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
 	let stats = registry
 		.tier(moq_net::stats::Tier::default())
-		.session(moq_net::Path::empty());
+		.session(moq_net::stats::SessionInfo::new(moq_net::Path::empty()));
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();

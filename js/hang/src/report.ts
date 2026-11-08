@@ -31,7 +31,7 @@ export class Writer<T> {
 
 	/** Create `name` on `broadcast`, validating each report against `schema` before it is written. */
 	constructor(broadcast: Moq.Broadcast.Producer, name: string, schema?: z.ZodMiniType<T>) {
-		this.track = broadcast.createTrack(name, { priority: PRIORITY, compress: true, refresh: REFRESH });
+		this.track = broadcast.createTrack(name, { priority: PRIORITY, compression: "deflate", refresh: REFRESH });
 		this.#producer = new Json.Snapshot.Producer<T>({ track: this.track, schema });
 	}
 

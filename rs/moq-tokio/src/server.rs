@@ -2521,7 +2521,7 @@ mod tests {
 		let request = request.with_stats(
 			registry
 				.tier(Default::default())
-				.session(moq_net::Path::from_static("room")),
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room"))),
 		);
 		let Err(err) = request.ok().await else {
 			panic!("a reply the peer never took completed");

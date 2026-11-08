@@ -21,7 +21,7 @@ use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for a JSON snapshot producer (lossy latest-value mode).
 ///
-/// Compression is the track's: set `compress` on the [`MoqTrackInfo`](crate::producer::MoqTrackInfo)
+/// Compression is the track's: set `compression` on the [`MoqTrackInfo`](crate::producer::MoqTrackInfo)
 /// the track is created with. A consumer reads either kind with no option of its own.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonSnapshotConfig {

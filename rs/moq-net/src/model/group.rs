@@ -13,7 +13,7 @@
 //! [Producer::finish] ends it wherever writing stopped. [Consumer::with_range] bounds a reader to a sub-range the same way [`track::Subscriber`]
 //! bounds group sequences.
 //!
-//! A group has no size cap. Each copy holds at most its newest [`MAX_CACHE_BYTES`], less
+//! A group has no size cap. Each copy holds at most its newest 32 MiB, less
 //! under the cache pool's memory pressure, and sheds whole frames from its front to stay
 //! there. A reader that reaches a shed frame rides a flight when the track has a
 //! [`track::Requests`] handler: a separate copy from that frame, paced by its fastest
@@ -49,7 +49,7 @@ use crate::{Error, IntoBytes, Result, StreamError, Timestamp};
 /// sheds the same way. A reader that reaches a shed frame rides a flight, or gets
 /// [`Error::Evicted`] when nothing serves one (see the module docs). A larger declared
 /// frame size is [`Error::FrameTooLarge`] before allocating.
-pub const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
+pub(crate) const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024; // 32 MB
 
 /// How far behind a copy's fastest reader a reader may board it: half the live tail, less
 /// the most one shed frees at once, since the other half may be all ahead of that reader.
@@ -1611,7 +1611,7 @@ impl Producer {
 		let access = charge.access();
 		let (log, pace) = {
 			let mut state = state.write().ok().expect("a new group is open");
-			if track.compress {
+			if track.compressed() {
 				state.flate = Some(Box::new(Flate::new(
 					Arc::new(Plain::new(charge.extra())),
 					charge.extra(),
@@ -1660,7 +1660,7 @@ impl Producer {
 	/// with its inflated size ([`frame::Header::inflated`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn compressed(&self) -> bool {
-		self.handle.track.compress
+		self.handle.track.compressed()
 	}
 
 	/// The track to check this group's start against, while frame 0 may still be unwritten.
@@ -1942,7 +1942,7 @@ impl Producer {
 	/// The `timestamp` is converted into the parent track's timescale, so the scale you
 	/// build it with doesn't have to match the track. A frame the group cannot take
 	/// aborts the group with the error: [`Error::FrameTooLarge`] if the declared size
-	/// exceeds [`MAX_CACHE_BYTES`] (refused before allocating),
+	/// exceeds 32 MiB, what a copy holds (refused before allocating),
 	/// [`Error::TimestampMismatch`] if the timestamp can't be converted, or
 	/// [`Error::Closed`] once the group finished.
 	///
@@ -1971,7 +1971,7 @@ impl Producer {
 	/// compresses on commit, which counts its stored slice then, as `bytes` counts payload
 	/// as stored.
 	fn chunk_meter(&self, inflated: Option<u64>) -> stats::Meter {
-		match self.handle.track.compress && inflated.is_none() {
+		match self.handle.track.compressed() && inflated.is_none() {
 			true => stats::Meter::default(),
 			false => self.stats.clone(),
 		}
@@ -1989,10 +1989,10 @@ impl Producer {
 		}
 		// Only a compressed group takes a stored slice, and every frame a local producer
 		// streams into one is plain until it commits.
-		if header.inflated.is_some() && !self.handle.track.compress {
+		if header.inflated.is_some() && !self.handle.track.compressed() {
 			return Err(Error::ProtocolViolation);
 		}
-		let scratch = self.handle.track.compress && header.inflated.is_none();
+		let scratch = self.handle.track.compressed() && header.inflated.is_none();
 
 		let producer = self.first_frame_track();
 		let track = producer.as_ref().map(|track| track.read());
@@ -2953,7 +2953,7 @@ impl Handle {
 				end: None,
 				prefetch: Prefetch::default(),
 				raw: false,
-				compressed: self.track.compress,
+				compressed: self.track.compressed(),
 				cache: self.cache.clone(),
 				alive: self.alive.clone(),
 				refreshed: self.cache.pool().now(),
@@ -6481,7 +6481,11 @@ mod test {
 
 	fn compressed_group(pool: &cache::Pool) -> Producer {
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
-		Producer::new(Info::from(0u64), track::Info::default().with_compress(true), cache)
+		Producer::new(
+			Info::from(0u64),
+			track::Info::default().with_compression(crate::track::Compression::Deflate),
+			cache,
+		)
 	}
 
 	fn read_plain(consumer: &mut Consumer) -> Result<Option<Bytes>> {
@@ -6573,7 +6577,7 @@ mod test {
 	fn reused_encoders_start_independent_group_streams() {
 		let pool = cache::Pool::unbounded();
 		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
-		let info = track::Info::default().with_compress(true);
+		let info = track::Info::default().with_compression(crate::track::Compression::Deflate);
 		let mut concurrent = Producer::new(0u64.into(), info.clone(), account.clone());
 		concurrent.write_frame(None, verbose(0)).unwrap();
 		for sequence in 1..5u64 {
@@ -6793,7 +6797,7 @@ mod test {
 		// A job belongs to its delivery even when another copy keeps the canonical
 		// inflated cache alive. Releasing one must not make its pending read succeed.
 		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
-		let info = track::Info::default().with_compress(true);
+		let info = track::Info::default().with_compression(crate::track::Compression::Deflate);
 		let mut released = Producer::new(Info::from(0u64), info.clone(), cache.clone());
 		released.bound(Bounds { start: 0, end: Some(2) }).unwrap();
 		for index in 0..2 {
@@ -6935,9 +6939,9 @@ mod test {
 	/// prefix matched. A compressed copy cannot continue with its advanced encoder.
 	#[test]
 	fn a_refused_shared_write_fails_the_group() {
-		for compress in [false, true] {
+		for compression in [crate::track::Compression::None, crate::track::Compression::Deflate] {
 			let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
-			let info = track::Info::default().with_compress(compress);
+			let info = track::Info::default().with_compression(compression);
 			let mut first = Producer::new(Info::from(0u64), info.clone(), cache.clone());
 			first.write_frame(None, verbose(0)).unwrap();
 			first.write_frame(None, verbose(1)).unwrap();

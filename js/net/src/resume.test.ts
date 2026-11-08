@@ -1831,7 +1831,7 @@ test("a front serving another front reports the inner serving route's drop", asy
 
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
-	["compression", { compress: true }, { compress: false }],
+	["compression", { compression: "deflate" }, { compression: "none" }],
 	["refresh", { refresh: 4 }, {}],
 ] as const) {
 	test(`track info keeps one ${field} answer across routes`, async () => {

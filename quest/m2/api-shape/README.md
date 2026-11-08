@@ -54,7 +54,7 @@ Rejected in planning:
 
 ## Required
 
-- [moq-net's small surface fixes](/quest/m2/api-shape/net.md) - one spelling per session, admission, compression, proxy, and priority surface, and no public wire codes
+- [moq-net's remaining surface fixes](/quest/m2/api-shape/net.md) - the route stream un-hide after #8063, whether `group::Demand` stays public, and whether a route refuses a minted instance
 - [Transports take shared types](/quest/m2/api-shape/transport.md) - moq-uring takes a congestion factory and rustls configs, and the tokio server request stops exposing its QUIC internals
 - [Crates re-export no whole crate](/quest/m2/api-shape/reexports.md) - no moq crate re-exports a whole crate, moq's own included, so a dependency bump is no moq break, and moq-mux's container `Guard` gets a name
 - [Media crates' small surface fixes](/quest/m2/api-shape/media.md) - exporters, the container consumer, catalog color range, rate grant, moq-stats, JSON, and MSF each have one path and one name

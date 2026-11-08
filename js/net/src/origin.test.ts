@@ -2493,18 +2493,6 @@ test("a higher epoch of a dynamic route supersedes a cheaper local broadcast of 
 	origin.close();
 });
 
-test("a route refuses a minted instance", async () => {
-	const origin = new Producer();
-	const minted = { instance: Instance.minted() };
-	expect(() => origin.route(Path.from("camera"), minted)).toThrow();
-	expect(() => origin.routePrefix(Path.from("room"), minted)).toThrow();
-	const claim = origin.routePrefix(Path.from("lobby"));
-	const requests = claim.requested();
-	origin.consume().request(Path.from("lobby/alice"));
-	const asked = await requests.next();
-	expect(() => asked.value.route(minted)).toThrow();
-});
-
 test("a higher epoch that is not the best route still supersedes a local broadcast", async () => {
 	const origin = new Producer();
 	const path = Path.from("camera");

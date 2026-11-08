@@ -342,13 +342,6 @@ function received(entry: RouteEntry): boolean {
 	return !entry.originated;
 }
 
-/** Refuse a named instance a relay minted for one announcement: it names no stream. */
-function refuseMinted(options: RouteOptions): void {
-	if (options.instance !== undefined && Instance.isMinted(options.instance)) {
-		throw new Error("a minted instance names no stream to route");
-	}
-}
-
 /** What a peer cannot be served through: a received route, or one of another instance than it pinned. */
 function unservable(instance: Instance.Valid | undefined): (entry: RouteEntry) => boolean {
 	if (instance === undefined) return received;
@@ -1286,7 +1279,8 @@ export interface RouteOptions {
 	 * epoch wins over every older one of the instance, cheaper or not. Naming an instance grants
 	 * nothing: publishing still needs the path's grant.
 	 *
-	 * A {@link Instance.isMinted | minted} instance names no stream, so routing under one throws.
+	 * Do not start a named instance with `~`: that marks one a relay minted (see
+	 * {@link Instance.isMinted}), which signing refuses to bind and a catalog's instance check skips.
 	 */
 	instance?: Instance.Valid;
 	/** Which incarnation of {@link instance} this is; raise it on each restart. Ignored without an instance. */
@@ -1439,7 +1433,6 @@ export class Producer implements Table {
 		publishPath(path);
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
-		refuseMinted(options);
 		// Normalized first, so a bad cost throws before anything is created.
 		let info = WireRoute.normalize({
 			instance: options.instance ?? Instance.random(),
@@ -1566,7 +1559,6 @@ export class Producer implements Table {
 	 * {@link route} instead, so subscribers can enumerate them.
 	 */
 	routePrefix(prefix: Path.Valid, options: RouteOptions = {}): Route {
-		refuseMinted(options);
 		const info = WireRoute.normalize({
 			instance: options.instance,
 			epoch: options.epoch,

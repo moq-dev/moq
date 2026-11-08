@@ -1295,7 +1295,7 @@ impl Publish {
 		// Compressed: JSON is small and repetitive.
 		let mut info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
-			.with_compress(true);
+			.with_compression(moq_net::track::Compression::Deflate);
 		info.refresh = refresh;
 		let track = broadcast.producer.create_track(name, info)?;
 		let producer = publish(&broadcast.catalog, track)?;

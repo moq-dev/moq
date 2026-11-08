@@ -1714,7 +1714,7 @@ export class Subscriber {
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
 			refresh: info.refresh,
-			compress: info.compress,
+			compression: info.compress ? "deflate" : "none",
 			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
 			...(hasMediaTime(this.version) ? {} : { unchecked: true }),
 		};

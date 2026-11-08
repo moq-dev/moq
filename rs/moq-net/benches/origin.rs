@@ -1259,10 +1259,9 @@ fn runtime() -> tokio::runtime::Runtime {
 
 /// Everything under `room/`, which leaves out only the `muted` subscription.
 fn room() -> auth::Grant {
-	auth::Grant {
-		subscribe: Pattern::subtree("room").unwrap().into(),
-		..auth::Grant::all()
-	}
+	let mut grant = auth::Grant::all();
+	grant.subscribe = Pattern::subtree("room").unwrap().into();
+	grant
 }
 
 /// Steady-state delivery through a session's gates: one round across every

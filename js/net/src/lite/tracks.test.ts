@@ -465,7 +465,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 		maxAge: Milli(3000),
 		priority: 9,
 		refresh: 4,
-		compress: true,
+		compression: "deflate",
 	});
 
 	const tracks = wireOf(client).consume(Path.from("room")).tracks();
@@ -473,7 +473,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 	expect(await tracks.next()).toEqual({
 		kind: "added",
 		name: "a",
-		info: { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4, compress: true },
+		info: { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4, compression: "deflate" },
 	});
 	broadcast.createTrack("b");
 	expect(await next(tracks)).toBe("+b");
