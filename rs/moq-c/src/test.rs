@@ -5463,6 +5463,66 @@ fn consume_audio_refuses_a_sibling_of_another_instance() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A decoder whose rendition names a sibling broadcast that is never announced waits on it
+/// forever, so a cancel during that wait must still end the task with a terminal `0`.
+#[test]
+fn decoders_cancel_while_resolving_a_sibling() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"r/pub");
+	{
+		let mut state = State::lock();
+		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
+		let mut catalog = catalog.modify().unwrap();
+		let missing = moq_net::path::Relative::new("./missing").unwrap();
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.broadcast = Some(missing.clone());
+		catalog.audio.renditions.insert("audio".to_string(), audio);
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.broadcast = Some(missing);
+		catalog.video.renditions.insert("video".to_string(), video);
+	}
+
+	let consume = request_broadcast(origin, b"r/pub");
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let audio_output = moq_audio_decoder_output {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 0,
+		channels: 0,
+		delay: moq_delay::default(),
+		start: 0,
+		fixed: false,
+	};
+	let audio_cb = Callback::new();
+	let audio = id(unsafe { moq_decode_audio(catalog_id, 0, &audio_output, Some(channel_callback), audio_cb.ptr) });
+	let video_output = moq_video_decoder_output {
+		delay: moq_delay::default(),
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+		width: 0,
+		height: 0,
+		start: 0,
+		surface: false,
+	};
+	let video_cb = Callback::new();
+	let video = id(unsafe { moq_decode_video(catalog_id, 0, &video_output, Some(channel_callback), video_cb.ptr) });
+
+	assert_eq!(moq_decode_audio_cancel(audio), 0);
+	let code = audio_cb.rx.recv_timeout(TIMEOUT).expect("audio cancel ends the resolve wait");
+	assert_eq!(code, 0, "a cancelled audio decoder ends cleanly");
+	assert_eq!(moq_decode_video_cancel(video), 0);
+	let code = video_cb.rx.recv_timeout(TIMEOUT).expect("video cancel ends the resolve wait");
+	assert_eq!(code, 0, "a cancelled video decoder ends cleanly");
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A decoded consumer follows a rendition's sibling reference and instance too, decoding the
 /// sibling's track rather than looking for it on the catalog's own broadcast.
 #[test]

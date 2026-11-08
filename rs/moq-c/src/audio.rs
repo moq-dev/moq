@@ -277,12 +277,18 @@ impl Audio {
 		self.consumer_tasks.spawn(
 			on_frame,
 			|state| &mut state.audio.consumer_tasks,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						// The rendition may live in a sibling broadcast.
-						let broadcast = crate::consume::Rendition::resolve(broadcast, origin, &catalog).await?;
-						let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
+						// The rendition may live in a sibling broadcast that is never announced, and
+						// SUBSCRIBE_OK may never come, so the close races both steps.
+						let setup = async {
+							let broadcast = crate::consume::Rendition::resolve(broadcast, origin, &catalog).await?;
+							Ok(moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?)
+						};
+						let Some(consumer) = crate::consume::Consume::until_closed(&mut close, setup).await? else {
+							return Ok(());
+						};
 						Self::run(on_frame, consumer, close).await
 					})
 					.await

@@ -778,7 +778,7 @@ impl Consume {
 	///
 	/// A publisher can leave SUBSCRIBE_OK pending forever, so a cancel must not wait on it.
 	/// `close` is left unpolled once it fires, since a oneshot panics if polled again.
-	async fn until_closed<T>(
+	pub(crate) async fn until_closed<T>(
 		close: &mut oneshot::Receiver<()>,
 		setup: impl Future<Output = Result<T, Error>>,
 	) -> Result<Option<T>, Error> {
