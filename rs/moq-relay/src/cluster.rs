@@ -276,6 +276,8 @@ impl DialTarget {
 	/// defaults to `cost`; anything else is rejected, never ignored.
 	fn from_peer(peer: &Peer) -> anyhow::Result<Self> {
 		let mut url = peer_url(&peer.url)?;
+		// Never sent, so it must not make two spellings of one peer conflict.
+		url.set_fragment(None);
 		let has_cost = url.query_pairs().any(|(key, _)| key == "cost");
 		let has_jwt = url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty());
 		if peer.cost.is_some() || peer.egress.is_some() {
@@ -1799,7 +1801,16 @@ impl Cluster {
 			}
 		}
 
-		let can_dial = !self.config.connect.is_empty() || self.config.api.url.is_some() || lan;
+		// A static list naming only this relay dials nothing, so it runs standalone
+		// rather than as a mesh that finishes at once.
+		let own = node.as_deref().map(PeerKey::canonicalize);
+		let statics = self
+			.config
+			.connect
+			.iter()
+			.any(|peer| own.as_ref() != Some(&PeerKey::canonicalize(&peer.url)))
+			|| self.config.api.url.is_some();
+		let can_dial = statics || lan;
 		if !can_dial {
 			tracing::info!("no cluster peers configured; running standalone");
 			return Ok(Started {
@@ -1856,7 +1867,6 @@ impl Cluster {
 		// Static and API peers share this client only on a fixed bind port, which
 		// names one source port. Otherwise every session builds its own (see
 		// `run_remote_session`), and this one only checks the template.
-		let statics = !self.config.connect.is_empty() || self.config.api.url.is_some();
 		let fixed = self
 			.connect
 			.as_ref()
@@ -2148,13 +2158,15 @@ impl Cluster {
 	/// with the mDNS credential.
 	fn dial_addrs(target: &DialTarget, token: &ClusterToken) -> anyhow::Result<moq_tokio::Addrs> {
 		let mut urls = target.addrs();
+		let bare = |url: &Url| !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty());
+		// Read only when a URL needs it, so an unreadable file never blocks a peer
+		// carrying its own credential.
 		if !target.lan
+			&& urls.iter().any(bare)
 			&& let Some(token) = token.read()?
 		{
-			for url in &mut urls {
-				if !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty()) {
-					url.query_pairs_mut().append_pair("jwt", &token);
-				}
+			for url in urls.iter_mut().filter(|url| bare(url)) {
+				url.query_pairs_mut().append_pair("jwt", &token);
 			}
 		}
 		moq_tokio::Addrs::collect(urls).context("peer advertised no reachable address")
@@ -4043,6 +4055,36 @@ mod tests {
 			Cluster::dial_addrs(&shared, &token).is_err(),
 			"a vanished token fails the attempt"
 		);
+		assert_eq!(
+			query(&inline).as_deref(),
+			Some("jwt=own"),
+			"an own credential needs no file"
+		);
+	}
+
+	/// A fragment is never sent, so a list naming one peer with and without one
+	/// dedupes instead of conflicting.
+	#[test]
+	fn peer_list_ignores_a_fragment() {
+		let desired = parse_peer_list(vec![
+			Peer::new("https://peer.example/"),
+			Peer::new("https://peer.example/#frag"),
+		])
+		.expect("one peer");
+		assert_eq!(desired.len(), 1);
+	}
+
+	/// A static list naming only this relay runs standalone, rather than as a mesh
+	/// that finishes at once and stops watching for critical failures.
+	#[tokio::test]
+	async fn a_static_list_of_only_this_relay_runs_standalone() {
+		let config = Config {
+			connect: vec![Peer::new("https://self.example/")],
+			node: Some("https://SELF.example".to_string()),
+			..Default::default()
+		};
+		let started = new_cluster(config).unwrap().start().await.expect("start");
+		assert!(started.standalone());
 	}
 
 	/// A start that fails binds no dial socket, so a corrected start on the same
