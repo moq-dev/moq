@@ -202,7 +202,6 @@ quests that require them.
 - [Native playout sync keeps tracks decoupled](/quest/m2/mux-sync.md) - `moq_mux::timeline` becomes `moq_mux::sync`, and one slow track no longer stalls or moves another
 - [JS time values are types, not numbers](/quest/m2/js-time-types.md) - every public JS duration and instant is a `Clock.Duration` or `Clock.Instant` object, so a unit mistake fails to compile
 - [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
-- [Public constructors spawn nothing, or say why](/quest/m2/spawn-constructors.md) - each public library entry point that spawns returns a driver its caller polls, or is listed as kept
 - [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - `encode` and `decode` return any number of outputs and gain `flush`, as moq-video's do
 - [A mix-minus removes several sources](/quest/m2/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
 - [Plan: recovery boundaries](/quest/m2/intra-refresh-boundary.md) - the catalog's new `warmup` contract is settled before the cut publishes it

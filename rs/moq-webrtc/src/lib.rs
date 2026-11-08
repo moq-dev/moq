@@ -30,6 +30,11 @@
 //! the `axum` re-export sit behind the default `server` feature, so such an
 //! embedder can drop them with `default-features = false`.
 //!
+//! ## Runtime
+//!
+//! The crate is a tokio edge, built on `moq-tokio`, axum, and tokio sockets: its entry
+//! points spawn their session drivers on the current tokio runtime.
+//!
 //! ## Bitstream gotcha
 //!
 //! The WebRTC ↔ MoQ shape conversion for H.264 and H.265 is handled by
