@@ -319,13 +319,16 @@ capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
 The NixOS module (`services.moq-relay` in this repository's flake) wires the
 same setup: `cluster.ca` and `auth.enable` on the relay peers dial into, and
 `cluster.certFile` and `cluster.keyFile` on each relay that dials. Bring the CA
-and certificates yourself, from paths outside the Nix store:
+and certificates yourself, from paths outside the Nix store. The cluster CA only
+issues client certificates; each relay still serves a certificate its peers
+trust, such as one from ACME, so a leaf verifies the root it dials:
 
 ```nix
 # root
 services.moq-relay = {
   enable = true;
   auth.enable = true;
+  tls.certs = [ { chain = "/var/lib/acme/root.example.com/fullchain.pem"; key = "/var/lib/acme/root.example.com/key.pem"; } ];
   cluster.ca = [ "/etc/moq/cluster-ca.pem" ];
 };
 
@@ -333,6 +336,7 @@ services.moq-relay = {
 services.moq-relay = {
   enable = true;
   auth.enable = true;
+  tls.certs = [ { chain = "/var/lib/acme/leaf.example.com/fullchain.pem"; key = "/var/lib/acme/leaf.example.com/key.pem"; } ];
   cluster = {
     mode = "leaf";
     rootUrl = [ "https://root.example.com:4443" ];
