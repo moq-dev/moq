@@ -3956,9 +3956,17 @@ impl Producer {
 	///
 	/// Other clones of this producer stay open handles, and refuse a group at or past the end
 	/// with [`Error::Closed`]. Fails with [`Error::Closed`] if the track already declared an
-	/// end, or with the abort error.
+	/// end, or with the abort error. A track whose highest group is `u64::MAX` has no end to
+	/// declare: it is aborted with [`Error::BoundsExceeded`], which the call also returns.
 	pub fn finish(self) -> Result<Finished> {
-		self.finish_shared()?;
+		if let Err(err) = self.finish_shared() {
+			// Every other failure finds the track already ended. This one leaves it open, and
+			// the caller can no longer abort it, so readers get the cause rather than `Dropped`.
+			if matches!(err, Error::BoundsExceeded(_)) {
+				let _ = self.abort(err.clone());
+			}
+			return Err(err);
+		}
 		Ok(Finished { producer: self })
 	}
 
@@ -15547,6 +15555,31 @@ mod test {
 		let done = ordered.next_group().now_or_never().expect("end").unwrap();
 		assert!(done.is_none(), "the finished track ends after its late group");
 		assert!(finished.closed().now_or_never().expect("settled").is_ok());
+	}
+
+	/// No end follows group `u64::MAX`, so finishing aborts the track with that cause: the
+	/// consumed handle leaves the caller nothing to abort it with.
+	#[test]
+	#[cfg(feature = "async")]
+	fn finish_past_the_last_sequence_aborts_with_the_cause() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay());
+		let mut group = producer.create_group(group::Info { sequence: u64::MAX }).unwrap();
+		group.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
+		let mut reader = group.consume();
+		assert!(matches!(producer.finish(), Err(Error::BoundsExceeded(_))));
+		// The subscriber may hand out the open group before the error.
+		let ended = loop {
+			match subscriber.recv_group().now_or_never().expect("settled") {
+				Ok(Some(_)) => continue,
+				ended => break ended.map(|group| group.map(|group| group.sequence)),
+			}
+		};
+		assert!(matches!(ended, Err(Error::BoundsExceeded(_))), "{ended:?}");
+		// The open group is cut with the same cause.
+		let cut = reader.read_frame().now_or_never().expect("settled");
+		assert!(matches!(cut, Err(Error::BoundsExceeded(_))), "{cut:?}");
+		assert!(matches!(group.finish(), Err(Error::BoundsExceeded(_))));
 	}
 
 	#[test]
