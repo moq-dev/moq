@@ -15,6 +15,7 @@ export interface InitSegment {
 	defaultSampleFlags: number;
 	defaultSampleSize: number;
 	description?: Uint8Array;
+	encrypted: boolean;
 	kind: "audio" | "video";
 	timescale: number;
 	trackId: number;

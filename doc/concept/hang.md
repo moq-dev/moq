@@ -64,7 +64,7 @@ A few things the catalog can express beyond decoder config:
 - **Labels.** Any rendition may carry a human-readable `label` for a track picker. The map key stays the rendition's ID, so labels need not be unique and renaming one doesn't rename the track.
 - **Renditions in another broadcast.** A rendition may point at a relative broadcast path, so a transcoder can publish a ladder that adds low rungs and references the source's original rendition without re-publishing its bytes. The path resolves against where the consumer found the catalog, so a reference that escapes above the root names nothing and the catalog is rejected. `@moq/watch` and `moqsrc` follow a referenced path's announcements like their own, restarting the rendition on each instance that serves it; every other reader, such as `moq play`, the exporters, and the bindings, waits for the first one announced and keeps it, and an exporter ends the rendition with it. An optional `instance` beside the path names the [stream](/concept/moq-lite#publisher-instances) it expects: a route of another instance ends the rendition instead of falling back to it, while a route whose instance a session minted (one that crossed an older version) cannot prove one, so there it is best effort. Omit `instance` for a broadcast produced on demand, which has none until a worker answers; see [identity and recovery](/concept/identity).
 - **Whole includes.** A root `include` map names whole broadcasts, such as transcoded renditions of the source, by the same relative path and optional `instance` as a rendition's reference. They share the listing catalog's PTS timeline and root settings, including its clock and join interval. Listing one opens nothing, so an include produced on demand starts only once a viewer selects it, which `@moq/watch` does with `broadcast.include(effect, id)`. Its rendition IDs stay its own.
-- **DRM.** A root `drm` map describes the DRM systems protecting Common Encryption CMAF renditions, one entry per system, scheme, and key: its `system` and `kid` UUIDs, the `pssh` box, and the `license` and `certificate` servers. A protected rendition lists its entries' IDs in its own `drm` field, keeps the encrypted sample entry in its `init`, and names the codec that entry wraps. A rendition listing any ID is protected, even when its entry is one a reader cannot parse, so an unknown scheme or a malformed entry hides only the renditions it protects. The MSF catalog carries the same entries as CMSF `contentProtections`. See [Content protection](#content-protection).
+- **DRM.** A root `drm` map describes the DRM systems protecting Common Encryption CMAF renditions, one entry per system, scheme, and key: its `system` and `kid` UUIDs, the `pssh` box, and the `license` and `certificate` servers. A protected rendition lists its entries' IDs in its own `drm` field, keeps the encrypted sample entry in its `init`, and names the codec that entry wraps. A rendition listing any ID is protected, even when its entry is one a reader cannot parse, so an unknown scheme or a malformed entry hides only the renditions it protects. An entry that is not a JSON object, or an ID the map lacks, still refuses the whole catalog. The MSF catalog carries the same entries as CMSF `contentProtections`. See [Content protection](#content-protection).
 - **Track names.** The map key is a rendition's ID and, by default, its track name. A rendition sets `track` only when the two must differ, such as two renditions of same-named tracks in different broadcasts, or a rendition whose media changed and so needs a new name; readers subscribe to `track` when present. An ID can't name both a video and an audio rendition.
 - **Jitter.** A rendition can say how much media it writes behind a frame's timestamp, in whole milliseconds rounded up: the reorder delay of B-frames and the span of a fragment or batch written together. It is measured from media timestamps alone, never the time a frame was written, so neither a constant encoder delay nor a capture clock counts. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Delay.** A rendition can also say how far its frames' timestamps trail those another rendition already wrote, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. A rendition alone measures none. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
@@ -268,13 +268,14 @@ publisher supplies, which the media does not carry.
 WebCodecs cannot decrypt, so `@moq/watch` treats a protected rendition as
 unplayable and never selects it. Playback through MSE and EME is not built yet.
 Nothing in the Rust tools decrypts either: `moq play`, `moq export`, the HLS
-gateway, recordings, transcoding, and the C and UniFFI bindings leave a
-protected rendition out, as they would a codec they cannot decode. Every
-reader, `@moq/watch` included,
-also counts a CMAF rendition whose `init` holds an encrypted sample entry
-(`encv`/`enca`) as protected when it lists no `drm`. An entry a reader cannot
-parse, such as a scheme a later draft adds, hides only the renditions that list
-it.
+gateway, transcoding, and the C and UniFFI bindings leave a protected rendition
+out, as they would a codec they cannot decode. A recording stores every track as
+published, protected ones included, and playing it back leaves them out the
+same way. Every reader, `@moq/watch` included, also counts a CMAF rendition
+whose `init` holds an encrypted sample entry (`encv`/`enca`) as protected when
+it lists no `drm`. An entry a reader cannot parse, such as a scheme a later
+draft adds, hides only the renditions that list it; an entry that is not a JSON
+object refuses the catalog.
 
 ## Your own format
 

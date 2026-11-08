@@ -7,6 +7,7 @@ import { $brand } from "zod/mini";
 import { $loose } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
 import { Net } from "@moq/hang";
+import { ZodMiniArray } from "zod/mini";
 import { ZodMiniBase64 } from "zod/mini";
 import { ZodMiniBoolean } from "zod/mini";
 import { ZodMiniCatch } from "zod/mini";
@@ -14,16 +15,20 @@ import { ZodMiniCustom } from "zod/mini";
 import { ZodMiniDefault } from "zod/mini";
 import { ZodMiniDiscriminatedUnion } from "zod/mini";
 import { ZodMiniEnum } from "zod/mini";
+import { ZodMiniGUID } from "zod/mini";
 import { ZodMiniInt32 } from "zod/mini";
 import { ZodMiniLiteral } from "zod/mini";
 import { ZodMiniNumber } from "zod/mini";
 import { ZodMiniObject } from "zod/mini";
 import { ZodMiniOptional } from "zod/mini";
 import { ZodMiniPipe } from "zod/mini";
+import { ZodMiniRecord } from "zod/mini";
 import { ZodMiniString } from "zod/mini";
 import { ZodMiniTransform } from "zod/mini";
 import { ZodMiniType } from "zod/mini";
+import { ZodMiniURL } from "zod/mini";
 import { ZodMiniUnion } from "zod/mini";
+import { ZodMiniUnknown } from "zod/mini";
 import { infer } from "zod/mini";
 
 export const Audio: {
@@ -59,6 +64,7 @@ export const AudioConfigSchema: ZodMiniObject<{
 	}>>]>>;
 	delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
 	description: ZodMiniOptional<ZodMiniString<string>>;
+	drm: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
 	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
 	jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
@@ -91,6 +97,7 @@ export const AudioSchema: ZodMiniObject<{
 		};
 		delay?: number & $brand<"u53"> | undefined;
 		description?: string | undefined;
+		drm?: string[] | undefined;
 		enabled?: boolean | undefined;
 		instance?: ReferenceInstance | undefined;
 		jitter?: number & $brand<"u53"> | undefined;
@@ -203,6 +210,54 @@ export const ContainerSchema: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscr
 
 export const DEFAULT_FORMAT: Format;
 
+export const DRM_SYSTEM: {
+	readonly clearkey: "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b";
+	readonly fairplay: "94ce86fb-07ff-4f43-adb8-93d2fa968ca2";
+	readonly playready: "9a04f079-9840-4286-ab92-e65be0885f95";
+	readonly widevine: "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
+};
+
+export type DrmEntry = infer<typeof DrmEntrySchema>;
+
+export const DrmEntrySchema: ZodMiniUnion<readonly [ZodMiniObject<{
+	certificate: ZodMiniOptional<ZodMiniObject<{
+		type: ZodMiniOptional<ZodMiniString<string>>;
+		url: ZodMiniURL;
+	}, $strip>>;
+	kid: ZodMiniGUID;
+	license: ZodMiniOptional<ZodMiniObject<{
+		type: ZodMiniOptional<ZodMiniString<string>>;
+		url: ZodMiniURL;
+	}, $strip>>;
+	pssh: ZodMiniOptional<ZodMiniBase64>;
+	scheme: ZodMiniString<string>;
+	system: ZodMiniGUID;
+}, $strip>, ZodMiniRecord<ZodMiniString<string>, ZodMiniUnknown>]>;
+
+export type DrmServer = infer<typeof DrmServerSchema>;
+
+export const DrmServerSchema: ZodMiniObject<{
+	type: ZodMiniOptional<ZodMiniString<string>>;
+	url: ZodMiniURL;
+}, $strip>;
+
+export type DrmSystem = infer<typeof DrmSystemSchema>;
+
+export const DrmSystemSchema: ZodMiniObject<{
+	certificate: ZodMiniOptional<ZodMiniObject<{
+		type: ZodMiniOptional<ZodMiniString<string>>;
+		url: ZodMiniURL;
+	}, $strip>>;
+	kid: ZodMiniGUID;
+	license: ZodMiniOptional<ZodMiniObject<{
+		type: ZodMiniOptional<ZodMiniString<string>>;
+		url: ZodMiniURL;
+	}, $strip>>;
+	pssh: ZodMiniOptional<ZodMiniBase64>;
+	scheme: ZodMiniString<string>;
+	system: ZodMiniGUID;
+}, $strip>;
+
 export class DuplicateRendition extends Error {
 	constructor(id: string);
 	readonly id: string;
@@ -285,6 +340,12 @@ export const MediaSchema: ZodMiniObject<{
 	}, $strip>>>;
 }, $strip>;
 
+export class MissingDrm extends Error {
+	constructor(rendition: string, id: string);
+	readonly id: string;
+	readonly rendition: string;
+}
+
 export type Mode = infer<typeof ModeSchema>;
 
 export const ModeSchema: ZodMiniString<string>;
@@ -350,6 +411,7 @@ export const RootSchema: ZodMiniObject<{
 			};
 			delay?: number & $brand<"u53"> | undefined;
 			description?: string | undefined;
+			drm?: string[] | undefined;
 			enabled?: boolean | undefined;
 			instance?: ReferenceInstance | undefined;
 			jitter?: number & $brand<"u53"> | undefined;
@@ -374,6 +436,20 @@ export const RootSchema: ZodMiniObject<{
 			track?: string | undefined;
 		}>, Record<string, unknown>>>;
 	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
+	drm: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, Record<string, unknown> | {
+		certificate?: {
+			type?: string | undefined;
+			url: string;
+		} | undefined;
+		kid: string;
+		license?: {
+			type?: string | undefined;
+			url: string;
+		} | undefined;
+		pssh?: string | undefined;
+		scheme: string;
+		system: string;
+	}>, Record<string, unknown>>>>;
 	echo: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
 		path: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
 	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;
@@ -494,6 +570,7 @@ export const RootSchema: ZodMiniObject<{
 			description?: string | undefined;
 			displayAspectHeight?: number & $brand<"u53"> | undefined;
 			displayAspectWidth?: number & $brand<"u53"> | undefined;
+			drm?: string[] | undefined;
 			enabled?: boolean | undefined;
 			framerate?: number | undefined;
 			instance?: ReferenceInstance | undefined;
@@ -700,6 +777,7 @@ export const VideoConfigSchema: ZodMiniObject<{
 	description: ZodMiniOptional<ZodMiniString<string>>;
 	displayAspectHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 	displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
+	drm: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
 	framerate: ZodMiniOptional<ZodMiniNumber<number>>;
 	instance: ZodMiniOptional<ZodMiniType<ReferenceInstance, string, $ZodTypeInternals<ReferenceInstance, string>>>;
@@ -791,6 +869,7 @@ export const VideoSchema: ZodMiniObject<{
 		description?: string | undefined;
 		displayAspectHeight?: number & $brand<"u53"> | undefined;
 		displayAspectWidth?: number & $brand<"u53"> | undefined;
+		drm?: string[] | undefined;
 		enabled?: boolean | undefined;
 		framerate?: number | undefined;
 		instance?: ReferenceInstance | undefined;
@@ -830,6 +909,11 @@ export function detectFormat(name: string): Format | undefined;
 export function encode(root: Root): Root;
 
 export const hexSchema: ZodMiniString<string>;
+
+export function isProtected(config: {
+	container?: Container;
+	drm?: string[];
+}): boolean;
 
 export function modeSupported(mode: Mode): mode is KnownMode;
 

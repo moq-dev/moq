@@ -287,7 +287,7 @@ The `pssh` field is the system's whole `pssh` box, base64-encoded ({{!RFC4648, S
 The `license` field names the server a consumer requests a license from, and `certificate` the server certificate a system such as FairPlay needs first; each `type` is the license protocol or the certificate's MIME type.
 Renditions encrypted under the same system, scheme, and key MAY share an entry.
 
-A protected audio or video rendition lists the IDs of the entries that can decrypt it in its `drm` field, an array of strings; absent or empty means the rendition is clear.
+A protected audio or video rendition lists the IDs of the entries that can decrypt it in its `drm` field, an array of strings; absent or empty lists none, and the rendition is clear unless its `init` holds an encrypted sample entry, as below.
 Common Encryption is defined for CMAF, so a protected rendition is in practice a `cmaf` one ({{cmaf}}): its `init` keeps the encrypted sample entry with its `sinf`, and the `pssh` boxes, while its `codec` names the codec the encrypted entry wraps.
 A rendition listing any ID is protected, whether or not the consumer can parse the entries it names.
 A consumer MUST NOT reject a catalog for an entry it cannot parse, such as one with another `scheme` or a malformed UUID or URL: the renditions listing that entry stay protected, and the rest of the catalog stays usable.

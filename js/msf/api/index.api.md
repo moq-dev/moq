@@ -18,12 +18,30 @@ import { infer } from "zod/mini";
 export type Catalog = infer<typeof CatalogSchema>;
 
 export const CatalogSchema: ZodMiniObject<{
+	contentProtections: ZodMiniOptional<ZodMiniArray<ZodMiniObject<{
+		defaultKID: ZodMiniArray<ZodMiniString<string>>;
+		drmSystem: ZodMiniObject<{
+			certURL: ZodMiniOptional<ZodMiniObject<{
+				type: ZodMiniOptional<ZodMiniString<string>>;
+				url: ZodMiniString<string>;
+			}, $strip>>;
+			laURL: ZodMiniOptional<ZodMiniObject<{
+				type: ZodMiniOptional<ZodMiniString<string>>;
+				url: ZodMiniString<string>;
+			}, $strip>>;
+			pssh: ZodMiniOptional<ZodMiniString<string>>;
+			systemID: ZodMiniString<string>;
+		}, $strip>;
+		refID: ZodMiniString<string>;
+		scheme: ZodMiniString<string>;
+	}, $strip>>>;
 	ext: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, unknown>, Record<string, unknown>>>>;
 	tracks: ZodMiniArray<ZodMiniObject<{
 		altGroup: ZodMiniOptional<ZodMiniNumber<number>>;
 		bitrate: ZodMiniOptional<ZodMiniNumber<number>>;
 		channelConfig: ZodMiniOptional<ZodMiniString<string>>;
 		codec: ZodMiniOptional<ZodMiniString<string>>;
+		contentProtectionRefIDs: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		delay: ZodMiniOptional<ZodMiniNumber<number>>;
 		framerate: ZodMiniOptional<ZodMiniNumber<number>>;
 		height: ZodMiniOptional<ZodMiniNumber<number>>;
@@ -57,6 +75,41 @@ export const CatalogSchema: ZodMiniObject<{
 	}, $strip>>;
 }, $strip>;
 
+export type ContentProtection = infer<typeof ContentProtectionSchema>;
+
+export const ContentProtectionSchema: ZodMiniObject<{
+	defaultKID: ZodMiniArray<ZodMiniString<string>>;
+	drmSystem: ZodMiniObject<{
+		certURL: ZodMiniOptional<ZodMiniObject<{
+			type: ZodMiniOptional<ZodMiniString<string>>;
+			url: ZodMiniString<string>;
+		}, $strip>>;
+		laURL: ZodMiniOptional<ZodMiniObject<{
+			type: ZodMiniOptional<ZodMiniString<string>>;
+			url: ZodMiniString<string>;
+		}, $strip>>;
+		pssh: ZodMiniOptional<ZodMiniString<string>>;
+		systemID: ZodMiniString<string>;
+	}, $strip>;
+	refID: ZodMiniString<string>;
+	scheme: ZodMiniString<string>;
+}, $strip>;
+
+export type DrmSystem = infer<typeof DrmSystemSchema>;
+
+export const DrmSystemSchema: ZodMiniObject<{
+	certURL: ZodMiniOptional<ZodMiniObject<{
+		type: ZodMiniOptional<ZodMiniString<string>>;
+		url: ZodMiniString<string>;
+	}, $strip>>;
+	laURL: ZodMiniOptional<ZodMiniObject<{
+		type: ZodMiniOptional<ZodMiniString<string>>;
+		url: ZodMiniString<string>;
+	}, $strip>>;
+	pssh: ZodMiniOptional<ZodMiniString<string>>;
+	systemID: ZodMiniString<string>;
+}, $strip>;
+
 export type Packaging = infer<typeof PackagingSchema>;
 
 export const PackagingSchema: ZodMiniUnion<readonly [ZodMiniEnum<{
@@ -66,6 +119,11 @@ export const PackagingSchema: ZodMiniUnion<readonly [ZodMiniEnum<{
 	loc: "loc";
 	mediatimeline: "mediatimeline";
 }>, ZodMiniString<string>]>;
+
+export const ProtectionUrlSchema: ZodMiniObject<{
+	type: ZodMiniOptional<ZodMiniString<string>>;
+	url: ZodMiniString<string>;
+}, $strip>;
 
 export type Role = infer<typeof RoleSchema>;
 
@@ -85,6 +143,7 @@ export const TrackSchema: ZodMiniObject<{
 	bitrate: ZodMiniOptional<ZodMiniNumber<number>>;
 	channelConfig: ZodMiniOptional<ZodMiniString<string>>;
 	codec: ZodMiniOptional<ZodMiniString<string>>;
+	contentProtectionRefIDs: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	delay: ZodMiniOptional<ZodMiniNumber<number>>;
 	framerate: ZodMiniOptional<ZodMiniNumber<number>>;
 	height: ZodMiniOptional<ZodMiniNumber<number>>;

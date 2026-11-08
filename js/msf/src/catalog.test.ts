@@ -375,4 +375,8 @@ test("content protection round-trips and a dangling refID is refused", () => {
 
 	const dangling = encodeJson({ version: "draft-01", tracks: [{ ...track, contentProtectionRefIDs: ["2"] }] });
 	expect(() => decode(dangling)).toThrow("missing content protection");
+	// Encoding refuses it too, so a publisher fails before its subscribers do.
+	expect(() =>
+		encode({ tracks: [{ ...track, contentProtectionRefIDs: ["2"] }] } as Parameters<typeof encode>[0]),
+	).toThrow("missing content protection");
 });

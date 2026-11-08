@@ -1341,7 +1341,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 		return false;
 	}
 
-	let init: { description?: Uint8Array; encrypted: boolean } | undefined;
+	let init: { description?: Uint8Array } | undefined;
 	if (config.container.kind === "cmaf") {
 		try {
 			const Cmaf = await import("@moq/hang/cmaf");
@@ -1352,11 +1352,6 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 			// track rather than letting isConfigSupported pass on a
 			// description-less config and then having runCmaf fail later.
 			console.warn(`video: malformed CMAF init segment for codec ${config.codec}`, err);
-			return false;
-		}
-		// An encrypted sample entry is protected even when the catalog lists no `drm` entry.
-		if (init.encrypted) {
-			console.warn(`video: ignoring encrypted CMAF rendition ${config.codec}: playback cannot decrypt it`);
 			return false;
 		}
 	}

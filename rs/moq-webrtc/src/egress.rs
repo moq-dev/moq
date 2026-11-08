@@ -112,9 +112,13 @@ impl EgressSource {
 	/// which takes the receiver via [`Self::take_writes`].
 	pub async fn new(source: moq_mux::Source) -> Result<Self> {
 		let mut consumer = source.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await?;
-		let catalog = consumer.next().await?.ok_or(Error::CatalogClosed)?;
+		let mut catalog = consumer.next().await?.ok_or(Error::CatalogClosed)?;
+		// WebRTC egress would forward ciphertext as media; it does not decrypt. The first
+		// snapshot passes the same filter as the rest, which keeps it to log each rendition once.
+		let mut clear = moq_mux::catalog::hang::Clear::default();
+		clear.retain(&mut catalog);
 		let (catalog_tx, catalog) = watch::channel(catalog);
-		let catalog_end = tokio::spawn(follow_catalog(consumer, catalog_tx));
+		let catalog_end = tokio::spawn(follow_catalog(consumer, catalog_tx, clear));
 
 		let (tx, rx) = mpsc::channel(64);
 		Ok(Self {
@@ -194,15 +198,17 @@ impl EgressSource {
 	}
 }
 
-/// Publish each catalog snapshot until the catalog ends or every pump is gone, failing with the
-/// catalog's failure.
-async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch::Sender<Catalog>) -> Result<()> {
-	let mut clear = moq_mux::catalog::hang::Clear::default();
+/// Publish each catalog snapshot, without its protected renditions, until the catalog ends or
+/// every pump is gone, failing with the catalog's failure.
+async fn follow_catalog(
+	mut consumer: moq_mux::catalog::Consumer<()>,
+	tx: watch::Sender<Catalog>,
+	mut clear: moq_mux::catalog::hang::Clear,
+) -> Result<()> {
 	loop {
 		tokio::select! {
 			next = consumer.next() => match next {
 				Ok(Some(mut catalog)) => {
-					// WebRTC egress would forward ciphertext as media; it does not decrypt.
 					clear.retain(&mut catalog);
 					tx.send_replace(catalog);
 				}
@@ -923,6 +929,36 @@ mod tests {
 		idle(&mut writes).await;
 		high.write(frame(200, b"high-1", true)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"high-1");
+	}
+
+	/// A protected rendition in the first and only snapshot is never served: the line takes its
+	/// clear sibling, as it would for a disabled one.
+	#[tokio::test(start_paused = true)]
+	async fn a_protected_rendition_in_the_first_snapshot_is_skipped() {
+		use hang::catalog::drm;
+
+		let origin = produce_origin();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut high = vp8(&mut broadcast, &mut catalog, "high", 1080);
+		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
+		{
+			let mut modify = catalog.modify().unwrap();
+			let entry = drm::System::new(drm::system::CLEARKEY, drm::Scheme::Cenc, drm::system::CLEARKEY);
+			modify.drm.insert("1".to_string(), entry.into());
+			modify.video.renditions.get_mut("high").unwrap().drm = vec!["1".to_string()];
+		}
+
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
+
+		high.write(frame(0, b"high-0", true)).unwrap();
+		low.write(frame(0, b"low-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
+		idle(&mut writes).await;
 	}
 
 	/// A rendition the catalog moves to another track, in its broadcast or a sibling one, keeps

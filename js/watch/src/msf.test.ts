@@ -367,9 +367,13 @@ test("maps CMSF content protection onto hang drm entries", () => {
 				contentProtectionRefIDs: ["ck", "two", "bad"],
 			},
 			{ name: "audio", packaging: "loc", role: "audio", codec: "opus" },
+			{ name: "words", packaging: "loc", role: "caption", codec: "vtt" },
+			{ name: "sealed", packaging: "loc", role: "caption", codec: "vtt", contentProtectionRefIDs: ["ck"] },
 		],
 	};
 	const root = Catalog.checkRenditions(toHang(catalog));
+	// A hang text rendition has no `drm`, so a protected one is left out rather than read as clear.
+	expect(Object.keys(root.text?.renditions ?? {})).toEqual(["words"]);
 	expect(Object.keys(root.drm ?? {}).sort()).toEqual(["bad", "ck", "two"]);
 	const ck = known(root.drm?.ck);
 	expect(ck.system).toBe(Catalog.DRM_SYSTEM.clearkey);

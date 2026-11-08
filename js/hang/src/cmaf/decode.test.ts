@@ -96,7 +96,28 @@ describe("CMAF encrypted sample entries", () => {
 		expect(decodeInitSegment(init("audioInit")).encrypted).toBe(false);
 		expect(decodeInitSegment(encrypt(init("audioInit"), "Opus", "enca")).encrypted).toBe(true);
 	});
+
+	test("an encrypted later track is not hidden by a clear first one", () => {
+		const [ftyp, moov] = split(init("videoInit"));
+		const [, audioMoov] = split(encrypt(init("audioInit"), "Opus", "enca"));
+		const audioTrak = split(audioMoov.subarray(8)).find((child) => child.subarray(4, 8).toString() === "trak");
+		if (!audioTrak) throw new Error("no audio trak");
+		const both = Buffer.concat([ftyp, box("moov", ...split(moov.subarray(8)), audioTrak)]);
+		const decoded = decodeInitSegment(both);
+		expect(decoded.kind).toBe("video");
+		expect(decoded.encrypted).toBe(true);
+	});
 });
+
+/** The boxes in `data`, each whole with its header. */
+function split(data: Uint8Array): Buffer[] {
+	const out: Buffer[] = [];
+	const buffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+	for (let at = 0; at < buffer.byteLength; at += buffer.readUInt32BE(at)) {
+		out.push(buffer.subarray(at, at + buffer.readUInt32BE(at)));
+	}
+	return out;
+}
 
 describe("CMAF untrusted counts and sizes", () => {
 	test("a zero timescale is refused at initialization", () => {

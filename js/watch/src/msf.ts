@@ -230,6 +230,8 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 				track.role !== "signlanguage" &&
 				["vtt", "ttml", "utf8"].includes(track.codec ?? ""))
 		) {
+			// A hang text rendition has no `drm` to say it is protected, so it would read as clear.
+			if (track.contentProtectionRefIDs?.length) continue;
 			const info = toContainer(track);
 			// A player selects usable renditions; an optional unsupported track cannot invalidate A/V.
 			if (!info) continue;

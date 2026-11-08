@@ -43,4 +43,7 @@ test("an encrypted CMAF init is unplayable without drm entries", async () => {
 	});
 	expect(await Video.Decoder.supported(video)).toBe(false);
 	expect(await Audio.Decoder.supported(audio)).toBe(false);
+	expect(Catalog.isProtected(video)).toBe(true);
+	expect(Catalog.isProtected(audio)).toBe(true);
+	expect(Catalog.isProtected({ container: { kind: "cmaf", init: fixtures.videoInit } })).toBe(false);
 });

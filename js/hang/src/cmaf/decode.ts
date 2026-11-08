@@ -166,6 +166,24 @@ export interface Sample {
 }
 
 /**
+ * Whether any track in the moov has an encrypted (`encv`/`enca`) sample entry, which only a player
+ * that decrypts can read. Every track counts, as Rust's check reads them all.
+ */
+function encrypted(moov: Box[]): boolean {
+	for (const trak of moov) {
+		if (trak.type !== "trak") continue;
+		const mdia = child(boxes(trak.payload), "mdia");
+		const minf = mdia && child(boxes(mdia.payload), "minf");
+		const stbl = minf && child(boxes(minf.payload), "stbl");
+		const stsd = stbl && child(boxes(stbl.payload), "stsd");
+		if (!stsd) continue;
+		if (boxes(stsd.payload.subarray(8)).some((entry) => entry.type === "encv" || entry.type === "enca"))
+			return true;
+	}
+	return false;
+}
+
+/**
  * Parse an init segment (ftyp + moov) to extract codec description and timescale.
  *
  * @param init - The init segment data
@@ -236,7 +254,7 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 		timescale,
 		trackId,
 		kind,
-		encrypted: entries.some((entry) => entry.type === "encv" || entry.type === "enca"),
+		encrypted: encrypted(moov),
 		defaultSampleDuration: trex?.duration ?? 0,
 		defaultSampleSize: trex?.size ?? 0,
 		defaultSampleFlags: trex?.flags ?? 0,

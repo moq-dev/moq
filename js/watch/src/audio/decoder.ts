@@ -1057,7 +1057,7 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		console.warn(`audio: opus advertised at ${config.sampleRate}Hz, which some browsers cannot decode`);
 	}
 
-	let init: { description?: Uint8Array; encrypted: boolean } | undefined;
+	let init: { description?: Uint8Array } | undefined;
 	if (config.container.kind === "cmaf") {
 		try {
 			const Cmaf = await import("@moq/hang/cmaf");
@@ -1068,11 +1068,6 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 			// track rather than letting isConfigSupported pass on a
 			// description-less config and then having decode() fail later.
 			console.warn(`audio: malformed CMAF init segment for codec ${config.codec}`, err);
-			return false;
-		}
-		// An encrypted sample entry is protected even when the catalog lists no `drm` entry.
-		if (init.encrypted) {
-			console.warn(`audio: ignoring encrypted CMAF rendition ${config.codec}: playback cannot decrypt it`);
 			return false;
 		}
 	}

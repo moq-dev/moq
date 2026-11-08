@@ -165,10 +165,28 @@ const WireCatalogSchema = z.object({
 	contentProtections: z.optional(z.array(ContentProtectionSchema)),
 });
 
+/**
+ * Refuse a track whose protection names no root entry: it would claim encryption the catalog
+ * cannot describe, so it is refused like a missing initRef.
+ */
+function checkProtections(
+	tracks: { name: string; contentProtectionRefIDs?: string[] }[],
+	protections: { refID: string }[] | undefined,
+): void {
+	const refIDs = new Set((protections ?? []).map((cp) => cp.refID));
+	for (const track of tracks) {
+		const missing = track.contentProtectionRefIDs?.find((id) => !refIDs.has(id));
+		if (missing !== undefined) {
+			throw new Error(`MSF track "${track.name}" references missing content protection "${missing}"`);
+		}
+	}
+}
+
 /** Serialize a catalog to its JSON wire representation (draft-01). */
 export function encode(catalog: Catalog): Uint8Array {
 	// Refuse what `decode` would reject, so a publisher fails here instead of its subscribers.
 	CatalogSchema.parse(catalog);
+	checkProtections(catalog.tracks, catalog.contentProtections);
 
 	// Hoist inline init payloads into a shared, deduplicated initDataList and
 	// reference each from its track via initRef (the draft-01 wire shape).
@@ -231,16 +249,10 @@ export function decode(raw: Uint8Array): Catalog {
 		byId.set(entry.id, entry);
 	}
 
-	// A track's protection refers to a root entry by refID; one that names none would claim
-	// encryption the catalog cannot describe, so it is refused like a missing initRef.
-	const refIDs = new Set((wire.contentProtections ?? []).map((cp) => cp.refID));
+	checkProtections(wire.tracks ?? [], wire.contentProtections);
 
 	const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
 		track.isLive ??= false;
-		const missing = track.contentProtectionRefIDs?.find((id) => !refIDs.has(id));
-		if (missing !== undefined) {
-			throw new Error(`MSF track "${track.name}" references missing content protection "${missing}"`);
-		}
 
 		// Resolve draft-01 initRef into inline initData so callers never see the
 		// indirection. Inline initData (draft-00) is kept as-is, but a catalog that

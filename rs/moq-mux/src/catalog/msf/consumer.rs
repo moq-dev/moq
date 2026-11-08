@@ -174,11 +174,17 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 				}
 			},
 			moq_msf::Role::Caption | moq_msf::Role::Subtitle => {
+				if protected_text(track) {
+					continue;
+				}
 				let mut config = text_config_from_msf(track, &mut init_cache)?;
 				config.broadcast = broadcast;
 				catalog.text.renditions.insert(track.name.clone(), config);
 			}
 			moq_msf::Role::Unknown(_) if matches!(track.codec.as_deref(), Some("vtt" | "ttml" | "utf8")) => {
+				if protected_text(track) {
+					continue;
+				}
 				let mut config = text_config_from_msf(track, &mut init_cache)?;
 				config.broadcast = broadcast;
 				catalog.text.renditions.insert(track.name.clone(), config);
@@ -190,6 +196,16 @@ pub(crate) fn from_msf<E: CatalogExt>(msf: &moq_msf::Catalog<E>, base: &moq_net:
 	}
 
 	Ok(catalog)
+}
+
+/// Whether an MSF text track is protected, which a hang text rendition has no `drm` to say, so it
+/// would read as clear: such a track is left out.
+fn protected_text(track: &moq_msf::Track) -> bool {
+	let protected = !track.content_protection_ref_ids.is_empty();
+	if protected {
+		tracing::debug!(track = %track.name, "skipping protected MSF text track");
+	}
+	protected
 }
 
 /// An MSF catalog's `contentProtections` as hang `drm` entries, keyed by `refID`.
@@ -595,12 +611,18 @@ mod test {
 				{ "name": "video", "packaging": "legacy", "isLive": true, "role": "video", "codec": "vp8",
 				  "contentProtectionRefIDs": ["wv", "ck", "two", "bad"] },
 				{ "name": "audio", "packaging": "legacy", "isLive": true, "role": "audio", "codec": "opus",
-				  "samplerate": 48000, "channelConfig": "2" }
+				  "samplerate": 48000, "channelConfig": "2" },
+				{ "name": "words", "packaging": "loc", "isLive": true, "role": "caption", "codec": "vtt" },
+				{ "name": "sealed", "packaging": "loc", "isLive": true, "role": "caption", "codec": "vtt",
+				  "contentProtectionRefIDs": ["wv"] }
 			]
 		}"#;
 		let msf: moq_msf::Catalog = json.parse().unwrap();
 		let catalog = from_msf(&msf, &moq_net::Path::empty()).unwrap();
 		catalog.check_renditions().unwrap();
+
+		// A hang text rendition has no `drm`, so a protected one is left out rather than read as clear.
+		assert_eq!(catalog.text.renditions.keys().collect::<Vec<_>>(), ["words"]);
 
 		assert_eq!(catalog.drm.keys().collect::<Vec<_>>(), ["bad", "ck", "two", "wv"]);
 		let wv = known(&catalog.drm["wv"]);

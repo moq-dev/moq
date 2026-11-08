@@ -1,4 +1,6 @@
 import * as z from "zod/mini";
+import { decodeInitSegment } from "../cmaf/decode";
+import type { Container } from "./container";
 
 /**
  * Well-known DRM system IDs, as draft-ietf-moq-cmsf lists them.
@@ -72,13 +74,18 @@ export class MissingDrm extends Error {
 }
 
 /**
- * Whether a rendition signals protection: it lists `drm` entries, so its samples are encrypted and
- * only a consumer that can decrypt them may select it.
- *
- * A CMAF rendition is also protected when its init holds an encrypted sample entry, which this
- * does not decode: check `Cmaf.decodeInitSegment(init).encrypted` as well, as Rust's `protected`
- * does in one call.
+ * Whether a rendition is protected, so its samples are encrypted and only a consumer that can
+ * decrypt them may select it: it lists `drm` entries, or it is CMAF and its init holds an encrypted
+ * (`encv`/`enca`) sample entry, so a publisher that encrypts without signalling it is never read as
+ * clear. An init that fails to parse is not one, since no consumer reads it either way.
  */
-export function isProtected(config: { drm?: string[] }): boolean {
-	return (config.drm?.length ?? 0) > 0;
+export function isProtected(config: { drm?: string[]; container?: Container }): boolean {
+	if ((config.drm?.length ?? 0) > 0) return true;
+	if (config.container?.kind !== "cmaf") return false;
+	try {
+		const init = Uint8Array.from(atob(config.container.init), (char) => char.charCodeAt(0));
+		return decodeInitSegment(init).encrypted;
+	} catch {
+		return false;
+	}
 }

@@ -1357,28 +1357,34 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		Some((name.to_string(), namespace))
 	};
 
-	// CMSF has no form for an entry this build cannot read, so a rendition it protects is left out
-	// rather than advertised with a dangling or missing protection, which would read as clear.
-	let signalled_quietly = |drm: &[String]| {
-		(drm.iter()).all(|entry| matches!(catalog.drm.get(entry), Some(hang::catalog::drm::Entry::Known(_))))
+	let protections: BTreeMap<&String, moq_msf::ContentProtection> = (catalog.drm.iter())
+		.filter_map(|(id, entry)| Some((id, msf_protection(id, entry)?)))
+		.collect();
+
+	// A rendition CMSF cannot mark as protected is left out rather than advertised with a dangling
+	// or missing protection, which would read as clear: one listing an entry with no CMSF form, or
+	// one only its encrypted init marks.
+	let signalled_quietly = |drm: &[String], container: &hang::catalog::Container| match drm {
+		[] => !crate::catalog::hang::protected(drm, container),
+		_ => drm.iter().all(|id| protections.contains_key(id)),
 	};
-	let signalled = |id: &str, drm: &[String]| {
-		let known = signalled_quietly(drm);
-		if !known {
+	let signalled = |id: &str, drm: &[String], container: &hang::catalog::Container| {
+		let signalled = signalled_quietly(drm, container);
+		if !signalled {
 			tracing::debug!(
 				rendition = id,
-				"MSF cannot carry this rendition's drm entries; leaving it out"
+				"MSF cannot mark this rendition as protected; leaving it out"
 			);
 		}
-		known
+		signalled
 	};
 
 	let has_multiple_video = (catalog.video.renditions.values())
-		.filter(|config| signalled_quietly(&config.drm))
+		.filter(|config| signalled_quietly(&config.drm, &config.container))
 		.count()
 		> 1;
 	for (name, config) in &catalog.video.renditions {
-		if !signalled(name, &config.drm) {
+		if !signalled(name, &config.drm, &config.container) {
 			continue;
 		}
 		let packaging = packaging_of(&config.container);
@@ -1416,11 +1422,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	}
 
 	let has_multiple_audio = (catalog.audio.renditions.values())
-		.filter(|config| signalled_quietly(&config.drm))
+		.filter(|config| signalled_quietly(&config.drm, &config.container))
 		.count()
 		> 1;
 	for (name, config) in &catalog.audio.renditions {
-		if !signalled(name, &config.drm) {
+		if !signalled(name, &config.drm, &config.container) {
 			continue;
 		}
 		let packaging = packaging_of(&config.container);
@@ -1488,13 +1494,23 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		}
 	}
 	let mut msf = moq_msf::Catalog::with_ext(unique, E::default());
-	msf.content_protections = (catalog.drm.iter())
-		.filter_map(|(id, entry)| match entry {
-			hang::catalog::drm::Entry::Known(system) => Some(content_protection(id, system)),
-			_ => None,
-		})
-		.collect();
+	msf.content_protections = protections.into_values().collect();
 	msf
+}
+
+/// The CMSF `contentProtections` entry for a hang `drm` entry: a known one as the entry it mirrors,
+/// or an unknown one that is already a CMSF entry, as one read from MSF with several default keys
+/// is, so a catalog read from MSF renders back without losing it.
+fn msf_protection(id: &str, entry: &hang::catalog::drm::Entry) -> Option<moq_msf::ContentProtection> {
+	match entry {
+		hang::catalog::drm::Entry::Known(system) => Some(content_protection(id, system)),
+		hang::catalog::drm::Entry::Unknown(unknown) => {
+			let fields = serde_json::Value::Object(unknown.fields().clone());
+			let mut msf: moq_msf::ContentProtection = serde_json::from_value(fields).ok()?;
+			msf.ref_id = id.to_string();
+			Some(msf)
+		}
+	}
 }
 
 /// A hang `drm` entry as the CMSF `contentProtections` entry it mirrors (draft-ietf-moq-cmsf
@@ -1731,6 +1747,91 @@ mod test {
 		assert_eq!(names, ["hd", "video", "video"]);
 		assert_eq!(msf.tracks[1].namespace.as_deref(), Some("left"));
 		assert_eq!(msf.tracks[2].namespace.as_deref(), Some("right"));
+	}
+
+	/// hang `drm` entries render as the CMSF `contentProtections` each protected track references,
+	/// and a catalog read back from that MSF keeps them. An unknown entry that is already a CMSF
+	/// entry, as one read from MSF with several keys is, renders as it was. A rendition CMSF cannot
+	/// mark as protected is left out: one listing an entry with no CMSF form, or one only its
+	/// encrypted init marks.
+	#[test]
+	fn drm_entries_render_as_content_protections() {
+		let mut catalog = hang::Catalog::<()>::from_str(
+			r#"{
+			"drm": {
+				"wv": {"system": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed", "scheme": "cbcs",
+				       "kid": "01234567-89ab-cdef-0123-456789abcdef",
+				       "license": {"url": "https://wv.example.com/", "type": "EME-1.0"}},
+				"two": {"refID": "two", "scheme": "cenc",
+				        "defaultKID": ["01234567-89ab-cdef-0123-456789abcdef", "a1b2c3d4-e5f6-0718-293a-4b5c6d7e8f90"],
+				        "drmSystem": {"systemID": "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b"}},
+				"odd": {"system": "not-a-uuid"}
+			},
+			"video": {"renditions": {
+				"clear": {"codec": "avc1.64001f", "container": {"kind": "legacy"}},
+				"hd": {"codec": "avc1.64001f", "container": {"kind": "legacy"}, "drm": ["wv"]},
+				"keys": {"codec": "avc1.64001f", "container": {"kind": "legacy"}, "drm": ["two"]},
+				"odd": {"codec": "avc1.64001f", "container": {"kind": "legacy"}, "drm": ["odd"]}
+			}},
+			"audio": {"renditions": {
+				"sound": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 2,
+				          "container": {"kind": "legacy"}, "drm": ["wv"]}
+			}}
+		}"#,
+		)
+		.unwrap();
+		let mut sealed = catalog.video.renditions["clear"].clone();
+		sealed.container = hang::catalog::Container::Cmaf {
+			init: encrypted_init().into(),
+		};
+		catalog.video.renditions.insert("sealed".to_string(), sealed);
+
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
+		let tracks: Vec<_> = (msf.tracks.iter())
+			.map(|track| (track.name.as_str(), track.content_protection_ref_ids.clone()))
+			.collect();
+		let refs = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+		assert_eq!(
+			tracks,
+			[
+				("clear", refs(&[])),
+				("hd", refs(&["wv"])),
+				("keys", refs(&["two"])),
+				("sound", refs(&["wv"]))
+			]
+		);
+
+		let ids: Vec<_> = msf.content_protections.iter().map(|cp| cp.ref_id.as_str()).collect();
+		assert_eq!(ids, ["two", "wv"]);
+		let wv = &msf.content_protections[1];
+		assert_eq!(wv.default_kid, ["01234567-89ab-cdef-0123-456789abcdef"]);
+		assert_eq!(wv.scheme, "cbcs");
+		assert_eq!(wv.drm_system.system_id, "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed");
+		let license = wv.drm_system.la_url.as_ref().unwrap();
+		assert_eq!(
+			(license.url.as_str(), license.kind.as_deref()),
+			("https://wv.example.com/", Some("EME-1.0"))
+		);
+		assert_eq!(msf.content_protections[0].default_kid.len(), 2);
+
+		let back = crate::catalog::msf::from_msf(&msf, &moq_net::Path::empty()).unwrap();
+		back.check_renditions().unwrap();
+		assert_eq!(back.drm.keys().collect::<Vec<_>>(), ["two", "wv"]);
+		assert_eq!(back.video.renditions["keys"].drm, ["two"]);
+	}
+
+	/// The init of `bbb.mp4` with its video entry renamed `encv`, standing in for an encrypted one.
+	fn encrypted_init() -> Vec<u8> {
+		const FILE: &[u8] = include_bytes!("../container/fmp4/test_data/bbb.mp4");
+		let mut end = 0;
+		while &FILE[end + 4..end + 8] != b"moof" {
+			end += u32::from_be_bytes(FILE[end..end + 4].try_into().unwrap()) as usize;
+		}
+		let mut init = FILE[..end].to_vec();
+		let moov = init.windows(4).position(|window| window == b"moov").unwrap();
+		let entry = moov + init[moov..].windows(4).position(|window| window == b"avc1").unwrap();
+		init[entry..entry + 4].copy_from_slice(b"encv");
+		init
 	}
 
 	#[test]
