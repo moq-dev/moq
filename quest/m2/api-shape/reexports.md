@@ -2,8 +2,9 @@
 
 ## Goal
 
-moq's crates re-export no whole crate, moq's own included, so a bump of a
-dependency is no longer a semver break of the crates that re-export it:
+moq's crates re-export no whole crate, moq's own included, so a breaking
+release of a dependency is no longer a semver break of the crates that
+re-export it:
 
 - hang: `pub use moq_net;` (`rs/hang/src/lib.rs`)
 - moq-net: `pub use bytes;` and `pub use kio;` (`rs/moq-net/src/lib.rs`)
@@ -59,9 +60,9 @@ Decided 2026-11-07 (maintainer, rust2's
 [export census](https://github.com/moq-dev/rust2/pull/655)): ✅ drop
 whole-crate re-exports from moq, wrapping the few third-party types its
 signatures need. A whole-crate re-export makes that crate's whole API part
-of moq's, so any bump of it breaks moq's semver. rust2's exporter refuses
-each one with a span at its `pub use` (rejected there: skipping them
-silently, as rustdoc does; exporting their whole APIs).
+of moq's, so any breaking release of it breaks moq's semver. rust2's
+exporter refuses each one with a span at its `pub use` (rejected there:
+skipping them silently, as rustdoc does; exporting their whole APIs).
 
 Decided 2026-11-07 (maintainer,
 [moq-dev/moq#8233](https://github.com/moq-dev/moq/pull/8233)): ✅ every
