@@ -49,8 +49,9 @@ Decided 2026-11-07 (maintainer):
   REVIEW.md's State check and its AGENTS.md line). Not chosen:
   REVIEW.md only, or no rule change.
 - ✅ `quic::driver::Endpoint::rebind` becomes crate-private, since only
-  tests call it (see [Transport close](/quest/m1/explicit-state/transport-close.md)).
-  Not chosen: refusing to rebind after close.
+  tests call it (done: test-only, and unreleased, so it broke no published
+  surface and needed no m2 quest). Not chosen: refusing to rebind after
+  close.
 
 Every child reproduces each folded bug in a test before fixing it. A bug
 that doesn't reproduce is dropped from the child, and its PR says why. A
@@ -69,7 +70,6 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 ## Required
 
 - [moq-boy pause state](/quest/m1/explicit-state/boy-pause.md) - a new viewer always wakes a paused emulator
-- [Transport close](/quest/m1/explicit-state/transport-close.md) - connection status ends with its error, and every Rust QUIC backend agrees when a connection is closed
 - [Video codec drains](/quest/m1/explicit-state/video-drain.md) - a hardware codec whose drain fails is ready for input again or terminally failed, never left stuck
 - [Publish capture phases](/quest/m1/explicit-state/publish-capture.md) - dismissing the screen-share picker turns sharing off
 - [js/qmux close](/quest/m1/explicit-state/qmux-close.md) - a graceful remote close ends qmux streams cleanly

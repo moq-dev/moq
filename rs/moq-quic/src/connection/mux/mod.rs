@@ -18,7 +18,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use tracing::{debug, trace};
 
 use super::{
-	Error as ConnectionError, State as ConnectionState, ThinRetransmits,
+	Error as ConnectionError, ThinRetransmits,
 	datagrams::DatagramState,
 	spaces::Retransmits,
 	stats::FrameStats,
@@ -127,6 +127,19 @@ fn limit(limit: Option<NonZeroU64>, default: u64) -> VarInt {
 	VarInt::from_u64(limit.map_or(default, NonZeroU64::get)).unwrap_or(VarInt::MAX)
 }
 
+/// How a [`Connection`] ended, if it has, during the handshake or after it
+enum End {
+	/// Not ended
+	Open,
+	/// Ended with `error`; `frame` is the close still to write, if any
+	Closing {
+		error: ConnectionError,
+		frame: Option<Close>,
+	},
+	/// Ended with `error`, having written everything it will
+	Closed(ConnectionError),
+}
+
 /// A QMux connection over a reliable, ordered transport
 pub struct Connection {
 	side: Side,
@@ -134,11 +147,14 @@ pub struct Connection {
 	streams: StreamsState,
 	/// Control frames waiting to be written
 	pending: Retransmits,
-	conn_state: ConnectionState,
 	stats: FrameStats,
 
+	/// Our transport parameters went out: the first record carries them, whether the peer's
+	/// arrived first or the connection already ended
 	params_sent: bool,
+	/// The peer's transport parameters, once they arrive; they stay in force after the end
 	peer: Option<Params>,
+	end: End,
 	protocol: Option<String>,
 	timer: Timer,
 
@@ -150,10 +166,6 @@ pub struct Connection {
 
 	datagrams: DatagramState,
 
-	/// The close frame waiting to be written
-	close: Option<Close>,
-	close_sent: bool,
-	error: Option<ConnectionError>,
 	/// Draft-00 frames already serialized, one per transport message
 	queued: VecDeque<Bytes>,
 	/// Where records are serialized. Each one handed out is split off, so the allocation is
@@ -183,10 +195,10 @@ impl Connection {
 			config,
 			streams,
 			pending: Retransmits::default(),
-			conn_state: ConnectionState::Established,
 			stats: FrameStats::default(),
 			params_sent: false,
 			peer: None,
+			end: End::Open,
 			protocol: None,
 			timer,
 			next_ping: 0,
@@ -194,9 +206,6 @@ impl Connection {
 			ping_request: false,
 			ping_response: None,
 			datagrams: DatagramState::default(),
-			close: None,
-			close_sent: false,
-			error: None,
 			queued: VecDeque::new(),
 			out: BytesMut::new(),
 		}
@@ -214,23 +223,29 @@ impl Connection {
 
 	/// Whether the peer's transport parameters arrived and the connection is still up
 	pub fn is_established(&self) -> bool {
-		self.peer.is_some() && self.error.is_none()
+		self.peer.is_some() && !self.is_closed()
 	}
 
 	/// Whether the connection ended
 	pub fn is_closed(&self) -> bool {
-		self.error.is_some()
+		!matches!(self.end, End::Open)
 	}
 
 	/// Whether the connection ended and has nothing left to write, so the transport can be
 	/// shut down
 	pub fn is_drained(&self) -> bool {
-		self.error.is_some() && self.close.is_none() && self.queued.is_empty()
+		match self.end {
+			End::Closing { frame: None, .. } | End::Closed(_) => self.queued.is_empty(),
+			End::Open | End::Closing { frame: Some(_), .. } => false,
+		}
 	}
 
 	/// Why the connection ended, if it has
 	pub fn error(&self) -> Option<&ConnectionError> {
-		self.error.as_ref()
+		match &self.end {
+			End::Closing { error, .. } | End::Closed(error) => Some(error),
+			End::Open => None,
+		}
 	}
 
 	/// Wait for the peer's transport parameters
@@ -261,7 +276,7 @@ impl Connection {
 	/// A protocol violation ends the connection with a CONNECTION_CLOSE from the next
 	/// [`Self::poll_transmit`].
 	pub fn handle_record(&mut self, payload: Bytes, now: Instant) {
-		if self.error.is_some() {
+		if self.is_closed() {
 			return;
 		}
 		self.timer.on_recv(now);
@@ -273,17 +288,13 @@ impl Connection {
 	/// The transport refused an incoming record larger than `max_record_size`, or a draft-00
 	/// frame larger than `max_frame_size`, rather than read it into memory
 	pub fn handle_oversized(&mut self) {
-		if self.error.is_none() {
-			self.fail(self.oversized());
-		}
+		self.fail(self.oversized());
 	}
 
 	/// The transport found the peer violating its framing, such as overrunning a buffer it
 	/// bounds itself, so close with `err`
 	pub fn handle_violation(&mut self, err: TransportError) {
-		if self.error.is_none() {
-			self.fail(err);
-		}
+		self.fail(err);
 	}
 
 	/// The transport failed, or ended without a close frame
@@ -302,17 +313,20 @@ impl Connection {
 	/// The frame comes from the next [`Self::poll_transmit`]; flush it before shutting down
 	/// the transport.
 	pub fn close(&mut self, error_code: VarInt, reason: String) {
-		if self.error.is_some() {
+		if self.is_closed() {
 			return;
 		}
-		self.close = Some(Close::Application(ApplicationClose {
+		let frame = Close::Application(ApplicationClose {
 			error_code,
 			reason: reason.clone(),
-		}));
-		self.lost(ConnectionError::LocallyClosed {
-			code: error_code,
-			reason,
 		});
+		self.terminate(
+			ConnectionError::LocallyClosed {
+				code: error_code,
+				reason,
+			},
+			Some(frame),
+		);
 	}
 
 	/// The next record to write, without its Size field, or the next frame on draft-00, or wait
@@ -345,15 +359,15 @@ impl Connection {
 
 	/// The instant [`Self::handle_timeout`] should run next
 	pub fn poll_timeout(&self) -> Option<Instant> {
-		match self.error {
-			Some(_) => None,
-			None => self.timer.next(),
+		match self.is_closed() {
+			true => None,
+			false => self.timer.next(),
 		}
 	}
 
 	/// Run the handshake, idle, keep-alive, and RTT timers
 	pub fn handle_timeout(&mut self, now: Instant) {
-		if self.error.is_some() {
+		if self.is_closed() {
 			return;
 		}
 		let due = self.timer.poll(now);
@@ -372,8 +386,8 @@ impl Connection {
 	/// Open and accept streams
 	pub fn streams(&mut self) -> Streams<'_> {
 		Streams {
+			closed: self.is_closed(),
 			state: &mut self.streams,
-			conn_state: &self.conn_state,
 		}
 	}
 
@@ -388,9 +402,9 @@ impl Connection {
 	pub fn send_stream(&mut self, id: crate::StreamId) -> send::Stream<'_> {
 		send::Stream {
 			id,
+			closed: self.is_closed(),
 			state: &mut self.streams,
 			pending: &mut self.pending,
-			conn_state: &self.conn_state,
 		}
 	}
 
@@ -491,7 +505,7 @@ impl Connection {
 
 	/// Serialize the next batch of frames, each counted as acknowledged on the spot
 	fn fill(&mut self, now: Instant) -> Option<Bytes> {
-		if self.close_sent {
+		if matches!(self.end, End::Closed(_)) {
 			return None;
 		}
 		let budget = self.budget();
@@ -514,13 +528,13 @@ impl Connection {
 			self.params_sent = true;
 		}
 
-		if self.error.is_some() {
+		if let End::Closing { error, frame } = &mut self.end {
 			// Write the close frame, if any, and go quiet
-			if let Some(close) = self.close.take() {
+			if let Some(close) = frame.take() {
 				let room = budget - buf.len();
 				close.encode(buf, room);
 			}
-			self.close_sent = true;
+			self.end = End::Closed(error.clone());
 			if buf.is_empty() {
 				return false;
 			}
@@ -630,7 +644,7 @@ impl Connection {
 				));
 			}
 			self.on_frame(frame, allocation, frame_len, now)?;
-			if self.error.is_some() {
+			if self.is_closed() {
 				// The peer closed; ignore the rest
 				return Ok(());
 			}
@@ -650,11 +664,15 @@ impl Connection {
 		}
 	}
 
-	/// End the connection over a violation, telling the peer with a CONNECTION_CLOSE
+	/// End the connection over a violation, telling the peer with a CONNECTION_CLOSE, unless it
+	/// already ended
 	fn fail(&mut self, err: TransportError) {
+		if self.is_closed() {
+			return;
+		}
 		debug!(%err, "qmux protocol error");
-		self.close = Some(Close::from(err.clone()));
-		self.lost(ConnectionError::TransportError(err));
+		let frame = Close::from(err.clone());
+		self.terminate(ConnectionError::TransportError(err), Some(frame));
 	}
 
 	fn on_frame(
@@ -850,14 +868,19 @@ impl Connection {
 		Ok(())
 	}
 
-	/// End the connection with `reason`, unless it already ended: the first close wins
+	/// End the connection with `reason` without a close frame, unless it already ended
 	fn lost(&mut self, reason: ConnectionError) {
-		if self.error.is_some() {
+		self.terminate(reason, None);
+	}
+
+	/// End the connection with `error`, writing `frame` if any, unless it already ended: the
+	/// first close wins
+	fn terminate(&mut self, error: ConnectionError, frame: Option<Close>) {
+		if self.is_closed() {
 			return;
 		}
-		self.error = Some(reason.clone());
-		self.streams.waits.lose(reason.clone());
-		self.conn_state = ConnectionState::Draining;
+		self.streams.waits.lose(error.clone());
+		self.end = End::Closing { error, frame };
 	}
 }
 
@@ -867,7 +890,7 @@ impl std::fmt::Debug for Connection {
 			.field("side", &self.side)
 			.field("version", &self.config.version)
 			.field("established", &self.peer.is_some())
-			.field("error", &self.error)
+			.field("error", &self.error())
 			.finish_non_exhaustive()
 	}
 }

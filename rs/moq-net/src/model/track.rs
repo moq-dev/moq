@@ -314,6 +314,9 @@ enum Feed {
 		/// The newest group cached when the track went idle: what the route's answer is
 		/// judged against, whatever lands before it.
 		newest: Option<u64>,
+		/// The newest object the ended feed left in the cache. Snapshotted, since the next
+		/// feed's groups can land before its answer is judged.
+		held: Option<Position>,
 	},
 	/// The route answered that its feed reaches group `from`, which the cache cannot show
 	/// yet: until it can, the newest group cached would read as the live edge.
@@ -2948,7 +2951,6 @@ impl TrackState {
 			.rev()
 			.find(|(_, slot)| slot.is_shown())
 			.map(|(sequence, _)| *sequence);
-		self.feed = Feed::Idle { newest };
 		// An open group stops because this copy dropped its feed, not because the publisher
 		// gave it up: its stream resets as a cut would, so it leaves the cache first, and the
 		// next feed sends it again.
@@ -2961,6 +2963,19 @@ impl TrackState {
 		for sequence in open {
 			self.displace(sequence);
 		}
+		// Largest names an object, so an empty group holds nothing to judge.
+		let held = self
+			.lookup
+			.iter()
+			.rev()
+			.filter(|(_, slot)| slot.is_shown())
+			.find_map(|(&group, slot)| {
+				Some(Position {
+					group,
+					frame: slot.group.last_object()?,
+				})
+			});
+		self.feed = Feed::Idle { newest, held };
 	}
 
 	/// The route answered with its largest position (`None` for nothing yet): the cache
@@ -2972,44 +2987,84 @@ impl TrackState {
 	///
 	/// Readers wait until the cache shows that position: before then its newest group would
 	/// read as the live edge, though the route already holds a newer one.
+	///
+	/// [`Error::MalformedTrack`] when the answer is behind the cache; see [`Self::judge`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
+	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) -> Result<()> {
+		self.judge(largest)?;
 		self.answered(largest, start, true);
+		Ok(())
 	}
 
 	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
 	/// bounded subscription of history: the cache can never show that group, so the answer
 	/// alone makes it current, and relative starts count back from that group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) {
+	fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) -> Result<()> {
+		self.judge(Some(largest))?;
 		self.answered(Some(largest), start, false);
+		Ok(())
+	}
+
+	/// [`Self::set_live`] for an answer with no Largest, where the first group the feed
+	/// sent, `first`, stands in for it. A group says nothing of how far the route's feed
+	/// reaches, so the cache is not judged against it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn set_live_from(&mut self, first: Position, start: Option<u64>) {
+		self.answered(Some(first), start, true);
+	}
+
+	/// An idle copy's route answered behind what its ended feed left in the cache: no
+	/// Largest while the copy held an object, or a Largest before the newest one it held.
+	/// The cache is likely another track, so it is dropped rather than served while the
+	/// copy fails.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn judge(&mut self, largest: Option<Position>) -> Result<()> {
+		let Feed::Idle { held: Some(held), .. } = self.feed else {
+			return Ok(());
+		};
+		if largest.is_some_and(|largest| largest >= held) {
+			return Ok(());
+		}
+		let err = Error::MalformedTrack;
+		let sequences: Vec<u64> = self.lookup.keys().copied().collect();
+		for sequence in sequences {
+			self.evict_group(sequence, err.clone());
+		}
+		Err(err)
+	}
+
+	/// The newest group an idle copy still shows from its ended feed. Judged by what
+	/// survived: the cancel that idled the copy resets the group in flight.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn idle_cached(&self) -> Option<u64> {
+		let Feed::Idle { newest, .. } = self.feed else {
+			return None;
+		};
+		self.lookup
+			.range(..=newest?)
+			.rev()
+			.find(|(_, slot)| slot.is_shown())
+			.map(|(sequence, _)| *sequence)
 	}
 
 	/// The route answered with `largest`. With `reaches`, its feed reaches that group, so
 	/// readers wait until the cache shows it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn answered(&mut self, largest: Option<Position>, start: Option<u64>, reaches: bool) {
-		let Feed::Idle { newest } = self.feed else {
+		if !matches!(self.feed, Feed::Idle { .. }) {
 			return;
-		};
-		// Judged by what survived: the cancel that idled the copy resets the group in flight,
-		// and an answer past it leaves a gap after the newest group still cached.
-		let cached = newest.and_then(|newest| {
-			self.lookup
-				.range(..=newest)
-				.rev()
-				.find(|(_, slot)| slot.is_shown())
-				.map(|(sequence, _)| *sequence)
-		});
+		}
+		// An answer past the newest group still cached leaves a gap after it.
+		let cached = self.idle_cached();
 		// A feed asked from the cache's head resends what follows it, newest first on a
 		// descending track, so its largest alone would read as a gap.
 		let start = start.or(largest.map(|largest| largest.group));
-		self.live_floor = match (largest, cached) {
-			(Some(_), Some(cached)) if start.is_some_and(|start| start > cached.saturating_add(1)) => Some(cached + 1),
-			// The route has nothing, so whatever is cached is not its feed.
-			(None, Some(cached)) => Some(cached.saturating_add(1)),
-			_ => self.live_floor,
-		};
+		if let (Some(start), Some(cached)) = (start, cached)
+			&& start > cached.saturating_add(1)
+		{
+			self.live_floor = Some(cached + 1);
+		}
 		match largest.map(|largest| largest.group) {
 			Some(from) if reaches && !self.shows(from) => self.feed = Feed::Answered { from },
 			edge => self.go_live(edge),
@@ -3655,9 +3710,12 @@ impl Producer {
 	/// there. Those sequences are then final: creating one is refused. Appending alone never
 	/// leaves such a gap; one left by out-of-order [`Self::create_group`] calls is what it names.
 	///
-	/// The broadcast remembers nothing of an earlier producer of the name, so a replacement
-	/// starts at 0. Since a name always means the same content, a replacement continues past
-	/// its predecessor's groups with [`Self::create_group`].
+	/// The same broadcast, track, and group sequence always name the same content, and nothing
+	/// checks it: the broadcast remembers nothing of an earlier producer of the name, so a
+	/// replacement starts at 0. A recreated track, or a restarted publisher keeping its
+	/// instance, continues past its predecessor's groups with [`Self::create_group`], or uses
+	/// a new track name or instance. Reusing a sequence only corrupts this broadcast for its
+	/// readers. Datagram sequences name no cached content and are exempt.
 	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		let sequence = state.next_sequence()?;
@@ -3972,10 +4030,15 @@ impl Producer {
 	/// The route answered with its largest position, `None` for nothing yet, and the first
 	/// group its feed serves when the answer names it; see [`Self::set_idle`]. Readers
 	/// resume once the cache shows the largest position. A no-op unless idle.
+	///
+	/// [`Error::MalformedTrack`] when the answer is behind the cache (no Largest while the
+	/// copy shows groups, or a Largest before its newest position): the cache is likely
+	/// another track, so the caller fails the copy and the next request builds a fresh one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
-		if let Ok(mut state) = self.modify() {
-			state.set_live(largest, start);
+	pub(crate) fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) -> Result<()> {
+		match self.modify() {
+			Ok(mut state) => state.set_live(largest, start),
+			Err(_) => Ok(()),
 		}
 	}
 
@@ -3983,9 +4046,19 @@ impl Producer {
 	/// bounded subscription of history: readers resume at once, counting relative starts
 	/// back from `largest`'s group. A no-op unless idle.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) {
+	pub(crate) fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) -> Result<()> {
+		match self.modify() {
+			Ok(mut state) => state.set_live_ahead(largest, start),
+			Err(_) => Ok(()),
+		}
+	}
+
+	/// [`Self::set_live`] for an answer with no Largest, where `first`, the first group the
+	/// feed sent, stands in for it. The cache is not judged against it. A no-op unless idle.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn set_live_from(&mut self, first: Position, start: Option<u64>) {
 		if let Ok(mut state) = self.modify() {
-			state.set_live_ahead(largest, start);
+			state.set_live_from(first, start);
 		}
 	}
 
@@ -4059,7 +4132,7 @@ impl Producer {
 		for (range, resolved) in subscription.ranges.iter_mut().zip(resolved) {
 			if match range.start {
 				super::subscription::Anchor::Time(_) => true,
-				super::subscription::Anchor::Relative(back) => back != 0 && back != u64::MAX,
+				super::subscription::Anchor::Relative(back) => back != 0,
 				_ => false,
 			} {
 				range.start = super::subscription::Anchor::Absolute(resolved.ok_or(Error::Unsupported)?.start);
@@ -4096,7 +4169,7 @@ impl Producer {
 	pub(crate) fn idle_newest(&self) -> Option<u64> {
 		let state = self.state.read();
 		match state.feed {
-			Feed::Idle { newest } => newest,
+			Feed::Idle { newest, .. } => newest,
 			_ => None,
 		}
 	}
@@ -10782,7 +10855,7 @@ mod test {
 		reader.set_range(..);
 		assert!(reader.poll_largest(&noop).is_pending(), "the copy is idle");
 
-		producer.set_live(Some(Position::group(2)), None);
+		producer.set_live(Some(Position::group(2)), None).unwrap();
 		assert!(
 			reader.poll_largest(&noop).is_pending(),
 			"the same largest is not reported again"
@@ -10803,7 +10876,7 @@ mod test {
 
 		let mut reader = producer.subscribe(replay());
 		assert!(reader.poll_largest(&noop).is_pending(), "the copy is idle");
-		producer.set_live(Some(Position::group(5)), None);
+		producer.set_live(Some(Position::group(5)), None).unwrap();
 		let _answer = framed(&producer, 5, 1);
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
 
@@ -10828,7 +10901,7 @@ mod test {
 		let (flag, waiter) = Flag::waiter();
 		assert!(reader.poll_largest(&waiter).is_pending(), "the copy is idle");
 
-		producer.set_live(Some(Position::group(5)), None);
+		producer.set_live(Some(Position::group(5)), None).unwrap();
 		producer.report_largest(Position::group(5));
 		assert!(
 			reader.poll_largest(&waiter).is_pending(),
@@ -10875,7 +10948,7 @@ mod test {
 			assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the copy is idle");
 			assert_eq!(reader.floor(), None, "the start waits for the live feed");
 
-			producer.set_live(Some(Position::group(4)), None);
+			producer.set_live(Some(Position::group(4)), None).unwrap();
 			framed(&producer, 4, 1).finish().unwrap();
 			assert_eq!(ready_groups(&mut reader), expected, "{ranges:?}");
 		}
@@ -10887,7 +10960,7 @@ mod test {
 	fn a_relative_start_on_an_idle_copy_waits_for_the_answer_to_show() {
 		let mut producer = idle_copy();
 		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
-		producer.set_live(Some(Position::group(5)), None);
+		producer.set_live(Some(Position::group(5)), None).unwrap();
 		framed(&producer, 4, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the answer has not shown");
 
@@ -10895,19 +10968,123 @@ mod test {
 		assert_eq!(ready_groups(&mut reader), vec![5]);
 	}
 
-	/// A route that answers with nothing leaves the cache unrelated to its feed, so a
-	/// relative start resolves at the first group the feed then produces.
+	/// A route answer behind what an idle copy cached, with no Largest or one before the
+	/// newest position the copy holds, is malformed, and the copy's cache is dropped.
 	#[test]
-	fn a_relative_start_on_an_idle_copy_skips_a_cache_the_route_disowns() {
-		let mut producer = idle_copy();
-		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
-		producer.set_live(None, None);
-		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new());
-		assert_eq!(reader.floor(), None, "no cached group anchors the start");
+	fn an_answer_behind_an_idle_copys_cache_is_malformed() {
+		let behind = [None, Some(Position::group(2)), Some(Position { group: 3, frame: 0 })];
+		let current = [Some(Position { group: 3, frame: 1 }), Some(Position::group(4))];
+		for (largest, ok) in behind
+			.map(|largest| (largest, false))
+			.into_iter()
+			.chain(current.map(|largest| (largest, true)))
+		{
+			let mut producer = track_producer("test", None);
+			framed(&producer, 2, 1).finish().unwrap();
+			framed(&producer, 3, 2).finish().unwrap();
+			producer.set_idle();
+			let mut reader = producer.subscribe(replay());
 
-		framed(&producer, 7, 1).finish().unwrap();
-		assert_eq!(ready_groups(&mut reader), vec![7]);
-		assert_eq!(reader.floor(), Some(7));
+			let answered = producer.set_live(largest, None);
+			assert_eq!(answered.is_ok(), ok, "{largest:?}");
+			if let Err(err) = answered {
+				assert!(matches!(err, Error::MalformedTrack), "{largest:?}");
+				// The session fails the copy, and its readers get the error, not the cache.
+				producer.abort(err).unwrap();
+				let noop = kio::Waiter::noop();
+				assert!(
+					matches!(reader.poll_recv_group(&noop), Poll::Ready(Err(Error::MalformedTrack))),
+					"{largest:?}"
+				);
+			}
+		}
+
+		let mut producer = idle_copy();
+		assert!(matches!(
+			producer.set_live_ahead(Position::group(2), None),
+			Err(Error::MalformedTrack)
+		));
+
+		// Largest names the newest object, which an empty newest group does not hold.
+		for (largest, ok) in [(Some(Position::group(2)), true), (None, false)] {
+			let mut producer = track_producer("test", None);
+			framed(&producer, 2, 1).finish().unwrap();
+			framed(&producer, 3, 0).finish().unwrap();
+			producer.set_idle();
+			assert_eq!(producer.set_live(largest, None).is_ok(), ok, "{largest:?}");
+		}
+	}
+
+	/// The answer is judged against what the ended feed left, not the next feed's groups
+	/// that land before it: a group in flight at idle is sent again, past the answer.
+	#[test]
+	fn an_idle_copy_judges_its_answer_against_the_ended_feed() {
+		let mut producer = track_producer("test", None);
+		framed(&producer, 2, 1).finish().unwrap();
+		let _open = framed(&producer, 3, 1);
+		producer.set_idle();
+
+		let resent = framed(&producer, 3, 3);
+		producer.set_live(Some(Position { group: 3, frame: 0 }), None).unwrap();
+		drop(resent);
+	}
+
+	/// Largest names a moq-transport object by its ID, which a sparse group's frame count
+	/// does not give.
+	#[cfg(feature = "async")]
+	#[test]
+	fn an_idle_copy_judges_a_sparse_group_by_object_id() {
+		let wire = group::Wire {
+			sparse: true,
+			first_object: true,
+			first_id: 0,
+			extensions: false,
+			has_end: false,
+			fetchable: true,
+			last: None,
+		};
+		for (object, ok) in [(50, false), (100, true)] {
+			let mut producer = track_producer("test", None);
+			let mut group = producer.create_group(group::Info { sequence: 2 }).unwrap();
+			group.set_wire(wire.clone()).unwrap();
+			for id in [0, 100] {
+				let mut frame = group
+					.create_object(frame::Header {
+						info: frame::Info {
+							size: 1,
+							timestamp: None,
+						},
+						fields: Some(Arc::new(super::super::object::Fields {
+							id,
+							properties: Default::default(),
+						})),
+						inflated: None,
+					})
+					.unwrap();
+				frame.write(&b"x"[..]).unwrap();
+				group = frame.finish().unwrap();
+			}
+			group.finish().unwrap();
+			producer.set_idle();
+			let answered = producer.set_live(
+				Some(Position {
+					group: 2,
+					frame: object,
+				}),
+				None,
+			);
+			assert_eq!(answered.is_ok(), ok, "object {object}");
+		}
+	}
+
+	/// A group standing in for a missing Largest says nothing of how far the route's feed
+	/// reaches, so one below the cache does not judge it.
+	#[test]
+	fn a_first_group_below_an_idle_copys_cache_is_not_judged() {
+		let mut producer = idle_copy();
+		let mut reader = producer.subscribe(replay());
+		producer.set_live_from(Position::group(0), None);
+		assert_eq!(ready_groups(&mut reader), vec![0, 1, 2, 3]);
 	}
 
 	/// An end the idle copy has not reached does not make its cache the whole track: until
@@ -10922,7 +11099,7 @@ mod test {
 		assert_eq!(live.floor(), None, "the start waits for the live feed");
 		assert_eq!(ready_groups(&mut oldest), Vec::<u64>::new(), "the copy is idle");
 
-		producer.set_live(Some(Position::group(4)), None);
+		producer.set_live(Some(Position::group(4)), None).unwrap();
 		framed(&producer, 4, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut live), vec![4]);
 		assert_eq!(ready_groups(&mut oldest), vec![0, 1, 2, 3, 4]);
@@ -12133,7 +12310,7 @@ mod test {
 		open.abort(Error::Cancel).unwrap();
 
 		let mut answer = producer.create_group(group::Info { sequence: 2 }).unwrap();
-		producer.set_live(Some(Position::group(2)), None);
+		producer.set_live(Some(Position::group(2)), None).unwrap();
 		answer
 			.write_frame(Timestamp::from_millis(533).unwrap(), bytes::Bytes::from_static(b""))
 			.unwrap();
@@ -12168,7 +12345,7 @@ mod test {
 				.with_delay(Delay::default().with_max(Duration::from_millis(400)))
 				.with_range(0..),
 		);
-		producer.set_live(Some(Position::group(8)), None);
+		producer.set_live(Some(Position::group(8)), None).unwrap();
 		for sequence in [6, 8] {
 			framed(&producer, sequence, 1).finish().unwrap();
 		}
@@ -12193,7 +12370,7 @@ mod test {
 			}
 			producer.set_idle();
 			producer.start_at(6).unwrap();
-			producer.set_live(Some(Position::group(6)), None);
+			producer.set_live(Some(Position::group(6)), None).unwrap();
 			framed(&producer, 6, 1).finish().unwrap();
 			if !cached {
 				for sequence in 0..3 {
@@ -12249,7 +12426,7 @@ mod test {
 		}
 		producer.set_idle();
 		producer.start_at(6).unwrap();
-		producer.set_live(Some(Position::group(6)), None);
+		producer.set_live(Some(Position::group(6)), None).unwrap();
 		framed(&producer, 6, 1).finish().unwrap();
 		for sequence in 0..3 {
 			evict(&producer, sequence);
@@ -12302,7 +12479,7 @@ mod test {
 			framed(&producer, sequence, 1).finish().unwrap();
 		}
 		producer.set_idle();
-		producer.set_live(Some(Position::group(6)), None);
+		producer.set_live(Some(Position::group(6)), None).unwrap();
 		framed(&producer, 6, 1).finish().unwrap();
 		let delivered = Delivered::default();
 		let unread = Unread {
@@ -12329,7 +12506,7 @@ mod test {
 		producer.received();
 		framed(&producer, 0, 1).finish().unwrap();
 		producer.set_idle();
-		producer.set_live(Some(Position::group(6)), None);
+		producer.set_live(Some(Position::group(6)), None).unwrap();
 		framed(&producer, 6, 1).finish().unwrap();
 		evict(&producer, 0);
 		let state = producer.state.read();
@@ -12366,7 +12543,7 @@ mod test {
 				assert_eq!(read_now(&mut reader, ordered), None, "the copy is idle");
 
 				producer.start_at(3).unwrap();
-				producer.set_live(Some(Position::group(3)), None);
+				producer.set_live(Some(Position::group(3)), None).unwrap();
 				framed(&producer, 3, 1).finish().unwrap();
 				assert_eq!(read_now(&mut reader, ordered), Some(Some(0)), "cached history");
 				// An arrival-order reader may take the live group before its history.
@@ -12421,7 +12598,7 @@ mod test {
 		assert!(subscriber.poll_drop(&waiter).is_pending(), "nothing was given up");
 
 		let mut again = producer.create_group(group::Info { sequence: 1 }).unwrap();
-		producer.set_live(Some(Position::group(1)), None);
+		producer.set_live(Some(Position::group(1)), None).unwrap();
 		again
 			.write_frame(Timestamp::from_millis(1000).unwrap(), bytes::Bytes::from_static(b"x"))
 			.unwrap();
@@ -14011,7 +14188,7 @@ mod test {
 		let consumer = request.consume();
 		let mut producer = request.idle().accept(None);
 		assert!(!consumer.is_live(), "idle from the accept");
-		producer.set_live(None, None);
+		producer.set_live(None, None).unwrap();
 		assert!(consumer.is_live());
 	}
 
@@ -14043,7 +14220,7 @@ mod test {
 		assert!(consumer.is_live(), "accepting the track starts its live feed");
 		producer.set_idle();
 		assert!(!consumer.is_live(), "an idle accepted copy is not live");
-		producer.set_live(None, None);
+		producer.set_live(None, None).unwrap();
 		assert!(consumer.is_live(), "the answered copy is live again");
 
 		// The fetch handler holds the same producer lifetime, so both leave.
@@ -21082,7 +21259,7 @@ mod test {
 		}
 		producer.set_idle();
 		// The feed resumes at 8, above the cached 0..=4: its live floor is 5.
-		producer.set_live(Some(Position::group(8)), None);
+		producer.set_live(Some(Position::group(8)), None).unwrap();
 		framed(&producer, 8, 1).finish().unwrap();
 		let mut reader = producer.subscribe(
 			Subscription::default()
@@ -23660,7 +23837,7 @@ mod test {
 			let mut producer = track_producer("test", Info::timed());
 			if copy {
 				producer.set_idle();
-				producer.set_live(Some(Position::group(9)), Some(2));
+				producer.set_live(Some(Position::group(9)), Some(2)).unwrap();
 			}
 			let mut groups: Vec<_> = (2..9)
 				.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
@@ -25131,7 +25308,7 @@ mod test {
 				for _ in 0..2 {
 					assert_eq!(read_now(&mut reader, ordered), end, "the source is idle");
 				}
-				source.set_live(Some(Position::group(5)), None);
+				source.set_live(Some(Position::group(5)), None).unwrap();
 				reader.update(subscription.clone()).unwrap();
 				assert_eq!(read_now(&mut reader, ordered), end);
 				reader.update(subscription.clone().with_range(3..4)).unwrap();
