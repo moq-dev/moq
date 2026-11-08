@@ -665,11 +665,20 @@ mod tests {
 	}
 
 	/// A claim beneath a subtree the origin handle excludes never enters the node, on
-	/// the floor or on a replay, even though the permit admits it.
+	/// the floor or on a replay, even though the permit admits it; a covering claim
+	/// overlapping the handle's scope still does.
 	#[kio::test]
 	async fn an_excluded_claim_never_enters_the_node() {
 		let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-		subscriber.origin = subscriber.origin.exclude(".stats").unwrap();
+		subscriber.origin = {
+			let patterns: crate::Patterns = ["live/*/public/**", ".stats/**"]
+				.into_iter()
+				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+				.collect();
+			subscriber.origin.scope("", &patterns).unwrap()
+		}
+		.exclude(".stats")
+		.unwrap();
 		let prefix = Path::empty();
 		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
 		let mut decoder = AnnounceDecoder::default();
@@ -683,7 +692,7 @@ mod tests {
 		};
 		for msg in [
 			route,
-			start("room"),
+			start("live"),
 			start(".stats/node"),
 			start(".stats/node/evil"),
 			floor,
@@ -694,12 +703,12 @@ mod tests {
 			routed.node.shown().keys().map(|(_, path)| path.to_string()).collect()
 		};
 		routed.outputs(&subscriber);
-		assert_eq!(shown(&routed), ["room"]);
-		assert_eq!(served(&routed), ["room"]);
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
 
 		routed.limit(&subscriber, &Default::default()).unwrap();
-		assert_eq!(shown(&routed), ["room"]);
-		assert_eq!(served(&routed), ["room"]);
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
 	}
 
 	/// An unscoped stream narrowed to a limit that leaves a claim out certifies nothing,

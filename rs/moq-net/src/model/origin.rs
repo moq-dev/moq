@@ -2505,11 +2505,13 @@ impl Producer {
 		self.exact(full, options, None)
 	}
 
-	/// Whether this handle could publish the absolute `full` path: its scope reaches
-	/// it, and no mount or excluded subtree covers it.
+	/// Whether this handle could publish a route at the absolute `full` prefix: its
+	/// scope overlaps the subtree (as a forwarded claim is admitted, a covering prefix
+	/// serving the permitted descendants), and no mount or excluded subtree covers it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn publishable(&self, full: &Path) -> bool {
-		self.scope.permits(full) && self.scope.publishes(full)
+		Pattern::subtree(full.as_str()).is_ok_and(|subtree| self.scope.allowed.overlaps(&subtree))
+			&& self.scope.publishes(full)
 	}
 
 	/// An exact route at the absolute `full` path, answering `request` on its first
