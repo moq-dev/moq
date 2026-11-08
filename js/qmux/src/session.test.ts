@@ -1907,12 +1907,16 @@ describe("Session integration (scripted peer)", () => {
 			session.close();
 		});
 
-		test("until our send half is reset", async () => {
+		test("until our send half is reset and the peer answers our STOP_SENDING", async () => {
 			const { session, peer, stream } = await accept();
 			await stream.readable.cancel();
 			await expectCredit(peer, 0);
 
 			await stream.writable.abort();
+			// The peer may still be sending, so the stream stays open until its final size is known.
+			await expectCredit(peer, 0);
+
+			peer.send({ type: "reset_stream", id, code: VarInt.from(0), finalSize: 1n });
 			await waitFor(() => peer.count("max_streams_bidi") === 1);
 			session.close();
 		});
@@ -1927,6 +1931,155 @@ describe("Session integration (scripted peer)", () => {
 			session.close();
 		});
 	});
+
+	// Ported from Rust's `credit_returns_for_unread_and_stopped_streams`: every byte the
+	// peer spends returns its connection credit, whether read, discarded on arrival after
+	// STOP_SENDING, or only declared by a RESET_STREAM's final size.
+	test("credit returns for unread, stopped, and reset streams", async () => {
+		const window = 64n << 10n;
+		// Half a record, so each frame fits in one.
+		const chunk = new Uint8Array(8 << 10);
+		const size = BigInt(chunk.byteLength);
+		const { session, peer } = connect({ receiveWindow: window, streamReceiveWindow: 16n << 10n });
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+
+		// The peer is honest: it spends no more connection credit than we advertised.
+		let spent = 0n;
+		const spend = async (bytes: bigint) => {
+			await peer.barrier();
+			const maxes = peer.received().flatMap((f) => (f.type === "max_data" ? [f.max] : []));
+			const max = maxes.reduce((a, b) => (a > b ? a : b), window);
+			if (spent + bytes > max) throw new Error(`stalled at ${spent} of ${max}`);
+			spent += bytes;
+		};
+
+		const acceptor = session.incomingUnidirectionalStreams.getReader();
+		// Far more than the connection window, a stream at a time.
+		for (let round = 0n; round < 64n; round++) {
+			const id = Stream.Id.create(round, Stream.Dir.Uni, true);
+			await spend(size);
+			peer.send({ type: "stream", id, offset: 0n, data: chunk, fin: false });
+			const accepted = await acceptor.read();
+			if (!accepted.value) throw new Error("expected an incoming stream");
+
+			switch (round % 3n) {
+				// Stopped, then more arrives before the peer sees STOP_SENDING, then its reset.
+				case 0n:
+					await accepted.value.cancel();
+					await spend(size);
+					peer.send({ type: "stream", id, offset: size, data: chunk, fin: false });
+					peer.send({ type: "reset_stream", id, code: VarInt.from(0), finalSize: 2n * size });
+					break;
+				// Stopped, then reset with a final size past the bytes it carried.
+				case 1n:
+					await accepted.value.cancel();
+					await spend(size);
+					peer.send({ type: "reset_stream", id, code: VarInt.from(0), finalSize: 2n * size });
+					break;
+				// Read to the end.
+				default: {
+					peer.send({ type: "stream", id, offset: size, data: new Uint8Array(), fin: true });
+					const reader = accepted.value.getReader();
+					let read = 0;
+					for (;;) {
+						const { value, done } = await reader.read();
+						if (done) break;
+						read += value.byteLength;
+					}
+					expect(read).toBe(chunk.byteLength);
+				}
+			}
+		}
+		await peer.barrier();
+		expect(peer.has("connection_close")).toBe(false);
+		acceptor.releaseLock();
+		session.close();
+	});
+
+	test("a STOP_SENDING during a frame's write resets with that frame in the final size", async () => {
+		const { session, peer } = connect();
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		await waitFor(() => peer.has("transport_parameters"));
+
+		const writer = (await session.createUnidirectionalStream()).getWriter();
+		// The frame leaves the scheduler and sticks in the socket.
+		peer.blockWrites();
+		const write = settleTo(writer.write(new Uint8Array(10)));
+		await settle();
+
+		const id = Stream.Id.create(0n, Stream.Dir.Uni, false);
+		peer.send({ type: "stop_sending", id, code: VarInt.from(5) });
+		await settle();
+		peer.unblockWrites();
+
+		await waitFor(() => peer.has("reset_stream"));
+		const stream = peer.received().find((f) => f.type === "stream") as Frame.Data;
+		const reset = peer.received().find((f) => f.type === "reset_stream") as Frame.ResetStream;
+		expect(stream.data.byteLength).toBe(10);
+		expect(reset.finalSize).toBe(10n);
+		await write;
+		session.close();
+	});
+
+	test("window updates owed behind a wedged socket go out once, with the newest limit", async () => {
+		const { session, peer } = connect({ receiveWindow: 100n, streamReceiveWindow: 100n });
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+		await waitFor(() => peer.has("transport_parameters"));
+
+		const id = Stream.Id.create(0n, Stream.Dir.Uni, true);
+		peer.send({ type: "stream", id, offset: 0n, data: new Uint8Array(60), fin: false });
+		const accepted = await session.incomingUnidirectionalStreams.getReader().read();
+		if (!accepted.value) throw new Error("expected an incoming stream");
+		const reader = accepted.value.getReader();
+
+		// The ping response sticks in the socket, so every update queues behind it.
+		peer.blockWrites();
+		peer.send({ type: "ping_request", sequence: 1n });
+		await settle();
+		let offset = 0n;
+		for (let i = 0; i < 10; i++) {
+			if (i > 0) peer.send({ type: "stream", id, offset, data: new Uint8Array(60), fin: false });
+			offset += 60n;
+			expect((await reader.read()).value?.byteLength).toBe(60);
+		}
+		peer.unblockWrites();
+		await waitFor(() => peer.has("max_data") && peer.has("max_stream_data"));
+		await peer.barrier();
+
+		const maxData = peer.received().filter((f): f is Frame.MaxData => f.type === "max_data");
+		const maxStreamData = peer.received().filter((f): f is Frame.MaxStreamData => f.type === "max_stream_data");
+		expect(maxData.map((f) => f.max)).toEqual([offset + 100n]);
+		expect(maxStreamData.map((f) => f.max)).toEqual([offset + 100n]);
+		session.close();
+	});
+
+	test("a late STREAM frame on a bidi stream we opened and stopped reading returns its credit", async () => {
+		const { session, peer } = connect({ receiveWindow: 100n });
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await session.ready;
+
+		const bidi = await session.createBidirectionalStream();
+		await bidi.readable.cancel();
+		const id = Stream.Id.create(0n, Stream.Dir.Bi, false);
+		peer.send({ type: "stream", id, offset: 0n, data: new Uint8Array(60), fin: false });
+		await peer.barrier();
+		expect(peer.received().find((f) => f.type === "max_data")).toEqual({ type: "max_data", max: 160n });
+		session.close();
+	});
+
+	for (const protocol of ["qmux-00", "qmux-01"]) {
+		test(`an empty WebSocket message is a no-op on ${protocol}`, async () => {
+			const { session, peer } = accept({ protocol });
+			await started(peer);
+			peer.sendRaw(new Uint8Array());
+			await peer.barrier();
+			expect(peer.has("connection_close")).toBe(false);
+			session.close();
+		});
+	}
 
 	// Regression: a STREAM frame delivered by the read loop after the session has
 	// closed used to hit the already-closed incoming-stream controllers, and the
