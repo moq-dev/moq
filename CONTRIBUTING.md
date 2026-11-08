@@ -47,10 +47,13 @@ Request landing with `quest merge <pr> --land <full-head-sha>` once the review i
 An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
 `quest merge --land` enqueues the pinned head, or arms auto-merge bound to it while its checks are pending; a push removes it from the queue. A head GitHub refuses to enqueue, for a conflict or failing checks, fails the command: fix it and request landing again.
 Local and hosted checks select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
-Repository tooling tests run in `just gh test` by default, including every class
-in each script. Only the named benchmark-build fixture class
-is excluded from the gate; `just gh test-integration` runs those and selector
-timing nightly. New classes stay in the gate unless explicitly excluded.
+Repository tooling tests run whole files in `just gh test`, listed explicitly in
+`.github/justfile`. Slow fixtures live in separate `*.slow.test.py` files;
+`just gh test-integration` runs those files and selector timing nightly. Only
+`bench/build.slow.test.py` leaves the gate: its paired Cargo builds took 211.91 s.
+The selector timing sweep took 3.56 s and collects performance samples; its
+correctness tests remain in the gate. All version, hakari, test-lint, and nightly
+helper tests remain in the gate, including their cheap static invariants.
 To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
 
 When the queue drops a PR for a failing build or a conflict, moq-dev/quest's queue watcher on the maintainer's host comments with the reason and the failing log's tail, runs a Codex fixer on it in the background, and re-enqueues the fixed head, or the unchanged head after a flaky failure, at the back of the queue. The fixer hands the PR back, with its diagnosis, when the fix needs a decision or stops making progress. `quest status` shows why a PR left the queue under `landing-stopped`.
