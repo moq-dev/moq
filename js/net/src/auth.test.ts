@@ -1,6 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
-import type { Getter } from "@moq/signals";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -10,7 +9,7 @@ import * as IetfMessage from "./ietf/message.ts";
 import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
 import * as LiteMessage from "./lite/message.ts";
-import { createMockTransportPair, type MockTransport, manual, settlesWithin } from "./mock.ts";
+import { createMockTransportPair, type MockTransport, manual, settlesWithin, waitFor } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
@@ -36,12 +35,6 @@ function patterns(...prefixes: string[]): Path.Patterns {
 
 function grant(publish: string[], subscribe: string[]): Grant {
 	return { publish: patterns(...publish), subscribe: patterns(...subscribe) };
-}
-
-async function waitFor<T>(getter: Getter<T>, ready: (value: T) => boolean): Promise<T> {
-	let value = getter.peek();
-	while (!ready(value)) value = await getter.changed();
-	return value;
 }
 
 /** Whether a request on `path` logged the end of its authorization wait. */

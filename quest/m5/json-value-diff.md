@@ -54,6 +54,8 @@ Context:
 - `moq_json::diff<T>` has no in-repo callers since #7400. With a `Value` diff
   it could take `&Value`, or be removed.
 
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `moq_json::{diff, Diff}` become private before the cut ([api-shape/media](/quest/m2/api-shape/media.md)), so this work is internal.
+
 ## Related
 
 - [Compile time audit](/quest/m3/audit-compile-time.md)

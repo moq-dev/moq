@@ -19,3 +19,13 @@ publication and a maintainer with npm rights:
 - `npm deprecate @moq/web-socket-stream "Folded into @moq/qmux; see https://github.com/moq-dev/moq/blob/main/js/qmux/MIGRATE.md"`.
 - Remove or freeze `js/qmux` and `js/web-socket-stream` in moq-dev/web-transport,
   whose release script would otherwise publish a competing `@moq/qmux`.
+
+## Waiting
+
+- Maintainer: freeze web-transport's `js/qmux` publisher before the cut,
+  then, with npm rights, run the deprecation above once the first moq
+  release of `@moq/qmux` is on npm, so the migration guide never points at
+  web-transport's 0.3.4; an agent has no npm or web-transport rights. Done
+  when web-transport's release config no longer publishes `@moq/qmux`,
+  `npm view @moq/qmux repository` names moq-dev/moq, and
+  `npm view @moq/web-socket-stream deprecated` is set.

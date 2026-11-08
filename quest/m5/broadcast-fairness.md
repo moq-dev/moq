@@ -13,7 +13,7 @@ strict priority across the session, as today.
 
 ## Plan
 
-Needs a fresh `/quest-plan` before starting: there is no settled design.
+Needs a fresh `/quest-plan` before starting: there is no settled design. Parked in m5: Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests). No tenant identity exists to key the share on, and the scheduler trait change stays cheap after the cut.
 Every transport already shares moq-quic's scheduler since qmux moved onto it
 ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)); revisit once the
 auth line carries a tenant identity.
