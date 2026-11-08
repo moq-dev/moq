@@ -126,7 +126,7 @@ mod tests {
 
 	/// We need a concrete HmacProvider for tests.
 	fn hmac_provider() -> &'static dyn HmacProvider {
-		&crate::vendor::dimpl::crypto::aws_lc_rs::hmac::HMAC_PROVIDER
+		&crate::vendor::dimpl::crypto::rind::HMAC
 	}
 
 	// ========================================================================

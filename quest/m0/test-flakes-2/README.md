@@ -195,4 +195,3 @@ Public API: none. Wire: none.
 - [moq-gst's stale-completion sink test survives load](/quest/m0/test-flakes-2/gst-stale-completion.md) - `a_stale_completion_cannot_end_the_next_publication` passes under stress, and its `#[ignore]` is removed
 - [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
 - [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
-- [moq-tokio's stream-stopped tests survive a loaded host](/quest/m0/test-flakes-2/quic-stream-stopped.md) - `stream_stopped` awaits its stop event instead of a 100 ms wall-clock deadline, and its `#[ignore]` is removed
