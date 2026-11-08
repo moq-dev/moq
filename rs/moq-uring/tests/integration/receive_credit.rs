@@ -96,9 +96,7 @@ fn partial_frame_gives_way() {
 	let high = broadcast.broadcast().create_track("high", timed()).expect("high track");
 
 	let certs = support::certs().expect("certificates");
-	let server_config = quic::server::Config::new(
-		certs.server(&[ALPN]),
-	);
+	let server_config = quic::server::Config::new(certs.server(&[ALPN]));
 	let socket = |handle: &moq_uring::Handle| {
 		handle
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -245,9 +243,7 @@ fn javascript_partial_frame_gives_way() {
 	});
 
 	let certs = support::certs().expect("certificates");
-	let mut server = quic::server::Config::new(
-		certs.server(&["h3"]),
-	);
+	let mut server = quic::server::Config::new(certs.server(&["h3"]));
 	server.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())

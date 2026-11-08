@@ -91,9 +91,7 @@ fn endpoints(
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket")
 	};
-	let mut server_config = quic::server::Config::new(
-		certs.server(&[ALPN]),
-	);
+	let mut server_config = quic::server::Config::new(certs.server(&[ALPN]));
 	server_config.transport.limits.receive_window = std::num::NonZeroU64::new(window as u64);
 	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(stream_window as u64);
 	let server = quic::Endpoint::new(
@@ -231,9 +229,7 @@ fn chunked_writes_stop_at_the_window() {
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket")
 	};
-	let mut server_config = quic::server::Config::new(
-		certs.server(&[ALPN]),
-	);
+	let mut server_config = quic::server::Config::new(certs.server(&[ALPN]));
 	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(STREAM_WINDOW as u64);
 	let server = quic::Endpoint::new(
 		quic::endpoint::Config::default().with_server(server_config),

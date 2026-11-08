@@ -69,14 +69,11 @@ fn a_send_staged_on_the_way_out_still_goes() {
 }
 
 fn server_config(certs: &support::Certs) -> quic::server::Config {
-	quic::server::Config::new(
-		certs.server(&[ALPN]),
-	)
+	quic::server::Config::new(certs.server(&[ALPN]))
 }
 
 fn dial_config() -> quic::client::Config {
-	let config = quic::client::Config::new(support::client_tls(&[ALPN]));
-	config
+	quic::client::Config::new(support::client_tls(&[ALPN]))
 }
 
 /// The one-shot client shape: dial, close, wait for the close to be published,

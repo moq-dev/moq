@@ -21,7 +21,6 @@ pub(crate) use connection::Shared;
 
 use std::{num::NonZeroU64, sync::Arc};
 
-
 #[cfg(feature = "qlog")]
 use super::qlog;
 use super::{Error, client, server, transport};
@@ -171,7 +170,6 @@ fn transport_config(config: &transport::Config) -> Result<moq_quic::transport::C
 	transport.validate()?;
 	Ok(transport)
 }
-
 
 #[cfg(test)]
 mod tests {

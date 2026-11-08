@@ -32,14 +32,11 @@ const CLOSE_CODE: u32 = 42;
 const CLOSE_REASON: &str = "bye";
 
 fn server_config(certs: &support::Certs) -> quic::server::Config {
-	quic::server::Config::new(
-		certs.server(&[ALPN]),
-	)
+	quic::server::Config::new(certs.server(&[ALPN]))
 }
 
 fn dial_config() -> quic::client::Config {
-	let config = quic::client::Config::new(support::client_tls(&[ALPN]));
-	config
+	quic::client::Config::new(support::client_tls(&[ALPN]))
 }
 
 /// One socket carries dials and accepts at once: two endpoints dial each

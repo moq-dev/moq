@@ -70,9 +70,7 @@ fn lite_session_over_the_worker() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let server_config = quic::server::Config::new(
-		certs.server(&[ALPN]),
-	);
+	let server_config = quic::server::Config::new(certs.server(&[ALPN]));
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -202,9 +200,7 @@ fn two_lite_sessions_share_the_server_socket() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let server_config = quic::server::Config::new(
-		certs.server(&[ALPN]),
-	);
+	let server_config = quic::server::Config::new(certs.server(&[ALPN]));
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())

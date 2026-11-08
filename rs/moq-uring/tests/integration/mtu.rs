@@ -195,9 +195,7 @@ fn endpoints(
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket")
 	};
-	let mut server_config = quic::server::Config::new(
-		certs.server(&[ALPN]),
-	);
+	let mut server_config = quic::server::Config::new(certs.server(&[ALPN]));
 	server_config.transport = transport.clone();
 	let server = quic::Endpoint::new(
 		quic::endpoint::Config::default().with_server(server_config),

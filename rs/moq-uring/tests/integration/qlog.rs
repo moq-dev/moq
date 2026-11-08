@@ -49,9 +49,7 @@ fn a_connection_writes_a_trace() {
 
 	let sink = quic::qlog::Sink::directory(dir.path()).expect("qlog sink");
 
-	let mut server = quic::server::Config::new(
-		certs.server(&[ALPN]),
-	);
+	let mut server = quic::server::Config::new(certs.server(&[ALPN]));
 	server.transport.qlog = Some(sink.clone());
 
 	let server_sock = handle

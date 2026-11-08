@@ -124,9 +124,7 @@ mod linux {
 				.expect("create track");
 
 			let certs = support::certs().expect("certificates");
-			let server_config = quic::server::Config::new(
-				certs.server(&[ALPN]),
-			);
+			let server_config = quic::server::Config::new(certs.server(&[ALPN]));
 
 			let server_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
