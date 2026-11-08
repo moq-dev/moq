@@ -76,6 +76,8 @@ pub(super) struct Routed {
 	/// The requested prefix, absolute.
 	prefix: Path,
 	root: Path,
+	/// The session's origin handle, whose exclusions and mounts also gate the claims.
+	origin: crate::origin::Producer,
 	routes: HashMap<u64, WireRoute>,
 	next_route: u64,
 	claims: HashMap<u64, WireClaim>,
@@ -136,6 +138,7 @@ impl Routed {
 			session_key,
 			prefix,
 			root,
+			origin: subscriber.origin.clone(),
 			routes: HashMap::new(),
 			next_route: 0,
 			claims: HashMap::new(),
@@ -206,7 +209,7 @@ impl Routed {
 				*floor = revision;
 				// The node never held a claim the limit leaves out, so it neither starts nor ends.
 				let changes = (changes.into_iter())
-					.filter(|(path, _)| admits(&self.root, &self.permit, path))
+					.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
 					.collect();
 				let revision = revision.filter(|_| certifies);
 				self.stream.batch(route.node, changes, revision);
@@ -342,7 +345,7 @@ impl Routed {
 			let route = &self.routes[id];
 			if let Some((claims, floor)) = &route.committed {
 				let changes = (claims.iter())
-					.filter(|(path, _)| admits(&self.root, &self.permit, path))
+					.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
 					.map(|(path, claim)| (path.clone(), Some(claim.clone())));
 				stream.batch(route.node, changes.collect(), floor.filter(|_| certifies));
 			}
@@ -528,9 +531,13 @@ fn hops(id: route::Id) -> crate::Hops {
 }
 
 /// Whether `permit`'s limit admits the peer's claim at the absolute `path`.
-fn admits(root: &Path, permit: &crate::auth::Permit, path: &Path) -> bool {
-	path.strip_prefix(root)
-		.is_some_and(|relative| permit.within_limit(relative.as_str()))
+/// Whether the node may hold the peer's claim at `path`: the permit's limit admits
+/// it, and the origin would serve it rather than refuse it (an excluded subtree or mount).
+fn admits(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::Permit, path: &Path) -> bool {
+	origin.publishable(path)
+		&& path
+			.strip_prefix(root)
+			.is_some_and(|relative| permit.within_limit(relative.as_str()))
 }
 
 /// The absolute regions a permit confines the peer's claims to.
@@ -613,6 +620,59 @@ mod tests {
 
 		routed.limit(&subscriber, &public).unwrap();
 		assert_eq!(served(&routed), ["live/a/public/x"]);
+	}
+
+	/// A claim beneath a subtree the origin handle excludes never enters the node, on
+	/// the floor or on a replay, even though the permit admits it; a covering claim
+	/// overlapping the handle's scope still does.
+	#[kio::test]
+	async fn an_excluded_claim_never_enters_the_node() {
+		let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		subscriber.origin = {
+			let patterns: crate::Patterns = ["live/*/public/**", ".stats/**"]
+				.into_iter()
+				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+				.collect();
+			subscriber.origin.scope("", &patterns).unwrap()
+		}
+		.exclude(".stats")
+		.unwrap();
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: ADVERT,
+		};
+		for msg in [
+			route,
+			start("live"),
+			start(".stats/node"),
+			start(".stats/node/evil"),
+			floor,
+		] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		let shown = |routed: &super::Routed| -> Vec<String> {
+			routed.node.shown().keys().map(|(_, path)| path.to_string()).collect()
+		};
+		routed.outputs(&subscriber);
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
+
+		// A narrower limit certifies nothing, so widening it again replays every
+		// committed claim into a fresh view; only the replay filter keeps `.stats` out.
+		routed.limit(&subscriber, &limited("live/**")).unwrap();
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
+
+		routed.limit(&subscriber, &Default::default()).unwrap();
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
 	}
 
 	/// An unscoped stream narrowed to a limit that leaves a claim out certifies nothing,
