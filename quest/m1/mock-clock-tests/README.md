@@ -39,7 +39,3 @@ Rules every child keeps:
 
 The counts come from a heuristic scan on 2026-11-06; re-scan each area
 before starting, since tests land and move.
-
-## Required
-
-- [Manual.drive waits for mocked I/O the work is blocked on](/quest/m1/mock-clock-tests/manual-drive-host-io.md) - `drive` stops at the deadline the work meets, and `js/net`'s `driveUntil` workaround is deleted
