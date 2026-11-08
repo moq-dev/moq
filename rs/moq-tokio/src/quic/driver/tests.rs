@@ -1259,6 +1259,47 @@ async fn refused_incoming_wakes_all_draining_waiter() {
 	assert!(timeout(Duration::from_secs(5), connect).await.unwrap().is_err());
 }
 
+/// Nothing revives a closed endpoint or one whose driver is gone: neither dials nor accepts again.
+#[tokio::test]
+async fn a_closed_or_driverless_endpoint_stays_closed() {
+	let _guard = subscribe();
+	let factory = EndpointFactory::new();
+	let mut roots = RootCertStore::empty();
+	roots.add(factory.cert.cert.der().clone()).unwrap();
+	let config = client::Config::with_root_certificates(Arc::new(roots)).unwrap();
+
+	let closed = factory.endpoint();
+	let addr = closed.local_addr();
+	closed.close(0u32.into(), "done").await;
+	assert!(matches!(
+		closed.connect(&config, addr, "localhost"),
+		Err(endpoint::ConnectError::EndpointStopping)
+	));
+	assert!(closed.accept().await.is_none());
+
+	let failure = Arc::new(SocketFailure::default());
+	let socket: Box<dyn AsyncUdpSocket> = Box::new(FailingSocket {
+		inner: localhost_socket(),
+		failure: failure.clone(),
+	});
+	let driverless = Endpoint::new(
+		endpoint::Config::default().with_server(factory.server_config(transport::Config::default())),
+		socket,
+	)
+	.unwrap();
+	failure.trigger();
+	assert!(
+		timeout(Duration::from_secs(5), driverless.accept())
+			.await
+			.unwrap()
+			.is_none()
+	);
+	assert!(matches!(
+		driverless.connect(&config, addr, "localhost"),
+		Err(endpoint::ConnectError::EndpointStopping)
+	));
+}
+
 /// The endpoint driver may exit while an accept runs without the lock. The connection registered
 /// afterwards must still be told that the driver is gone, so that its `Connecting` fails promptly
 /// and `wait_idle` does not wait on a connection nobody drives.
