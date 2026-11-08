@@ -4,6 +4,7 @@ import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { Viewers } from "../bandwidth.ts";
+import { DEFAULT_EXPIRY } from "../cache.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import {
 	error,
@@ -21,7 +22,7 @@ import type { Consumer as GroupConsumer } from "../group.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
-import { CACHE_EXPIRY, GRACE } from "../ledger.ts";
+import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -2743,7 +2744,7 @@ test("a finished group wins over a late stale drop once evicted on lite-07", asy
 				new Reader(new ReadableStream({ start: (controller) => controller.close() }), undefined, version),
 			);
 		// Everything below the live edge ages out of the cache.
-		const evict = () => clock.advance(Nano.fromMilli(Milli(2 * CACHE_EXPIRY)));
+		const evict = () => clock.advance(Nano.fromMilli(Milli(2 * DEFAULT_EXPIRY)));
 		let priority = 0;
 		const update = async () => {
 			track.update({ priority: ++priority, delay: { max: Milli(500) } });

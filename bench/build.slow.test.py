@@ -20,8 +20,8 @@ class Builds(unittest.TestCase):
                 repo = Path(directory) / "repo"
                 repo.mkdir()
                 shutil.copytree(ROOT / "bench", repo / "bench", ignore=shutil.ignore_patterns("__pycache__"))
-                # The fixture measures nothing, and `just gh test` runs it in every gate, which must
-                # not wait behind another session's benchmark for the host lock.
+                # The fixture measures nothing, so it need not wait behind another
+                # session's benchmark for the host lock.
                 (repo / "bench/lock.sh").write_text("bench_lock() { :; }\n")
                 (repo / ".cargo").mkdir()
                 (repo / ".cargo/config.toml").touch()
