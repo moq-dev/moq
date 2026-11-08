@@ -121,10 +121,7 @@ async fn main() -> anyhow::Result<()> {
 					.connect(url)
 					.established()
 					.await?;
-				let mut priority = track.priority();
-				while priority.is_none() {
-					priority = kio::wait(|waiter| track.poll_priority(waiter, priority)).await;
-				}
+				while kio::wait(|waiter| track.poll_priority_changed(waiter)).await.is_none() {}
 				for sequence in 0..GROUPS {
 					ensure!(
 						commands.next_line().await?.as_deref() == Some(&format!("datagram {sequence}")),

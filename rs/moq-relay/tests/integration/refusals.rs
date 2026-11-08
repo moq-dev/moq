@@ -198,7 +198,7 @@ async fn lan_refusals_are_counted() {
 		false,
 	)
 	.await;
-	assert_eq!(relay.refused("lan").await, 1);
+	assert_eq!(relay.refused("membership").await, 1);
 	assert_eq!(relay.refused("refused").await, 0);
 	relay.stop().await;
 }

@@ -1731,11 +1731,6 @@ impl Cluster {
 		grant
 	}
 
-	/// Whether a protocol version carries the request path used to mark a mesh dial.
-	pub(crate) fn carries_request_path(version: &moq_net::Version) -> bool {
-		!version.is_lite() || version.code() >= 0xff0dad05
-	}
-
 	/// Reject version restrictions that leave a LAN dial with no request path.
 	pub fn validate_lan_versions(
 		client: &moq_tokio::connect::Config,
@@ -1746,7 +1741,7 @@ impl Cluster {
 		anyhow::ensure!(
 			client
 				.iter()
-				.any(|version| Self::carries_request_path(version) && server.contains(version)),
+				.any(|version| version.has_request_path() && server.contains(version)),
 			"--cluster-lan needs --connect-version and --listen-version to share a version that carries a request path (moq-lite-05 and newer, or any moq-transport version)"
 		);
 		Ok(())
@@ -1791,7 +1786,7 @@ impl Cluster {
 			);
 			if let Some(connect) = &self.connect {
 				anyhow::ensure!(
-					connect.versions().iter().any(Self::carries_request_path),
+					connect.versions().iter().any(moq_net::Version::has_request_path),
 					"--cluster-lan needs --connect-version to include a version that carries a request path (moq-lite-05 and newer, or any moq-transport version)"
 				);
 			} else {
@@ -2281,7 +2276,7 @@ impl Cluster {
 			connect.version = connect
 				.versions()
 				.iter()
-				.filter(|version| Self::carries_request_path(version))
+				.filter(|version| version.has_request_path())
 				.copied()
 				.collect();
 		}
@@ -2305,9 +2300,11 @@ impl Cluster {
 	#[cfg(all(test, feature = "cluster-lan"))]
 	fn dial_lan_target(&self, target: &DialTarget) -> anyhow::Result<moq_tokio::Connection> {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
+		let origin = self.origin.clone().with_link(origin::Link::Peer);
 		let mut client = self
 			.peer_client(true, Some(target))?
-			.with_origin(self.origin.clone().with_link(origin::Link::Peer));
+			.with_publisher(&origin)
+			.with_subscriber(origin);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}

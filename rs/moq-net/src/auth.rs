@@ -48,7 +48,7 @@ use crate::{Error, Patterns, Result, SessionError, time::Instant};
 
 mod tokens;
 
-pub(crate) use tokens::Dial;
+pub(crate) use tokens::{Dial, locate};
 pub use tokens::{EmptyToken, Token, Tokens};
 
 /// Classify malformed AUTH messages separately from transport and local failures.

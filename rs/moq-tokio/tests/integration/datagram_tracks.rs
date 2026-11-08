@@ -203,10 +203,7 @@ async fn run(relay: bool, js_publishes: bool) {
 
 		let (mut child, mut lines) = spawn("subscribe");
 		expect_line(&mut lines, "subscribed").await;
-		let mut priority = None;
-		while priority != Some(PRIORITY) {
-			priority = kio::wait(|waiter| audio.poll_priority(waiter, priority)).await;
-		}
+		while audio.priority_changed().await != Some(PRIORITY) {}
 		for (sequence, micros, payload) in AUDIO {
 			audio
 				.insert(datagram::Datagram {

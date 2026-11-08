@@ -114,7 +114,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct Options {
 	pub(crate) url: Url,
 	pub(crate) server: moq_net::Server,
-	pub(crate) active: moq_net::server::Active,
+	pub(crate) active: moq_net::server::Admitted,
 	/// The addresses and negotiated subprotocol captured before the upgrade.
 	pub link: crate::server::Link,
 	/// The verified TLS peer, when the HTTP server requested a certificate.
@@ -129,7 +129,7 @@ pub struct Options {
 
 impl Options {
 	/// Carry an accepted connection's guard, URL, and MoQ policy through its upgrade.
-	pub fn new(url: Url, server: moq_net::Server, active: moq_net::server::Active) -> Self {
+	pub fn new(url: Url, server: moq_net::Server, active: moq_net::server::Admitted) -> Self {
 		Self {
 			url,
 			server,
@@ -1034,11 +1034,11 @@ mod tests {
 			stream_receive_window: Some(256 * 1024),
 			..Default::default()
 		};
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let mut options = Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new().with_versions(moq_net::Versions::all()),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
 		options.quic = quic.resolve();
@@ -1069,9 +1069,9 @@ mod tests {
 	fn moqt_18_and_newer_pin_to_qmux01() {
 		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
 		// otherwise the pin silently stops matching.
-		let drafts: Vec<_> = [0xff000012, 0xff000014, 0xff000016]
+		let drafts: Vec<_> = ["moq-transport-18", "moq-transport-20", "moq-transport-22"]
 			.into_iter()
-			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
+			.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
 			.collect();
 		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 		for &alpn in QMUX01_ONLY_ALPNS {
@@ -1158,12 +1158,12 @@ mod timeout_tests {
 	#[tokio::test(start_paused = true)]
 	async fn silent_qmux_peer_is_refused_at_the_deadline() {
 		const ALPN: &str = "qmux-01.moq-lite-06";
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let timeout = time::Duration::from_secs(1);
 		let mut options = Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new().with_timeout(Some(timeout)),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(ALPN.into());
 		let (server, _peer) = tokio::io::duplex(4096);
@@ -1185,11 +1185,11 @@ mod timeout_tests {
 		const ALPN: &str = "qmux-01.moq-lite-06";
 		let short = time::Duration::from_secs(1);
 		for (timeout, expires) in [(Some(short), true), (None, false)] {
-			let activity = moq_net::server::Activity::default();
+			let admission = moq_net::server::Admission::default();
 			let mut options = Options::new(
 				"ws://localhost/".parse().unwrap(),
 				moq_net::Server::new().with_timeout(timeout),
-				activity.enter().unwrap(),
+				admission.enter().unwrap(),
 			);
 			options.link.alpn = Some(ALPN.into());
 			// Complete QMux over an in-memory WebSocket, then withhold MoQ SETUP.

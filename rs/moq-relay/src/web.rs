@@ -466,7 +466,7 @@ impl Web {
 				crate::listener::Config {
 					health: health.clone(),
 					timeout: state.timeout,
-					activity: Some(state.shutdown.activity.clone()),
+					admission: Some(state.shutdown.admission.clone()),
 				},
 				WebAcceptor::plain(ws, rtmp.clone(), state.clone()),
 			)?;
@@ -483,7 +483,7 @@ impl Web {
 				crate::listener::Config {
 					health: health.clone(),
 					timeout: state.timeout,
-					activity: Some(state.shutdown.activity.clone()),
+					admission: Some(state.shutdown.admission.clone()),
 				},
 				WebAcceptor::tls(
 					crate::listener::Tls {
@@ -687,7 +687,7 @@ impl WebAcceptor {
 			.admission
 			.clone()
 			.and_then(|admission| admission.take())
-			.or_else(|| state.shutdown.activity.enter())
+			.or_else(|| state.shutdown.admission.enter())
 		else {
 			return;
 		};
@@ -2834,7 +2834,7 @@ mod tests {
 			fn holds_drain(&self) {
 				use futures::FutureExt;
 				assert!(
-					self.shutdown.activity().close().now_or_never().is_none(),
+					self.shutdown.admission().close().now_or_never().is_none(),
 					"a TCP-accepted web connection was absent from the drain before its upgrade"
 				);
 			}
@@ -2954,17 +2954,17 @@ mod tests {
 				.with_no_client_auth();
 			client.alpn_protocols = vec![b"h2".to_vec()];
 			let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
-			let activity = moq_net::server::Activity::default();
+			let admission = moq_net::server::Admission::default();
 			let bound = moq_tokio::bind::tcp("127.0.0.1:0".parse().unwrap()).unwrap();
 			let addr = bound.local_addr().unwrap();
 			let listener =
-				crate::listener::Listener::new(bound, moq_tokio::accept::Health::new("h2"), Some(activity.clone()))
+				crate::listener::Listener::new(bound, moq_tokio::accept::Health::new("h2"), Some(admission.clone()))
 					.unwrap();
 			let ((accepted, _), connected) =
 				socket_step(async { tokio::try_join!(listener.accept_stream(), tokio::net::TcpStream::connect(addr)) })
 					.await
 					.unwrap();
-			assert!(activity.close().now_or_never().is_none(), "TLS was not counted");
+			assert!(admission.close().now_or_never().is_none(), "TLS was not counted");
 			let tls = crate::listener::Tls {
 				http: RustlsConfig::from_config(tls),
 				serve,
@@ -2981,7 +2981,7 @@ mod tests {
 			.unwrap();
 			assert_eq!(stream.tls().unwrap().alpn_protocol(), Some(&b"h2"[..]));
 			assert!(
-				activity.close().now_or_never().is_some(),
+				admission.close().now_or_never().is_some(),
 				"h2 awaited request headers before releasing its admission"
 			);
 		}
@@ -3009,7 +3009,7 @@ mod tests {
 		#[tokio::test(start_paused = true)]
 		async fn later_keep_alive_upgrade_enters_from_the_handler() {
 			let mut web = DrainingWeb::new(false, true).await;
-			let pending = web.shutdown.activity().enter().unwrap();
+			let pending = web.shutdown.admission().enter().unwrap();
 			socket_step(plain_request(&mut web.stream)).await;
 			web.trigger.start();
 			let session = socket_step(upgrade_while_draining(web.stream, false)).await;
@@ -3043,7 +3043,7 @@ mod tests {
 			socket_step(plain_request(&mut web.stream)).await;
 			// Keep the listener running while admission is closed, exposing the
 			// same boundary a connection can reach just before Relay::run stops it.
-			socket_step(web.shutdown.activity().close()).await;
+			socket_step(web.shutdown.admission().close()).await;
 			socket_step(refused_upgrade(web.stream)).await;
 			let mut fresh = socket_step(tokio::net::TcpStream::connect(addr)).await.unwrap();
 			socket_step(plain_request(&mut fresh)).await;

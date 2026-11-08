@@ -8194,7 +8194,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 	let (client, server) = moq_net::transport::memory::pair(transport);
 	let connect = async {
 		let (session, driver) = moq_net::Client::new()
-			.with_origin(a.inner.clone())
+			.with_publisher(&a.inner)
+			.with_subscriber(a.inner.clone())
 			.with_versions(version.into())
 			.connect(kio::clock::Instant::now(), client)
 			.await

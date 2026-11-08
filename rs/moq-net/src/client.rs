@@ -17,7 +17,7 @@ pub struct Client {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
-	versions: Versions,
+	pub(crate) versions: Versions,
 	url: Option<url::Url>,
 	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
@@ -59,14 +59,6 @@ impl Client {
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
 		self
-	}
-
-	/// Set both publish and subscribe from one shared [`origin::Producer`].
-	///
-	/// Equivalent to [`with_publisher`](Self::with_publisher) and
-	/// [`with_subscriber`](Self::with_subscriber) with the same origin.
-	pub fn with_origin(self, origin: origin::Producer) -> Self {
-		self.with_publisher(&origin).with_subscriber(origin)
 	}
 
 	/// Cap what the server can make this session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
@@ -125,6 +117,11 @@ impl Client {
 	pub fn with_url(mut self, url: url::Url) -> Self {
 		self.url = Some(url);
 		self
+	}
+
+	/// The URL [`with_url`](Self::with_url) set, if any.
+	pub fn url(&self) -> Option<&url::Url> {
+		self.url.as_ref()
 	}
 
 	/// The request target our SETUP carries: the dialed URL's path, plus `?` and the

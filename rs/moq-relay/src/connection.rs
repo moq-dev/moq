@@ -329,7 +329,7 @@ impl Lifecycle {
 			let Some(presented) = cluster::Cluster::lan_credential(&request.path) else {
 				return Err(Rejection {
 					code: moq_net::SessionError::Unauthorized,
-					refusal: Some(RefusalKind::Lan),
+					refusal: Some(RefusalKind::Membership),
 					source: anyhow::anyhow!("LAN peer did not present a membership proof"),
 				});
 			};
@@ -342,14 +342,14 @@ impl Lifecycle {
 				Some(false) => {
 					return Err(Rejection {
 						code: moq_net::SessionError::Unauthorized,
-						refusal: Some(RefusalKind::Lan),
+						refusal: Some(RefusalKind::Membership),
 						source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
 					});
 				}
 				None => {
 					return Err(Rejection {
 						code: moq_net::SessionError::Unauthorized,
-						refusal: Some(RefusalKind::Lan),
+						refusal: Some(RefusalKind::Membership),
 						source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
 					});
 				}

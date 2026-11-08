@@ -887,12 +887,11 @@ struct Running {
 type CloseGuard = std::sync::Arc<std::sync::Mutex<Option<moq_net::Error>>>;
 
 impl Connection {
-	pub(crate) fn new(mut client: Client, addrs: Addrs) -> Self {
+	pub(crate) fn new(client: Client, addrs: Addrs) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
 		let tokens = moq_net::auth::Tokens::new(client.tokens.clone());
 		let auth = tokens.handle();
-		client.moq = client.moq.with_auth(auth.clone());
 
 		// The loop feeds these across every reconnect, so a consumer's handle survives session churn
 		// (unlike a session's own bandwidth consumer, which dies with the session).
@@ -1034,7 +1033,7 @@ impl Connection {
 		let mut client = client;
 		let mut policy = moq_net::Reconnect::new(client.policy, addrs.as_slice().to_vec(), kio::clock::now())
 			.map_err(|_| Error::BackoffHealthy)?
-			.with_tokens(shared.tokens.clone(), client.versions.clone());
+			.with_tokens(shared.tokens.clone());
 		// The dial in flight, and the address it was asked for. It owns its client, so a
 		// fresh port can replace the loop's between walks.
 		let mut dial: Option<(url::Url, std::pin::Pin<Box<Dial>>)> = None;

@@ -39,10 +39,11 @@ pub use coordinator::*;
 
 /// The context string every [`Proof`] signature starts with, so a signature made for
 /// enrollment can never be replayed as anything else the endpoint key signs.
-pub const PROOF_CONTEXT: &[u8] = b"moq-mesh-enroll-00";
+const PROOF_CONTEXT: &[u8] = b"moq-mesh-enroll-00";
 
 /// The length of a challenge in bytes.
-pub const CHALLENGE_LEN: usize = 32;
+#[cfg_attr(not(feature = "serve"), allow(dead_code, reason = "only the coordinator issues challenges"))]
+pub(crate) const CHALLENGE_LEN: usize = 32;
 
 const SIGNATURE_LEN: usize = 64;
 
@@ -51,7 +52,7 @@ const SIGNATURE_LEN: usize = 64;
 ///
 /// The URL binds the proof to one coordinator, so a coordinator the device trusts cannot
 /// relay another's challenge and enroll the device's key there.
-pub fn proof_message(base: &url::Url, challenge: &[u8]) -> Vec<u8> {
+fn proof_message(base: &url::Url, challenge: &[u8]) -> Vec<u8> {
 	let base = audience(base);
 	let mut message = Vec::with_capacity(PROOF_CONTEXT.len() + base.len() + challenge.len() + 2);
 	message.extend_from_slice(PROOF_CONTEXT);
@@ -71,7 +72,7 @@ fn audience(base: &url::Url) -> &str {
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Challenge {
-	/// [`CHALLENGE_LEN`] bytes, opaque to the device, base64url without padding.
+	/// 32 bytes, opaque to the device, base64url without padding.
 	#[serde_as(as = "serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>")]
 	pub challenge: Vec<u8>,
 	/// When the coordinator stops accepting a proof over it, unix seconds.
@@ -79,8 +80,11 @@ pub struct Challenge {
 	pub expires: kio::clock::Wall,
 }
 
-/// Proof that the caller holds `endpoint`'s secret key: its signature over
-/// [`proof_message`] for a challenge the coordinator issued and has not yet seen used.
+/// Proof that the caller holds `endpoint`'s secret key: its signature over a challenge the
+/// coordinator issued and has not yet seen used.
+///
+/// The signed message is `moq-mesh-enroll-00`, a zero byte, the coordinator's base URL as
+/// the device addressed it without a trailing slash, a zero byte, then the raw challenge.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof {
@@ -89,7 +93,7 @@ pub struct Proof {
 	/// The challenge, as issued.
 	#[serde_as(as = "serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>")]
 	pub challenge: Vec<u8>,
-	/// The Ed25519 signature over [`proof_message`].
+	/// The Ed25519 signature over the challenge, bound to the coordinator's base URL.
 	#[serde_as(as = "serde_with::base64::Base64<serde_with::base64::UrlSafe, serde_with::formats::Unpadded>")]
 	pub signature: Vec<u8>,
 }

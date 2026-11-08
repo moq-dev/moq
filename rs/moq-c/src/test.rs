@@ -2358,13 +2358,14 @@ fn raw_track_publish_consume() {
 
 /// Wait until a datagram producer has a reader.
 fn wait_datagram_reader(track: u32) {
-	let datagrams = State::lock()
+	let mut datagrams = State::lock()
 		.publish
 		.datagram_producer(Id::try_from(track).unwrap())
 		.expect("a datagram track");
-	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
-		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
-		_ => std::task::Poll::Pending,
+	let reader = kio::wait(|waiter| loop {
+		if std::task::ready!(datagrams.poll_priority_changed(waiter)).is_some() {
+			return std::task::Poll::Ready(());
+		}
 	});
 	crate::ffi::RUNTIME
 		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })
@@ -2483,9 +2484,10 @@ fn a_datagram_only_track_is_read() {
 			dg_cb.ptr,
 		)
 	});
-	let reader = kio::wait(|waiter| match datagrams.poll_priority(waiter, None) {
-		std::task::Poll::Ready(Some(_)) => std::task::Poll::Ready(()),
-		_ => std::task::Poll::Pending,
+	let reader = kio::wait(|waiter| loop {
+		if std::task::ready!(datagrams.poll_priority_changed(waiter)).is_some() {
+			return std::task::Poll::Ready(());
+		}
 	});
 	crate::ffi::RUNTIME
 		.block_on(async { kio::clock::timeout(TIMEOUT, reader).await })

@@ -328,7 +328,7 @@ impl Internal {
 			crate::listener::Config {
 				health,
 				timeout,
-				activity: None,
+				admission: None,
 			},
 			InternalAcceptor,
 		)?
@@ -2159,7 +2159,7 @@ counter moq_relay_sessions_failed_total{kind="transport",tier="edge"} 0
 counter moq_relay_sessions_opened_total{tier="edge"} 1
 counter moq_relay_sessions_refused_total{reason="expired"} 0
 counter moq_relay_sessions_refused_total{reason="forbidden"} 0
-counter moq_relay_sessions_refused_total{reason="lan"} 0
+counter moq_relay_sessions_refused_total{reason="membership"} 0
 counter moq_relay_sessions_refused_total{reason="refused"} 0
 counter moq_relay_sessions_refused_total{reason="request"} 0
 counter moq_relay_sessions_refused_total{reason="unavailable"} 1

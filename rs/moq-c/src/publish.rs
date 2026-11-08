@@ -1948,7 +1948,7 @@ impl Publish {
 
 	pub fn datagrams_demand(&mut self, track: Id, callback: OnStatus) -> Result<Id, Error> {
 		let entry = self.datagrams.get(track).ok_or(Error::TrackNotFound)?;
-		let producer = entry.producer.clone();
+		let mut producer = entry.producer.clone();
 		let alive = entry.alive.consume();
 		let (task, mut close) = Task::new(callback);
 		let id = self.datagram_demand.insert(DatagramDemand {
@@ -1967,7 +1967,12 @@ impl Publish {
 					 biased;
 					 _ = &mut close => return Ok(()),
 					 _ = alive.closed() => return Ok(()),
-					 priority = kio::wait(|waiter| producer.poll_priority(waiter, priority)) => priority,
+					 next = kio::wait(|waiter| loop {
+						 let next = std::task::ready!(producer.poll_priority_changed(waiter));
+						 if next != priority {
+							 return std::task::Poll::Ready(next);
+						 }
+					 }) => next,
 					};
 				}
 			})
