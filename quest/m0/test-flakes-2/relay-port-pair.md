@@ -38,6 +38,9 @@ Reproduce first: hold the UDP port the test's TCP listener will get (for
 example, hold UDP sockets across most of the ephemeral range) and watch line
 281 fail, then show the fixed test passing under the same pressure. Also hold
 TCP listeners across most of the range, so TCP refuses the first draws, and
-show the search redraws until a pair binds.
+show the search redraws until a pair binds. Hold the pressure sockets in a
+separate process: `relay_owns_port` checks the test's own PID, so a pressure
+listener the test owns at the drawn port plus two would make the negative `tls`
+assertion fail, and the test's descriptors stay free for the search.
 
 Public API: none. Wire: none.
