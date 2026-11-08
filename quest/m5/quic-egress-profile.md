@@ -117,15 +117,18 @@ Then, only where the profile shows a cost:
     6,090), so the p99 rise is measured under unequal loss, not drop-free.
   - **Only at 400 audio did it cut CPU, by 13%.** Lost groups fell too (150,424
     against 325,694), but the proxy's listener dropped about 1.1 M datagrams in
-    both runs, so that difference can't be credited to batching. The server was
-    past its limit: with batching off its own socket dropped 3,100 datagrams,
-    against none with it on, and CPU peaked at 0.78. Audio p99 fell from 212 to
-    110 ms, while video p99 rose from 31 to 79 ms.
-  - **The losses at 300 came from the proxy's client-facing socket buffer**, not
-    the server: it dropped 242,019 datagrams with batching off and 232,662 with
-    it on, at its 208 KiB default. With a 1 MiB receive buffer, batching off
-    loses nothing there (audio p50 / p99 11 / 29 ms, CPU 0.499 / 0.609, video
-    p99 22 ms); batching on was not re-run with it.
+    both runs, so that difference can't be credited to batching. The server's own
+    socket also dropped 3,100 datagrams with batching off, against none with it
+    on, and its CPU peaked at 0.78 cores; both runs were measured under the
+    proxy's overflow too, so neither number isolates the server's ceiling. Audio
+    p99 fell from 212 to 110 ms, while video p99 rose from 31 to 79 ms.
+  - **At 300, both arms lost datagrams at the proxy's client-facing socket
+    buffer**, at its 208 KiB default: 242,019 with batching off and 232,662 with
+    it on. The server's socket dropped none. With a 1 MiB proxy buffer, batching
+    off loses nothing there (audio p50 / p99 11 / 29 ms, CPU 0.499 / 0.609, video
+    p99 22 ms), so its loss was the proxy's. Batching on was not re-run with it,
+    and what accounts for its extra lost groups on fewer proxy drops hasn't been
+    measured.
 
   So on this path, below the ceiling p99 rose with no CPU saving; past it, CPU
   fell and audio p99 halved but video p99 rose. That leans toward keeping batching
