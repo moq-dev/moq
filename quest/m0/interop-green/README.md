@@ -93,4 +93,13 @@ this quest's PR:
   `moq-lite-07-wip` planned break stale again; remeasured, with the same 16
   cells failing.
 
+Scheduled run
+[42382888974](https://github.com/moq-dev/moq/actions/runs/42382888974)
+(2026-11-07, at b98833c40a, after those fixes landed) failed only Harness
+regressions: `publish-ui.browser.ts`'s invalid-attribute check still tested
+moq-watch's `buffer`, which
+[moq-dev/moq#8057](https://github.com/moq-dev/moq/pull/8057) renamed to
+`lookahead`. Fixed in this quest's PR: the case tests `lookahead`, and a new
+check confirms `buffer` reports its rename and recovers once removed.
+
 Public API: none. Wire: none.

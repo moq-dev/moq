@@ -145,6 +145,11 @@ SUBSCRIBE_FINISH arrived before its FIN aborted with the session's error. Its
 datagrams now finish whenever the stream track's settled end survives the abort,
 fixed by [moq-dev/moq#8157](https://github.com/moq-dev/moq/pull/8157).
 
+Added 2026-11-07 (maintainer, /quest-complete): moq-relay's
+`embed::worker_tokio_custom_route_and_quic`, which failed
+[moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138)'s Check with "the
+owner's sockets outlived `run`". It is `#[ignore]`d until its child fixes it.
+
 `sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
 landing just after the dispatcher's `wait -n` returned left Bash marking the
 exit trap's next `wait` as interrupted, so it returned 143 at once and errexit
@@ -152,6 +157,17 @@ skipped the timing report. A TERM landing after a lane forked but before
 `running` recorded it left that lane uncancelled and the exit trap's `wait`
 hung. The exit trap now waits again, and cancellation reads the job table,
 fixed by [moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138).
+
+moq-gst's sink-restart pad test caught a real source bug: a track that failed on
+an instance still up, such as a relay's copy cut off as its publisher's session
+closed, left no finished record, so the final catalog snapshot started the
+rendition again and replayed a group on its held pad. A failure now counts as
+the track's end, fixed by [moq-dev/moq#8160](https://github.com/moq-dev/moq/pull/8160).
+
+Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s
+http:// fingerprint tests, whose slow real fetch lets the WebTransport hedge
+timer fire on the host clock, seen in
+[moq-dev/moq#8163](https://github.com/moq-dev/moq/pull/8163)'s CI.
 
 Added 2026-11-07 (maintainer, /quest-complete): `js/net`'s lite-07
 relative-start integration test, which failed once on main in
@@ -169,6 +185,8 @@ Public API: none. Wire: none.
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [moq-gst's sink-restart pad test survives load](/quest/m0/test-flakes-2/gst-sink-restart-pads.md) - `a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times` keeps its pads under load
+- [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
+- [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
 - [A lite-07 relative start resolves to the publisher's start every time](/quest/m0/test-flakes-2/lite07-relative-start.md) - `js/net`'s frameless-newest-group integration test stops reading a start of 0, and its `test.skip` is removed
 - [A lite-07 reply FINs instead of resetting when the subscriber FINs mid-write](/quest/m0/test-flakes-2/lite07-reply-fin.md) - `js/net`'s empty-window reply test passes under `--rerun-each 200`, fixed in the publisher
+- [moq-tokio's stream-stopped tests survive a loaded host](/quest/m0/test-flakes-2/quic-stream-stopped.md) - `stream_stopped` awaits its stop event instead of a 100 ms wall-clock deadline, and its `#[ignore]` is removed

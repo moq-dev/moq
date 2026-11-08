@@ -52,7 +52,10 @@ enforcement needs it and nobody owned it.
   included, stays under the cap is untouched; under the cap nothing changes.
 
 Public API: a rate handle and a rate-limit close reason on moq-srt's server.
-Wire: none.
+The handle is `moq_net::bandwidth::Limit`, shared with WHIP, WHEP, and the
+relay's grant caps since [gateway-ingest](/quest/m2/gateway-ingest.md)
+(2026-11-07, maintainer, /quest-plan from the API shape audit), not a
+moq-srt copy. Wire: none.
 
 ## Required
 

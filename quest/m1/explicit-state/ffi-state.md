@@ -51,6 +51,14 @@ Also sweep:
 - `MoqServer` (`server.rs`): its lifecycle is spread over four places.
 - `MoqTrackProducer.keep: None`, which means both "finished" and "has no
   family".
+- `MoqConnectionState` (`session.rs`) is a flat snapshot (`revision`,
+  `phase`, `connects`, `failure`, `version`), so `failure` and `version` are
+  readable in phases where they mean nothing. It carries each phase's data
+  with that phase, mirroring whatever shape Rust's connection state takes,
+  and moq-c's `moq_connection_state` follows (renaming its `protocol` to
+  `version`). It breaks every binding, so under the epic's milestone rule
+  this item splits into its own m2 quest when this quest starts (added
+  2026-11-07, maintainer, /quest-plan from the API shape audit).
 - moq-c's global id counter, whose wrap lets a stale route id name a newer
   broadcast. Use generation-tagged ids or clear ids on close.
 

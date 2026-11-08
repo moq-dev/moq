@@ -11,7 +11,8 @@ import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import { StreamCode, StreamError, toStreamCode } from "./error.ts";
-import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { Consumer as FrameConsumer } from "./frame.ts";
+import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";

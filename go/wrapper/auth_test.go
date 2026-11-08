@@ -16,7 +16,7 @@ func awaitGrant(t *testing.T, ctx context.Context, session *moq.Session, want mo
 	t.Helper()
 
 	grants := session.Grants()
-	defer grants.Close()
+	defer grants.Cancel()
 	got := grants.Grant()
 	for got == nil || !reflect.DeepEqual(*got, want) {
 		var err error
@@ -97,7 +97,7 @@ func TestSessionAuthReadsTheGrant(t *testing.T) {
 		t.Fatalf("answered = %v, want ErrUnsupported", err)
 	}
 	grants := client.Session().Grants()
-	defer grants.Close()
+	defer grants.Cancel()
 	if got := grants.Grant(); got == nil || !reflect.DeepEqual(*got, everything) {
 		t.Fatalf("grant after a refusal = %+v", got)
 	}

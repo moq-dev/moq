@@ -76,8 +76,9 @@ impl Default for Options {
 /// a subscriber that opens the catalog before any frames arrive still sees the
 /// track.
 pub struct Producer {
-	// None after a successful finish: keep the track and catalog rendition, not the codec.
-	encoder: Option<Encoder>,
+	/// The codec while input is accepted. Ending keeps the track and catalog rendition, not the
+	/// codec.
+	codec: Codec,
 	bitrate: moq_net::bandwidth::Rate,
 	input: Input,
 	/// Converts the input layout to the codec's, when they differ.
@@ -105,6 +106,33 @@ pub struct Producer {
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it published most recently.
 	activity: Activity,
+}
+
+/// The codec while the producer accepts input, or how it ended.
+enum Codec {
+	Live(Encoder),
+	/// [`finish`](Producer::finish) published every packet and ended the track.
+	Finished,
+	/// Ending failed, aborting the track: every later call reports the cause.
+	Failed(Error),
+}
+
+impl Codec {
+	fn get(&self) -> Result<&Encoder, Error> {
+		match self {
+			Self::Live(encoder) => Ok(encoder),
+			Self::Finished => Err(moq_net::Error::Closed.into()),
+			Self::Failed(err) => Err(err.clone()),
+		}
+	}
+
+	fn get_mut(&mut self) -> Result<&mut Encoder, Error> {
+		match self {
+			Self::Live(encoder) => Ok(encoder),
+			Self::Finished => Err(moq_net::Error::Closed.into()),
+			Self::Failed(err) => Err(err.clone()),
+		}
+	}
 }
 
 struct Terminal {
@@ -216,7 +244,7 @@ impl Reserved {
 			active: true,
 			reset_pending: false,
 			bitrate,
-			encoder: Some(registered.encoder),
+			codec: Codec::Live(registered.encoder),
 			input: registered.input,
 			remix: registered.remix,
 			resampler: registered.resampler,
@@ -301,7 +329,7 @@ impl Producer {
 
 	/// Retune the live encoder to `bitrate`.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
-		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
+		let encoder = self.codec.get_mut()?;
 		let previous = encoder.bitrate();
 		encoder.set_bitrate(bitrate)?;
 		// Advertise the configured target in place, so encoded-byte estimates cannot replace it.
@@ -317,7 +345,7 @@ impl Producer {
 	}
 
 	fn encoder(&self) -> Result<&Encoder, Error> {
-		self.encoder.as_ref().ok_or(moq_net::Error::Closed.into())
+		self.codec.get()
 	}
 
 	/// Re-anchor the timeline to the next frame's timestamp, dropping any
@@ -328,7 +356,7 @@ impl Producer {
 	/// `reanchor`. If the codec had started, a marker group is published before
 	/// the next packet so subscribers jump the playhead.
 	pub fn reanchor(&mut self) {
-		if self.encoder.as_ref().is_some_and(Encoder::started) || !self.backlog.is_empty() {
+		if self.codec.get().is_ok_and(Encoder::started) || !self.backlog.is_empty() {
 			self.pending_discontinuity = true;
 		}
 		self.reset_state();
@@ -341,7 +369,7 @@ impl Producer {
 		self.pending.clear();
 		self.reset_pending = true;
 		if self.backlog.is_empty()
-			&& let Some(encoder) = self.encoder.as_mut()
+			&& let Ok(encoder) = self.codec.get_mut()
 		{
 			encoder.reset();
 		}
@@ -370,11 +398,9 @@ impl Producer {
 	/// produced, which [`activity`](Self::activity) reports.
 	///
 	/// Writes after a successful [`finish`](Self::finish) fail with
-	/// [`moq_net::Error::Closed`].
+	/// [`moq_net::Error::Closed`], and after a failed one with its cause.
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
-		if self.encoder.is_none() {
-			return Err(moq_net::Error::Closed.into());
-		}
+		self.encoder()?;
 		let timestamp_us = u64::try_from(frame.timestamp.as_micros())
 			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
 		let anchor_us = *self.anchor_us.get_or_insert(timestamp_us);
@@ -457,7 +483,7 @@ impl Producer {
 			self.track.discontinuity()?;
 			self.decoder_boundary = true;
 		}
-		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
+		let encoder = self.codec.get_mut()?;
 		if reset {
 			encoder.reset();
 		}
@@ -613,7 +639,8 @@ impl Producer {
 	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
 	/// run after a successful finish. The codec and input scratch are released, while the
 	/// track and its catalog rendition stay published. Writes and bitrate changes then
-	/// fail with [`moq_net::Error::Closed`].
+	/// fail with [`moq_net::Error::Closed`]. A finish that fails ends the track with an error
+	/// instead, and every later call returns its cause.
 	pub fn finish(&mut self) -> Result<(), Error> {
 		self.end(None)
 	}
@@ -626,9 +653,29 @@ impl Producer {
 	}
 
 	fn end(&mut self, err: Option<moq_net::Error>) -> Result<(), Error> {
-		if self.encoder.is_none() {
-			return Ok(());
+		match &self.codec {
+			Codec::Live(_) => {}
+			Codec::Finished => return Ok(()),
+			Codec::Failed(cause) => return Err(cause.clone()),
 		}
+		let result = self.drain(err);
+		self.codec = match &result {
+			Ok(()) => Codec::Finished,
+			Err(cause) => {
+				// Every published packet stays readable, then subscribers get an error rather than an
+				// end that would claim the source was published whole.
+				let _ = self.track.fail(moq_net::StreamError::Internal.into());
+				Codec::Failed(cause.clone())
+			}
+		};
+		self.pending = Vec::new();
+		self.remix = None;
+		self.resampler = None;
+		result
+	}
+
+	/// Publish everything still held, then end the track with `err` or cleanly.
+	fn drain(&mut self, err: Option<moq_net::Error>) -> Result<(), Error> {
 		// Preserve the final retained history after capture ends, even without live demand.
 		self.active = true;
 		while let Some(raw) = self.backlog.pop() {
@@ -636,7 +683,7 @@ impl Producer {
 			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
 		}
 		if self.reset_pending
-			&& let Some(encoder) = self.encoder.as_mut()
+			&& let Ok(encoder) = self.codec.get_mut()
 		{
 			encoder.reset();
 		}
@@ -666,11 +713,7 @@ impl Producer {
 		let start = Self::timestamp(anchor_us, self.frames_produced, delay, codec_rate)?;
 		// The source ends where it ends: priming only moves the packets carrying it.
 		let end = Self::timestamp(anchor_us, self.frames_produced + source_frames as u64, 0, codec_rate)?;
-		let finish = self
-			.encoder
-			.as_mut()
-			.ok_or(moq_net::Error::Closed)?
-			.drain(&self.pending)?;
+		let finish = self.codec.get_mut()?.drain(&self.pending)?;
 		let discard_padding = finish.discard_padding();
 		let packets = finish.into_packets();
 
@@ -698,9 +741,6 @@ impl Producer {
 			None => self.track.finish()?,
 			Some(err) => self.track.fail(err)?,
 		}
-		self.encoder = None;
-		self.pending = Vec::new();
-		self.remix = None;
 		Ok(())
 	}
 
@@ -1385,6 +1425,40 @@ mod tests {
 			packets += 1;
 		}
 		assert_eq!(packets, 11);
+	}
+
+	/// A failed finish is final: writes are refused with its cause rather than reaching the codec
+	/// at the input rate, now that the resampler is gone, and a retry reports the cause rather than
+	/// publishing the terminal packets again.
+	#[tokio::test]
+	async fn a_failed_finish_refuses_later_calls() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 44_100,
+			layout: Layout::Mono,
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".to_string()),
+			config: Config::new(48_000, Layout::Mono),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let frame = |samples: usize| {
+			let data: Vec<u8> = vec![0.25f32; samples].iter().flat_map(|s| s.to_le_bytes()).collect();
+			Frame::new(data.into(), moq_net::Timestamp::ZERO)
+		};
+		producer.write(&frame(4_410)).unwrap();
+
+		// Another handle ends the track, so finishing cannot publish the tail.
+		producer.track.track().clone().abort(moq_net::Error::Cancel).unwrap();
+		let cause = producer.finish().unwrap_err().to_string();
+
+		// Short of a codec frame, so nothing but the guard could refuse it.
+		let err = producer.write(&frame(100)).unwrap_err();
+		assert_eq!(err.to_string(), cause);
+		assert_eq!(producer.finish().unwrap_err().to_string(), cause);
 	}
 
 	/// `reanchor` promises to drop buffered samples, and the resampler buffers

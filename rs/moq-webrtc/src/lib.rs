@@ -56,6 +56,8 @@ mod ice;
 mod ingest;
 mod sdp;
 mod session;
+// str0m, dimpl, `is`, and sctp-proto, vendored and trimmed; see the module docs.
+mod vendor;
 
 /// Re-export of the HTTP router stack, so consumers can merge the [`axum::Router`]
 /// returned by [`Server::publish_router`] / [`Server::subscribe_router`] into their
@@ -402,7 +404,7 @@ mod tests {
 		logged("bps=900000").await;
 		// Lifting the cap lifts the publisher's ceiling rather than leaving the last one.
 		rate.set(None);
-		logged(&format!("bps={}", str0m::bwe::Bitrate::MAX.as_u64())).await;
+		logged(&format!("bps={}", crate::vendor::str0m::bwe::Bitrate::MAX.as_u64())).await;
 		assert!(!session.is_finished(), "a publisher under the cap was closed");
 		assert!(!pushed.is_finished(), "a publisher under the cap stopped");
 		session.abort();
@@ -518,7 +520,7 @@ mod tests {
 
 		let client = Client::new(client::Config::default());
 		// Credentials in the dialed URLs must never reach the client's connect logs.
-		let whip = format!("http://user:pass@{address}/whip/ingested?jwt=secret")
+		let whip = format!("http://user:pass@{address}/whip/ingested?jwt=canary-7f3e")
 			.parse()
 			.expect("WHIP URL");
 		// Each client call resolves once its session ends, so the test drives them aside.
@@ -541,7 +543,7 @@ mod tests {
 			.route("output", moq_net::origin::RouteOptions::hidden())
 			.expect("create output broadcast");
 		let output_consumer = output.broadcast().consume();
-		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=secret")
+		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=canary-7f3e")
 			.parse()
 			.expect("WHEP URL");
 		let fill = output.broadcast().clone();
@@ -556,7 +558,7 @@ mod tests {
 
 		assert!(logs_contain("whip client connected"));
 		assert!(logs_contain("whep client connected"));
-		for secret in ["jwt", "secret", "user:pass"] {
+		for secret in ["jwt", "canary-7f3e", "user:pass"] {
 			assert!(!logs_contain(secret), "client logs leaked {secret}");
 		}
 		assert!(server.terminate(&whep_id));

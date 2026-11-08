@@ -358,15 +358,6 @@ class IncomingStreamQueue<T> {
 	}
 }
 
-/** The streams a peer still lets this side open in one direction. */
-export interface StreamCredit {
-	/** The streams this side may still open before the peer grants more. */
-	available: bigint;
-	/** Whether an open was refused for lack of credit since the peer last granted more, so
-	 *  this side waits for the peer, as QUIC's STREAMS_BLOCKED says. */
-	blocked: boolean;
-}
-
 /** What a send stream has sent so far, the shape of W3C WebTransport's `WebTransportSendStreamStats`. */
 export interface SendStreamStats {
 	/** The bytes written to the stream. */
@@ -1892,15 +1883,6 @@ export default class Session implements WebTransport {
 				this.#scheduler?.setSendOrder(streamId, value);
 			},
 		});
-	}
-
-	/** The streams the peer still lets this side open in `dir`, as last heard.
-	 *
-	 *  A WebTransport extension: a browser's WebTransport reports no stream credit, so callers
-	 *  holding either check for this method. */
-	streamCredit(dir: "uni" | "bi"): StreamCredit {
-		const credit = dir === "bi" ? this.#bidiStreamCredit : this.#uniStreamCredit;
-		return { available: credit.available, blocked: credit.blocked };
 	}
 
 	/** Open a bidirectional stream, waiting for the peer to grant stream credit

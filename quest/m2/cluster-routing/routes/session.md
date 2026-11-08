@@ -27,19 +27,21 @@ node table, and the public API drops what the route layer replaced.
   change and per interest (`Router::advertise`), so a large origin costs
   linear work per update. Do it with the scoping change, which reshapes the
   same per-stream presentation.
-- Public API: `Hops`, `RouteInfo::hops`, and the saturating `Cost` stay while
-  lite-06 and the moq-transport cluster extension still carry hop chains.
-  Remove them, or hide them behind those wires, when the rollout window
-  closes (see Waiting).
+- Public API: remove `Hops`, `RouteInfo::hops`, and the saturating `Cost`
+  from the public API now, keeping a private chain type for lite-06 and the
+  moq-transport cluster extension, which still carry hop chains. Decided
+  2026-11-07 (maintainer, /quest-unblock): ✅ now (rejected: when lite-06
+  retires). It is a breaking change; the PR marks its title with `!`.
 
-## Waiting
+Added 2026-11-07 (maintainer, /quest-plan from the API shape audit), for
+the PR that lands this ([moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)):
 
-- Maintainer: decide when `Hops`, `RouteInfo::hops`, and the saturating
-  `Cost` leave the public API. Every older wire still fills them, so an agent
-  cannot drop them without picking the rollout's end. Options: **when lite-06
-  retires (recommended)**, since removing them now only moves them behind a
-  private type; or **now**, keeping a private chain type for the older wires.
-  Done when the Plan item above names the point.
+- An origin has one identity on both wires, seeded from `Config.hop`, not a
+  hop ID beside a separate random route identity.
+- `Cost::{MAX, DRAIN}` become `pub(crate)`. A drained route is the lowest
+  preference, never a saturated metric ("drain is a preference state", in
+  the [epic](/quest/m2/cluster-routing/README.md)), so sessions stop
+  stamping `Cost::DRAIN` on GOAWAY, including on moq-transport.
 
 ## Related
 
