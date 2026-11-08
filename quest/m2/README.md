@@ -206,7 +206,6 @@ quests that require them.
 - [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
 - [Public constructors spawn nothing, or say why](/quest/m2/spawn-constructors.md) - each public library entry point that spawns returns a driver its caller polls, or is listed as kept
 - [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - `encode` and `decode` return any number of outputs and gain `flush`, as moq-video's do
-- [Finishing consumes the producer](/quest/m2/finish-self.md) - importers and producers take `finish(self)`, so a finished producer cannot be written
 - [Bus writes land at a bus position](/quest/m2/bus-positioned-write.md) - callers sync audio to video without copying the bus's private latency, before the cut first publishes `bus`
 - [A mix-minus removes several sources](/quest/m2/bus-minus-several.md) - a guest's return feed drops every copy of their own sound
 - [Drop moq-auth's iroh transport](/quest/m2/auth-drop-iroh.md) - this breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
