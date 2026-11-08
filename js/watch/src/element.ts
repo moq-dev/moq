@@ -224,12 +224,15 @@ export default class MoqWatch extends HTMLElement {
 	#captionsOverlayEl?: HTMLDivElement;
 
 	// Whether the element is connected to a document.
-	#connected = new Signal(false);
+	#connected = false;
 	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether to connect and play: connected with every attribute valid. Written only by the effect
-	// deriving it; a Signal because the connection takes one.
+	// Whether to connect and play: on while connected with every attribute valid, unless the page turned
+	// it off. Written by `#update` and by the page through `connection.enabled`.
 	#enabled = new Signal(false);
+	// Set while the element holds the connection off, recording whether to turn it back on: false when
+	// the page had already turned it off, so neither a corrected attribute nor a move overrides the page.
+	#suspended: { resume: boolean } | undefined = { resume: true };
 	#reflecting = false;
 
 	/**
@@ -242,11 +245,6 @@ export default class MoqWatch extends HTMLElement {
 
 	constructor() {
 		super();
-
-		this.signals.run((effect) => {
-			const connected = effect.get(this.#connected);
-			this.#enabled.set(connected && effect.get(this.#invalid).size === 0);
-		});
 
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
@@ -385,7 +383,8 @@ export default class MoqWatch extends HTMLElement {
 	// This wouldn't be so bad if there was a destructor for web components to clean up our effects.
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
-		this.#connected.set(true);
+		this.#connected = true;
+		this.#update();
 		this.style.display = "block";
 		this.style.position = "relative";
 
@@ -406,7 +405,8 @@ export default class MoqWatch extends HTMLElement {
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
-		this.#connected.set(false);
+		this.#connected = false;
+		this.#update();
 	}
 
 	/** Called by the browser when an observed attribute changes. */
@@ -439,6 +439,7 @@ export default class MoqWatch extends HTMLElement {
 			}
 		} catch (error) {
 			this.#invalid.update((previous) => new Set(previous).add(name));
+			this.#update();
 			throw error;
 		}
 	}
@@ -450,6 +451,22 @@ export default class MoqWatch extends HTMLElement {
 			next.delete(name);
 			return next;
 		});
+		this.#update();
+	}
+
+	// Turns the connection off while disconnected or holding an invalid attribute, and back on once
+	// neither holds, but only if it was this that turned it off: an explicit page choice wins. Run
+	// synchronously at each change, so a refusal takes effect before its setter throws and a page's
+	// write right after a change is not overwritten later.
+	#update() {
+		const running = this.#connected && this.#invalid.peek().size === 0;
+		if (!running) {
+			this.#suspended ??= { resume: this.#enabled.peek() };
+			this.#enabled.set(false);
+		} else if (this.#suspended) {
+			if (this.#suspended.resume) this.#enabled.set(true);
+			this.#suspended = undefined;
+		}
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {

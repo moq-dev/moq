@@ -58,11 +58,15 @@ export default class MoqBoy extends HTMLElement {
 
 	readonly #signals = new Moq.Signals.Effect();
 	// Set when the element is connected to the DOM.
-	readonly #connected = new Moq.Signals.Signal(false);
+	#connected = false;
 	// The path attributes holding an invalid path, which idle the element until each is fixed.
-	readonly #refused = new Moq.Signals.Signal<ReadonlySet<Observed>>(new Set());
-	// Whether to run: connected, with nothing refused.
+	readonly #refused = new Set<Observed>();
+	// Whether to run: on while connected with nothing refused, unless the page turned it off. Written by
+	// `#update` and by the page through `connection.enabled`.
 	readonly #enabled = new Moq.Signals.Signal(false);
+	// Set while the element holds the connection off, recording whether to turn it back on: false when
+	// the page had already turned it off, so neither a corrected path nor a move overrides the page.
+	#suspended: { resume: boolean } | undefined = { resume: true };
 	readonly #prefix = new Moq.Signals.Signal<Moq.Path.Valid>(DEFAULT_PREFIX);
 	readonly #gamePrefixOverride = new Moq.Signals.Signal<Moq.Path.Valid | undefined>(undefined);
 	readonly #sessions = new Map<string, Game>();
@@ -71,10 +75,6 @@ export default class MoqBoy extends HTMLElement {
 	constructor() {
 		super();
 		cleanup.register(this, this.#signals);
-
-		this.#signals.run((effect) => {
-			this.#enabled.set(effect.get(this.#connected) && effect.get(this.#refused).size === 0);
-		});
 
 		// One origin, both directions: the viewer's endpoint is published into it and the
 		// relay's announced games and endpoints arrive in it, with no risk of echoing either back.
@@ -94,7 +94,8 @@ export default class MoqBoy extends HTMLElement {
 
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
-		this.#connected.set(true);
+		this.#connected = true;
+		this.#update();
 
 		// Render the UI into a Shadow DOM (reuse existing on reconnect).
 		const shadow = this.shadowRoot ?? this.attachShadow({ mode: "open" });
@@ -103,7 +104,8 @@ export default class MoqBoy extends HTMLElement {
 
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
-		this.#connected.set(false);
+		this.#connected = false;
+		this.#update();
 		this.#dispose?.();
 		this.#dispose = undefined;
 	}
@@ -115,9 +117,14 @@ export default class MoqBoy extends HTMLElement {
 			return;
 		}
 
-		// Refused until parsed, so an invalid path leaves the element idle and the error rethrown.
-		this.#refuse(name, true);
-		const path = newValue === null ? undefined : Moq.Path.from(newValue);
+		// An invalid path leaves the element idle until fixed, with the error rethrown.
+		let path: Moq.Path.Valid | undefined;
+		try {
+			path = newValue === null ? undefined : Moq.Path.from(newValue);
+		} catch (error) {
+			this.#refuse(name, true);
+			throw error;
+		}
 		this.#refuse(name, false);
 
 		if (name === "prefix") {
@@ -128,10 +135,22 @@ export default class MoqBoy extends HTMLElement {
 	}
 
 	#refuse(name: Observed, refused: boolean) {
-		const next = new Set(this.#refused.peek());
-		if (refused) next.add(name);
-		else next.delete(name);
-		this.#refused.set(next);
+		if (refused) this.#refused.add(name);
+		else this.#refused.delete(name);
+		this.#update();
+	}
+
+	// Turns the connection off while disconnected or holding an invalid path, and back on once neither
+	// holds, but only if it was this that turned it off: an explicit page choice wins.
+	#update() {
+		const running = this.#connected && this.#refused.size === 0;
+		if (!running) {
+			this.#suspended ??= { resume: this.#enabled.peek() };
+			this.#enabled.set(false);
+		} else if (this.#suspended) {
+			if (this.#suspended.resume) this.#enabled.set(true);
+			this.#suspended = undefined;
+		}
 	}
 
 	/** The relay URL, mirrored by the `url` attribute. */

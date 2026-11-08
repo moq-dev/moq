@@ -211,9 +211,12 @@ export default class MoqPublish extends HTMLElement {
 	#root = new Signal<Document | ShadowRoot | undefined>(undefined);
 	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether to connect and capture: connected to a document with every attribute valid. Written only
-	// by the effect deriving it; a Signal because the connection takes one.
+	// Whether to connect and capture: on while connected with every attribute valid, unless the page turned
+	// it off. Written by `#update` and by the page through `connection.enabled`.
 	#enabled = new Signal(false);
+	// Set while the element holds the connection off, recording whether to turn it back on: false when
+	// the page had already turned it off, so neither a corrected attribute nor a move overrides the page.
+	#suspended: { resume: boolean } | undefined = { resume: true };
 	#reflecting = false;
 
 	// Whether to advertise the broadcast, driven by the `announce` mode.
@@ -229,11 +232,6 @@ export default class MoqPublish extends HTMLElement {
 
 	constructor() {
 		super();
-
-		this.signals.run((effect) => {
-			const root = effect.get(this.#root);
-			this.#enabled.set(root !== undefined && effect.get(this.#invalid).size === 0);
-		});
 
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
@@ -450,11 +448,13 @@ export default class MoqPublish extends HTMLElement {
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#root.set(this.getRootNode() as Document | ShadowRoot);
+		this.#update();
 	}
 
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#root.set(undefined);
+		this.#update();
 	}
 
 	/** Called by the browser when an observed attribute changes. */
@@ -479,6 +479,7 @@ export default class MoqPublish extends HTMLElement {
 			}
 		} catch (error) {
 			this.#invalid.update((previous) => new Set(previous).add(name));
+			this.#update();
 			throw error;
 		}
 	}
@@ -490,6 +491,22 @@ export default class MoqPublish extends HTMLElement {
 			next.delete(name);
 			return next;
 		});
+		this.#update();
+	}
+
+	// Turns the connection off while disconnected or holding an invalid attribute, and back on once
+	// neither holds, but only if it was this that turned it off: an explicit page choice wins. Run
+	// synchronously at each change, so a refusal takes effect before its setter throws and a page's
+	// write right after a change is not overwritten later.
+	#update() {
+		const running = this.#root.peek() !== undefined && this.#invalid.peek().size === 0;
+		if (!running) {
+			this.#suspended ??= { resume: this.#enabled.peek() };
+			this.#enabled.set(false);
+		} else if (this.#suspended) {
+			if (this.#suspended.resume) this.#enabled.set(true);
+			this.#suspended = undefined;
+		}
 	}
 
 	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {

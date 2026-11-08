@@ -36,6 +36,9 @@ async function flush() {
 }
 
 function setup() {
+	// Each test counts only its own Local's sources and encoders.
+	sources.length = 0;
+	encoders.length = 0;
 	const bandwidth = new Signal(undefined);
 	const local = new Local({
 		connection: { origin: new Signal(undefined), allocator: bandwidth } as never,
@@ -48,8 +51,8 @@ test("screen capture stays enabled while prompting and resets after a live share
 	const { local, bandwidth, screen } = setup();
 	try {
 		await flush();
-		expect(encoders.slice(-6)).toHaveLength(6);
-		expect(encoders.slice(-6).every((props) => props.bandwidth === bandwidth)).toBe(true);
+		expect(encoders).toHaveLength(6);
+		expect(encoders.every((props) => props.bandwidth === bandwidth)).toBe(true);
 		local.screenEnabled.set(true);
 		screen.out.state.set({ kind: "prompting" });
 		await flush();
