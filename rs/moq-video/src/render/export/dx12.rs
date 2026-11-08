@@ -349,8 +349,8 @@ mod tests {
 	async fn media_foundation_encodes_the_export_in_place() {
 		let (device, queue) = dx12(false).await;
 		let size = Size::new(640, 480);
-		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
-		let (mut exporter, _) = Exporter::new(&device, &queue, &mut config).await.unwrap();
+		let config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
+		let (mut exporter, config, _) = Exporter::new(&device, &queue, &config).await.unwrap();
 		assert_eq!(exporter.route(), Route::Gpu, "Media Foundation reads textures");
 		let mut encoder = crate::encode::Encoder::new(&config).unwrap();
 		assert_eq!(encoder.name(), "mediafoundation");
