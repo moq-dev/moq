@@ -44,12 +44,13 @@ impl Stream<'_> {
 
 		// An eviction already discarded the buffer, leaving the peer and the bytes the reader
 		// took to this stop.
-		let (read_credits, stop_sending) = match stream.lease.evicted {
-			true => (0, stream.final_offset_unknown()),
-			false => {
-				let (credits, stop_sending) = stream.stop()?;
-				(credits, stop_sending)
+		let evicted = stream.reader == Reader::Evicted;
+		let (read_credits, stop_sending) = match evicted {
+			true => {
+				stream.reader = Reader::Stopped;
+				(0, stream.final_offset_unknown())
 			}
+			false => stream.stop()?,
 		};
 		let mut lease = std::mem::take(&mut stream.lease);
 		if stop_sending {
@@ -69,7 +70,7 @@ impl Stream<'_> {
 			self.state.queue_max_stream_id(self.pending);
 		}
 
-		let leased = self.state.discard_lease(self.id, &mut lease);
+		let leased = self.state.discard_lease(self.id, &mut lease, evicted);
 		let transmit = self.state.add_read_credits(read_credits);
 		self.pending.max_data |= leased || transmit;
 		// The credit returned may only have paid a shrunk window's debt.
@@ -95,11 +96,10 @@ impl Stream<'_> {
 		let Some(s) = entry.get().as_deref() else {
 			return Ok(None);
 		};
-		if s.stopped {
-			return Err(match s.lease.evicted {
-				true => Error::Evicted,
-				false => Error::Closed,
-			});
+		match s.reader {
+			Reader::Reading => {}
+			Reader::Evicted => return Err(Error::Evicted),
+			Reader::Stopped => return Err(Error::Closed),
 		}
 		let Some(code) = s.reset_code() else {
 			return Ok(None);
@@ -150,9 +150,21 @@ pub(super) struct Recv {
 	/// next one starts. Unlike `end`, a reset's final size does not raise it.
 	#[cfg(feature = "mux")]
 	pub(super) data_end: u64,
-	pub(super) stopped: bool,
+	pub(super) reader: Reader,
 	/// What a reader leased, which lives as long as the stream does.
 	pub(super) lease: Leased,
+}
+
+/// Whether the application still reads a receive stream
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Reader {
+	#[default]
+	Reading,
+	/// Discarded to free a stuck window, with the reader and the peer yet to hear of it from a
+	/// stop; it keeps no data meanwhile, but its lease keeps the credit of bytes the reader took
+	Evicted,
+	/// The application stopped the stream, which keeps no data
+	Stopped,
 }
 
 impl Recv {
@@ -164,7 +176,7 @@ impl Recv {
 			end: 0,
 			#[cfg(feature = "mux")]
 			data_end: 0,
-			stopped: false,
+			reader: Reader::Reading,
 			lease: Leased::default(),
 		})
 	}
@@ -217,17 +229,17 @@ impl Recv {
 		}
 		// Don't bother storing data or releasing stream-level flow control credit if the stream's
 		// already stopped
-		if !self.stopped && !frame.data.is_empty() {
+		if self.reader == Reader::Reading && !frame.data.is_empty() {
 			self.assembler
 				.insert(frame.offset, frame.data, payload_len)
 				.map_err(|_| TransportError::INTERNAL_ERROR("too many gaps in stream buffer"))?;
 		}
 
-		Ok((new_bytes, frame.fin && self.stopped))
+		Ok((new_bytes, frame.fin && self.reader != Reader::Reading))
 	}
 
 	pub(super) fn stop(&mut self) -> Result<(u64, bool), Error> {
-		if self.stopped {
+		if self.reader != Reader::Reading {
 			return Err(Error::Closed);
 		}
 
@@ -237,7 +249,7 @@ impl Recv {
 		// data that the peer might still be trying to retransmit, in which case a STOP_SENDING is
 		// still useful. A stream read to its end, as a lease leaves it, sends none.
 		let stop_sending = self.is_receiving() && !self.is_read();
-		self.stopped = true;
+		self.reader = Reader::Stopped;
 		self.assembler.clear();
 		Ok((read_credits, stop_sending))
 	}
@@ -305,7 +317,7 @@ impl Recv {
 	pub(super) fn can_send_flow_control(&self) -> bool {
 		// Stream-level flow control is redundant if the sender has already sent the whole stream,
 		// and moot if we no longer want data on this stream.
-		self.final_offset_unknown() && !self.stopped
+		self.final_offset_unknown() && self.reader == Reader::Reading
 	}
 
 	/// Whether data is still being accepted from the peer
@@ -438,7 +450,7 @@ impl<'a> Chunks<'a> {
 		};
 
 		let recv = get_or_insert_recv(entry.get_mut(), streams.initial_stream_receive_window);
-		if recv.stopped {
+		if recv.reader != Reader::Reading {
 			return Err(Error::Closed);
 		}
 		let recv = entry.remove().unwrap(); // initialized above

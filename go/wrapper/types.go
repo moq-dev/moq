@@ -59,8 +59,10 @@ type (
 	// A relative start is the first frame of its group, a relative end includes its whole
 	// group, and an absolute end is exclusive.
 	Range = ffi.MoqRange
-	// Anchor is where one end of a Range falls: AnchorAbsolute, AnchorRelative, or AnchorTime.
+	// Anchor is where one end of a Range falls: AnchorOldest, AnchorAbsolute, AnchorRelative, or AnchorTime.
 	Anchor = ffi.MoqAnchor
+	// AnchorOldest is the oldest group still around, as far back as the max delay allows. A start only.
+	AnchorOldest = ffi.MoqAnchorOldest
 	// AnchorAbsolute is a group, delivered from its first frame.
 	AnchorAbsolute = ffi.MoqAnchorAbsolute
 	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.

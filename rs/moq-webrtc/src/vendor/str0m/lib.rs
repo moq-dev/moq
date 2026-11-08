@@ -339,8 +339,8 @@
 //!
 //! # Crypto backends
 //!
-//! The vendored copy keeps only the aws-lc-rs backend (`str0m_aws_lc_rs`, DTLS
-//! from dimpl), which is the default. The `CryptoProvider` trait stays so another
+//! The vendored copy keeps only the rind backend (`str0m_rind`, DTLS from
+//! dimpl), which is the default. The `CryptoProvider` trait stays so another
 //! backend can be installed process-wide or per instance:
 //!
 //! ```ignore
@@ -1143,7 +1143,7 @@ impl Rtc {
 			.clone()
 			// If crypto_provider is not set in config, check process default
 			.or_else(|| CryptoProvider::get_default().cloned().map(Arc::new))
-			// Or fall back on the vendored aws-lc-rs backend
+			// Or fall back on the vendored rind backend
 			.unwrap_or_else(|| Arc::new(from_feature_flags()));
 
 		let session = Session::new(&config);

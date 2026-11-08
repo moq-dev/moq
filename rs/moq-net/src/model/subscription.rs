@@ -167,7 +167,7 @@ pub enum Order {
 }
 
 /// Where one end of a [`Range`] falls: a fixed group, a count of groups back from the
-/// latest one, or a presentation time.
+/// latest one, the oldest group, or a presentation time.
 ///
 /// Every anchor names a whole group: a subscription always starts at a group's first frame,
 /// since a group is the unit of decodability.
@@ -182,8 +182,8 @@ pub enum Order {
 /// A Rust moq-transport copy resolves a relative anchor from the Largest Object its live
 /// join reports, and accepts time anchors its cache can already resolve, translating both
 /// to group bounds upstream; any other time anchor is refused. Older moq-lite versions
-/// accept absolute anchors but refuse time anchors and relative anchors other
-/// than [`Range::live`] and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported)
+/// accept absolute and [`Anchor::Oldest`] starts but refuse time anchors and relative
+/// anchors other than [`Range::live`]'s with [`Error::Unsupported`](crate::Error::Unsupported)
 /// rather than guess from a partial copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
@@ -191,6 +191,12 @@ pub enum Anchor {
 	Absolute(u64),
 	/// The group this many before the latest, clamped to group 0: `Relative(0)` is the latest group.
 	Relative(u64),
+	/// The oldest group still around, as far back as [`Delay::max`] allows, naming no floor.
+	///
+	/// A start only: [`Range::oldest`] is the range starting here. An end here is refused
+	/// with [`Error::InvalidRange`](crate::Error::InvalidRange), since no hop can tell
+	/// which group is the oldest still around anywhere upstream.
+	Oldest,
 	/// The group containing this presentation time: the newest one starting at or before it.
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
@@ -236,7 +242,7 @@ impl Range {
 	/// starts at the live edge, filling nothing below it.
 	pub fn oldest() -> Self {
 		Self {
-			start: Anchor::Relative(u64::MAX),
+			start: Anchor::Oldest,
 			end: None,
 		}
 	}
@@ -261,16 +267,19 @@ impl Range {
 	/// the live and oldest starts it spells with no floor.
 	pub(super) fn is_wire(&self) -> bool {
 		let start = match self.start {
-			Anchor::Absolute(_) => true,
-			Anchor::Relative(back) => back == 0 || back == u64::MAX,
-			Anchor::Time(_) => false,
+			Anchor::Oldest | Anchor::Absolute(_) | Anchor::Relative(0) => true,
+			Anchor::Relative(_) | Anchor::Time(_) => false,
 		};
 		start && matches!(self.end, None | Some(Anchor::Absolute(_)))
 	}
 
 	/// Whether this range certainly delivers nothing, wherever the latest group lands.
+	///
+	/// An [`Anchor::Oldest`] end delivers nothing either: every reader holding one is
+	/// refused, so it never reaches the demand asked upstream.
 	pub(super) fn is_empty(&self) -> bool {
 		match (self.start, self.end) {
+			(_, Some(Anchor::Oldest)) => true,
 			(Anchor::Absolute(start), Some(Anchor::Absolute(end))) => end <= start,
 			_ => false,
 		}
@@ -329,6 +338,8 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 		(Anchor::Absolute(_), None | Some(Anchor::Absolute(_))) | (Anchor::Relative(_), None) => false,
 		(Anchor::Absolute(start), _) => tail.is_none_or(|tail| start < tail),
 		(Anchor::Relative(back), _) => farthest.is_none_or(|farthest| back > farthest),
+		// Nothing but the open oldest range, handled above, covers the oldest group.
+		(Anchor::Oldest, _) => true,
 		// A time can't be placed against the others without the hop's groups.
 		(Anchor::Time(_), _) => true,
 	}));
@@ -462,7 +473,9 @@ impl Subscription {
 			.map(|(index, range)| {
 				let resolved = resolved.get(index).copied().flatten().filter(|_| clamping);
 				let start = match (range.start, resolved) {
-					(Anchor::Relative(_) | Anchor::Time(_), Some(resolved)) => Anchor::Absolute(resolved.start),
+					(Anchor::Oldest | Anchor::Relative(_) | Anchor::Time(_), Some(resolved)) => {
+						Anchor::Absolute(resolved.start)
+					}
 					(start, _) => start,
 				};
 				let requested = match (range.end, resolved.and_then(|resolved| resolved.end)) {
@@ -501,7 +514,7 @@ impl Subscription {
 	pub(super) fn joins_live(&self) -> bool {
 		self.ranges
 			.iter()
-			.any(|range| matches!(range.start, Anchor::Relative(_)) && range.end.is_none())
+			.any(|range| matches!(range.start, Anchor::Oldest | Anchor::Relative(_)) && range.end.is_none())
 	}
 }
 

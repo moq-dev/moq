@@ -873,6 +873,70 @@ mod test {
 		));
 	}
 
+	/// A finish that fails is final: the track aborts, and a retry reports the failure rather than
+	/// claiming the track finished.
+	#[test]
+	fn a_failed_finish_is_final() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		// Another handle ends the track, so finishing it fails.
+		track.abort(moq_net::Error::Cancel).unwrap();
+
+		let err = producer.finish().unwrap_err().to_string();
+		assert_eq!(producer.finish().unwrap_err().to_string(), err);
+		assert_eq!(producer.push(&rec(2)).unwrap_err().to_string(), err);
+	}
+
+	/// A track another handle already ended still has its open group closed by this producer's
+	/// finish, which then refuses edits even though the end leaves room below it.
+	#[test]
+	fn finish_closes_the_group_on_a_track_already_ended() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut subscriber = track.subscribe(None).ordered();
+		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		track.finish().unwrap();
+		producer.finish().unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("expected the window group");
+		};
+		while let Poll::Ready(Ok(Some(_))) = group.poll_read_frame(&waiter) {}
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
+			"the group ends rather than waiting for a producer that finished"
+		);
+		assert!(matches!(
+			producer.push(&rec(2)),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+	}
+
+	/// Clones of an aborted producer report the abort's cause, not just a closed track.
+	#[test]
+	fn edits_after_an_abort_report_its_cause() {
+		let (mut producer, _track) = producer(ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		producer.clone().abort(moq_net::Error::Cancel).unwrap();
+
+		assert!(matches!(
+			producer.push(&rec(2)),
+			Err(crate::Error::Net(moq_net::Error::Cancel))
+		));
+		assert!(matches!(
+			producer.finish(),
+			Err(crate::Error::Net(moq_net::Error::Cancel))
+		));
+	}
+
 	#[test]
 	fn writes_after_another_clone_finishes_are_rejected() {
 		let (mut producer, _track) = producer(ProducerConfig::default());

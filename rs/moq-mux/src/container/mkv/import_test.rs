@@ -1141,10 +1141,7 @@ fn tracks_after_finish_are_refused() {
 
 	mkv.finish().unwrap();
 	let err = mkv.decode(&data).unwrap_err();
-	assert!(
-		matches!(err, crate::Error::Mkv(crate::container::mkv::Error::TracksAfterFinish)),
-		"{err:?}"
-	);
+	assert!(matches!(err, crate::Error::Finished), "{err:?}");
 	assert!(catalog.snapshot().audio.renditions.is_empty(), "no track was declared");
 }
 
