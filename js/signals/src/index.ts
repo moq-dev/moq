@@ -743,12 +743,16 @@ export class Effect {
 		}
 	}
 
-	/** Reads a signal and tracks it, rerunning the effect whenever it changes. */
+	/**
+	 * Reads a signal and tracks it, rerunning the effect whenever it changes. A {@link spawn} task
+	 * that outlived its run only reads: the next run tracks what it reads itself.
+	 */
 	get<T>(signal: Getter<T>): T {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.get called when closed, returning current value");
 			return signal.peek();
 		}
+		if (this.#stale) return signal.peek();
 
 		const value = signal.peek();
 
