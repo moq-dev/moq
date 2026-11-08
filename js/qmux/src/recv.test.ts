@@ -1,99 +1,98 @@
 import { describe, expect, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
-import { replenishWindow } from "./credit.ts";
+import { replenishWindow, Window } from "./credit.ts";
 import { RecvStream } from "./recv.ts";
 
 const tick = () => yieldNow();
 
+/** A receive half over fresh windows, recording the STOP_SENDING it asks for. */
+function recvStream(conn = 1000n, window = 1000n) {
+	const stops: unknown[] = [];
+	const windows = { conn: new Window(conn, () => {}), stream: new Window(window, () => {}) };
+	const recv = new RecvStream({ conn: windows.conn, window: windows.stream, stop: (reason) => stops.push(reason) });
+	return { recv, stops, ...windows };
+}
+
 describe("RecvStream", () => {
-	test("delivers buffered chunks in order, crediting each on delivery", async () => {
-		const consumed: number[] = [];
-		const recv = new RecvStream(
-			(b) => consumed.push(b),
-			() => {},
-		);
-		recv.push(new Uint8Array([1]));
-		recv.push(new Uint8Array([2, 2]));
-		recv.push(new Uint8Array([3, 3, 3]));
-		recv.finish();
+	test("delivers chunks in order and returns credit only on delivery", async () => {
+		const { recv, conn, stream } = recvStream(10n, 10n);
+		recv.data(0n, new Uint8Array([1]), false);
+		recv.data(1n, new Uint8Array([2, 2]), false);
+		recv.data(3n, new Uint8Array([3, 3, 3]), true);
+		await tick();
+		// A zero high-water mark keeps even one chunk from being prefetched.
+		expect(conn.max).toBe(10n);
 
 		const reader = recv.readable.getReader();
 		expect((await reader.read()).value).toEqual(new Uint8Array([1]));
 		expect((await reader.read()).value).toEqual(new Uint8Array([2, 2]));
 		expect((await reader.read()).value).toEqual(new Uint8Array([3, 3, 3]));
 		expect((await reader.read()).done).toBe(true);
-
-		// One onConsume per delivered chunk, by byte length.
-		expect(consumed).toEqual([1, 2, 3]);
+		expect(recv.state).toBe("dataRead");
+		// Half the connection window read, so it rose; the stream's last byte arrived, so its didn't.
+		expect(conn.max).toBe(16n);
+		expect(stream.max).toBe(10n);
 	});
 
-	test("does not credit undelivered data (slow-reader backpressure)", async () => {
-		let consumed = 0;
-		const recv = new RecvStream(
-			(b) => {
-				consumed += b;
-			},
-			() => {},
-		);
-		// Buffer 1000 bytes the application never reads.
-		for (let i = 0; i < 10; i++) recv.push(new Uint8Array(100));
-		await tick();
-
-		// A zero high-water mark prevents even one chunk from being prefetched into
-		// the ReadableStream before the application issues a read.
-		expect(consumed).toBe(0);
+	test("a frame past either window is a flow control error", () => {
+		expect(() => recvStream(10n, 5n).recv.data(0n, new Uint8Array(6), false)).toThrow("flow control error");
+		expect(() => recvStream(5n, 10n).recv.data(0n, new Uint8Array(6), false)).toThrow("flow control error");
 	});
 
-	test("reading resumes crediting", async () => {
-		let consumed = 0;
-		const recv = new RecvStream(
-			(b) => {
-				consumed += b;
-			},
-			() => {},
-		);
-		for (let i = 0; i < 5; i++) recv.push(new Uint8Array(10));
-		await tick();
-		const before = consumed;
+	test("a frame that doesn't continue the stream is refused", () => {
+		const { recv } = recvStream();
+		recv.data(0n, new Uint8Array(3), false);
+		expect(() => recv.data(2n, new Uint8Array(1), false)).toThrow("does not continue");
+	});
+
+	test("cancel asks for STOP_SENDING, and later bytes are charged and freed as they land", async () => {
+		const { recv, stops, conn } = recvStream(100n);
+		recv.data(0n, new Uint8Array(20), false);
+		const reason = new Error("done");
+		await recv.readable.cancel(reason);
+		expect(stops).toEqual([reason]);
+		expect(recv.sizeKnown).toBe(false);
+
+		recv.data(20n, new Uint8Array(40), false);
+		expect(conn.received).toBe(60n);
+		// All 60 discarded, so the connection window rose.
+		expect(conn.max).toBe(160n);
+		recv.data(60n, new Uint8Array(), true);
+		expect(recv.sizeKnown).toBe(true);
+	});
+
+	test("cancel after the final size is known sends no STOP_SENDING", async () => {
+		const { recv, stops } = recvStream();
+		recv.data(0n, new Uint8Array(5), true);
+		await recv.readable.cancel();
+		expect(stops).toEqual([]);
+	});
+
+	test("a reset charges its final-size gap and frees it with the bytes past the reliable prefix", async () => {
+		const { recv, conn } = recvStream(100n);
+		recv.data(0n, new Uint8Array([1, 2, 3, 4]), false);
+		recv.reset(new Error("RESET_STREAM"), 60n, 2n);
+		expect(conn.received).toBe(60n);
+		// The gap (56) and the discarded tail (2) are free; the prefix waits for the reader.
+		expect(conn.max).toBe(158n);
 
 		const reader = recv.readable.getReader();
-		await reader.read();
-		await reader.read();
-		await tick();
-
-		expect(consumed).toBeGreaterThan(before);
+		expect((await reader.read()).value).toEqual(new Uint8Array([1, 2]));
+		await expect(reader.read()).rejects.toThrow("RESET_STREAM");
+		expect(recv.state).toBe("resetRead");
 	});
 
-	test("finish with no data closes immediately", async () => {
-		const recv = new RecvStream(
-			() => {},
-			() => {},
-		);
-		recv.finish();
-		expect((await recv.readable.getReader().read()).done).toBe(true);
+	test("a reset's final size past the stream window is a flow control error", () => {
+		expect(() => recvStream(100n, 10n).recv.reset(new Error("RESET_STREAM"), 11n)).toThrow("flow control error");
 	});
 
-	test("error aborts the readable and discards buffered data", async () => {
-		const recv = new RecvStream(
-			() => {},
-			() => {},
-		);
-		recv.push(new Uint8Array(50));
-		expect(recv.error(new Error("RESET_STREAM"))).toBe(50);
-		await expect(recv.readable.getReader().read()).rejects.toThrow("RESET_STREAM");
-	});
-
-	test("cancel invokes onCancel (STOP_SENDING)", async () => {
-		let discarded = -1;
-		const recv = new RecvStream(
-			() => {},
-			(bytes) => {
-				discarded = bytes;
-			},
-		);
-		recv.push(new Uint8Array(25));
-		await recv.readable.getReader().cancel();
-		expect(discarded).toBe(25);
+	test("refuse discards the buffer, frees its credit, and errors the reader without STOP_SENDING", async () => {
+		const { recv, stops, conn } = recvStream(100n);
+		recv.data(0n, new Uint8Array(50), false);
+		recv.refuse(new Error("refused"));
+		expect(conn.max).toBe(150n);
+		expect(stops).toEqual([]);
+		await expect(recv.readable.getReader().read()).rejects.toThrow("refused");
 	});
 });
 
