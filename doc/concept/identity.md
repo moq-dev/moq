@@ -195,7 +195,11 @@ while let Some(request) = claim.requested().await {
 JavaScript mirrors this with `request.route({ hidden: true })` and
 `job.announce()`; see [`@moq/net`](/lib/js/net) and [`moq-net`](/lib/rs/moq-net).
 A hidden job route is unannounced until it announces, and dropping it before
-then refuses the request. Ending a job's route withdraws its path, and the
+then refuses the request. It takes the claim's instance when it announces, or
+earlier when its instance is first read, as a signer built from it does. Read
+first, the job announces under it or not at all: if another job under the claim
+ends in between, moving the claim to a fresh instance, `announce` fails with
+`Unroutable` and the request reaches the worker again. Ending a job's route withdraws its path, and the
 prefix route keeps answering later requests.
 
 A lazy job's lifecycle, as a viewer of `transcode/alice` sees it through a relay:

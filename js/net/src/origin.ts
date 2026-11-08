@@ -487,7 +487,7 @@ class ServeState {
  * job for the path is a new stream and nothing answers the ended one's instance again.
  */
 interface Handoff {
-	/** The instance and epoch the claim serves now, which a job binds when it first announces. */
+	/** The instance and epoch the claim serves now, which a job binds when it first announces or reads its instance. */
 	current(): { instance: Instance.Valid; epoch: bigint };
 	/** A job serving `instance` stopped being advertised; the claim moves on if it still serves it. */
 	advance(instance: Instance.Valid): void;
@@ -1459,8 +1459,9 @@ export class Producer implements Table {
 			auth: options.auth,
 		});
 
-		// A job naming no instance continues its claim's, bound when it first announces rather
-		// than now, so a job still being prepared is never invalidated by the claim moving on.
+		// A job naming no instance continues its claim's, bound when it first announces or when its
+		// instance is read, whichever comes first. One that never read it is not invalidated by the
+		// claim moving on while it is prepared; one that read it announces under it or not at all.
 		const claim = request && options.instance === undefined ? requestHandoff(request) : undefined;
 		let bound = false;
 
@@ -1511,7 +1512,14 @@ export class Producer implements Table {
 				// A request released meanwhile can never be answered, so this route never announces.
 				if (!jobPending(job)) throw unroutable();
 				if (claim) {
-					info = { ...info, ...claim.current() };
+					const current = claim.current();
+					// A job that read its instance announces under it or not at all. Its requesters ask
+					// the claim again, so the worker prepares the job under the claim's new instance.
+					if (bound && current.instance !== info.instance) {
+						requeueJob(job);
+						throw unroutable();
+					}
+					info = { ...info, ...current };
 					bound = true;
 				}
 				this.#advertiseExact(path, front, info);
@@ -1531,7 +1539,13 @@ export class Producer implements Table {
 
 		const route = makeRoute({
 			broadcast: producer,
-			instance: () => (claim && !bound ? claim.current().instance : (info.instance as Instance.Valid)),
+			instance: () => {
+				if (claim && !bound && pending) {
+					info = { ...info, ...claim.current() };
+					bound = true;
+				}
+				return info.instance as Instance.Valid;
+			},
 			announce,
 			withdraw: retract,
 			announced,
@@ -1946,6 +1960,7 @@ let setRequestPublisher: (request: Request, publisher: Producer | undefined) => 
 let jobPending: (request: Request) => boolean;
 let answerJob: (request: Request) => void;
 let rejectJob: (request: Request, err: Error) => void;
+let requeueJob: (request: Request) => void;
 let requestHandoff: (request: Request) => Handoff | undefined;
 
 /**
@@ -2796,8 +2811,10 @@ export class Route {
 	 * A prefix route that minted its instance moves to a fresh one, as a restart, the moment a
 	 * job's route carrying its instance stops being advertised. A job's route
 	 * ({@link Request.route}) naming no instance takes its prefix route's current one when it
-	 * first announces, and reports that until then; a prefix route naming its instance gives each
-	 * job a fresh one instead.
+	 * first announces or when this first reads it. Read first, the job announces under it, and
+	 * {@link announce} throws {@link StreamCode | StreamCode.Unroutable} once the prefix route has
+	 * moved past it, so a signer built from it stays valid. A prefix route naming its instance
+	 * gives each job a fresh one instead.
 	 */
 	get instance(): Instance.Valid {
 		return this.#control.instance();
@@ -2809,7 +2826,9 @@ export class Route {
 	 * Visible to local consumers before it returns. A job's route ({@link Request.route}) also
 	 * answers the requesters waiting on its path. Throws once the route or its broadcast closed,
 	 * and, announcing nothing, with {@link StreamCode | StreamCode.Unroutable} when a job's request
-	 * was released or its prefix route retracted meanwhile: that route can never announce.
+	 * was released or its prefix route retracted meanwhile, or when the job read its
+	 * {@link instance} and its prefix route has moved past it since: that route can never
+	 * announce. In that last case its requesters ask the prefix route again.
 	 */
 	announce(): void {
 		this.#control.announce();
@@ -2905,6 +2924,11 @@ export class Request {
 			request.#server.settled.update((n) => n + 1);
 		};
 		rejectJob = (request, err) => request.#server.reject(request, err);
+		requeueJob = (request) => {
+			const path = Path.join(request.#server.root, request.path);
+			request.#server.forget(path, request);
+			request.#server.enqueue(path);
+		};
 		requestHandoff = (request) => request.#server.handoff;
 		finishRequest = (request, err) => {
 			request.#done = true;
@@ -2917,7 +2941,7 @@ export class Request {
 	 * Answer with the path's own exact route, owning a new broadcast.
 	 *
 	 * Unless `options` names an instance, the route continues the prefix route's minted
-	 * instance, bound when it first announces, so readers that resolved the path through the
+	 * instance, bound when it first announces or {@link Route.instance} first reads it, so readers that resolved the path through the
 	 * prefix route keep reading the same stream. Once this route stops being advertised the
 	 * prefix route moves to a fresh instance, so a job that restarts beneath it is a new stream
 	 * for its restarted sequences, and a request naming the ended instance is refused. Under a

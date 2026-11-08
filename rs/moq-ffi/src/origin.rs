@@ -440,8 +440,15 @@ impl MoqRoute {
 	}
 
 	fn new(route: moq_net::origin::Route, broadcast: Option<Arc<MoqBroadcastProducer>>, driver: Background) -> Self {
+		// Reading a hidden job's instance binds it, so one is cached only once it announces or
+		// is read.
+		let instance = if route.is_announced() || broadcast.is_none() {
+			route.instance().to_string()
+		} else {
+			String::new()
+		};
 		Self {
-			instance: std::sync::Mutex::new(route.instance().to_string()),
+			instance: std::sync::Mutex::new(instance),
 			reads: Polled::new(route).supervised(driver.clone()),
 			broadcast,
 			driver,
@@ -469,11 +476,14 @@ impl MoqRoute {
 		})
 	}
 
-	/// The stream this route serves now, or the last one once cancelled.
+	/// The stream this route serves now, or once cancelled, the last one it reported or
+	/// announced under (empty for a hidden route that did neither).
 	///
 	/// Named options keep one instance. Unnamed, a prefix route moves to a fresh one each
-	/// time a job holding its current one ends, and a job's route reports its prefix route's
-	/// current one until it first announces, binding whichever that is then.
+	/// time a job holding its current one ends. A job's route takes its prefix route's current
+	/// one when it first announces or when this first reads it. Read first, the job announces
+	/// under it, and [`MoqRoute::announce`] fails with `Unroutable` once the prefix route has
+	/// moved past it, so a signer built from it stays valid.
 	///
 	/// Named `instance_id` rather than `instance` because the generated C and C++
 	/// objects keep their handle in a private field named `instance`; the wrappers
@@ -493,7 +503,12 @@ impl MoqRoute {
 	/// `Unroutable` when a request's route can never announce because the request was
 	/// released or its prefix route retracted meanwhile.
 	pub fn announce(&self) -> Result<(), MoqError> {
-		self.with(|route| route.announce())
+		let instance = self.with(|route| {
+			route.announce()?;
+			Ok(route.instance().to_string())
+		})?;
+		*self.instance.lock().unwrap() = instance;
+		Ok(())
 	}
 
 	/// Hide the route from everyone, keeping its broadcast and instance: `announce` brings the
@@ -562,7 +577,7 @@ impl MoqBroadcastRequest {
 	/// Answer with the path's own exact route, owning a new broadcast.
 	///
 	/// Unless `options` names an instance, the route takes the one its prefix route lends
-	/// when it first announces, so readers that resolved the path through the prefix route
+	/// when it first announces or [`MoqRoute::instance_id`] first reads it, so readers that resolved the path through the prefix route
 	/// continue on it; its end then moves the prefix route to a fresh instance, so a job that
 	/// restarts is a new stream. A prefix route that names its instance lends none, and the
 	/// route mints its own. Created visible, it announces now and answers the waiting

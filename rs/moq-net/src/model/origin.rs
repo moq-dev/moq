@@ -2943,6 +2943,10 @@ struct RouteControl {
 	/// moves on as its jobs end (see [`OriginState::advance`]), or a job's route taking one
 	/// from it. An update then names none, leaving the entry's as it is.
 	held: bool,
+	/// Whether a job's route read its instance before it first announced: it then announces
+	/// under that one or not at all, so whatever was built from it, such as a signer, stays
+	/// valid.
+	bound: bool,
 	/// The request a job's route answers when it first announces.
 	request: Option<Request>,
 }
@@ -2957,6 +2961,7 @@ impl RouteControl {
 			options,
 			instance,
 			held,
+			bound: false,
 			request,
 		}
 	}
@@ -3008,17 +3013,20 @@ impl Route {
 	/// The stream this route serves, minted when it was created unless
 	/// [`RouteOptions::with_instance`] named one.
 	///
-	/// Unnamed, it can change: a prefix route ([`Producer::route_prefix`]) moves to a fresh
-	/// instance each time an answer holding its current one ends, and a job's route
-	/// ([`Request::route`]) reports its prefix route's current one until it first announces,
-	/// binding whichever that is then.
+	/// Unnamed, a prefix route's ([`Producer::route_prefix`]) can change: it moves to a fresh
+	/// instance each time an answer holding its current one ends. A job's route
+	/// ([`Request::route`]) takes its prefix route's current one when it first announces,
+	/// or when this reads it first. Read before announcing, it is the one the job announces
+	/// under, and [`Self::announce`] fails with [`Error::Unroutable`] once the prefix route
+	/// has moved past it.
 	pub fn instance(&self) -> Instance {
 		let mut control = self.state.control.lock();
-		let lender = control.request.as_ref().map(|request| &request.home);
-		if control.held
-			&& let Some(current) = self.state.announcement.instance(lender)
-		{
-			control.instance = current;
+		if control.held && !control.bound {
+			let lender = control.request.as_ref().map(|request| &request.home);
+			if let Some(current) = self.state.announcement.instance(lender) {
+				control.instance = current;
+			}
+			control.bound = control.request.is_some();
 		}
 		control.instance.0.clone()
 	}
@@ -3030,14 +3038,16 @@ impl Route {
 	///
 	/// Fails with [`Error::Closed`] once the route's broadcast closed or the origin's
 	/// [`Driver`] was dropped, and with [`Error::Unroutable`], announcing nothing, when a
-	/// job's request was released or its prefix route retracted meanwhile: that route can
-	/// never announce.
+	/// job's request was released or its prefix route retracted meanwhile, or when the job
+	/// read its [`instance`](Self::instance) and its prefix route has moved past it since:
+	/// that route can never announce. Its requesters ask the prefix route again.
 	pub fn announce(&self) -> Result<(), Error> {
 		let mut control = self.state.control.lock();
 		let info = control.info();
 		let Some(request) = control.request.take() else {
 			return self.state.announcement.update_if(info, None, |_| true).map(|_| ());
 		};
+		let bound = std::mem::take(&mut control.bound).then(|| control.instance.0.clone());
 		let answer = self.broadcast().consume();
 		let mut resolved = None;
 		// Answered under the table lock that every release takes first, so the route
@@ -3056,6 +3066,15 @@ impl Route {
 					.is_some_and(|server| server.same_channel(&request.home))
 			});
 			if !home {
+				return false;
+			}
+			// A job that read its instance announces under it or not at all. A prefix route
+			// that lends nothing never moves, and one no longer serving released the request.
+			if let Some(bound) = &bound
+				&& table
+					.lender(&request.path, &request.home)
+					.is_some_and(|lent| lent.instance != *bound)
+			{
 				return false;
 			}
 			// The exact route owns this answer's availability. Caching it under the
@@ -4859,6 +4878,13 @@ impl kio::Task for FrontServe {
 								standing: false,
 							}),
 						},
+						// A refusal for an instance the route has since moved off, such as a
+						// job's announce refused because it read its claim's old instance, is
+						// not the answer for the new one: ask again.
+						Err(err) if self.stale(route, &asked) => Event::Resolved {
+							route,
+							result: Err(Refusal { err, standing: false }),
+						},
 						Ok(source) => {
 							let id = self.next_source;
 							self.next_source += 1;
@@ -6485,7 +6511,7 @@ impl Request {
 	/// Answer with the path's own exact route, owning a new broadcast.
 	///
 	/// Unless `options` names an instance, the route takes the one its prefix route lends
-	/// when it first announces, so whatever resolved the path through the prefix route
+	/// when it first announces or [`Route::instance`] first reads it, so whatever resolved the path through the prefix route
 	/// continues on this answer; a prefix route that lends nothing has the route mint its
 	/// own. Ending the route withdraws only this path, and moves a prefix route that lent
 	/// its instance to a fresh one, so a job that ends and restarts beneath the same prefix
@@ -12236,7 +12262,8 @@ mod tests {
 	}
 
 	/// A job's route takes the instance its claim lends when it announces, not when it was
-	/// created: a hidden job outlives a sibling's end and joins the claim's next stream.
+	/// created: a hidden job that never read its instance outlives a sibling's end and joins
+	/// the claim's next stream.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_hidden_job_takes_the_claims_instance_when_it_announces() {
@@ -12251,16 +12278,43 @@ mod tests {
 		bob.await.unwrap();
 		let first = claim.instance();
 		assert_eq!(sibling.instance(), first);
-		assert_eq!(prepared.instance(), first);
 
 		drop(sibling);
 		let second = claim.instance();
 		assert_ne!(second, first);
-		// Unannounced, it reports the instance it would bind now.
-		assert_eq!(prepared.instance(), second);
 
 		prepared.announce().unwrap();
 		assert_eq!(prepared.instance(), second);
+		assert_eq!(alice.await.unwrap().info().instance, Some(second));
+	}
+
+	/// A hidden job that read its instance, as a signer does, announces under it or not at
+	/// all: once a sibling's end moves the claim past it, the announce is refused and its
+	/// requesters ask the claim again, so the worker prepares the job under the new instance.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_job_that_read_its_instance_is_refused_once_the_claim_moves() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+
+		let alice = consumer.request("room/alice", None);
+		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
+		let bob = consumer.request("room/bob", None);
+		let sibling = queued(&claim).await.route(RouteOptions::default()).unwrap();
+		bob.await.unwrap();
+		let first = prepared.instance();
+		assert_eq!(first, claim.instance());
+
+		drop(sibling);
+		let second = claim.instance();
+		assert_ne!(second, first);
+		assert_eq!(prepared.instance(), first, "a read instance moved");
+		assert!(matches!(prepared.announce(), Err(Error::Unroutable)));
+
+		let again = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
+		assert_eq!(again.instance(), second);
+		again.announce().unwrap();
 		assert_eq!(alice.await.unwrap().info().instance, Some(second));
 	}
 

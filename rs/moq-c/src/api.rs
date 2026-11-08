@@ -2124,8 +2124,10 @@ pub extern "C" fn moq_route_broadcast(route: u32) -> i32 {
 /// The stream a route serves now.
 ///
 /// Named options keep one instance. Unnamed, a prefix route moves to a fresh one each time a
-/// job holding its current one ends, and a route from [moq_broadcast_request_route] reports
-/// its prefix route's current one until it first announces, binding whichever that is then.
+/// job holding its current one ends. A route from [moq_broadcast_request_route] takes its
+/// prefix route's current one when it first announces or when this first reads it. Read first,
+/// the job announces under it, and [moq_route_announce] fails with an unroutable error once the
+/// prefix route has moved past it, so a signer built from it stays valid.
 /// Withdrawing and announcing again keep it. The destination borrows the route's storage
 /// until the next [moq_route_instance] on the route or [moq_route_free].
 ///
@@ -2249,7 +2251,7 @@ pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i
 ///
 /// Consumes the request handle and returns a positive route handle, or a negative error.
 /// Unless `options` names an instance, the route takes the one its prefix route lends when
-/// it first announces, so readers that resolved the path through the prefix route continue
+/// it first announces or [moq_route_instance] first reads it, so readers that resolved the path through the prefix route continue
 /// on it; its end then moves the prefix route to a fresh instance, so a job that restarts is
 /// a new stream. A prefix route that names its instance lends none, and the route mints its
 /// own. Created visible, it announces now and answers the waiting requesters;

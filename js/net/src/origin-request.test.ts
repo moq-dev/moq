@@ -1011,9 +1011,41 @@ test("a restarted job gets a fresh instance and its old one is refused", async (
 	origin.close();
 });
 
-// A job binds its claim's instance when it announces, so one still hidden when an unrelated job
-// ends keeps its request and answers it under the claim's new instance.
+// A job that never read its instance binds its claim's when it announces, so one still hidden
+// when an unrelated job ends keeps its request and answers it under the claim's new instance.
 test("a hidden job announces under the instance its claim moved to", async () => {
+	const origin = new Producer();
+	const claim = origin.routePrefix(Path.from("room"));
+	const minted = claim.instance;
+	const requests = claim.requested();
+	const alice = origin.request(Path.from("room/alice"));
+	const first = (await requests.next()).value;
+	if (!first) throw new Error("expected a request");
+	const ended = first.route();
+	const bob = origin.request(Path.from("room/bob"));
+	const second = (await requests.next()).value;
+	if (!second) throw new Error("expected a request");
+	const hidden = second.route({ hidden: true });
+
+	ended.close();
+	await settle();
+	const moved = claim.instance;
+	expect(moved).not.toBe(minted);
+	expect(bob.closed.peek()).toBeUndefined();
+	hidden.announce();
+	await settle();
+	expect(hidden.instance).toBe(moved);
+	expect(bob.active.peek()?.instance).toBe(moved);
+	for (const request of [alice, bob]) request.close();
+	hidden.close();
+	claim.close();
+	origin.close();
+});
+
+// A hidden job that read its instance, as a signer does, announces under it or not at all: once an
+// unrelated job's end moves the claim past it, the announce is refused and its request is asked
+// again, so the worker prepares the job under the claim's new instance.
+test("a job that read its instance is refused once its claim moves", async () => {
 	const origin = new Producer();
 	const claim = origin.routePrefix(Path.from("room"));
 	const minted = claim.instance;
@@ -1032,14 +1064,21 @@ test("a hidden job announces under the instance its claim moved to", async () =>
 	await settle();
 	const moved = claim.instance;
 	expect(moved).not.toBe(minted);
-	expect(hidden.instance).toBe(moved);
-	expect(bob.closed.peek()).toBeUndefined();
-	hidden.announce();
+	expect(hidden.instance).toBe(minted);
+	expect(() => hidden.announce()).toThrow(expect.objectContaining({ code: StreamCode.Unroutable }));
 	await settle();
-	expect(hidden.instance).toBe(moved);
+	expect(bob.closed.peek()).toBeUndefined();
+
+	const third = (await requests.next()).value;
+	if (!third) throw new Error("expected the request again");
+	expect(third.path).toBe(Path.from("room/bob"));
+	const again = third.route({ hidden: true });
+	expect(again.instance).toBe(moved);
+	again.announce();
+	await settle();
 	expect(bob.active.peek()?.instance).toBe(moved);
 	for (const request of [alice, bob]) request.close();
-	hidden.close();
+	again.close();
 	claim.close();
 	origin.close();
 });

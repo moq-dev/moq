@@ -120,7 +120,7 @@ class BroadcastRequest:
         """Answer with the path's own exact :class:`Route`, owning a new broadcast.
 
         Unless ``instance`` names one, the route takes the instance its prefix route lends
-        when it first announces, so readers that resolved the path through the prefix route
+        when it first announces or :attr:`Route.instance` first reads it, so readers that resolved the path through the prefix route
         continue on it; its end then moves the prefix route to a fresh instance, so a job that
         restarts is a new stream. A prefix route that names its instance lends none, and the
         route mints its own. Created visible, it announces now and answers the waiting
@@ -169,8 +169,10 @@ class Route(_Stream[BroadcastRequest]):
         """The stream this route serves now.
 
         A named instance never changes. Unnamed, a prefix route moves to a fresh one each time
-        a job holding its current one ends, and a job's route reports its prefix route's
-        current one until it first announces. Withdrawing and announcing keep it."""
+        a job holding its current one ends. A job's route takes its prefix route's current one
+        when it first announces or when this first reads it. Read first, the job announces
+        under it, and :meth:`announce` fails with ``Unroutable`` once the prefix route has moved
+        past it, so a signer built from it stays valid. Withdrawing and announcing keep it."""
         return self._inner.instance_id()
 
     def announce(self) -> None:

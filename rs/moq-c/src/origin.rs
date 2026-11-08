@@ -409,8 +409,9 @@ impl Origin {
 		driver: crate::ffi::Background,
 		broadcast: Id,
 	) -> Result<Id, Error> {
+		// Read only on request: reading a hidden job's instance binds it.
 		self.routes.insert(RouteEntry {
-			instance: route.instance().to_string(),
+			instance: String::new(),
 			inner: route,
 			driver,
 			kind: RouteKind::Exact { broadcast },
