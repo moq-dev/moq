@@ -1704,6 +1704,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
 			const sub = await servedSubscription({ version, startGroup: 2n });
 			try {
+				hooks.receiveTrack(sub.track);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
@@ -1727,6 +1728,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`lite ${version}: START waits for the upstream START before resolving`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 2n });
 		try {
+			hooks.receiveTrack(sub.track);
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
@@ -1744,6 +1746,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`lite ${version}: a closed source releases the START it was waiting for`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 2n });
 		try {
+			hooks.receiveTrack(sub.track);
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
@@ -1766,6 +1769,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			maxAge: skipped === "stale" ? Milli(0) : undefined,
 		});
 		try {
+			hooks.receiveTrack(sub.track);
 			hooks.startTrack(sub.track, { start: 5n, requested: 5n });
 			const group = sub.track.createGroup(5n);
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
