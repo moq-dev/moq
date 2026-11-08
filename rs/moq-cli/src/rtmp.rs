@@ -113,7 +113,7 @@ pub async fn listen_export(
 	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
-	max_delay: Duration,
+	delay: Duration,
 ) -> anyhow::Result<()> {
 	let name = moq_net::Path::new(&name)?;
 	let mut server = Server::bind(addr).await?;
@@ -126,7 +126,7 @@ pub async fn listen_export(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = play.with_max_delay(max_delay).accept(&origin, &name).await {
+					if let Err(err) = play.with_delay(delay).accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "RTMP play ended with error");
 					}
 				});
@@ -166,7 +166,7 @@ pub async fn connect_export(
 	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
-	max_delay: Duration,
+	delay: Duration,
 ) -> anyhow::Result<()> {
 	let name = moq_net::Path::new(&name)?;
 	let (addr, app, key) = parse_url(&url).await?;
@@ -184,7 +184,7 @@ pub async fn connect_export(
 	tracing::info!(%addr, %app, %name, "RTMP client pushing");
 	notify_ready();
 
-	let client = Client::connect(addr, &app).await?.with_max_delay(max_delay);
+	let client = Client::connect(addr, &app).await?.with_delay(delay);
 	Ok(client.publish(&key, source).await?)
 }
 
