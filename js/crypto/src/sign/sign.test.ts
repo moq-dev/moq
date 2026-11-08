@@ -1,6 +1,6 @@
 // Signed tracks over a real moq-lite session: the subscriber delivers only what verifies.
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { type Broadcast, Connection, Error as NetError, Origin, Path, Time } from "@moq/net";
 // The in-memory WebTransport pair @moq/net tests with; not part of its published surface.
 import { createMockTransportPair } from "../../../net/src/mock.ts";
@@ -14,7 +14,7 @@ import * as Track from "./track.ts";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const url = new URL("https://localhost:4443/test");
-const subscription = { delay: { max: Milli(60_000) } };
+const subscription = { delay: { max: Duration.millis(60_000) } };
 
 async function session() {
 	const pair = createMockTransportPair("moq-lite-07-wip");

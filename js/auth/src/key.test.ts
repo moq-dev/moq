@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Wall, wall } from "@moq/clock";
+import { Duration, Manual, Wall, wall } from "@moq/clock";
 import { base64url, exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims } from "./claims.ts";
@@ -25,8 +25,8 @@ const testClaims = {
 	root: "test-path",
 	publish: ["test-pub/**"],
 	subscribe: ["test-sub/**"],
-	exp: Math.floor((wall() + 60 * 1000) / 1000), // 1 minute from now in seconds
-	iat: Math.floor(wall() / 1000), // now in seconds
+	exp: Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs() + 60), // 1 minute from now in seconds
+	iat: Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs()), // now in seconds
 };
 
 type AsymmetricAlgorithm = Exclude<Algorithm, "HS256" | "HS384" | "HS512">;
@@ -56,7 +56,7 @@ async function generateAsymmetricKeyPair(
 
 test("verify refuses unsafe signed payloads without dropping their restrictions", async () => {
 	const clock = new Manual();
-	clock.stepWall(Wall(1_000_000));
+	clock.stepWall(Wall.UNIX_EPOCH.add(Duration.millis(1_000_000)));
 	const installed = clock.install();
 	try {
 		const key = Key.parse(encodeJwk(testKey));
@@ -283,7 +283,7 @@ test("verify - invalid token format", async () => {
 test("verify - expired token", async () => {
 	const expiredClaims = {
 		...testClaims,
-		exp: Math.floor((wall() - 60 * 1000) / 1000), // 1 minute ago in seconds
+		exp: Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs() - 60), // 1 minute ago in seconds
 	};
 
 	const key = Key.parse(encodeJwk(testKey));
@@ -332,8 +332,8 @@ test("round-trip - sign and verify", async () => {
 		root: "test-path",
 		publish: ["test-pub/**"],
 		subscribe: ["test-sub/**"],
-		exp: Math.floor((wall() + 60 * 1000) / 1000),
-		iat: Math.floor(wall() / 1000),
+		exp: Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs() + 60),
+		iat: Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs()),
 	};
 
 	const token = await Key.sign(key, originalClaims);
@@ -876,7 +876,7 @@ async function signRaw(payload: Record<string, unknown>): Promise<string> {
 // might narrow the grant, and a misspelled `root` would widen it to everything.
 test("verify - only registered claims", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const now = Math.floor(wall() / 1000);
+	const now = Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs());
 
 	const token = await signRaw({ root: "room", publish: ["**"], iss: "api", sub: "alice", jti: "1", iat: now });
 	const claims = await Key.verify(key, token);
@@ -895,7 +895,7 @@ test("verify - only registered claims", async () => {
 
 test("verify - enforces not before", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const now = Math.floor(wall() / 1000);
+	const now = Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs());
 	expect((await Key.verify(key, await signRaw({ publish: ["**"], nbf: now - 60 }))).nbf).toBe(now - 60);
 	await expect(Key.verify(key, await signRaw({ publish: ["**"], nbf: now + 3600 }))).rejects.toThrow();
 });

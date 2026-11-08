@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { wall } from "@moq/clock";
+import { Wall, wall } from "@moq/clock";
 
 const CLI = join(import.meta.dir, `cli${extname(fileURLToPath(import.meta.url))}`);
 
@@ -81,9 +81,9 @@ describe("sign", () => {
 
 	/** The `exp` `args` write, with the wall seconds bracketing the subprocess that wrote it. */
 	function bracketed(...args: string[]) {
-		const before = Math.floor(wall() / 1000);
+		const before = Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs());
 		const value = exp(...args) ?? 0;
-		const after = Math.floor(wall() / 1000);
+		const after = Math.floor(wall().since(Wall.UNIX_EPOCH).asSecs());
 		return { before, value, after };
 	}
 

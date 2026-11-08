@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
@@ -212,7 +212,7 @@ test("compressed round-trip across rolls", async () => {
 
 // The frame count and first-frame timestamp of each group in a finished track.
 async function groups(track: Track.Producer): Promise<[number, number | undefined][]> {
-	const ordered = track.subscribe({ delay: { max: Milli(30_000) } }).ordered();
+	const ordered = track.subscribe({ delay: { max: Duration.millis(30_000) } }).ordered();
 	const out: [number, number | undefined][] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const first = await group.readFrame();
