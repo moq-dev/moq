@@ -420,14 +420,15 @@ fn length_prefix(out: &mut BytesMut, nal: &[u8]) -> Result<()> {
 }
 
 /// Reconcile the retained parameter sets with what a keyframe access unit carried
-/// inline, called when the keyframe slice is reached. `retained` and `seen` hold
+/// inline, called when the keyframe slice is reached or, to see every inline set, when
+/// the access unit closes. `retained` and `seen` hold
 /// each parameter-set type in dependency order (VPS, SPS, PPS).
 ///
 /// - Each type and layer the AU presented sets for adopts them as its retained
 ///   sets, dropping any the new GOP no longer uses (a mid-stream reinit).
 /// - When any retained type or layer is missing from the AU, its parameter sets are
 ///   rewritten as every retained set in dependency order, at the first inline one or
-///   before the slice, so a receiver tuning in at this keyframe still gets them all
+///   before the first slice, so a receiver tuning in at this keyframe still gets them all
 ///   and each after those it references.
 ///
 /// `seen` is this AU's inline NALs (already appended to `chunks`); `retained` is
@@ -458,10 +459,11 @@ pub(crate) fn reconcile_keyframe_params(
 		if nal.is_empty() {
 			continue;
 		}
-		if types.iter().any(|&(ty, _)| ty == codec.nal_type(&nal)) {
-			if !std::mem::replace(&mut injected, true) {
-				chunks.extend_from_slice(&block);
-			}
+		let set = types.iter().any(|&(ty, _)| ty == codec.nal_type(&nal));
+		if (set || codec.is_vcl(&nal)) && !std::mem::replace(&mut injected, true) {
+			chunks.extend_from_slice(&block);
+		}
+		if set {
 			continue;
 		}
 		chunks.extend_from_slice(&START_CODE);

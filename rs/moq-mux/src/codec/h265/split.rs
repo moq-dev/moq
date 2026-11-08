@@ -201,19 +201,6 @@ impl Split {
 				if nal.get(2).ok_or(Error::NalTooShort)? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
 				}
-				// Adopt this keyframe's inline set (dropping any the new GOP no longer
-				// uses), or re-inject the retained set if the keyframe carried none.
-				crate::codec::annexb::reconcile_keyframe_params(
-					InBandCodec::H265,
-					&mut self.current.chunks,
-					&mut [&mut self.vps, &mut self.sps, &mut self.pps],
-					&mut [
-						&mut self.current.vps_seen,
-						&mut self.current.sps_seen,
-						&mut self.current.pps_seen,
-					],
-				)?;
-
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
@@ -248,8 +235,23 @@ impl Split {
 			return Ok(());
 		}
 
-		let payload = std::mem::take(&mut self.current.chunks).freeze();
 		let keyframe = self.current.contains_idr;
+		if keyframe {
+			// Adopt this keyframe's inline sets (dropping any the new GOP no longer uses), or
+			// re-inject the retained ones it lacks. Run on the whole access unit, since a
+			// layered one may carry an enhancement layer's sets after the base slice.
+			crate::codec::annexb::reconcile_keyframe_params(
+				InBandCodec::H265,
+				&mut self.current.chunks,
+				&mut [&mut self.vps, &mut self.sps, &mut self.pps],
+				&mut [
+					&mut self.current.vps_seen,
+					&mut self.current.sps_seen,
+					&mut self.current.pps_seen,
+				],
+			)?;
+		}
+		let payload = std::mem::take(&mut self.current.chunks).freeze();
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
 		self.current.vps_seen.clear();
@@ -691,5 +693,25 @@ mod tests {
 		assert_eq!(frames[0].payload.as_ref(), annexb(&key).freeze().as_ref());
 		assert!(!frames[1].keyframe);
 		assert_eq!(frames[1].payload.as_ref(), annexb(&delta).freeze().as_ref());
+	}
+
+	/// A layered keyframe may carry the enhancement layer's parameter sets between the base and
+	/// enhancement slices; they are retained like those before the base slice, so a later bare
+	/// keyframe re-injects them.
+	#[tokio::test(start_paused = true)]
+	async fn retains_enhancement_sets_after_the_base_slice() {
+		use crate::codec::h265::fixtures::{MV_PPS_LAYER1, MV_SPS_LAYER1};
+
+		const IDR_LAYER1: &[u8] = &[0x26, 0x09, 0x80, 0xbb];
+
+		let mut split = Split::new();
+		let key = [VPS, SPS, PPS, IDR, MV_SPS_LAYER1, MV_PPS_LAYER1, IDR_LAYER1];
+		let first = decode_one(&mut split, &mut annexb(&key), ts());
+		assert_eq!(first[0].payload.as_ref(), annexb(&key).freeze().as_ref());
+
+		let bare = decode_one(&mut split, &mut annexb(&[IDR, IDR_LAYER1]), ts());
+		assert!(bare[0].keyframe);
+		let full = [VPS, SPS, MV_SPS_LAYER1, PPS, MV_PPS_LAYER1, IDR, IDR_LAYER1];
+		assert_eq!(bare[0].payload.as_ref(), annexb(&full).freeze().as_ref());
 	}
 }
