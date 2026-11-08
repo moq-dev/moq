@@ -453,10 +453,14 @@ impl Follower {
 			Target::Enabled(rate) => {
 				self.control.target = rate.min(self.control.policy.max);
 				self.control.enabled = true;
+				// The sender is at this rate now, so a raise ramps from here.
+				self.control.applied = Some(kio::clock::now());
 			}
-			Target::Disabled => self.control.enabled = false,
+			Target::Disabled => {
+				self.control.enabled = false;
+				self.control.applied = None;
+			}
 		}
-		self.control.applied = None;
 		self.control.deadline = None;
 		self.control.last = None;
 		self.refeed = true;
@@ -961,7 +965,7 @@ mod tests {
 	}
 
 	/// A follower that assumes its sender's state corrects it against an unchanged grant: a
-	/// sender below a full grant climbs back, and a disabled one resumes.
+	/// sender below a full grant ramps back up, and a disabled one resumes.
 	#[tokio::test(start_paused = true)]
 	async fn an_assumed_target_climbs_to_the_grant() {
 		let grant = bandwidth::Producer::new();
@@ -969,11 +973,12 @@ mod tests {
 
 		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
 		follower.assume(on(bps(1_000_000)));
-		let mut last = None;
+		let mut applied = Vec::new();
 		while let Ok(target) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
-			last = Some(target.unwrap());
+			applied.push(target.unwrap());
 		}
-		assert_eq!(last, Some(on(bps(4_000_000))));
+		assert_eq!(applied.last(), Some(&on(bps(4_000_000))));
+		assert!(applied.len() > 1, "the climb ramps rather than jumping: {applied:?}");
 
 		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
 		follower.assume(Target::Disabled);
