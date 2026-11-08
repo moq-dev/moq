@@ -476,7 +476,7 @@ export interface StagedTrack {
 
 /**
  * How a received copy's start bounds the fills its readers ask below it. Mirrors the Rust
- * `TrackState::start_resolved` and `fills_from_start`.
+ * `Start::Resolved` and `Producer::fills_from_start`.
  *
  * Below a start the publisher resolved from the budget (`resolvesStart`), a reader fills the
  * history its own budget reaches: an update can cross the response, so nobody knows which
@@ -560,8 +560,9 @@ export const hooks: {
 	 */
 	supersedeStale: (producer: Producer, judged: readonly Run[] | undefined) => Run[];
 	/**
-	 * Mark a track as fed by a wire subscription, which owes missing groups. `starts` says how
-	 * that wire's start bounds the fills its readers ask below it. Assigned by `track.ts`.
+	 * Mark a track as fed by a wire subscription, which owes missing groups, until
+	 * {@link cacheTrack} ends it. `starts` says how that wire's start bounds the fills its readers
+	 * ask below it. Assigned by `track.ts`.
 	 */
 	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
@@ -588,7 +589,8 @@ export const hooks: {
 	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
 	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
-	 * waits on its START, as the Rust `request_start`.
+	 * waits on its START, as the Rust `request_start`. Only after {@link receiveTrack}: the start
+	 * is that subscription's, and ends with it.
 	 */
 	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint }) => void;
 	/**
@@ -826,7 +828,12 @@ export const hooks: {
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
-	/** Carry a handed-out group across its logical track's route changes. */
+	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
+	groupFailed: (group: GroupConsumer) => Error | undefined;
+	/**
+	 * Carry a group across its logical track's route changes. Attached before the group is handed
+	 * out, so its `closed` never settles on a failure the recovery continues past.
+	 */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
@@ -1160,6 +1167,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupFailed: () => {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
