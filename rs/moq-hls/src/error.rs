@@ -107,6 +107,15 @@ pub enum Error {
 		status: u16,
 	},
 
+	/// A playlist or init segment, which import must hold whole, was larger than it holds.
+	#[error("{url} is larger than the {limit} bytes import holds")]
+	ResourceTooLarge {
+		/// The resource, without its credentials.
+		url: url::Url,
+		/// The most bytes import holds for this kind of resource.
+		limit: usize,
+	},
+
 	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
 	#[error("HLS {kind} sequence {value} is too large to encode")]
 	SequenceOverflow {

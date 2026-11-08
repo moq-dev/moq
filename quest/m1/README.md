@@ -49,7 +49,6 @@ moves what remains of them once their claims merge.
 - [A macOS camera delivers frames the renderer imports](/quest/m1/camera-nv12-macos.md) - AVFoundation capture asks for NV12, so a camera whose native format is `2vuy` reaches the renderer
 - [js/qmux drains a stream in linear time](/quest/m1/qmux-recv-queue.md) - a peer's one-byte STREAM frames no longer make reading quadratic and stall the browser
 - [js/qmux's WebSocket ponyfill ends its writable on close](/quest/m1/qmux-ws-close.md) - writes after close reject, and a reused AbortSignal stops holding closed sockets
-- [HLS import holds a bounded amount of each response](/quest/m1/hls-import-bounds.md) - media segments stream into the importer and playlists and init segments are refused past a bound
 - [@moq/json accepts only what it can reconstruct](/quest/m1/json-decode-limits.md) - nesting past 128 levels and out-of-range numbers are refused at parse like Rust, and schema output shares no decoder state
 - [@moq/signals delivers every change exactly as documented](/quest/m1/signals-correctness.md) - the React adapter, silent writes, cyclic equality, and `watch` dispose
 - [@moq/publish file sources and Fanout end cleanly](/quest/m1/publish-stream-end.md) - empty file tracks end, samples never leak on failure or cancel, and readers drain their tail at EOF
