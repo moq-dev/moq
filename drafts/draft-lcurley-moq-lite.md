@@ -139,6 +139,7 @@ A continuous stream is named by an Instance, carried on its claims (see [ANNOUNC
 Within one Instance, group sequences never restart and never name two different groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
 A publisher that starts its group sequences over, such as a restarted process, uses a new Instance, while replicas of the same content share one.
 A publisher MAY keep an Instance across restarts only if it continues the sequence space and announces a higher Epoch each time.
+A restarted publisher MUST start each Track past every Group Sequence it published under the Instance before, or else use a new Instance; a receiver does not detect a restart whose sequences go backwards, so its groups are dropped as already delivered or spliced into groups a subscriber already holds.
 The Epoch is a counter within one Instance that picks its live incarnation while a stale claim lingers; it is never compared across Instances.
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a claim covering every broadcast path beneath it.
@@ -2223,6 +2224,7 @@ The `Message Length` describes the payload size on the wire.
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining claims that end before delivery.
 - Added `Instance` and `Epoch` to ANNOUNCE_START and ANNOUNCE_RESTART, and `Instance` to TRACK, TRACKS, SUBSCRIBE, and FETCH. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): a live advertisement now serves another Instance, or a higher Epoch of the same one.
+- A publisher that keeps an Instance across a restart starts each Track past every Group Sequence it published before; nothing detects one that goes backwards.
 - Added ANNOUNCE_TAKEOVER (0x5): a claim that continues what a live claim served beneath it, such as a job answering a request through a worker's prefix at its exact path, so subscriptions resolved through the prefix are not reset.
 - A receiver mints an Instance, starting with `~`, for each announcement a session of an earlier version delivers.
 - Added announce compression: ANNOUNCE_START and ANNOUNCE_TAKEOVER gain `Path Base` and `Path Keep` to copy the head of a live claim's suffix.

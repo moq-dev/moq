@@ -185,7 +185,6 @@ quests that require them.
 - [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
 - [Publish reports rendition stats as hang's type](/quest/m2/rendition-stats-type.md) - `Rendition.stats` and `Report.Writer` take the rendition stats schema's input type, so encoders write plain numbers
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto (held in m1 by an open claim)
-- [A restarted instance cannot reuse group sequences](/quest/m2/sequence-reuse.md) - a publisher restarting an instance at a higher epoch is refused when its sequences go backwards, instead of resume dropping or stitching its groups
 - [Subscriptions name the oldest group without a u64::MAX sentinel](/quest/m2/anchor-oldest.md) - `Anchor` gets an explicit oldest variant, decoded the same way on every wire
 - [moq auth serve bounds what a leaked token or public caller can do](/quest/m2/auth-serve-policy.md) - tokens need an `exp` unless the operator opts out, and a public listener authenticates relays
 - [Cut readiness](/quest/m2/cut-gate/README.md) - the checks the cut needs that break nothing: main no slower than release, vendored fixes ported, and moq-c at parity
