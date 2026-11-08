@@ -343,7 +343,7 @@ impl Config {
 		// is checked by `Cluster::new`, which embedders call directly.
 		self.quic.validate().context("invalid [quic]")?;
 		self.check_runtime()?;
-		self.check_stats()?;
+		self.stats.check(&self.cluster)?;
 		#[cfg(feature = "cluster-lan")]
 		self.check_lan()?;
 
@@ -371,6 +371,12 @@ impl Config {
 		anyhow::ensure!(!self.runtime.pin || workers, "runtime.pin requires runtime.workers");
 		let io_uring = self.runtime.io_uring();
 		anyhow::ensure!(!io_uring || workers, "runtime.io_uring requires runtime.workers");
+		// The io_uring workers never default a bind: unset means stream-only when a
+		// tcp/unix listener is configured, which they cannot serve.
+		anyhow::ensure!(
+			!io_uring || self.listen.bind.is_some(),
+			"runtime.io_uring requires listen.bind"
+		);
 		#[cfg(not(target_os = "linux"))]
 		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
 		#[cfg(all(target_os = "linux", not(feature = "_uring")))]
@@ -388,37 +394,18 @@ impl Config {
 		Ok(())
 	}
 
-	/// Refuse stats on a clustered relay without a node name: every node would
-	/// publish the same `<prefix>/node` broadcast and the origin keeps only one.
-	fn check_stats(&self) -> anyhow::Result<()> {
-		#[cfg(feature = "cluster-lan")]
-		let lan = self.cluster.lan.enabled;
-		#[cfg(not(feature = "cluster-lan"))]
-		let lan = false;
-		let clustered =
-			!self.cluster.connect.is_empty() || self.cluster.api.url.is_some() || self.cluster.node.is_some() || lan;
-		// An empty or all-slash name is no name: it publishes the shared unnamed path.
-		let named = self
-			.stats
-			.node
-			.as_deref()
-			.is_some_and(|node| moq_net::Path::new(node).is_ok_and(|node| !node.is_empty()));
-		anyhow::ensure!(
-			!self.stats.enabled || !clustered || named,
-			"--stats-enabled on a clustered relay requires --stats-node, so each node publishes its own stats"
-		);
-		Ok(())
-	}
-
 	/// Refuse LAN discovery this relay cannot advertise or dial.
 	#[cfg(feature = "cluster-lan")]
 	fn check_lan(&self) -> anyhow::Result<()> {
 		if !self.cluster.lan.enabled {
 			return Ok(());
 		}
-		// Workers always bind QUIC, on the default address when `--listen` is unset.
+		// The io_uring workers always bind QUIC (`check_runtime` requires their bind). The
+		// tokio listener and workers need the `quic` feature, and the workers bind the
+		// default address when `--listen` is unset.
+		let tokio = self.listen.serves_quic() || self.runtime.workers().is_some();
 		anyhow::ensure!(
-			self.listen.serves_quic() || self.runtime.workers().is_some(),
+			self.runtime.io_uring() || (cfg!(feature = "_quic") && tokio),
 			"--cluster-lan needs a QUIC listener (--listen) to advertise. See https://doc.moq.dev/bin/relay/cluster."
 		);
 		// A fingerprint is advertised only for a certificate generated or supplied in memory.
@@ -957,9 +944,30 @@ root = ["ca.pem"]
 				&format!("[stats]\nenabled = true\nnode = \"\"\n{cluster}"),
 				"--stats-node",
 			);
+			// A malformed node was set, so the error names it rather than the missing flag.
+			refuse(
+				&format!("[stats]\nenabled = true\nnode = \"a//b\"\n{cluster}"),
+				"invalid stats.node",
+			);
 			resolve(cluster);
 		}
 		resolve("[stats]\nenabled = true\n");
+
+		// Embedders build a cluster without resolving, so it refuses the same.
+		let mut cluster = cluster::Config::default();
+		cluster.node = Some("https://a.example".into());
+		let stats: crate::stats::Config = toml::from_str("enabled = true\n").expect("parse");
+		let err = cluster::Cluster::new(cluster::Options::new(cluster).with_stats(stats))
+			.err()
+			.expect("an unnamed clustered stats node must be refused")
+			.to_string();
+		assert!(err.contains("--stats-node"), "{err}");
+
+		// The io_uring workers need an explicit bind, whatever the build.
+		refuse(
+			"[runtime]\nworkers = 1\nio_uring = true\n",
+			"runtime.io_uring requires listen.bind",
+		);
 	}
 
 	/// LAN discovery needs a QUIC port and an identity to advertise.
@@ -976,15 +984,18 @@ root = ["ca.pem"]
 			&format!("{node}[listen.unix]\nbind = \"relay.sock\"\n"),
 			"needs a QUIC listener",
 		);
-		refuse("[cluster.lan]\nenabled = true\n", "--cluster-node");
+		// The default listener is QUIC only in a build with a QUIC backend for it.
+		#[cfg(not(feature = "_quic"))]
+		refuse(node, "needs a QUIC listener");
 		#[cfg(feature = "_quic")]
 		{
+			refuse("[cluster.lan]\nenabled = true\n", "--cluster-node");
 			let workers = format!("{node}[listen.unix]\nbind = \"relay.sock\"\n[runtime]\nworkers = 1\n");
 			let config: Config = toml::from_str(&workers).expect("parse");
 			config.resolve().expect("workers serve QUIC on the default address");
+			let config: Config = toml::from_str(node).expect("parse");
+			config.resolve().expect("a node URL and the default QUIC listener");
 		}
-		let config: Config = toml::from_str(node).expect("parse");
-		config.resolve().expect("a node URL and the default QUIC listener");
 	}
 
 	/// The canonical top-level table, which is what the demo configs use.

@@ -1418,6 +1418,7 @@ impl Cluster {
 		peer.quic.validate()?;
 		#[cfg(feature = "cluster-lan")]
 		config.lan.validate()?;
+		stats.check(&config)?;
 		let mut work = kio::Tasks::new();
 		let mut origin_config = origin::Config::default();
 		origin_config.route_key = Some(match &config.route_key {
