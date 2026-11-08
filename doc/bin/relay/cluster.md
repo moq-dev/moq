@@ -49,9 +49,11 @@ every frame once. A publisher whose groups restart, such as an encoder
 restarting from group 0, publishes under a new instance, which replaces the
 old broadcast instead of resuming it; the RTMP, SRT, and WHIP ingests mint one
 per connection. Among instances every relay ranks routes in [one
-order](/concept/identity#choosing-a-route), ending in a hash of the instance
-and the path, so the relays of a mesh agree on each path's stream and a pool's
-paths spread over its hosts. Seamless failover needs moq-lite 07 on every link
+order](/concept/identity#choosing-a-route), ending in a hash of the path with
+the route's origin node on moq-lite 07, or with the instance on older wires, so
+the relays of a mesh agree on each path's stream and a pool's paths spread over
+its hosts. On moq-lite 07 a path therefore stays on its host when the instance
+changes. Seamless failover needs moq-lite 07 on every link
 the route crosses. Over moq-lite 06 and older, or moq-transport, the receiving
 relay mints an instance per announcement, so failover onto such a route is
 announced as a restart. Viewers re-request on a restart, and a relay drops its

@@ -359,7 +359,6 @@ struct State {
 /// disabled. Clones share the session, which closes with code 0 once its last
 /// clone and stream are gone.
 pub struct Session {
-	opening: Rc<kio::Bridge<Opening>>,
 	handles: Rc<Handles>,
 	conn: Connection,
 	/// The WebTransport layering, or `None` for raw QUIC.
@@ -407,7 +406,6 @@ impl Session {
 	/// WebTransport layering: streams and datagrams pass through untouched.
 	pub fn raw(conn: Connection) -> Self {
 		Self {
-			opening: Default::default(),
 			handles: Handles::new(&conn, None),
 			conn,
 			web: None,
@@ -483,7 +481,6 @@ impl Session {
 			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
 
 		Self {
-			opening: Default::default(),
 			handles: Handles::new(&conn, Some(&web)),
 			conn,
 			web: Some(web),
@@ -499,7 +496,6 @@ impl Session {
 impl Clone for Session {
 	fn clone(&self) -> Self {
 		Self {
-			opening: self.opening.clone(),
 			handles: self.handles.clone(),
 			conn: self.conn.clone(),
 			web: self.web.clone(),
@@ -514,14 +510,6 @@ impl std::fmt::Debug for Session {
 			.field("protocol", &self.protocol())
 			.finish()
 	}
-}
-
-#[derive(Default)]
-struct Opening {
-	// Driver wakes must go through the bridge, so they cannot reenter its held lock.
-	park: kio::Park,
-	uni: Option<(SendStream, Bytes)>,
-	bi: Option<(SendStream, RecvStream, Bytes)>,
 }
 
 impl Session {
@@ -568,7 +556,7 @@ impl Session {
 				.poll_accept_bi(waiter)
 				.map_ok(|(send, recv)| {
 					(
-						SendStream::new(send, &self.handles, None),
+						SendStream::new(send, &self.handles, Bytes::new()),
 						RecvStream::new(recv, &self.handles),
 					)
 				})
@@ -578,7 +566,7 @@ impl Session {
 			loop {
 				if let Some((send, recv)) = state.ready_bi.pop_front() {
 					return Poll::Ready(Ok((
-						SendStream::new(send, &self.handles, None),
+						SendStream::new(send, &self.handles, Bytes::new()),
 						RecvStream::new(recv, &self.handles),
 					)));
 				}
@@ -601,69 +589,33 @@ impl Session {
 		})
 	}
 
-	/// Open a unidirectional stream scheduled by `options`.
+	/// Open a unidirectional stream scheduled by `options`, pending only for the peer's stream
+	/// credit. The stream writes its session header ahead of its first data.
 	#[kio::wrapper]
 	pub fn poll_open_uni(
 		&self,
 		waiter: &kio::Waiter,
 		options: driver_send::Options<'_>,
 	) -> Poll<Result<SendStream, Error>> {
-		self.opening.poll(waiter, |opening, cx| {
-			if opening.uni.is_none() {
-				let inner = ready!(self.conn.poll_open_uni(
-					opening.park.hold(cx),
-					driver_send::Options {
-						group: None,
-						priority: i64::MAX
-					}
-				))
-				.map_err(|err| self.map_err(err))?;
-				let header = self.web.as_ref().map(|web| web.header_uni.clone()).unwrap_or_default();
-				opening.uni = Some((SendStream::new(inner, &self.handles, None), header));
-			}
-			let (send, header) = opening.uni.as_mut().unwrap();
-			let result = ready!(send.poll_header(opening.park.hold(cx), header));
-			let (mut send, _) = opening.uni.take().unwrap();
-			result?;
-			send.set_priority(options.priority);
-			send.set_group(options.group);
-			Poll::Ready(Ok(send))
-		})
+		let send = ready!(self.conn.poll_open_uni(waiter, options)).map_err(|err| self.map_err(err))?;
+		let header = self.web.as_ref().map(|web| web.header_uni.clone()).unwrap_or_default();
+		Poll::Ready(Ok(SendStream::new(send, &self.handles, header)))
 	}
 
-	/// Open a bidirectional stream scheduled by `options`.
+	/// Open a bidirectional stream scheduled by `options`, pending only for the peer's stream
+	/// credit. The stream writes its session header ahead of its first data.
 	#[kio::wrapper]
 	pub fn poll_open_bi(
 		&self,
 		waiter: &kio::Waiter,
 		options: driver_send::Options<'_>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.opening.poll(waiter, |opening, cx| {
-			if opening.bi.is_none() {
-				let (mut send, recv) = ready!(self.conn.poll_open_bi(
-					opening.park.hold(cx),
-					driver_send::Options {
-						group: None,
-						priority: i64::MAX
-					}
-				))
-				.map_err(|e| self.map_err(e))?;
-				send.set_priority(i64::MAX);
-				let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
-				opening.bi = Some((
-					SendStream::new(send, &self.handles, None),
-					RecvStream::new(recv, &self.handles),
-					header,
-				));
-			}
-			let (send, _, header) = opening.bi.as_mut().unwrap();
-			let result = ready!(send.poll_header(opening.park.hold(cx), header));
-			let (mut send, recv, _) = opening.bi.take().unwrap();
-			result?;
-			send.set_priority(options.priority);
-			send.set_group(options.group);
-			Poll::Ready(Ok((send, recv)))
-		})
+		let (send, recv) = ready!(self.conn.poll_open_bi(waiter, options)).map_err(|err| self.map_err(err))?;
+		let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
+		Poll::Ready(Ok((
+			SendStream::new(send, &self.handles, header),
+			RecvStream::new(recv, &self.handles),
+		)))
 	}
 
 	/// The next datagram, with its session header removed.
@@ -823,10 +775,6 @@ impl moq_net::transport::poll::Session for Session {
 		let mut quic = super::Limits::default();
 		quic.receive_window = limits.receive_window;
 		Self::set_limits(self, quic).map_err(|err| moq_net::transport::LimitsError::Refused(err.to_string()))
-	}
-	/// The connection's credit, which every WebTransport session on it shares.
-	fn stream_credit(&self, dir: moq_net::transport::Dir) -> Option<moq_net::transport::StreamCredit> {
-		Some(self.conn.stream_credit(dir))
 	}
 	/// The connection's exporter on raw QUIC; on WebTransport, this session's own.
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {

@@ -11,7 +11,7 @@
 //! target, and what they present is named under the mount point on the same routes.
 
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, HashMap},
 	task::{Poll, ready},
 };
 
@@ -338,9 +338,8 @@ impl Answer {
 				for path in &paths {
 					sent.claims.remove(path);
 				}
-				let mut started = BTreeSet::new();
 				for path in paths {
-					self.sync(stream, id, path, &mut started)?;
+					self.sync(stream, id, path)?;
 				}
 			}
 		}
@@ -387,21 +386,14 @@ impl Answer {
 				None => path,
 			};
 			match claim {
-				Some(mut claim) => {
-					if let Some(mount) = mount {
-						claim.continues = (claim.continues.take())
-							.and_then(|(taken, instance)| Some((mount.name(&taken)?, instance)));
-					}
-					sent.claims.insert(path.clone(), claim)
-				}
+				Some(claim) => sent.claims.insert(path.clone(), claim),
 				None => sent.claims.remove(&path),
 			};
 			paths.push(path);
 		}
 		sent.floor = floor;
-		let mut started = BTreeSet::new();
 		for path in paths {
-			self.sync(stream, id, path, &mut started)?;
+			self.sync(stream, id, path)?;
 		}
 		self.floor(stream, id)
 	}
@@ -451,83 +443,49 @@ impl Answer {
 	}
 
 	/// Bring the peer's claim at `path` for the route to `id` in line with the node's.
-	///
-	/// `started` collects the claims this pass started: a claim takes over only one the
-	/// peer held before, so a snapshot replays no takeover.
-	fn sync(
-		&mut self,
-		stream: &mut Stream<Transport, Version>,
-		id: route::Id,
-		path: Path,
-		started: &mut BTreeSet<Path>,
-	) -> Result<(), Error> {
+	fn sync(&mut self, stream: &mut Stream<Transport, Version>, id: route::Id, path: Path) -> Result<(), Error> {
 		let sent = self.routes.get(&id).expect("only a held route syncs");
 		let wanted = (sent.claims.get(&path))
 			.filter(|claim| self.shows(&path) && sends(&self.link, claim))
 			.cloned();
 		let wire = sent.wire;
-		let taken = (wanted.as_ref())
-			.and_then(|claim| self.continued(id, &path, claim))
-			.filter(|(taken, _)| !started.contains(taken));
 		let key = (id, path);
 		match (self.live.get_mut(&key), wanted) {
 			(None, Some(claim)) => {
 				let suffix = self.suffix(&key.1).expect("shown claims are under the prefix");
-				let announce = match taken {
-					Some((taken, predecessor)) => {
-						tracing::debug!(route = %key.1, node = id, predecessor = %taken, "takeover");
-						self.takeover(stream, wire, predecessor, suffix, &claim)?
-					}
-					None => {
-						tracing::debug!(route = %key.1, node = id, "announce");
-						let (announce, suffix) = self.encoder.start(suffix);
-						stream.writer.buffer(&Msg::Active {
-							suffix,
-							route: wire,
-							instance: Some(claim.instance.clone()),
-							epoch: claim.epoch,
-							hops: crate::Hops::new(),
-							cost: origin::Cost::new(claim.cost),
-						})?;
-						announce.expect("lite-07 assigns announce ids")
-					}
-				};
-				started.insert(key.1.clone());
+				tracing::debug!(route = %key.1, node = id, "announce");
+				let (announce, suffix) = self.encoder.start(suffix);
+				stream.writer.buffer(&Msg::Active {
+					suffix,
+					route: wire,
+					instance: Some(claim.instance.clone()),
+					epoch: claim.epoch,
+					hops: crate::Hops::new(),
+					cost: origin::Cost::new(claim.cost),
+				})?;
+				let announce = announce.expect("lite-07 assigns announce ids");
 				self.live.insert(key, (announce, claim));
 			}
 			(Some((announce, held)), Some(claim)) => {
 				let announce = *announce;
 				let restart = held.instance != claim.instance || held.epoch != claim.epoch;
 				let reprice = held.cost != claim.cost;
-				let replacement = match taken {
-					// In place: a new Announce ID replaces the one it continues.
-					Some((taken, predecessor)) if taken == key.1 => {
-						tracing::debug!(route = %key.1, node = id, "takeover");
-						let suffix = self.suffix(&key.1).expect("held claims are under the prefix");
-						self.takeover(stream, wire, predecessor, suffix, &claim)?
-					}
-					_ if restart => {
-						tracing::debug!(route = %key.1, "restart");
-						stream.writer.buffer(&Msg::Restart {
-							id: announce,
-							instance: Some(claim.instance.clone()),
-							epoch: claim.epoch,
-							cost: origin::Cost::new(claim.cost),
-						})?;
-						announce
-					}
-					_ => {
-						if reprice {
-							stream.writer.buffer(&Msg::Update {
-								id: announce,
-								hops: crate::Hops::new(),
-								cost: origin::Cost::new(claim.cost),
-							})?;
-						}
-						announce
-					}
-				};
-				self.live.insert(key, (replacement, claim));
+				if restart {
+					tracing::debug!(route = %key.1, "restart");
+					stream.writer.buffer(&Msg::Restart {
+						id: announce,
+						instance: Some(claim.instance.clone()),
+						epoch: claim.epoch,
+						cost: origin::Cost::new(claim.cost),
+					})?;
+				} else if reprice {
+					stream.writer.buffer(&Msg::Update {
+						id: announce,
+						hops: crate::Hops::new(),
+						cost: origin::Cost::new(claim.cost),
+					})?;
+				}
+				self.live.insert(key, (announce, claim));
 			}
 			(Some(_), None) => {
 				let (announce, _) = self.live.remove(&key).expect("matched above");
@@ -539,45 +497,6 @@ impl Answer {
 		Ok(())
 	}
 
-	/// Send `claim` at `suffix` under the route `wire` as an ANNOUNCE_TAKEOVER of the
-	/// peer's live `predecessor`, returning its Announce ID.
-	fn takeover(
-		&mut self,
-		stream: &mut Stream<Transport, Version>,
-		wire: u64,
-		predecessor: u64,
-		suffix: Path,
-		claim: &node::Claim,
-	) -> Result<u64, Error> {
-		let (announce, suffix) = self.encoder.takeover(predecessor, suffix);
-		stream.writer.buffer(&Msg::Takeover {
-			predecessor,
-			suffix,
-			route: wire,
-			instance: Some(claim.instance.clone()),
-			epoch: claim.epoch,
-			cost: origin::Cost::new(claim.cost),
-		})?;
-		Ok(announce)
-	}
-
-	/// The claim the peer holds that `claim` at `path` takes over, and its Announce ID.
-	///
-	/// Only the claim it continues, under the same route at the instance it continued,
-	/// and only while every claim the peer holds at that path serves the same instance:
-	/// otherwise the peer cannot tell which one it resolved through.
-	fn continued(&self, id: route::Id, path: &Path, claim: &node::Claim) -> Option<(Path, u64)> {
-		let (taken, instance) = claim.continues.as_ref()?;
-		if !path.has_prefix(taken) {
-			return None;
-		}
-		let (predecessor, held) = self.live.get(&(id, taken.clone()))?;
-		let alike = self.routes.keys().all(|other| {
-			(self.live.get(&(*other, taken.clone()))).is_none_or(|(_, other)| other.instance == *instance)
-		});
-		(held.instance == *instance && alike).then(|| (taken.clone(), *predecessor))
-	}
-
 	/// The grant changed: end what it no longer covers, start what it now does, and
 	/// floor every route again, which certifies only while the grant covers the prefix.
 	fn refilter(&mut self, stream: &mut Stream<Transport, Version>) -> Result<(), Error> {
@@ -585,9 +504,8 @@ impl Answer {
 		ids.sort_unstable();
 		for id in ids {
 			let paths: Vec<Path> = self.routes[&id].claims.keys().cloned().collect();
-			let mut started = BTreeSet::new();
 			for path in paths {
-				self.sync(stream, id, path, &mut started)?;
+				self.sync(stream, id, path)?;
 			}
 			if self.routes[&id].floored {
 				self.floor(stream, id)?;

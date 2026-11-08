@@ -37,7 +37,3 @@ put the comparison in the PR under `## Waiting` with a recommendation. After
 the maintainer picks, land the winner in JS, moq-ffi, moq-c, and the
 wrappers in the same PR. The route instance accessor's five spellings across
 bindings stay with [the exporter](/quest/m3/ffi-exporter.md).
-
-## Required
-
-- [A job's exact route continues its claim's readers](/quest/m2/announce-takeover.md) - changes how `Request::route` lends a claim's instance, which both shapes must keep

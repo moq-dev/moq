@@ -41,7 +41,6 @@ Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open 
 
 Found by the 2026-11-07 API shape audit (media formats); see the
 [epic](/quest/m2/api-shape/README.md). The playout clock is
-`moq_mux::sync`, already reshaped, and rendition stats are
-[rendition-stats-type](/quest/m2/rendition-stats-type.md). Check the
+`moq_mux::sync`, already reshaped. Check the
 `ts::Follower` and `ts::Release` collision too, and rename whichever name
 the PR shows is ambiguous.

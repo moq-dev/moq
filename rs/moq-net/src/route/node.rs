@@ -36,11 +36,6 @@ pub(crate) struct Claim {
 	pub epoch: u64,
 	/// The origin's Announce Cost.
 	pub cost: u64,
-	/// The claim of the same identity this one took over, at or above its path, and the
-	/// instance that claim served: what was resolved through it beneath this path is
-	/// this claim's broadcast. Kept while the instance stays, and sent as
-	/// ANNOUNCE_TAKEOVER to a peer still holding that claim.
-	pub continues: Option<(Path, Instance)>,
 	/// This node's own claim, served through a route learned from an upstream peer: it
 	/// is never sent to another upstream, so this node never carries traffic between
 	/// two. Always unset on a claim off the wire.
@@ -118,10 +113,12 @@ struct Outbox {
 	pending: HashMap<Id, (u64, Pending)>,
 	/// Outputs to read in order: the other kinds, and a pending entry once taken.
 	ready: VecDeque<Output>,
-	/// Each claim's last Serve or Unserve, read after the rest, in queue order. A
-	/// takeover queues its successor's Serve before its predecessor's Unserve, and the
-	/// session needs the predecessor still served to carry it on: so a Serve replacing
-	/// a queued Serve keeps its place, while an Unserve, or a Serve after one, goes last.
+	/// Each claim's last Serve or Unserve, read after the rest, in queue order. A job
+	/// queues its Serve before the Unserve or restart of the claim it continues, and the
+	/// session needs the job's route in place before the claim's goes, so a reader
+	/// resolved through the claim carries on: so a Serve replacing a queued Serve of the
+	/// same instance and epoch keeps its place, while an Unserve, a restart, or a Serve
+	/// after an Unserve goes last.
 	serves: BTreeMap<u64, Output>,
 	/// Where each claim's last change sits in `serves`.
 	serving: HashMap<(Id, Path), u64>,
@@ -222,8 +219,10 @@ impl Outbox {
 			Output::Serve { id, ref claim, .. } | Output::Unserve { id, ref claim } => {
 				let key = (id, claim.clone());
 				if let Some(&seq) = self.serving.get(&key)
-					&& matches!(output, Output::Serve { .. })
-					&& matches!(self.serves.get(&seq), Some(Output::Serve { .. }))
+					&& let Output::Serve { served, .. } = &output
+					&& let Some(Output::Serve { served: queued, .. }) = self.serves.get(&seq)
+					&& queued.claim.instance == served.claim.instance
+					&& queued.claim.epoch == served.claim.epoch
 				{
 					self.serves.insert(seq, output);
 					return None;
@@ -379,22 +378,13 @@ impl Node {
 			.expect("a node always declares an identity")
 	}
 
-	/// This node's own claim at `path` changed: `None` withdraws it. A claim taking over
-	/// the own claim at `predecessor` continues the instance that one serves now.
-	pub fn own(&self, path: Path, claim: Option<Claim>, predecessor: Option<&Path>) {
+	/// This node's own claim at `path` changed: `None` withdraws it.
+	pub fn own(&self, path: Path, claim: Option<Claim>) {
 		let mut state = self.lock();
 		let changed = match claim {
-			Some(mut claim) => {
+			Some(claim) => {
 				let view = state.router.declared().and_then(|id| state.router.view(id));
 				let current = view.and_then(|view| view.items.get(&path));
-				claim.continues = match predecessor {
-					Some(predecessor) => (view.and_then(|view| view.items.get(predecessor)))
-						.map(|taken| (predecessor.clone(), taken.instance.clone())),
-					// A re-price or a newer epoch of the same instance continues what it did.
-					None => current
-						.filter(|current| current.instance == claim.instance)
-						.and_then(|current| current.continues.clone()),
-				};
 				let changed = current != Some(&claim);
 				changed && state.router.announce(path, claim).is_ok()
 			}
@@ -627,7 +617,9 @@ impl State {
 			.take_while(|((home, _), _)| *home == id)
 			.map(|((_, claim), _)| claim.clone())
 			.collect();
-		for (claim, item, available) in claims {
+		// Most specific first: a job continuing its claim's instance is served before
+		// the claim moves on, so a reader resolved through the claim finds the job's route.
+		for (claim, item, available) in claims.into_iter().rev() {
 			gone.remove(&claim);
 			let routes = self.router.routes(id, &claim);
 			let home = self.homes.entry((id, claim.clone())).or_default();
@@ -731,7 +723,6 @@ mod tests {
 			instance: instance.clone(),
 			epoch: 0,
 			cost,
-			continues: None,
 			upstream: false,
 			learned: false,
 		}
@@ -768,7 +759,7 @@ mod tests {
 		let (origin, relay) = (Node::new(1, 1), Node::new(2, 2));
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let receive = relay.receive(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 5)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 5)));
 		pump(&answer, &receive);
 		assert_eq!(
 			served(outputs(&receive)),
@@ -784,7 +775,7 @@ mod tests {
 			}]
 		);
 
-		origin.own(p("live/x"), None, None);
+		origin.own(p("live/x"), None);
 		pump(&answer, &receive);
 		assert_eq!(
 			served(outputs(&receive)),
@@ -812,7 +803,7 @@ mod tests {
 		let far_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let near = relay.receive(Link::default(), Path::empty()).unwrap();
 		let near_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&far_answer, &far);
 		pump(&near_answer, &near);
 		let metric = |outputs: Vec<Output>| match &served(outputs)[..] {
@@ -851,8 +842,8 @@ mod tests {
 		};
 		let b = relay.receive(costly, p("live/b")).unwrap();
 		let b_answer = origin.answer(Link::default(), p("live/b")).unwrap();
-		origin.own(p("live/a/x"), Some(claim(&instance, 0)), None);
-		origin.own(p("live/b/y"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/a/x"), Some(claim(&instance, 0)));
+		origin.own(p("live/b/y"), Some(claim(&instance, 0)));
 		pump(&a_answer, &a);
 		pump(&b_answer, &b);
 		let claims = |outputs: Vec<Output>| -> Vec<Path> {
@@ -867,28 +858,28 @@ mod tests {
 		assert_eq!(claims(outputs(&b)), [p("live/b/y")]);
 	}
 
-	/// A stalled stream reads a takeover's successor before its predecessor goes, even
-	/// once the successor changed again meanwhile, so the session still finds the
-	/// predecessor to carry on.
+	/// A stalled stream reads a job's Serve before the Unserve of the claim it
+	/// continues, even once the job changed again meanwhile, so a reader resolved
+	/// through the claim finds the job's route before the claim's goes.
 	#[test]
-	fn a_stalled_takeover_reads_its_successor_first() {
-		let (old, new) = (Instance::random(), Instance::random());
+	fn a_stalled_stream_reads_a_job_before_its_claim_goes() {
+		let instance = Instance::random();
 		let origin = Node::new(1, 1);
 		let relay = Node::new(2, 2);
 		let fast = relay.receive(Link::default(), Path::empty()).unwrap();
 		let stalled = relay.receive(Link::default(), Path::empty()).unwrap();
 		let fast_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let stalled_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live"), Some(claim(&old, 0)), None);
+		origin.own(p("live"), Some(claim(&instance, 0)));
 		pump(&fast_answer, &fast);
 		pump(&stalled_answer, &stalled);
 		outputs(&fast);
 		outputs(&stalled);
 
-		origin.own(p("live/x"), Some(claim(&new, 0)), Some(&p("live")));
-		origin.own(p("live"), None, None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
+		origin.own(p("live"), None);
 		pump(&fast_answer, &fast);
-		origin.own(p("live/x"), Some(claim(&new, 5)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 5)));
 		pump(&fast_answer, &fast);
 		let read: Vec<(Path, Option<u64>)> = (served(outputs(&stalled)).into_iter())
 			.map(|output| match output {
@@ -898,6 +889,45 @@ mod tests {
 			})
 			.collect();
 		assert_eq!(read, [(p("live/x"), Some(5)), (p("live"), None)]);
+	}
+
+	/// A job and its claim's restart arriving together are read job first, even past a
+	/// change to the claim still queued, so a reader resolved through the claim's old
+	/// instance finds the job's route before the claim's moves on.
+	#[test]
+	fn a_job_is_read_before_its_claims_restart() {
+		let (old, new) = (Instance::random(), Instance::random());
+		let origin = Node::new(1, 1);
+		let relay = Node::new(2, 2);
+		let fast = relay.receive(Link::default(), Path::empty()).unwrap();
+		let stalled = relay.receive(Link::default(), Path::empty()).unwrap();
+		let fast_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		let stalled_answer = origin.answer(Link::default(), Path::empty()).unwrap();
+		origin.own(p("live"), Some(claim(&old, 0)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		outputs(&fast);
+		outputs(&stalled);
+
+		// A change to the claim the stalled stream leaves queued.
+		origin.own(p("live"), Some(claim(&old, 1)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		outputs(&fast);
+
+		origin.own(p("live/x"), Some(claim(&old, 0)));
+		origin.own(p("live"), Some(claim(&new, 0)));
+		pump(&fast_answer, &fast);
+		pump(&stalled_answer, &stalled);
+		for stream in [&fast, &stalled] {
+			let read: Vec<(Path, Instance)> = (served(outputs(stream)).into_iter())
+				.map(|output| match output {
+					Output::Serve { claim, served, .. } => (claim, served.claim.instance),
+					other => panic!("not a serve: {other:?}"),
+				})
+				.collect();
+			assert_eq!(read, [(p("live/x"), old.clone()), (p("live"), new.clone())]);
+		}
 	}
 
 	/// A claim of a scoped peer left with no usable route stays where it is served,
@@ -919,7 +949,7 @@ mod tests {
 		let second = relay.receive(scoped(), Path::empty()).unwrap();
 		let first_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let second_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&first_answer, &first);
 		pump(&second_answer, &second);
 		second.route(1, Some(Reach::Held));
@@ -949,11 +979,11 @@ mod tests {
 		let stalled = relay.receive(Link::default(), Path::empty()).unwrap();
 		let fast_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let stalled_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&fast_answer, &fast);
 		pump(&stalled_answer, &stalled);
 		for cost in 1..1000 {
-			origin.own(p("live/x"), Some(claim(&instance, cost)), None);
+			origin.own(p("live/x"), Some(claim(&instance, cost)));
 			pump(&fast_answer, &fast);
 			outputs(&fast);
 		}
@@ -975,9 +1005,9 @@ mod tests {
 		let answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		outputs(&answer);
 		for cost in 0..1000 {
-			origin.own(p("live/x"), Some(claim(&instance, cost)), None);
-			origin.own(p("live/churn"), Some(claim(&instance, cost)), None);
-			origin.own(p("live/churn"), None, None);
+			origin.own(p("live/x"), Some(claim(&instance, cost)));
+			origin.own(p("live/churn"), Some(claim(&instance, cost)));
+			origin.own(p("live/churn"), None);
 		}
 		let read = outputs(&answer);
 		let batch = |read: &[Output]| match read {
@@ -989,9 +1019,9 @@ mod tests {
 
 		// Once sent, a claim's end is kept, behind what started.
 		for cost in 0..1000 {
-			origin.own(p("live/y"), Some(claim(&instance, cost)), None);
+			origin.own(p("live/y"), Some(claim(&instance, cost)));
 		}
-		origin.own(p("live/x"), None, None);
+		origin.own(p("live/x"), None);
 		let read = outputs(&answer);
 		assert_eq!(read.len(), 1, "{read:?}");
 		assert_eq!(
@@ -1068,7 +1098,7 @@ mod tests {
 		let first_answer = origin.answer(Link::default(), Path::empty()).unwrap();
 		let second = relay.receive(Link::default(), Path::empty()).unwrap();
 		let second_answer = origin.answer(Link::default(), Path::empty()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)), None);
+		origin.own(p("live/x"), Some(claim(&instance, 0)));
 		pump(&first_answer, &first);
 		pump(&second_answer, &second);
 		outputs(&first);
