@@ -2359,7 +2359,7 @@ export class Subscriber {
 			// stamped group's latest frame: walk back from the cap to the first one.
 			for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
 				const group = timeline[i];
-				if (group.closed.peek() instanceof Error || !this.#judges(group.sequence)) continue;
+				if (hooks.groupFailed(group) || !this.#judges(group.sequence)) continue;
 				const timestamp = hooks.groupTimestamp(group);
 				if (timestamp === undefined) continue;
 				presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
@@ -2413,7 +2413,7 @@ export class Subscriber {
 		for (let i = timelineIndex(timeline, sequence + 1n); i < timeline.length; i++) {
 			const successor = timeline[i];
 			if (end !== undefined && successor.sequence >= end) break;
-			if (successor.closed.peek() instanceof Error || !this.#judges(successor.sequence)) continue;
+			if (hooks.groupFailed(successor) || !this.#judges(successor.sequence)) continue;
 			if (counts(successor)) return successor;
 		}
 		return undefined;
@@ -2964,7 +2964,7 @@ export class Subscriber {
 						const group = timeline[i];
 						if (group.sequence >= open.end) break;
 						// A failed copy holds nothing to read, so it is missed like an evicted one.
-						if (group.closed.peek() instanceof Error) continue;
+						if (hooks.groupFailed(group)) continue;
 						this.#askMiss(next, group.sequence, drift, asker);
 						next = group.sequence + 1n;
 					}
@@ -3209,7 +3209,7 @@ export class Subscriber {
 						group.sequence >= start &&
 						(end === undefined || group.sequence < end) &&
 						!delivered.has(group.sequence) &&
-						!(group.closed.peek() instanceof Error),
+						!hooks.groupFailed(group),
 				);
 		hooks.spent = (subscriber, start, end, delivered) =>
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
@@ -3549,7 +3549,7 @@ export class Subscriber {
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
 		if (!this.#closed) {
-			const arrivals = this.#state.timeline.filter((group) => !(group.closed.peek() instanceof Error));
+			const arrivals = this.#state.timeline.filter((group) => !hooks.groupFailed(group));
 			this.#arrivals = arrivals.map((group) => ({
 				sequence: group.sequence,
 				arrived: hooks.groupArrived(group),
@@ -3674,8 +3674,8 @@ export class Subscriber {
 				continue;
 			}
 			groups.splice(index, 1);
-			const failed = group.closed.peek();
-			if (dispositions && failed instanceof Error) {
+			const failed = hooks.groupFailed(group);
+			if (dispositions && failed) {
 				// A group expired under this subscription's budget is a stale verdict.
 				const hole =
 					toStreamCode(failed) === StreamCode.Old

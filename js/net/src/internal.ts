@@ -816,7 +816,12 @@ export const hooks: {
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
-	/** Carry a handed-out group across its logical track's route changes. */
+	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
+	groupFailed: (group: GroupConsumer) => Error | undefined;
+	/**
+	 * Carry a group across its logical track's route changes. Attached before the group is handed
+	 * out, so its `closed` never settles on a failure the recovery continues past.
+	 */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
@@ -1138,6 +1143,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupFailed: () => {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
