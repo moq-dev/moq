@@ -167,7 +167,10 @@ export default defineConfig({
 						{
 							text: "moq-cli",
 							link: "/bin/cli",
-							items: [{ text: "Inspect a relay", link: "/bin/inspect" }],
+							items: [
+								{ text: "MPEG-TS", link: "/bin/ts" },
+								{ text: "Inspect a relay", link: "/bin/inspect" },
+							],
 						},
 						{ text: "moq-studio", link: "/bin/studio" },
 						{
