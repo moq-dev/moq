@@ -603,3 +603,20 @@ describe("Source viewer ceiling", () => {
 		}
 	});
 });
+
+it("defaults to the decoder's probe when no supported input is given", async () => {
+	const globals = globalThis as unknown as Record<string, unknown>;
+	const original = globals.VideoDecoder;
+	globals.VideoDecoder = {
+		isConfigSupported: async (c: VideoDecoderConfig) => ({ supported: c.codec === "avc1.42e01e", config: c }),
+	};
+	const source = new Source({ broadcast: mockBroadcast({ cam: config("avc1.42e01e") }) });
+	try {
+		await settle();
+		expect(source.out.track.peek()).toBe("cam");
+	} finally {
+		source.close();
+		if (original === undefined) delete globals.VideoDecoder;
+		else globals.VideoDecoder = original;
+	}
+});
