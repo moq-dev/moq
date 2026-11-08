@@ -31,8 +31,6 @@ p2p = ["dep:if-addrs", "dep:mdns-sd", "dep:qmux", "moq-tokio/qmux"]
 # The vendored stack's AES-CCM DTLS suites.
 aes = { workspace = true }
 arrayvec = { workspace = true }
-# The vendored stack's crypto provider: DTLS, SRTP, and STUN MESSAGE-INTEGRITY.
-aws-lc-rs = { workspace = true }
 axum = { workspace = true, optional = true }
 base64ct = { workspace = true }
 bytes = { workspace = true }
@@ -40,14 +38,14 @@ ccm = { workspace = true }
 # The vendored stack's SDP parser.
 combine = { workspace = true }
 crc = { workspace = true }
-# The vendored DTLS's certificate and key parsing.
-der = { workspace = true }
 fastrand = { workspace = true }
 hang = { workspace = true }
 if-addrs = { workspace = true, optional = true }
 # Drives each WebRTC connection over its UDP socket.
 kio = { workspace = true, features = ["runtime"] }
 mdns-sd = { workspace = true, optional = true }
+# Refuses a CPU rind can't run on, and gives the WHIP/WHEP client rind's rustls provider.
+moq-crypto = { workspace = true, features = ["provider"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 # `RedactedUrl` keeps a dialed URL's query token and userinfo out of the logs, and with
@@ -56,14 +54,15 @@ moq-tokio = { workspace = true }
 # The vendored DTLS's record parser.
 nom = { workspace = true }
 once_cell = { workspace = true }
-pkcs8 = { workspace = true, features = ["pem"] }
 qmux = { workspace = true, optional = true }
 rand = { workspace = true }
 # The vendored DTLS's self-signed certificates.
-rcgen = { workspace = true, features = ["aws_lc_rs"] }
-reqwest = { workspace = true, features = ["rustls"] }
+rcgen = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+# The vendored stack's crypto: DTLS, SRTP, and STUN MESSAGE-INTEGRITY.
+rind = { workspace = true }
+rind-rcgen = { workspace = true }
 rustc-hash = { workspace = true }
-sec1 = { workspace = true }
 serde = { workspace = true }
 slab = { workspace = true }
 spki = { workspace = true }
@@ -76,6 +75,7 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
+# The vendored DTLS's certificate parsing.
 x509-cert = { workspace = true }
 
 [dev-dependencies]

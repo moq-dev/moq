@@ -409,6 +409,35 @@ async fn resets_and_stops_carry_their_codes() {
 	assert!(matches!(send.closed().await, Err(Error::StreamStop(11))));
 }
 
+/// A stream the peer stopped answers with a reset, as RFC 9000 section 3.5 requires, even when
+/// a `finish` came after the stop: otherwise the peer never learns its final size, and never
+/// returns its stream credit.
+#[tokio::test(start_paused = true)]
+async fn a_stopped_stream_resets_even_after_finish() {
+	let mut server = config(Version::QMux02);
+	server.limits.max_streams = std::num::NonZeroU64::new(1);
+	let (client, server) = pair(config(Version::QMux02), server).await;
+
+	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut send, Bytes::from_static(b"refused")).await;
+	let mut recv = server.accept_uni().await.unwrap();
+	recv.stop(11);
+	drop(recv);
+	kio::clock::sleep(Duration::from_millis(1)).await;
+	assert!(matches!(send.finish(), Err(Error::StreamStop(11))));
+	assert!(
+		matches!(send.write(b"more").await, Err(Error::StreamStop(11))),
+		"still reads as the stop"
+	);
+	drop(send);
+
+	let opening = client.open_uni(SendOptions::default());
+	kio::clock::timeout(Duration::from_secs(1), opening)
+		.await
+		.expect("credit returned once the stopped stream is reset")
+		.unwrap();
+}
+
 /// A send stream dropped before `finish` resets with code 0, so its reader learns it ended.
 #[tokio::test(start_paused = true)]
 async fn dropping_an_unfinished_send_resets_it() {

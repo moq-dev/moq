@@ -35,14 +35,10 @@ const MAX_TAG_LEN: usize = AeadAes256Gcm::TAG_LEN;
 pub const SRTCP_OVERHEAD: usize = MAX_TAG_LEN + SRTCP_INDEX_LEN;
 pub const SRTP_OVERHEAD: usize = MAX_TAG_LEN;
 
-// aws-lc-rs CTR mode requires output buffer to be input.len() + block_len - 1
-// This adds 15 bytes of padding that we truncate after encryption
-const CTR_BUFFER_PADDING: usize = SRTP_BLOCK_SIZE - 1;
-
 /// Initial capacity for the RTP decryption scratch buffer. Sized to fit the
-/// largest possible received datagram plus the CTR padding the AES-CM cipher
-/// needs, so `unprotect_rtp` never has to grow the buffer in practice.
-const RX_SCRATCH_CAPACITY: usize = DATAGRAM_MAX_PACKET_SIZE + CTR_BUFFER_PADDING;
+/// largest possible received datagram, so `unprotect_rtp` never has to grow
+/// the buffer in practice.
+const RX_SCRATCH_CAPACITY: usize = DATAGRAM_MAX_PACKET_SIZE;
 
 /// Start repeated warnings here, then double the failure count between reports.
 const DECRYPT_WARN_INITIAL_COUNT: u64 = 4_096;
@@ -251,15 +247,10 @@ impl SrtpContext {
 
 		match &mut self.rtp {
 			Derived::Aes128CmSha1_80 { key, salt, enc, .. } => {
-				// arbitrary body lengths are fine: the output buffer below is
-				// allocated with the CTR scratch the ciphers need and truncated
-				// after encryption, so no 16-byte alignment is required.
+				// Counter mode takes arbitrary body lengths, so no 16-byte alignment is required.
 				let iv = Aes128CmSha1_80::rtp_iv(*salt, *header.ssrc, srtp_index);
 
-				// Allocate buffer with CTR padding (aws-lc-rs requirement)
-				// HMAC_TAG_LEN is 10, CTR_BUFFER_PADDING is 15, so we need 5 extra bytes
-				let padding_needed = CTR_BUFFER_PADDING.saturating_sub(Aes128CmSha1_80::HMAC_TAG_LEN);
-				let mut output = vec![0_u8; buf.len() + Aes128CmSha1_80::HMAC_TAG_LEN + padding_needed];
+				let mut output = vec![0_u8; buf.len() + Aes128CmSha1_80::HMAC_TAG_LEN];
 
 				enc.encrypt(&iv, input, &mut output[hlen..]).expect("rtp encrypt");
 
@@ -269,7 +260,6 @@ impl SrtpContext {
 				let sha1_hmac = |k: &[u8], p: &[&[u8]]| self.sha1_hmac_provider.sha1_hmac(k, p);
 				Aes128CmSha1_80::rtp_hmac(sha1_hmac, key, &mut output, srtp_index, hmac_start);
 
-				output.truncate(buf.len() + Aes128CmSha1_80::HMAC_TAG_LEN);
 				output
 			}
 			Derived::AeadAes128Gcm { salt, enc, .. } => {
@@ -332,8 +322,7 @@ impl SrtpContext {
 				let iv = Aes128CmSha1_80::rtp_iv(*salt, *header.ssrc, srtp_index);
 
 				let input = &buf[header.header_len..hmac_start];
-				// Sized with CTR padding (aws-lc-rs requirement).
-				self.rx_scratch.resize(input.len() + CTR_BUFFER_PADDING, 0);
+				self.rx_scratch.resize(input.len(), 0);
 
 				if let Err(e) = dec.decrypt(&iv, input, &mut self.rx_scratch) {
 					trace!(
@@ -437,10 +426,7 @@ impl SrtpContext {
 				let iv = Aes128CmSha1_80::rtp_iv(*salt, ssrc, srtcp_index as u64);
 
 				let final_size = buf.len() + SRTCP_INDEX_LEN + Aes128CmSha1_80::HMAC_TAG_LEN;
-				// Allocate buffer with CTR padding (aws-lc-rs requirement)
-				// SRTCP_INDEX_LEN + HMAC_TAG_LEN is 14, CTR_BUFFER_PADDING is 15, so we need 1 extra byte
-				let padding_needed = CTR_BUFFER_PADDING.saturating_sub(SRTCP_INDEX_LEN + Aes128CmSha1_80::HMAC_TAG_LEN);
-				let mut output = vec![0_u8; final_size + padding_needed];
+				let mut output = vec![0_u8; final_size];
 
 				output[0..8].copy_from_slice(&buf[0..8]);
 				let input = &buf[8..];
@@ -453,7 +439,6 @@ impl SrtpContext {
 				let sha1_hmac = |k: &[u8], p: &[&[u8]]| self.sha1_hmac_provider.sha1_hmac(k, p);
 				Aes128CmSha1_80::rtcp_hmac(sha1_hmac, key, &mut output, hmac_index);
 
-				output.truncate(final_size);
 				output
 			}
 			Derived::AeadAes128Gcm { salt, enc, .. } => {
@@ -556,8 +541,7 @@ impl SrtpContext {
 				// first RTCP packet, i.e., from the ninth (9) octet to the end of the
 				// compound packet.
 				let input = &buf[8..idx_start];
-				// Allocate buffer with CTR padding (aws-lc-rs requirement)
-				let mut output = vec![0_u8; input.len() + 8 + CTR_BUFFER_PADDING];
+				let mut output = vec![0_u8; input.len() + 8];
 				output[0..8].copy_from_slice(&buf[0..8]);
 
 				if let Err(e) = dec.decrypt(&iv, input, &mut output[8..]) {
@@ -566,7 +550,6 @@ impl SrtpContext {
 					return None;
 				}
 
-				output.truncate(input.len() + 8);
 				Some(output)
 			}
 			Derived::AeadAes128Gcm { salt, dec, .. } => {

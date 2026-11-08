@@ -11,6 +11,21 @@ use crate::{Duration, Instant, TIMER_GRANULARITY, congestion, packet::SpaceId, t
 #[cfg(feature = "qlog")]
 use qlog::events::{ExData, quic::RecoveryMetricsUpdated};
 
+/// An unanswered PATH_CHALLENGE
+#[derive(Clone, Copy)]
+pub(super) struct Challenge {
+	pub(super) token: u64,
+	/// A packet of its own is still due for it; after that, it only rides along with the path's
+	/// other frames
+	pub(super) pending: bool,
+}
+
+impl Challenge {
+	pub(super) fn new(token: u64) -> Self {
+		Self { token, pending: true }
+	}
+}
+
 /// Description of a particular network path
 pub(super) struct PathData {
 	pub(super) remote: SocketAddr,
@@ -19,9 +34,8 @@ pub(super) struct PathData {
 	pub(super) sending_ecn: bool,
 	/// Congestion controller state
 	pub(super) congestion: Box<dyn congestion::Controller>,
-	/// Pacing state
-	pub(super) challenge: Option<u64>,
-	pub(super) challenge_pending: bool,
+	/// The PATH_CHALLENGE validating this path, until it is answered or abandoned
+	pub(super) challenge: Option<Challenge>,
 	/// Whether we're certain the peer can both send and receive on this address
 	///
 	/// Initially equal to `use_stateless_retry` for servers, and becomes false again on every
@@ -89,7 +103,6 @@ impl PathData {
 			// Sized for the MTU discovery starts at, which a known peer limit may have lowered
 			congestion: build_congestion(now, mtud.current_mtu(), seed, config),
 			challenge: None,
-			challenge_pending: false,
 			validated: false,
 			total_sent: 0,
 			total_recvd: 0,
@@ -110,7 +123,6 @@ impl PathData {
 			sending_ecn: true,
 			congestion: prev.congestion.clone_box(),
 			challenge: None,
-			challenge_pending: false,
 			validated: false,
 			total_sent: 0,
 			total_recvd: 0,
