@@ -3,6 +3,7 @@ import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { SEGMENT_BYTES } from "../util/limits.ts";
 import { decodeRoute, encodeRoute } from "./instance.ts";
 import * as Message from "./message.ts";
 import {
@@ -586,8 +587,10 @@ export class AnnounceInit {
 		}
 	}
 
-	static async #decode(r: Reader): Promise<AnnounceInit> {
+	static async #decode(r: Reader, budget: number): Promise<AnnounceInit> {
 		const count = await r.u53();
+		// Refused before decoding any, so the set grows no larger than what may be announced.
+		if (count > budget) throw new Error(`announce init lists ${count} broadcasts with ${budget} slots left`);
 		const suffixes: Path.Valid[] = [];
 		for (let i = 0; i < count; i++) {
 			suffixes.push(Path.decode(await r.string()));
@@ -595,17 +598,19 @@ export class AnnounceInit {
 		return new AnnounceInit(suffixes);
 	}
 
-	// The whole initial set in one message, so it scales with the publisher's broadcasts.
-	static readonly MAX_SIZE = 64 * 1024 * 1024;
+	// The whole initial set in one message, capped like Rust's so it fits one storage segment
+	// (1 MiB) with its type and size prefixes. A larger set is refused on both ends.
+	static readonly MAX_SIZE = SEGMENT_BYTES - 16;
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceInit.#guard(version);
 		return Message.encode(w, this.#encode.bind(this), { max: AnnounceInit.MAX_SIZE });
 	}
 
-	static async decode(r: Reader, version: Version): Promise<AnnounceInit> {
+	/** Decode the initial set, refusing one that lists more than `budget` broadcasts. */
+	static async decode(r: Reader, version: Version, budget: number): Promise<AnnounceInit> {
 		AnnounceInit.#guard(version);
-		return Message.decode(r, AnnounceInit.#decode, AnnounceInit.MAX_SIZE);
+		return Message.decode(r, (r) => AnnounceInit.#decode(r, budget), AnnounceInit.MAX_SIZE);
 	}
 }
 
