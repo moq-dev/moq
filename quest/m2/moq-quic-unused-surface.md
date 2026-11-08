@@ -15,9 +15,8 @@ current defaults: `packet_threshold`, `time_threshold`,
 `retry_token_lifetime`, `incoming_buffer_size_total`, and `initial_rtt`.
 moq-tokio, moq-uring, and qmux each trim their lists of moq-quic names
 (20 in moq-tokio's `quic::driver`) to the items their own public signatures
-use, and add no `pub use moq_quic;`, since
-[reexports](/quest/m2/api-shape/reexports.md) drops every whole-crate
-re-export. qmux keeps `Version`, its own wire concept. The PR's Impact section says how to
+use, and add no `pub use moq_quic;`, since moq re-exports no whole crate.
+qmux keeps `Version`, its own wire concept. The PR's Impact section says how to
 migrate; the release cut copies that into `MIGRATE.md`.
 
 ## Plan
