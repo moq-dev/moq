@@ -132,7 +132,7 @@ impl<O: Output> Video<O> {
 		let selector = Mutex::new(Selector::new(refresh.is_some(), interval));
 		// The newest presentation time fed to the min-delay decoder, which the
 		// max-delay decoder may always decode up to.
-		let edge: Mutex<Option<hang::moq_net::Timestamp>> = Mutex::new(None);
+		let edge: Mutex<Option<moq_net::Timestamp>> = Mutex::new(None);
 		// Wakes the max-delay decoder when the clock, the segments, or the selector change.
 		let wake = tokio::sync::Notify::new();
 		let closed = std::sync::atomic::AtomicBool::new(false);
@@ -645,7 +645,6 @@ mod tests {
 		media::Media,
 	};
 	use super::*;
-	use hang::moq_net;
 	use moq_mux::container::Container as _;
 
 	/// A codec whose reorder buffer holds `depth` pictures and bumps the

@@ -12,13 +12,12 @@ use bytes::{Buf, Bytes};
 use futures::stream::{FuturesUnordered, StreamExt};
 use kio::Waiter;
 
+use web_transport_proto::{ConnectRequest, ConnectResponse, Frame, StreamUni, VarInt};
+
 use crate::quic::driver::send;
 use crate::quic::web::fan::Fan;
 use crate::quic::web::{
-	CloseReason, Connected, Error, Settings,
-	proto::{ConnectRequest, ConnectResponse, Frame, StreamUni, VarInt},
-	recv::Stream as RecvStream,
-	send::Stream as SendStream,
+	CloseReason, Connected, Error, Settings, recv::Stream as RecvStream, send::Stream as SendStream,
 };
 
 /// An established WebTransport session, acting like a full QUIC connection. See
@@ -1250,12 +1249,8 @@ mod tests {
 	#[tokio::test]
 	async fn a_rejection_refuses_non_error_statuses() {
 		use futures::FutureExt;
-		for status in [
-			http::StatusCode::CONTINUE,
-			http::StatusCode::OK,
-			http::StatusCode::NO_CONTENT,
-			http::StatusCode::FOUND,
-		] {
+		// 600 parses as an HTTP status but is no error; 99 is no HTTP status at all.
+		for status in [100, 200, 204, 302, 600, 99] {
 			let (client, server, _endpoints) = pair().await;
 			let (client, ()) = tokio::join!(
 				Session::connect(client, url::Url::parse("https://localhost/").unwrap()),

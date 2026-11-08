@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
-use moq_tokio::moq_net;
 
 use crate::logs::Logs;
 
@@ -452,7 +451,7 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	trigger.start();
 	let deadline = kio::clock::now() + DRAIN;
 	let draining = established.draining().expect("connected");
-	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	let goaway = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.unwrap_or_else(|_| panic!("{label}: no GOAWAY after the trigger"))
 		.expect("session closed without a GOAWAY");
@@ -481,13 +480,10 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	pending.grant(arrival_consumer);
 	let arrival = arriving.await.expect("arrival task");
 	let draining = arrival.draining().expect("connected");
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(1),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.unwrap_or_else(|_| panic!("{label}: an arrival mid-drain was not sent a GOAWAY"))
-	.expect("arrival closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.unwrap_or_else(|_| panic!("{label}: an arrival mid-drain was not sent a GOAWAY"))
+		.expect("arrival closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "{label}: expected a reconnect-to-me GOAWAY");
 	if ietf {
 		// Only what is left of the window, not a fresh one that would outlive the
@@ -1000,7 +996,7 @@ async fn uring_forwards_the_setup_token() {
 			.unwrap();
 		let session = if webtransport {
 			let url: url::Url = format!("https://{addr}/room?source=setup").parse().unwrap();
-			let request = web::proto::ConnectRequest::new(url).with_protocol("moqt-18".to_string());
+			let request = web_transport_proto::ConnectRequest::new(url).with_protocol("moqt-18".to_string());
 			web::Session::connect(conn, request).await.unwrap()
 		} else {
 			web::Session::raw(conn)
@@ -1231,7 +1227,8 @@ fn uring_workers_bound_stalled_handshakes() {
 				}
 				if scheme == "https" {
 					let url: url::Url = format!("https://{addr}/stalled").parse().unwrap();
-					let request = web::proto::ConnectRequest::new(url).with_protocol("moq-lite-06".to_string());
+					let request =
+						web_transport_proto::ConnectRequest::new(url).with_protocol("moq-lite-06".to_string());
 					web::Session::connect(conn, request).await.unwrap()
 				} else {
 					web::Session::raw(conn)

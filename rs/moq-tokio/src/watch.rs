@@ -28,14 +28,15 @@ impl Files {
 	/// instance/watch limit is hit). `notify` already falls back to a built-in
 	/// poll watcher on platforms without a native backend, so there's no manual
 	/// polling here.
-	pub fn new(paths: &[PathBuf]) -> notify::Result<Self> {
+	pub fn new(paths: &[PathBuf]) -> crate::Result<Self> {
 		// A capacity-1 channel of unit wakeups coalesces the burst of raw events
 		// notify emits per change: a full buffer already has a pending wakeup, so
 		// extra sends are dropped.
 		let (tx, rx) = mpsc::channel(1);
 		let watcher = callback(paths, move || {
 			let _ = tx.try_send(());
-		})?;
+		})
+		.map_err(|err| crate::Error::Watch(crate::error::message(err)))?;
 
 		Ok(Self {
 			_watcher: watcher,
@@ -199,7 +200,7 @@ mod tests {
 	// watcher, so `new` must fall back to the current directory rather than error.
 	#[test]
 	fn bare_filename_watches_current_dir() {
-		match Files::new(&[PathBuf::from("cert.pem"), PathBuf::from("key.pem")]) {
+		match callback(&[PathBuf::from("cert.pem"), PathBuf::from("key.pem")], || {}) {
 			Ok(_) => {}
 			Err(err) if matches!(err.kind, notify::ErrorKind::MaxFilesWatch) => {
 				eprintln!("skipping bare_filename_watches_current_dir: {err}");

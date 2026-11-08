@@ -8,8 +8,6 @@ use std::time::Duration;
 use kio::clock::Instant;
 
 use anyhow::Context;
-use hang::moq_net;
-use moq_video::render::wgpu;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};

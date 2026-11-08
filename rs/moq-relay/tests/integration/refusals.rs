@@ -447,7 +447,7 @@ async fn web_peer(addr: SocketAddr, alpn: &str) -> moq_tokio::quic::web::Session
 		.unwrap()
 		.await
 		.unwrap();
-	let request = web::proto::ConnectRequest::new(
+	let request = web_transport_proto::ConnectRequest::new(
 		format!("https://{addr}/room?jwt=url-token")
 			.parse::<url::Url>()
 			.unwrap(),

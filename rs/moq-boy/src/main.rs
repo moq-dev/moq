@@ -35,7 +35,7 @@ use std::time::Duration;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
-static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jemalloc::tikv_jemallocator::Jemalloc;
+static ALLOC: moq_tokio::jemalloc::Allocator = moq_tokio::jemalloc::Allocator;
 
 mod audio;
 mod emulator;

@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use axum::http::Method;
 use futures::FutureExt;
-use hang::moq_net;
 use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};

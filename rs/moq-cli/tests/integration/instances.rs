@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use hang::moq_net::{self, Instance, Timestamp, origin, track};
 use moq_mux::catalog::Stream;
+use moq_net::{Instance, Timestamp, origin, track};
 
 const LITE_07: &str = "moq-lite-07-wip";
 

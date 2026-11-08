@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use hang::moq_net::origin;
+use moq_net::origin;
 use tokio::sync::{Notify, mpsc};
 
 use moq_audio::playback::Observer;

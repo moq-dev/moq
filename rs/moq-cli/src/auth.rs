@@ -1753,11 +1753,10 @@ relay = ["https://relay.example"]
 
 		let mut internal_config = moq_relay::internal::Config::default();
 		internal_config.listen = Some("127.0.0.1:0".parse().unwrap());
-		let internal =
-			moq_relay::internal::Internal::new(internal_config, moq_tokio::moq_net::stats::Registry::disabled())
-				.with_sessions(sessions)
-				.bind()
-				.expect("bind internal listener");
+		let internal = moq_relay::internal::Internal::new(internal_config, moq_net::stats::Registry::disabled())
+			.with_sessions(sessions)
+			.bind()
+			.expect("bind internal listener");
 		let listen = internal.addr().expect("internal listener is configured");
 		tokio::spawn(async move {
 			let _ = internal.run().await;

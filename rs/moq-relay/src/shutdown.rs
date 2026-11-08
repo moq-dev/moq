@@ -679,7 +679,7 @@ mod tests {
 		admission.grant(consumer);
 		let connection = connecting.await.unwrap().unwrap();
 		let draining = connection.draining().unwrap();
-		let goaway = moq_net::kio::wait(|waiter| draining.poll(waiter)).await.unwrap();
+		let goaway = kio::wait(|waiter| draining.poll(waiter)).await.unwrap();
 		assert_eq!(goaway.uri(), "");
 		connection.closed().await.unwrap();
 		running.await.unwrap().unwrap();

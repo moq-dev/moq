@@ -2244,7 +2244,7 @@ mod tests {
 		let mut subscriber = track.subscribe(
 			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_millis(500))),
 		);
-		let edge = match subscriber.poll_largest(&moq_net::kio::Waiter::noop()) {
+		let edge = match subscriber.poll_largest(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Some(edge)) => edge,
 			_ => panic!("the empty group is the largest"),
 		};

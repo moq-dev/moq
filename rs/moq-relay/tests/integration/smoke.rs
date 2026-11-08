@@ -12,7 +12,6 @@ use std::time::Duration;
 #[cfg(all(feature = "quic", feature = "websocket"))]
 use moq_relay::{Config, Relay};
 use moq_relay::{Connection, auth, cluster, web};
-use moq_tokio::moq_net;
 
 #[cfg(feature = "websocket")]
 use crate::logs::Logs;

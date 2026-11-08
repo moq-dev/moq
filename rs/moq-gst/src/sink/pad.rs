@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 
-use hang::moq_net;
 use moq_mux::import;
 
 use super::listed::Listed;

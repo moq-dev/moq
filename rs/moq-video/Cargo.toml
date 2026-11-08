@@ -144,7 +144,7 @@ tracing = { workspace = true }
 # GPU rendering behind the `render` feature. `wgpu::hal` is re-exported by wgpu
 # itself, so the zero-copy import paths reach the platform handles without a
 # separate wgpu-hal dependency that could drift to a different version.
-wgpu = { version = "30", optional = true }
+wgpu = { workspace = true, optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
 

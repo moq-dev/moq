@@ -12,7 +12,7 @@ pub(super) use moq_mux::timeline::Kind;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Track {
 	/// Resolved rather than as written, since several references name one broadcast.
-	broadcast: Option<hang::moq_net::Path>,
+	broadcast: Option<moq_net::Path>,
 	name: String,
 }
 

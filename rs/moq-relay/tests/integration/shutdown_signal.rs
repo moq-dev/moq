@@ -178,13 +178,10 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	// handler, registered above.
 	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
 
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(5),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("no GOAWAY within 5s of SIGINT")
-	.expect("session closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("no GOAWAY within 5s of SIGINT")
+		.expect("session closed without a GOAWAY");
 	// Empty URI: the relay is restarting, not moving. The window itself is the
 	// sender's own timer here (only moq-transport puts it on the wire),
 	// so it is the elapsed time below that proves it was honored.
@@ -220,13 +217,10 @@ async fn a_signal_right_after_ready_drains_inner() {
 	// for SIGTERM, so in a process of its own (nextest) the relay's handler is all
 	// that keeps this from killing the test.
 	assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0, "failed to raise SIGTERM");
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(5),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("no GOAWAY within 5s of SIGTERM")
-	.expect("session closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("no GOAWAY within 5s of SIGTERM")
+		.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
@@ -302,13 +296,10 @@ async fn an_embedder_drains_on_its_trigger_inner() {
 	// The embedder decides when.
 	let started = kio::clock::now();
 	trigger.start();
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(5),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("no GOAWAY within 5s of the trigger")
-	.expect("session closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("no GOAWAY within 5s of the trigger")
+		.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
 	kio::clock::timeout(Duration::from_secs(15), run)
@@ -343,13 +334,10 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let _straggler = straggler(port).await;
 	trigger.start();
 	let deadline = kio::clock::now() + DRAIN_TIMEOUT;
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(5),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("no GOAWAY within 5s of the trigger")
-	.expect("session closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("no GOAWAY within 5s of the trigger")
+		.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 	let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
 	assert!(
@@ -363,13 +351,10 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let dialed = kio::clock::now();
 	let arrival = connect(&client, port).await;
 	let draining = arrival.draining().expect("connected");
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(1),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("an arrival mid-drain was not sent a GOAWAY")
-	.expect("arrival closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("an arrival mid-drain was not sent a GOAWAY")
+		.expect("arrival closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
 	// Only what is left of the window, not a fresh one that would outlive the
@@ -533,7 +518,7 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 /// A one-shot client offering `version` (every version when empty): a
 /// reconnecting one would migrate on the GOAWAY and hide whether the relay
 /// closed the original session.
-fn client(version: Vec<moq_tokio::moq_net::Version>) -> moq_tokio::Client {
+fn client(version: Vec<moq_net::Version>) -> moq_tokio::Client {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.version = version;
