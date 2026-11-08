@@ -240,7 +240,7 @@ func (s *Server) Accept(ctx context.Context) (*Request, error) {
 // All ranges over incoming requests until the server stops or the loop
 // breaks. Each request must be answered with Accept or Reject.
 func (s *Server) All(ctx context.Context) iter.Seq2[*Request, error] {
-	return bridge.Seq(ctx, s.Accept)
+	return bridge.Seq(ctx, nil, s.Accept)
 }
 
 // Serve accepts every session in a loop, holding each one alive in its own

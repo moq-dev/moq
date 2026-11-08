@@ -11,8 +11,6 @@ type (
 	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec or AacAudioCodec;
 	// adding a codec later adds a constructor, not a breaking enum change.
 	AudioCodec = ffi.MoqAudioCodec
-	// AudioDecoderOutput configures the PCM format, sample rate, and channels an audio.Consumer delivers.
-	AudioDecoderOutput = ffi.MoqAudioDecoderOutput
 	// AudioEncoderInput declares the PCM sample format, sample rate, and channel count of frames written to an audio producer.
 	AudioEncoderInput = ffi.MoqAudioEncoderInput
 	// AudioEncoderOutput configures the encoder: codec, optional sample rate, channels, bitrate, and frame duration.
@@ -73,8 +71,6 @@ type (
 	Order = ffi.MoqOrder
 	// Position is a location within a track: a group sequence and a frame index in it.
 	Position = ffi.MoqPosition
-	// VideoDecoderOutput configures what a video.Consumer delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
-	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
 	VideoSurface = ffi.MoqVideoSurface
 	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.

@@ -18,7 +18,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
         from datetime import timedelta
 
         import moq
-        from moq.testing import Clock
+        from clock import Clock
 
         clock = Clock()
 
@@ -64,7 +64,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
 def test_clock_refuses_invalid_advances() -> None:
     _run(
         """
-        from moq.testing import Clock
+        from clock import Clock
 
         clock = Clock()
         for seconds in (-1, float("nan"), float("inf")):
@@ -92,7 +92,7 @@ def test_clock_refuses_a_started_runtime() -> None:
     _run(
         """
         import moq
-        from moq.testing import Clock
+        from clock import Clock
 
         moq.BroadcastProducer()
         try:

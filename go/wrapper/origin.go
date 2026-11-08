@@ -144,7 +144,7 @@ func (r *Route) Requested(ctx context.Context) (*BroadcastRequest, error) {
 // All ranges over requested broadcasts until the route ends, a call errors, or
 // the loop breaks.
 func (r *Route) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
-	return bridge.Seq(ctx, r.Requested)
+	return bridge.Seq(ctx, nil, r.Requested)
 }
 
 // Cancel retracts the route now, rather than when the collector reclaims it.
@@ -254,7 +254,7 @@ type AnnounceConsumer struct {
 
 // Next returns the next path becoming present or absent, or (nil, nil) when the stream ends.
 func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
-	res, err := bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
+	res, err := bridge.Call(ctx, nil, a.inner.Next)
 	if err != nil || res == nil {
 		return nil, err
 	}
@@ -263,7 +263,7 @@ func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 
 // All ranges over the listing's events until the stream ends or the loop breaks.
 func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[AnnounceEvent, error] {
-	return bridge.Seq(ctx, a.Next)
+	return bridge.Seq(ctx, a.inner.Cancel, a.Next)
 }
 
 // Cancel stops the listing.
@@ -284,7 +284,7 @@ type Following struct {
 // instance, once another instance takes it over), then whatever serves it next. Drop
 // what was read from the previous instance then: its tracks end when its route does.
 func (a *Following) Available(ctx context.Context) (*BroadcastConsumer, error) {
-	inner, err := bridge.CallHandle(ctx, a.inner.Cancel, func(ctx context.Context) (*ffi.MoqBroadcastConsumer, error) {
+	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqBroadcastConsumer, error) {
 		res, err := a.inner.Available(ctx)
 		if err != nil || res == nil {
 			return nil, err

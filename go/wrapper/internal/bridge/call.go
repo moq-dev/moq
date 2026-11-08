@@ -130,6 +130,9 @@ func releaseHandle[T Handle](val T) {
 // into a Go 1.23 range-over-func sequence. It yields (value, nil) for each item,
 // yields (nil, err) once if a call fails, and stops cleanly when Next returns nil
 // (the stream ended) or when the consumer breaks out of the range loop.
+// cancel, the stream's own Cancel, runs when the loop ends because ctx did:
+// each read cancels only itself, but a range loop over a cancelled context is
+// done with the stream.
 //
 //	for frame, err := range consumer.All(ctx) {
 //	    if err != nil {
@@ -138,12 +141,15 @@ func releaseHandle[T Handle](val T) {
 //	    }
 //	    // use frame
 //	}
-func Seq[T comparable](ctx context.Context, next func(context.Context) (T, error)) iter.Seq2[T, error] {
+func Seq[T comparable](ctx context.Context, cancel func(), next func(context.Context) (T, error)) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
 		var zero T
 		for {
 			val, err := next(ctx)
 			if err != nil {
+				if cancel != nil && ctx.Err() != nil {
+					cancel()
+				}
 				yield(zero, err)
 				return
 			}

@@ -302,6 +302,12 @@ extension GrantConsumerUpdates on GrantConsumer {
   Stream<Grant?> updates() => _Grants(this);
 }
 
+/// A route's instance under the name the other bindings use.
+extension RouteInstance on MoqRoute {
+  /// The instance this route announces under (empty for a hidden route that never announced).
+  String instance() => instanceId();
+}
+
 /// A [Stream] view over an announcement cursor.
 extension AnnounceConsumerUpdates on AnnounceConsumer {
   /// Stream announce events until the cursor ends.
