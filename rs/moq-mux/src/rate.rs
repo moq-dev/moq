@@ -330,7 +330,9 @@ impl Control {
 		let disable = boundary.is_some_and(|boundary| desired < boundary);
 		let under = boundary.is_some_and(|boundary| self.target < boundary);
 		let settling = next > self.target && next == self.policy.max;
-		let suppressed = next == self.target || (!settling && next.abs_diff(self.target) < band(self.target));
+		// A sender above the ceiling, such as an assumed one, always comes down to it.
+		let over = self.target > self.policy.max;
+		let suppressed = next == self.target || (!settling && !over && next.abs_diff(self.target) < band(self.target));
 		if suppressed && !(disable && under) {
 			self.deadline = self.raise(desired);
 			return None;
@@ -447,11 +449,12 @@ impl Follower {
 
 	/// Follow on from a sender already producing at `target`, such as one moving to a new
 	/// grant, rather than at [`Policy::max`]. The current grant is fed on the next poll, so a
-	/// sender below a grant that has room climbs back without waiting for the grant to change.
+	/// sender below a grant that has room climbs back without waiting for the grant to change,
+	/// and one above [`Policy::max`] is lowered to it.
 	pub fn assume(&mut self, target: Target) {
 		match target {
 			Target::Enabled(rate) => {
-				self.control.target = rate.min(self.control.policy.max);
+				self.control.target = rate;
 				self.control.enabled = true;
 				// The sender is at this rate now, so a raise ramps from here.
 				self.control.applied = Some(kio::clock::now());
@@ -983,6 +986,19 @@ mod tests {
 		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
 		follower.assume(Target::Disabled);
 		assert!(matches!(follower.next().await.unwrap(), Target::Enabled(_)));
+	}
+
+	/// A follower that assumes a sender above its ceiling lowers it to the ceiling, even from
+	/// inside the deadband, with the grant unchanged.
+	#[tokio::test(start_paused = true)]
+	async fn an_assumed_target_above_the_ceiling_comes_down() {
+		let grant = bandwidth::Producer::new();
+		grant.set(Some(bps(2_000_000))).unwrap();
+		for above in [4_000_000, 2_050_000] {
+			let mut follower = Follower::new(grant.consume(), Policy::new(bps(2_000_000)));
+			follower.assume(on(bps(above)));
+			assert_eq!(follower.next().await.unwrap(), on(bps(2_000_000)), "from {above}");
+		}
 	}
 
 	/// A new policy feeds the unchanged grant through it at once, and setting the same
