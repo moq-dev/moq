@@ -461,11 +461,12 @@ test("Consumer raises a malformed group an age skip passes after the track finis
 		expect(await within(consumer.next())).toMatchObject({ kind: "frame", group: 0n });
 		await flush();
 
-		// Group 1 holds a valid frame then a malformed one, and group 2 starts past the max delay, so the
-		// next read's decode skips group 1 for its age.
+		// Group 1 holds a valid frame then a malformed one, and group 2 starts a whole max delay behind
+		// its own newest frame, so the next read's decode skips group 1 for its age.
 		write(malformed, 10_000);
 		malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.now() });
 		write(later, 2_000_000);
+		write(later, 2_500_000);
 		await expect(within(consumer.next())).rejects.toThrow("buffer too short");
 	} finally {
 		consumer.close();
