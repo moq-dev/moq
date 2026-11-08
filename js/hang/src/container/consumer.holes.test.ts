@@ -46,8 +46,11 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		consumer.close();
 		track.finish();
 		track.close();
-		await reading;
-		installed.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
 	}
 });
 
@@ -97,8 +100,11 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		consumer.close();
 		track.finish();
 		track.close();
-		await reading;
-		installed.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
 	}
 });
 
@@ -138,8 +144,11 @@ test("the holes a stalled source left behind share one budget", async () => {
 		consumer.close();
 		track.finish();
 		track.close();
-		await reading;
-		installed.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
 	}
 });
 
@@ -182,8 +191,11 @@ test("a hole is late from the earliest arrival past it", async () => {
 		consumer.close();
 		track.finish();
 		track.close();
-		await reading;
-		installed.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
 	}
 });
 
@@ -234,8 +246,11 @@ test("a hole in a drained backlog is late from the earliest arrival past it, not
 		consumer.close();
 		track.finish();
 		track.close();
-		await reading;
-		installed.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
 	}
 });
 
@@ -305,8 +320,11 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 		consumer.close();
 		track.finish();
 		track.close();
-		await reading;
-		installed.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
 	}
 });
 
@@ -356,7 +374,10 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 		consumer.close();
 		track.finish();
 		track.close();
-		await reading;
-		installed.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
 	}
 });

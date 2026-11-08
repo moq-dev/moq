@@ -534,6 +534,9 @@ export class Consumer {
 		const start = this.#groups[0]?.consumer.sequence;
 		// The span left after each further skip, computed once the first skip shows more may follow.
 		let spans: Spans | undefined;
+		// The index of the first stamped group past the head, kept across skips so a run of unstamped
+		// groups ahead of it stays linear: each skip shifts it down one, and only a skip onto it rescans.
+		let stamped = 0;
 
 		// Keep skipping the oldest group while the buffered span exceeds the max delay.
 		// This also handles gaps in group sequence numbers: if #active points to a missing
@@ -585,11 +588,13 @@ export class Consumer {
 				// past every missing group in between, which a group arriving below it then never delivers.
 				// An unstamped group between ages out on a later pass, as the head. Mirrors Rust's skip of
 				// a blocking group, which measures from `poll_next_group`.
-				const successor = this.#groups.find((group, i) => i > 0 && group.start !== undefined)?.start;
+				if (stamped < 1) stamped = this.#groups.findIndex((group, i) => i > 0 && group.start !== undefined);
+				const successor = stamped < 1 ? undefined : this.#groups[stamped].start;
 				if (successor === undefined || max - successor < threshold) break;
 			}
 
 			this.#groups.shift();
+			stamped--;
 			this.#active = this.#groups[0]?.consumer.sequence;
 
 			const next = this.#groups[0];

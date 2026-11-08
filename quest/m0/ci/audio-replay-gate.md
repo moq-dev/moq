@@ -22,3 +22,9 @@ only Bun and the player's `js/` packages. Register them as a module in
 harness itself (`test/audio-quality/`), so the queue's `just ci` runs it too.
 Then decide whether `audio-quality.yml`'s release-PR job still earns its
 runner, and update the audio-quality README's account of where the replays run.
+
+`grade.ts --enforce` fails only a value over its ceiling, so a replay row that
+improves still passes and leaves headroom for a later regression, against
+`budgets.json`'s rule that a replay ceiling is exactly what it measures. Make
+`--enforce` fail a replay row whose value differs from its budget in either
+direction, keeping the ceiling comparison for the browser and native rows.
