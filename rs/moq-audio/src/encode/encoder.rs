@@ -896,7 +896,11 @@ mod tests {
 		let catalog = encoder.catalog();
 		let mut decoder = Decoder::new(&catalog, &DecodeConfig::default()).unwrap();
 		let input = [0.1, 0.2, 0.3].repeat(encoder.frame_size());
-		let output = crate::single(decoder.decode(&crate::single(encoder.encode(&input).unwrap()).payload).unwrap());
+		let output = crate::single(
+			decoder
+				.decode(&crate::single(encoder.encode(&input).unwrap()).payload)
+				.unwrap(),
+		);
 
 		assert_eq!(decoder.layout(), Layout::TwoPointOne);
 		assert_eq!(output.samples, input);
@@ -1044,7 +1048,10 @@ mod tests {
 	fn aac_finish_drains_the_encoder_delay() {
 		let mut enc = stub(&aac(Layout::Mono)).unwrap();
 		assert_eq!(enc.folded_delay(), backend::stub::DELAY);
-		assert!(enc.encode(&[0.0; 1024]).unwrap().is_empty(), "the stub holds its first frame");
+		assert!(
+			enc.encode(&[0.0; 1024]).unwrap().is_empty(),
+			"the stub holds its first frame"
+		);
 
 		// 2112 frames of delay take three 1024-frame packets.
 		let finish = enc.finish(&[]).unwrap();

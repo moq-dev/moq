@@ -1982,10 +1982,8 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let mut reader = moq_mux::container::Consumer::new(
-			track,
-			moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
-		);
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
 
 		// The stub holds the third frame, so only `finish` releases it.
 		producer.write(&pcm_frame(&[0.1; 3 * 1024], 1_000_000)).unwrap();

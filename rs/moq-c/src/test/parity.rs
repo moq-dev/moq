@@ -601,6 +601,7 @@ fn audio_encoder_without_a_broadcast() {
 		assert!(count >= 0, "encode failed: {count}");
 		packets += count;
 	}
+	assert_eq!(moq_audio_encoder_flush(encoder), 0, "libopus holds no packet");
 	let mut padding = 0;
 	let drained = unsafe { moq_audio_encoder_finish(encoder, pcm.as_ptr(), pcm.len() / 2, &mut padding) };
 	assert!(drained >= 0, "finish failed: {drained}");

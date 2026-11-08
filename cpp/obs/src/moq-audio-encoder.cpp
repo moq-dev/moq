@@ -114,7 +114,13 @@ bool Encode(void *data, struct encoder_frame *frame, struct encoder_packet *pack
 		LOG_ERROR("MoQ Opus encode failed: %s", encoded.error().to_string().c_str());
 		return false;
 	}
-	enc->packet = std::move(encoded->data);
+	// libopus returns each frame's packet from the call that submits it, and OBS
+	// takes at most one packet per call.
+	if (encoded->size() != 1) {
+		LOG_ERROR("MoQ Opus encoder returned %zu packets for one frame", encoded->size());
+		return false;
+	}
+	enc->packet = std::move(encoded->front().data);
 
 	// One packet per frame, stamped with its first input sample: the OpusHead's
 	// pre-skip already tells the decoder to trim the codec's lookahead.

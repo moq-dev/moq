@@ -381,7 +381,10 @@ pub(crate) mod tests {
 			init: bytes::Bytes::new(),
 		};
 		let mut decoder = Decoder::new(&catalog, &Config::default()).unwrap();
-		assert_eq!(crate::single(decoder.decode(AAC_FRAMES[0]).unwrap()).samples.len(), 1024);
+		assert_eq!(
+			crate::single(decoder.decode(AAC_FRAMES[0]).unwrap()).samples.len(),
+			1024
+		);
 	}
 
 	/// A packet libopus rejects is that packet's problem, not the
@@ -437,7 +440,10 @@ pub(crate) mod tests {
 			assert_eq!(decoder.sample_rate(), 48_000, "input rate {input_rate}");
 
 			// The pre-skip is 48 kHz samples, trimmed once.
-			assert_eq!(crate::single(decoder.decode(&packets[0]).unwrap()).samples.len(), 960 - 312);
+			assert_eq!(
+				crate::single(decoder.decode(&packets[0]).unwrap()).samples.len(),
+				960 - 312
+			);
 			assert_eq!(crate::single(decoder.decode(&packets[1]).unwrap()).samples.len(), 960);
 		}
 	}

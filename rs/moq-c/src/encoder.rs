@@ -226,8 +226,9 @@ pub extern "C" fn moq_audio_encoder_bitrate(encoder: u32, bitrate: u64) -> i32 {
 /// Encode one frame of interleaved f32 PCM, exactly [moq_audio_encoder_frame_size] samples
 /// per channel.
 ///
-/// Returns the number of packets produced (one), read with [moq_audio_encoder_packet], or a
-/// negative code on failure.
+/// Returns the number of packets now ready, read with [moq_audio_encoder_packet], or a negative
+/// code on failure: zero while a pipelining codec holds the frame, or several when it releases
+/// earlier ones.
 ///
 /// # Safety
 /// - `pcm` must point at `pcm_len` floats.
@@ -236,8 +237,21 @@ pub unsafe extern "C" fn moq_audio_encoder_encode(encoder: u32, pcm: *const f32,
 	ffi::enter(move || {
 		let pcm = unsafe { ffi::parse_slice(pcm, pcm_len)? };
 		with(encoder, audio, |audio| {
-			let packet = audio.encoder()?.encode(pcm)?;
-			audio.keep([packet])
+			let packets = audio.encoder()?.encode(pcm)?;
+			audio.keep(packets)
+		})
+	})
+}
+
+/// Drain the packets the codec still holds, without padding, keeping the encoder open.
+///
+/// Returns their count, read with [moq_audio_encoder_packet], or a negative code.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_audio_encoder_flush(encoder: u32) -> i32 {
+	ffi::enter(move || {
+		with(encoder, audio, |audio| {
+			let packets = audio.encoder()?.flush()?;
+			audio.keep(packets)
 		})
 	})
 }
@@ -274,7 +288,8 @@ pub unsafe extern "C" fn moq_audio_encoder_finish(
 	})
 }
 
-/// Read packet `index` from the last [moq_audio_encoder_encode] or [moq_audio_encoder_finish].
+/// Read packet `index` from the last [moq_audio_encoder_encode], [moq_audio_encoder_flush], or
+/// [moq_audio_encoder_finish].
 ///
 /// `payload` borrows the encoder until its next call or [moq_audio_encoder_free]; `timestamp`
 /// is NULL and `keyframe` false, since the codec stamps nothing. Returns zero, or a negative
