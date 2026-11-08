@@ -7,7 +7,7 @@ use crate::{Dir, StreamId, connection::Error, frame};
 
 mod lease;
 pub mod recv;
-use recv::Recv;
+use recv::{Reader, Recv};
 
 #[cfg(test)]
 mod saturated;

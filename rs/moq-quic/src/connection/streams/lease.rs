@@ -8,7 +8,7 @@ use std::task::Poll;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use super::StreamId;
-use super::recv::{Error, Stream};
+use super::recv::{Error, Reader, Stream};
 use super::{StreamsState, state::get_or_insert_recv};
 use crate::VarInt;
 use crate::connection::assembler::Assembler;
@@ -41,9 +41,6 @@ pub(super) struct Leased {
 	/// The chunks are out in a [`Lease`], whose reader may be about to free the window, which
 	/// holds eviction off until it comes back.
 	out: bool,
-	/// Discarded to free a stuck window, with the reader and the peer yet to hear of it from a
-	/// stop.
-	pub(super) evicted: bool,
 }
 
 /// A receive stream's place in the eviction order: lowest priority first, then the newest, which
@@ -182,7 +179,6 @@ impl Leased {
 		self.chunks.clear();
 		self.want = None;
 		self.ready = false;
-		self.evicted = true;
 		leased
 	}
 
@@ -351,7 +347,12 @@ impl Stream<'_> {
 		match result {
 			// A stuck window may have evicted this very stream, waking its readers before this
 			// one parked.
-			Err(Error::Blocked) if self.state.lease_mut(self.id).is_some_and(|lease| lease.evicted) => {
+			Err(Error::Blocked)
+				if self
+					.state
+					.recv_mut(self.id)
+					.is_some_and(|recv| recv.reader == Reader::Evicted) =>
+			{
 				Poll::Ready(Err(Error::Evicted))
 			}
 			Err(Error::Blocked) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
@@ -392,11 +393,11 @@ impl Stream<'_> {
 
 	/// Return the credit of every byte read out of a lease.
 	fn release_credit(&mut self) -> bool {
-		let Some(lease) = self.state.lease_mut(self.id) else {
+		let Some(recv) = self.state.recv_mut(self.id) else {
 			return false;
 		};
-		let freed = lease.release();
-		if lease.evicted {
+		let freed = recv.lease.release();
+		if recv.reader == Reader::Evicted {
 			self.state.evicted_held -= freed;
 		}
 		let transmit = self.return_credit(freed);
@@ -444,14 +445,15 @@ impl Stream<'_> {
 	///
 	/// Dropped instead once the stream was stopped, which discarded its lease and its credit.
 	fn put_back(&mut self, lease: Lease) {
-		let Some(state) = self.state.lease_mut(self.id) else {
+		let Some(recv) = self.state.recv_mut(self.id) else {
 			return;
 		};
+		let state = &mut recv.lease;
 		if !std::mem::take(&mut state.out) {
 			return;
 		}
 		// An out lease holds eviction off, and nothing fills a lease while it is out.
-		debug_assert!(!state.evicted && state.chunks.is_empty());
+		debug_assert!(recv.reader != Reader::Evicted && state.chunks.is_empty());
 		state.chunks = lease.chunks;
 		state.len = lease.len as u64;
 	}
@@ -477,11 +479,10 @@ impl Stream<'_> {
 		};
 		let recv = get_or_insert_recv(slot, self.state.initial_stream_receive_window);
 		assert!(!recv.lease.out, "leased again before the last lease was handed back");
-		if recv.lease.evicted {
-			return Err(Error::Evicted);
-		}
-		if recv.stopped {
-			return Err(Error::Closed);
+		match recv.reader {
+			Reader::Reading => {}
+			Reader::Evicted => return Err(Error::Evicted),
+			Reader::Stopped => return Err(Error::Closed),
 		}
 		self.state.unlooked.remove(&self.id);
 		self.state.held += recv.lease.fill(&mut recv.assembler);
@@ -530,12 +531,24 @@ impl StreamsState {
 	pub(super) fn leased(&self, id: StreamId) -> Option<&Leased> {
 		let recv = self.recv.get(&id)?.as_deref()?;
 		let lease = &recv.lease;
-		(lease.filled && (!recv.stopped || lease.evicted)).then_some(lease)
+		(lease.filled && recv.reader != Reader::Stopped).then_some(lease)
+	}
+
+	/// Whether a stuck window evicted `id`, and its reader has yet to stop it.
+	#[cfg(test)]
+	pub(super) fn is_evicted(&self, id: StreamId) -> bool {
+		self.recv
+			.get(&id)
+			.and_then(|slot| slot.as_deref())
+			.is_some_and(|recv| recv.reader == Reader::Evicted)
+	}
+
+	fn recv_mut(&mut self, id: StreamId) -> Option<&mut super::Recv> {
+		self.recv.get_mut(&id)?.as_deref_mut()
 	}
 
 	fn lease_mut(&mut self, id: StreamId) -> Option<&mut Leased> {
-		let recv = self.recv.get_mut(&id)?.as_deref_mut()?;
-		Some(&mut recv.lease)
+		Some(&mut self.recv_mut(id)?.lease)
 	}
 
 	/// Return `bytes` of credit withheld by a lease to the peer.
@@ -550,13 +563,13 @@ impl StreamsState {
 	}
 
 	/// Take the lease of `id`, stopped or freed, out of the eviction order and return the credit
-	/// of the bytes it holds.
-	pub(super) fn discard_lease(&mut self, id: StreamId, lease: &mut Leased) -> bool {
+	/// of the bytes it holds, which `evicted` counts in [`Self::evicted_held`].
+	pub(super) fn discard_lease(&mut self, id: StreamId, lease: &mut Leased, evicted: bool) -> bool {
 		if std::mem::take(&mut lease.ranked) {
 			self.ranks.remove(&lease.rank(id));
 		}
 		let held = lease.discard();
-		if std::mem::take(&mut lease.evicted) {
+		if evicted {
 			self.evicted_held -= held;
 		}
 		self.release(held)
@@ -614,7 +627,7 @@ impl StreamsState {
 				.and_then(|slot| slot.as_deref_mut())
 				.expect("a freed stream leaves the ranks");
 			recv.lease.ranked = false;
-			if recv.stopped || recv.unread_credit() + recv.lease.held == 0 {
+			if recv.reader != Reader::Reading || recv.unread_credit() + recv.lease.held == 0 {
 				continue;
 			}
 			debug_assert!(
@@ -640,7 +653,7 @@ impl StreamsState {
 				.recv
 				.get(&id)
 				.and_then(|slot| slot.as_deref())
-				.filter(|recv| !recv.stopped && unlooked(recv.unread_credit(), &recv.lease));
+				.filter(|recv| recv.reader == Reader::Reading && unlooked(recv.unread_credit(), &recv.lease));
 			if let Some(recv) = recv {
 				// Nothing else reruns the pass once the lease comes back.
 				self.stuck_waiting = recv.lease.out;
@@ -670,6 +683,7 @@ impl StreamsState {
 		self.evicted_held += recv.lease.held;
 		// The peer hears of it when the application stops the stream with its own code.
 		let (unread, _) = recv.stop().expect("a candidate is not stopped");
+		recv.reader = Reader::Evicted;
 		self.held -= leased;
 		self.unlooked.remove(&id);
 		self.evicted += 1;
@@ -688,12 +702,12 @@ impl StreamsState {
 			};
 			let lease = &recv.lease;
 			held += lease.held;
-			if lease.evicted {
+			if recv.reader == Reader::Evicted {
 				evicted_held += lease.held;
 			}
 			assert_eq!(lease.ranked, self.ranks.contains(&lease.rank(id)), "{id}");
 			ranked += usize::from(lease.ranked);
-			if lease.filled && !recv.stopped && recv.unread_credit() + lease.held > 0 {
+			if lease.filled && recv.reader == Reader::Reading && recv.unread_credit() + lease.held > 0 {
 				assert!(lease.ranked, "{id} holds credit unranked");
 			}
 		}

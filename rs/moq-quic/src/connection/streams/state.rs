@@ -11,7 +11,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 
 use super::{
-	Next, Recv, Retransmits, Schedule, Send, SendState, StreamHalf, ThinRetransmits,
+	Next, Reader, Recv, Retransmits, Schedule, Send, SendState, StreamHalf, ThinRetransmits,
 	lease::Rank,
 	send::{End, Error},
 };
@@ -267,7 +267,7 @@ impl StreamsState {
 		}
 
 		let (new_bytes, closed) = rs.ingest(frame, payload_len, self.data_recvd, self.local_max_data)?;
-		let (stopped, evicted) = (rs.stopped, rs.lease.evicted);
+		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 
@@ -362,7 +362,7 @@ impl StreamsState {
 			// Redundant reset
 			return Ok(false);
 		};
-		let (stopped, evicted) = (rs.stopped, rs.lease.evicted);
+		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 		let credit = if stopped {
@@ -717,10 +717,14 @@ impl StreamsState {
 			// are required to encode it.
 			let max_buf_size = max_buf_size - buf.len() - 1 - VarInt::size(id.into());
 			let (offsets, encode_length) = stream.pending.poll_transmit(max_buf_size);
-			let fin = offsets.end == stream.pending.offset() && matches!(stream.state, SendState::DataSent { .. });
-			if fin {
-				stream.fin_pending = false;
-			}
+			let fin = offsets.end == stream.pending.offset()
+				&& match &mut stream.state {
+					SendState::DataSent { fin_pending, .. } => {
+						*fin_pending = false;
+						true
+					}
+					SendState::Ready | SendState::ResetSent { .. } => false,
+				};
 
 			let meta = frame::StreamMeta { id, offsets, fin };
 			trace!(id = %meta.id, off = meta.offsets.start, len = meta.offsets.end - meta.offsets.start, fin = meta.fin, "STREAM");
@@ -857,7 +861,11 @@ impl StreamsState {
 		};
 		let was_pending = stream.is_pending();
 		// The Reliable Size of a reset stream supersedes any FIN
-		stream.fin_pending |= frame.fin && !stream.is_reset();
+		if frame.fin
+			&& let SendState::DataSent { fin_pending, .. } = &mut stream.state
+		{
+			*fin_pending = true;
+		}
 		stream.pending.retransmit(frame.offsets);
 		if !was_pending && stream.is_pending() {
 			self.pending.push(frame.id, &mut stream.slot, stream.priority);
@@ -1314,7 +1322,8 @@ impl StreamsState {
 	///
 	/// Returns whether a `MAX_DATA` frame should be enqueued for that credit.
 	pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: Box<Recv>) -> bool {
-		let transmit = self.discard_lease(id, &mut recv.lease);
+		let evicted = recv.reader == Reader::Evicted;
+		let transmit = self.discard_lease(id, &mut recv.lease, evicted);
 		self.unlooked.remove(&id);
 		self.stream_freed(id, StreamHalf::Recv);
 		transmit
@@ -3990,7 +3999,7 @@ mod tests {
 		assert_eq!(client.credit_stats().evicted, 2);
 		assert_eq!(readers.woken(&mut client), [ids[1], ids[2]]);
 		assert_eq!(client.local_max_data, max_data + WINDOW / 2);
-		assert!(!client.leased(ids[0]).unwrap().evicted);
+		assert!(client.leased(ids[0]).is_some() && !client.is_evicted(ids[0]));
 	}
 
 	/// However its reader consumes tiny frames, and however many arrive, the lease holds copies
@@ -4369,7 +4378,7 @@ mod tests {
 		assert!(matches!(wait(&mut client, high, 2000), Err(recv::Error::Blocked)));
 		assert!(matches!(wait(&mut client, low, 2000), Err(recv::Error::Blocked)));
 		assert!(
-			client.leased(low).is_some_and(|lease| !lease.evicted),
+			client.leased(low).is_some() && !client.is_evicted(low),
 			"a byte of credit left"
 		);
 		assert_eq!(client.credit_stats().evicted, 0);
@@ -4377,7 +4386,7 @@ mod tests {
 		data(&mut client, low, WINDOW - 1, 1, false);
 		// The arrival woke the reader of `low`, which may yet consume.
 		assert_eq!(readers.woken(&mut client), [low]);
-		assert!(!client.leased(low).unwrap().evicted);
+		assert!(client.leased(low).is_some() && !client.is_evicted(low));
 		let blocked = wait_transmit(&mut client, low, 2000);
 		assert_eq!(blocked, (Err(recv::Error::Blocked), true));
 		assert_eq!(readers.woken(&mut client), [low], "the evicted reader wakes");
@@ -4415,7 +4424,7 @@ mod tests {
 		assert!(matches!(wait(&mut client, high, 2000), Err(recv::Error::Blocked)));
 		assert!(matches!(wait(&mut client, low, 2000), Err(recv::Error::Blocked)));
 		data(&mut client, low, WINDOW - 1, 1, false);
-		assert!(!client.leased(low).unwrap().evicted);
+		assert!(client.leased(low).is_some() && !client.is_evicted(low));
 
 		// This wait spends the last byte of credit and evicts its own stream.
 		let waiter = Counter::new();
@@ -4587,7 +4596,7 @@ mod tests {
 			recv(&mut client, &mut pending, waiting).peek(2 * WINDOW),
 			(Err(recv::Error::Blocked), true)
 		);
-		assert!(client.leased(parked).unwrap().evicted);
+		assert!(client.leased(parked).is_some() && client.is_evicted(parked));
 		assert!(!pending.max_stream_id[Dir::Uni as usize], "its reader has yet to hear");
 
 		let pending = stop(&mut client, parked, 0);

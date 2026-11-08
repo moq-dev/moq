@@ -17,8 +17,6 @@ pub(super) struct Send {
 	pub(super) pending: SendBuffer,
 	pub(super) priority: i64,
 	pub(super) slot: Slot,
-	/// Whether a frame containing a FIN bit must be transmitted, even if we don't have any new data
-	pub(super) fin_pending: bool,
 	/// Value of `max_data` for which a `STREAM_DATA_BLOCKED` frame was most recently queued
 	///
 	/// A new frame is only queued once the peer has raised the limit.
@@ -39,7 +37,6 @@ impl Send {
 			pending: SendBuffer::new(),
 			priority: 0,
 			slot: Slot::default(),
-			fin_pending: false,
 			data_blocked_limit: None,
 			stop_reason: None,
 			notify: None,
@@ -56,8 +53,10 @@ impl Send {
 		if let Some(error_code) = self.stop_reason {
 			Err(Error::Stopped(error_code))
 		} else if self.state == SendState::Ready {
-			self.state = SendState::DataSent { finish_acked: false };
-			self.fin_pending = true;
+			self.state = SendState::DataSent {
+				finish_acked: false,
+				fin_pending: true,
+			};
 			Ok(())
 		} else {
 			Err(Error::Closed)
@@ -101,7 +100,7 @@ impl Send {
 		}
 		match self.state {
 			SendState::ResetSent { error_code, .. } => Some(End::Reset(error_code)),
-			SendState::DataSent { finish_acked: true } if self.pending.is_fully_acked() => Some(End::Finished),
+			SendState::DataSent { finish_acked: true, .. } if self.pending.is_fully_acked() => Some(End::Finished),
 			_ => None,
 		}
 	}
@@ -120,7 +119,6 @@ impl Send {
 		debug_assert!(reliable_size <= self.pending.offset());
 		let final_size = self.pending.offset();
 		self.pending.truncate(reliable_size);
-		self.fin_pending = false;
 		let send = at || self.pending.is_fully_acked();
 		self.state = ResetSent {
 			final_size,
@@ -240,7 +238,7 @@ impl Send {
 	pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
 		self.pending.ack(frame.offsets);
 		match &mut self.state {
-			SendState::DataSent { finish_acked } => {
+			SendState::DataSent { finish_acked, .. } => {
 				*finish_acked |= frame.fin;
 				*finish_acked && self.pending.is_fully_acked()
 			}
@@ -295,7 +293,7 @@ impl Send {
 	}
 
 	pub(super) fn is_pending(&self) -> bool {
-		self.pending.has_unsent_data() || self.fin_pending
+		self.pending.has_unsent_data() || matches!(self.state, SendState::DataSent { fin_pending: true, .. })
 	}
 
 	pub(super) fn is_writable(&self) -> bool {
@@ -308,7 +306,11 @@ pub(super) enum SendState {
 	/// Sending new data
 	Ready,
 	/// Stream was finished; now sending retransmits only
-	DataSent { finish_acked: bool },
+	DataSent {
+		finish_acked: bool,
+		/// A frame with the FIN bit is due, even without new data
+		fin_pending: bool,
+	},
 	/// Reset by the application, while data below `reliable_size` is still delivered
 	///
 	/// The peer gets RESET_STREAM_AT, or, without it, a RESET_STREAM `held` until it has
