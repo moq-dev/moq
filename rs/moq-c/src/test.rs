@@ -5,6 +5,8 @@ use std::ffi::{c_char, c_void};
 use std::sync::mpsc;
 use std::time::Duration;
 
+mod parity;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A timestamp of `value` microseconds.
@@ -368,6 +370,7 @@ fn video_read(id: u32) -> (i32, moq_video_read) {
 			height: 0,
 			data: std::ptr::null(),
 			data_size: 0,
+			surface: std::ptr::null(),
 		},
 		gap: moq_decode_gap::default(),
 		end: moq_timestamp::default(),
@@ -458,6 +461,7 @@ fn publish_container(broadcast: u32, format: moq_container_format, init: &[u8]) 
 		format: format as u32,
 		init: init_ptr(init),
 		init_len: init.len(),
+		timebase: 0,
 	};
 
 	unsafe { moq_publish_container(broadcast, &config) }
@@ -705,6 +709,16 @@ fn publish_media_labels_config_without_naming_track() {
 		sample_rate: 0,
 		channel_count: 0,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id1, 0, &mut audio_cfg) }, 0);
 	assert_eq!(
@@ -776,6 +790,14 @@ fn publish_catalog_config_invalid_broadcast() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert!(unsafe { moq_publish_video_config(0, &video) } < 0);
 	assert!(unsafe { moq_publish_video_properties(0, &moq_video_properties::default()) } < 0);
@@ -793,6 +815,16 @@ fn publish_catalog_config_invalid_broadcast() {
 		sample_rate: 48000,
 		channel_count: 2,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert!(unsafe { moq_publish_audio_config(0, &audio) } < 0);
 
@@ -832,6 +864,14 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(
 		unsafe { moq_publish_video_config(broadcast, &video) },
@@ -883,6 +923,14 @@ fn publish_video_config_replaces_its_own_rendition() {
 		coded_width: 640,
 		coded_height: 360,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
@@ -928,6 +976,14 @@ fn manual_video_identity_change_is_refused() {
 		coded_height: 360,
 		container: moq_container::default(),
 		preference: 0,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 	let next = "vp09.00.10.08";
@@ -962,6 +1018,16 @@ fn manual_audio_identity_change_is_refused() {
 		sample_rate: 48_000,
 		channel_count: 2,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
 	audio.label = label.as_ptr().cast();
@@ -1127,6 +1193,9 @@ fn publish_catalog_roundtrip() {
 	let width: u32 = 1920;
 	let height: u32 = 1080;
 	let description: &[u8] = &[0x01, 0x02, 0x03];
+	let reference = "./source";
+	let instance = fresh_instance();
+	let track = "video-track";
 	let video = moq_video_config {
 		preference: 0,
 		name: video_name.as_ptr() as *const c_char,
@@ -1140,6 +1209,14 @@ fn publish_catalog_roundtrip() {
 		coded_width: width,
 		coded_height: height,
 		container: moq_container::default(),
+		warmup_us: 250_000,
+		has_warmup: true,
+		broadcast: reference.as_ptr().cast(),
+		broadcast_len: reference.len(),
+		instance: instance.as_ptr().cast(),
+		instance_len: instance.len(),
+		track: track.as_ptr().cast(),
+		track_len: track.len(),
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 	let disabled_video_name = "video-disabled";
@@ -1156,6 +1233,14 @@ fn publish_catalog_roundtrip() {
 		coded_width: width,
 		coded_height: height,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &disabled_video) }, 0);
 	{
@@ -1196,6 +1281,16 @@ fn publish_catalog_roundtrip() {
 		sample_rate: 48000,
 		channel_count: 2,
 		container: moq_container::default(),
+		jitter_us: 20_000,
+		has_jitter: true,
+		warmup_us: 40_000,
+		has_warmup: true,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
 
@@ -1219,6 +1314,14 @@ fn publish_catalog_roundtrip() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) }, 0);
 	let codec = unsafe {
@@ -1235,6 +1338,20 @@ fn publish_catalog_roundtrip() {
 	);
 	assert_eq!(video_cfg.coded_width, 1920);
 	assert_eq!(video_cfg.coded_height, 1080);
+	assert_eq!((video_cfg.warmup_us, video_cfg.has_warmup), (250_000, true));
+	// Normalized: a reader sees the plain relative path.
+	assert_eq!(
+		borrowed_string(video_cfg.broadcast, video_cfg.broadcast_len).as_deref(),
+		Some("source")
+	);
+	assert_eq!(
+		borrowed_string(video_cfg.instance, video_cfg.instance_len),
+		Some(instance.clone())
+	);
+	assert_eq!(
+		borrowed_string(video_cfg.track, video_cfg.track_len).as_deref(),
+		Some(track)
+	);
 	let mut enabled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
 		unsafe { moq_consume_video_enabled(catalog_id, 0, enabled.as_mut_ptr()) },
@@ -1288,6 +1405,16 @@ fn publish_catalog_roundtrip() {
 		sample_rate: 0,
 		channel_count: 0,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
 	assert_eq!(
@@ -1296,6 +1423,9 @@ fn publish_catalog_roundtrip() {
 	);
 	assert_eq!(audio_cfg.sample_rate, 48000);
 	assert_eq!(audio_cfg.channel_count, 2);
+	assert_eq!((audio_cfg.jitter_us, audio_cfg.has_jitter), (20_000, true));
+	assert_eq!((audio_cfg.warmup_us, audio_cfg.has_warmup), (40_000, true));
+	assert!(audio_cfg.broadcast.is_null() && audio_cfg.instance.is_null() && audio_cfg.track.is_null());
 
 	// Removing the video rendition republishes a catalog without it.
 	assert_eq!(
@@ -1343,6 +1473,14 @@ fn a_half_specified_coded_size_round_trips() {
 		coded_width: 1920,
 		coded_height: 0, // absent, not "zero pixels tall"
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 
@@ -1364,6 +1502,14 @@ fn a_half_specified_coded_size_round_trips() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut read) }, 0);
 	assert_eq!(read.preference, -1);
@@ -1430,6 +1576,14 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 			init: std::ptr::null(),
 			init_len: 0,
 		},
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 
@@ -1452,6 +1606,14 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut video_cfg) }, 0);
 	assert_eq!(
@@ -1529,6 +1691,16 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 			init: init.as_ptr(),
 			init_len: init.len(),
 		},
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
 
@@ -1549,6 +1721,16 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 		sample_rate: 0,
 		channel_count: 0,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog, 0, &mut audio_cfg) }, 0);
 	assert_eq!(
@@ -1588,6 +1770,14 @@ fn unpublishable_catalog_containers_are_rejected() {
 		coded_width: 0,
 		coded_height: 0,
 		container,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 
 	// UNKNOWN only ever comes out of a catalog: we keep none of the original JSON, so
@@ -3471,6 +3661,14 @@ fn media_consumers_cancel_while_subscribing() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 	let (audio_name, audio_codec) = ("audio", "opus");
@@ -3486,6 +3684,16 @@ fn media_consumers_cancel_while_subscribing() {
 		sample_rate: 48000,
 		channel_count: 2,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
 
@@ -4952,6 +5160,16 @@ fn local_publish_consume() {
 		sample_rate: 0,
 		channel_count: 0,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
 	assert_eq!(audio_cfg.sample_rate, 48000);
@@ -4979,6 +5197,14 @@ fn local_publish_consume() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert!(
 		unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) } < 0,
@@ -5068,6 +5294,16 @@ fn follow_local() {
 		sample_rate: 0,
 		channel_count: 0,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
 	assert_eq!(audio_cfg.sample_rate, 48000);
@@ -5082,15 +5318,12 @@ fn follow_local() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
-/// there, not on the broadcast the catalog came from. Ignoring the reference subscribes on the
-/// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
-#[test]
-fn consume_audio_follows_a_sibling_broadcast_reference() {
-	let origin = id(moq_origin_create());
-
+/// Publish an Opus rendition on `a/source` (served under `source_instance`) and describe it
+/// in `a/pub`'s catalog as a sibling reference naming `rendition_instance`, returning
+/// (source, media, broadcast).
+fn publish_sibling_audio(origin: u32, source_instance: &str, rendition_instance: Option<&str>) -> (u32, u32, u32) {
 	// Only the sibling serves the track; the catalog broadcast just describes it.
-	let source = publish_broadcast(origin, b"a/source");
+	let source = create_route(origin, b"a/source", Some(&route_options(0, source_instance, false))).1;
 	let init = opus_head();
 	let media = id(publish_audio(
 		source,
@@ -5115,6 +5348,10 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 
 	let broadcast = publish_broadcast(origin, b"a/pub");
 	let codec = "opus";
+	let sibling = "./source";
+	let (instance, instance_len) = rendition_instance.map_or((std::ptr::null(), 0), |instance| {
+		(instance.as_ptr() as *const c_char, instance.len())
+	});
 	let config = moq_audio_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
@@ -5127,22 +5364,30 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 		sample_rate: 48000,
 		channel_count: 2,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: sibling.as_ptr() as *const c_char,
+		broadcast_len: sibling.len(),
+		instance,
+		instance_len,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &config) }, 0);
+	(source, media, broadcast)
+}
 
-	// The C config struct has no broadcast field, so point the rendition at the sibling here.
-	{
-		let mut state = State::lock();
-		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
-		catalog
-			.modify()
-			.unwrap()
-			.audio
-			.renditions
-			.get_mut(&name)
-			.unwrap()
-			.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
-	}
+/// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
+/// there, not on the broadcast the catalog came from. Ignoring the reference subscribes on the
+/// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
+/// The rendition's instance, when it matches the sibling's, does not get in the way.
+#[test]
+fn consume_audio_follows_a_sibling_broadcast_reference() {
+	let origin = id(moq_origin_create());
+	let instance = fresh_instance();
+	let (source, media, broadcast) = publish_sibling_audio(origin, &instance, Some(&instance));
 
 	let consume = request_broadcast(origin, b"a/pub");
 	let catalog_cb = Callback::new();
@@ -5180,6 +5425,189 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_close(source), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A rendition naming an instance refuses a sibling proven to serve another stream, rather
+/// than delivering that stream's frames.
+#[test]
+fn consume_audio_refuses_a_sibling_of_another_instance() {
+	let origin = id(moq_origin_create());
+	let (wanted, served) = (fresh_instance(), fresh_instance());
+	let (source, media, broadcast) = publish_sibling_audio(origin, &served, Some(&wanted));
+
+	let consume = request_broadcast(origin, b"a/pub");
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let frame_cb = Callback::new();
+	let _track = id(unsafe { moq_consume_audio(catalog_id, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
+	let payload = b"another stream";
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(1_000_000)) },
+		0
+	);
+	let code = frame_cb.recv();
+	assert!(code < 0, "a sibling of another instance is refused, got {code}");
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_close(source), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A decoder whose rendition names a sibling broadcast that is never announced waits on it
+/// forever, so a cancel during that wait must still end the task with a terminal `0`.
+#[test]
+fn decoders_cancel_while_resolving_a_sibling() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"r/pub");
+	{
+		let mut state = State::lock();
+		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
+		let mut catalog = catalog.modify().unwrap();
+		let missing = moq_net::path::Relative::new("./missing").unwrap();
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.broadcast = Some(missing.clone());
+		catalog.audio.renditions.insert("audio".to_string(), audio);
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.broadcast = Some(missing);
+		catalog.video.renditions.insert("video".to_string(), video);
+	}
+
+	let consume = request_broadcast(origin, b"r/pub");
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let audio_output = moq_audio_decoder_output {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 0,
+		channels: 0,
+		delay: moq_delay::default(),
+		start: 0,
+		fixed: false,
+	};
+	let audio_cb = Callback::new();
+	let audio = id(unsafe { moq_decode_audio(catalog_id, 0, &audio_output, Some(channel_callback), audio_cb.ptr) });
+	let video_output = moq_video_decoder_output {
+		delay: moq_delay::default(),
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+		width: 0,
+		height: 0,
+		start: 0,
+		surface: false,
+	};
+	let video_cb = Callback::new();
+	let video = id(unsafe { moq_decode_video(catalog_id, 0, &video_output, Some(channel_callback), video_cb.ptr) });
+
+	assert_eq!(moq_decode_audio_cancel(audio), 0);
+	let code = audio_cb
+		.rx
+		.recv_timeout(TIMEOUT)
+		.expect("audio cancel ends the resolve wait");
+	assert_eq!(code, 0, "a cancelled audio decoder ends cleanly");
+	assert_eq!(moq_decode_video_cancel(video), 0);
+	let code = video_cb
+		.rx
+		.recv_timeout(TIMEOUT)
+		.expect("video cancel ends the resolve wait");
+	assert_eq!(code, 0, "a cancelled video decoder ends cleanly");
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A decoded consumer follows a rendition's sibling reference and instance too, decoding the
+/// sibling's track rather than looking for it on the catalog's own broadcast.
+#[test]
+fn decode_audio_follows_a_sibling_broadcast_reference() {
+	let origin = id(moq_origin_create());
+	let instance = fresh_instance();
+	let source = create_route(origin, b"d/source", Some(&route_options(0, &instance, false))).1;
+	let input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let producer = id(unsafe { moq_encode_audio(source, c"audio".as_ptr(), 5, &input, &output, 0) });
+	let pcm: Vec<u8> = (0..960).flat_map(|i| (i as f32 / 960.0).to_le_bytes()).collect();
+	let frame = moq_audio_frame {
+		timestamp: micros(0),
+		data: pcm.as_ptr(),
+		data_size: pcm.len(),
+	};
+	assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+	assert_eq!(moq_encode_audio_finish(producer), 0);
+
+	// Describe the sibling's rendition in `d/pub`'s catalog, pointing back at it.
+	let broadcast = publish_broadcast(origin, b"d/pub");
+	{
+		let mut state = State::lock();
+		let (name, mut config) = {
+			let catalog = state.publish.target(Id::try_from(source).unwrap()).unwrap().catalog;
+			let catalog = catalog.modify().unwrap();
+			let (name, config) = catalog.audio.renditions.iter().next().expect("one rendition");
+			(name.clone(), config.clone())
+		};
+		config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
+		config.instance = Some(instance.parse().unwrap());
+		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
+		catalog.modify().unwrap().audio.renditions.insert(name, config);
+	}
+
+	let consume = request_broadcast(origin, b"d/pub");
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+	let decoded = moq_audio_decoder_output {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 0,
+		channels: 0,
+		delay: moq_delay {
+			max_us: 30_000_000,
+			..moq_delay::default()
+		},
+		start: 0,
+		fixed: false,
+	};
+	let read_cb = Callback::new();
+	id(unsafe { moq_decode_audio(catalog_id, 0, &decoded, Some(channel_callback), read_cb.ptr) });
+	let mut frames = 0;
+	loop {
+		let code = read_cb.recv();
+		if code <= 0 {
+			assert_eq!(code, 0, "the sibling's finished track closes cleanly");
+			break;
+		}
+		frames += 1;
+		assert_eq!(moq_decode_audio_read_free(id(code)), 0);
+	}
+	assert!(frames > 0, "the sibling's audio decodes");
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_publish_close(source), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -5535,6 +5963,14 @@ fn video_publish_consume() {
 		coded_width: 0,
 		coded_height: 0,
 		container: moq_container::default(),
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(
 		unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) },
@@ -5569,6 +6005,16 @@ fn video_publish_consume() {
 		sample_rate: 0,
 		channel_count: 0,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert!(
 		unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) } < 0,
@@ -5775,6 +6221,7 @@ fn audio_raw_decode_reads_the_encoder_end() {
 			..moq_delay::default()
 		},
 		start: 0,
+		fixed: false,
 	};
 	let read_cb = Callback::new();
 	id(unsafe { moq_decode_audio(catalog_id, 0, &decoded, Some(channel_callback), read_cb.ptr) });
@@ -5796,6 +6243,7 @@ fn audio_raw_decode_reads_the_encoder_end() {
 			},
 			gap: moq_decode_gap::default(),
 			end: moq_timestamp::default(),
+			delay_us: 0,
 		};
 		assert_eq!(unsafe { moq_decode_audio_read(id(code), &mut read) }, 0);
 		match read.kind {
@@ -5883,6 +6331,7 @@ fn video_raw_publish_consume() {
 		width: 0,
 		height: 0,
 		start: 0,
+		surface: false,
 	};
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
@@ -5951,6 +6400,7 @@ fn video_raw_decode_output_rejected() {
 		width: 0,
 		height: 0,
 		start: 0,
+		surface: false,
 	};
 	assert_eq!(
 		unsafe { moq_decode_video(1, 0, &bad_format, Some(ignore_callback), std::ptr::null_mut()) },
@@ -5963,6 +6413,7 @@ fn video_raw_decode_output_rejected() {
 		width: 0,
 		height: 0,
 		start: moq_decode_start::MOQ_DECODE_START_LATEST as u32 + 1,
+		surface: false,
 	};
 	assert_eq!(
 		unsafe { moq_decode_video(1, 0, &bad_start, Some(ignore_callback), std::ptr::null_mut()) },
@@ -5976,6 +6427,7 @@ fn video_raw_decode_output_rejected() {
 			width,
 			height,
 			start: 0,
+			surface: false,
 		};
 		assert_eq!(
 			unsafe { moq_decode_video(1, 0, &bad_size, Some(ignore_callback), std::ptr::null_mut()) },
@@ -5995,6 +6447,7 @@ fn video_raw_decode_output_rejected() {
 		width: 160,
 		height: 120,
 		start: 0,
+		surface: false,
 	};
 	assert_eq!(
 		unsafe { moq_decode_video(u32::MAX / 2, 0, &valid, Some(ignore_callback), std::ptr::null_mut(),) },
@@ -6098,6 +6551,7 @@ fn video_raw_decode_rgba() {
 		width: 0,
 		height: 0,
 		start: 0,
+		surface: false,
 	};
 	assert_eq!(decode_first_frame(&output), (320, 240, 320 * 240 * 4));
 }
@@ -6115,6 +6569,7 @@ fn video_raw_decode_resize() {
 		width: 160,
 		height: 120,
 		start: 0,
+		surface: false,
 	};
 	assert_eq!(decode_first_frame(&output), (160, 120, 160 * 120 * 3 / 2));
 }
@@ -6525,6 +6980,7 @@ fn video_raw_decode() {
 		width: 0,
 		height: 0,
 		start: 0,
+		surface: false,
 	};
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });
@@ -6674,6 +7130,16 @@ fn catalog_update_on_new_track() {
 		sample_rate: 0,
 		channel_count: 0,
 		container: moq_container::default(),
+		jitter_us: 0,
+		has_jitter: false,
+		warmup_us: 0,
+		has_warmup: false,
+		broadcast: std::ptr::null(),
+		broadcast_len: 0,
+		instance: std::ptr::null(),
+		instance_len: 0,
+		track: std::ptr::null(),
+		track_len: 0,
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id1, 0, &mut audio_cfg) }, 0);
 	assert!(unsafe { moq_consume_audio_config(catalog_id1, 1, &mut audio_cfg) } < 0);

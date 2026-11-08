@@ -1,6 +1,9 @@
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
+use crate::auth::Auth;
 use crate::bandwidth::Bandwidth;
+use crate::encoder::Encoders;
+use crate::socket::Socket;
 use crate::{Consume, Origin, Publish, Server, Session, audio::Audio, video::Video};
 
 pub struct State {
@@ -12,6 +15,9 @@ pub struct State {
 	pub audio: Audio,
 	pub video: Video,
 	pub bandwidth: Bandwidth,
+	pub auth: Auth,
+	pub encoders: Encoders,
+	pub socket: Socket,
 }
 
 impl State {
@@ -25,6 +31,9 @@ impl State {
 			audio: Audio::default(),
 			video: Video::default(),
 			bandwidth: Bandwidth::default(),
+			auth: Auth::default(),
+			encoders: Encoders::default(),
+			socket: Socket::default(),
 		}
 	}
 
