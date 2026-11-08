@@ -18035,9 +18035,9 @@ mod test {
 
 		// Serving it replaces the too-narrow entry rather than colliding with it.
 		let mut whole = request.accept(Info::timed()).unwrap();
-		whole
-			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
-			.unwrap();
+		for payload in [b"head".as_ref(), b"mid1", b"mid2", b"tail"] {
+			whole.write_frame(Timestamp::ZERO, payload).unwrap();
+		}
 		whole.finish().unwrap();
 
 		let mut served = fetch.await.unwrap();
@@ -18242,6 +18242,7 @@ mod test {
 			for request in requests {
 				let mut head = request.accept(Info::default()).unwrap();
 				head.write_frame(None, bytes::Bytes::from_static(b"snapshot")).unwrap();
+				head.write_frame(None, bytes::Bytes::from_static(b"delta")).unwrap();
 				head.finish().unwrap();
 			}
 
@@ -18280,6 +18281,7 @@ mod test {
 		sub.update(replay().with_range(1..2)).unwrap();
 		let mut head = request.accept(Info::default()).unwrap();
 		head.write_frame(None, bytes::Bytes::from_static(b"snapshot")).unwrap();
+		head.write_frame(None, bytes::Bytes::from_static(b"delta")).unwrap();
 		head.finish().unwrap();
 		assert!(
 			matches!(sub.recv_group().now_or_never(), Some(Ok(None))),
@@ -18638,6 +18640,8 @@ mod test {
 			.unwrap();
 		head.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 10_000]))
 			.unwrap();
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
 		head.finish().unwrap();
 		drop(fetch.await.unwrap());
 		if abort_live {
@@ -18726,6 +18730,9 @@ mod test {
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"from0"))
 			.unwrap();
 		assert_eq!(widest.await.unwrap().index(), 0);
+		for payload in [b"from1".as_ref(), b"from2"] {
+			group.write_frame(Timestamp::ZERO, payload).unwrap();
+		}
 		group.finish().unwrap();
 	}
 
