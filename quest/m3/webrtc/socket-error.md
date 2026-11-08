@@ -3,9 +3,15 @@
 ## Goal
 
 When the UDP socket under a moq-webrtc client session fails to receive,
-`Client::publish`, `Client::subscribe`, and the `p2p` transport end with an
-error that carries the socket's `io::Error`, instead of `Ok` as if the peer
-had disconnected. A peer disconnect still ends `Ok`.
+`Client::publish` and `Client::subscribe` end with `Error::Io` carrying the
+socket's `io::Error`, instead of `Ok` as if the peer had disconnected. A
+`p2p` connection that fails this way before its channel opens hands its opener
+`p2p::Error::Io`, not `Closed`. A peer disconnect still ends `Ok`.
+
+Non-goal: carrying the cause past an opened `p2p` channel. There the driver
+drops the channel's reader, so the MoQ session over it already fails with
+qmux's `Closed`, an error rather than `Ok`. `qmux::Error` has no I/O variant to
+carry the cause.
 
 ## Plan
 
@@ -29,10 +35,14 @@ Where it goes wrong today:
 The cause no caller can see is step 1: the reader drops the error. Fix it there.
 The reader hands its `io::Error` to the agent, for example as the queue's last
 item, and the agent fails with a new `ice::Error` variant named by role (such as
-`Socket`). The session maps it to a matching `moq_webrtc::Error` variant, and
-`p2p` maps it to its own error. `ice::Error` is `Clone`, so the variant holds
-the error behind an `Arc` rather than a string, keeping its kind for callers.
-Don't match on error kinds to decide which errors are fatal (AGENTS.md).
+`Socket`). `Agent::next` returns a clone of the stored failure on every later
+call, so `ice::Error` stays `Clone` and the variant holds an `Arc<io::Error>`.
+The session maps it to the existing `moq_webrtc::Error::Io`, which is already
+documented as covering a receive error on the media socket. `p2p`'s
+`Error::ice` maps it to `p2p::Error::Io`, whose doc widens from bind and STUN
+failures to cover it. `io::Error::new(err.kind(), err)` rebuilds an owned error
+from the `Arc` that keeps its kind and source. Don't match on error kinds to
+decide which errors are fatal (AGENTS.md).
 
 Boundary: the server's shared-socket `server::mux::demux` logs and continues on
 every recv error, since one transient error, such as an ICMP unreachable,
@@ -51,8 +61,8 @@ port, send once, and feed the socket to `ice::reader` and an agent, as
 session end with the socket error, not `Closed` or `Ok`. Keep the existing
 peer-disconnect path asserting `Ok`.
 
-Public API: an additive variant on `moq_webrtc::Error` (`#[non_exhaustive]`)
-and on `p2p`'s error. Wire: none.
+Public API: none. The errors map to existing `Io` variants, and the new
+`ice::Error` variant is crate-private. Wire: none.
 
 ## Related
 
