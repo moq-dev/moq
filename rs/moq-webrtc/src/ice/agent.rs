@@ -38,7 +38,7 @@ const STUN_SENDS: u32 = 7;
 const STUN_LAST_WAIT: u32 = 16;
 
 /// Why an [`Agent`] stopped.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
 	/// The peer disconnected, str0m closed the connection, or the inbound queue ended.
 	#[error("peer connection closed")]
@@ -92,6 +92,19 @@ struct Query {
 	deadline: Instant,
 }
 
+/// Where the connection is in its life.
+enum Phase {
+	/// An offer awaits its answer, which holds off the [`ESTABLISH_TIMEOUT`].
+	Held,
+	/// ICE has yet to connect; the [`ESTABLISH_TIMEOUT`] runs from `started`.
+	Establishing {
+		started: Instant,
+	},
+	Connected,
+	/// The connection ended, for this reason: every later [`Agent::next`] reports it.
+	Failed(Error),
+}
+
 /// Drives one [`Rtc`] over a UDP socket until the connection ends.
 pub struct Agent {
 	rtc: Rtc,
@@ -109,15 +122,11 @@ pub struct Agent {
 	/// When every STUN query answered or gave up, once [`Event::Gathered`] went out.
 	gathered: Option<Instant>,
 	events: VecDeque<Event>,
-	/// Why the connection ended, found while draining and reported by the next [`Agent::next`].
-	failed: Option<Error>,
 	/// When str0m next wants a timeout, as of the last drain.
 	timeout: Instant,
 	/// Datagrams the socket refused for lack of buffer space, sent first next time.
 	outbox: VecDeque<(Vec<u8>, SocketAddr)>,
-	/// When the [`ESTABLISH_TIMEOUT`] started, or `None` while an offer awaits its answer.
-	started: Option<Instant>,
-	connected: bool,
+	phase: Phase,
 }
 
 impl Agent {
@@ -139,11 +148,9 @@ impl Agent {
 			stun: Vec::new(),
 			gathered: None,
 			events: VecDeque::new(),
-			failed: None,
 			timeout: now,
 			outbox: VecDeque::new(),
-			started: Some(now),
-			connected: false,
+			phase: Phase::Establishing { started: now },
 		};
 		// Signaling already changed the connection.
 		agent.drain();
@@ -189,14 +196,18 @@ impl Agent {
 	/// for an offer whose answer has yet to arrive: signaling time is the caller's.
 	#[cfg_attr(not(feature = "p2p"), allow(dead_code, reason = "only the p2p transport offers"))]
 	pub fn awaiting_answer(mut self) -> Self {
-		self.started = None;
+		self.phase = Phase::Held;
 		self
 	}
 
 	/// Change the connection through a guard that drains what the change produced
 	/// when dropped: transmits are sent, and events wait for [`Agent::next`].
 	pub fn rtc_mut(&mut self) -> RtcMut<'_> {
-		self.started.get_or_insert_with(Instant::now);
+		if let Phase::Held = self.phase {
+			self.phase = Phase::Establishing {
+				started: Instant::now(),
+			};
+		}
 		self.change()
 	}
 
@@ -214,8 +225,8 @@ impl Agent {
 			if let Some(event) = self.events.pop_front() {
 				return Ok(event);
 			}
-			if let Some(err) = self.failed.take() {
-				return Err(err);
+			if let Phase::Failed(err) = &self.phase {
+				return Err(err.clone());
 			}
 			if self.gathered.is_none() && self.stun.is_empty() {
 				self.gathered = Some(Instant::now());
@@ -233,11 +244,13 @@ impl Agent {
 			// A dead Rtc (DTLS failure, explicit disconnect) reports a never-firing
 			// timeout instead of an error, which would park this loop forever.
 			if !self.rtc.is_alive() {
-				return Err(Error::Closed);
+				self.fail(Error::Closed);
+				continue;
 			}
 			let establish = self.establish();
 			if establish.is_some_and(|at| at <= Instant::now()) {
-				return Err(Error::Timeout);
+				self.fail(Error::Timeout);
+				continue;
 			}
 
 			let deadline = self.stun.iter().map(|q| q.deadline).chain(establish);
@@ -249,7 +262,8 @@ impl Agent {
 					packet = self.inbound.packets.recv() => {
 						let Some((data, src)) = packet else {
 							// Every sender dropped: nothing more will arrive.
-							return Err(Error::Closed);
+							self.fail(Error::Closed);
+							continue;
 						};
 						self.receive(&data, src);
 						continue;
@@ -267,24 +281,26 @@ impl Agent {
 		}
 	}
 
-	/// When [`ESTABLISH_TIMEOUT`] expires, or `None` while it is held or ICE connected.
+	/// When [`ESTABLISH_TIMEOUT`] expires, or `None` while it is held, gathering, or over.
 	fn establish(&self) -> Option<Instant> {
-		match (self.started, self.gathered) {
-			(Some(started), Some(gathered)) if !self.connected => Some(started.max(gathered) + ESTABLISH_TIMEOUT),
+		match (&self.phase, self.gathered) {
+			(Phase::Establishing { started }, Some(gathered)) => Some((*started).max(gathered) + ESTABLISH_TIMEOUT),
 			_ => None,
 		}
 	}
 
 	/// Poll str0m until it asks for a timeout: transmits are sent, events queued.
 	fn drain(&mut self) {
-		while self.failed.is_none() {
+		while !matches!(self.phase, Phase::Failed(_)) {
 			let output = match self.rtc.poll_output() {
 				Ok(output) => output,
 				// Before ICE connects no DTLS record can reach the peer, so a DTLS failure
 				// is its handshake giving up on retransmitting into the void. Its flights
 				// (~31s, randomly jittered) race the establishment deadline, so report
 				// either as ICE never connecting.
-				Err(str0m::RtcError::Dtls(_)) if !self.connected => return self.fail(Error::Timeout),
+				Err(str0m::RtcError::Dtls(_)) if !matches!(self.phase, Phase::Connected) => {
+					return self.fail(Error::Timeout);
+				}
 				Err(err) => return self.fail(Error::rtc(err)),
 			};
 			match output {
@@ -300,7 +316,9 @@ impl Agent {
 						if *state == IceConnectionState::Disconnected {
 							return self.fail(Error::Closed);
 						}
-						self.connected |= state.is_connected();
+						if state.is_connected() {
+							self.phase = Phase::Connected;
+						}
 					}
 					self.events.push_back(Event::Rtc(event));
 				}
@@ -310,7 +328,9 @@ impl Agent {
 
 	/// Keep the first reason the connection ended.
 	fn fail(&mut self, err: Error) {
-		self.failed.get_or_insert(err);
+		if !matches!(self.phase, Phase::Failed(_)) {
+			self.phase = Phase::Failed(err);
+		}
 	}
 
 	/// Send without waiting, keeping the datagram for later when the socket is full.
@@ -501,12 +521,12 @@ mod tests {
 	#[tokio::test]
 	async fn awaiting_answer_holds_the_deadline() {
 		let mut agent = unpolled().awaiting_answer();
-		assert_eq!(agent.started, None);
+		assert!(matches!(agent.phase, Phase::Held));
 		// The agent's own changes, such as timeouts and STUN, leave it held.
 		drop(agent.change());
-		assert_eq!(agent.started, None);
+		assert!(matches!(agent.phase, Phase::Held));
 		drop(agent.rtc_mut());
-		assert!(agent.started.is_some());
+		assert!(matches!(agent.phase, Phase::Establishing { .. }));
 	}
 
 	#[tokio::test]
@@ -554,6 +574,9 @@ mod tests {
 		};
 		assert!(matches!(err, Error::Timeout), "{err:?}");
 		assert_eq!(agent.establish(), None, "the deadline had yet to start");
+		// The reason sticks: driving the agent again reports it again.
+		let again = agent.next().await;
+		assert!(matches!(again, Err(Error::Timeout)), "{again:?}");
 	}
 
 	#[test]

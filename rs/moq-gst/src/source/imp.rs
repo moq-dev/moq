@@ -1317,10 +1317,26 @@ struct Attached {
 /// A rendition a [`Follower`] plays.
 struct Entry {
 	shape: Shape,
-	/// Reading the current instance, if it is.
-	reader: Option<ReaderHandle>,
+	reading: Reading,
+}
+
+/// Whether a rendition reads the current instance.
+enum Reading {
+	/// No reader: no instance yet, or one that does not serve it.
+	Idle,
+	Reader(ReaderHandle),
 	/// Delisted while reading: plays out the instance it reads, then leaves.
-	draining: bool,
+	Draining(ReaderHandle),
+}
+
+impl Reading {
+	/// The running reader, draining or not.
+	fn reader(&self) -> Option<&ReaderHandle> {
+		match self {
+			Reading::Idle => None,
+			Reading::Reader(reader) | Reading::Draining(reader) => Some(reader),
+		}
+	}
 }
 
 /// A running [`Reader`], cancelled when dropped.
@@ -1448,23 +1464,35 @@ impl Follower {
 					// warmup for the next one.
 					let reshaped = shape != entry.shape;
 					entry.shape = shape;
-					if reshaped {
-						entry.reader = None;
-						fresh.insert(rendition.clone());
-					}
-					entry.draining = false;
+					entry.reading = match std::mem::replace(&mut entry.reading, Reading::Idle) {
+						_ if reshaped => {
+							fresh.insert(rendition.clone());
+							Reading::Idle
+						}
+						Reading::Reader(reader) | Reading::Draining(reader) => Reading::Reader(reader),
+						Reading::Idle => Reading::Idle,
+					};
 					true
 				}
 				// A delisted rendition plays out the instance it reads, then leaves. One that never
 				// took its pad, or that is disabled or now reads another broadcast, stops now.
 				None => {
-					entry.draining = !pads.is_listed(rendition)
+					let drains = !pads.is_listed(rendition)
 						&& !disabled.contains(rendition)
 						&& entry
-							.reader
-							.as_ref()
+							.reading
+							.reader()
 							.is_some_and(|reader| reader.live.load(Ordering::Acquire));
-					entry.draining
+					if !drains {
+						return false;
+					}
+					// A later catalog update finds it already draining: it keeps playing out.
+					if let Reading::Reader(reader) | Reading::Draining(reader) =
+						std::mem::replace(&mut entry.reading, Reading::Idle)
+					{
+						entry.reading = Reading::Draining(reader);
+					}
+					true
 				}
 			});
 		for (rendition, shape) in wanted {
@@ -1473,8 +1501,7 @@ impl Follower {
 				rendition,
 				Entry {
 					shape,
-					reader: None,
-					draining: false,
+					reading: Reading::Idle,
 				},
 			);
 		}
@@ -1557,9 +1584,10 @@ impl Follower {
 
 	/// Stop reading the instance. A draining rendition leaves with it.
 	fn idle(&mut self) {
-		self.renditions.retain(|_, entry| !entry.draining);
+		self.renditions
+			.retain(|_, entry| !matches!(entry.reading, Reading::Draining(_)));
 		for entry in self.renditions.values_mut() {
-			entry.reader = None;
+			entry.reading = Reading::Idle;
 		}
 	}
 
@@ -1577,7 +1605,10 @@ impl Follower {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
-			if entry.reader.is_none() && only(rendition) && serves(instance, entry.shape.instance.as_ref()) {
+			if matches!(entry.reading, Reading::Idle)
+				&& only(rendition)
+				&& serves(instance, entry.shape.instance.as_ref())
+			{
 				self.next_id += 1;
 				let (cancel, cancelled) = watch::channel(false);
 				let live = Arc::new(AtomicBool::new(false));
@@ -1603,7 +1634,7 @@ impl Follower {
 					}),
 					RUNTIME.handle(),
 				);
-				entry.reader = Some(ReaderHandle { id, live, cancel });
+				entry.reading = Reading::Reader(ReaderHandle { id, live, cancel });
 			}
 		}
 	}
@@ -1613,11 +1644,10 @@ impl Follower {
 		let Some(entry) = self.renditions.get_mut(&rendition) else {
 			return;
 		};
-		if entry.reader.as_ref().is_none_or(|reader| reader.id != id) {
+		if entry.reading.reader().is_none_or(|reader| reader.id != id) {
 			return;
 		}
-		entry.reader = None;
-		if entry.draining {
+		if let Reading::Draining(_) = std::mem::replace(&mut entry.reading, Reading::Idle) {
 			self.renditions.remove(&rendition);
 		} else if let Exit::Unlisted = exit
 			&& self.playback.session.pads.is_listed(&rendition)
@@ -3256,7 +3286,8 @@ mod session_tests {
 	/// short: the pad owes downstream every frame of the track and an EOS.
 	///
 	/// The subscriber's view of that arrival order is reproduced exactly: the head of the track,
-	/// then the catalog update, then the tail and the clean end.
+	/// then the catalog update, then the tail and the clean end. A second update lands while the
+	/// rendition drains, which must leave it draining.
 	#[test]
 	fn a_retired_rendition_drains_to_eos() {
 		const HEAD: u64 = 3;
@@ -3272,6 +3303,9 @@ mod session_tests {
 			.unwrap();
 		let _audio = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let _audio2 = broadcast
+			.create_track("audio2", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		{
 			let mut guard = catalog.modify().unwrap();
@@ -3344,6 +3378,18 @@ mod session_tests {
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 		await_pad(&element, "audio_");
+
+		// A second update while the video drains, whose new audio pad proves it was acted on.
+		let (added, added_rx) = std::sync::mpsc::channel();
+		let handler = element.connect_pad_added(move |_, pad| {
+			let _ = added.send(pad.name().to_string());
+		});
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.audio.renditions.insert("audio2".to_string(), audio_rendition());
+		}
+		while !added_rx.recv().expect("the element is alive").starts_with("audio_") {}
+		element.disconnect(handler);
 
 		// A reader the update cancelled still has to notice. It takes its pad with it when it does,
 		// so the wait is only ever served in full by one that is still reading.
