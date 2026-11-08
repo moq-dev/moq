@@ -1827,7 +1827,7 @@ mod tests {
 
 	/// Answer the next request through `claim` with one `audio` rendition, under a fresh instance.
 	async fn answer(
-		claim: &moq_net::origin::Route,
+		claim: &moq_net::origin::Claim,
 	) -> (
 		moq_net::origin::Route,
 		catalog::Producer,
