@@ -496,14 +496,15 @@ impl Producer {
 			self.in_flight.clear();
 		}
 		encoder.encode(samples)?;
-		self.in_flight.push_back(timestamp);
-		self.publish_ready()
+		self.publish_ready(Some(timestamp))
 	}
 
-	/// Publish every packet the codec has ready, each stamped with the frame it pairs with.
-	fn publish_ready(&mut self) -> Result<(), Error> {
+	/// Publish every packet the codec has ready, each stamped with the frame it pairs with:
+	/// the oldest held stamp, then `submitted`, the frame just encoded, which is queued only
+	/// when the codec holds its packet, so a codec that holds nothing never fills the queue.
+	fn publish_ready(&mut self, mut submitted: Option<Timestamp>) -> Result<(), Error> {
 		while let Some(packet) = self.codec.get_mut()?.receive()? {
-			let Some(timestamp) = self.in_flight.pop_front() else {
+			let Some(timestamp) = self.in_flight.pop_front().or_else(|| submitted.take()) else {
 				return Err(Error::Codec(format!(
 					"{} returned more packets than it was given frames",
 					self.encoder()?.name()
@@ -517,6 +518,7 @@ impl Producer {
 			}
 			self.decoder_boundary = false;
 		}
+		self.in_flight.extend(submitted);
 		Ok(())
 	}
 
@@ -737,7 +739,7 @@ impl Producer {
 		// What the codec still holds came from full frames, so it goes out at their stamps, leaving
 		// the terminal drain's packets to start where the source's partial tail does.
 		self.codec.get_mut()?.flush()?;
-		self.publish_ready()?;
+		self.publish_ready(None)?;
 		if !self.in_flight.is_empty() {
 			return Err(Error::Codec(format!(
 				"{} kept {} packet(s) past its flush",

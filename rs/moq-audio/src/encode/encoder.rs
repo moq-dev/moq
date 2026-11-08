@@ -447,7 +447,8 @@ impl Encoder {
 	/// whose packet [`receive`](Self::receive) returns.
 	///
 	/// A codec that pipelines holds the packet past later frames; libopus and
-	/// PCM ready it at once.
+	/// PCM ready it at once. [`receive`](Self::receive) every ready packet before
+	/// the next frame: libopus refuses one while its last packet waits.
 	///
 	/// `pcm.len()` must equal `frame_size() * codec_channels()`. The
 	/// [`Producer`](super::Producer) handles format conversion and resampling
@@ -512,6 +513,9 @@ impl Encoder {
 		}
 
 		let source_frames = pcm.len() / channels;
+		// Any packets not yet received from earlier calls come first.
+		let mut packets = Vec::new();
+		self.receive_into(&mut packets)?;
 		let padding = if pcm.is_empty() {
 			0
 		} else {
@@ -520,12 +524,13 @@ impl Encoder {
 			frame.resize(frame_samples, 0.0);
 			let padding = (frame_samples - pcm.len()) / channels;
 			self.encode(&frame)?;
+			self.receive_into(&mut packets)?;
 			padding
 		};
 
 		if !self.started {
 			return Ok(Finish {
-				packets: self.collect()?,
+				packets,
 				discard_padding: 0,
 			});
 		}
@@ -536,9 +541,10 @@ impl Encoder {
 		let silent_frames = drain.div_ceil(self.frame_size);
 		for _ in 0..silent_frames {
 			self.encode(&silence)?;
+			self.receive_into(&mut packets)?;
 		}
 		self.backend.flush()?;
-		let packets = self.collect()?;
+		self.receive_into(&mut packets)?;
 
 		// Counted in frames submitted here rather than packets returned, which
 		// include any not yet received from earlier calls.
@@ -554,23 +560,30 @@ impl Encoder {
 		})
 	}
 
-	/// Every packet ready now, oldest first.
-	fn collect(&mut self) -> Result<Vec<Encoded>, Error> {
-		std::iter::from_fn(|| self.receive().transpose()).collect()
+	/// Append every packet ready now, oldest first.
+	fn receive_into(&mut self, packets: &mut Vec<Encoded>) -> Result<(), Error> {
+		while let Some(packet) = self.receive()? {
+			packets.push(packet);
+		}
+		Ok(())
 	}
 
 	/// Submit `pcm` and take every packet it readied.
 	#[cfg(test)]
 	pub(crate) fn encode_all(&mut self, pcm: &[f32]) -> Result<Vec<Encoded>, Error> {
 		self.encode(pcm)?;
-		self.collect()
+		let mut packets = Vec::new();
+		self.receive_into(&mut packets)?;
+		Ok(packets)
 	}
 
 	/// Flush and take every packet the codec held.
 	#[cfg(test)]
 	pub(crate) fn flush_all(&mut self) -> Result<Vec<Encoded>, Error> {
 		self.flush()?;
-		self.collect()
+		let mut packets = Vec::new();
+		self.receive_into(&mut packets)?;
+		Ok(packets)
 	}
 
 	/// hang catalog entry describing this encoder's output stream.
