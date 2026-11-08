@@ -41,6 +41,7 @@ TCP listeners across most of the range, so TCP refuses the first draws, and
 show the search redraws until a pair binds. Hold the pressure sockets in a
 separate process: `relay_owns_port` checks the test's own PID, so a pressure
 listener the test owns at the drawn port plus two would make the negative `tls`
-assertion fail, and the test's descriptors stay free for the search.
+assertion fail. The search keeps one UDP socket per refused draw, so hold fewer
+TCP listeners than the test's spare descriptors; real collisions are rare.
 
 Public API: none. Wire: none.

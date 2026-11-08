@@ -40,18 +40,23 @@ documented as covering a receive error on the media socket. `p2p`'s
 `Error::ice` maps it to `p2p::Error::Io`, whose doc widens from bind and STUN
 failures to cover it. Rebuild an owned error from the `Arc` that keeps what
 callers read: `io::Error::from_raw_os_error` when it has an OS code, so
-`raw_os_error()` still answers, else `io::Error::new(err.kind(), err)`. Once `p2p`'s channel has opened,
-the driver drops the channel's `Inbox`, which its `Reader` reads as
-`qmux::Error::Closed`. On a socket failure the driver instead pushes
-`Err(qmux::Error::Io(arc))` into that `Inbox` before it drops the `Inbox` or
-the outbox, since `Inbox::push` already carries errors, so a pending write
-cannot end the MoQ session with `Closed` first. A `p2p` opener that asks after
-the driver exited gets `Closed` from the dropped command channel today, whatever
-the cause. The driver leaves its terminal error where the handle reads it once
-the channel is gone, which fixes it for every cause, not only the socket. `Agent::next` judges the establishment deadline before
-it reads the inbound queue, so a socket error queued just before that deadline
-would surface as `Timeout`: drain the queue, datagrams and any socket error
-behind them, before judging the deadline, since the socket error is the cause. Don't match on error kinds to decide which errors are fatal (AGENTS.md).
+`raw_os_error()` still answers, else `io::Error::new(err.kind(), err)`.
+
+Every handle on a `p2p` connection reads its end as `Closed` today, whatever the
+cause: an opener that asks after the driver exited (the dropped command channel),
+and an opened channel's `Reader` (the dropped `Inbox`) and `Writer` (the closed
+outbox). Pushing the error into the `Inbox` alone would race: qmux's driver can
+find the outbox closed before it reads the `Inbox`. Instead the driver records
+its terminal error in one slot the handles share before it drops anything, and
+each handle that finds its channel gone reports that error, as `p2p::Error` or
+`qmux::Error::Io`, instead of `Closed`. That fixes every cause, not only the
+socket.
+
+`Agent::next` judges the establishment deadline before it reads the inbound
+queue, so a socket error queued just before that deadline would surface as
+`Timeout`: drain the queue, datagrams and any socket error behind them, before
+judging the deadline, since the socket error is the cause.
+Don't match on error kinds to decide which errors are fatal (AGENTS.md).
 
 Boundary: the server's shared-socket `server::mux::demux` logs and continues on
 every recv error, since one transient error, such as an ICMP unreachable,
@@ -59,10 +64,10 @@ must not end every session on the socket. It is out of scope. Do check whether
 the client reader has the same transient case. On Windows an unconnected UDP
 socket reports an ICMP port unreachable as `WSAECONNRESET` unless
 `SIO_UDP_CONNRESET` is off. If tokio leaves it on, a client's ICE check to a
-dead candidate ends the session today. Linux reports ICMP errors on an
-unconnected UDP socket only with `IP_RECVERR`, which nothing here sets, so there
-a receive error is the socket failing. Turn it off when the socket is bound,
+dead candidate ends the session today. Turn it off when the socket is bound,
 as a known platform capability, rather than ignoring that error at runtime.
+Linux reports ICMP errors on an unconnected UDP socket only with `IP_RECVERR`,
+which nothing here sets, so there a receive error is the socket failing.
 
 Reproducing test, failing on main first. On Linux, a connected UDP socket
 reports a loopback ICMP port unreachable as `ECONNREFUSED` on its next
@@ -72,7 +77,8 @@ port, send once, and feed the socket to `ice::reader` and an agent, as
 session end with the socket error, not `Closed` or `Ok`. Also assert that a
 `p2p` opener gets `p2p::Error::Io` with the underlying error whether it asked
 before or after the failure. With a channel opened between two peers and a
-write pending, failing one side's socket ends its MoQ session with
+write pending, and the outbox's closure reaching qmux before the `Inbox`'s,
+failing one side's socket ends its MoQ session with
 `qmux::Error::Io` and the OS code. A socket error queued behind a datagram,
 read after the establishment deadline, still wins over `Timeout`. Keep the
 existing peer-disconnect path asserting `Ok`.
