@@ -116,7 +116,10 @@ enum Init {
 	Waiting(VecDeque<(String, Fragment)>),
 	/// `first_late` is the first track id the init does not declare, and `queued` the
 	/// fragments cut while it waited, still to go out.
-	Written { first_late: u32, queued: VecDeque<Fragment> },
+	Written {
+		first_late: u32,
+		queued: VecDeque<Fragment>,
+	},
 }
 
 impl Init {
@@ -127,7 +130,10 @@ impl Init {
 	/// The init segment went out, declaring every track id below `first_late`.
 	fn write(&mut self, first_late: u32) {
 		if let Init::Waiting(queued) = self {
-			let queued = std::mem::take(queued).into_iter().map(|(_, fragment)| fragment).collect();
+			let queued = std::mem::take(queued)
+				.into_iter()
+				.map(|(_, fragment)| fragment)
+				.collect();
 			*self = Init::Written { first_late, queued };
 		}
 	}
@@ -938,7 +944,8 @@ impl<S: Stream> Export<S> {
 				.iter()
 				.filter_map(|(name, t)| {
 					let first = t.buffer.first()?;
-					(t.finished() || t.buffer.is_closed()).then(|| (Duration::from(first.timestamp), !t.is_video, name.clone()))
+					(t.finished() || t.buffer.is_closed())
+						.then(|| (Duration::from(first.timestamp), !t.is_video, name.clone()))
 				})
 				.min()
 				.map(|(_, _, name)| name);
@@ -1275,7 +1282,10 @@ fn emit_fragment(
 	batch: Batch,
 	successor: Option<&Frame>,
 ) -> Result<Fragment> {
-	let Batch { mut frames, independent } = batch;
+	let Batch {
+		mut frames,
+		independent,
+	} = batch;
 	apply_codec_durations(&mut frames, track.opus);
 	// A run that starts or ends inside a GOP sees only part of its reordering.
 	let partial = !independent || successor.is_some_and(|next| !next.keyframe);

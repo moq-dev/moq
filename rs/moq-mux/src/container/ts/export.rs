@@ -138,8 +138,9 @@ where
 	expected: Vec<TrackKey>,
 	expected_changed: bool,
 	source: crate::Source,
-	/// Kept once read no further, for its format, which a follower subscribes a return with.
-	catalog: S,
+	/// Kept once read no further, for its format, which a follower subscribes a return with,
+	/// until a follow runs out on it: a replacement is then selected, and the subscription goes.
+	catalog: Option<S>,
 	/// A snapshot arrived on `catalog` since it was subscribed.
 	cataloged: bool,
 	feed: Feed,
@@ -1572,7 +1573,7 @@ where
 			expected: Vec::new(),
 			expected_changed: false,
 			source,
-			catalog,
+			catalog: Some(catalog),
 			cataloged: false,
 			feed: Feed::Live,
 			instance,
@@ -1714,7 +1715,10 @@ where
 				if let Err(err) = self.prepare_pending(waiter) {
 					// A replacement that leaves before it commits is no switch: the old program
 					// plays on, and a later replacement gets its own follow window.
-					if self.jitter.is_committed() || matches!(self.program.feed, Feed::Retired(_)) || !super::follower::left(&err) {
+					if self.jitter.is_committed()
+						|| matches!(self.program.feed, Feed::Retired(_))
+						|| !super::follower::left(&err)
+					{
 						return Poll::Ready(Err(err));
 					}
 					tracing::warn!(%err, "replacement left before it went out, keeping the old program");
@@ -1926,7 +1930,11 @@ where
 		// independent of the catalog: a retained track finishes while the broadcast stays
 		// live, and holding its tail until the catalog closed would strand it indefinitely.
 		let drained = !self.program.tracks.is_empty()
-			&& self.program.tracks.values().all(|t| t.read != Read::Live && t.parked.is_empty())
+			&& self
+				.program
+				.tracks
+				.values()
+				.all(|t| t.read != Read::Live && t.parked.is_empty())
 			&& self.jitter.is_empty()
 			&& self.held.is_none();
 		if drained {
@@ -1974,7 +1982,9 @@ where
 		}
 
 		// End of stream once the catalog is closed too: nothing more can appear.
-		if self.pending.is_none() && !matches!(self.program.feed, Feed::Live) && (drained || self.program.tracks.is_empty())
+		if self.pending.is_none()
+			&& !matches!(self.program.feed, Feed::Live)
+			&& (drained || self.program.tracks.is_empty())
 		{
 			return Poll::Ready(match &mut self.program.feed {
 				Feed::Retired(left) => left.take().map_or(Ok(None), Err),
@@ -2065,8 +2075,10 @@ where
 			return Ok(true);
 		}
 		// 1. Drain catalog updates, discovering the track layout.
-		while matches!(self.program.feed, Feed::Live) {
-			match self.program.catalog.poll_next(waiter)? {
+		while matches!(self.program.feed, Feed::Live)
+			&& let Some(catalog) = self.program.catalog.as_mut()
+		{
+			match catalog.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => {
 					self.program.cataloged = true;
 					self.update_catalog(snapshot)?
@@ -2208,6 +2220,7 @@ where
 		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "follow-expired", now = ?kio::clock::now(), program = self.program.id, committed = self.jitter.is_committed());
 		self.follow_timer = None;
 		self.follow_until = None;
+		self.program.catalog = None;
 		self.retire(None)
 	}
 
@@ -2904,7 +2917,7 @@ where
 	}
 
 	fn resume(&mut self, catalog: S) -> Result<(), crate::Error> {
-		self.program.catalog = catalog;
+		self.program.catalog = Some(catalog);
 		self.program.cataloged = false;
 		self.program.feed = Feed::Live;
 		self.program.si_flushed = false;
@@ -3337,22 +3350,22 @@ where
 		if self.program.psi.is_none() {
 			return Ok(());
 		}
-		let gone: Vec<String> =
-			self.program
-				.tracks
-				.iter()
-				.filter(|(_, track)| {
-					// A track the same instance's return has yet to resubscribe stays, silent on its PID.
-					!track.cataloged
-						&& matches!(track.read, Read::Ended | Read::Withdrawn)
-						&& track.pack.is_none()
-						&& track.parked.is_empty()
-						&& !self.jitter.holds(&track.key)
-						&& self.held.as_ref().is_none_or(|held| held.track != track.key)
-						&& !(track.listed && self.program.schedule.holds(track.pid))
-				})
-				.map(|(name, _)| name.clone())
-				.collect();
+		let gone: Vec<String> = self
+			.program
+			.tracks
+			.iter()
+			.filter(|(_, track)| {
+				// A track the same instance's return has yet to resubscribe stays, silent on its PID.
+				!track.cataloged
+					&& matches!(track.read, Read::Ended | Read::Withdrawn)
+					&& track.pack.is_none()
+					&& track.parked.is_empty()
+					&& !self.jitter.holds(&track.key)
+					&& self.held.as_ref().is_none_or(|held| held.track != track.key)
+					&& !(track.listed && self.program.schedule.holds(track.pid))
+			})
+			.map(|(name, _)| name.clone())
+			.collect();
 		let mut changed = false;
 		for name in gone {
 			let track = self.program.tracks.remove(&name).expect("collected above");
@@ -4151,7 +4164,7 @@ fn write_packet(
 
 impl<E: catalog::Catalog> Export<crate::catalog::Consumer<E>> {
 	pub(super) fn catalog_format(&self) -> crate::catalog::CatalogFormat {
-		self.selected().catalog.format()
+		self.selected().catalog.as_ref().expect("selected catalog").format()
 	}
 }
 
