@@ -6,7 +6,7 @@ use std::ops::Deref;
 mod keying;
 
 // Provider traits and implementations
-pub mod aws_lc_rs;
+pub mod rind;
 
 pub(crate) mod ccm_cipher;
 

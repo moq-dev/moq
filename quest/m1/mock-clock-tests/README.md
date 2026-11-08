@@ -42,5 +42,4 @@ before starting, since tests land and move.
 
 ## Required
 
-- [js/net tests run on a mocked clock](/quest/m1/mock-clock-tests/js-net.md) - about 120 js/net tests stop waiting on real time, through their shared helpers
 - [Manual.drive waits for mocked I/O the work is blocked on](/quest/m1/mock-clock-tests/manual-drive-host-io.md) - `drive` stops at the deadline the work meets, and `js/net`'s `driveUntil` workaround is deleted

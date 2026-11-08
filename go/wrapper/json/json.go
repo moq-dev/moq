@@ -45,7 +45,7 @@ func (o SnapshotOptions) deltas() bool {
 type WindowOptions struct {
 	// CheckpointRecords bounds the records retained and restated when a group rolls,
 	// for a window that is never popped: a reader that keeps up still sees every
-	// record, while a later joiner gets a WindowSkip for the older ones. Nil restates
+	// record, while a later joiner gets a WindowEventSkip for the older ones. Nil restates
 	// the whole window; zero is refused.
 	CheckpointRecords *uint64
 }
@@ -286,43 +286,43 @@ func (p *WindowProducer) Finish() error {
 	return p.inner.Finish()
 }
 
-// WindowEvent is one change to a window: a WindowPush, WindowPop, or WindowSkip.
+// WindowEvent is one change to a window: a WindowEventPush, WindowEventPop, or WindowEventSkip.
 type WindowEvent interface {
 	windowEvent()
 }
 
-// WindowPush is a record joining the window at its absolute index.
-type WindowPush struct {
+// WindowEventPush is a record joining the window at its absolute index.
+type WindowEventPush struct {
 	// Index is the record's absolute index.
 	Index uint64
 	// Value is the JSON document.
 	Value stdjson.RawMessage
 }
 
-// WindowPop is the records in [Start, End) leaving the window.
-type WindowPop struct {
+// WindowEventPop is the records in [Start, End) leaving the window.
+type WindowEventPop struct {
 	// Start is the first index popped.
 	Start uint64
 	// End is one past the last index popped.
 	End uint64
 }
 
-// WindowSkip is the records in [Start, End) that will never be delivered: they
+// WindowEventSkip is the records in [Start, End) that will never be delivered: they
 // were pushed and dropped while this reader was behind, or fell outside the
 // producer's checkpoint when it joined.
-type WindowSkip struct {
+type WindowEventSkip struct {
 	// Start is the first index skipped.
 	Start uint64
 	// End is one past the last index skipped.
 	End uint64
 }
 
-func (WindowPush) windowEvent() {}
-func (WindowPop) windowEvent()  {}
-func (WindowSkip) windowEvent() {}
+func (WindowEventPush) windowEvent() {}
+func (WindowEventPop) windowEvent()  {}
+func (WindowEventSkip) windowEvent() {}
 
-// TimedWindowEvent is a window change and the timestamp of the frame that carried it.
-type TimedWindowEvent struct {
+// WindowTimed is a window change and the timestamp of the frame that carried it.
+type WindowTimed struct {
 	// Event is the change to the window.
 	Event WindowEvent
 	// Timestamp is on the broadcast clock, or nil on an untimed track. A record
@@ -331,18 +331,18 @@ type TimedWindowEvent struct {
 	Timestamp *moq.Timestamp
 }
 
-func timedWindowEvent(value *ffi.MoqJsonWindowTimed) (*TimedWindowEvent, error) {
+func windowTimed(value *ffi.MoqJsonWindowTimed) (*WindowTimed, error) {
 	if value == nil {
 		return nil, nil
 	}
-	out := &TimedWindowEvent{Timestamp: value.Timestamp}
+	out := &WindowTimed{Timestamp: value.Timestamp}
 	switch event := value.Event.(type) {
 	case ffi.MoqJsonWindowEventPush:
-		out.Event = WindowPush{Index: event.Index, Value: stdjson.RawMessage(event.Value)}
+		out.Event = WindowEventPush{Index: event.Index, Value: stdjson.RawMessage(event.Value)}
 	case ffi.MoqJsonWindowEventPop:
-		out.Event = WindowPop{Start: event.Start, End: event.End}
+		out.Event = WindowEventPop{Start: event.Start, End: event.End}
 	case ffi.MoqJsonWindowEventSkip:
-		out.Event = WindowSkip{Start: event.Start, End: event.End}
+		out.Event = WindowEventSkip{Start: event.Start, End: event.End}
 	default:
 		return nil, fmt.Errorf("unknown window event: %T", event)
 	}
@@ -366,16 +366,16 @@ func NewWindowConsumer(track *moq.TrackConsumer) (*WindowConsumer, error) {
 
 // Next returns the next change to the window, or nil when the track ends. Group
 // rolls never surface.
-func (c *WindowConsumer) Next(ctx context.Context) (*TimedWindowEvent, error) {
+func (c *WindowConsumer) Next(ctx context.Context) (*WindowTimed, error) {
 	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
 	if err != nil {
 		return nil, err
 	}
-	return timedWindowEvent(value)
+	return windowTimed(value)
 }
 
 // All ranges over every change to the window until the track ends.
-func (c *WindowConsumer) All(ctx context.Context) iter.Seq2[*TimedWindowEvent, error] {
+func (c *WindowConsumer) All(ctx context.Context) iter.Seq2[*WindowTimed, error] {
 	return bridge.Seq(ctx, c.Next)
 }
 

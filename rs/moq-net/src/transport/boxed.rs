@@ -117,6 +117,17 @@ impl Session {
 		&self.closing
 	}
 
+	/// Resolve once the session is ending: this side closed the transport, or it closed.
+	///
+	/// Unlike `poll_closed`, which a backend holds until its close is on the wire, this sees a
+	/// local close the moment it is sent.
+	pub(crate) fn poll_ending(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.closing.is_sent() {
+			return Poll::Ready(());
+		}
+		poll::Session::poll_closed(self, waiter).map(|_| ())
+	}
+
 	/// The subscriptions and fetches the session's tasks carry over this transport.
 	pub(crate) fn work(&self) -> &crate::session::Work {
 		&self.work

@@ -28,14 +28,16 @@ export interface ConsumerProps {
 	delay?: GetterInit<Moq.Track.Delay>;
 	/**
 	 * Cap the bytes of decoded frames held ahead of the reader, counting the whole wire payload they
-	 * share and each frame's and group's own overhead (default: {@link DEFAULT_MAX_BUFFER}). Mirrors
-	 * Rust's `Consumer::set_max_buffer`.
+	 * share and each frame's and group's own overhead (default: one group at the transport's size
+	 * cap). Mirrors Rust's `Consumer::set_max_buffer`.
 	 *
 	 * Once it is full the consumer stops decoding ahead and stops pulling new groups past one successor
 	 * to the group being read, so the undecoded rest stays in the transport's cache, which bounds it. The group being read still decodes a wire
 	 * frame whenever it holds nothing, so reading never waits on its own lookahead. If it stalls while the
 	 * cap is full, the consumer moves on to the next group like a skip past a slow group, read or not: no
 	 * more of what it waits behind can be held.
+	 *
+	 * @internal
 	 */
 	maxBuffer?: number;
 	/**
@@ -87,8 +89,8 @@ export type Read =
 	 */
 	| { kind: "end"; group: bigint; end: Micro };
 
-/** The default {@link ConsumerProps.maxBuffer}: one group at the transport's size cap. Mirrors Rust's. */
-export const DEFAULT_MAX_BUFFER = 32 * 1024 * 1024;
+// The default max buffer: one group at the transport's size cap. Mirrors Rust's.
+const DEFAULT_MAX_BUFFER = 32 * 1024 * 1024;
 
 // Rough sizes of a buffered frame's and a group's own objects, charged to the max buffer alongside
 // payload bytes. JS cannot measure them; these only need to be the right order of magnitude.
