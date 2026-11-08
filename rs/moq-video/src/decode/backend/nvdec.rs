@@ -164,7 +164,7 @@ impl Nvdec {
 
 		let parser = self
 			.parser
-			.ok_or_else(|| codec_err("NVDEC failed for good: no parser after a drain".into()))?;
+			.ok_or_else(|| Error::CodecGone("NVDEC parser replacement failed after a drain".into()))?;
 		// SAFETY: parser and packet are valid. A non-null payload is owned by the
 		// caller for the duration of this synchronous call.
 		let result = unsafe { (self.state.api.parse_video_data)(parser, packet) };
@@ -213,7 +213,9 @@ impl Backend for Nvdec {
 		// the next access unit goes to a new parser. The cuvid decoder is kept: the
 		// new parser's sequence callback reuses it while the format holds.
 		self.destroy_parser();
-		self.parser = Some(create_parser(self.codec, &mut self.state)?);
+		let parser = create_parser(self.codec, &mut self.state)
+			.map_err(|err| Error::CodecGone(format!("NVDEC parser replacement: {err}")))?;
+		self.parser = Some(parser);
 		frames
 	}
 
