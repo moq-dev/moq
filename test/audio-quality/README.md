@@ -288,7 +288,9 @@ player's own count, which its stats panel shows, is read alongside:
 - `underrun_ms`: the missing audio, summed, and the longest episode as `max`.
 - `skip_aheads`: re-anchors that discarded buffered audio, seen as a forward step of more than 40 ms
   in the lag between the viewer clock and the playhead (judged on the median of four samples either
-  side, after removing the media clock's drift).
+  side, after removing the media clock's drift). A time stretch that accelerates onto a lower target
+  by more than 40 ms across those nine samples counts too, though it re-anchors nothing: `moq play`
+  accelerates about 8%, so shedding more than about 40 ms reads as one skip or more.
 - `discarded_ms`: the media those skip-aheads jumped over. Audio dropped before it reached the ring
   moves no playhead, so it is not counted.
 - `stalled`: the share of the window the ring spent stalled, refilling rather than playing. A gap
