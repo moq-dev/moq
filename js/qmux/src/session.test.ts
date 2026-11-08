@@ -1949,6 +1949,7 @@ describe("Session integration (scripted peer)", () => {
 		const spend = async (bytes: bigint) => {
 			await peer.barrier();
 			const maxes = peer.received().flatMap((f) => (f.type === "max_data" ? [f.max] : []));
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			const max = maxes.reduce((a, b) => (a > b ? a : b), window);
 			if (spent + bytes > max) throw new Error(`stalled at ${spent} of ${max}`);
 			spent += bytes;

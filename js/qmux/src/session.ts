@@ -1468,7 +1468,9 @@ export default class Session implements WebTransport {
 		if (!limit.open(id.index)) throw new Error("stream limit exceeded");
 		this.#recvOpen(id.dir).record(id.index);
 		const size =
-			id.dir === Stream.Dir.Bi ? this.#ourParams.initialMaxStreamDataBidiRemote : this.#ourParams.initialMaxStreamDataUni;
+			id.dir === Stream.Dir.Bi
+				? this.#ourParams.initialMaxStreamDataBidiRemote
+				: this.#ourParams.initialMaxStreamDataUni;
 		this.#recvHalf(id, size).reset(err, frame.finalSize, frame.reliableSize);
 		limit.close();
 	}
@@ -1547,7 +1549,13 @@ export default class Session implements WebTransport {
 		await scheduler.enqueueStream(streamId, bytes);
 	}
 
-	async #sendStreamData(id: Stream.Id, send: SendHalf, data: Uint8Array, signal: AbortSignal, stats: SendStreamStats) {
+	async #sendStreamData(
+		id: Stream.Id,
+		send: SendHalf,
+		data: Uint8Array,
+		signal: AbortSignal,
+		stats: SendStreamStats,
+	) {
 		const streamId = id.value.value;
 		stats.bytesWritten += data.byteLength;
 
@@ -1562,7 +1570,11 @@ export default class Session implements WebTransport {
 
 			const sendable = Number(await send.claim(chunkMax, this.#connCredit, signal));
 			const chunk = data.subarray(offset, offset + sendable);
-			await this.#enqueueStreamFrame(streamId, { type: "stream", id, offset: start, data: chunk, fin: false }, signal);
+			await this.#enqueueStreamFrame(
+				streamId,
+				{ type: "stream", id, offset: start, data: chunk, fin: false },
+				signal,
+			);
 
 			offset += sendable;
 			stats.bytesSent += sendable;
@@ -1697,7 +1709,10 @@ export default class Session implements WebTransport {
 					"abort",
 					() => {
 						const reason = controller.signal.reason;
-						this.#scheduler?.dropStream(streamId, reason instanceof Error ? reason : new Error("stream aborted"));
+						this.#scheduler?.dropStream(
+							streamId,
+							reason instanceof Error ? reason : new Error("stream aborted"),
+						);
 					},
 					{ once: true },
 				);
@@ -1718,7 +1733,13 @@ export default class Session implements WebTransport {
 					const offset = send.finish();
 					// Routed through the stream's own queue so it stays ordered after that
 					// stream's data (not via the control lane, which would jump ahead).
-					await this.#enqueueStreamFrame(streamId, { type: "stream", id, offset, data: new Uint8Array(), fin: true });
+					await this.#enqueueStreamFrame(streamId, {
+						type: "stream",
+						id,
+						offset,
+						data: new Uint8Array(),
+						fin: true,
+					});
 				} catch (e) {
 					// An abort during close drops the queued FIN, and WritableStream never
 					// runs `abort` once an in-flight close fails, so reset here instead.

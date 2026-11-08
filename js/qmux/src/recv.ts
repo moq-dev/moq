@@ -205,7 +205,6 @@ export class RecvStream {
 		this.#signal();
 	}
 
-
 	#signal(): void {
 		const wake = this.#wake;
 		if (wake) {
