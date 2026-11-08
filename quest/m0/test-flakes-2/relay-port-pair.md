@@ -34,14 +34,17 @@ Decided (rejected options in parentheses):
   binds only TCP to port 0, and the relay startup tests go through
   `start_relay`, which already draws again when a port is taken.
 
-Reproduce first: hold the UDP port the test's TCP listener will get (for
-example, hold UDP sockets across most of the ephemeral range) and watch line
-281 fail, then show the fixed test passing under the same pressure. Also hold
-TCP listeners across most of the range, so TCP refuses the first draws, and
-show the search redraws until a pair binds. Hold the pressure sockets in a
-separate process: `relay_owns_port` checks the test's own PID, so a pressure
-listener the test owns at the drawn port plus two would make the negative `tls`
-assertion fail. The search keeps one UDP socket per refused draw, so hold fewer
-TCP listeners than the test's spare descriptors; real collisions are rare.
+Reproduce first, by hand rather than as a committed test: from a helper process,
+hold UDP sockets across all but a few ports of the ephemeral range, and watch
+line 281 fail. Then show the fixed test passing under the same pressure. Next,
+have the helper hold TCP listeners on all but a few ports instead, so TCP
+refuses nearly every draw, and show the search redraws until a pair binds.
+Each held socket costs a descriptor: the helper holds one per port, and the
+test keeps one UDP socket per refused draw. Raise both processes' soft
+`RLIMIT_NOFILE` to cover the range plus a few spare (the Linux default hard
+limit, 524288, allows it). The helper is a separate process because
+`relay_owns_port` checks the test's own PID, so a pressure listener the test
+owned at the drawn port plus two would make the negative `tls` assertion fail.
+Real collisions are rare, so the search itself needs no cap.
 
 Public API: none. Wire: none.
