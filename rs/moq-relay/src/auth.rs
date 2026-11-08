@@ -29,7 +29,7 @@ const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
-#[derive(usage_rs::Args, Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(usage_rs::Args, Clone, Default, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -110,6 +110,20 @@ pub struct Config {
 	#[usage(skip)]
 	#[serde(skip_serializing)]
 	pub(crate) tls: Option<serde::de::IgnoredAny>,
+}
+
+impl std::fmt::Debug for Config {
+	/// Redact the URL: `Config::load` traces the whole resolved config, and its
+	/// userinfo carries the auth server's `--listen-secret`.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Config")
+			.field("url", &self.url.as_ref().map(moq_tokio::RedactedUrl::new))
+			.field("root", &self.root)
+			.field("public", &self.public)
+			.field("public_subscribe", &self.public_subscribe)
+			.field("public_publish", &self.public_publish)
+			.finish_non_exhaustive()
+	}
 }
 
 /// Maximum in-band token verifications one session, or requests one HTTP/2
@@ -1544,7 +1558,7 @@ mod tests {
 	async fn capped_grants_are_refused_without_a_pacer() {
 		use moq_auth::Transport::*;
 		let rate = moq_auth::Rate::from_bps(8000).unwrap();
-		for transport in [Quic, WebTransport, Iroh, WebSocket, Http, Rtmp, Srt] {
+		for transport in [Quic, WebTransport, WebSocket, Http, Rtmp, Srt] {
 			for publish in [false, true] {
 				let mut grant = Grant::new(Pattern::all(), Pattern::all());
 				match publish {

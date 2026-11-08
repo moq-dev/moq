@@ -24,6 +24,10 @@ deleted.
 - [P2P](/quest/m4/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Challenge proof for certificate credentials](/quest/m4/cert-challenge.md) - a relay can require a signed nonce, so a certificate credential replayed within its time window admits nothing
 - [Benchmark sources](/quest/m4/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
+- [The fan-out benchmark's session scenario builds again](/quest/m4/bench-fanout-session.md) - `just bench-fanout` measures sessions, not only the model
+- [A browser round-trips media through moq-webrtc](/quest/m4/whip-whep-browser.md) - Chromium and Firefox publish over WHIP and play over WHEP nightly
+- [Shared corpora live in each crate's fixtures/](/quest/m4/corpus-fixtures.md) - moq-auth's corpus moves beside moq-net's
+- [An MV-HEVC stream with access unit delimiters stays one frame per access unit](/quest/m4/h265-layered-aud.md) - x265's `--aud` layered output imports, or is refused by name
 - [HLS and DASH browser playback](/quest/m4/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly
 - [Cache fair share](/quest/m4/cache-fairness.md) - one tenant cannot crowd another out of the relay's shared group cache
 - [Peer grant bound](/quest/m4/peer-grant-bound.md) - a peer's AUTH_OK costs near-linear time in its bytes on every input shape, in Rust and in a browser
@@ -68,7 +72,7 @@ deleted.
 - [The API diff reports GStreamer element properties](/quest/m4/api-diff-gst.md) - `just api-diff` lists added, removed, and changed moq-gst properties
 - [Hand-written wrappers reach every FFI item](/quest/m4/binding-export-coverage.md) - Python, Go, and Swift fail a test when an FFI item has no wrapper path, as Kotlin does
 - [The HLS server follows each path once](/quest/m4/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
-- [moq-bench pins the instances it measures](/quest/m4/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
+- [moq-bench pins the instances it measures](/quest/m4/bench-epoch-pin.md) - pooled requests pin their announced instance, so another instance at the path is not counted as the same broadcast
 - [moq-bench reports sub-millisecond latency](/quest/m4/bench-latency-resolution.md) - steady-window latency resolves finer than 1 ms
 - [Benchmark series stay meaningful](/quest/m4/bench-hygiene.md) - a warm `burst` variant, stale series pruned, and slow-group `bytes` kept out of series names
 - [Re-run the SPS fuzzer on h264-reader](/quest/m4/sps-fuzz-h264-reader.md) - the H.264 SPS overflow is rechecked on the new parser

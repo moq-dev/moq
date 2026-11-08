@@ -2698,7 +2698,8 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 	},
 );
 
-test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+// Without an instance on the wire nothing says the job's route continues the claim's stream.
+test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 	"publishing a job still resets its first subscribe on %s",
 	async (protocol) => {
 		const pair = createMockTransportPair(protocol);
@@ -2725,6 +2726,58 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		await expect(track.readString()).rejects.toBeInstanceOf(Error);
 		const job = await serving;
 		track.close();
+		requested.close();
+		handle.close();
+		job.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		consumer.close();
+	},
+);
+
+// On lite-07 a job's exact route continues its claim's minted instance, so a reader resolved
+// through the claim keeps its broadcast and its subscription once that route lands.
+test.each(["request", "follow"] as const)(
+	"a job's route continues a reader resolved through its claim (%s)",
+	async (method) => {
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		const origin = new OriginProducer();
+		const consumer = new OriginProducer();
+		const path = Path.from("live/cam");
+		const handle = origin.routePrefix(Path.empty());
+		const serving = (async () => {
+			const requests = handle.requested();
+			const request = (await requests.next()).value;
+			if (!request) throw new Error("missing job request");
+			const job = request.route({ hidden: true });
+			const chat = job.broadcast.createTrack("chat", { timescale: Timescale.MILLI });
+			chat.writeFrame(textFrame("job"));
+			job.announce();
+			return { job, chat };
+		})();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: consumer }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const listing = consumer.announced(Path.Pattern.literal(path));
+		const requested = method === "request" ? consumer.request(path) : consumer.follow(path);
+		const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
+		if (!remote) throw new Error("request did not resolve");
+		const track = remote.track("chat").subscribe().ordered();
+		expect(await track.readString()).toBe("job");
+
+		// Written once the job's route is listed at the reader: the same subscription carries it.
+		const { job, chat } = await serving;
+		expect(job.instance).toBe(handle.instance);
+		expect(await listing.next()).toMatchObject({ kind: "present", prefix: path });
+		chat.writeFrame(textFrame("later"));
+		expect(await track.readString()).toBe("later");
+		expect(requested.active.peek()).toBe(remote);
+		expect(requested.closed.peek()).toBeUndefined();
+
+		track.close();
+		listing.close();
 		requested.close();
 		handle.close();
 		job.close();

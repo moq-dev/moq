@@ -1,0 +1,26 @@
+# [S] js/net's lite-06 session-close test keeps the end under load
+
+## Goal
+
+`js/net/src/lite/datagram-tracks.test.ts`'s "moq-lite-06: a session close right
+after a datagram track's end keeps the end" passes under load and runs again.
+
+## Plan
+
+Planned 2026-11-08 (maintainer). The lite-06 case failed in the merge queue,
+dropping [moq-dev/moq#8280](https://github.com/moq-dev/moq/pull/8280)
+([job](https://github.com/moq-dev/moq/actions/runs/42489349640/job/128758087035)):
+`reader.recv()` rejected with `Session: remote error: 0` from `closeError`
+(`js/net/src/error.ts`) instead of returning the end. The lite-05 and lite-07
+cases still run; the lite-06 case is quarantined with `test.skip`.
+
+Suspects: the test drains 10,000 microtasks and assumes the end reached the
+reader by then. Find which lite-06 step (SUBSCRIBE_FINISH, the FIN, or the
+track's host-task wait for its datagrams) can still be pending when
+`client.abort()` lands, and whether the library or the test is wrong: the
+comment above the test says a close after the end must keep the end. Wait on
+that event, never a longer drain, timeout, or retry. Reproduce with
+`bun test --rerun-each 200` under a loaded machine first. Then remove the skip
+and delete this quest.
+
+Public API: none. Wire: none.

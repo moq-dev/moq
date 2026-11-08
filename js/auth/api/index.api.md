@@ -702,7 +702,6 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}, $strip>>;
 	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 		http: "http";
-		iroh: "iroh";
 		quic: "quic";
 		rtmp: "rtmp";
 		srt: "srt";
@@ -742,7 +741,6 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}, $strip>>;
 	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 		http: "http";
-		iroh: "iroh";
 		quic: "quic";
 		rtmp: "rtmp";
 		srt: "srt";
@@ -782,7 +780,6 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}, $strip>>;
 	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 		http: "http";
-		iroh: "iroh";
 		quic: "quic";
 		rtmp: "rtmp";
 		srt: "srt";
@@ -828,7 +825,6 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}, $strip>>;
 	transport: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 		http: "http";
-		iroh: "iroh";
 		quic: "quic";
 		rtmp: "rtmp";
 		srt: "srt";
@@ -889,7 +885,6 @@ export type Transport = infer<typeof TransportSchema>;
 
 export const TransportSchema: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<ZodMiniEnum<{
 	http: "http";
-	iroh: "iroh";
 	quic: "quic";
 	rtmp: "rtmp";
 	srt: "srt";

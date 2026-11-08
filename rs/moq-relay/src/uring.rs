@@ -855,6 +855,10 @@ impl crate::incoming::Sealed for Request {
 		self.handshake.role()
 	}
 
+	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
+		self.handshake.peer_hop()
+	}
+
 	fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
 		self.handshake = self.handshake.with_stats(stats);
 		self
