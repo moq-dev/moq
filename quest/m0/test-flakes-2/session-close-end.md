@@ -23,4 +23,18 @@ that event, never a longer drain, timeout, or retry. Reproduce with
 `bun test --rerun-each 200` under a loaded machine first. Then remove the skip
 and delete this quest.
 
+Investigated 2026-11-08 (no repro): on `main` and on the failing queue's base
+`12e41a369e`, with Bun 1.4.2 as in CI, 24 parallel copies of
+`--rerun-each 300` of the lite-06 case (7,200 runs each), 640 loaded runs of
+the whole file, and 12 parallel full `js/net` suites all passed. Instrumenting
+`@moq/clock`'s host `task()` showed the case runs in one host task: only the
+two `AuthSession` decision yields and the subscriber's `#datagramsRouted`
+yield are pending at `client.abort()`, and the publisher's post-update
+`yieldNow()` is not. Forcing a host task before `reader.info()`, the priority
+wait, `finish()`, or the abort still passed. In the CI log the lite-06 stream
+track failed (`subscribe error`, no `subscribe close`), so its responses or
+`#settleTail` were unsettled, not the datagram routing. Since load cannot
+reorder microtasks, the remaining suspects read real time: `Budget` (stubbed
+only after `connect` resolves), and `now()` in `group.ts`/`cache.ts`.
+
 Public API: none. Wire: none.
