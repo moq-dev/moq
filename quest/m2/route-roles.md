@@ -37,3 +37,16 @@ put the comparison in the PR under `## Waiting` with a recommendation. After
 the maintainer picks, land the winner in JS, moq-ffi, moq-c, and the
 wrappers in the same PR. The route instance accessor's five spellings across
 bindings stay with [the exporter](/quest/m3/ffi-exporter.md).
+
+Status (2026-11-08, [moq-dev/moq#8292](https://github.com/moq-dev/moq/pull/8292)):
+the split is built in Rust (moq-net returns a `Claim` from `route_prefix`; moq-ffi
+and moq-c wrap both kinds in a private enum, so their API is unchanged so far). The single
+prefix Route is sketched in the PR with caller diffs, not built: building it means
+redesigning the origin table (exact routes become serving entries, sibling broadcasts
+share one instance, job routes answer requests differently).
+
+## Waiting
+
+- Maintainer: pick split or single prefix on moq-dev/moq#8292, and whether the split
+  renames `route_prefix` to `claim`; recommended: split, renamed. Done when the PR has a
+  reply naming the shape.
