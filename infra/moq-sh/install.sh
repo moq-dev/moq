@@ -61,13 +61,18 @@ detect_target() {
             esac
             ;;
         Linux)
+            # A 32-bit OS on a 64-bit kernel, as Raspberry Pi OS ships on a Pi 4,
+            # reports aarch64 but runs only 32-bit binaries.
+            if [ "$arch" = aarch64 ] && [ "$(getconf LONG_BIT 2>/dev/null || true)" = 32 ]; then
+                arch=armv7l
+            fi
             case "$arch" in
-                x86_64 | amd64) arch=x86_64 ;;
-                aarch64 | arm64) arch=aarch64 ;;
-                *) die "no moq build for Linux on $arch; x86_64 and aarch64 are published. Try: cargo install moq-cli" ;;
+                x86_64 | amd64) target=x86_64-unknown-linux-gnu ;;
+                aarch64 | arm64) target=aarch64-unknown-linux-gnu ;;
+                armv7* | armv8l) target=armv7-unknown-linux-gnueabihf ;;
+                *) die "no moq build for Linux on $arch; x86_64, aarch64, and armv7 are published. Try: cargo install moq-cli" ;;
             esac
             check_glibc
-            target=$arch-unknown-linux-gnu
             ;;
         *) die "no moq build for $os; macOS and Linux are published. On Windows: winget install moq-dev.moq" ;;
     esac

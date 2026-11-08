@@ -206,6 +206,7 @@ async fn lan_refusals_are_counted() {
 /// An auth server whose connection fails is `unavailable`, apart from a refusal.
 #[tokio::test]
 async fn unavailable_auth_server_is_counted() {
+	moq_tokio::crypto::install_default().unwrap();
 	// Listen to reserve the port on every OS, then hang up before answering HTTP.
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
 		.await

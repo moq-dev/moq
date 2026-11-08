@@ -28,7 +28,7 @@ curl -fsSL https://moq.sh | sh
 ```
 
 It installs the newest `moq` release into `~/.local/bin`, without sudo or Rust,
-on macOS (Apple Silicon) and Linux (x86\_64, aarch64, glibc 2.34+). It checks
+on macOS (Apple Silicon) and Linux (x86\_64, aarch64, armv7, glibc 2.34+). It checks
 the download against the release's `SHA256SUMS` and never edits your shell
 profile; it prints the `PATH` line to add if needed. Run it again to upgrade.
 Pass options after `sh -s --`:
@@ -67,7 +67,8 @@ docker run -i moqdev/moq --help
 
 Static binaries for Linux (x86\_64, aarch64), macOS (Apple Silicon), and Windows
 (x64) are attached to every
-[GitHub release](https://github.com/moq-dev/moq/releases). The Nix cache at
+[GitHub release](https://github.com/moq-dev/moq/releases), plus `moq` for Linux
+armv7. The Nix cache at
 `nix.moq.dev` only holds tagged releases, so the `release` branch builds from
 source. Nix asks before trusting it; `--accept-flake-config` says yes for one
 command.
@@ -90,7 +91,8 @@ gh attestation verify moq-cli-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz \
 ## Debian and Ubuntu
 
 Debian 12+ and Ubuntu 22.04+. The GStreamer plugin needs GStreamer 1.22, so it
-is available on Debian 12+ and Ubuntu 24.04+.
+is available on Debian 12+ and Ubuntu 24.04+. On 32-bit ARM (`armhf`), only
+`moq` is published.
 
 ```bash
 curl -fsSL https://apt.moq.dev/moq-keyring.gpg | sudo tee /usr/share/keyrings/moq-keyring.gpg > /dev/null

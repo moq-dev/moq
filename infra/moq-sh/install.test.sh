@@ -13,7 +13,8 @@ script="$here/install.sh"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# Fake host tools, driven by FAKE_OS, FAKE_ARCH, FAKE_GLIBC, and FAKE_ROSETTA.
+# Fake host tools, driven by FAKE_OS, FAKE_ARCH, FAKE_GLIBC, FAKE_ROSETTA, and
+# FAKE_BITS.
 mkdir "$tmp/fake"
 cat >"$tmp/fake/uname" <<'EOF'
 #!/bin/sh
@@ -24,8 +25,13 @@ esac
 EOF
 cat >"$tmp/fake/getconf" <<'EOF'
 #!/bin/sh
-[ -n "$FAKE_GLIBC" ] || exit 1
-echo "glibc $FAKE_GLIBC"
+case "$1" in
+    LONG_BIT) echo "$FAKE_BITS" ;;
+    *)
+        [ -n "$FAKE_GLIBC" ] || exit 1
+        echo "glibc $FAKE_GLIBC"
+        ;;
+esac
 EOF
 cat >"$tmp/fake/sysctl" <<'EOF'
 #!/bin/sh
@@ -40,7 +46,7 @@ release() {
     version=$1
     tag="moq-cli-v$version"
     mkdir -p "$releases/$tag"
-    for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf; do
         root="$tmp/build/$tag-$target"
         mkdir -p "$root/bin"
         printf '#!/bin/sh\necho "moq %s"\n' "$version" >"$root/bin/moq"
@@ -107,7 +113,8 @@ host() {
     FAKE_ARCH=$2
     FAKE_GLIBC=${3:-}
     FAKE_ROSETTA=${4:-0}
-    export FAKE_OS FAKE_ARCH FAKE_GLIBC FAKE_ROSETTA
+    FAKE_BITS=${5:-64}
+    export FAKE_OS FAKE_ARCH FAKE_GLIBC FAKE_ROSETTA FAKE_BITS
 }
 
 suite() {
@@ -162,6 +169,9 @@ suite() {
     grep -v aarch64-unknown-linux-gnu "$releases/moq-cli-v1.1.0/SHA256SUMS" >"$releases/moq-cli-v1.2.0/SHA256SUMS"
     host Linux aarch64 2.34
     refuse "incomplete release" "has no moq-cli-v1.2.0-aarch64-unknown-linux-gnu.tar.gz" "$tmp/served.sh" --dir "$dir" --version 1.2.0
+    # A 32-bit OS on a 64-bit kernel asks for the armv7 build.
+    host Linux aarch64 2.36 0 32
+    refuse "32-bit OS on a 64-bit kernel" "has no moq-cli-v1.2.0-armv7-unknown-linux-gnueabihf.tar.gz" "$tmp/served.sh" --dir "$dir" --version 1.2.0
     installed 1.0.0
 
     # A tarball that doesn't match SHA256SUMS is never installed.
@@ -204,6 +214,12 @@ suite() {
     host Linux aarch64 2.34
     ok "linux aarch64" "$tmp/served.sh" --dir "$dir"
     installed 1.1.0
+    host Linux armv7l 2.36
+    ok "linux armv7" "$tmp/served.sh" --dir "$dir" --version 1.0.0
+    installed 1.0.0
+    host Linux aarch64 2.34
+    ok "linux aarch64 again" "$tmp/served.sh" --dir "$dir"
+    installed 1.1.0
     host Darwin arm64
     ok "macOS arm64" "$tmp/served.sh" --dir "$dir" --version 1.0.0
     installed 1.0.0
@@ -214,7 +230,7 @@ suite() {
     host Darwin x86_64
     refuse "intel mac" "only Apple silicon" "$tmp/served.sh" --dir "$dir"
     host Linux riscv64 2.39
-    refuse "unsupported arch" "x86_64 and aarch64" "$tmp/served.sh" --dir "$dir"
+    refuse "unsupported arch" "x86_64, aarch64, and armv7" "$tmp/served.sh" --dir "$dir"
     host FreeBSD amd64
     refuse "unsupported os" "winget" "$tmp/served.sh" --dir "$dir"
     host Linux x86_64 2.31

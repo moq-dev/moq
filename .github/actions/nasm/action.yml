@@ -1,5 +1,5 @@
 name: Install NASM
-description: Install the pinned NASM on a Windows runner, where aws-lc-rs assembles its x86_64 crypto with it.
+description: Install the pinned NASM on a Windows runner, where openh264 assembles its x86_64 kernels with it.
 
 runs:
   using: composite
