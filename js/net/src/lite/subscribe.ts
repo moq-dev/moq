@@ -11,6 +11,7 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { floorAt, type Timescale, Timestamp } from "../time.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
+import { UNBOUNDED } from "../util/sequence.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import * as Duration from "./duration.ts";
 import { decodePin, encodePin } from "./instance.ts";
@@ -20,6 +21,7 @@ import {
 	hasDropCode,
 	hasEndError,
 	hasFrameBounds,
+	hasGroupCount,
 	hasGroupOrder,
 	hasMinDelay,
 	hasOrder,
@@ -1155,6 +1157,26 @@ export class SubscribeStarted {
 }
 
 /**
+ * A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: `Group Start` and `Group Count` on lite-07, an inclusive
+ * `Group Start` and `Group End` before. Either way it ends by the reserved sequence 2^64-1, so it
+ * never names that group.
+ */
+async function decodeGroups(r: Reader, version: Version): Promise<{ start: bigint; end: bigint }> {
+	const start = await r.u62();
+	const end = hasGroupCount(version) ? start + (await r.u62()) : (await r.u62()) + 1n;
+	if (end < start || end >= UNBOUNDED) throw new ProtocolViolation(`invalid group range: [${start}, ${end})`);
+	return { start, end };
+}
+
+async function encodeGroups(w: Writer, start: bigint, end: bigint, version: Version) {
+	// An empty range at 0 has no inclusive end to spell before lite-07.
+	if (end < start || end >= UNBOUNDED || (end === 0n && !hasGroupCount(version)))
+		throw new RangeError(`invalid group range: [${start}, ${end})`);
+	await w.u62(start);
+	await w.u62(hasGroupCount(version) ? end - start : end - 1n);
+}
+
+/**
  * Names groups that existed but will not be delivered: aborted or reset, evicted or expired with
  * no copy left, or stale.
  *
@@ -1162,7 +1184,9 @@ export class SubscribeStarted {
  * declared skipped, which lite-07 names in {@link SubscribeSkip}.
  */
 export class SubscribeDrop {
+	/** The first dropped group sequence. */
 	start: bigint;
+	/** One past the last dropped group sequence. */
 	end: bigint;
 	error: number;
 	/**
@@ -1179,7 +1203,7 @@ export class SubscribeDrop {
 		this.update = props.update ?? 0n;
 	}
 
-	/** Name `[start, end]` given up with `err` under the terms numbered `update`, as `version` carries it. */
+	/** Name `[start, end)` given up with `err` under the terms numbered `update`, as `version` carries it. */
 	static given(start: bigint, end: bigint, err: unknown, version: Version, update = 0n): SubscribeDrop {
 		return new SubscribeDrop({
 			start,
@@ -1204,17 +1228,13 @@ export class SubscribeDrop {
 	}
 
 	async #encode(w: Writer, version: Version) {
-		if (this.start - this.end > 1n) throw new RangeError("invalid dropped range");
-		await w.u62(this.start);
-		await w.u62(this.end);
+		await encodeGroups(w, this.start, this.end, version);
 		await w.u53(this.error);
 		await encodeUpdate(w, version, this.update);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<SubscribeDrop> {
-		const start = await r.u62();
-		const end = await r.u62();
-		if (start - end > 1n) throw new ProtocolViolation("invalid dropped range");
+		const { start, end } = await decodeGroups(r, version);
 		const error = await r.u53();
 		const update = await decodeUpdate(r, version);
 		return new SubscribeDrop({ start, end, error, update });
@@ -1235,7 +1255,9 @@ export class SubscribeDrop {
  * {@link SubscribeDrop}.
  */
 export class SubscribeSkip {
+	/** The first skipped group sequence. */
 	start: bigint;
+	/** One past the last skipped group sequence. */
 	end: bigint;
 
 	constructor(props: { start: bigint; end: bigint }) {
@@ -1243,24 +1265,12 @@ export class SubscribeSkip {
 		this.end = props.end;
 	}
 
-	async #encode(w: Writer) {
-		if (this.start - this.end > 1n) throw new RangeError("invalid skipped range");
-		await w.u62(this.start);
-		await w.u62(this.end);
+	async encode(w: Writer, version: Version): Promise<void> {
+		return Message.encode(w, (w) => encodeGroups(w, this.start, this.end, version));
 	}
 
-	static async #decode(r: Reader): Promise<SubscribeSkip> {
-		const skip = new SubscribeSkip({ start: await r.u62(), end: await r.u62() });
-		if (skip.start - skip.end > 1n) throw new ProtocolViolation("invalid skipped range");
-		return skip;
-	}
-
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader): Promise<SubscribeSkip> {
-		return Message.decode(r, SubscribeSkip.#decode);
+	static async decode(r: Reader, version: Version): Promise<SubscribeSkip> {
+		return Message.decode(r, async (r) => new SubscribeSkip(await decodeGroups(r, version)));
 	}
 }
 
@@ -1318,7 +1328,7 @@ export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse
 				await resp.drop.encode(w, version);
 			} else if ("skip" in resp && hasSkip(version)) {
 				await w.u53(0x3);
-				await resp.skip.encode(w);
+				await resp.skip.encode(w, version);
 			} else if ("started" in resp && hasRanges(version)) {
 				await w.u53(0x4);
 				await resp.started.encode(w);
@@ -1357,7 +1367,7 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 					return { drop: await SubscribeDrop.decode(r, version) };
 				case 0x3:
 					if (!hasSkip(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
-					return { skip: await SubscribeSkip.decode(r) };
+					return { skip: await SubscribeSkip.decode(r, version) };
 				case 0x4:
 					if (!hasRanges(version)) throw new ProtocolViolation(`unknown subscribe response type: ${typ}`);
 					return { started: await SubscribeStarted.decode(r) };

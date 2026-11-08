@@ -5154,20 +5154,13 @@ impl TrackRun {
 			// drop again is judged again too, since these terms may serve it, and so is a group
 			// one re-offered that has not opened yet, since they may no longer admit it.
 			for group in std::mem::take(&mut self.reoffered) {
-				if let Some(end) = group.sequence.checked_add(1) {
-					self.expired.insert(group.sequence..end);
-				}
+				self.expired.insert(group.sequence..group.sequence + 1);
 			}
 			let pending = std::mem::take(&mut self.redrop);
 			self.expired.extend(pending.iter().cloned());
 			for run in std::mem::take(&mut self.expired).iter() {
 				let (groups, gone) = self.track.reoffer_groups(run.clone());
-				self.owe(
-					groups
-						.iter()
-						.filter_map(|group| Some(group.sequence..group.sequence.checked_add(1)?))
-						.collect(),
-				);
+				self.owe(groups.iter().map(|group| group.sequence..group.sequence + 1).collect());
 				self.reoffered.extend(groups);
 				self.redrop.extend(gone.iter().cloned());
 			}
@@ -5335,24 +5328,22 @@ impl TrackRun {
 				// A stream expired under this subscription's budget is a stale verdict.
 				let hole = match err {
 					StreamError::Old => {
-						if self.ctx.version.has_skip()
-							&& let Some(end) = sequence.checked_add(1)
-						{
-							self.expired.insert(sequence..end);
-							self.sent_stale(sequence..end);
+						if self.ctx.version.has_skip() {
+							self.expired.insert(sequence..sequence + 1);
+							self.sent_stale(sequence..sequence + 1);
 						}
 						Hole::stale(self.track.budget())
 					}
 					err => Hole::drop(err),
 				};
-				writer.buffer(&self.hole(sequence..=sequence, &hole))?;
+				writer.buffer(&self.hole(sequence..sequence + 1, &hole))?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 		if !self.redrop.is_empty() {
 			let hole = Hole::stale(self.track.budget());
 			for run in std::mem::take(&mut self.redrop).iter() {
-				writer.buffer(&self.hole(run.start..=run.end - 1, &hole))?;
+				writer.buffer(&self.hole(run.clone(), &hole))?;
 				self.expired.insert(run.clone());
 				self.sent_stale(run.clone());
 				// A re-offer an update owed again is given up now, so the end sweep never names it.
@@ -5435,9 +5426,7 @@ impl TrackRun {
 			match position_group(group, &self.frames) {
 				Some(group) => self.serve(group),
 				None => {
-					if let Some(end) = sequence.checked_add(1) {
-						self.drop_range(sequence..end, &Hole::drop(StreamError::NotFound), writer)?;
-					}
+					self.drop_range(sequence..sequence + 1, &Hole::drop(StreamError::NotFound), writer)?;
 				}
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -5458,10 +5447,8 @@ impl TrackRun {
 					// group handed out after one is served, as one a route the front switched to
 					// delivers: the update that reopens the drop would never re-offer it.
 					let sequence = group.sequence;
-					if self.dropped_stale.contains(&sequence)
-						&& let Some(end) = sequence.checked_add(1)
-					{
-						self.replace_stale(sequence..end);
+					if self.dropped_stale.contains(&sequence) {
+						self.replace_stale(sequence..sequence + 1);
 					} else if self.served.as_ref().is_some_and(|served| served.contains(&sequence)) {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
@@ -5471,15 +5458,11 @@ impl TrackRun {
 						// only be reset; the next servable group resolves the start.
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "skipping group with a missing head");
 						if self.emit_range && self.start.is_none() {
-							// At u64::MAX no later group can resolve a start past this one.
-							if let Some(end) = sequence.checked_add(1) {
-								self.skipped.insert(sequence..end, Hole::drop(StreamError::NotFound));
-							}
-						} else if self.start.is_some()
-							&& let Some(end) = sequence.checked_add(1)
-						{
+							self.skipped
+								.insert(sequence..sequence + 1, Hole::drop(StreamError::NotFound));
+						} else if self.start.is_some() {
 							// Lite-05+ names it now; a no-op on other versions.
-							self.drop_range(sequence..end, &Hole::drop(StreamError::NotFound), writer)?;
+							self.drop_range(sequence..sequence + 1, &Hole::drop(StreamError::NotFound), writer)?;
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					};
@@ -5601,9 +5584,7 @@ impl TrackRun {
 		let Some(served) = &mut self.served else {
 			return;
 		};
-		if let Some(next) = sequence.checked_add(1) {
-			served.insert(sequence..next);
-		}
+		served.insert(sequence..sequence + 1);
 	}
 
 	/// Forward a verdict the cursor reached on `range`, as [`Self::drop_range`] does. On lite-07
@@ -5695,7 +5676,7 @@ impl TrackRun {
 		}
 		served.extend(gaps.iter().cloned());
 		for gap in gaps.iter() {
-			let msg = self.hole(gap.start..=gap.end - 1, hole);
+			let msg = self.hole(gap.clone(), hole);
 			writer.buffer(&msg)?;
 		}
 		Ok(!gaps.is_empty())
@@ -5703,13 +5684,10 @@ impl TrackRun {
 
 	/// The message naming `groups` given up as `hole`: lite-07 skips what was never
 	/// produced, and earlier versions drop it as not found.
-	fn hole(&self, groups: std::ops::RangeInclusive<u64>, hole: &Hole) -> lite::SubscribeResponse {
+	fn hole(&self, groups: std::ops::Range<u64>, hole: &Hole) -> lite::SubscribeResponse {
 		let version = self.ctx.version;
 		match hole {
-			Hole::Skip if version.has_skip() => lite::SubscribeResponse::Skip(lite::SubscribeSkip {
-				start: *groups.start(),
-				end: *groups.end(),
-			}),
+			Hole::Skip if version.has_skip() => lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
 			hole => {
 				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &hole.error(), self.update, version))
 			}
@@ -7883,14 +7861,14 @@ mod serve_group_test {
 				let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
 				buf = &buf[size..];
 				match msg {
-					lite::SubscribeResponse::Skip(skip) => holes.push(("skip", skip.start, skip.end)),
-					lite::SubscribeResponse::Drop(drop) => holes.push(("drop", drop.start, drop.end)),
+					lite::SubscribeResponse::Skip(skip) => holes.push(("skip", skip.groups)),
+					lite::SubscribeResponse::Drop(drop) => holes.push(("drop", drop.groups)),
 					_ => {}
 				}
 			}
 			let expected = match version.has_skip() {
-				true => vec![("drop", 1, 2), ("skip", 1, 2)],
-				false => vec![("drop", 1, 2)],
+				true => vec![("drop", 1..3), ("skip", 1..3)],
+				false => vec![("drop", 1..3)],
 			};
 			assert_eq!(holes, expected, "{version}");
 		}
@@ -7923,12 +7901,12 @@ mod serve_group_test {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, Version::Lite07).unwrap();
 			buf = &buf[size..];
 			match msg {
-				lite::SubscribeResponse::Skip(skip) => skips.push((skip.start, skip.end)),
+				lite::SubscribeResponse::Skip(skip) => skips.push(skip.groups),
 				lite::SubscribeResponse::Drop(_) => drops += 1,
 				_ => {}
 			}
 		}
-		assert_eq!((skips, drops), (vec![(1, FAR - 1)], 0));
+		assert_eq!((skips, drops), (vec![1..FAR], 0));
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
@@ -7962,7 +7940,8 @@ mod serve_group_test {
 		);
 	}
 
-	/// The SUBSCRIBE_DROP ranges a run loop's subscribe stream carried, once flushed.
+	/// The SUBSCRIBE_DROP ranges a run loop's subscribe stream carried, once flushed, each as
+	/// its first and last group.
 	async fn drops(
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		log: &Log,
@@ -7977,14 +7956,14 @@ mod serve_group_test {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
 			buf = &buf[size..];
 			if let lite::SubscribeResponse::Drop(drop) = msg {
-				drops.push((drop.start, drop.end));
+				drops.push((drop.groups.start, drop.groups.end - 1));
 			}
 		}
 		drops
 	}
 
-	/// The SUBSCRIBE_DROP ranges a run loop's subscribe stream carried, once flushed, with the
-	/// update each names.
+	/// The SUBSCRIBE_DROP ranges a run loop's subscribe stream carried, once flushed, each as
+	/// its first and last group with the update it names.
 	async fn drop_updates(
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		log: &Log,
@@ -7998,7 +7977,7 @@ mod serve_group_test {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
 			buf = &buf[size..];
 			if let lite::SubscribeResponse::Drop(drop) = msg {
-				drops.push((drop.start, drop.end, drop.update));
+				drops.push((drop.groups.start, drop.groups.end - 1, drop.update));
 			}
 		}
 		drops
@@ -8772,29 +8751,6 @@ mod serve_group_test {
 			"only group 0 is served"
 		);
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
-	}
-
-	/// A missing head at the model's largest sequence has no successor to name.
-	#[kio::test]
-	async fn a_missing_head_at_the_maximum_sequence_does_not_panic() {
-		let track = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		let subscriber = track.subscribe(
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60))),
-		);
-		let mut group = track.create_group(group::Info { sequence: u64::MAX }).unwrap();
-		group.start_at(1).unwrap();
-		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
-		group.finish().unwrap();
-		let (mut run, mut writer, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), subscriber);
-		assert!(
-			kio::wait(|waiter| run.poll(&mut writer, waiter))
-				.now_or_never()
-				.is_none()
-		);
 	}
 
 	/// A long-budget reader warms the relay without changing a live reader's resolved start.
@@ -9606,8 +9562,9 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "group 1 is still opening");
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			// The DROP carries OLD (0x34) and the SUBSCRIBE's update, 0.
-			[0, 4, 1, 0, 1, 1, 2, 4, 0, 0, 0x34, 0, 1, 2, 2, 0],
+			// The DROP names group 0 as a start and count, with OLD (0x34) and the SUBSCRIBE's
+			// update, 0.
+			[0, 4, 1, 0, 1, 1, 2, 4, 0, 1, 0x34, 0, 1, 2, 2, 0],
 			"the expired group is dropped and the end precedes stream credit"
 		);
 
@@ -9619,7 +9576,7 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "the stream stays open");
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			[0, 4, 1, 0, 1, 1, 2, 4, 0, 0, 0x34, 0, 1, 2, 2, 0]
+			[0, 4, 1, 0, 1, 1, 2, 4, 0, 1, 0x34, 0, 1, 2, 2, 0]
 		);
 	}
 }

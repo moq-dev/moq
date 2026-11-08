@@ -1112,7 +1112,7 @@ test("lite draft-05: a late-arriving older group is still served", async () => {
 	}
 });
 
-// The SUBSCRIBE_DROP ranges, inclusive, a subscribe stream carried up to its FIN.
+// The SUBSCRIBE_DROP ranges a subscribe stream carried up to its FIN.
 async function drops(reader: Reader, version: Version): Promise<[bigint, bigint][]> {
 	const ranges: [bigint, bigint][] = [];
 	for (;;) {
@@ -1135,7 +1135,7 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 		cut.abort(new Error("cut"));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
+		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
 
 		sub.serve(2n);
 		expect(await sub.servedSequence()).toBe(2n);
@@ -1163,7 +1163,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
 				1n,
-				1n,
+				2n,
 				version === Version.DRAFT_07 ? 70 : 0,
 			]);
 		} finally {
@@ -1183,7 +1183,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
 				1n,
-				2n,
+				3n,
 				version === Version.DRAFT_07 ? 70 : 0,
 			]);
 		} finally {
@@ -1203,12 +1203,12 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.dropTrackGroups(sub.track, 1n, 3n, { error: new StreamError(StreamCode(70), { message: "cut" }) });
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-			expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
+			expect([resp.drop.start, resp.drop.end]).toEqual([1n, 3n]);
 
 			sub.track.skipGroups(1n, 3n);
 			if (version === Version.DRAFT_07) {
 				const skip = await decodeSubscribeResponse(sub.client.reader, version);
-				expect(skip).toMatchObject({ skip: { start: 1n, end: 2n } });
+				expect(skip).toMatchObject({ skip: { start: 1n, end: 3n } });
 			}
 			sub.track.finish();
 			sub.track.close();
@@ -1239,7 +1239,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.dropTrackGroups(sub.track, 1n, 2n, staleHole(60_000));
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-			expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
+			expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
 
 			sub.serve(1n);
 			sub.serve(2n);
@@ -1280,7 +1280,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				if (version !== Version.DRAFT_07) {
 					expect([codes, skips]).toEqual([[0], []]);
 				} else if (declared) {
-					expect([codes, skips]).toEqual([[], [[2n, 4n]]]);
+					expect([codes, skips]).toEqual([[], [[2n, 5n]]]);
 				} else {
 					expect([codes, skips]).toEqual([[StreamCode.NotFound], []]);
 				}
@@ -1311,7 +1311,7 @@ test("lite-07 skips a huge run at once", async () => {
 			if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
 			if ("finish" in resp) break;
 		}
-		expect([codes, skips]).toEqual([[], [[1n, FAR - 1n]]]);
+		expect([codes, skips]).toEqual([[], [[1n, FAR]]]);
 	} finally {
 		await sub.close();
 	}
@@ -1330,7 +1330,7 @@ test("lite draft-06: a reported cut stays dropped when re-created", async () => 
 		cut.abort(new Error("cut"));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
+		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
 
 		sub.serve(1n);
 		sub.serve(2n);
@@ -1377,7 +1377,7 @@ test("lite draft-06: a group stream that never completes is reset once the group
 		expect(toStreamCode(fromTransport(reason))).toBe(StreamCode.Old);
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
+		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
 	} finally {
 		await sub.close();
 		installed.close();
@@ -1409,7 +1409,7 @@ test("lite draft-07: an update drops an expired stream again while it is still s
 		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.Old);
 		const first = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
 		if (!("drop" in first)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 1n, 0n]);
+		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 2n, 0n]);
 
 		// The track's max age still caps the budget, so group 1 is still stale.
 		await replayUpdate({ priority: 1, startGroup: 0n, update: 1n, ...restate(Version.DRAFT_07) }).encode(
@@ -1418,7 +1418,7 @@ test("lite draft-07: an update drops an expired stream again while it is still s
 		);
 		const again = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
 		if (!("drop" in again)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([again.drop.start, again.drop.end, again.drop.update]).toEqual([1n, 1n, 1n]);
+		expect([again.drop.start, again.drop.end, again.drop.update]).toEqual([1n, 2n, 1n]);
 	} finally {
 		await sub.close();
 		installed.close();
@@ -1452,7 +1452,7 @@ test("lite draft-07: a group served over a stale drop retires it", async () => {
 		hooks.dropTrackGroups(sub.track, 1n, 2n, staleHole(60_000));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
+		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
 		sub.serve(1n);
 		expect(await sub.servedSequence()).toBe(1n);
 
@@ -1496,12 +1496,12 @@ test("lite draft-07: a final drop replaces an expired stream", async () => {
 		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.Old);
 		const first = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
 		if (!("drop" in first)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 1n, 0n]);
+		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 2n, 0n]);
 
 		hooks.dropTrackGroups(sub.track, 1n, 2n, { error: new StreamError(StreamCode(70), { message: "cut" }) });
 		const final = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
 		if (!("drop" in final)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([final.drop.start, final.drop.end, final.drop.error]).toEqual([1n, 1n, 70]);
+		expect([final.drop.start, final.drop.end, final.drop.error]).toEqual([1n, 2n, 70]);
 
 		await replayUpdate({ priority: 1, startGroup: 0n, update: 1n, ...restate(Version.DRAFT_07) }).encode(
 			sub.client.writer,
@@ -1556,7 +1556,7 @@ test("lite draft-07: a re-offer dropped again before it opens stays stale at the
 		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.Old);
 		const first = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
 		if (!("drop" in first)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 1n, 1n]);
+		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 2n, 1n]);
 
 		// Update 2 widens the budget, so group 1 is re-offered. Update 3 restores it within the
 		// task the publisher yields after an update, before that re-offer opens.
@@ -1566,7 +1566,7 @@ test("lite draft-07: a re-offer dropped again before it opens stays stale at the
 		await flush();
 		sub.track.finish();
 		sub.track.close();
-		expect(await holesToEnd(sub.client.reader)).toEqual([["drop", 1n, 1n, 3n]]);
+		expect(await holesToEnd(sub.client.reader)).toEqual([["drop", 1n, 2n, 3n]]);
 	} finally {
 		await sub.close();
 		installed.close();
@@ -1588,7 +1588,7 @@ test("lite draft-07: a final OLD drop is dropped again by each update", async ()
 		hooks.dropTrackGroups(sub.track, 1n, 2n, { error: new StreamError(StreamCode.Old) });
 		const first = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
 		if (!("drop" in first)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 1n, 0n]);
+		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 2n, 0n]);
 
 		for (const update of [1n, 2n]) {
 			await replayUpdate({
@@ -1602,8 +1602,8 @@ test("lite draft-07: a final OLD drop is dropped again by each update", async ()
 		sub.track.finish();
 		sub.track.close();
 		expect(await holesToEnd(sub.client.reader)).toEqual([
-			["drop", 1n, 1n, 1n],
-			["drop", 1n, 1n, 2n],
+			["drop", 1n, 2n, 1n],
+			["drop", 1n, 2n, 2n],
 		]);
 	} finally {
 		await sub.close();
@@ -1621,7 +1621,7 @@ test("lite draft-06: an update lowering the start is swept at the end", async ()
 		await flush();
 		sub.track.finish();
 		sub.track.close();
-		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([[2n, 4n]]);
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([[2n, 5n]]);
 	} finally {
 		await sub.close();
 	}
@@ -1779,7 +1779,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			if (skipped === "failed") {
 				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
-				expect([dropped.drop.start, dropped.drop.end]).toEqual([7n, 7n]);
+				expect([dropped.drop.start, dropped.drop.end]).toEqual([7n, 8n]);
 			}
 			expect(await sub.servedSequence()).toBe(6n);
 		} finally {
@@ -2466,7 +2466,7 @@ test("lite draft-07: subscribe end precedes a failed stream open", async () => {
 		expect(resp.finish.group).toBe(1n);
 		const dropped = await held.next();
 		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([dropped.drop.start, dropped.drop.end, dropped.drop.error]).toEqual([0n, 0n, 0]);
+		expect([dropped.drop.start, dropped.drop.end, dropped.drop.error]).toEqual([0n, 1n, 0]);
 	} finally {
 		held.close();
 	}
@@ -2513,7 +2513,7 @@ test("lite draft-07: a group whose close fails is dropped", async () => {
 		if (!("finish" in end)) throw new Error("expected SUBSCRIBE_FINISH");
 		const dropped = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
 		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([dropped.drop.start, dropped.drop.end, dropped.drop.error]).toEqual([0n, 0n, 0]);
+		expect([dropped.drop.start, dropped.drop.end, dropped.drop.error]).toEqual([0n, 1n, 0]);
 	} finally {
 		publisher.close();
 		client.close();
@@ -2576,7 +2576,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 		while (dropped < 72) {
 			const response = await decodeSubscribeResponseMaybe(client.reader, Version.DRAFT_07);
 			if (!response) break;
-			if ("drop" in response) dropped += Number(response.drop.end - response.drop.start) + 1;
+			if ("drop" in response) dropped += Number(response.drop.end - response.drop.start);
 		}
 		expect(dropped).toBe(72);
 		expect(opens).toHaveBeenCalledTimes(72);

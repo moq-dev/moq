@@ -696,7 +696,7 @@ impl Misses {
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
 		let low = key.0;
-		let top = newest.min(u64::MAX - 1);
+		let top = newest;
 		let mut candidates = RangeSet::new();
 		if terms {
 			let mut span = RangeSet::new();
@@ -1034,7 +1034,7 @@ impl Misses {
 		// The reader's floor, as the whole judgement takes it: a resumed copy's live floor
 		// can sit above history the reader still reads.
 		let low = key.0;
-		let top = newest.min(u64::MAX - 1);
+		let top = newest;
 		let first = judged_to.saturating_add(1).max(low);
 		let mut fresh = RangeSet::new();
 		if first <= top {
@@ -1467,7 +1467,7 @@ impl TrackState {
 /// reads by arrival never raises its floor, so without this every old group the cache
 /// evicts would land with it and count as an eviction to judge again.
 fn inbox_floor(low: u64, taken: &Delivered) -> u64 {
-	low.max(taken.floor().unwrap_or(u64::MAX))
+	low.max(taken.floor())
 }
 
 fn backfill(state: &TrackState, run: ops::Range<u64>) -> RangeSet<u64> {

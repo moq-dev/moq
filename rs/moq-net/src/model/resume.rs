@@ -1504,7 +1504,7 @@ impl Reader {
 		self.backfill_gaps(delivered);
 		let groups = self.groups;
 		let budget = self.mirrored.budget();
-		let floor = if ordered { delivered.floor() } else { Some(0) };
+		let floor = if ordered { delivered.floor() } else { 0 };
 		let mut lowest: Option<Candidate> = None;
 		for index in 0..self.copies.len() {
 			let copy = &mut self.copies[index];
@@ -1550,7 +1550,7 @@ impl Reader {
 								unreachable!()
 							};
 							if ordered {
-								sub.skip_ordered(sequence.checked_add(1));
+								sub.skip_ordered(sequence + 1);
 							} else {
 								let _ = sub.take(reserved);
 							}
