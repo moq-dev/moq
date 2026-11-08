@@ -141,6 +141,15 @@ impl Config {
 		Ok(())
 	}
 
+	/// The prefix stats publish under, reserved for the relay's own publisher, or
+	/// `None` when publishing is disabled.
+	pub(crate) fn reserved(&self) -> anyhow::Result<Option<Path>> {
+		if !self.enabled {
+			return Ok(None);
+		}
+		Ok(Some(Path::new(&self.prefix).context("invalid stats.prefix")?))
+	}
+
 	/// Build a [`moq_stats::Producer`] and its [`moq_stats::Publisher`] from this
 	/// config, publishing on `origin`.
 	///
