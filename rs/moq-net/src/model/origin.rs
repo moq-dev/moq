@@ -2956,7 +2956,7 @@ pub struct Route {
 /// A prefix route on an origin: a claim that every path beneath a prefix can be served,
 /// answering each request as it arrives.
 ///
-/// Created by [`Producer::route_prefix`]. Requests arrive on [`Self::requested`]; answer
+/// Created by [`Producer::route_prefix`]. Requests arrive on [`Self::poll_requested`]; answer
 /// each by serving a broadcast already held or by creating the path's own [`Route`].
 ///
 /// Clones share one claim. Dropping the last clone retracts it and refuses the requests
