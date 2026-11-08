@@ -5233,9 +5233,9 @@ dependencies = [
 
 [[package]]
 name = "moq-vaapi"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b175d0632ae90ceaa88ff0c2a6ad949ae227f39d35ea1dd5019beff278d967f"
+checksum = "67e1eee8b86560f73818e82838ac5ec60b04f1251deb94df35640de190db67f5"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",

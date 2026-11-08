@@ -54,7 +54,6 @@ moves what remains of them once their claims merge.
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
-- [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - AMD's VA-API H.264 encode decodes, once moq takes moq-vaapi 0.2.1
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [moq-mux reads only the base layer's H.265 SPS](/quest/m1/h265-base-layer-sps.md) - a layered MV-HEVC or SHVC stream imports as its base layer instead of misreading an enhancement-layer SPS, which still reaches the track
 - [A cancelled dispatch lane stops its phase promptly](/quest/m1/dispatch-cancel-race.md) - a TERM landing just before a lane forks its phase's command still stops that command, instead of waiting out the phase
