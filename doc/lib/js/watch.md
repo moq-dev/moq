@@ -252,7 +252,9 @@ response emitted in one burst with future timestamps, wants the opposite. Set
 `delay`, since playback only skips ahead once media sits more than
 `delay + lookahead` past the playhead.
 
-Durations need a unit; a bare number is rejected. Audio holds the lookahead
+Durations need a unit; a bare number is rejected. From script, the `delay` and
+`lookahead` properties take a `Duration` from `@moq/clock`, such as
+`el.delay = Duration.millis(300)`. Audio holds the lookahead
 as encoded frames, so a large one is cheap; video waits as decoded pictures,
 which hold decoder memory, so a long video lookahead is not. The first video
 frame shows as a poster at once, and playback starts once every enabled track

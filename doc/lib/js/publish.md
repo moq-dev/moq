@@ -118,8 +118,8 @@ puts every frame in its own group, and zero is refused. A longer join lets a
 relay keep fewer streams, at the cost of coarser loss: a viewer that falls
 behind skips a whole group. Frames still forward as they are encoded.
 
-Timestamps are `@moq/clock`'s `now()` in microseconds, so every source shares one
-timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks
+Timestamps are `@moq/clock`'s `now()` since its origin, a `Duration`, so every
+source shares one timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
 ## Custom tracks
