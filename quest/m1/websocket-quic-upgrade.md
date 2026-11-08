@@ -39,8 +39,11 @@ The work:
   first connect to a target that really has no UDP. Start from the
   `WEBSOCKET_WON` memory: it was added so a UDP-blocked target doesn't pay
   the head start on every dial, but after an outage it is stale. Confirm with
-  a test that it is why WebSocket keeps winning, then bound it, for example
-  by expiring an entry or by clearing it once a probe reaches QUIC.
+  a test that it is why WebSocket keeps winning, then bound it so the bound
+  takes effect before the redial: clear the entry when the WebSocket session
+  that set it ends (no clock), or expire it. Clearing it once a probe reaches
+  QUIC is only cleanup: a QUIC race win already clears it, and a probe
+  succeeds only after the redial has raced.
   Recommended: keep the race as it is apart from that, and
   treat a WebSocket win as provisional.
 - **Re-probe and migrate.** While a session runs on the WebSocket fallback
@@ -62,7 +65,9 @@ Update the `websocket.rs` module docs, which promise a WebSocket session
 stays on WebSocket for its lifetime.
 
 Public API: possibly a probe interval setting under `[connect.websocket]`,
-next to `--connect-websocket-delay`.
+next to `--connect-websocket-delay`. If added, mirror it in `moq-ffi`'s
+`MoqWebSocketConfig` (`rs/moq-ffi/src/session.rs`) beside `enabled` and
+`delay`, so every SDK gets it.
 Wire: none.
 
 ## Related
