@@ -39,7 +39,7 @@ qlog = ["moq-quic?/qlog"]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
-websocket = ["qmux", "watch", "dep:dns-lookup"]
+websocket = ["qmux", "watch", "dep:dns-lookup", "dep:httparse", "dep:tokio-rustls", "dep:tokio-tungstenite"]
 # Qmux over TCP: plaintext `tcp://`, and `tls://`. Server-side and client-side.
 tcp = ["qmux", "dep:dns-lookup", "dep:tokio-rustls"]
 # MoQ over a qmux session established elsewhere, such as moq-webrtc's data channel:
@@ -63,6 +63,8 @@ dns-lookup = { version = "4", optional = true }
 futures = "0.3"
 hex = { workspace = true }
 http = { version = "1", optional = true }
+# Parses the WebSocket upgrade response without reading past it.
+httparse = { version = "1", optional = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 kio = { workspace = true, features = ["async", "runtime"] }
@@ -95,6 +97,8 @@ time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 # The TLS stream `tcp::TlsAcceptor` accepts from a listener sharing its port.
 tokio-rustls = { workspace = true, optional = true }
+# The WebSocket upgrade's HTTP handshake; qmux runs the frames after it.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
 toml = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

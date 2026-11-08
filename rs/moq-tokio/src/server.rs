@@ -2201,12 +2201,8 @@ mod tests {
 	/// paused clock.
 	#[cfg(feature = "websocket")]
 	async fn session_pair() -> (qmux::Session, qmux::Session) {
-		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
-
 		const ALPN: &str = "qmux-01.moq-lite-06";
 		let (client, server) = tokio::io::duplex(64 * 1024);
-		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-		let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
 		let (client, server) = tokio::join!(
 			qmux::ws::Upgraded::new(client, ALPN).connect(),
 			qmux::ws::Upgraded::new(server, ALPN).accept(),
@@ -2219,11 +2215,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_preserves_request_metadata() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
-		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
-
 		let (client, server) = tokio::io::duplex(64 * 1024);
-		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-		let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
 		let activity = moq_net::server::Activity::default();
 		let url = "wss://example.com/room?jwt=token".parse().unwrap();
 		let mut options = crate::websocket::Options::new(url, moq_net::Server::new(), activity.enter().unwrap());
@@ -2263,13 +2255,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_refuses_setup_path_presence() {
 		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
-		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
-
 		for protocol in ["qmux-01.moq-lite-06", "qmux-01.moqt-18", "qmux-01.moqt-22"] {
 			for path in ["", "/room?jwt=url-token", "/other?jwt=setup-token"] {
 				let (client, server) = tokio::io::duplex(64 * 1024);
-				let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-				let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
 				let activity = moq_net::server::Activity::default();
 				let mut options = crate::websocket::Options::new(
 					"wss://example.com/room?jwt=url-token".parse().unwrap(),

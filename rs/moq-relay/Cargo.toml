@@ -42,7 +42,7 @@ _quic = []
 # congestion-control testing. Covers the io_uring workers too, so one feature
 # means one thing whichever runtime is serving.
 qlog = ["moq-tokio/qlog", "moq-uring?/qlog"]
-websocket = ["moq-tokio/websocket", "dep:qmux", "dep:hyper"]
+websocket = ["moq-tokio/websocket", "dep:qmux", "dep:hyper", "dep:tokio-tungstenite"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
 uds = ["moq-tokio/uds"]
@@ -92,6 +92,8 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
+# The upgrade's accept key; qmux runs the frames after it.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"], optional = true }
 toml = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }

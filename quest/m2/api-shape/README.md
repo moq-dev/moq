@@ -55,7 +55,6 @@ Rejected in planning:
 ## Required
 
 - [moq-net's small surface fixes](/quest/m2/api-shape/net.md) - one spelling per session, admission, compression, proxy, and priority surface, and no public wire codes
-- [qmux names no tungstenite type](/quest/m2/api-shape/transport.md) - qmux stops exposing tungstenite types and its re-export
 - [Crates re-export no whole crate](/quest/m2/api-shape/reexports.md) - no moq crate re-exports a whole crate, moq's own included, so a dependency bump is no moq break, and moq-mux's container `Guard` gets a name
 - [Media crates' small surface fixes](/quest/m2/api-shape/media.md) - exporters, the container consumer, catalog color range, rate grant, moq-stats, JSON, and MSF each have one path and one name
 - [Native media's small surface fixes](/quest/m2/api-shape/native.md) - audio encode internals go private, `on_demand` has one meaning, and video and render setters fold into their constructors

@@ -26,9 +26,6 @@ re-export it:
 - moq-mux: `container::fmp4::mp4_atom`, unless
   [media](/quest/m2/api-shape/media.md) has already dropped it, as
   [moq-dev/moq#8214](https://github.com/moq-dev/moq/pull/8214) plans
-- qmux: `ws`'s `tokio_tungstenite` and `tungstenite`, unless
-  [transport](/quest/m2/api-shape/transport.md) has already dropped them, as
-  #8214 plans
 
 No new one lands either:
 [moq-quic-unused-surface](/quest/m2/moq-quic-unused-surface.md) names the

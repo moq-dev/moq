@@ -2531,7 +2531,7 @@ mod tests {
 	async fn websocket_upgrade_advertises_the_configured_receive_windows() {
 		use bytes::Buf;
 		use futures::StreamExt;
-		use qmux::ws::tungstenite::{Message, client::IntoClientRequest};
+		use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 		// QMux's frame type, lengths, and QUIC transport parameter values use QUIC varints.
 		fn decode_quic(bytes: &mut bytes::Bytes) -> Result<u64, &'static str> {
@@ -2564,7 +2564,7 @@ mod tests {
 			request
 				.headers_mut()
 				.insert("sec-websocket-protocol", version.alpn().parse().unwrap());
-			let (mut socket, _) = qmux::ws::tokio_tungstenite::connect_async(request).await.unwrap();
+			let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
 			let Message::Binary(mut record) = kio::clock::timeout(std::time::Duration::from_secs(5), socket.next())
 				.await
 				.unwrap()
@@ -2859,13 +2859,7 @@ mod tests {
 				"{}",
 				String::from_utf8_lossy(&response)
 			);
-			let socket = qmux::ws::tokio_tungstenite::WebSocketStream::from_raw_socket(
-				stream,
-				qmux::ws::tungstenite::protocol::Role::Client,
-				None,
-			)
-			.await;
-			let (transport, driver) = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
+			let (transport, driver) = qmux::ws::Upgraded::new(stream, "qmux-01.moq-lite-06")
 				.connect()
 				.await
 				.unwrap();
@@ -3021,15 +3015,15 @@ mod tests {
 		}
 
 		async fn refused_upgrade(stream: tokio::net::TcpStream) {
-			use qmux::ws::tungstenite::client::IntoClientRequest;
+			use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 			let mut request = format!("ws://{}/room", stream.peer_addr().unwrap())
 				.into_client_request()
 				.unwrap();
 			request
 				.headers_mut()
 				.insert("sec-websocket-protocol", "qmux-01.moq-lite-06".parse().unwrap());
-			let result = qmux::ws::tokio_tungstenite::client_async(request, stream).await;
-			let Err(qmux::ws::tungstenite::Error::Http(response)) = result else {
+			let result = tokio_tungstenite::client_async(request, stream).await;
+			let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
 				panic!("an upgrade after drain admission closed was not refused");
 			};
 			assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
