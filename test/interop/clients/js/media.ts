@@ -162,9 +162,7 @@ const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
 if (selected.delete("replacement")) {
-	console.error(
-		"QUARANTINE\treplacement\tJS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md",
-	);
+	console.error("QUARANTINE\treplacement\tJS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md");
 	if (selected.size === 0) {
 		console.error("SKIP replacement: JS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md");
 		process.exit(SKIPPED);
