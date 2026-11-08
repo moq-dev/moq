@@ -42,7 +42,6 @@ moves what remains of them once their claims merge.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [A reader on a failed copy continues on the held re-offer](/quest/m1/copy-recover.md) - a live reader keeps a group whose copy fails by continuing on the same track's re-offer at the same frame
 - [Group errors are cached by kind](/quest/m1/group-error-cache.md) - permanent group errors bind every reader, retryable ones are kept only for a bounded time, and a live SUBSCRIBE_DROP or FETCH answered `Old` no longer caches it for good
-- [A route answer behind its idle copy's cache fails the copy](/quest/m1/answer-behind-cache.md) - a resuming copy whose route answers behind its cache fails loud instead of refusing the feed's groups as duplicates, so readers resubscribe onto a fresh copy
 - [The overcommitted receive-window cells run again](/quest/m1/receive-windows-evicted.md) - `benchmark_receive_windows` measures its 256-stream and 4 MiB-frame cells again, reporting delivered frames and evictions instead of stalling
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; time-stretched browser playback without steady-state underruns and a native trace replay remain
@@ -52,10 +51,8 @@ moves what remains of them once their claims merge.
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
-- [VA-API encode is correct on radeonsi](/quest/m1/vaapi-radeonsi.md) - AMD's VA-API H.264 encode decodes, once moq takes moq-vaapi 0.2.1
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [moq-mux reads only the base layer's H.265 SPS](/quest/m1/h265-base-layer-sps.md) - a layered MV-HEVC or SHVC stream imports as its base layer instead of misreading an enhancement-layer SPS, which still reaches the track
-- [A cancelled dispatch lane stops its phase promptly](/quest/m1/dispatch-cancel-race.md) - a TERM landing just before a lane forks its phase's command still stops that command, instead of waiting out the phase
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
 - [Copies of one group identity must agree beyond their bytes](/quest/m1/copy-identity.md) - copies that differ in timestamp, object fields, or frame count fail as a protocol violation
 - [Session auth grants and replies stay consistent and bounded](/quest/m1/auth-stream-bounds.md) - an AUTH_ERROR revokes its grant, queued grants and retiring tokens are bounded, and dropping queued requests cannot deadlock
