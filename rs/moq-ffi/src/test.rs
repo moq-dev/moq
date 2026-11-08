@@ -5039,7 +5039,7 @@ async fn dynamic_broadcast_request() {
 	let job = request.route(hidden()).unwrap();
 	let served = job.broadcast().unwrap();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	// Only announce answers the requester, under a fresh instance and after admission.
+	// Only announce answers the requester, under the claim's instance and after admission.
 	let instance = job.instance_id();
 	job.announce().unwrap();
 	// A re-price keeps the instance the answer was announced under.
@@ -5070,8 +5070,12 @@ async fn dynamic_broadcast_request() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp.map(micros), Some(20_000));
 
+	// The job carried the claim's instance, and its end moves the claim on.
+	assert_eq!(dynamic.instance_id(), instance);
 	track.finish().unwrap();
 	served.close().unwrap();
+	job.cancel();
+	assert_ne!(dynamic.instance_id(), instance);
 }
 
 /// A prefix serves requests beneath it; cancelling the handle

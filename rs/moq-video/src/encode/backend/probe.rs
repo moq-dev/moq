@@ -136,7 +136,7 @@ impl Backend for Probe {
 		let mut refuse = REFUSE.lock().unwrap();
 		if *refuse == Some(bitrate) {
 			*refuse = None;
-			return Err(Error::Codec(anyhow::anyhow!("probe refused {bitrate} bps")));
+			return Err(Error::codec(anyhow::anyhow!("probe refused {bitrate} bps")));
 		}
 		BITRATES.lock().unwrap().push(bitrate);
 		Ok(())

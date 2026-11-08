@@ -38,6 +38,8 @@ its listed segments and returns `Ok(None)`, mirroring [moq-dev/moq#7399](https:/
 Public API: `moq_mux::Source` gains a way to follow its own path. Wire:
 none.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): additive. Add a method named by role (for example `Source::instances()`) and leave `Source::follow`'s documented contract alone.
+
 ## Related
 
 - [A recording stalled on an open group reports what it waits for](/quest/m3/hls-stalled-segment.md) - the other [moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399) follow-up

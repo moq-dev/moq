@@ -95,6 +95,7 @@ impl Connect {
 			.clone()
 			.init(self.config.quic.clone())
 			.map_err(|err| Error::InvalidConfig(err.to_string()))?;
+		client = client.with_reconnect(!self.config.once);
 		if let Some(publish) = &self.publish {
 			client = client.with_publisher(&publish.producer);
 		}
@@ -305,6 +306,26 @@ impl Session {
 		match self.link(id)? {
 			Link::Dialed { connection, .. } => Ok(connection.viewers()),
 			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.viewers()),
+		}
+	}
+
+	/// The grants the session's peer gave it. A dialed session's survive reconnects.
+	///
+	/// Errors with [`Error::Offline`] for an accepted session still in SETUP.
+	pub fn auth(&self, id: Id) -> Result<moq_net::auth::Handle, Error> {
+		match self.link(id)? {
+			Link::Dialed { connection, .. } => Ok(connection.auth()),
+			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.auth()),
+		}
+	}
+
+	/// The tokens a dialed session presents. An accepted session presents none.
+	pub fn tokens(&self, id: Id) -> Result<moq_net::auth::Tokens, Error> {
+		match self.link(id)? {
+			Link::Dialed { connection, .. } => Ok(connection.tokens()),
+			Link::Accepted(_) => Err(Error::Unsupported(
+				"a server-accepted session presents no tokens".into(),
+			)),
 		}
 	}
 

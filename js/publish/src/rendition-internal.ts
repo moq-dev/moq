@@ -1,27 +1,11 @@
 import type { Milli } from "@moq/clock";
+import type { Stats } from "@moq/hang";
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
 import type { Slot } from "./publication";
 
 /** The media kind of a rendition, selecting its catalog section (`video`, `audio`, or `text`). */
 export type Kind = "video" | "audio" | "text";
-
-/**
- * What a rendition's producer has sent, as the broadcast's stats track reports it. Counters are
- * cumulative and a missing one means zero; `bitrate` is a gauge, absent when unknown.
- */
-export interface RenditionStats {
-	/** Media frames sent. */
-	frames?: number;
-	/** Media payload bytes sent. */
-	bytes?: number;
-	/** Keyframes sent. */
-	keyframes?: number;
-	/** Frames skipped before sending, such as those an overloaded encoder had no room for. */
-	skipped?: number;
-	/** The latest target encoder bitrate in bits per second. */
-	bitrate?: number;
-}
 
 /** @internal Register a handle whose track and teardown belong to its broadcast. */
 export let makeRendition: <Config>(
@@ -70,9 +54,10 @@ export class Rendition<Config> {
 
 	/**
 	 * What the producer has sent under this rendition, written by the producer and reported under
-	 * its ID on the broadcast's stats track. `undefined` leaves the rendition out of the report.
+	 * its ID on the broadcast's stats track. Counters are cumulative and a missing one means zero;
+	 * `bitrate` is a gauge, absent when unknown. `undefined` leaves the rendition out of the report.
 	 */
-	readonly stats = new Signal<RenditionStats | undefined>(undefined);
+	readonly stats = new Signal<Stats.RenditionInput | undefined>(undefined);
 
 	/**
 	 * The open track producer, or `undefined` while the network broadcast is down, after the track

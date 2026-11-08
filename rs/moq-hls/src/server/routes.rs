@@ -272,14 +272,9 @@ fn not_found() -> Response {
 fn server_error(err: crate::Error) -> Response {
 	tracing::warn!(%err, "hls request failed");
 	// A catalog denied mid-stream still answers as a denial.
-	let denied = match &err {
-		crate::Error::CatalogFailed { source } => source.as_ref(),
-		err => err,
-	};
-	let status = match denied {
-		crate::Error::Moq(moq_net::Error::Unauthorized)
-		| crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => StatusCode::FORBIDDEN,
-		_ => StatusCode::INTERNAL_SERVER_ERROR,
+	let status = match err.is_denied() {
+		true => StatusCode::FORBIDDEN,
+		false => StatusCode::INTERNAL_SERVER_ERROR,
 	};
 	(status, [(header::CACHE_CONTROL, "no-store")]).into_response()
 }

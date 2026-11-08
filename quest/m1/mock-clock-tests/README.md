@@ -1,4 +1,4 @@
-# Tests run on a mocked clock
+# [L] Tests run on a mocked clock
 
 ## Goal
 
@@ -56,7 +56,3 @@ tests land and move:
   asserts `20ms <= elapsed < 400ms` around a worker that sleeps 30 ms. Each
   needs an event from the plugin, such as its worker joining or the bridge
   observing the close, instead of a window.
-
-## Required
-
-- [A lint rejects expect(clock.drive(...)).rejects and .resolves](/quest/m1/mock-clock-tests/drive-expect-guard.md) - wrapping `drive` in `expect(...).rejects` or `.resolves` fails lint

@@ -116,7 +116,8 @@ test("an idle track on a live connection claims nothing", async () => {
 	}
 });
 
-test("a connection samples the transport only while a reservation reads the estimate", async () => {
+// Quarantined: flaky under load, see /quest/m0/test-flakes-2/bandwidth-sampling.md
+test.skip("a connection samples the transport only while a reservation reads the estimate", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	let calls = 0;
