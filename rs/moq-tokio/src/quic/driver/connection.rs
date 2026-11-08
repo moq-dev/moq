@@ -174,6 +174,8 @@ impl Future for ConnectionDriver {
 		let waiter = this.park.hold(cx);
 		let conn = &mut *this.conn.state.lock();
 		let _guard = this.span.enter();
+		// Every packet this poll opens or seals pays one DIT toggle rather than one per rind call.
+		let _dit = moq_crypto::cpu::Dit::hold();
 
 		if let Err(e) = conn.process_conn_events(cx) {
 			conn.terminate(e);

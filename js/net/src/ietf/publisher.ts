@@ -912,9 +912,10 @@ export class Publisher {
 					resolve();
 				};
 			});
-			let filling = Promise.resolve();
+			// The fill in flight. It never rejects.
+			let filling: Promise<void> | undefined;
 			const startFill = (requestId: bigint, selected: FillServe, source: TrackSubscriber) => {
-				filling = this.#runFill({
+				const fill: Promise<void> = this.#runFill({
 					requestId,
 					priority: fromWire(msg.subscriberPriority),
 					publisherPriority,
@@ -925,8 +926,13 @@ export class Publisher {
 					unsubscribed,
 					cancelled: fillAbort.signal,
 					streams,
+				}).finally(() => {
+					if (filling === fill) filling = undefined;
 				});
+				filling = fill;
 			};
+			// The update being applied, from its decode until it is answered or fails.
+			let updating: Promise<void> | undefined;
 			if (fill && cache) startFill(answer?.requestId ?? msg.requestId, fill, cache);
 
 			// Every group started, until its stream finishes or resets, and the data streams
@@ -958,97 +964,105 @@ export class Publisher {
 					const framed = await request.next();
 					// The requester sent its last message, which ends the request only where FIN cancels.
 					if (framed === undefined) return request.ended;
-					const { params, requestId: ownRequestId } = await this.#decodeUpdate(request, framed);
-					// update() replaces every option, so carry the rest over as Rust does.
-					if (params.subscriberPriority !== undefined) {
-						const priority = fromWire(params.subscriberPriority);
-						track.update({ ...track.subscription.peek(), priority });
-						datagramPriority.set(priority);
-						if (datagramDemand) datagrams?.setPriority(priority);
-					}
-					const maxAge = params.maxAge;
-					if (maxAge !== undefined) {
-						const current = track.subscription.peek();
-						track.update({ ...current, delay: { ...current?.delay, max: Duration.millis(maxAge) } });
-					}
-					// A fill holds one cache view. At most this decoded update waits behind
-					// it; request parsing then backpressures any further fill requests.
-					if (params.fillParameters) await filling;
-					const snapshot = liveEdge(track);
-					this.#applyPublished(msg, params);
-					const selected =
-						msg.fill && Filter.isDraft20(version)
-							? fillRange(msg.fill, msg.filter, snapshot.largest)
-							: undefined;
-					if (params.subscriptionFilter !== undefined || selected) {
-						// An update's unfiltered range explicitly lowers the floor to zero;
-						// an initial unfiltered subscription still joins the live group. A
-						// fill-only update keeps the range it already has.
-						const requested: ServeRange =
-							params.subscriptionFilter === undefined
-								? bounds.peek()
-								: msg.filter.kind === "unfiltered"
-									? { start: { group: 0n, object: 0n } }
-									: filterRange(msg.filter, snapshot);
-						const tail = afterFill(requested, selected, snapshot);
-						range.start = tail.start;
-						range.end = tail.end;
-						bounds.set(requested, true);
-						track.update({ ...track.subscription.peek(), ranges: serveRanges(range) });
-						// Below its floor the live cursor already passed every group or never owned it,
-						// so lowering it for a fill-only update would hand those groups out a second time.
-						let start = range.start ? range.start.group : 0n;
-						if (params.subscriptionFilter === undefined) start = max(start, floor);
-						floor = start;
-						track.withRange({ ...rangeGroups(range), start: { included: start } });
-						// The fill took the current group's head. The cursor never hands a group out
-						// twice, so what its stream no longer carries resumes from the cache.
-						const next = tail !== requested ? tail.start : undefined;
-						const at = next?.group;
-						if (next && at !== undefined && hooks.handedOut(track, at)) {
-							const slice = groupSlice(range, at);
-							// A stream still serving this group from the fill's edge keeps what it
-							// covers, so the tail resumes where that stream stops.
-							const streaming =
-								live?.sequence === at &&
-								live.slice.skip <= slice.skip &&
-								!live.retired &&
-								!excludes(requested, at, live.slice)
-									? live
-									: undefined;
-							const resume = streaming ? streaming.slice.until : slice.skip;
-							if (resume !== undefined) slice.skip = Math.max(slice.skip, resume);
-							const group =
-								resume !== undefined &&
-								(!range.end || range.end.group >= next.group) &&
-								(slice.until === undefined || slice.until > slice.skip)
-									? hooks.cachedGroup(track, at)
-									: undefined;
-							if (group) serveGroup(group, slice);
-						}
-					}
-					if (params.groupOrder !== undefined)
-						track.update({ ...track.subscription.peek(), order: msg.groupOrder });
-					// Every data stream closes before the pause is answered.
-					if (params.forward === false) throw new Paused(true);
-					const parameters = new Parameters();
-					if (snapshot.largest)
-						parameters.largest = { groupId: snapshot.largest.group, objectId: snapshot.largest.object };
-					const source =
-						selected && selected.kind !== "empty"
-							? track.fork({
-									priority: fromWire(msg.subscriberPriority),
-									order: msg.groupOrder,
-									delay: { max: Duration.millis(Varint.MAX_U53), min: null },
-								})
-							: undefined;
+					// A drained track waits this out, decode included, since the update may reopen its range.
+					const applied = Promise.withResolvers<void>();
+					updating = applied.promise;
 					try {
-						await Message.write(request.writer, RequestOk.id, new RequestOk({ parameters }), version);
-					} catch (err) {
-						source?.close();
-						throw err;
+						const { params, requestId: ownRequestId } = await this.#decodeUpdate(request, framed);
+						// update() replaces every option, so carry the rest over as Rust does.
+						if (params.subscriberPriority !== undefined) {
+							const priority = fromWire(params.subscriberPriority);
+							track.update({ ...track.subscription.peek(), priority });
+							datagramPriority.set(priority);
+							if (datagramDemand) datagrams?.setPriority(priority);
+						}
+						const maxAge = params.maxAge;
+						if (maxAge !== undefined) {
+							const current = track.subscription.peek();
+							track.update({ ...current, delay: { ...current?.delay, max: Duration.millis(maxAge) } });
+						}
+						// A fill holds one cache view. At most this decoded update waits behind
+						// it; request parsing then backpressures any further fill requests.
+						if (params.fillParameters) await filling;
+						const snapshot = liveEdge(track);
+						this.#applyPublished(msg, params);
+						const selected =
+							msg.fill && Filter.isDraft20(version)
+								? fillRange(msg.fill, msg.filter, snapshot.largest)
+								: undefined;
+						if (params.subscriptionFilter !== undefined || selected) {
+							// An update's unfiltered range explicitly lowers the floor to zero;
+							// an initial unfiltered subscription still joins the live group. A
+							// fill-only update keeps the range it already has.
+							const requested: ServeRange =
+								params.subscriptionFilter === undefined
+									? bounds.peek()
+									: msg.filter.kind === "unfiltered"
+										? { start: { group: 0n, object: 0n } }
+										: filterRange(msg.filter, snapshot);
+							const tail = afterFill(requested, selected, snapshot);
+							range.start = tail.start;
+							range.end = tail.end;
+							bounds.set(requested, true);
+							track.update({ ...track.subscription.peek(), ranges: serveRanges(range) });
+							// Below its floor the live cursor already passed every group or never owned it,
+							// so lowering it for a fill-only update would hand those groups out a second time.
+							let start = range.start ? range.start.group : 0n;
+							if (params.subscriptionFilter === undefined) start = max(start, floor);
+							floor = start;
+							track.withRange({ ...rangeGroups(range), start: { included: start } });
+							// The fill took the current group's head. The cursor never hands a group out
+							// twice, so what its stream no longer carries resumes from the cache.
+							const next = tail !== requested ? tail.start : undefined;
+							const at = next?.group;
+							if (next && at !== undefined && hooks.handedOut(track, at)) {
+								const slice = groupSlice(range, at);
+								// A stream still serving this group from the fill's edge keeps what it
+								// covers, so the tail resumes where that stream stops.
+								const streaming =
+									live?.sequence === at &&
+									live.slice.skip <= slice.skip &&
+									!live.retired &&
+									!excludes(requested, at, live.slice)
+										? live
+										: undefined;
+								const resume = streaming ? streaming.slice.until : slice.skip;
+								if (resume !== undefined) slice.skip = Math.max(slice.skip, resume);
+								const group =
+									resume !== undefined &&
+									(!range.end || range.end.group >= next.group) &&
+									(slice.until === undefined || slice.until > slice.skip)
+										? hooks.cachedGroup(track, at)
+										: undefined;
+								if (group) serveGroup(group, slice);
+							}
+						}
+						if (params.groupOrder !== undefined)
+							track.update({ ...track.subscription.peek(), order: msg.groupOrder });
+						// Every data stream closes before the pause is answered.
+						if (params.forward === false) throw new Paused(true);
+						const parameters = new Parameters();
+						if (snapshot.largest)
+							parameters.largest = { groupId: snapshot.largest.group, objectId: snapshot.largest.object };
+						const source =
+							selected && selected.kind !== "empty"
+								? track.fork({
+										priority: fromWire(msg.subscriberPriority),
+										order: msg.groupOrder,
+										delay: { max: Duration.millis(Varint.MAX_U53), min: null },
+									})
+								: undefined;
+						try {
+							await Message.write(request.writer, RequestOk.id, new RequestOk({ parameters }), version);
+						} catch (err) {
+							source?.close();
+							throw err;
+						}
+						if (selected && source) startFill(ownRequestId, selected, source);
+					} finally {
+						updating = undefined;
+						applied.resolve();
 					}
-					if (selected && source) startFill(ownRequestId, selected, source);
 				}
 			})();
 			const requestEnded = race([updates, request.ended]);
@@ -1060,12 +1074,19 @@ export class Publisher {
 				() => unsubscribe(),
 			);
 
-			// Serve groups until the track ends or the requester cancels.
+			// Serve groups until the track ends or the requester cancels. Serving ends with the
+			// track only once no update or fill is in flight: an update may reopen the range, and
+			// a reopened group the cursor never handed out is still the cursor's to serve.
 			const serving = (async () => {
 				for (;;) {
 					const group = await servingGroup(track);
-					if (!group) return;
-					serveGroup(group, groupSlice(range, group.sequence));
+					if (group) {
+						serveGroup(group, groupSlice(range, group.sequence));
+						continue;
+					}
+					const pending = updating ?? filling;
+					if (!pending) return;
+					await pending;
 				}
 			})();
 
@@ -1083,14 +1104,7 @@ export class Publisher {
 			let ended = false;
 			try {
 				const served = Symbol("served");
-				const end = await race([
-					serving.then(async () => {
-						await filling;
-						return served;
-					}),
-					requestEnded,
-					revoked,
-				]);
+				const end = await race([serving.then(() => served), requestEnded, revoked]);
 				if (end === "revoked") {
 					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
 					unauthorized = true;
@@ -2982,7 +2996,8 @@ function untilGivenUp(group: group.Consumer, signal: AbortSignal): { signal: Abo
 }
 
 /** The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with. */
-function trackProperties(info: Info, wanted: boolean): Properties.Properties {
+/** @internal Exported for tests. */
+export function trackProperties(info: Info, wanted: boolean): Properties.Properties {
 	// INCLUDE_PROPERTIES=0. The block stays present but empty, which also means the track opts
 	// out of timestamps for this requester.
 	if (!wanted) return {};
@@ -2993,7 +3008,7 @@ function trackProperties(info: Info, wanted: boolean): Properties.Properties {
 		priority: toWire(info.priority),
 		// The publisher's default, newest first.
 		groupOrder: Properties.DESCENDING,
-		maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge.asMillis()),
+		maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(Math.ceil(info.maxAge.asMillis())),
 	};
 }
 

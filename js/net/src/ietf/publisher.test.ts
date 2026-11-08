@@ -35,7 +35,7 @@ import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
 import { PublishDone, PublishDoneStatus } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
-import { Publisher } from "./publisher.ts";
+import { Publisher, trackProperties } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { NativeSession, type Session } from "./session.ts";
 import { GroupOrder, Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
@@ -4580,6 +4580,56 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 	}
 });
 
+test("draft-22: an update reopening a drained subscription serves its tail", async () => {
+	const fx = fixture();
+	// The SUBSCRIBE's fill waits for stream credit, holding the request open past the track's end.
+	const credit = Promise.withResolvers<void>();
+	const createUni = fx.pair.server.createUnidirectionalStream.bind(fx.pair.server);
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async (options) => {
+		await credit.promise;
+		return createUni(options);
+	});
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("head"), timestamp: Timestamp.now() });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 5n, startObject: 0n },
+			fill: { filter: { kind: "absolute", startGroup: 0n, startObject: 0n }, rangeFilters: false },
+		}),
+	);
+	try {
+		// The open group stays open: the end falls after it.
+		track.finish();
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+		parameters.fillParameters = Filter.encodeFill({ rangeFilters: false }, fx.version);
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		credit.resolve();
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		open.writeFrame({ payload: new TextEncoder().encode("tail"), timestamp: Timestamp.now() });
+		open.finish();
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, fx.version);
+		// Both fills, the tail's group, then END_OF_TRACK once they closed.
+		expect(done.streamCount).toBe(4n);
+		expect((await readServed(fx.uni, 3)).sort()).toEqual(["head", "head", "tail"]);
+		expect(await readEndOfTrack(await nextUni(fx.uni))).toBe(1n);
+	} finally {
+		open.finish();
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
 test("draft-22: widening with a fill keeps the open live group", async () => {
 	using clock = manual();
 	const fx = fixture();
@@ -4835,3 +4885,8 @@ for (const endObject of [BigInt(Number.MAX_SAFE_INTEGER), (1n << 60n) + 1n]) {
 		}
 	});
 }
+
+test("a fractional max age reaches MAX_CACHE_DURATION as whole milliseconds rounded up", () => {
+	const properties = trackProperties({ priority: 0, maxAge: Duration.micros(1500) }, true);
+	expect(properties.maxCacheDuration).toBe(2n);
+});

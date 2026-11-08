@@ -82,13 +82,16 @@ export interface ConnectionProps {
 	probeTarget?: Getter<number>;
 }
 
+/** Where a session is: open, delivering what it owes before it closes, or closed. */
+type Phase = { kind: "open" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+
 /**
  * Represents a connection to a MoQ server.
  *
  * @internal
  */
 export class Connection implements Established {
-	#closing?: Promise<void>;
+	#phase: Phase = { kind: "open" };
 	// The URL of the connection.
 	readonly url: URL;
 
@@ -214,7 +217,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
+			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -276,16 +279,27 @@ export class Connection implements Established {
 	 * its own, so it holds the close until the deadline.
 	 */
 	close(): Promise<void> {
-		this.#closing ??= withTimeout(
-			this.#publisher.drain(),
-			Duration.millis(1000),
-			"session close timed out",
-		).finally(() => this.abort());
-		return this.#closing;
+		switch (this.#phase.kind) {
+			case "open": {
+				const done = withTimeout(
+					this.#publisher.drain(),
+					Duration.millis(1000),
+					"session close timed out",
+				).finally(() => this.abort());
+				this.#phase = { kind: "closing", done };
+				return done;
+			}
+			case "closing":
+				return this.#phase.done;
+			case "closed":
+				return Promise.resolve();
+		}
 	}
 
 	/** End the session immediately without waiting for delivery. */
 	abort(): void {
+		if (this.#phase.kind === "closed") return;
+		this.#phase = { kind: "closed" };
 		this.#auth.close();
 		this.#publisher.close();
 		// Received tracks end in #run once what already arrived drains, as on the peer's close.
