@@ -3,8 +3,8 @@ import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { decodeRoute, encodeRoute } from "./instance.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
+import { decodeRoute, encodeRoute } from "./instance.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
