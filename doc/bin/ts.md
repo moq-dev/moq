@@ -25,7 +25,7 @@ moq ... --broadcast event.hang export ts --passthrough > out.ts
 | --- | --- | --- |
 | On the wire | One track per elementary stream, plus the PSI and SI the import keeps, in the [`mpegts`](/draft/moq-mpegts) catalog section | One [`m2ts`](/concept/hang#transport-streams) track of whole 188-byte packets |
 | Output | A rebuilt TS: same media, programs, descriptors and kept SI; new packetization, PCR and table cadence | The source's packets, byte for byte, from the first group on |
-| Browsers and `moq play` | Watch it | Have nothing to decode |
+| Browsers and `moq play` | Watch the video and AAC or Opus audio; MP2, AC-3 and E-AC-3 play only where the player has a decoder for them, which `moq play` does not | Have nothing to decode |
 | A relay | Drops and prioritizes per track | Caches and drops whole runs of packets |
 | Scrambled services, CA, unlisted PIDs | Refused and counted | Carried |
 | Multi-program | One program per broadcast (`--program`) | The whole MPTS in one broadcast |
@@ -45,9 +45,9 @@ SCTE-35). For example,
 
 ### What it carries
 
-The import decodes H.264/H.265 video and AAC (ADTS), MP2, AC-3, E-AC-3, and
-Opus audio into renditions any player can watch. Everything else it keeps goes
-through without being decoded:
+The import parses H.264/H.265 video and AAC (ADTS), MP2, AC-3, E-AC-3, and
+Opus audio into renditions, without transcoding: a player still needs a
+decoder for each codec. Everything else it keeps rides through whole:
 
 | Source | Carried as |
 | --- | --- |
@@ -174,10 +174,11 @@ relay, a group cut short, or a frame later than `--delay`. QUIC retransmits
 what the network drops, so random packet loss alone loses no content.
 
 - **Semantic:** a missing group leaves a hole in the media, not in the
-  multiplex: padding keeps the PCR on its grid, the first PCR after the hole
-  flags the jump, and PAT/PMT versions do not change. A group cut short keeps
-  what arrived. Video resumes at its next keyframe, dropping orphaned leading
-  pictures; other tracks carry on. On a path slower than the media, whole groups
+  multiplex: padding keeps the PCR on its continuous grid, unflagged. Only a
+  hole longer than the export can pad over skips PCR slots, and then the first
+  PCR after them flags the clock jump. PAT/PMT versions do not change either
+  way. A group cut short keeps what arrived. Video resumes at its next
+  keyframe, dropping orphaned leading pictures; other tracks carry on. On a path slower than the media, whole groups
   are shed and the latency holds. After an outage that exhausts the buffered
   media, overdue padding can arrive in a burst when media resumes.
 - **Passthrough:** surviving packets go out unchanged, on their source schedule.
@@ -243,7 +244,7 @@ details each grader and its negative controls.
 | --- | --- | --- |
 | Semantic: a join starts on a whole group, each acquisition point carries PAT and PMT and decodes like the continuous source | [`recovery_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/recovery_test.rs) `a_join_starts_on_a_whole_group`, `a_late_catalog_starts_on_the_group_in_flight` | PR |
 | Semantic: a late exporter matches a running one | [`export_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/export_test.rs) `late_join_matches_a_running_exporter`; `just test ts --pair` | PR, Nightly only |
-| Semantic: a skipped group flags only the first PCR after it, with no table change | [`export_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/export_test.rs) `a_skipped_group_flags_the_clock`; [`recovery_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/recovery_test.rs) `disjoint_outages_across_both_tracks_keep_the_clock` | PR |
+| Semantic: a padded hole keeps the PCR unflagged; a longer one flags only the first PCR after its skipped slots; tables keep their versions | [`export_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/export_test.rs) `a_skipped_group_flags_the_clock`; [`recovery_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/recovery_test.rs) `disjoint_outages_across_both_tracks_keep_the_clock` | PR |
 | Semantic: skipped, cut, stalled, and late groups, decoded against the source; open GOP and HEVC RASL trimmed, RADL kept | [`recovery_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/recovery_test.rs) (graders with failure controls) | PR |
 | Semantic: two minutes of faults hold their latency | `just rs ts-recovery` | Nightly only |
 | Semantic: a congested and an overflowing path shed whole groups, stay T-STD compliant, keep their latency | `just test ts --headroom --rate 7000000`, with `--queue 250ms` | Nightly only |
