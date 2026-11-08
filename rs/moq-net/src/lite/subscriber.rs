@@ -200,7 +200,7 @@ impl TrackEntry {
 		self.start = self.start.or(start);
 		self.first = self.first.or(first);
 		if let (Some(start), Some(first), Some(copy)) = (self.start, self.first, &mut self.copy) {
-			copy.producer.set_live(Some(first), Some(start));
+			copy.producer.set_live_from(first, Some(start));
 		}
 	}
 }
@@ -402,11 +402,11 @@ impl TrackEntry {
 				frame: hdr.frame_start,
 			};
 			if !version.has_track_stream() {
-				producer.set_live(Some(first), None);
+				producer.set_live_from(first, None);
 			} else if !version.has_largest() {
 				self.first = self.first.or(Some(first));
 				if let (Some(start), Some(first)) = (self.start, self.first) {
-					producer.set_live(Some(first), Some(start));
+					producer.set_live_from(first, Some(start));
 				}
 			}
 		}
@@ -11712,10 +11712,12 @@ impl ServeLoop {
 				} else if serve.subscriber.version.has_largest() {
 					// A bounded feed that never delivers Largest goes live at the
 					// answer alone; one that does waits for it to show.
+					// An answer behind the copy's cache fails it.
 					match active.never_serves(start.largest) {
 						Some(largest) => self.serving.set_live_ahead(largest, served),
 						None => self.serving.set_live(start.largest, served),
 					}
+					.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
 					if let Some(largest) = start.largest {
 						self.serving.report_largest(largest);
 					}
