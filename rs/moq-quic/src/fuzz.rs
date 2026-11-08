@@ -23,9 +23,9 @@ use bytes::{Bytes, BytesMut};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
-	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, Side, StreamId, Streams, VarInt,
+	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, Side, StreamId, VarInt,
 	coding::BufMutExt,
-	connection::{Retransmits, StreamsState},
+	connection::{Retransmits, Streams, StreamsState},
 	frame::{self, Frame},
 	packet::{FixedLengthConnectionIdParser, PartialDecode},
 	transport_parameters::{PreferredAddress, TransportParameters},

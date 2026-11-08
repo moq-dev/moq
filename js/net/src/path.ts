@@ -61,6 +61,8 @@ export const MAX_PARTS = 32;
  *
  * Matches the IETF moq-transport limit of 4096 bytes for a namespace. Its tuple fields
  * drop the path's separators and escapes, so every path fits both wires.
+ *
+ * @internal
  */
 export const MAX_BYTES = 4096;
 
@@ -98,7 +100,7 @@ export function parts(path: Valid): string[] {
 }
 
 /**
- * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS} and {@link MAX_BYTES}.
+ * Validate an untrusted wire string as a path, enforcing {@link MAX_PARTS} and a 4096 byte limit.
  *
  * Throws when the path has an empty segment or is too deep or too long; use at wire decode sites.
  */
@@ -107,7 +109,7 @@ export function decode(raw: string): Valid {
 }
 
 /**
- * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS} and {@link MAX_BYTES}.
+ * Validate a path before writing it to the wire, enforcing {@link MAX_PARTS} and a 4096 byte limit.
  *
  * Throws when the path is too deep or too long; use at wire encode sites so we never
  * emit a path the remote side is required to reject.

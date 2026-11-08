@@ -66,9 +66,9 @@ pub(crate) use kio::clock::Instant;
 pub(crate) use std::time::Duration;
 
 pub use moq_quic::{
-	ApplicationClose, ConfigError, ConnectionClose, ConnectionId, ConnectionIdGenerator, CreditStats, EcnCodepoint,
-	FrameStats, FrameType, InvalidCid, Limits, LimitsError, PathStats, Rate, Transmit, TransportErrorCode, UdpStats,
-	VarInt, VarIntBoundsExceeded, Version, client, crypto, server, stream, transport,
+	ApplicationClose, ConfigError, ConnectionClose, ConnectionId, ConnectionIdGenerator, EcnCodepoint, FrameType,
+	InvalidCid, Limits, LimitsError, Rate, Transmit, TransportErrorCode, VarInt, VarIntBoundsExceeded, Version, client,
+	crypto, server, stream, transport,
 };
 
 #[cfg(feature = "quic")]

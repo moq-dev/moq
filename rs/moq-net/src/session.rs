@@ -422,13 +422,12 @@ impl Session {
 		self.goaway.consumer()
 	}
 
-	/// Resolves once the session carries no subscription or fetch, in either direction.
+	/// Ready once the session carries no subscription or fetch, in either direction.
 	///
 	/// Ready at once while it carries none. A track request still being set up, waiting
 	/// on authorization or the track's info, counts too. Announcements and the other
 	/// control streams don't, so a session can be idle while it still serves discovery.
-	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+	pub(crate) fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.work.poll_idle(waiter)
 	}
 
@@ -1155,3 +1154,6 @@ impl Drop for Slot {
 		self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
 	}
 }
+
+#[cfg(all(test, feature = "async"))]
+mod tests;

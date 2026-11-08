@@ -712,12 +712,34 @@ where
 		self.estimator.cut(end);
 		self.claim();
 
-		let tail_end = marker_at.filter(|_| !self.reordered);
-		self.flush_buffer(tail_end)?;
-
+		// The group's own state ends with it, whether or not closing it succeeds.
+		let reordered = std::mem::take(&mut self.reordered);
 		// Where this group's content stops: the duration marker when we write one, else the
 		// caller's bound, else the furthest point we wrote.
-		let reached = marker_at.or(end).max(self.end);
+		let reached = marker_at.or(end).max(self.end.take());
+		self.last_duration = None;
+		self.previous_timestamp = None;
+
+		let tail_end = marker_at.filter(|_| !reordered);
+		if let Err(err) = self.close_group(tail_end, reached) {
+			// A group that fails to close fails with the cause, rather than staying open for the next
+			// write to continue.
+			self.buffer.clear();
+			if let Some(group) = self.group.take() {
+				let _ = group.abort(err.reason());
+			}
+			return Err(err);
+		}
+		self.publish_estimate()
+	}
+
+	/// Flush the buffer into the open group and finish it, raising the live edge to `reached`.
+	fn close_group(
+		&mut self,
+		tail_end: Option<moq_net::Timestamp>,
+		reached: Option<moq_net::Timestamp>,
+	) -> crate::Result<()> {
+		self.flush_buffer(tail_end)?;
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
@@ -728,11 +750,6 @@ where
 				self.raise_live_edge(end);
 			}
 		}
-		self.end = None;
-		self.last_duration = None;
-		self.previous_timestamp = None;
-		self.reordered = false;
-		self.publish_estimate()?;
 		Ok(())
 	}
 
@@ -930,7 +947,11 @@ where
 	}
 
 	fn end_with(&mut self, err: Option<moq_net::Error>) -> crate::Result<()> {
-		self.cut(None)?;
+		if let Err(cause) = self.cut(None) {
+			// A track that cannot close its last group ends with the cause rather than staying open.
+			let _ = self.inner.clone().abort(cause.reason());
+			return Err(cause);
+		}
 		match err {
 			None => self.inner.finish()?,
 			Some(err) => {
@@ -941,7 +962,7 @@ where
 				self.inner.finish_at(moq_net::track::Position::group(next), Some(err))?;
 			}
 		}
-		self.publish_estimate()?;
+		let published = self.publish_estimate();
 		// A track that ended before measuring declares what it saw, and no longer holds the join
 		// interval back.
 		if let Some(mut member) = self.member.take() {
@@ -949,7 +970,7 @@ where
 		}
 		// A finished track may be kept around, but its media stops holding the other tracks back.
 		self.estimator.discontinuity();
-		Ok(())
+		published
 	}
 
 	/// [`finish`](Self::finish) the track unless it already ended, for an owner about to drop it.

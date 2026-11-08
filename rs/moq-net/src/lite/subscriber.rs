@@ -926,7 +926,7 @@ impl Subscriber {
 			.map(|(value, scale)| Timestamp::new(value, scale))
 			.transpose()
 			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-		producer.insert(crate::Datagram {
+		producer.insert(crate::datagram::Datagram {
 			sequence: dg.sequence,
 			timestamp,
 			payload: dg.payload,

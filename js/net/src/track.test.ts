@@ -1,6 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Manual, Milli, Nano, Wall, yieldNow } from "@moq/clock";
 import { race } from "@moq/signals";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -2451,7 +2450,6 @@ test("end is group 0 for an empty track and undefined after an abort", async () 
 });
 
 test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
-	hostTime();
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe().ordered();
 
@@ -2461,8 +2459,8 @@ test("readFrame does not livelock when a sole group finishes before the next arr
 	const g0 = producer.appendGroup();
 	g0.finish();
 
-	// The next group arrives via a macrotask; if the reader livelocks on microtasks it never runs.
-	void sleep(Nano.fromMilli(Milli(10))).then(() => {
+	// The next group arrives in a later host task; if the reader livelocks on microtasks it never runs.
+	void yieldNow().then(() => {
 		const g1 = producer.appendGroup();
 		g1.writeFrame(textFrame("hello"));
 		g1.finish();

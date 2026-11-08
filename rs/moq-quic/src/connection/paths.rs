@@ -73,7 +73,6 @@ fn build_congestion(now: Instant, mtu: u16, seed: u64, config: &transport::Confi
 		now,
 		mtu,
 		rtt: config.initial_rtt,
-		max_pacing_rate: config.max_outgoing_bytes_per_second,
 		seed,
 	})
 }

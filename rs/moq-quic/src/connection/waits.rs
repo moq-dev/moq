@@ -188,6 +188,7 @@ impl Waits {
 	}
 
 	/// Ready once the handshake was confirmed, or with the error once the connection was lost first
+	#[cfg(test)]
 	pub(crate) fn poll_confirmed(&mut self, waiter: &Waiter) -> Poll<Result<(), Error>> {
 		Self::poll_latch(&mut self.confirmed, &self.lost, waiter)
 	}
