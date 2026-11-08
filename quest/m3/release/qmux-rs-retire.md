@@ -8,7 +8,8 @@ is removed from its workspace or marked `release = false` in its
 release-plz config (dropping the entry alone leaves it publishable), and its README
 points at moq-dev/moq, so one repository owns the crate name.
 
-Check with `cargo info qmux` (its repository names moq-dev/moq) and the
+Check crates.io's published `qmux` (`cargo info qmux` run outside this
+workspace, which otherwise reports the local package; its repository names moq-dev/moq) and the
 web-transport release-plz config.
 
 ## Plan
@@ -23,5 +24,5 @@ move or close them there.
 - Maintainer: with rights in moq-dev/web-transport, freeze or remove its
   `rs/qmux` (remove it from the workspace, or set `release = false` for it
   in release-plz) before the cut publishes `qmux` from this repository; an
-  agent has no publish rights there. Done when `cargo info qmux` names
+  agent has no publish rights there. Done when crates.io's published `qmux` names
   moq-dev/moq and web-transport can no longer publish `qmux`.

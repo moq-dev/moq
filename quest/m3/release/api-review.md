@@ -45,11 +45,11 @@ and publish versions of packages exempt from the cut's version. `just
 api-diff` compares against this repository's `release` branch, which never
 held `@moq/qmux`, so compare `js/qmux`'s candidate API against npm's newest
 `@moq/qmux` (0.3.4 today, from moq-dev/web-transport) by hand, and the Rust `qmux`
-crate against crates.io's newest `qmux` (0.6.6 today) the same way. The
-web-transport publishers are frozen by then
+crate against crates.io's newest `qmux` (0.6.6 today) the same way. Run
+this comparison only after both web-transport publishers are frozen
 ([qmux-js-retire](/quest/m3/release/qmux-js-retire.md),
 [qmux-rs-retire](/quest/m3/release/qmux-rs-retire.md)), so the newest is
-the last.
+the last; if a freeze lands later, repeat it.
 This review still runs after m2 lands, over what changed since.
 
 ## Required

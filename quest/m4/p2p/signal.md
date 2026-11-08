@@ -59,11 +59,16 @@ ICE servers, decided 2026-11-07 (maintainer, /quest-plan from the API sweep
 of open PRs and remaining quests): each selected or admitted peer takes its
 own `iceServers`, defaulting to `Peers`' list, which replaces the earlier
 roster-size gate and its `max` knob. An application that wants to stop using
-STUN past some roster size passes an empty list for the peers it selects
-then. Host and mDNS candidates are always gathered, so an empty list can
-still pair on a LAN when local-network access and mDNS resolution work;
-otherwise the peers stay on the relay. Changing a peer's list never closes an established pair; test
-roster churn and pending negotiations separately.
+STUN past some roster size passes an empty list for the peers it selects or
+admits then. Host and mDNS candidates are gathered where the browser's privacy
+policy allows, so an empty list can still pair on a LAN when local-network
+access and mDNS resolution work, or across the Internet through a publicly
+reachable host candidate, and a selected native peer may still connect over
+its advertised WebTransport URL; otherwise the peers stay on the relay.
+Changing a peer's list never closes an established pair; it applies to the
+peer's next negotiation, and a pair whose ICE failed renegotiates with the new
+list, without touching other pairs. Test roster churn and pending
+negotiations separately.
 
 Native entries: when `info.webtransport` is present the dialer tries its
 URLs in advertised order, using `connect` with the listener's fingerprint

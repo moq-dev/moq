@@ -18,8 +18,8 @@ The application is in charge of policy. It supplies the ICE servers (an empty
 list disables ICE servers: only host and mDNS candidates, which pair on a
 LAN when the network allows it, and can still pair across the Internet
 when a host address, often IPv6, is publicly reachable), publishes opaque hints
-about itself, decides which roster peers to dial, and sets the roster size
-above which new negotiations stop using STUN. P2P is off unless the
+about itself, decides which roster peers to dial, and may pass a peer an empty
+`iceServers` list, for example past a roster size it picks. P2P is off unless the
 application turns it on.
 
 Three endpoint pairs work: browser to browser and browser to native over a
@@ -82,8 +82,9 @@ not a `Peers` knob):
 - `iceServers`: the default RTCPeerConnection server list, which each
   selected or admitted peer may override with its own; empty disables ICE
   servers (no STUN or TURN), which is not a LAN-only guarantee.
-  Host and mDNS candidates are always gathered, so LAN pairing stays
-  possible where local-network access and mDNS work,
+  Host and mDNS candidates are gathered where the browser's privacy policy
+  allows, so LAN pairing stays possible where local-network access and mDNS
+  work, with the relay as fallback otherwise,
   and changing a peer's list never closes an established pair;
 - `meta`: an opaque JSON value published in this peer's roster entry;
 - application-owned peer selection: discovery exposes candidates and only
@@ -165,7 +166,7 @@ Extractor declaration checks, which analyze only published packages since
 
 ## Required
 
-- [Signaling and policy](/quest/m4/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
+- [Signaling and policy](/quest/m4/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and per-peer `iceServers` decide whether STUN is used
 - [Native pairs over ICE and QUIC](/quest/m4/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
 - [moq-cli joins](/quest/m4/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
 - [Peer route policy](/quest/m4/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover

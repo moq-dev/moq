@@ -55,8 +55,9 @@ Member grants change shape, which breaks every enrolled device's paths:
 
 - `moq_auth::mesh`'s coordinator issues publish `mesh/node/<id>/**` and the
   two service patterns (`rs/moq-auth/src/mesh/coordinator.rs`), with its
-  docs (`rs/moq-auth/src/mesh/mod.rs`), contract tests, and a `MIGRATE.md`
-  entry replacing the `Pattern::subtree(&format!("mesh/{endpoint}"))` note.
+  docs (`rs/moq-auth/src/mesh/mod.rs`), and contract tests; the PR's Impact section
+  replaces the `Pattern::subtree(&format!("mesh/{endpoint}"))` migration note
+  (`MIGRATE.md` is written at the release cut).
 - `doc/bin/relay/auth.md`'s mesh enrollment section names the new grant.
 - moq-crypto's and `@moq/crypto`'s sign examples and tests that use
   `mesh/<key>/agent` paths move to `mesh/node/<key>/agent`, so the examples
@@ -67,7 +68,7 @@ Member grants change shape, which breaks every enrolled device's paths:
   grant, can't publish. Open, for whoever starts this, with the maintainer:
   recommended, the coordinator issues both the old and new patterns for one
   release while clients upgrade and refresh their tokens, then drops the old
-  one, with the MIGRATE entry giving that order; the old pattern keeps the
+  one, with the PR's Impact section giving that order; the old pattern keeps the
   service-name collision open until it is dropped.
 
 ## Required

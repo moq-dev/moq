@@ -26,7 +26,7 @@ behind the `mediacodec` feature and the encode seam.
 This backend implements the zero-or-more packet return and `flush` that
 [audio-codec-seam](/quest/m2/audio-codec-seam.md) lands in m2 before the cut
 (decided 2026-11-07, maintainer, /quest-plan from the API sweep of open PRs
-and remaining quests), so it adds no break and waits on no other backend.
+and remaining quests), so it adds no break and waits on no other encoder backend; its round-trip test still needs its platform decoder.
 
 ## Required
 

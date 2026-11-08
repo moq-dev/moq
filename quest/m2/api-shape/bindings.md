@@ -16,8 +16,8 @@
 - moq-ffi's `MoqVideoSurface` gets `#[non_exhaustive]`: it has one variant,
   and Android HardwareBuffer, D3D11, and DMA-BUF surfaces are planned in m3.
   Check any other output-only UniFFI enum an m3 quest plans to grow.
-  `#[non_exhaustive]` fences Rust and C only: UniFFI's Kotlin, Swift, and
-  Dart enums stay exhaustive, so a new variant breaks a foreign `when` or
+  `#[non_exhaustive]` fences Rust and C only: UniFFI's Kotlin, Swift, Python,
+  Dart, and C++ enums stay exhaustive, so a new variant breaks a foreign `when` or
   `switch`. Open, for whoever starts this, with the maintainer: fence it in
   the bindings too (recommended: the wrappers add an unknown arm that a new
   variant maps to until the wrapper learns it), or record a new variant as
