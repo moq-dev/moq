@@ -36,6 +36,8 @@ Decided (rejected options in parentheses):
 
 Reproduce first: hold the UDP port the test's TCP listener will get (for
 example, hold UDP sockets across most of the ephemeral range) and watch line
-281 fail, then show the fixed test passing under the same pressure.
+281 fail, then show the fixed test passing under the same pressure. Also hold
+TCP listeners across most of the range, so TCP refuses the first draws, and
+show the search redraws until a pair binds.
 
 Public API: none. Wire: none.

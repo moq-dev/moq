@@ -41,8 +41,10 @@ from the `Arc` that keeps its kind and source. Once `p2p`'s channel has opened,
 the driver drops the channel's `Inbox`, which its `Reader` reads as
 `qmux::Error::Closed`. On a socket failure the driver instead pushes
 `Err(qmux::Error::Io(arc))` into that `Inbox` first, since `Inbox::push`
-already carries errors. Don't match on error kinds to decide which errors are
-fatal (AGENTS.md).
+already carries errors. `Agent::next` judges the establishment deadline before
+it reads the inbound queue, so a socket error queued just before that deadline
+would surface as `Timeout`: read a queued socket error first, since it is the
+cause. Don't match on error kinds to decide which errors are fatal (AGENTS.md).
 
 Boundary: the server's shared-socket `server::mux::demux` logs and continues on
 every recv error, since one transient error, such as an ICMP unreachable,
@@ -58,9 +60,11 @@ reports a loopback ICMP port unreachable as `ECONNREFUSED` on its next
 receive, with no rate limit on loopback. Connect a socket to a closed loopback
 port, send once, and feed the socket to `ice::reader` and an agent, as
 `agent.rs`'s `unpolled` fixture does. Then assert that the agent and the
-session end with the socket error, not `Closed` or `Ok`, and that an opened
-`p2p` channel's reader returns `qmux::Error::Io`. Keep the existing
-peer-disconnect path asserting `Ok`.
+session end with the socket error, not `Closed` or `Ok`. Also assert that a
+`p2p` opener still waiting gets `p2p::Error::Io` with the underlying error, that
+an opened `p2p` channel's reader returns `qmux::Error::Io`, and that an error
+queued past the establishment deadline still wins over `Timeout`. Keep the
+existing peer-disconnect path asserting `Ok`.
 
 Public API: none. The errors map to existing `Io` variants, and the new
 `ice::Error` variant is crate-private. Wire: none.
