@@ -76,8 +76,9 @@ describe("resolve", () => {
 		// AAC-LC's 1024 samples at the captured rate.
 		const aac = resolve(captured, "aac");
 		const frame = (1024 * 1000) / Number(aac.catalog.sampleRate);
-		expect(groupSpacing(Duration.millis(20), aac).asMillis()).toBeCloseTo(frame, 9);
-		expect(groupSpacing(Duration.millis(frame * 3), aac).asMillis()).toBeCloseTo(frame * 3, 9);
+		// Durations hold whole nanoseconds, so the spacing matches to the nanosecond.
+		expect(groupSpacing(Duration.millis(20), aac).asMillis()).toBeCloseTo(frame, 6);
+		expect(groupSpacing(Duration.millis(frame * 3), aac).asMillis()).toBeCloseTo(frame * 3, 6);
 	});
 
 	// AAC-LC has a fixed 1024-sample frame, so there is no duration to configure.
