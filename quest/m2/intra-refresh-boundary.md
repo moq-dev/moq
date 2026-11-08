@@ -8,6 +8,8 @@ earlier ones. Rewrite the import and consumer quests around that contract.
 
 ## Plan
 
+Moved from the m3 intra-refresh epic to m2: Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests). The catalog's `warmup` field is new in this release, so its contract (a safe upper bound published before the content it covers) is settled before the cut publishes it. The implementation quests stay in m3.
+
 The 2026-10-11 TS audit found the proposed catalog duration is not yet a
 sufficient guarantee. `h264-import` raises the global value after observing
 a longer sweep.

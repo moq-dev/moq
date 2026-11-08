@@ -42,4 +42,4 @@ not attempt.
 
 ## Required
 
-- [Robot teleoperation primitive](/quest/m5/teleop-robot.md)
+- [Robot teleoperation conventions](/quest/m5/teleop-robot.md)

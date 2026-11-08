@@ -130,10 +130,42 @@ recorded only sequencing.
   tracks stay independent.
 - **No local clock in the model.** Added 2026-11-07 (maintainer,
   /quest-plan from the API shape audit): `Timestamp::now()`, the only model
-  API that reads the local clock, is removed, and its caller (moq-boy)
-  stamps from its own clock. `Timed<P>` moves from moq-net's root to
-  moq-json, whose producers and readers are its only users, and its `at`
-  becomes required under the rule above.
+  API that reads the local clock, is removed, and its callers stamp from
+  their own clock: moq-boy, moq-hls, moq-room, moq-stats, moq-bench, hang's
+  video example, moq-tokio's examples, and tests across moq-net, moq-json,
+  moq-mux, and moq-hls. `Timed<P>` moves from moq-net's root to moq-json,
+  since moq-net never uses it internally, and its `at` becomes required under
+  the rule above. Every crate that names `moq_net::Timed` follows the move:
+  moq-mux, moq-ffi, moq-c, moq-cli, moq-room, moq-boy, moq-hls, moq-stats,
+  and moq-net-tests.
+- **One anchor rule.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ collapse `Anchor` to `{Oldest,
+  Relative(n), Time(ts)}` with every end inclusive (rejected: keep
+  `Absolute` and make it inclusive; only add `Oldest`). Today an `Absolute`
+  end is exclusive while `Relative` and `Time` ends include their group
+  (`rs/moq-net/src/model/subscription.rs`), and "oldest" is the sentinel
+  `Relative(u64::MAX)`. Once keys are starts, `Absolute(key)` and `Time(ts)`
+  name the same group, so `Absolute` goes; a legacy exclusive end `E` maps
+  to `Time(E - 1)`, since legacy keys pass through. A legacy inclusive
+  start `S` keeps its bound: it resolves to the first group keyed at or
+  above `S`, never to an earlier group that covers `S`, and a regression
+  covers sparse keys (4 and 7 with a start of 5 selects 7). An exclusive end of 0
+  (today `sequence_bounds(..0)` and an empty range list's
+  `Subscription::end()`) selects nothing, so it is dropped as an empty range
+  before conversion, never saturated to `Time(0)`, which would include
+  group 0. Regressions cover `E = 0` and `E = 1` beside the legacy round
+  trips. `Oldest` is explicit and
+  encoded the same on every wire (lite-07, lite-06 and earlier, IETF), where
+  today the lite encoder treats any `back > MAX_QUIC` as oldest and the
+  model does not. `Range::groups(RangeBounds<u64>)` and
+  `Subscription::with_range` go. JS's omitted start keeps meaning `Oldest`.
+  This absorbs the deleted anchor-oldest quest (from the 2026-11-07
+  invariant audit, model-4).
+- **Fence what grows after the cut.** Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `Position` becomes
+  `#[non_exhaustive]`, so byte-holes can add a byte offset without a break.
+- **Wires without a start.** Check which moq-lite versions can encode a
+  historical start; lite-01/02 may not. On any that can't, an `Oldest` or
+  earlier start gets the live feed, and the PR documents that exception
+  rather than changing the old format.
 - **Open, for whoever starts this, with the maintainer:** how lite-05/06,
   which carry both a sequence and frame timestamps, map on the way out.
 
@@ -181,7 +213,8 @@ Public API: breaking. `group::Info`, `create_group`, `append_group`,
 `Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, and group consumers
 address by start timestamp, every producer write takes a required
 timestamp, untimed tracks become scale-less, `Timestamp::now` is gone, and
-`Timed` is moq-json's.
+`Timed` is moq-json's, and `Anchor` is `{Oldest, Relative, Time}` with inclusive
+ends.
 Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required
