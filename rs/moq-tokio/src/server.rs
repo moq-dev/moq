@@ -1492,6 +1492,27 @@ pub struct Link {
 	pub alpn: Option<String>,
 }
 
+/// Changes one accepted QUIC connection's limits while its session runs, from
+/// [`Request::quic_limits`]. Cloning shares the connection.
+#[cfg(feature = "quic")]
+#[derive(Clone)]
+pub struct QuicLimits(crate::quic::driver::connection::Connection);
+
+#[cfg(feature = "quic")]
+impl QuicLimits {
+	/// Replace the connection's limits, as [`Request::with_quic_limits`] does before SETUP.
+	pub fn set(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
+		self.0.set_limits(limits)
+	}
+}
+
+#[cfg(feature = "quic")]
+impl std::fmt::Debug for QuicLimits {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("QuicLimits").finish_non_exhaustive()
+	}
+}
+
 /// An incoming MoQ session that can be accepted or rejected.
 ///
 /// The transport connection and the MoQ SETUP are already complete, so [`path`](Self::path),
@@ -1607,12 +1628,13 @@ impl Request {
 		self
 	}
 
-	/// The QUIC connection under this request, to change its limits once the session runs.
-	/// `None` on a transport moq-quic does not drive (qmux streams).
+	/// A handle that changes this connection's QUIC limits while the session runs, such as
+	/// bitrate caps that change after acceptance. `None` on a transport moq-quic does not
+	/// drive (qmux streams).
 	#[cfg(feature = "quic")]
-	pub fn quic(&self) -> Option<&crate::quic::driver::connection::Connection> {
+	pub fn quic_limits(&self) -> Option<QuicLimits> {
 		match &self.under {
-			Under::Quic(quic) => Some(quic),
+			Under::Quic(quic) => Some(QuicLimits(quic.clone())),
 			#[allow(unreachable_patterns, reason = "a QUIC-only build has no other connection")]
 			_ => None,
 		}
@@ -2923,7 +2945,10 @@ mod tests {
 			let _connection = client.with_reconnect(false).connect(url);
 
 			let mut request = listener.accept().await.expect("no incoming connection");
-			let quic = request.quic().expect("a QUIC request").clone();
+			let Under::Quic(quic) = &request.under else {
+				panic!("a QUIC request");
+			};
+			let quic = quic.clone();
 			assert_eq!(
 				quic.receive_window().connection,
 				moq_net::transport::SETUP_RECEIVE_WINDOW

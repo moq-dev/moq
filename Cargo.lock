@@ -5209,7 +5209,6 @@ dependencies = [
  "rind-rustls",
  "rustc-hash 2.1.3",
  "rustls",
- "rustls-platform-verifier",
  "send_wrapper",
  "serde_json",
  "slab",

@@ -70,17 +70,12 @@ fn a_send_staged_on_the_way_out_still_goes() {
 
 fn server_config(certs: &support::Certs) -> quic::server::Config {
 	quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
+		certs.server(&[ALPN]),
 	)
 }
 
 fn dial_config() -> quic::client::Config {
-	let mut config = quic::client::Config::default();
-	config.alpn = vec![ALPN.to_string()];
-	config.verify = false;
+	let config = quic::client::Config::new(support::client_tls(&[ALPN]));
 	config
 }
 

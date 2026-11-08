@@ -98,8 +98,7 @@ fn a_steered_group_serves_a_shared_port() {
 		.map(|(member, stop)| {
 			let accepted = accepted.clone();
 			let stop = stop.clone();
-			let cert = certs.cert.clone();
-			let key = certs.key.clone();
+			let tls = certs.server(&[ALPN]);
 			let ready = ready.clone();
 			std::thread::spawn(move || {
 				let shard = member.shard();
@@ -110,10 +109,7 @@ fn a_steered_group_serves_a_shared_port() {
 				let socket = handle.udp(member, udp::Config::default()).expect("socket");
 
 				let server = quic::server::Config::new(
-					quic::Identity::open(cert, key)
-						.expect("identity")
-						.server(&[ALPN], quic::server::ClientAuth::None)
-						.expect("tls"),
+					tls,
 				);
 				let endpoint = quic::Endpoint::new(quic::endpoint::Config::default().with_server(server), socket)
 					.expect("endpoint");
@@ -140,9 +136,7 @@ fn a_steered_group_serves_a_shared_port() {
 	// accepted is the steering assertion (see the module docs).
 	let mut client_worker = client_worker;
 	let handle = client_worker.handle();
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
+	let dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 
 	client_worker
 		.block_on(async {

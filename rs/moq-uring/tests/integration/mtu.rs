@@ -196,10 +196,7 @@ fn endpoints(
 			.expect("socket")
 	};
 	let mut server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
+		certs.server(&[ALPN]),
 	);
 	server_config.transport = transport.clone();
 	let server = quic::Endpoint::new(
@@ -209,9 +206,7 @@ fn endpoints(
 	.expect("server endpoint");
 	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket(handle)).expect("client endpoint");
 	let path = Path::new(server.local_addr(), mtu);
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
+	let mut dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 	dial.transport = transport.clone();
 	(server, client, dial, path)
 }

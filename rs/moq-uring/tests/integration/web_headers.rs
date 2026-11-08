@@ -20,10 +20,7 @@ pub fn run(pending: usize, ready: usize, iterations: u64) -> Duration {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 	let mut server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&["h3"], quic::server::ClientAuth::None)
-			.expect("TLS"),
+		certs.server(&["h3"]),
 	);
 	server.transport.limits.max_streams = std::num::NonZeroU64::new((pending + ready + 3) as u64);
 	let socket = handle

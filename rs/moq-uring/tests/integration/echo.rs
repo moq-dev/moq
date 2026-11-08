@@ -51,10 +51,7 @@ fn echo_tokio_peer() {
 	let certs = support::certs().expect("certificates");
 
 	let server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[moq_tokio::quic::web::ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
+		certs.server(&[moq_tokio::quic::web::ALPN]),
 	);
 	let socket = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())

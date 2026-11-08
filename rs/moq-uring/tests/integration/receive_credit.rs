@@ -97,10 +97,7 @@ fn partial_frame_gives_way() {
 
 	let certs = support::certs().expect("certificates");
 	let server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
+		certs.server(&[ALPN]),
 	);
 	let socket = |handle: &moq_uring::Handle| {
 		handle
@@ -109,9 +106,7 @@ fn partial_frame_gives_way() {
 	};
 	let server_sock = socket(&handle);
 	let server_addr = server_sock.local_addr().expect("server addr");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
+	let mut dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 	dial.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let client_sock = socket(&handle);
 
@@ -251,10 +246,7 @@ fn javascript_partial_frame_gives_way() {
 
 	let certs = support::certs().expect("certificates");
 	let mut server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&["h3"], quic::server::ClientAuth::None)
-			.expect("tls"),
+		certs.server(&["h3"]),
 	);
 	server.transport.limits.receive_window = std::num::NonZeroU64::new(WINDOW as u64);
 	let sock = handle

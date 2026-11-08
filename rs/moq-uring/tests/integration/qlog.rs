@@ -50,10 +50,7 @@ fn a_connection_writes_a_trace() {
 	let sink = quic::qlog::Sink::directory(dir.path()).expect("qlog sink");
 
 	let mut server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
+		certs.server(&[ALPN]),
 	);
 	server.transport.qlog = Some(sink.clone());
 
@@ -65,9 +62,7 @@ fn a_connection_writes_a_trace() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
 
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
+	let mut dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 	dial.transport.qlog = Some(sink.clone());
 
 	handle.spawn(async move {
