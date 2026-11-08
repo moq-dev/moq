@@ -149,7 +149,7 @@ pub struct MoqAnnounceConsumer {
 #[derive(uniffi::Object)]
 pub struct MoqRoute {
 	/// The route itself, released on cancel.
-	reads: Polled<moq_net::origin::Route>,
+	reads: Polled<Held>,
 	/// An exact route's broadcast, wrapped once so every caller shares its catalog.
 	broadcast: Option<Arc<MoqBroadcastProducer>>,
 	/// The instance last read, reported once the route is cancelled.
@@ -412,6 +412,57 @@ impl MoqOriginConsumer {
 
 // ---- MoqRoute ----
 
+/// The native route a [`MoqRoute`] holds: an exact route or a prefix claim.
+enum Held {
+	Route(moq_net::origin::Route),
+	Claim(moq_net::origin::Claim),
+}
+
+impl Held {
+	fn instance(&self) -> moq_net::Instance {
+		match self {
+			Self::Route(route) => route.instance(),
+			Self::Claim(claim) => claim.instance(),
+		}
+	}
+
+	fn is_announced(&self) -> bool {
+		match self {
+			Self::Route(route) => route.is_announced(),
+			Self::Claim(claim) => claim.is_announced(),
+		}
+	}
+
+	fn announce(&self) -> Result<(), moq_net::Error> {
+		match self {
+			Self::Route(route) => route.announce(),
+			Self::Claim(claim) => claim.announce(),
+		}
+	}
+
+	fn withdraw(&self) {
+		match self {
+			Self::Route(route) => route.withdraw(),
+			Self::Claim(claim) => claim.withdraw(),
+		}
+	}
+
+	fn set_cost(&self, cost: u64) -> Result<(), moq_net::Error> {
+		match self {
+			Self::Route(route) => route.set_cost(cost),
+			Self::Claim(claim) => claim.set_cost(cost),
+		}
+	}
+
+	/// A claim's next request; an exact route yields none.
+	fn poll_requested(&self, waiter: &kio::Waiter) -> Poll<Option<moq_net::origin::Request>> {
+		match self {
+			Self::Route(_) => Poll::Ready(None),
+			Self::Claim(claim) => claim.poll_requested(waiter),
+		}
+	}
+}
+
 impl MoqRoute {
 	/// An exact route's native options, always hidden so [`Self::exact`] attaches the catalog
 	/// track before anyone can find the route, and whether the caller asked it visible.
@@ -432,14 +483,14 @@ impl MoqRoute {
 		if visible {
 			route.announce()?;
 		}
-		Ok(Self::new(route, Some(Arc::new(broadcast)), driver))
+		Ok(Self::new(Held::Route(route), Some(Arc::new(broadcast)), driver))
 	}
 
-	fn prefix(route: moq_net::origin::Route, driver: Background) -> Self {
-		Self::new(route, None, driver)
+	fn prefix(claim: moq_net::origin::Claim, driver: Background) -> Self {
+		Self::new(Held::Claim(claim), None, driver)
 	}
 
-	fn new(route: moq_net::origin::Route, broadcast: Option<Arc<MoqBroadcastProducer>>, driver: Background) -> Self {
+	fn new(route: Held, broadcast: Option<Arc<MoqBroadcastProducer>>, driver: Background) -> Self {
 		// Reading a hidden job's instance binds it, so one is cached only once it announces or
 		// is read.
 		let instance = if route.is_announced() || broadcast.is_none() {
@@ -456,7 +507,7 @@ impl MoqRoute {
 	}
 
 	/// Run `f` against the route, refused with `Cancelled` once it was cancelled.
-	fn with<R>(&self, f: impl FnOnce(&moq_net::origin::Route) -> Result<R, moq_net::Error>) -> Result<R, MoqError> {
+	fn with<R>(&self, f: impl FnOnce(&Held) -> Result<R, moq_net::Error>) -> Result<R, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
 		let result = self.reads.peek(f).ok_or(MoqError::Cancelled)?;

@@ -655,7 +655,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 }
 
 /// Answer the claim's request for `path`, dropping any other it queued.
-fn answer(claim: &origin::Route, path: &str) -> origin::Route {
+fn answer(claim: &origin::Claim, path: &str) -> origin::Route {
 	loop {
 		let request = claim
 			.requested()
@@ -886,7 +886,7 @@ const POOL_HOP: u64 = 1_000;
 struct Pool {
 	producer: origin::Producer,
 	driver: origin::Driver,
-	_members: Vec<origin::Route>,
+	_members: Vec<origin::Claim>,
 	_producers: Vec<broadcast::Producer>,
 	_consumers: Vec<broadcast::Consumer>,
 	cursors: Vec<origin::Routes>,

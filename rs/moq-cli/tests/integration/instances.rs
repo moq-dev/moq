@@ -287,7 +287,7 @@ versions! {
 /// A worker claiming `live`, answering each request with a job's exact route: the catalog,
 /// which names `./media` under the job's instance, and the media it references.
 struct Worker {
-	claim: origin::Route,
+	claim: origin::Claim,
 	jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>>,
 }
 

@@ -2025,7 +2025,7 @@ mod tests {
 			&moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: Default::default(),
+				route: moq_net::fuzz::route_info([], 0, None),
 			},
 			instance.clone(),
 			true,
@@ -2047,7 +2047,7 @@ mod tests {
 			&moq_net::announce::Announce {
 				prefix: path.clone(),
 				captures: None,
-				route: Default::default(),
+				route: moq_net::fuzz::route_info([], 0, None),
 			},
 			"b".parse().unwrap(),
 			true,

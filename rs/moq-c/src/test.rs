@@ -5817,7 +5817,7 @@ fn an_instance_pins_request_and_follow() {
 }
 
 /// Serve `prefix` on `origin` dynamically.
-fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Route {
+fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Claim {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
 	State::lock()

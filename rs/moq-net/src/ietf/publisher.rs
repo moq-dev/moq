@@ -10723,11 +10723,11 @@ mod serve_tests {
 			let h = serve(version);
 			let _old = h
 				._origin
-				.announce("old/first", crate::origin::RouteInfo::default())
+				.announce("old/first", crate::origin::RouteInfo::new())
 				.unwrap();
 			let _new = h
 				._origin
-				.announce("new/second", crate::origin::RouteInfo::default())
+				.announce("new/second", crate::origin::RouteInfo::new())
 				.unwrap();
 			settle().await;
 			let session = ScriptedSession::new(Vec::new());
@@ -10880,7 +10880,7 @@ mod serve_tests {
 
 			let other = h
 				._origin
-				.announce("other", crate::origin::RouteInfo::default())
+				.announce("other", crate::origin::RouteInfo::new())
 				.unwrap();
 			settle().await;
 			assert!(futures::poll!(running.as_mut()).is_pending());
@@ -11055,7 +11055,7 @@ mod serve_tests {
 		session.log.fail_writes();
 		let _other = h
 			._origin
-			.announce("other", crate::origin::RouteInfo::default())
+			.announce("other", crate::origin::RouteInfo::new())
 			.unwrap();
 		for _ in 0..10 {
 			assert!(
@@ -11401,7 +11401,7 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h._origin.forward("live", crate::origin::RouteInfo::default()).unwrap();
+			let claim = h._origin.forward("live", crate::origin::RouteInfo::new()).unwrap();
 			let auth = crate::auth::Link::new(false);
 			auth.handle().authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth);
@@ -11421,7 +11421,7 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h._origin.forward("live", crate::origin::RouteInfo::default()).unwrap();
+			let claim = h._origin.forward("live", crate::origin::RouteInfo::new()).unwrap();
 			let auth = crate::auth::Link::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
@@ -11738,7 +11738,7 @@ mod serve_tests {
 		let version = Version::Draft22;
 		for path in [".", "./child", ".session", ".session/extension"] {
 			let h = serve(version);
-			let claim = h._origin.forward("", crate::origin::RouteInfo::default()).unwrap();
+			let claim = h._origin.forward("", crate::origin::RouteInfo::new()).unwrap();
 			settle().await;
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 				.await
@@ -13884,7 +13884,7 @@ mod serve_tests {
 				{
 					*namespace = crate::Path::from_static("lobby");
 				}
-				Some(h._origin.forward("lobby", crate::origin::RouteInfo::default()).unwrap())
+				Some(h._origin.forward("lobby", crate::origin::RouteInfo::new()).unwrap())
 			}
 			FetchParked::Responding => None,
 		};
@@ -15492,7 +15492,7 @@ mod serve_tests {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
-				Some(origin.forward("room", crate::origin::RouteInfo::default()).unwrap()),
+				Some(origin.forward("room", crate::origin::RouteInfo::new()).unwrap()),
 				None,
 			),
 			Parked::Acking | Parked::Ending => {
@@ -15729,7 +15729,7 @@ mod serve_tests {
 		let mut idle = None;
 		match setup {
 			Setup::Resolving => {
-				let route = origin.forward("room", crate::origin::RouteInfo::default()).unwrap();
+				let route = origin.forward("room", crate::origin::RouteInfo::new()).unwrap();
 				let request = {
 					let requested = std::pin::pin!(route.requested());
 					match futures::future::select(requested, serving.as_mut()).await {
@@ -18036,7 +18036,7 @@ mod tests {
 		let echoed = origin
 			.announce(
 				"from/peer",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
 			)
@@ -18045,7 +18045,7 @@ mod tests {
 		let mut local_hops = crate::Hops::new();
 		local_hops.push(other).unwrap();
 		let local = origin
-			.announce("from/us", crate::origin::RouteInfo::default().with_hops(local_hops))
+			.announce("from/us", crate::origin::RouteInfo::new().with_hops(local_hops))
 			.unwrap();
 
 		(publisher, consumer, vec![echoed, local])
@@ -18095,7 +18095,7 @@ mod tests {
 		let _echoed = origin
 			.announce(
 				"from/peer",
-				crate::origin::RouteInfo::default().with_hops(hops.clone()).with_via(r1),
+				crate::origin::RouteInfo::new().with_hops(hops.clone()).with_via(r1),
 			)
 			.unwrap();
 
@@ -18167,7 +18167,7 @@ mod tests {
 		let _echoed = origin
 			.announce(
 				"from/peer",
-				crate::origin::RouteInfo::default().with_hops(hops).with_via(assigned),
+				crate::origin::RouteInfo::new().with_hops(hops).with_via(assigned),
 			)
 			.unwrap();
 
@@ -18211,13 +18211,13 @@ mod tests {
 		let mut clean = crate::Hops::new();
 		clean.push(crate::Hop::new(778).unwrap()).unwrap();
 		let _clean = origin
-			.announce("cam-clean", crate::origin::RouteInfo::default().with_hops(clean))
+			.announce("cam-clean", crate::origin::RouteInfo::new().with_hops(clean))
 			.unwrap();
 		// A chain with no room left for our own hop cannot be forwarded.
 		let mut full = crate::Hops::new();
 		while full.push(crate::Hop::new(100 + full.len() as u64).unwrap()).is_ok() {}
 		let _full = origin
-			.announce("cam-full", crate::origin::RouteInfo::default().with_hops(full))
+			.announce("cam-full", crate::origin::RouteInfo::new().with_hops(full))
 			.unwrap();
 		settle().await;
 
@@ -18286,7 +18286,7 @@ mod tests {
 		let _tainted = origin
 			.announce(
 				"route-flip-cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_hops(tainted_hops)
 					.with_via(assigned),
 			)
@@ -18316,7 +18316,7 @@ mod tests {
 		let clean = origin
 			.announce(
 				"route-flip-cam",
-				crate::origin::RouteInfo::default().with_hops(clean_hops),
+				crate::origin::RouteInfo::new().with_hops(clean_hops),
 			)
 			.unwrap();
 		settle().await;
@@ -18373,7 +18373,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin
-			.announce("lonely-cam", crate::origin::RouteInfo::default())
+			.announce("lonely-cam", crate::origin::RouteInfo::new())
 			.unwrap();
 		settle().await;
 
@@ -18447,7 +18447,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _local = origin
-			.announce("local-cam", crate::origin::RouteInfo::default())
+			.announce("local-cam", crate::origin::RouteInfo::new())
 			.unwrap();
 		settle().await;
 
@@ -18493,7 +18493,7 @@ mod tests {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let local = origin
-				.announce("local-cam", crate::origin::RouteInfo::default())
+				.announce("local-cam", crate::origin::RouteInfo::new())
 				.unwrap();
 			settle().await;
 
@@ -18559,7 +18559,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _local = origin
-			.announce("local-cam", crate::origin::RouteInfo::default())
+			.announce("local-cam", crate::origin::RouteInfo::new())
 			.unwrap();
 		settle().await;
 
@@ -18651,9 +18651,9 @@ mod tests {
 			scoped,
 		} = case;
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
+		let _cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 		let _stats = origin
-			.announce(".stats/node", crate::origin::RouteInfo::default())
+			.announce(".stats/node", crate::origin::RouteInfo::new())
 			.unwrap();
 		settle().await;
 
@@ -18801,7 +18801,7 @@ mod tests {
 		for version in [Version::Draft18] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let early = origin
-				.announce("early-cam", crate::origin::RouteInfo::default())
+				.announce("early-cam", crate::origin::RouteInfo::new())
 				.unwrap();
 			settle().await;
 
@@ -18847,7 +18847,7 @@ mod tests {
 			);
 
 			let _late = origin
-				.announce("late-cam", crate::origin::RouteInfo::default())
+				.announce("late-cam", crate::origin::RouteInfo::new())
 				.unwrap();
 			for _ in 0..100 {
 				assert!(futures::poll!(run.as_mut()).is_pending());
@@ -18896,7 +18896,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let first = origin
-			.announce("first-cam", crate::origin::RouteInfo::default())
+			.announce("first-cam", crate::origin::RouteInfo::new())
 			.unwrap();
 		settle().await;
 
@@ -18933,7 +18933,7 @@ mod tests {
 		// Send capacity runs out before the second advertisement can send its header.
 		set_gate(&gate, false);
 		let _second = origin
-			.announce("second-cam", crate::origin::RouteInfo::default())
+			.announce("second-cam", crate::origin::RouteInfo::new())
 			.unwrap();
 		settle().await;
 
@@ -19000,7 +19000,7 @@ mod tests {
 		// The state a refused or failed offer leaves behind: the peer holds nothing, and
 		// the loop is coming back to it on a timer.
 		let suffix: crate::Path = crate::Path::from_static("from/peer");
-		let mut watch = Watched::new(crate::origin::RouteInfo::default().with_hops(hops));
+		let mut watch = Watched::new(crate::origin::RouteInfo::new().with_hops(hops));
 		watch.deferred = true;
 
 		let mut ns = Namespaces::new(cluster::Peer::default(), Target::Requests);
@@ -19027,7 +19027,7 @@ mod tests {
 		let cam = origin
 			.announce(
 				"solo-cam",
-				crate::origin::RouteInfo::default().with_instance(instance.clone(), 0),
+				crate::origin::RouteInfo::new().with_instance(instance.clone(), 0),
 			)
 			.unwrap();
 		settle().await;
@@ -19063,7 +19063,7 @@ mod tests {
 		let _standby = origin
 			.announce(
 				"solo-cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance, 0)
 					.with_cost(0),
 			)
@@ -19133,7 +19133,7 @@ mod tests {
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance.clone(), 0)
 					.with_cost(4),
 			)
@@ -19170,7 +19170,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance, 0)
 					.with_cost(0),
 			)
@@ -19212,7 +19212,7 @@ mod tests {
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance.clone(), 0)
 					.with_cost(4),
 			)
@@ -19266,7 +19266,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance, 0)
 					.with_cost(0),
 			)
@@ -19301,7 +19301,7 @@ mod tests {
 		let _from_a = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance.clone(), 0)
 					.with_hops(publisher_a)
 					.with_cost(4),
@@ -19339,7 +19339,7 @@ mod tests {
 		let _from_b = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance, 0)
 					.with_hops(publisher_b)
 					.with_cost(0),
@@ -19442,7 +19442,7 @@ mod tests {
 			.present(bytes::Bytes::from_static(b"second-secret"), false)
 			.unwrap();
 		let cam = origin
-			.announce("cam", crate::origin::RouteInfo::default().with_auth(first))
+			.announce("cam", crate::origin::RouteInfo::new().with_auth(first))
 			.unwrap();
 		settle().await;
 
@@ -19464,7 +19464,7 @@ mod tests {
 			"{version}: PUBLISH_NAMESPACE carries the auth"
 		);
 
-		cam.update(crate::origin::RouteInfo::default().with_auth(second))
+		cam.update(crate::origin::RouteInfo::new().with_auth(second))
 			.unwrap();
 		let expected = request_update(
 			version,
@@ -19508,7 +19508,7 @@ mod tests {
 			.present(bytes::Bytes::from_static(b"foreign-secret"), false)
 			.unwrap();
 		let _cam = origin
-			.announce("cam", crate::origin::RouteInfo::default().with_auth(foreign))
+			.announce("cam", crate::origin::RouteInfo::new().with_auth(foreign))
 			.unwrap();
 		settle().await;
 
@@ -19534,7 +19534,7 @@ mod tests {
 		let origin = unheld_origin();
 		let auth = crate::auth::Link::ietf(false);
 		let token = auth.present(bytes::Bytes::from_static(b"late-secret"), false).unwrap();
-		let cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
+		let cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
@@ -19543,7 +19543,7 @@ mod tests {
 		poll_until(&mut run, &log, b"cam", 1).await;
 		assert_eq!(occurrences(&log, b"late-secret"), 0, "named before it had an auth");
 
-		cam.update(crate::origin::RouteInfo::default().with_auth(token))
+		cam.update(crate::origin::RouteInfo::new().with_auth(token))
 			.unwrap();
 		poll_until(&mut run, &log, b"cam", 2).await;
 
@@ -19564,13 +19564,13 @@ mod tests {
 		let a = origin
 			.announce(
 				"cam-a",
-				crate::origin::RouteInfo::default().with_auth(present(b"a-first")),
+				crate::origin::RouteInfo::new().with_auth(present(b"a-first")),
 			)
 			.unwrap();
 		let b = origin
 			.announce(
 				"cam-b",
-				crate::origin::RouteInfo::default().with_auth(present(b"b-first")),
+				crate::origin::RouteInfo::new().with_auth(present(b"b-first")),
 			)
 			.unwrap();
 		settle().await;
@@ -19583,9 +19583,9 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam-a"), 1, "cam-a was never advertised");
 		assert_eq!(occurrences(&log, b"cam-b"), 1, "cam-b was never advertised");
 
-		a.update(crate::origin::RouteInfo::default().with_auth(present(b"a-second")))
+		a.update(crate::origin::RouteInfo::new().with_auth(present(b"a-second")))
 			.unwrap();
-		b.update(crate::origin::RouteInfo::default().with_auth(present(b"b-second")))
+		b.update(crate::origin::RouteInfo::new().with_auth(present(b"b-second")))
 			.unwrap();
 		poll_until(&mut run, &log, b"b-second", 1).await;
 		assert_eq!(occurrences(&log, b"a-second"), 1, "cam-a's renewal never went out");
@@ -19595,7 +19595,7 @@ mod tests {
 			"cam-b's renewal waited on cam-a's answer"
 		);
 
-		let _c = origin.announce("cam-c", crate::origin::RouteInfo::default()).unwrap();
+		let _c = origin.announce("cam-c", crate::origin::RouteInfo::new()).unwrap();
 		poll_until(&mut run, &log, b"cam-c", 1).await;
 		assert_eq!(
 			occurrences(&log, b"cam-c"),
@@ -19614,7 +19614,7 @@ mod tests {
 
 		for fin in [true, false] {
 			let origin = unheld_origin();
-			let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
+			let _cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 			settle().await;
 
 			let (session, peer) = memory::pair(memory::Config::default());
@@ -19685,7 +19685,7 @@ mod tests {
 			.map(|name| {
 				(
 					name,
-					origin.announce(name, crate::origin::RouteInfo::default()).unwrap(),
+					origin.announce(name, crate::origin::RouteInfo::new()).unwrap(),
 				)
 			})
 			.collect();
@@ -19772,7 +19772,7 @@ mod tests {
 			let auth = crate::auth::Link::ietf(false);
 			let token = auth.present(bytes::Bytes::from(vec![0; 70_000]), false).unwrap();
 			let _cam = origin
-				.announce("cam", crate::origin::RouteInfo::default().with_auth(token))
+				.announce("cam", crate::origin::RouteInfo::new().with_auth(token))
 				.unwrap();
 			settle().await;
 
@@ -19819,7 +19819,7 @@ mod tests {
 		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
-			.announce("cam", crate::origin::RouteInfo::default().with_auth(present(b"first")))
+			.announce("cam", crate::origin::RouteInfo::new().with_auth(present(b"first")))
 			.unwrap();
 		settle().await;
 
@@ -19842,7 +19842,7 @@ mod tests {
 		// The idle request has read its OK and parked, so the reset waits for the renewal
 		// to wake it.
 		peer.close(crate::lite::test_transport::Close::Reset);
-		cam.update(crate::origin::RouteInfo::default().with_auth(present(b"second")))
+		cam.update(crate::origin::RouteInfo::new().with_auth(present(b"second")))
 			.unwrap();
 		poll_until(&mut run, &log, b"second", 1).await;
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -19872,7 +19872,7 @@ mod tests {
 		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let cam = origin
-			.announce("cam", crate::origin::RouteInfo::default().with_auth(present(b"first")))
+			.announce("cam", crate::origin::RouteInfo::new().with_auth(present(b"first")))
 			.unwrap();
 		settle().await;
 
@@ -19880,7 +19880,7 @@ mod tests {
 		let (publisher, log) = auth_publisher(&origin, &auth, vec![ok.clone(), ok], version);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"first", 1).await;
-		cam.update(crate::origin::RouteInfo::default().with_auth(present(b"second")))
+		cam.update(crate::origin::RouteInfo::new().with_auth(present(b"second")))
 			.unwrap();
 		poll_until(&mut run, &log, b"second", 1).await;
 		assert_eq!(occurrences(&log, b"second"), 1, "the renewal never went out");
@@ -19912,7 +19912,7 @@ mod tests {
 		}
 		.produce();
 		let _old = origin
-			.announce("cam", crate::origin::RouteInfo::default().with_cost(4))
+			.announce("cam", crate::origin::RouteInfo::new().with_cost(4))
 			.unwrap();
 		settle().await;
 
@@ -19941,7 +19941,7 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
 
 		let _new = origin
-			.announce("cam", crate::origin::RouteInfo::default().with_cost(0))
+			.announce("cam", crate::origin::RouteInfo::new().with_cost(0))
 			.unwrap();
 		for _ in 0..100 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
@@ -19968,7 +19968,7 @@ mod tests {
 		let _cold = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance.clone(), 0)
 					.with_cost(4),
 			)
@@ -20008,7 +20008,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::default()
+				crate::origin::RouteInfo::new()
 					.with_instance(instance, 0)
 					.with_cost(0),
 			)
@@ -20044,10 +20044,10 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _first = origin
-			.announce("first-cam", crate::origin::RouteInfo::default())
+			.announce("first-cam", crate::origin::RouteInfo::new())
 			.unwrap();
 		let _second = origin
-			.announce("second-cam", crate::origin::RouteInfo::default())
+			.announce("second-cam", crate::origin::RouteInfo::new())
 			.unwrap();
 		settle().await;
 
@@ -20112,7 +20112,7 @@ mod tests {
 						let first = auth.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 						let mut first_grant = first.grant();
 						let cam = origin
-							.announce("cam", crate::origin::RouteInfo::default().with_auth(first))
+							.announce("cam", crate::origin::RouteInfo::new().with_auth(first))
 							.unwrap();
 						settle().await;
 
@@ -20153,7 +20153,7 @@ mod tests {
 						assert!(futures::poll!(run.as_mut()).is_pending());
 						if matches!(stage, Stage::UpdateWrite) {
 							let second = auth.present(bytes::Bytes::from_static(b"second"), false).unwrap();
-							cam.update(crate::origin::RouteInfo::default().with_auth(second))
+							cam.update(crate::origin::RouteInfo::new().with_auth(second))
 								.unwrap();
 							settle().await;
 							assert!(futures::poll!(run.as_mut()).is_pending());
@@ -20206,7 +20206,7 @@ mod tests {
 	async fn an_unanswered_advertisement_is_withdrawn() {
 		for version in [Version::Draft18] {
 			let origin = unheld_origin();
-			let _cam = origin.announce("cam", crate::origin::RouteInfo::default()).unwrap();
+			let _cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
 			settle().await;
 
 			// The peer takes the request and answers nothing.
@@ -20247,7 +20247,7 @@ mod tests {
 		for version in [Version::Draft18] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 			let _cam = origin
-				.announce("lonely-cam", crate::origin::RouteInfo::default())
+				.announce("lonely-cam", crate::origin::RouteInfo::new())
 				.unwrap();
 			settle().await;
 			let session =
@@ -20299,7 +20299,7 @@ mod tests {
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin
-			.announce("lonely-cam", crate::origin::RouteInfo::default())
+			.announce("lonely-cam", crate::origin::RouteInfo::new())
 			.unwrap();
 		settle().await;
 

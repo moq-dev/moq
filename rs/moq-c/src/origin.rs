@@ -148,17 +148,68 @@ impl State {
 }
 
 struct RouteEntry {
-	inner: moq_net::origin::Route,
 	driver: crate::ffi::Background,
 	/// The instance last read, borrowed by [Origin::route_instance].
 	instance: String,
-	/// An exact route's broadcast fill handle, or a prefix route's request delivery task.
+	/// An exact route with its broadcast fill handle, or a prefix claim with its request
+	/// delivery task.
 	kind: RouteKind,
 }
 
 enum RouteKind {
-	Exact { broadcast: Id },
-	Prefix { requests: Id },
+	Exact {
+		route: moq_net::origin::Route,
+		broadcast: Id,
+	},
+	Prefix {
+		claim: moq_net::origin::Claim,
+		requests: Id,
+	},
+}
+
+/// The native route behind a handle, as [Origin::route_with] lends it.
+pub enum Held<'a> {
+	Route(&'a moq_net::origin::Route),
+	Claim(&'a moq_net::origin::Claim),
+}
+
+impl Held<'_> {
+	pub fn instance(&self) -> moq_net::Instance {
+		match self {
+			Self::Route(route) => route.instance(),
+			Self::Claim(claim) => claim.instance(),
+		}
+	}
+
+	pub fn announce(&self) -> Result<(), moq_net::Error> {
+		match self {
+			Self::Route(route) => route.announce(),
+			Self::Claim(claim) => claim.announce(),
+		}
+	}
+
+	pub fn withdraw(&self) {
+		match self {
+			Self::Route(route) => route.withdraw(),
+			Self::Claim(claim) => claim.withdraw(),
+		}
+	}
+
+	pub fn set_cost(&self, cost: u64) -> Result<(), moq_net::Error> {
+		match self {
+			Self::Route(route) => route.set_cost(cost),
+			Self::Claim(claim) => claim.set_cost(cost),
+		}
+	}
+}
+
+impl RouteEntry {
+	fn held(&self) -> Held<'_> {
+		match &self.kind {
+			RouteKind::Exact { route, .. } => Held::Route(route),
+			RouteKind::Prefix { claim, .. } => Held::Claim(claim),
+		}
+	}
 }
 
 impl Origin {
@@ -412,9 +463,8 @@ impl Origin {
 		// Read only on request: reading a hidden job's instance binds it.
 		self.routes.insert(RouteEntry {
 			instance: String::new(),
-			inner: route,
 			driver,
-			kind: RouteKind::Exact { broadcast },
+			kind: RouteKind::Exact { route, broadcast },
 		})
 	}
 
@@ -431,18 +481,17 @@ impl Origin {
 		let driver = origin.driver.clone();
 		let result = origin.producer.route_prefix(prefix, options);
 		driver.check()?;
-		let route = result?;
-		let instance = route.instance().to_string();
+		let claim = result?;
+		let instance = claim.instance().to_string();
 
 		// The route first, so the delivery task finds it once it runs; it cannot lock the
 		// state before this call returns.
 		let (task, close) = Task::new(on_request);
 		let requests = self.route_requests.insert(task)?;
 		let id = match self.routes.insert(RouteEntry {
-			inner: route,
 			driver: driver.clone(),
 			instance,
-			kind: RouteKind::Prefix { requests },
+			kind: RouteKind::Prefix { claim, requests },
 		}) {
 			Ok(id) => id,
 			Err(err) => {
@@ -474,9 +523,9 @@ impl Origin {
 				_ = &mut close => return Ok(()),
 				request = kio::wait(|waiter| {
 					let state = State::lock();
-					match state.origin.routes.get(route) {
-						Some(entry) => entry.inner.poll_requested(waiter),
-						None => std::task::Poll::Ready(None),
+					match state.origin.routes.get(route).map(|entry| &entry.kind) {
+						Some(RouteKind::Prefix { claim, .. }) => claim.poll_requested(waiter),
+						_ => std::task::Poll::Ready(None),
 					}
 				}) => match request {
 					Some(request) => request,
@@ -504,10 +553,10 @@ impl Origin {
 	pub fn route_with<R>(
 		&self,
 		route: Id,
-		f: impl FnOnce(&moq_net::origin::Route) -> Result<R, moq_net::Error>,
+		f: impl FnOnce(Held<'_>) -> Result<R, moq_net::Error>,
 	) -> Result<R, Error> {
 		let entry = self.route_entry(route)?;
-		let result = f(&entry.inner);
+		let result = f(entry.held());
 		entry.driver.check()?;
 		Ok(result?)
 	}
@@ -515,7 +564,7 @@ impl Origin {
 	/// An exact route's broadcast fill handle, or [`Error::BroadcastNotFound`] on a prefix route.
 	pub fn route_broadcast(&self, route: Id) -> Result<Id, Error> {
 		match self.route_entry(route)?.kind {
-			RouteKind::Exact { broadcast } => Ok(broadcast),
+			RouteKind::Exact { broadcast, .. } => Ok(broadcast),
 			RouteKind::Prefix { .. } => Err(Error::BroadcastNotFound),
 		}
 	}
@@ -523,7 +572,7 @@ impl Origin {
 	pub fn route_instance(&mut self, route: Id, dst: &mut moq_string) -> Result<(), Error> {
 		let entry = self.routes.get_mut(route).ok_or(Error::NotFound)?;
 		entry.driver.check()?;
-		entry.instance = entry.inner.instance().to_string();
+		entry.instance = entry.held().instance().to_string();
 		*dst = moq_string {
 			data: entry.instance.as_ptr().cast::<c_char>(),
 			len: entry.instance.len(),
@@ -533,13 +582,13 @@ impl Origin {
 
 	/// Release a route handle and stop a prefix route's request delivery, returning the route
 	/// for the caller to retract by dropping it.
-	pub fn route_take(&mut self, route: Id) -> Result<moq_net::origin::Route, Error> {
+	pub fn route_take(&mut self, route: Id) -> Result<impl Sized + use<>, Error> {
 		let entry = self.routes.remove(route).ok_or(Error::NotFound)?;
-		if let RouteKind::Prefix { requests } = entry.kind {
+		if let RouteKind::Prefix { requests, .. } = entry.kind {
 			// Already gone once the origin closed and the task delivered its terminal callback.
 			let _ = self.route_requests.close(requests, Error::NotFound);
 		}
-		Ok(entry.inner)
+		Ok(entry.kind)
 	}
 
 	pub fn broadcast_request_path(&self, request: Id, dst: &mut crate::moq_string) -> Result<(), Error> {

@@ -409,7 +409,7 @@ mod tests {
 	}
 
 	fn route(instance: &Instance) -> RouteInfo {
-		RouteInfo::default().with_instance(instance.clone(), 0)
+		RouteInfo::new().with_instance(instance.clone(), 0)
 	}
 
 	fn options(instance: &Instance) -> RouteOptions {
@@ -458,7 +458,7 @@ mod tests {
 	#[kio::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.forward("pool", RouteInfo::default()).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::new()).unwrap();
 		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
 
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
@@ -514,7 +514,7 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 
-		let _pool = origin.forward("pool", RouteInfo::default()).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::new()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
@@ -530,7 +530,7 @@ mod tests {
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
-			.forward("room/alice", RouteInfo::default())
+			.forward("room/alice", RouteInfo::new())
 			.unwrap();
 		let mut follow = origin.consume().path_routes("room/alice").unwrap();
 
@@ -593,7 +593,7 @@ mod tests {
 	}
 
 	/// The next request a dynamic route receives for its path.
-	async fn requested(dynamic: &crate::origin::Route) -> crate::origin::Request {
+	async fn requested(dynamic: &crate::origin::Claim) -> crate::origin::Request {
 		kio::clock::timeout(Duration::from_secs(1), dynamic.requested())
 			.await
 			.expect("never asked")

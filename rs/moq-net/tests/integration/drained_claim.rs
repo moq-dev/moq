@@ -46,7 +46,7 @@ async fn settle() {
 /// A worker claiming `pool`, answering each request with an output whose `video`
 /// track carries the worker's name.
 struct Worker {
-	_claim: Rc<origin::Route>,
+	_claim: Rc<origin::Claim>,
 	/// Each output with its track, which would end once its route drops.
 	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
 	origin: origin::Producer,
