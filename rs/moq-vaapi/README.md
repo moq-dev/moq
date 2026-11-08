@@ -69,7 +69,8 @@ It lived in [moq-dev/vaapi](https://github.com/moq-dev/vaapi) through 0.2.1.
 - **Loads system libva at runtime on Linux.** The generated `Va` function table
   loads `libva` / `libva-drm` with `libloading`. Building needs no system libva,
   and a binary can start without it; opening a display reports a missing driver
-  or library. The crate also compiles on macOS for development.
+  or library. Off Linux the crate compiles empty (`#![cfg(target_os = "linux")]`),
+  so its tests run only on Linux.
 
 ## Upstream
 
