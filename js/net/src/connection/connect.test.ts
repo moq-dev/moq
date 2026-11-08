@@ -6,7 +6,7 @@ import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
 import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as Lite } from "../lite/version.ts";
-import { createMockTransportPair, driveUntil, manual } from "../mock.ts";
+import { createMockTransportPair, manual } from "../mock.ts";
 import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
@@ -569,8 +569,9 @@ test("SETUP refuses a version the client did not name", async () => {
 		if (!stream) throw new Error("no SETUP stream");
 		await ClientSetup.decode(stream.reader);
 		await new ServerSetup(Lite.DRAFT_05).encode(stream.writer);
-		// The refusal waits out the grace a peer's close code gets.
-		await driveUntil(clock, connecting);
+		// The refusal waits out the grace a peer's close code gets. Driven outside `expect`, as
+		// `Manual.drive` asks.
+		await clock.drive(connecting.catch(() => {}));
 		await expect(connecting).rejects.toThrow("unsupported server version: 0xff0dad05");
 	} finally {
 		restore();
@@ -615,7 +616,7 @@ test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async
 		await ClientSetup.decode(stream.reader);
 		await new ServerSetup(version).encode(stream.writer);
 		// The refusal waits out the grace a peer's close code gets.
-		await driveUntil(clock, connecting);
+		await clock.drive(connecting.catch(() => {}));
 		await expect(connecting).rejects.toThrow(`unsupported server version: 0x${version.toString(16)}`);
 	} finally {
 		restore();

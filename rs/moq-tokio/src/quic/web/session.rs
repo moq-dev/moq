@@ -32,43 +32,50 @@ use crate::quic::web::{
 #[derive(Clone)]
 pub struct Session {
 	conn: crate::quic::driver::connection::Connection,
-
-	// The session ID, as determined by the stream ID of the connect request.
-	session_id: Option<VarInt>,
-
-	// The accept logic is stateful, so use an Arc<Mutex> to share it.
-	accept: Option<Arc<Mutex<SessionAccept>>>,
-
-	// Cache the headers in front of each stream we open.
-	header_uni: Bytes,
-	header_bi: Bytes,
-	header_datagram: Bytes,
-
-	#[allow(
-		dead_code,
-		reason = "keep a reference to the settings and connect stream to avoid closing them until dropped"
-	)]
-	settings: Option<Arc<Settings>>,
-
-	// The send side of the CONNECT stream, used to write the CloseWebTransportSession capsule.
-	// Wrapped in Arc<Mutex<Option<...>>> so close() can take it exactly once.
-	connect_send: Arc<Mutex<Option<crate::quic::driver::send::Stream>>>,
+	mode: Mode,
 
 	// Why the session closed: set once by a local close() or the background task
 	// when a remote CloseWebTransportSession capsule is received.
 	close: Arc<CloseReason>,
 
-	// The request sent by the client, or None for a raw QUIC session.
-	request: Option<ConnectRequest>,
-
-	// The response sent by the server, or None for a raw QUIC session.
-	response: Option<ConnectResponse>,
-
-	// The ALPN the QUIC handshake negotiated, for raw QUIC sessions, copied out of the
-	// connection's lock so `protocol()` can borrow it. HTTP/3 sessions read the
-	// subprotocol out of the response instead.
-	alpn: Option<Arc<str>>,
 	opening: Arc<kio::Bridge<Opening>>,
+}
+
+/// Whether a [`Session`] is WebTransport over HTTP/3 or a raw QUIC connection.
+#[derive(Clone)]
+enum Mode {
+	/// A raw QUIC connection, with the ALPN its handshake negotiated, copied out of the
+	/// connection's lock so `protocol()` can borrow it.
+	Raw { alpn: Option<Arc<str>> },
+	/// WebTransport over HTTP/3, shared by the session's clones.
+	Web(Arc<Web>),
+}
+
+/// The WebTransport layering a raw QUIC session goes without.
+struct Web {
+	/// The stream ID of the CONNECT request, which names the session.
+	session_id: VarInt,
+
+	/// The accept logic is stateful, so the clones share it.
+	accept: Mutex<SessionAccept>,
+
+	/// The headers in front of each stream and datagram we send.
+	header_uni: Bytes,
+	header_bi: Bytes,
+	header_datagram: Bytes,
+
+	/// Held so the control and QPACK streams stay open until the last clone drops.
+	_settings: Settings,
+
+	/// The send side of the CONNECT stream, which the first close takes to write the
+	/// CloseWebTransportSession capsule.
+	connect_send: Mutex<Option<crate::quic::driver::send::Stream>>,
+
+	/// The request sent by the client.
+	request: ConnectRequest,
+
+	/// The response sent by the server, with the subprotocol it selected.
+	response: ConnectResponse,
 }
 
 impl Session {
@@ -98,19 +105,21 @@ impl Session {
 		let early = std::mem::take(settings.early.get_mut().unwrap());
 		let accept = SessionAccept::new(conn.clone(), session_id, close.clone(), early);
 
-		let this = Self {
-			conn,
-			accept: Some(Arc::new(Mutex::new(accept))),
-			session_id: Some(session_id),
+		let web = Web {
+			session_id,
+			accept: Mutex::new(accept),
 			header_uni: header_uni.into(),
 			header_bi: header_bi.into(),
 			header_datagram: header_datagram.into(),
-			settings: Some(Arc::new(settings)),
-			connect_send: Arc::new(Mutex::new(Some(connect.send))),
+			_settings: settings,
+			connect_send: Mutex::new(Some(connect.send)),
+			request: connect.request.clone(),
+			response: connect.response.clone(),
+		};
+		let this = Self {
+			conn,
+			mode: Mode::Web(Arc::new(web)),
 			close: close.clone(),
-			request: Some(connect.request.clone()),
-			response: Some(connect.response.clone()),
-			alpn: None,
 			opening: Default::default(),
 		};
 
@@ -215,8 +224,8 @@ impl Session {
 	/// The next unidirectional stream, after its WebTransport header.
 	#[kio::wrapper]
 	pub fn poll_accept_uni(&self, waiter: &Waiter) -> Poll<Result<RecvStream, Error>> {
-		if let Some(accept) = &self.accept {
-			poll_accept_uni_shared(accept, waiter).map_err(|e| self.map_error(e))
+		if let Some(web) = self.web() {
+			poll_accept_uni_shared(&web.accept, waiter).map_err(|e| self.map_error(e))
 		} else {
 			self.conn
 				.poll_accept_uni(waiter)
@@ -228,8 +237,8 @@ impl Session {
 	/// The next bidirectional stream, after its WebTransport header.
 	#[kio::wrapper]
 	pub fn poll_accept_bi(&self, waiter: &Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		if let Some(accept) = &self.accept {
-			poll_accept_bi_shared(accept, waiter).map_err(|e| self.map_error(e))
+		if let Some(web) = self.web() {
+			poll_accept_bi_shared(&web.accept, waiter).map_err(|e| self.map_error(e))
 		} else {
 			self.conn
 				.poll_accept_bi(waiter)
@@ -256,7 +265,8 @@ impl Session {
 					}
 				))
 				.map_err(|e| self.map_error(e))?;
-				opening.uni = Some((send, self.header_uni.clone()));
+				let header = self.web().map_or_else(Bytes::new, |web| web.header_uni.clone());
+				opening.uni = Some((send, header));
 			}
 			let (send, header) = opening.uni.as_mut().unwrap();
 			let result = std::task::ready!(poll_header(send, opening.park.hold(cx), header));
@@ -264,7 +274,7 @@ impl Session {
 			result.map_err(|e| self.map_error(e))?;
 			send.set_priority(options.priority);
 			send.set_group(options.group);
-			let header = self.session_id.map(|_| send.offset());
+			let header = self.web().map(|_| send.offset());
 			Poll::Ready(Ok(SendStream::new(send, self.close.clone(), header)))
 		})
 	}
@@ -287,7 +297,8 @@ impl Session {
 				))
 				.map_err(|e| self.map_error(e))?;
 				send.set_priority(i64::MAX);
-				opening.bi = Some((send, recv, self.header_bi.clone()));
+				let header = self.web().map_or_else(Bytes::new, |web| web.header_bi.clone());
+				opening.bi = Some((send, recv, header));
 			}
 			let (send, _, header) = opening.bi.as_mut().unwrap();
 			let result = std::task::ready!(poll_header(send, opening.park.hold(cx), header));
@@ -295,7 +306,7 @@ impl Session {
 			result.map_err(|e| self.map_error(e))?;
 			send.set_priority(options.priority);
 			send.set_group(options.group);
-			let header = self.session_id.map(|_| send.offset());
+			let header = self.web().map(|_| send.offset());
 			Poll::Ready(Ok((
 				SendStream::new(send, self.close.clone(), header),
 				RecvStream::new(recv, self.close.clone()),
@@ -312,12 +323,12 @@ impl Session {
 		loop {
 			let mut datagram =
 				std::task::ready!(self.conn.poll_recv_datagram(waiter)).map_err(|e| self.map_error(e))?;
-			let Some(session_id) = self.session_id else {
+			let Some(web) = self.web() else {
 				return Poll::Ready(Ok(datagram));
 			};
 			let mut cursor = Cursor::new(&datagram);
 			match VarInt::decode(&mut cursor) {
-				Ok(actual) if actual == session_id => {
+				Ok(actual) if actual == web.session_id => {
 					return Poll::Ready(Ok(datagram.split_off(cursor.position() as usize)));
 				}
 				_ => tracing::debug!("dropping a datagram for an unknown session"),
@@ -334,7 +345,8 @@ impl Session {
 	pub fn send_datagram(&self, data: impl Buf, options: send::Options<'_>) -> Result<(), Error> {
 		// Prepend the header naming the session, which is empty for a raw QUIC session. The
 		// payload is chained rather than copied.
-		let datagram = self.header_datagram.clone().chain(data);
+		let header = self.web().map_or_else(Bytes::new, |web| web.header_datagram.clone());
+		let datagram = header.chain(data);
 		self.conn
 			.send_datagram(datagram, options)
 			.map_err(|e| self.map_error(e))?;
@@ -356,7 +368,7 @@ impl Session {
 		self.conn
 			.max_datagram_size()
 			.unwrap_or(0)
-			.saturating_sub(self.header_datagram.len())
+			.saturating_sub(self.datagram_header_len())
 	}
 
 	/// Returns the available buffer space for sending datagrams.
@@ -365,7 +377,7 @@ impl Session {
 	pub fn datagram_send_buffer_space(&self) -> usize {
 		self.conn
 			.datagram_send_buffer_space()
-			.saturating_sub(self.header_datagram.len())
+			.saturating_sub(self.datagram_header_len())
 	}
 
 	/// Close the session with an error code and reason.
@@ -393,9 +405,9 @@ impl Session {
 			return;
 		}
 
-		if self.session_id.is_some() {
+		if let Some(web) = self.web() {
 			// Take the send stream for the capsule write.
-			let send = self.connect_send.lock().unwrap().take();
+			let send = web.connect_send.lock().unwrap().take();
 
 			if let Some(send) = send {
 				let capsule = web_transport_proto::Capsule::CloseWebTransportSession {
@@ -489,6 +501,19 @@ impl Session {
 		self.close.map(e.into())
 	}
 
+	/// The WebTransport layering, or `None` on a raw QUIC session.
+	fn web(&self) -> Option<&Web> {
+		match &self.mode {
+			Mode::Web(web) => Some(web),
+			Mode::Raw { .. } => None,
+		}
+	}
+
+	/// The bytes in front of each datagram we send, naming the session.
+	fn datagram_header_len(&self) -> usize {
+		self.web().map_or(0, |web| web.header_datagram.len())
+	}
+
 	/// Create a new session from a raw QUIC connection.
 	///
 	/// This is used to pretend like a QUIC connection is a WebTransport session,
@@ -504,32 +529,23 @@ impl Session {
 			.and_then(|data| String::from_utf8(data.alpn?).ok())
 			.map(Arc::from);
 		Self {
-			alpn,
-			opening: Default::default(),
 			conn,
-			session_id: None,
-			header_uni: Default::default(),
-			header_bi: Default::default(),
-			header_datagram: Default::default(),
-			accept: None,
-			settings: None,
-			connect_send: Arc::new(Mutex::new(None)),
+			mode: Mode::Raw { alpn },
 			close: Arc::new(CloseReason::new(true)),
-			request: None,
-			response: None,
+			opening: Default::default(),
 		}
 	}
 
 	/// Returns the [`ConnectRequest`] if this session was established over HTTP/3,
 	/// or `None` for a raw QUIC session.
 	pub fn request(&self) -> Option<&ConnectRequest> {
-		self.request.as_ref()
+		self.web().map(|web| &web.request)
 	}
 
 	/// Returns the [`ConnectResponse`] if this session was established over HTTP/3,
 	/// or `None` for a raw QUIC session.
 	pub fn response(&self) -> Option<&ConnectResponse> {
-		self.response.as_ref()
+		self.web().map(|web| &web.response)
 	}
 
 	/// Returns the application protocol negotiated for this session.
@@ -538,9 +554,9 @@ impl Session {
 	/// `WT-Available-Protocols`; for a raw QUIC session it is the negotiated ALPN.
 	/// `None` if neither was negotiated or the ALPN is not valid UTF-8.
 	pub fn protocol(&self) -> Option<&str> {
-		match &self.response {
-			Some(response) => response.protocol.as_deref(),
-			None => self.alpn.as_deref(),
+		match &self.mode {
+			Mode::Web(web) => web.response.protocol.as_deref(),
+			Mode::Raw { alpn } => alpn.as_deref(),
 		}
 	}
 
@@ -549,10 +565,9 @@ impl Session {
 	/// If the peer sent a `CloseWebTransportSession` capsule, the returned error will be
 	/// [`Error::Closed`] with the code and reason from the capsule.
 	///
-	/// Unlike [`crate::quic::driver::connection::Connection::closed`], this does **not** return early when
-	/// [`close()`](Self::close) has been called. It waits for the underlying QUIC
-	/// connection to shut down, ensuring the `CloseWebTransportSession` capsule has
-	/// been delivered. Use [`close_reason()`](Self::close_reason) for a non-blocking check.
+	/// After [`close()`](Self::close), this waits for the `CloseWebTransportSession` capsule
+	/// to be delivered and then for the QUIC connection to send its own close. Use
+	/// [`close_reason()`](Self::close_reason) for a non-blocking check.
 	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<Error> {
 		self.conn.poll_closed(waiter).map(|e| self.map_error(e))
@@ -1021,10 +1036,9 @@ impl moq_net::transport::poll::Session for Session {
 		Self::protocol(self)
 	}
 	fn address(&self) -> moq_net::transport::Address {
-		if self.session_id.is_some() {
-			moq_net::transport::Address::Uri
-		} else {
-			moq_net::transport::Address::Setup
+		match self.mode {
+			Mode::Web(_) => moq_net::transport::Address::Uri,
+			Mode::Raw { .. } => moq_net::transport::Address::Setup,
 		}
 	}
 	fn close(&self, code: u32, reason: &str) {
@@ -1059,11 +1073,11 @@ impl moq_net::transport::poll::Session for Session {
 	}
 	/// The connection's exporter on raw QUIC; on WebTransport, this session's own.
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		match self.session_id {
+		match self.web() {
 			None => self.conn.export_keying_material(label, context),
-			Some(id) => self.conn.export_keying_material(
+			Some(web) => self.conn.export_keying_material(
 				WEBTRANSPORT_EXPORTER,
-				&webtransport_exporter_context(id.into_inner(), label, context)?,
+				&webtransport_exporter_context(web.session_id.into_inner(), label, context)?,
 			),
 		}
 	}
@@ -1502,7 +1516,10 @@ mod tests {
 		let client = client.unwrap();
 		let server = server.unwrap();
 		let conn = server.conn.clone();
-		let settings = Arc::downgrade(server.settings.as_ref().unwrap());
+		let Mode::Web(web) = &server.mode else {
+			panic!("an HTTP/3 session");
+		};
+		let settings = Arc::downgrade(web);
 		tokio::time::pause();
 		gate.blocked.store(true, Ordering::SeqCst);
 		server.close(2, "unauthorized");
@@ -1799,7 +1816,7 @@ mod tests {
 		assert_eq!(recv.read_to_end(64).await.unwrap(), b"after");
 
 		// Closing the QPACK stream would end the peer's HTTP/3 connection, so the session holds it.
-		let accept = server.accept.as_ref().unwrap().lock().unwrap();
+		let accept = server.web().expect("an HTTP/3 session").accept.lock().unwrap();
 		assert!(accept.qpack_encoder.is_some(), "the QPACK stream was dropped");
 	}
 
