@@ -3,11 +3,17 @@ language js
 // Bun's expect(...).rejects and .resolves await in a nested event loop, which breaks the order drive relies on.
 or {
 	`expect($call).rejects`,
-	`expect($call).resolves`
+	`expect($call).resolves`,
+	`expect($call).not.rejects`,
+	`expect($call).not.resolves`
 } as $bad where {
 	$call <: contains or {
 		`$_.drive($...)`,
 		`$_.driveUntil($...)`
+	},
+	$call <: not contains or {
+		`await $_.drive($...)`,
+		`await $_.driveUntil($...)`
 	},
 	register_diagnostic(span=$bad, message="Await drive() first, then assert on the settled result")
 }
