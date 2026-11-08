@@ -4,6 +4,7 @@ import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { decodeRoute, encodeRoute } from "./instance.ts";
+import { SEGMENT_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
@@ -599,7 +600,7 @@ export class AnnounceInit {
 
 	// The whole initial set in one message, capped like Rust's so it fits one storage segment
 	// (1 MiB) with its type and size prefixes. A larger set is refused on both ends.
-	static readonly MAX_SIZE = 1024 * 1024 - 16;
+	static readonly MAX_SIZE = SEGMENT_BYTES - 16;
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceInit.#guard(version);
