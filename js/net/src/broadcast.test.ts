@@ -513,10 +513,9 @@ test("a stalled consumer does not pin evicted groups", async () => {
 
 		producer.writeFrame(textFrame("old"));
 
-		// Advance past the cache window, plus the scan slice a prune may lag by, and write
-		// again to trigger a prune. The old (closed, aged-out) group is dropped from the
-		// stalled sink, not retained.
-		clock.jump(Nano.fromMilli(Milli(30_000 + 30_000 / 8)));
+		// Advance past the cache window and write again, which scans for idle groups. The old
+		// (closed, aged-out) group is dropped from the stalled sink, not retained.
+		clock.jump(Nano.fromMilli(Milli(30_000 + 1_000)));
 		producer.writeFrame(textFrame("fresh"));
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group

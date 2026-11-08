@@ -31,7 +31,6 @@ moves what remains of them once their claims merge.
 
 ## Required
 
-- [JS cache pool](/quest/m1/js-cache-pool.md) - `js/net` bills cached frames and drop-set runs to a per-broadcast byte pool ported from Rust
 - [Drop set](/quest/m1/drop-set.md) - the drop set's track and cursor runs are billed to the cache pool, so fragmenting drops costs what the pool holds; eviction folds final runs or ends the cursor with `TooFarBehind`
 - [Only the relay's own stats publisher uses the stats prefix](/quest/m1/stats-prefix.md) - a broad grant can no longer publish unmetered media or spoof node stats under `.stats`
 - [js/net and moq-net decode the same inputs the same way](/quest/m1/js-net-input-checks.md) - a shared input corpus pins both decoders, and a typed endpoint stops loopback spellings from slipping past GOAWAY checks
