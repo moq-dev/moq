@@ -2947,7 +2947,8 @@ impl DatagramSend {
 	/// datagram size or the transport has no room for it now.
 	///
 	/// Fails on a sequence the version's varints cannot carry (2^62 and up before lite-07):
-	/// every later datagram is at least as far, so the subscription can deliver no more.
+	/// every datagram its source produces later is at least as far, so the subscription can
+	/// deliver no more. One the network reordered below it is lost, as any datagram may be.
 	fn send(&self, datagram: crate::Datagram) -> Result<(), Error> {
 		let Ok(timestamp) = self
 			.stamp
