@@ -35,9 +35,11 @@
 //! frames, VA-API decodes handed over as DMA-BUFs, and packed RGB buffers at
 //! and above the encoder's size, decode each stream with openh264, and compare
 //! pixels. The H.265 case decodes with the VA-API decoder, since there is no
-//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of them,
-//! ignored ones included, pass on an AMD Radeon RX 9070 (radeonsi, Mesa 26.2.5).
-//! They skip on a machine without a VA-API device.
+//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of
+//! them, ignored ones included, also pass on an AMD RX 9070 with radeonsi (Mesa
+//! 26.2.6). They skip on a machine without a VA-API device, except the ignored
+//! `vaapi_1080p_ladder_stays_on_the_gpu`, which requests hardware explicitly and
+//! fails without it.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -645,7 +647,7 @@ mod hardware_tests {
 	/// The tests above check pixels with an independent software decoder; this
 	/// proof deliberately compiles without a software codec.
 	#[test]
-	#[ignore = "requires an Intel VA-API decode/VPP/encode device"]
+	#[ignore = "requires a VA-API decode/VPP/encode device"]
 	fn vaapi_1080p_ladder_stays_on_the_gpu() {
 		const FRAMES: usize = 12;
 		let size = Size::new(1920, 1080);

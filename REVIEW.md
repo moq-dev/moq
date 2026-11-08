@@ -52,7 +52,7 @@ The runtime guards fail Rust and bun tests only when a timer fires on the host c
 Each of these has been raised and refuted repeatedly here; the rules in `AGENTS.md` already decide them:
 
 - A cap, timeout, or retry as the fix for an unbounded cost or a hang. Name the design-level bound (backpressure, flow control, ownership) or the root cause instead.
-- Detecting a peer's duplicate or reused IDs when only the sender's own requests suffer.
+- Detecting a peer's duplicate or reused IDs, or a publisher's reused sequences, when only the sender's own requests or broadcast suffer.
 - A compatibility shim, deprecation path, or migration for something no release has shipped. Check the `release` branch and tags before claiming a break; `main` breaks freely, and unpublished `-wip` wire versions change freely.
 - A moq-transport MUST or "spec violation" with no behavioral consequence, or extra machinery for a moq-transport feature moq-lite lacks.
 - Cross-node or cross-session waiting to close a rare race. Reporting current state and accepting a rare undercount is the intended design.
