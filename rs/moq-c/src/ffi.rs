@@ -548,13 +548,13 @@ pub unsafe fn parse_strings(items: *const crate::moq_string, count: usize) -> Re
 		.collect()
 }
 
-/// Parse a raw pointer and size into a byte slice.
+/// Parse a raw pointer and element count into a slice.
 ///
 /// Returns an empty slice if both pointer and size are zero.
 ///
 /// # Safety
 /// The caller must ensure that data is valid for 'a.
-pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], Error> {
+pub unsafe fn parse_slice<'a, T>(data: *const T, size: usize) -> Result<&'a [T], Error> {
 	if data.is_null() {
 		if size == 0 {
 			return Ok(&[]);

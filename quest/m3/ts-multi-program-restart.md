@@ -25,13 +25,9 @@ import.
 - Reuse #7780's step judgement and its "carry nothing" rule rather than a
   second mechanism; decide whether the switch restarts every program or only
   the ones whose identity or clock changed, and say why in the PR.
-- Keep the existing [TS reliability](/quest/m1/ts-reliability/README.md)
+- Keep the [MPEG-TS guide](/doc/bin/ts.md#programs-and-changes)'s
   rules for PAT changes that aren't a source switch (a moved PMT PID, a
   program added or removed) as they are.
 
 Public API: possibly additive on `Programs` (a restart result like
 `Import`'s). Wire: none.
-
-## Related
-
-- [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - the single-program restart and PAT-change rules this extends

@@ -270,10 +270,15 @@ fn read_head(r: &mut impl BitRead) -> ReadResult<SpsHead> {
 	})
 }
 
-/// Read `sps_seq_parameter_set_id` from an SPS RBSP (the payload after the NAL header).
-pub(crate) fn id(r: &mut impl BitRead) -> ReadResult<u32> {
+/// Read `sps_seq_parameter_set_id` from an SPS RBSP (the payload after the NAL header) in layer
+/// `layer`, whose `nuh_layer_id` picks the layout (F.7.3.2.2.1).
+pub(crate) fn id(r: &mut impl BitRead, layer: u8) -> ReadResult<u32> {
 	r.skip(4, "sps_video_parameter_set_id")?;
-	let max_sub_layers_minus1 = r.read::<3, u8>("sps_max_sub_layers_minus1")?;
+	let max_sub_layers_minus1 = r.read::<3, u8>("sps_ext_or_max_sub_layers_minus1")?;
+	// MultiLayerExtSpsFlag: an enhancement layer's SPS that inherits its profile_tier_level.
+	if layer > 0 && max_sub_layers_minus1 == 7 {
+		return r.read_ue("sps_seq_parameter_set_id");
+	}
 	r.skip(1, "sps_temporal_id_nesting_flag")?;
 	r.skip(96, "general_profile_and_level")?; // the general profile's 88 bits and general_level_idc
 	skip_sub_layers(r, max_sub_layers_minus1)?;
@@ -762,14 +767,24 @@ mod tests {
 			SPS_SUB_LAYER_PROFILE_AND_LEVEL,
 			SPS_SCALING_LIST,
 			SPS_INTER_RPS,
+			fixtures::MV_SPS,
 		] {
 			let sps = assert_reads_to_the_end(nal);
 			assert_eq!(Sps::parse_or_head(nal).unwrap().tail, sps.tail);
 			assert_eq!(
-				id(&mut crate::codec::annexb::rbsp(nal, 2)).unwrap(),
+				id(&mut crate::codec::annexb::rbsp(nal, 2), 0).unwrap(),
 				u32::from(sps.head.id)
 			);
 		}
+	}
+
+	/// An enhancement layer's SPS that inherits its profile_tier_level carries its id right after
+	/// `sps_ext_or_max_sub_layers_minus1`, where the base layout reads a refused sub-layer count.
+	#[test]
+	fn multi_layer_ext_sps_id() {
+		let nal = fixtures::MV_SPS_LAYER1;
+		assert_eq!(id(&mut crate::codec::annexb::rbsp(nal, 2), 1).unwrap(), 1);
+		assert!(id(&mut crate::codec::annexb::rbsp(nal, 2), 0).is_err());
 	}
 
 	/// The fields callers read, from x265's HDR10 and B-pyramid encodes and nvenc's anamorphic one.
