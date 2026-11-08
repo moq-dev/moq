@@ -2,14 +2,15 @@
 
 //! A frame crosses an in-memory session as the same allocation it was written as: the
 //! publisher hands the payload to the transport, and the subscriber reads it back,
-//! without a copy on either side.
+//! without a copy on either side. Only a frame of at most 2 KiB is copied, so a small
+//! frame never keeps a larger receive allocation alive.
 
 use crate::support;
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Client, Hop, Server, Timestamp, Version, origin, transport::memory};
+use moq_net::{Client, Server, Timestamp, Version, origin, transport::memory};
 use support::harness::{now, spawn, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -17,12 +18,12 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VERSIONS: &[&str] = &["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn frames_cross_without_a_copy() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
@@ -53,16 +54,19 @@ async fn frames_cross_without_a_copy() {
 			}
 		);
 
-		let broadcast = publisher.create_broadcast("room").unwrap();
+		let broadcast = publisher
+			.route("room", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let track = broadcast.create_track("video", info).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", info).unwrap();
+		broadcast.announce().unwrap();
 
 		let consumer = subscriber.consume();
-		let remote = moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
+		let remote = kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 		subscribed(&track).await;
 
@@ -71,7 +75,7 @@ async fn frames_cross_without_a_copy() {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 		group.finish().unwrap();
 
-		let mut group = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()

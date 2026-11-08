@@ -9,7 +9,7 @@
  */
 import * as z from "zod/mini";
 import type { Credential } from "./auth.ts";
-import type * as Epoch from "./epoch.ts";
+import type * as Instance from "./instance.ts";
 import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 
 /**
@@ -89,49 +89,95 @@ export const Cost = {
 };
 
 /**
- * The path a route took through the mesh and what using it costs.
+ * The stream a received route serves, the path it took through the mesh, and what using it
+ * costs: read-only facts on an announcement. Mirrors `RouteInfo` in rs/moq-net.
  *
- * The metadata half of an advertisement: an origin `requests()` pairs it with the
- * pattern it covers, a broadcast `announce()` with the broadcast's exact path, and
- * an announce event carries it so consumers can read it back.
+ * Carried by an announce event. Applications never build one: an origin `Route` takes
+ * `RouteOptions`, and the origin and the relays fill in the rest.
  */
-export interface Route {
+export interface RouteInfo {
 	/**
-	 * The publisher instance the route serves, if known: routes with the same epoch serve
-	 * the same bytes. Among routes at one prefix the newest epoch wins, and a route without
-	 * one ranks last. Fixed for the advertisement's lifetime: changing it retracts and
-	 * announces afresh. Mirrors `Route::epoch` in rs/moq-net.
+	 * The stream the route serves: routes with one instance serve one continuous sequence
+	 * space, so a subscription resumes from one to another. Pass it to an origin `request` to
+	 * pin this stream.
 	 */
-	epoch?: Epoch.Valid;
-	/** The chain of hops the route has traversed, oldest first. */
-	hops: Hop[];
+	readonly instance?: Instance.Valid;
+	/**
+	 * The hop ids of the origins the route has traversed, oldest first. A 0 entry is the
+	 * anonymous mark; see {@link anonymous}. A route announced on this origin has none.
+	 */
+	readonly hops: readonly bigint[];
 	/** What pulling content via this route costs; lower wins. */
-	cost: Cost;
+	readonly cost: Cost;
+	/**
+	 * Whether the route passed through an anonymous hop (id 0) at any depth. An anonymous route
+	 * ranks below every fully identified one, whatever the costs say. An empty chain is a local
+	 * announcement, not the anonymous mark.
+	 */
+	readonly anonymous: boolean;
+}
+
+/**
+ * The read-only facts an announcement shows of `route`, leaving its epoch and credential internal.
+ *
+ * @internal
+ */
+export function routeInfo(route: WireRoute): RouteInfo {
+	return {
+		instance: route.instance,
+		hops: [...route.hops],
+		cost: route.cost,
+		anonymous: isAnonymous(route),
+	};
+}
+
+/**
+ * A route as the origin and sessions carry it: the {@link RouteInfo} facts plus the epoch that
+ * orders an instance's incarnations and the credential that advertises it, which applications
+ * never see.
+ *
+ * @internal
+ */
+export interface WireRoute {
+	/** See {@link RouteInfo.instance}. Always set on a route the origin delivers. */
+	readonly instance?: Instance.Valid;
+	/**
+	 * Which incarnation of {@link instance} this is: among its routes at one prefix only the
+	 * highest epoch is eligible, cheaper or not. Never compared across instances.
+	 */
+	readonly epoch?: bigint;
+	/**
+	 * The chain of hops the route has traversed, oldest first. A 0 entry is the anonymous mark;
+	 * see {@link isAnonymous}. A route announced on this origin has none.
+	 */
+	readonly hops: readonly Hop[];
+	/** What pulling content via this route costs; lower wins. */
+	readonly cost: Cost;
 	/**
 	 * The token the request advertising this route carries, from `auth.add()`, or undefined
 	 * for the session's own credential. Only the session that issued it carries it, as the
 	 * token on its moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE
 	 * answering a solicited SUBSCRIBE_NAMESPACE, and moq-lite advertise the route unnamed.
-	 * Swapping it renews the request with REQUEST_UPDATE. Local: a relay never forwards it. Mirrors `Route::auth` in rs/moq-net.
+	 * Swapping it renews the request with REQUEST_UPDATE. Local: a relay never forwards it.
 	 */
-	auth?: Credential;
+	readonly auth?: Credential;
 }
 
-/** Constructors and helpers for {@link Route}. */
-export const Route = {
+/** Constructors and helpers for {@link WireRoute}. @internal */
+export const WireRoute = {
 	/** An empty hop chain at zero cost: what a publisher seeds for a live broadcast. */
-	default: { hops: [], cost: Cost.zero } as Route,
+	default: { hops: [], cost: Cost.zero } as WireRoute,
 
 	/** Fill route defaults and saturate the static price at the wire ceiling. */
-	normalize(
-		route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost; auth?: Credential } = {},
-	): Route {
+	normalize(route: Partial<WireRoute> = {}): WireRoute {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
 		const max = 2n ** 62n - 1n;
 		return {
-			epoch: route.epoch,
+			instance: route.instance,
+			epoch: route.instance === undefined ? undefined : (route.epoch ?? 0n),
 			hops: route.hops ? [...route.hops] : [],
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,
 			auth: route.auth,
 		};
@@ -143,16 +189,23 @@ export const Route = {
  *
  * An empty chain is a local announcement, not the anonymous mark. Ingress fills a
  * received empty list with the anonymous hop before yielding it.
+ *
+ * @internal
  */
-export function isAnonymous(route: Route): boolean {
+export function isAnonymous(route: WireRoute): boolean {
 	return route.hops.includes(UNKNOWN_HOP);
 }
 
-/** Whether two routes name the same epoch, hop chain, cost, and auth. */
-export function routesEqual(a: Route | undefined, b: Route | undefined): boolean {
+/**
+ * Whether two routes name the same instance, epoch, hop chain, cost, and auth.
+ *
+ * @internal
+ */
+export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined): boolean {
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (
+		a.instance === b.instance &&
 		a.epoch === b.epoch &&
 		a.cost === b.cost &&
 		a.auth === b.auth &&

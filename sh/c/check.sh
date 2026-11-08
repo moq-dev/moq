@@ -5,6 +5,13 @@
 # CMAKE_INSTALL_LIBDIR; archives use lib/. CC picks the compiler on Unix; Windows uses MSVC.
 set -euo pipefail
 
+# Both configure and build need the cache session for CMake's compiler launchers.
+# Keep Visual Studio builds on plain CMake, as on the Windows platform job.
+cmake_command=(cmake)
+if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]] && command -v mbx >/dev/null 2>&1; then
+    cmake_command=(mbx exec cmake)
+fi
+
 ffi_dir=""
 archive=""
 if [[ $# -gt 0 ]]; then
@@ -24,6 +31,12 @@ if [[ $# -gt 0 ]]; then
 fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../c"
+
+# A source build checks formatting first; the release jobs that pass an input
+# check a build of sources already gated.
+if [[ -z "$archive" && -z "$ffi_dir" ]]; then
+    bash ../sh/clang-format.sh --check c
+fi
 
 # Single-config generators build Debug. Visual Studio ignores CMAKE_BUILD_TYPE and builds the
 # package with --config Release, since the Rust staticlib links the release CRT (/MD) either way.
@@ -52,22 +65,22 @@ if [[ -n "$archive" ]]; then
     fi
 else
     prefix="$PWD/$build/prefix"
-    cmake -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR="$libdir" -DMOQ_FFI_DIR="$ffi_dir"
-    cmake --build "$build/package" --config Release
+    "${cmake_command[@]}" -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR="$libdir" -DMOQ_FFI_DIR="$ffi_dir"
+    "${cmake_command[@]}" --build "$build/package" --config Release
     rm -rf "$prefix"
     cmake --install "$build/package" --config Release --prefix "$prefix"
 fi
 
 # Ninja refuses two rules for one output, so a dry run proves both packages share one cargo rule.
 if [[ -z "$archive" && -z "$ffi_dir" ]] && command -v ninja >/dev/null 2>&1; then
-    cmake -G Ninja -S moq/test/superbuild -B "$build/superbuild" -DCMAKE_BUILD_TYPE=Debug
+    "${cmake_command[@]}" -G Ninja -S moq/test/superbuild -B "$build/superbuild" -DCMAKE_BUILD_TYPE=Debug
     ninja -C "$build/superbuild" -n >/dev/null
 fi
 
 # Naming the system makes CMake cross-compile, which a source build of moq-ffi refuses at
 # configure, pointing at a prebuilt input. Windows' generator is left alone.
 if [[ -z "$archive" && -z "$ffi_dir" && "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]]; then
-    if cmake -S moq -B "$build/cross" -DCMAKE_SYSTEM_NAME="$(uname -s)" >"$build/cross.log" 2>&1; then
+    if "${cmake_command[@]}" -S moq -B "$build/cross" -DCMAKE_SYSTEM_NAME="$(uname -s)" >"$build/cross.log" 2>&1; then
         echo "A cross-compiling source build configured instead of refusing" >&2
         exit 1
     fi
@@ -79,7 +92,7 @@ if [[ -z "$archive" && -z "$ffi_dir" && "$(uname -s)" != MINGW* && "$(uname -s)"
     target_dir=$(cargo metadata --locked --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
     mkdir -p "$build/odd"
     ln -sfn "$target_dir" "$build/odd/aarch64-unknown-linux-gnu"
-    CARGO_TARGET_DIR="$PWD/$build/odd/aarch64-unknown-linux-gnu" cmake --build "$build/package" --target moq_ffi_cargo
+    CARGO_TARGET_DIR="$PWD/$build/odd/aarch64-unknown-linux-gnu" "${cmake_command[@]}" --build "$build/package" --target moq_ffi_cargo
 fi
 
 run() {
@@ -91,13 +104,13 @@ find=(-DCMAKE_PREFIX_PATH="$prefix")
 [[ "$libdir" == lib ]] || find=(-Dmoq-c_DIR="$prefix/$libdir/cmake/moq-c")
 # An MSVC consumer links the release runtime (/MD) in every configuration, as the docs say,
 # since the package's C++ and Rust objects do.
-cmake -S moq/test -B "$build/test" -DCMAKE_BUILD_TYPE=Debug \
+"${cmake_command[@]}" -S moq/test -B "$build/test" -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL "${find[@]}"
-cmake --build "$build/test" --config Release
+"${cmake_command[@]}" --build "$build/test" --config Release
 run "$build/test"
 # Visual Studio also builds Debug, the configuration whose default runtime (/MDd) mismatches.
 if [[ ! -x "$build/test/probe" ]]; then
-    cmake --build "$build/test" --config Debug
+    "${cmake_command[@]}" --build "$build/test" --config Debug
     run "$build/test" Debug
 fi
 
@@ -108,9 +121,8 @@ if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
 fi
 
 if command -v pkg-config >/dev/null 2>&1; then
-    export PKG_CONFIG_PATH="$prefix/$libdir/pkgconfig"
     # Assigned first: set -e ignores a failing substitution inside a command's arguments.
-    flags=$(pkg-config --cflags --libs moq-c)
+    flags=$(pkg-config --cflags --libs "$prefix/$libdir/pkgconfig/moq-c.pc")
     mkdir -p "$build/pkg-config"
     # shellcheck disable=SC2086 # flags is a flag list.
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic-errors -o "$build/pkg-config/probe" moq/test/probe.c $flags

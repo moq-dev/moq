@@ -20,7 +20,7 @@ export function wall(): Wall {
 
 /**
  * Read the installed clock's wall time at instant zero, in Unix milliseconds.
- * Rust's `moq_clock::origin()` pairs a nanosecond `Wall` with an instant instead.
+ * Rust's `kio::clock::origin()` pairs a nanosecond `Wall` with an instant instead.
  */
 export function origin(): Wall {
 	return Wall(backend().origin());

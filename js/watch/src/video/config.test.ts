@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Effect, Signal } from "@moq/signals";
 import { playbackIdentity } from "./config";
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flush = () => yieldNow();
 
 function config(fields: Record<string, unknown> = {}): Catalog.VideoConfig {
 	return Catalog.VideoConfigSchema.parse({

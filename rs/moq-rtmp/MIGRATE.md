@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shared unsupported CPU error
+
+CPU refusals now return `Error::UnsupportedCpu(moq_crypto::cpu::UnsupportedCpu)` from listener, stream acceptance, and dial setup instead of an I/O or session error.
+
+### Handshake cryptography uses rind
+
+RTMP handshake HMAC-SHA256 uses rind. `Server::bind` checks CPU support before binding; `accept_stream` and the dial client also check at setup, before using crypto.
+The `tls` feature no longer selects rustls' aws-lc provider; build the supplied TLS configuration with `rind_rustls::default_provider()?` or `moq_tokio::tls::Listen::server_config`.
+RTMP and RTMPS wire formats are unchanged.
+
+### `with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+The ingest builders' `with_max_age` still default to `hang::container::MAX_AGE` (30 s), but `None` now sets no publisher limit instead of keeping that default.
+Call `with_max_age` only when you have a value, as with `moq_mux::catalog::Config::with_max_age`.
+
 ### `moq_net::Path` has no lifetime
 
 Entry points that took `impl moq_net::AsPath` take `impl Into<moq_net::Path>`: pass a `Path` or `&Path`, from `moq_net::Path::new(s)?` or `moq_net::Path::from_static`, since a string can be too long. See moq-net's migration for the rest.

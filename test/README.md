@@ -14,7 +14,6 @@ questions to a harness. For builds and CI selection, see the
 | [registry smoke](smoke/README.md) | `just test smoke` | published packages install and interoperate; see the guide for matrix selection |
 | [browser media](interop/README.md) | `just test media` | browser capture and playback deliver video and audio through publication lifecycle changes |
 | [failure drills](drill/README.md) | `just test drill` | relay and transport failures terminate or recover as expected |
-| [wasm](wasm/README.md) | `just test wasm` | the `@moq/wasm` bindings work in a real browser |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
 | [native-play](native-play/README.md) | `just test native-play` | the shipped headless player follows overlapping publishers and fallback through decoded PCM on a private Linux null audio device |
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser and native audio playout stay within budget over an impaired path |
@@ -35,6 +34,11 @@ Every run owns three things and touches nothing else.
 holding every log, generated config, and capture. `HARNESS_RUNS` moves the root.
 Client builds go here too (the Python venv, the staged Go modules, the browser
 page), so two runs from one checkout never rebuild a client the other is running.
+Interop and wire-compat also stage their Cargo executables, headers, static libraries,
+and GStreamer plugin here immediately after building, as hard links or copies across
+filesystems. Every later execution, link, and plugin load uses these run-owned paths,
+so collecting shared Cargo output cannot remove an artifact a running matrix still
+needs. Binary overrides are staged too, including nested wire-compat cells.
 
 **Reserved ports.** A port is claimed by creating a directory under
 `/tmp/moq-test-ports-<uid>` (`HARNESS_PORT_ROOT`), held for the whole run, and
@@ -55,7 +59,7 @@ ports.
 
 The reservation settles contention between harness runs, not with the rest of the
 machine, so each harness still refuses a port something unrelated is already
-serving on. Pinning a port (`INTEROP_PORT`, `WASM_PORT`, `TSC_PORT`, `--port`) takes
+serving on. Pinning a port (`INTEROP_PORT`, `TSC_PORT`, `--port`) takes
 that exact one or fails.
 
 Every port, pinned or walked to from `HARNESS_PORT_BASE`, has to be 1024..65535
@@ -100,8 +104,8 @@ what the test did not assert. Either way the children are still reaped and the
 ports still released: what is kept is evidence, not a live session. Remove it
 with the `rm -rf` the run prints; nothing expires it for you.
 
-In CI the harness writes under `HARNESS_RUNS`, and `interop.yml` and `wasm.yml`
-upload that directory as a short-lived artifact when the job fails.
+In CI the harness writes under `HARNESS_RUNS`, and `interop.yml`
+uploads that directory as a short-lived artifact when the job fails.
 
 `HARNESS_RESULTS` names a JSON Lines file a harness appends one record per case to,
 through `harness_result`; `interop.yml` builds its report from it. See

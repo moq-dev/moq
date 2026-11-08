@@ -7,11 +7,11 @@ async function main() {
 
 	// Own and close the origin announcement watch.
 	const announced = origin.announced();
-	const requests = new Map<Moq.Path.Valid, Moq.Origin.Requesting>();
+	const requests = new Map<Moq.Path.Valid, Moq.Origin.Following>();
 
 	// Discover broadcasts announced by the server
 	for await (const announcement of announced) {
-		if (announcement.kind === "end" || requests.has(announcement.prefix)) continue;
+		if (announcement.kind === "absent" || requests.has(announcement.prefix)) continue;
 		console.log("New stream available:", announcement.prefix);
 
 		// One request per path follows its publisher restarts until closed.

@@ -4,8 +4,8 @@
  * Connects to the relay, discovers camera broadcasts by announcement (like
  * moq-boy), renders each on a map with a video preview, and lets you take
  * control of one vehicle with the keyboard or a steering wheel. The
- * {@link Truck} backend publishes a `control` track and subscribes to the
- * vehicle's `status` track for round-trip confirmation.
+ * {@link Truck} backend dials the vehicle's socket endpoint to drive it and
+ * subscribes to its `status` track.
  *
  * @module
  */
@@ -30,7 +30,7 @@ import {
 	type View,
 	viewBox,
 } from "./map.ts";
-import { loadRoadMap } from "./maps/index.ts";
+import { loadRoadMap, preloadAerials } from "./maps/index.ts";
 import { CAMERAS, parseCamera } from "./paths.ts";
 import template from "./player.html?raw";
 import { presence } from "./presence.ts";
@@ -43,6 +43,7 @@ import {
 	Calibration,
 	failSafe,
 	type InputSource,
+	PedalHold,
 	shortName,
 	Wheel,
 	type WheelSample,
@@ -52,13 +53,15 @@ import {
 export const PREVIEW = import.meta.env.DEV && new URLSearchParams(location.search).has("preview");
 
 /**
- * Render the player into `root` and run it on `connection`.
+ * Render the player into `root` and run it on `connection`, which serves and
+ * fills `origin`.
  *
  * Everything it starts, window listeners and the input loop included, stops
  * when the returned function is called.
  */
-export function mount(root: ShadowRoot, connection: Moq.Connection): () => void {
+export function mount(root: ShadowRoot, connection: Moq.Connection, origin: Moq.Origin.Producer): () => void {
 	root.innerHTML = `<style>${style}</style>${template}`;
+	preloadAerials();
 
 	const interaction = new Interaction(focusFromHash(window.location.hash));
 	const { driving, focused, hovered } = interaction;
@@ -121,14 +124,21 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				// A broad route can cover the scope without naming one camera.
 				if (!parseCamera(entry.prefix)) continue;
 
-				// A restart is a new simulator instance on the same path; the watch
-				// broadcast follows it, so only an end removes the tile.
-				if (entry.kind !== "end" && !tiles.has(entry.prefix)) {
-					const truck = new Truck({ broadcastId: entry.prefix, connection, driving, focused, hovered });
+				// A restarted simulator keeps its path present, and the watch broadcast
+				// follows it, so only an absence removes the tile.
+				if (entry.kind !== "absent" && !tiles.has(entry.prefix)) {
+					const truck = new Truck({
+						broadcastId: entry.prefix,
+						connection,
+						origin,
+						driving,
+						focused,
+						hovered,
+					});
 					tiles.set(entry.prefix, new TruckTile(truck));
 					vehicles.set(tiles.size);
 					refreshFocusLayout();
-				} else if (entry.kind === "end") {
+				} else if (entry.kind === "absent") {
 					const tile = tiles.get(entry.prefix);
 					tile?.dispose();
 					tiles.delete(entry.prefix);
@@ -184,6 +194,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 	let roadMap: RoadMap | undefined;
 	let wantedMap: string | undefined;
 	let unreadableMap: string | undefined;
+	let unbakedMap: string | undefined;
 	let fitted: View | undefined;
 	let fittedFleet = "";
 	let view: View | undefined;
@@ -212,7 +223,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			// Deliberately no retry. Status arrives at 10 Hz, so releasing the name
 			// here would turn telemetry into a tight retry timer, and would re-clear
 			// `fitted` on every tick. A reload is the supervisor that can actually
-			// re-establish this, so say the chunk failed rather than reporting a town
+			// re-establish this, so say the map failed rather than reporting a town
 			// that IS baked as if it were not.
 			console.warn(`failed to load the road map for ${name}:`, err);
 			if (wantedMap === name) unreadableMap = name;
@@ -225,6 +236,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		// Another town won the race while this one loaded: it owns the map now.
 		if (wantedMap !== name) return;
 		useRoads(loaded);
+		unbakedMap = loaded ? undefined : name;
 	}
 
 	/**
@@ -238,6 +250,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 	function useRoads(map: RoadMap | undefined) {
 		roadMap = map;
 		unreadableMap = undefined;
+		unbakedMap = undefined;
 		fitted = undefined;
 		els.roads.querySelector("#lane-geometry")?.setAttribute("d", map ? pathData(map) : "");
 		const image = required<SVGImageElement>("#aerial-image");
@@ -296,7 +309,8 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		// once one nears an edge, or the map slides under the driver at 10 Hz.
 		const fleet = [...poses.keys()].filter(onShownMap).sort().join(" ");
 		if (roadMap) {
-			fitted = mapView(roadMap, 0.06);
+			// An aerial carries its own surroundings; bare roads need room for the markers.
+			fitted = mapView(roadMap, roadMap.aerial ? 0 : 0.06);
 		} else if (fleet !== fittedFleet || needsRefit(fitted, points)) {
 			fitted = fitPoints(points);
 		}
@@ -345,8 +359,8 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				? ""
 				: unreadableMap
 					? `unreadable:${unreadableMap}`
-					: wantedMap
-						? `unbaked:${wantedMap}`
+					: unbakedMap
+						? `unbaked:${unbakedMap}`
 						: "";
 		if (key !== note) {
 			note = key;
@@ -361,7 +375,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			} else if (key.startsWith("unbaked:")) {
 				els.note.replaceChildren(
 					"Road imagery unavailable for ",
-					code(wantedMap ?? ""),
+					code(unbakedMap ?? ""),
 					". Showing truck positions only.",
 				);
 			}
@@ -450,7 +464,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		const id = focused.peek();
 		const open = hasTruck(id);
 		els.backdrop.hidden = !open;
-		for (const el of root.querySelectorAll<HTMLElement>("header, main, footer")) el.inert = open;
+		for (const el of root.querySelectorAll<HTMLElement>("main, footer")) el.inert = open;
 		if (id !== previousFocus) {
 			const last = previousFocus;
 			previousFocus = id;
@@ -581,9 +595,16 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		const id = focused.peek();
 		const truck = truckById(id);
 		if (!id || !truck) return undefined;
-		if (driving.peek() !== id && !truck.beginTakeover()) return undefined;
+		if (driving.peek() !== id && !takeover(truck)) return undefined;
 		if (!interaction.takeDrive(id)) return undefined;
 		return truck;
+	}
+
+	/** Reset the pedals for a new lease, keeping the wheel's off them until one moves. */
+	function takeover(truck: Truck): boolean {
+		if (!truck.beginTakeover()) return false;
+		pedalHold.start();
+		return true;
 	}
 
 	function safetyTruck(): Truck | undefined {
@@ -615,6 +636,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 	// hands it control. Any drive key takes the axes straight back.
 	const wheel = new Wheel();
 	const source = new Moq.Signals.Signal<InputSource>("keyboard");
+	const pedalHold = new PedalHold();
 
 	/**
 	 * Advance the arbitration, failing the truck safe if an armed wheel vanished.
@@ -682,8 +704,12 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		const truck = activeTruck();
 		if (truck) {
 			const cur = truck.drive.peek();
+			const target =
+				pedalHold.update(sample) && sample ? { ...sample, throttle: cur.throttle, brake: cur.brake } : sample;
 			const next =
-				source.peek() === "wheel" && sample ? applyWheel(cur, sample, dt) : applyKeys(cur, held.peek(), dt);
+				source.peek() === "wheel" && target ? applyWheel(cur, target, dt) : applyKeys(cur, held.peek(), dt);
+			// A drive key changing a pedal ends the hold as well.
+			if (next.throttle !== cur.throttle || next.brake !== cur.brake) pedalHold.stop();
 			stepDrive(truck, next);
 		}
 	}
@@ -731,7 +757,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		finishCalibration();
 	});
 
-	/** Reflect the connected wheel in the header chip. */
+	/** Reflect the connected wheel in the map chip. */
 	function refreshWheel() {
 		const id = wheel.id;
 		if (!id) {
@@ -761,6 +787,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 		// the truck before it goes up rather than leaving whatever was commanded to
 		// keep heartbeating out for the duration.
 		activeTruck()?.setDrive({ ...REST });
+		pedalHold.start();
 		calEls.warn.hidden = true;
 		els.cal.hidden = false;
 		refreshCalibration();
@@ -901,7 +928,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				e.stopPropagation();
 				if (this.truck.active.peek()) {
 					interaction.releaseDrive();
-				} else if (this.truck.beginTakeover()) {
+				} else if (takeover(this.truck)) {
 					interaction.takeDrive(truck.id);
 				}
 			});
@@ -984,15 +1011,11 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 				// Status carries the measured takeover state. Never guess while it is unavailable.
 				controlButton.disabled = !active && !status;
 				const respawnButton = q(".respawn-btn") as HTMLButtonElement;
-				const driverId = effect.get(this.truck.driverId);
+				const handle = effect.get(this.truck.handle);
 				const estopped = effect.get(this.truck.estopped) || Boolean(status?.estopped);
 				respawnButton.hidden = !isFocused;
 				respawnButton.disabled =
-					effect.get(this.truck.respawning) ||
-					!active ||
-					!driverId ||
-					status?.driver !== driverId ||
-					estopped;
+					effect.get(this.truck.respawning) || !active || !handle || status?.driver !== handle || estopped;
 				// Latched if either side thinks so: the local signal reacts
 				// instantly, the status echo is authoritative (see resetEstop).
 				const stopButton = q(".estop-btn") as HTMLButtonElement;
@@ -1022,7 +1045,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 								estopped,
 								estopBy: status?.estop_by,
 								status: statusState,
-								driverId,
+								handle,
 								statusDriver: status?.driver,
 								wheel: effect.get(source) === "wheel",
 							});
@@ -1073,8 +1096,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 								? "Manual"
 								: "Unknown";
 				q(".mode").className = `mode${s?.estopped ? " estopped" : ""}`;
-				const me = effect.get(this.truck.driverId);
-				const mine = me ? s?.media_pipeline[me] : undefined;
+				const mine = effect.get(this.truck.pipeline);
 				const roundTrip = effect.get(this.truck.roundTripMs);
 				q(".rtt").textContent = roundTrip == null ? "Not measured" : `${Math.round(roundTrip)} ms`;
 				q(".lat").textContent = mine?.length
@@ -1213,7 +1235,7 @@ export function mount(root: ShadowRoot, connection: Moq.Connection): () => void 
 			const { populatePreview } = await import("./preview.ts");
 			if (abort.signal.aborted) return;
 			const cleanup = populatePreview((path) => {
-				const truck = new Truck({ broadcastId: path, connection, driving, focused, hovered });
+				const truck = new Truck({ broadcastId: path, connection, origin, driving, focused, hovered });
 				const tile = new TruckTile(truck);
 				tiles.set(path, tile);
 				vehicles.set(tiles.size);

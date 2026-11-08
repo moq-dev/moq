@@ -1,11 +1,9 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path,
-	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
+	Path, StreamError,
+	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, StreamCodes, varint},
 };
-#[cfg(feature = "async")]
-use crate::{StreamError, coding::StreamCodes};
 
 use super::{Message, Version};
 use crate::track::Order;
@@ -17,18 +15,28 @@ use crate::track::Order;
 pub struct Subscribe<'a> {
 	pub id: u64,
 	pub broadcast: Path,
-	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
-	pub epoch: Option<crate::Epoch>,
+	pub instance: Option<crate::Instance>,
+	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// publisher selects. Lite07+ only.
+	pub node: u64,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
 	pub max_delay: std::time::Duration,
+	/// The subscriber's `Subscriber Min Age`, or `None` when not stated. Lite07+ only; earlier
+	/// wires decode as not stated and drop it on encode.
+	pub min_delay: Option<std::time::Duration>,
 	/// The spans to deliver, never empty. Lite07+ carries any number; earlier wires carry
 	/// exactly one (see [`Range`]).
 	pub ranges: Vec<Range>,
 	/// Which pending group to send first. Lite07+ only; earlier wires decode as
 	/// [`Order::Descending`] and cannot ask for anything else.
 	pub order: Order,
+	/// The number of the terms in effect: the SUBSCRIBE is 0 and every SUBSCRIBE_UPDATE
+	/// carries a larger one, which a [`SubscribeDrop`] echoes. Lite07+ only; earlier wires
+	/// decode as 0 and drop it on encode.
+	pub update: u64,
 }
 
 impl Subscribe<'_> {
@@ -37,18 +45,21 @@ impl Subscribe<'_> {
 		Subscribe {
 			id: self.id,
 			broadcast: self.broadcast,
-			epoch: self.epoch,
+			instance: self.instance,
+			node: self.node,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
+			min_delay: self.min_delay,
 			ranges: self.ranges,
 			order: self.order,
+			update: self.update,
 		}
 	}
 }
 
 /// One end of a [`Range`], as the wire carries it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
 	/// A position: a start delivers from it, and an end stops just before it.
 	Absolute(crate::track::Position),
@@ -67,7 +78,7 @@ pub enum Anchor {
 /// `Group Start` of 0 with a `Frame Start` of 0, the same absence of a floor there. No start
 /// and a [`Anchor::Relative`] start of 0 both encode as an absent `Group Start`, which a
 /// pre-06 publisher reads as the latest group and a lite-06 one as no floor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Range {
 	/// Where delivery starts, or `None` for the oldest group the max age allows.
 	pub start: Option<Anchor>,
@@ -125,35 +136,44 @@ impl<'a> Message<'a> for Subscribe<'a> {
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
-		let epoch = super::epoch::decode_epoch(r, version)?;
+		let instance = super::instance::decode_pin(r, version)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 
-		let (order, max_delay, ranges) = match version {
-			Version::Lite01 | Version::Lite02 => (Order::Descending, std::time::Duration::ZERO, vec![Range::OLDEST]),
+		let (order, max_delay, min_delay, ranges) = match version {
+			Version::Lite01 | Version::Lite02 => {
+				(Order::Descending, std::time::Duration::ZERO, None, vec![Range::OLDEST])
+			}
 			_ => {
 				let order = decode_order(r, version)?;
 				let max_delay = std::time::Duration::from_millis(r.varint()?);
-				(order, max_delay, decode_ranges(r, version)?)
+				let min_delay = decode_min_delay(r, version)?;
+				(order, max_delay, min_delay, decode_ranges(r, version)?)
 			}
 		};
+		let update = decode_update(r, version)?;
 
 		Ok(Self {
 			id,
 			broadcast,
-			epoch,
+			instance,
+			node,
 			track,
 			priority,
 			max_delay,
+			min_delay,
 			ranges,
 			order,
+			update,
 		})
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		w.varint(self.id)?;
 		self.broadcast.encode(w, version)?;
-		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
+		super::instance::encode_pin(w, version, self.instance.as_ref())?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 
@@ -163,12 +183,54 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			_ => {
 				encode_order(w, version, self.order)?;
 				w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+				encode_min_delay(w, version, self.min_delay)?;
 				encode_ranges(w, version, &self.ranges)?;
 			}
 		}
+		encode_update(w, version, self.update)?;
 
 		Ok(())
 	}
+}
+
+/// Decode the `Update` number after the ranges. A wire without the field decodes as 0.
+fn decode_update(r: &mut Decoder<'_>, version: Version) -> Result<u64, DecodeError> {
+	match version.has_skip() {
+		true => r.varint(),
+		false => Ok(0),
+	}
+}
+
+/// Encode the `Update` number, dropping it on a wire without the field.
+fn encode_update(w: &mut Encoder<'_>, version: Version, update: u64) -> Result<(), EncodeError> {
+	match version.has_skip() {
+		true => w.varint(update),
+		false => Ok(()),
+	}
+}
+
+/// Decode the `Subscriber Min Age` after the max age: milliseconds plus one, zero meaning not
+/// stated. A wire without the field decodes as not stated.
+fn decode_min_delay(r: &mut Decoder<'_>, version: Version) -> Result<Option<std::time::Duration>, DecodeError> {
+	match version.has_min_delay() {
+		true => Ok(r.varint_opt()?.map(std::time::Duration::from_millis)),
+		false => Ok(None),
+	}
+}
+
+/// Encode the `Subscriber Min Age`, dropping it on a wire without the field.
+fn encode_min_delay(
+	w: &mut Encoder<'_>,
+	version: Version,
+	min_delay: Option<std::time::Duration>,
+) -> Result<(), EncodeError> {
+	if !version.has_min_delay() {
+		return Ok(());
+	}
+	let min_delay = min_delay
+		.map(|min| u64::try_from(min.as_millis()).map_err(|_| EncodeError::BoundsExceeded))
+		.transpose()?;
+	w.varint_opt(min_delay)
 }
 
 /// Decode the ranges SUBSCRIBE and SUBSCRIBE_UPDATE carry after the max age.
@@ -177,18 +239,10 @@ impl<'a> Message<'a> for Subscribe<'a> {
 /// `Group End`, and their frame bounds; see [`Range`].
 fn decode_ranges(r: &mut Decoder<'_>, version: Version) -> Result<Vec<Range>, DecodeError> {
 	if version.has_ranges() {
-		let count = r.varint()?;
+		let ranges = decode_range_list(r)?;
 		// A subscription that asks for nothing has no use: refuse it rather than park it.
-		if count == 0 {
+		if ranges.is_empty() {
 			return Err(DecodeError::InvalidSubscribeLocation);
-		}
-		// Not preallocated: each range costs at least two bytes of the bounded message, so a
-		// count the bytes can't back runs out before it costs anything.
-		let mut ranges = Vec::new();
-		for _ in 0..count {
-			let start = decode_anchor(r)?;
-			let end = decode_anchor(r)?;
-			ranges.push(Range { start, end });
 		}
 		return Ok(ranges);
 	}
@@ -226,12 +280,7 @@ fn encode_ranges(w: &mut Encoder<'_>, version: Version, ranges: &[Range]) -> Res
 		if ranges.is_empty() {
 			return Err(EncodeError::InvalidState);
 		}
-		w.varint(ranges.len() as u64)?;
-		for range in ranges {
-			encode_anchor(w, range.start)?;
-			encode_anchor(w, range.end)?;
-		}
-		return Ok(());
+		return encode_range_list(w, ranges);
 	}
 
 	let [range] = ranges else {
@@ -255,6 +304,42 @@ fn encode_ranges(w: &mut Encoder<'_>, version: Version, ranges: &[Range]) -> Res
 	encode_start_group(w, version, start_group)?;
 	w.varint_opt(end_group)?;
 	encode_frame_bounds(w, version, start_group, start_frame, end_group, end_frame)
+}
+
+/// Decode a lite-07 `Range Count` and its ranges, which may be none.
+fn decode_range_list(r: &mut Decoder<'_>) -> Result<Vec<Range>, DecodeError> {
+	let count = r.varint()?;
+	// Not preallocated: each range costs at least two bytes of the bounded message, so a
+	// count the bytes can't back runs out before it costs anything.
+	let mut ranges = Vec::new();
+	for _ in 0..count {
+		let start = decode_anchor(r)?;
+		let end = decode_anchor(r)?;
+		ranges.push(Range { start, end });
+	}
+	Ok(ranges)
+}
+
+/// Encode the inverse of [`decode_range_list`].
+fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), EncodeError> {
+	w.varint(ranges.len() as u64)?;
+	for range in ranges {
+		encode_anchor(w, range.start)?;
+		encode_anchor(w, range.end)?;
+	}
+	Ok(())
+}
+
+/// The bytes a lite-07 range takes on the wire, or `None` past the varint's reach.
+fn range_size(range: &Range, form: Form) -> Option<usize> {
+	let size = |value| varint::size(value, form).ok();
+	let anchor = |anchor: Option<Anchor>| match anchor {
+		None => size(0),
+		Some(Anchor::Absolute(position)) => Some(size(1)? + size(position.group)? + size(position.frame)?),
+		Some(Anchor::Relative(back)) => Some(size(2)? + size(back)?),
+		Some(Anchor::Time(pts)) => Some(size(3)? + size(pts)?),
+	};
+	Some(anchor(range.start)? + anchor(range.end)?)
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
@@ -430,7 +515,7 @@ fn encode_frame_bounds(
 /// Publisher's acknowledgement on the Subscribe Stream for drafts 01-04.
 ///
 /// Lite05+ replaced this with implicit acceptance plus
-/// [`SubscribeStart`]/[`SubscribeEnd`]; the immutable timescale/cache moved
+/// [`SubscribeStart`]/[`SubscribeFinish`]; the immutable timescale/cache moved
 /// to [`super::TrackInfo`].
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {
@@ -562,23 +647,34 @@ impl<'a> Message<'a> for SubscribeStart {
 	}
 }
 
-/// Signals the exclusive end of a Lite05+ subscription.
+/// SUBSCRIBE_FINISH (SUBSCRIBE_END before lite-07): the exclusive end of a Lite05+
+/// subscription's track.
 ///
-/// No group at or after `group` will be produced. `0` means the track ended
+/// No group at or after `group` will be produced. Before lite-07 the publisher FINs the
+/// Subscribe Stream after it; lite-07 leaves the stream open for updates, so the
+/// subscriber FINs once it wants nothing more. `0` means the track ended
 /// before producing any groups.
 #[derive(Clone, Debug)]
-pub struct SubscribeEnd {
+pub struct SubscribeFinish {
 	pub group: u64,
+	/// The error the track ended with, if it did not end cleanly. Lite-07 and later.
+	pub error: Option<StreamError>,
 }
 
-impl<'a> Message<'a> for SubscribeEnd {
+impl<'a> Message<'a> for SubscribeFinish {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 		let group = r.varint()?;
-		Ok(Self { group })
+		let error = match version.has_end_error() {
+			true => r
+				.varint_opt()?
+				.map(|code| u32::try_from(code).map_or(StreamError::Internal, |code| version.decode_stream_code(code))),
+			false => None,
+		};
+		Ok(Self { group, error })
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -586,23 +682,50 @@ impl<'a> Message<'a> for SubscribeEnd {
 			return Err(EncodeError::Version);
 		}
 		w.varint(self.group)?;
+		match version.has_end_error() {
+			true => w.varint_opt(self.error.as_ref().map(|err| version.encode_stream_code(err).into()))?,
+			false if self.error.is_some() => return Err(EncodeError::Version),
+			false => {}
+		}
 		Ok(())
 	}
 }
 
 /// Sent by the subscriber to update subscription parameters.
 ///
+/// `R` is how the ranges travel: a [`RangeEdit`] on the wire, and every live range with its
+/// Range ID once [`LiveRanges`] resolves the edit, which is what a publisher applies.
+///
 /// Lite03+ only.
 #[derive(Clone, Debug)]
-pub struct SubscribeUpdate {
+pub struct SubscribeUpdate<R = RangeEdit> {
 	/// A join requesting this group or later, judged against the local refresh ratio.
 	pub wanted_group: Option<u64>,
 	pub priority: i8,
 	pub max_delay: std::time::Duration,
-	/// The replacement for every range; see [`Subscribe::ranges`].
-	pub ranges: Vec<Range>,
+	/// See [`Subscribe::min_delay`].
+	pub min_delay: Option<std::time::Duration>,
+	/// The change to the ranges; see [`Subscribe::ranges`].
+	pub ranges: R,
 	/// See [`Subscribe::order`].
 	pub order: Order,
+	/// See [`Subscribe::update`]: larger than the subscription's previous one.
+	pub update: u64,
+}
+
+impl<R> SubscribeUpdate<R> {
+	/// The same update with its ranges as `ranges`.
+	pub(crate) fn with_ranges<T>(self, ranges: T) -> SubscribeUpdate<T> {
+		SubscribeUpdate {
+			wanted_group: self.wanted_group,
+			priority: self.priority,
+			max_delay: self.max_delay,
+			min_delay: self.min_delay,
+			ranges,
+			order: self.order,
+			update: self.update,
+		}
+	}
 }
 
 impl<'a> Message<'a> for SubscribeUpdate {
@@ -618,7 +741,22 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		let priority = super::priority::from_wire(r.u8()?);
 		let order = decode_order(r, version)?;
 		let max_delay = std::time::Duration::from_millis(r.varint()?);
-		let ranges = decode_ranges(r, version)?;
+		let min_delay = decode_min_delay(r, version)?;
+		let ranges = match version.has_ranges() {
+			true => {
+				// Not preallocated, like the ranges: each id costs a byte of the bounded message.
+				let mut remove = Vec::new();
+				for _ in 0..r.varint()? {
+					remove.push(r.varint()?);
+				}
+				RangeEdit::Edit {
+					remove,
+					add: decode_range_list(r)?,
+				}
+			}
+			false => RangeEdit::Replace(decode_ranges(r, version)?),
+		};
+		let update = decode_update(r, version)?;
 
 		let wanted_group = match version.has_refresh() {
 			true => r.varint()?.checked_sub(1),
@@ -629,8 +767,10 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			wanted_group,
 			priority,
 			max_delay,
+			min_delay,
 			ranges,
 			order,
+			update,
 		})
 	}
 
@@ -645,7 +785,19 @@ impl<'a> Message<'a> for SubscribeUpdate {
 		w.u8(super::priority::to_wire(self.priority));
 		encode_order(w, version, self.order)?;
 		w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
-		encode_ranges(w, version, &self.ranges)?;
+		encode_min_delay(w, version, self.min_delay)?;
+		match (&self.ranges, version.has_ranges()) {
+			(RangeEdit::Edit { remove, add }, true) => {
+				w.varint(remove.len() as u64)?;
+				for id in remove {
+					w.varint(*id)?;
+				}
+				encode_range_list(w, add)?;
+			}
+			(RangeEdit::Replace(ranges), false) => encode_ranges(w, version, ranges)?,
+			_ => return Err(EncodeError::Version),
+		}
+		encode_update(w, version, self.update)?;
 
 		if version.has_refresh() {
 			w.varint_opt(self.wanted_group)?;
@@ -654,13 +806,244 @@ impl<'a> Message<'a> for SubscribeUpdate {
 	}
 }
 
-/// Indicates that one or more groups have been dropped.
+/// The ranges a SUBSCRIBE_UPDATE carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RangeEdit {
+	/// Before lite-07: the whole list, replacing the live one.
+	Replace(Vec<Range>),
+	/// Lite-07: retire the ranges with these Range IDs, then add these, each taking the next
+	/// Range ID.
+	Edit { remove: Vec<u64>, add: Vec<Range> },
+}
+
+/// A subscription's live ranges by Range ID, which both ends of a Subscribe Stream keep: the
+/// subscriber to write each update as an edit, the publisher to resolve one.
+///
+/// The SUBSCRIBE's ranges take Range IDs from 0 in order, and each range an update adds
+/// takes the next. Before lite-07 an update replaces the list, numbered afresh.
+#[derive(Clone, Debug)]
+pub(crate) struct LiveRanges {
+	version: Version,
+	next: u64,
+	live: std::collections::BTreeMap<u64, Range>,
+	/// The bytes the live ranges take on the wire, held to what one SUBSCRIBE carries.
+	size: usize,
+	/// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_OK reports.
+	initial: u64,
+}
+
+impl LiveRanges {
+	/// The ranges a SUBSCRIBE carried.
+	pub fn new(version: Version, ranges: &[Range]) -> Self {
+		let mut live = Self {
+			version,
+			next: 0,
+			live: Default::default(),
+			size: 0,
+			initial: ranges.len() as u64,
+		};
+		live.add(ranges.iter().copied());
+		live
+	}
+
+	fn add(&mut self, ranges: impl IntoIterator<Item = Range>) {
+		let form: Form = self.version.into();
+		for range in ranges {
+			// One past the varint's reach can't come off the wire, and is refused below.
+			self.size = self.size.saturating_add(range_size(&range, form).unwrap_or(usize::MAX));
+			self.live.insert(self.next, range);
+			self.next += 1;
+		}
+	}
+
+	fn remove(&mut self, id: u64) -> Option<Range> {
+		let range = self.live.remove(&id)?;
+		self.size = self
+			.size
+			.saturating_sub(range_size(&range, self.version.into()).unwrap_or(usize::MAX));
+		Some(range)
+	}
+
+	/// Every live range with its Range ID, in Range ID order.
+	pub fn numbered(&self) -> Vec<(u64, Range)> {
+		self.iter().map(|(id, range)| (id, *range)).collect()
+	}
+
+	/// Every live range with its Range ID, in Range ID order.
+	pub fn iter(&self) -> impl Iterator<Item = (u64, &Range)> {
+		self.live.iter().map(|(id, range)| (*id, range))
+	}
+
+	/// Whether the publisher reports where each range starts, which lite-07 does by Range
+	/// ID. Before it, a start describes the SUBSCRIBE's one range alone.
+	pub fn reports_starts(&self) -> bool {
+		self.version.has_ranges()
+	}
+
+	/// The live range with Range ID `id`.
+	pub fn get(&self, id: u64) -> Option<&Range> {
+		self.live.get(&id)
+	}
+
+	/// Whether `id` was ever assigned.
+	pub fn assigned(&self, id: u64) -> bool {
+		id < self.next
+	}
+
+	/// Whether SUBSCRIBE_OK reports the start of the range with Range ID `id`, which the
+	/// SUBSCRIBE carried; SUBSCRIBE_STARTED reports each one an update adds.
+	pub fn initial(&self, id: u64) -> bool {
+		id < self.initial
+	}
+
+	/// How many ranges the SUBSCRIBE carried.
+	pub fn initial_count(&self) -> u64 {
+		self.initial
+	}
+
+	/// Resolve a received edit, returning every live range with its Range ID.
+	pub fn apply(&mut self, edit: RangeEdit) -> Result<Vec<(u64, Range)>, DecodeError> {
+		match edit {
+			RangeEdit::Replace(ranges) if !self.version.has_ranges() => {
+				*self = Self::new(self.version, &ranges);
+			}
+			RangeEdit::Edit { remove, add } if self.version.has_ranges() => {
+				for id in remove {
+					// An id never assigned, or already retired (including earlier in this list).
+					self.remove(id).ok_or(DecodeError::InvalidValue)?;
+				}
+				self.add(add);
+			}
+			_ => return Err(DecodeError::Version),
+		}
+		// Asking for nothing is refused like a SUBSCRIBE that does, and a set no SUBSCRIBE
+		// could carry like one too large to send.
+		if self.live.is_empty() {
+			return Err(DecodeError::InvalidSubscribeLocation);
+		}
+		if self.size > super::message::MAX_MESSAGE_SIZE {
+			return Err(DecodeError::TooMany);
+		}
+		Ok(self.numbered())
+	}
+
+	/// The edit that keeps the live ranges as they are.
+	pub fn unchanged(&self) -> RangeEdit {
+		match self.version.has_ranges() {
+			true => RangeEdit::Edit {
+				remove: Vec::new(),
+				add: Vec::new(),
+			},
+			false => RangeEdit::Replace(self.live.values().copied().collect()),
+		}
+	}
+
+	/// The edit that turns the live ranges into `ranges`, which become the live ones.
+	///
+	/// A range already live keeps its Range ID, so an update that changes one range sends
+	/// only that one, and the publisher keeps where the rest resolved.
+	#[cfg(test)]
+	pub fn edit(&mut self, ranges: &[Range]) -> Result<RangeEdit, EncodeError> {
+		let keyed: Vec<_> = ranges.iter().map(|range| ((), *range)).collect();
+		self.edit_keyed(&keyed, |_| ()).map(|(edit, _)| edit)
+	}
+
+	/// [`Self::edit`] for ranges asked for by different owners: a live range keeps its Range
+	/// ID only for a wanted range of the same key, `key_of` giving each live one's. Returns
+	/// the edit and the Range ID each range it adds takes, with that range's key.
+	pub fn edit_keyed<K: Copy + Eq + std::hash::Hash>(
+		&mut self,
+		ranges: &[(K, Range)],
+		key_of: impl Fn(u64) -> K,
+	) -> Result<(RangeEdit, Vec<(u64, K)>), EncodeError> {
+		if ranges.is_empty() {
+			return Err(EncodeError::InvalidState);
+		}
+		if !self.version.has_ranges() {
+			// Replaced ranges take fresh Range IDs, so nothing said of the old ones applies.
+			let ranges: Vec<Range> = ranges.iter().map(|(_, range)| *range).collect();
+			if !self.live.values().eq(&ranges) {
+				self.live.clear();
+				self.size = 0;
+				self.add(ranges.iter().copied());
+			}
+			return Ok((RangeEdit::Replace(ranges), Vec::new()));
+		}
+		// Each live range keeps at most one wanted copy, so duplicates edit like any other.
+		let mut wanted = std::collections::HashMap::<(K, Range), usize>::new();
+		for wanted_range in ranges {
+			*wanted.entry(*wanted_range).or_default() += 1;
+		}
+		let mut remove = Vec::new();
+		for (&id, range) in &self.live {
+			match wanted.get_mut(&(key_of(id), *range)) {
+				Some(count) if *count > 0 => *count -= 1,
+				_ => remove.push(id),
+			}
+		}
+		// In the order asked for, so the publisher numbers them the way this side does.
+		let added: Vec<(K, Range)> = ranges
+			.iter()
+			.filter(|wanted_range| {
+				let count = wanted.get_mut(*wanted_range).expect("counted above");
+				let keep = *count > 0;
+				*count = count.saturating_sub(1);
+				keep
+			})
+			.copied()
+			.collect();
+		for &id in &remove {
+			self.remove(id);
+		}
+		let ids = (self.next..).zip(added.iter().map(|(key, _)| *key)).collect();
+		let add: Vec<Range> = added.into_iter().map(|(_, range)| range).collect();
+		self.add(add.iter().copied());
+		if self.size > super::message::MAX_MESSAGE_SIZE {
+			return Err(EncodeError::TooLarge);
+		}
+		Ok((RangeEdit::Edit { remove, add }, ids))
+	}
+}
+
+/// SUBSCRIBE_STARTED: where a range a SUBSCRIBE_UPDATE added starts. Lite-07 and later.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscribeStarted {
+	/// The range's Range ID.
+	pub id: u64,
+	/// The group its delivery starts at, `None` for a range with no group there.
+	pub start: Option<u64>,
+}
+
+impl<'a> Message<'a> for SubscribeStarted {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		if !version.has_ranges() {
+			return Err(DecodeError::Version);
+		}
+		Ok(Self {
+			id: r.varint()?,
+			start: r.varint_opt()?,
+		})
+	}
+
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		if !version.has_ranges() {
+			return Err(EncodeError::Version);
+		}
+		w.varint(self.id)?;
+		w.varint_opt(self.start)
+	}
+}
+
+/// Names groups that existed but will not be delivered: aborted or reset, evicted or
+/// expired with no copy left, or stale.
 ///
 /// The range `[start, end]` is inclusive on both ends. For example,
 /// `start = 5, end = 7` means groups 5, 6, and 7 were dropped.
 ///
-/// Lite03+; publishers send it on Lite05 and later.
-#[derive(Clone, Debug)]
+/// Lite03+; publishers send it on Lite05 and later. Before lite-07 it also names sequences
+/// declared skipped, which lite-07 names in [`SubscribeSkip`].
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscribeDrop {
 	/// The first absolute group sequence in the dropped range.
 	pub start: u64,
@@ -671,12 +1054,18 @@ pub struct SubscribeDrop {
 	/// Why the groups were given up: a stream error code on lite-07 and later, or an
 	/// application-specific code before, where 0 means simply unavailable.
 	pub error: u64,
+
+	/// The number of the SUBSCRIBE or SUBSCRIBE_UPDATE in effect when the groups were
+	/// given up ([`Subscribe::update`]): a stale (OLD) drop under a superseded one is no
+	/// verdict. Lite07+ only; earlier wires decode as 0.
+	pub update: u64,
 }
 
 #[cfg(feature = "async")]
 impl SubscribeDrop {
-	/// Name `groups` given up with `err`, as `version` carries it.
-	pub fn new(groups: std::ops::RangeInclusive<u64>, err: &StreamError, version: Version) -> Self {
+	/// Name `groups` given up with `err` under the terms numbered `update`, as `version`
+	/// carries it.
+	pub fn new(groups: std::ops::RangeInclusive<u64>, err: &StreamError, update: u64, version: Version) -> Self {
 		Self {
 			start: *groups.start(),
 			end: *groups.end(),
@@ -685,6 +1074,7 @@ impl SubscribeDrop {
 				true => version.encode_stream_code(err).into(),
 				false => 0,
 			},
+			update: if version.has_skip() { update } else { 0 },
 		}
 	}
 
@@ -711,15 +1101,18 @@ impl<'a> Message<'a> for SubscribeDrop {
 			_ => {}
 		}
 
-		let msg = Self {
-			start: r.varint()?,
-			end: r.varint()?,
-			error: r.varint()?,
-		};
-		if msg.start.saturating_sub(msg.end) > 1 {
+		let (start, end) = (r.varint()?, r.varint()?);
+		if start.saturating_sub(end) > 1 {
 			return Err(DecodeError::InvalidValue);
 		}
-		Ok(msg)
+		let error = r.varint()?;
+		let update = decode_update(r, version)?;
+		Ok(Self {
+			start,
+			end,
+			error,
+			update,
+		})
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -737,7 +1130,51 @@ impl<'a> Message<'a> for SubscribeDrop {
 		w.varint(self.start)?;
 		w.varint(self.end)?;
 		w.varint(self.error)?;
+		encode_update(w, version, self.update)?;
 
+		Ok(())
+	}
+}
+
+/// Names sequences the publisher declared it will never produce (see
+/// `track::Producer::skip_groups`): final, with no error, ending no reader.
+///
+/// The range `[start, end]` is inclusive on both ends. Lite07+ only; earlier versions name
+/// them in a [`SubscribeDrop`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscribeSkip {
+	/// The first absolute group sequence in the skipped range.
+	pub start: u64,
+
+	/// The last absolute group sequence in the skipped range (inclusive).
+	pub end: u64,
+}
+
+impl<'a> Message<'a> for SubscribeSkip {
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Subscribe);
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		if !version.has_skip() {
+			return Err(DecodeError::Version);
+		}
+		let msg = Self {
+			start: r.varint()?,
+			end: r.varint()?,
+		};
+		if msg.start.saturating_sub(msg.end) > 1 {
+			return Err(DecodeError::InvalidValue);
+		}
+		Ok(msg)
+	}
+
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		if !version.has_skip() {
+			return Err(EncodeError::Version);
+		}
+		if self.start.saturating_sub(self.end) > 1 {
+			return Err(EncodeError::InvalidState);
+		}
+		w.varint(self.start)?;
+		w.varint(self.end)?;
 		Ok(())
 	}
 }
@@ -747,14 +1184,18 @@ impl<'a> Message<'a> for SubscribeDrop {
 ///
 /// The discriminator is version-dependent:
 /// - Lite03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
-/// - Lite05+: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
+/// - Lite05+: `0x0` SUBSCRIBE_START (SUBSCRIBE_OK on lite-07), `0x1` SUBSCRIBE_FINISH
+///   (SUBSCRIBE_END before lite-07), `0x2` SUBSCRIBE_DROP
 ///   (SUBSCRIBE_OK was removed; acceptance is implicit).
+/// - Lite07+: also `0x3` SUBSCRIBE_SKIP and `0x4` SUBSCRIBE_STARTED.
 #[derive(Clone, Debug)]
 pub enum SubscribeResponse {
 	Ok(SubscribeOk),
 	Start(SubscribeStart),
-	End(SubscribeEnd),
+	Finish(SubscribeFinish),
 	Drop(SubscribeDrop),
+	Skip(SubscribeSkip),
+	Started(SubscribeStarted),
 }
 
 /// Write a `type` varint followed by the size-prefixed message body.
@@ -783,8 +1224,10 @@ impl Encode<Version> for SubscribeResponse {
 			// Lite05+: SUBSCRIBE_OK is gone; START/END/DROP carry the resolved range.
 			_ => match self {
 				Self::Start(start) => encode_typed(w, 0, start, version)?,
-				Self::End(end) => encode_typed(w, 1, end, version)?,
+				Self::Finish(end) => encode_typed(w, 1, end, version)?,
 				Self::Drop(drop) => encode_typed(w, 2, drop, version)?,
+				Self::Skip(skip) => encode_typed(w, 3, skip, version)?,
+				Self::Started(started) => encode_typed(w, 4, started, version)?,
 				Self::Ok(_) => return Err(EncodeError::Version),
 			},
 		}
@@ -809,8 +1252,10 @@ impl<'a> Decode<'a, Version> for SubscribeResponse {
 				let typ = buf.varint()?;
 				match typ {
 					0 => Ok(Self::Start(SubscribeStart::decode(buf, version)?)),
-					1 => Ok(Self::End(SubscribeEnd::decode(buf, version)?)),
+					1 => Ok(Self::Finish(SubscribeFinish::decode(buf, version)?)),
 					2 => Ok(Self::Drop(SubscribeDrop::decode(buf, version)?)),
+					3 if version.has_skip() => Ok(Self::Skip(SubscribeSkip::decode(buf, version)?)),
+					4 if version.has_ranges() => Ok(Self::Started(SubscribeStarted::decode(buf, version)?)),
 					_ => Err(DecodeError::InvalidMessage(typ)),
 				}
 			}
@@ -833,7 +1278,8 @@ mod test {
 				SubscribeDrop {
 					start: 3,
 					end: 1,
-					error: 0
+					error: 0,
+					update: 0,
 				}
 				.encode_bytes(version)
 				.is_err()
@@ -844,7 +1290,12 @@ mod test {
 				(1 << 62) - 1
 			};
 			for (start, end) in [(2, 1), (max, max)] {
-				let msg = SubscribeDrop { start, end, error: 0 };
+				let msg = SubscribeDrop {
+					start,
+					end,
+					error: 0,
+					update: 0,
+				};
 				let data = msg.encode_bytes(version).unwrap();
 				let (decoded, _) = SubscribeDrop::decode_slice(&data, version).unwrap();
 				assert_eq!((decoded.start, decoded.end), (start, end));
@@ -911,7 +1362,7 @@ mod test {
 
 	#[test]
 	fn subscribe_end_roundtrips_on_lite05() {
-		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
+		let resp = SubscribeResponse::Finish(SubscribeFinish { group: 7, error: None });
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
@@ -919,23 +1370,43 @@ mod test {
 		assert_eq!(buf, [1, 1, 7]);
 		let mut slice = buf.as_slice();
 		match crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
-			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
+			SubscribeResponse::Finish(end) => assert_eq!(end.group, 7),
 			other => panic!("expected End, got {other:?}"),
 		}
 	}
 
 	#[test]
-	fn subscribe_end_has_no_stream_count_on_lite07() {
-		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
-		let mut buf = Vec::new();
-		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
-			.unwrap();
-		assert_eq!(buf, [1, 1, 7]);
-		let mut slice = buf.as_slice();
-		match crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
-			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
-			other => panic!("expected End, got {other:?}"),
-		}
+	fn subscribe_end_carries_its_error_on_lite07() {
+		let encode = |error: Option<StreamError>| {
+			let resp = SubscribeResponse::Finish(SubscribeFinish { group: 7, error });
+			let mut buf = Vec::new();
+			resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+				.unwrap();
+			buf
+		};
+		let decode = |buf: &[u8]| {
+			let mut slice = buf;
+			match crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| SubscribeResponse::decode(r, v))
+				.unwrap()
+			{
+				SubscribeResponse::Finish(end) => (end.group, end.error),
+				other => panic!("expected End, got {other:?}"),
+			}
+		};
+		// Type, length, exclusive final group, then the error code plus one, 0 for a clean end.
+		let clean = encode(None);
+		assert_eq!(clean, [1, 2, 7, 0]);
+		assert_eq!(decode(&clean), (7, None));
+		let errored = encode(Some(StreamError::App(7)));
+		assert_eq!(errored, [1, 2, 7, 64 + 7 + 1]);
+		assert_eq!(decode(&errored), (7, Some(StreamError::App(7))));
+
+		// An older version has nowhere to carry it.
+		let resp = SubscribeResponse::Finish(SubscribeFinish {
+			group: 7,
+			error: Some(StreamError::App(7)),
+		});
+		assert!(resp.encode_bytes(Version::Lite06).is_err());
 	}
 
 	#[test]
@@ -944,11 +1415,13 @@ mod test {
 			start: 1,
 			end: 3,
 			error: 7,
+			update: 0,
 		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
-		assert_eq!(buf, [2, 3, 1, 3, 7]);
+		// The drop names the SUBSCRIBE's update, 0.
+		assert_eq!(buf, [2, 4, 1, 3, 7, 0]);
 		match crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, |r, v| {
 			SubscribeResponse::decode(r, v)
 		})
@@ -959,12 +1432,66 @@ mod test {
 		}
 	}
 
+	/// A drop names the update it was given up under on lite-07; earlier versions carry none.
+	#[test]
+	fn a_drop_names_its_update_on_lite07() {
+		let msg = SubscribeDrop {
+			start: 4,
+			end: 4,
+			error: 0x34,
+			update: 2,
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(buf.as_ref(), [4, 4, 4, 0x34, 2]);
+		let (decoded, _) = SubscribeDrop::decode_slice(&buf, Version::Lite07).unwrap();
+		assert_eq!(decoded, msg);
+		let msg = SubscribeDrop { error: 0, ..msg };
+		let buf = msg.encode_bytes(Version::Lite06).unwrap();
+		assert_eq!(buf.as_ref(), [3, 4, 4, 0]);
+		let (decoded, _) = SubscribeDrop::decode_slice(&buf, Version::Lite06).unwrap();
+		assert_eq!(decoded.update, 0);
+	}
+
+	/// SUBSCRIBE_SKIP is type 3 on lite-07 and unknown before it.
+	#[test]
+	fn subscribe_skip_is_lite07_only() {
+		let resp = SubscribeResponse::Skip(SubscribeSkip { start: 1, end: 3 });
+		let buf = resp.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(buf.as_ref(), [3, 2, 1, 3]);
+		match SubscribeResponse::decode_slice(&buf, Version::Lite07).unwrap().0 {
+			SubscribeResponse::Skip(skip) => assert_eq!(skip, SubscribeSkip { start: 1, end: 3 }),
+			other => panic!("expected Skip, got {other:?}"),
+		}
+		assert!(matches!(
+			SubscribeSkip::decode_slice(&[2, 3, 1], Version::Lite07),
+			Err(DecodeError::InvalidValue)
+		));
+		assert!(resp.encode_bytes(Version::Lite06).is_err());
+		assert!(matches!(
+			SubscribeResponse::decode_slice(&buf, Version::Lite06),
+			Err(DecodeError::InvalidMessage(3))
+		));
+	}
+
+	/// SUBSCRIBE and SUBSCRIBE_UPDATE carry their update number on lite-07 alone.
+	#[test]
+	fn update_number_roundtrips_only_on_lite07() {
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut msg = subscribe_sample();
+			msg.update = 5;
+			let buf = encode(&msg, version).unwrap();
+			let decoded = crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg).unwrap();
+			assert_eq!(decoded.update, if version.has_skip() { 5 } else { 0 });
+		}
+	}
+
 	#[test]
 	fn subscribe_drop_is_type_2_on_lite05() {
 		let resp = SubscribeResponse::Drop(SubscribeDrop {
 			start: 1,
 			end: 3,
 			error: 0,
+			update: 0,
 		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
@@ -985,6 +1512,7 @@ mod test {
 			start: 1,
 			end: 3,
 			error: 0,
+			update: 0,
 		});
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite04.into()), Version::Lite04)
@@ -1001,17 +1529,20 @@ mod test {
 	fn subscribe_sample() -> Subscribe<'static> {
 		Subscribe {
 			order: crate::track::Order::Descending,
-			epoch: None,
+			instance: None,
+			node: 0,
 			id: 1,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 			priority: 3,
 			max_delay: std::time::Duration::from_millis(250),
+			min_delay: None,
 			// Group 7 from frame 4, through frame 2 of group 9.
 			ranges: vec![Range {
 				start: absolute(7, 4),
 				end: absolute(9, 3),
 			}],
+			update: 0,
 		}
 	}
 
@@ -1028,6 +1559,16 @@ mod test {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)?;
 		Ok(buf)
+	}
+
+	/// Only lite-07 names the origin node; older versions decode as letting the
+	/// publisher select.
+	#[test]
+	fn node_roundtrips_only_on_lite07() {
+		let mut msg = subscribe_sample();
+		msg.node = 0x7a3f;
+		assert_eq!(roundtrip(&msg, Version::Lite07).node, 0x7a3f);
+		assert_eq!(roundtrip(&msg, Version::Lite06).node, 0);
 	}
 
 	/// Lite-06 carries one range's frame bounds; an inclusive `Frame End` on the wire is the
@@ -1183,17 +1724,150 @@ mod test {
 		];
 		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
 
+		// An update from the oldest group to the same ranges adds every one of them.
+		let mut sent = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
 		let update = SubscribeUpdate {
 			wanted_group: None,
 			priority: 3,
 			max_delay: std::time::Duration::from_millis(250),
-			ranges: msg.ranges.clone(),
+			min_delay: None,
+			ranges: sent.edit(&msg.ranges).unwrap(),
 			order: crate::track::Order::Ascending,
+			update: 0,
 		};
 		let buf = update.encode_bytes(Version::Lite07).unwrap();
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
 			.unwrap();
-		assert_eq!(got.ranges, msg.ranges);
+		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let resolved: Vec<_> = live
+			.apply(got.ranges)
+			.unwrap()
+			.into_iter()
+			.map(|(_, range)| range)
+			.collect();
+		assert_eq!(resolved, msg.ranges);
+	}
+
+	/// An update sends only the ranges that changed, and the publisher resolves the same list,
+	/// with the same Range IDs, as the subscriber holds.
+	#[test]
+	fn lite07_updates_edit_only_the_changed_ranges() {
+		let version = Version::Lite07;
+		let (a, b, c) = (
+			Range {
+				start: absolute(1, 0),
+				end: absolute(5, 0),
+			},
+			Range {
+				start: Some(Anchor::Relative(3)),
+				end: None,
+			},
+			Range {
+				start: Some(Anchor::Time(9_000)),
+				end: None,
+			},
+		);
+		let mut sent = LiveRanges::new(version, &[a, b]);
+		let mut live = LiveRanges::new(version, &[a, b]);
+		let mut step = |ranges: &[Range], expected: RangeEdit| {
+			let edit = sent.edit(ranges).unwrap();
+			assert_eq!(edit, expected);
+			let update = SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay: std::time::Duration::ZERO,
+				min_delay: None,
+				ranges: edit,
+				order: crate::track::Order::Descending,
+				update: 0,
+			};
+			let buf = update.encode_bytes(version).unwrap();
+			let got =
+				crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v)).unwrap();
+			assert_eq!(live.apply(got.ranges).unwrap(), sent.numbered());
+		};
+
+		let edit = |remove: &[u64], add: &[Range]| RangeEdit::Edit {
+			remove: remove.to_vec(),
+			add: add.to_vec(),
+		};
+		step(&[b, a], edit(&[], &[]));
+		step(&[a, c], edit(&[1], &[c]));
+		step(&[c, c, a], edit(&[], &[c]));
+		step(&[b], edit(&[0, 2, 3], &[b]));
+		assert_eq!(live.numbered(), [(4, b)]);
+		assert!(
+			live.initial(1) && !live.initial(2),
+			"SUBSCRIBE_START reports only the SUBSCRIBE's"
+		);
+	}
+
+	/// An edit naming a Range ID never assigned or already retired, one leaving nothing
+	/// live, or one adding more than a SUBSCRIBE carries, is refused.
+	#[test]
+	fn lite07_refuses_edits_it_cannot_apply() {
+		let version = Version::Lite07;
+		let edit = |remove: Vec<u64>, add: Vec<Range>| RangeEdit::Edit { remove, add };
+		let fresh = || LiveRanges::new(version, &[Range::OLDEST]);
+		assert!(
+			fresh().apply(edit(vec![1], vec![Range::OLDEST])).is_err(),
+			"never assigned"
+		);
+		assert!(
+			fresh().apply(edit(vec![0, 0], vec![Range::OLDEST])).is_err(),
+			"retired twice"
+		);
+		assert!(fresh().apply(edit(vec![0], vec![])).is_err(), "nothing left");
+		assert!(
+			fresh().apply(RangeEdit::Replace(vec![Range::OLDEST])).is_err(),
+			"not on lite-07"
+		);
+
+		let mut live = fresh();
+		let one = Range {
+			start: absolute(1 << 40, 1 << 40),
+			end: absolute(1 << 41, 1 << 40),
+		};
+		// Each update fits in a message, but together they would not fit in a SUBSCRIBE.
+		let mut refused = false;
+		for _ in 0..(super::super::message::MAX_MESSAGE_SIZE / 16) {
+			if live.apply(edit(vec![], vec![one; 8])).is_err() {
+				refused = true;
+				break;
+			}
+		}
+		assert!(refused, "the live ranges are held to one SUBSCRIBE");
+	}
+
+	/// SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it.
+	#[test]
+	fn subscribe_started_is_type_4_on_lite07() {
+		for start in [None, Some(0), Some(7)] {
+			let started = SubscribeStarted { id: 4, start };
+			let buf = SubscribeResponse::Started(started.clone())
+				.encode_bytes(Version::Lite07)
+				.unwrap();
+			assert_eq!(buf[0], 4);
+			let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| {
+				SubscribeResponse::decode(r, v)
+			})
+			.unwrap();
+			assert!(matches!(got, SubscribeResponse::Started(got) if got == started));
+		}
+		let started = SubscribeResponse::Started(SubscribeStarted { id: 0, start: None });
+		assert!(started.encode_bytes(Version::Lite06).is_err());
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, Version::Lite06.into());
+		w.varint(4).unwrap();
+		SubscribeStarted { id: 0, start: None }
+			.encode(&mut w, Version::Lite07)
+			.unwrap();
+		assert!(
+			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite06, |r, v| SubscribeResponse::decode(
+				r, v
+			))
+			.is_err()
+		);
 	}
 
 	/// A subscription asking for nothing is refused both ways, and an unknown anchor type
@@ -1207,9 +1881,9 @@ mod test {
 
 		msg.ranges = vec![Range::OLDEST];
 		let mut buf = encode(&msg, version).unwrap();
-		// The list is last: a count of one, then two anchors of type 0.
-		let at = buf.len() - 3;
-		assert_eq!(&buf[at..], [1, 0, 0]);
+		// The list is last but for the update number: a count of one, then two anchors of type 0.
+		let at = buf.len() - 4;
+		assert_eq!(&buf[at..], [1, 0, 0, 0]);
 		buf[at] = 0;
 		buf.truncate(at + 1);
 		assert!(matches!(
@@ -1218,7 +1892,7 @@ mod test {
 		));
 
 		let mut buf = encode(&msg, version).unwrap();
-		let last = buf.len() - 1;
+		let last = buf.len() - 2;
 		buf[last] = 4;
 		assert!(matches!(
 			crate::coding::decode_from(&mut buf.as_slice(), version, Subscribe::decode_msg),
@@ -1281,13 +1955,49 @@ mod test {
 					wanted_group: wanted,
 					priority: 0,
 					max_delay: std::time::Duration::ZERO,
-					ranges: vec![Range::OLDEST],
+					min_delay: None,
+					ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
 					order: crate::track::Order::Descending,
+					update: 0,
 				};
 				let buf = update.encode_bytes(version).unwrap();
 				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
 					.unwrap();
 				assert_eq!(got.wanted_group, if version.has_refresh() { wanted } else { None });
+			}
+		}
+	}
+
+	/// Lite-07 carries `Subscriber Min Age` on SUBSCRIBE and SUBSCRIBE_UPDATE, keeping a stated
+	/// zero apart from not stated; an earlier wire drops it, so it decodes as not stated.
+	#[test]
+	fn min_delay_roundtrips_only_on_lite07() {
+		let stated = [
+			None,
+			Some(std::time::Duration::ZERO),
+			Some(std::time::Duration::from_millis(250)),
+		];
+		for version in [Version::Lite03, Version::Lite06, Version::Lite07] {
+			for min_delay in stated {
+				let expected = if version.has_min_delay() { min_delay } else { None };
+				let mut msg = subscribe_sample();
+				msg.min_delay = min_delay;
+				msg.ranges = vec![Range::OLDEST];
+				assert_eq!(roundtrip(&msg, version).min_delay, expected, "{version:?}");
+
+				let update = SubscribeUpdate {
+					wanted_group: None,
+					priority: 0,
+					max_delay: std::time::Duration::ZERO,
+					min_delay,
+					ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
+					order: crate::track::Order::Descending,
+					update: 0,
+				};
+				let buf = update.encode_bytes(version).unwrap();
+				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
+					.unwrap();
+				assert_eq!(got.min_delay, expected, "{version:?}");
 			}
 		}
 	}
@@ -1308,8 +2018,10 @@ mod test {
 				wanted_group: None,
 				priority: 3,
 				max_delay: std::time::Duration::from_millis(250),
-				ranges: vec![Range::OLDEST],
+				min_delay: None,
+				ranges: LiveRanges::new(version, &[Range::OLDEST]).unchanged(),
 				order,
+				update: 0,
 			};
 			let mut buf = Vec::new();
 			update

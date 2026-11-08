@@ -12,7 +12,6 @@
 
 #![warn(missing_docs)]
 
-pub mod acme;
 pub mod auth;
 pub mod cache;
 /// Joining other relays into a cluster that shares one origin.
@@ -39,7 +38,7 @@ pub mod stun;
 #[cfg(feature = "test-support")]
 mod test_support;
 #[cfg(all(target_os = "linux", feature = "_uring"))]
-pub mod uring;
+pub(crate) mod uring;
 /// The HTTP/HTTPS server: health, certificate fingerprint, announcements, fetch, and WebSocket sessions.
 pub mod web;
 #[cfg(feature = "websocket")]

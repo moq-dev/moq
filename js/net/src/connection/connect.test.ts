@@ -1,10 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep } from "@moq/clock";
+import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
+import { hostTime } from "@moq/clock/test";
+import Qmux, { selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
 import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as Lite } from "../lite/version.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, manual } from "../mock.ts";
 import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
@@ -20,7 +22,7 @@ const SECRET = "super-secret-jwt";
 const authUrl = new URL(`https://example.com/test?jwt=${SECRET}#frag`);
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 const CONSOLE_METHODS = ["debug", "info", "log", "warn", "error"] as const;
@@ -117,6 +119,180 @@ test("a raw QUIC URL dials WebTransport over https", async () => {
 	expect(dialed).toBe("https://example.com:4443/anon?jwt=x");
 });
 
+// Serve `/certificate.sha256` from `respond`, recording when a request's client goes away.
+function fingerprintServer(respond: (request: Request) => Response | Promise<Response>) {
+	let requests = 0;
+	let aborted = 0;
+	const server = Bun.serve({
+		port: 0,
+		fetch(request) {
+			requests++;
+			request.signal.addEventListener("abort", () => aborted++, { once: true });
+			return respond(request);
+		},
+	});
+	return {
+		url: new URL(`http://127.0.0.1:${server.port}/anon`),
+		requests: () => requests,
+		aborted: () => aborted,
+		stop: () => server.stop(true),
+	};
+}
+
+// Wait, bounded, for `ready` to hold; a real socket needs more than a microtask turn.
+async function until(ready: () => boolean) {
+	for (let i = 0; i < 200 && !ready(); i++) await sleep(Nano.fromMilli(Milli(5)));
+}
+
+test("an http:// URL pins the fetched fingerprint and dials https", async () => {
+	const fingerprint = "ab".repeat(32);
+	const server = fingerprintServer(() => new Response(fingerprint));
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let dialed: string | undefined;
+	let hashes: WebTransportHash[] | undefined;
+
+	function StubWebTransport(this: unknown, target: string | URL, options: WebTransportOptions) {
+		dialed = target.toString();
+		hashes = options.serverCertificateHashes;
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+
+	try {
+		const connection = await connect(server.url, { websocket: { enabled: false } });
+		connection.abort();
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+
+	expect(dialed).toBe(`https://127.0.0.1:${server.url.port}/anon`);
+	expect(hashes?.map((hash) => [hash.algorithm, [...(hash.value as Uint8Array)]])).toEqual([
+		["sha-256", Array(32).fill(0xab)],
+	]);
+});
+
+test("a fingerprint fetch slower than the hedge starts no second dial", async () => {
+	using clock = manual();
+	// Hold the fingerprint until the clock has passed the 500 ms hedge: the hedge arms only once
+	// the fingerprint resolves, so a slow fetch neither fires it nor fetches or dials twice.
+	const requested = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const server = fingerprintServer(async () => {
+		requested.resolve();
+		await release.promise;
+		return new Response("ab".repeat(32));
+	});
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let dials = 0;
+	function StubWebTransport(this: unknown) {
+		dials++;
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+	const captured = captureConsole();
+
+	try {
+		const connecting = connect(server.url, { websocket: { enabled: false } });
+		await requested.promise;
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
+		// The hedge logs inside its timer callback, so this catches it as deterministically as the
+		// clock; the dial/request counts below race connect() cancelling the hedge once one dial wins.
+		expect(captured.lines.filter((line) => line.includes("dialing a second"))).toEqual([]);
+		release.resolve();
+		const connection = await connecting;
+		connection.abort();
+	} finally {
+		captured.restore();
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+
+	expect(dials).toBe(1);
+	expect(server.requests()).toBe(1);
+});
+
+test("an http:// fingerprint longer than a SHA-256 is refused without reading the rest", async () => {
+	// A chunked body with no Content-Length that never ends: only a bounded read can refuse it.
+	const chunk = new TextEncoder().encode("a".repeat(1024));
+	const server = fingerprintServer(
+		() =>
+			new Response(
+				new ReadableStream({
+					pull(controller) {
+						controller.enqueue(chunk);
+					},
+				}),
+			),
+	);
+	const original = globalThis.WebTransport;
+	let dials = 0;
+	function CountingWebTransport(this: unknown): never {
+		dials++;
+		throw new Error("unexpected dial");
+	}
+	globalThis.WebTransport = CountingWebTransport as unknown as typeof WebTransport;
+
+	try {
+		await expect(connect(server.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint is longer than 64 hex characters",
+		);
+		expect(dials).toBe(0);
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+});
+
+test("an http:// fingerprint of the wrong length or status is refused", async () => {
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = function Unused(this: unknown): never {
+		throw new Error("unexpected dial");
+	} as unknown as typeof WebTransport;
+
+	const short = fingerprintServer(() => new Response("ab".repeat(31)));
+	const missing = fingerprintServer(() => new Response("no certificate\n", { status: 404 }));
+	try {
+		await expect(connect(short.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint is 62 characters, expected 64 hex characters",
+		);
+		await expect(connect(missing.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint fetch failed: HTTP 404",
+		);
+	} finally {
+		globalThis.WebTransport = original;
+		short.stop();
+		missing.stop();
+	}
+});
+
+test("aborting connect aborts a pending http:// fingerprint fetch", async () => {
+	hostTime(); // a real HTTP server
+	// Answer nothing, so only the abort ends the request.
+	const server = fingerprintServer(() => new Promise<Response>(() => {}));
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = function Unused(this: unknown): never {
+		throw new Error("unexpected dial");
+	} as unknown as typeof WebTransport;
+
+	const controller = new AbortController();
+	try {
+		const pending = connect(server.url, { websocket: { enabled: false }, signal: controller.signal });
+		await until(() => server.requests() > 0);
+		expect(server.requests()).toBe(1);
+
+		controller.abort(new Error("stop"));
+		await expect(pending).rejects.toThrow("stop");
+		await until(() => server.aborted() > 0);
+		expect(server.aborted()).toBe(1);
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+});
+
 test("a failed connect names why the transport failed", async () => {
 	const original = globalThis.WebTransport;
 	function FailingWebTransport(this: unknown): never {
@@ -144,9 +320,9 @@ test("connect logs the relay URL without its credentials", async () => {
 		restoreTransport();
 	}
 
-	// The diagnostics must still identify the relay, just without the query.
+	// The diagnostics must still identify the relay, just without the path or query.
 	expect(captured.lines.length).toBeGreaterThan(0);
-	expect(captured.lines.every((line) => line.includes("https://example.com/test"))).toBe(true);
+	expect(captured.lines.every((line) => line.includes("https://example.com:443"))).toBe(true);
 
 	for (const line of captured.lines) {
 		expect(line).not.toContain(SECRET);
@@ -420,17 +596,37 @@ for (const protocol of ["", undefined]) {
 }
 
 test("SETUP refuses a version the client did not name", async () => {
+	using clock = manual();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
-		const server = accept({ url, transport: pair.server, version: Lite.DRAFT_05 }).catch(() => undefined);
-		await expect(
-			connect(url, { versions: ["moq-lite-07-wip", "moq-lite-06"], websocket: { enabled: false } }),
-		).rejects.toThrow("unsupported server version: 0xff0dad05");
-		(await server)?.abort();
+		const connecting = connect(url, {
+			versions: ["moq-lite-07-wip", "moq-lite-06"],
+			websocket: { enabled: false },
+		});
+		// Handled now, since the refusal can land while the write below yields.
+		connecting.catch(() => {});
+		const stream = await Stream.accept(pair.server, Lite.DRAFT_02);
+		if (!stream) throw new Error("no SETUP stream");
+		await ClientSetup.decode(stream.reader);
+		await new ServerSetup(Lite.DRAFT_05).encode(stream.writer);
+		// The refusal waits out the grace a peer's close code gets. Driven outside `expect`, as
+		// `Manual.drive` asks.
+		await clock.drive(connecting.catch(() => {}));
+		await expect(connecting).rejects.toThrow("unsupported server version: 0xff0dad05");
 	} finally {
 		restore();
 	}
+});
+
+test("a server pinned to a version the client did not offer refuses the SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const accepting = accept({ url, transport: pair.server, version: Lite.DRAFT_05 });
+	// Handled now, since the refusal can land while the write below yields.
+	accepting.catch(() => {});
+	const stream = await Stream.open(pair.client, { version: Lite.DRAFT_02 });
+	await new ClientSetup([Lite.DRAFT_07, Lite.DRAFT_06]).encode(stream.writer);
+	await expect(accepting).rejects.toThrow("no common version found");
 });
 
 test("a peer without an ALPN is refused when no named version negotiates in SETUP", async () => {
@@ -449,6 +645,7 @@ test("a peer without an ALPN is refused when no named version negotiates in SETU
 const IETF_VERSIONS = Object.values(Ietf.Version).map((v) => [Ietf.versionName(v), v] as const);
 
 test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async (_, version) => {
+	using clock = manual();
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
@@ -459,6 +656,8 @@ test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async
 		if (!stream) throw new Error("no SETUP stream");
 		await ClientSetup.decode(stream.reader);
 		await new ServerSetup(version).encode(stream.writer);
+		// The refusal waits out the grace a peer's close code gets.
+		await clock.drive(connecting.catch(() => {}));
 		await expect(connecting).rejects.toThrow(`unsupported server version: 0x${version.toString(16)}`);
 	} finally {
 		restore();
@@ -512,6 +711,144 @@ test("the WebSocket fallback offers the same versions", async () => {
 	const asked = await websocketOffer({ versions: ["moq-lite-07-wip", "moq-lite-06"] });
 	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);
 	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
+});
+
+// Read wire parameters without making qmux's private codec part of net's TS project.
+const { decodeRecord } = require("../../../qmux/src/frame.ts");
+
+interface ReceiveWindows {
+	initialMaxData: bigint;
+	initialMaxStreamDataBidiLocal: bigint;
+	initialMaxStreamDataBidiRemote: bigint;
+	initialMaxStreamDataUni: bigint;
+}
+
+// How many streams the WebSocket fallback lets a server open in each direction: a qmux
+// server accepts the dial and opens streams until the client's limit refuses one.
+async function websocketStreamLimits(props: Omit<ConnectProps, "url">) {
+	const original = globalThis.WebTransport;
+	// No WebTransport, so the WebSocket attempt goes at once.
+	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
+	const accepted = Promise.withResolvers<Qmux>();
+	const parameters = Promise.withResolvers<ReceiveWindows>();
+	// Bun's server socket, shaped as the `WebSocketLike` that `Qmux.accept` adopts.
+	let adopted: WebSocketLike | undefined;
+	const server = Bun.serve<{ protocol: string }>({
+		port: 0,
+		fetch(request, server) {
+			const protocol = selectSubprotocol(request.headers.get("sec-websocket-protocol"), {
+				protocols: [ALPN_06],
+				versions: { [ALPN_06]: null },
+			});
+			if (!protocol) return new Response("no protocol", { status: 400 });
+			const headers = { "sec-websocket-protocol": protocol };
+			if (server.upgrade(request, { headers, data: { protocol } })) return;
+			return new Response("no upgrade", { status: 400 });
+		},
+		websocket: {
+			open(socket) {
+				socket.binaryType = "arraybuffer";
+				adopted = {
+					binaryType: "arraybuffer",
+					get bufferedAmount() {
+						return socket.getBufferedAmount();
+					},
+					get readyState() {
+						return socket.readyState;
+					},
+					protocol: "",
+					extensions: "",
+					send: (data) => void socket.send(data as Uint8Array),
+					close: (code, reason) => socket.close(code, reason),
+					onopen: null,
+					onmessage: null,
+					onerror: null,
+					onclose: null,
+				};
+				accepted.resolve(Qmux.accept(adopted, { protocol: socket.data.protocol }));
+			},
+			message(_socket, data) {
+				if (typeof data === "string") throw new Error("expected binary QMux record");
+				for (const frame of decodeRecord(new Uint8Array(data))) {
+					if (frame.type === "transport_parameters") parameters.resolve(frame.params);
+				}
+				adopted?.onmessage?.({ data });
+			},
+			close(_socket, code, reason) {
+				adopted?.onclose?.({ code, reason });
+			},
+		},
+	});
+	const controller = new AbortController();
+	try {
+		// SETUP goes unanswered, so the attempt stays open until aborted.
+		const attempt = connect(new URL(`http://127.0.0.1:${server.port}/`), {
+			signal: controller.signal,
+			versions: ["moq-lite-06"],
+			...props,
+		}).catch(() => undefined);
+		const session = await accepted.promise;
+		const count = async (open: () => Promise<unknown>) => {
+			let opened = 0;
+			try {
+				for (; ; opened++) await open();
+			} catch {
+				return opened;
+			}
+		};
+		const now = { waitUntilAvailable: false };
+		const limits = {
+			bidi: await count(() => session.createBidirectionalStream(now)),
+			uni: await count(() => session.createUnidirectionalStream(now)),
+		};
+		controller.abort();
+		await attempt;
+		session.close();
+		return { ...limits, params: await parameters.promise };
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop(true);
+	}
+}
+
+test("the WebSocket fallback grants stream limits and receive windows", async () => {
+	const defaults = await websocketStreamLimits({});
+	expect(defaults).toMatchObject({
+		bidi: 10_000,
+		uni: 10_000,
+		params: {
+			initialMaxData: 4_194_304n,
+			initialMaxStreamDataBidiLocal: 1_048_576n,
+			initialMaxStreamDataBidiRemote: 1_048_576n,
+			initialMaxStreamDataUni: 1_048_576n,
+		},
+	});
+	expect(
+		await websocketStreamLimits({
+			websocket: {
+				maxStreams: 3,
+				receiveWindow: 65_537,
+				streamReceiveWindow: 16_385,
+			},
+		}),
+	).toMatchObject({
+		bidi: 3,
+		uni: 3,
+		params: {
+			initialMaxData: 65_537n,
+			initialMaxStreamDataBidiLocal: 16_385n,
+			initialMaxStreamDataBidiRemote: 16_385n,
+			initialMaxStreamDataUni: 16_385n,
+		},
+	});
+});
+
+test("WebSocket limits must be positive safe integers", async () => {
+	for (const key of ["maxStreams", "receiveWindow", "streamReceiveWindow"] as const) {
+		for (const value of [0, -1, 1.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+			await expect(connect(url, { websocket: { [key]: value } })).rejects.toThrow(RangeError);
+		}
+	}
 });
 
 // A WebTransport whose handshake nothing ever answers, as a dial to a dead target is.
@@ -792,12 +1129,7 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = sleep(Nano.fromMilli(Milli(100))).then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = sleep(Nano.fromMilli(Milli(100))).then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -806,7 +1138,8 @@ test("when the WebSocket wins, every WebTransport dial is closed", async () => {
 	};
 	const controller = new AbortController();
 	try {
-		const pending = connect(new URL("https://example.com/websocket-wins"), { signal: controller.signal });
+		// Its own host: a WebSocket win drops WebTransport's head start for that host and port afterwards.
+		const pending = connect(new URL("https://websocket-wins.example.com/"), { signal: controller.signal });
 		await clock.advance(Nano.fromMilli(Milli(700)));
 		expect(plan.dials.map((dial) => dial.at)).toEqual([0, 500]);
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
@@ -833,12 +1166,7 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	const originalStream = native.WebSocketStream;
 	native.WebSocketStream = class {
 		url: string;
-		opened = opened.then(() => ({
-			readable: new ReadableStream(),
-			writable: new WritableStream(),
-			protocol: "qmux-01",
-			extensions: "",
-		}));
+		opened = opened.then(qmuxStreams);
 		closed = new Promise(() => {});
 		constructor(url: string) {
 			this.url = url;
@@ -849,8 +1177,8 @@ test("when WebTransport and WebSocket open in the same turn, the one not chosen 
 	};
 	const controller = new AbortController();
 	try {
-		// Its own URL: a WebSocket win drops WebTransport's head start for that URL afterwards.
-		const pending = connect(new URL("https://example.com/same-turn"), {
+		// Its own host: a WebSocket win drops WebTransport's head start for that host and port afterwards.
+		const pending = connect(new URL("https://same-turn.example.com/"), {
 			websocket: { delay: Milli(0) },
 			signal: controller.signal,
 		});
@@ -957,10 +1285,24 @@ test("an invalid timeout throws before touching the caller's signal", async () =
 	await expect(connect(url, { timeout: -1 as Milli })).rejects.toThrow("invalid time: -1");
 });
 
+/** An opened WebSocketStream whose QMux server sent only its TRANSPORT_PARAMETERS (all
+ *  defaults), which a session's `ready` waits for. */
+function qmuxStreams() {
+	return {
+		readable: new ReadableStream({
+			start: (controller) =>
+				controller.enqueue(new Uint8Array([0xff, 0x51, 0x53, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0])),
+		}),
+		writable: new WritableStream(),
+		protocol: "qmux-01",
+		extensions: "",
+	};
+}
+
 type WebSocketDial = "hang" | "open" | { failAfter: Milli } | { openAfter: Milli };
 
-// Their own URL: a WebSocket that wins drops WebTransport's head start for its URL afterwards.
-const websocketUrl = new URL("https://example.com/websocket-only");
+// Their own host: a WebSocket that wins drops WebTransport's head start for its host and port afterwards.
+const websocketUrl = new URL("https://websocket-only.example.com/");
 
 // Stub a native WebSocketStream so each dial behaves as `plan` says, recording when it was
 // dialed (on the Manual clock) and how often it was closed. WebTransport is removed, as in
@@ -971,12 +1313,7 @@ function webSocketPlan(clock: Manual, plan: (dial: number) => WebSocketDial) {
 	const originalTransport = native.WebTransport;
 	native.WebTransport = undefined;
 	const dials: { at: number; closes: number }[] = [];
-	const streams = () => ({
-		readable: new ReadableStream(),
-		writable: new WritableStream(),
-		protocol: "qmux-01",
-		extensions: "",
-	});
+	const streams = qmuxStreams;
 	native.WebSocketStream = class {
 		url: string;
 		opened: Promise<unknown>;
@@ -1101,6 +1438,82 @@ test("with the default timeout, a silent WebSocket is redialed once and the atte
 		expect(plan.dials.map((dial) => dial.closes)).toEqual([1, 1]);
 	} finally {
 		plan.restore();
+		installed.close();
+	}
+});
+
+// One race on the Manual clock: WebTransport dials as `webtransport` says and the WebSocket as
+// `websocket` says. Returns when each WebSocket dial started, relative to the connect.
+async function raceOnce(
+	clock: Manual,
+	target: URL,
+	webtransport: Dial,
+	websocket: WebSocketDial,
+	props: Omit<ConnectProps, "url"> = {},
+): Promise<number[]> {
+	// `webSocketPlan` removes WebTransport; `webTransportPlan` puts a stub back over it.
+	const sockets = webSocketPlan(clock, () => websocket);
+	const transports = webTransportPlan(clock, () => webtransport);
+	const start = Nano.toMilli(Nano(clock.now()));
+	const controller = new AbortController();
+	try {
+		const pending = connect(target, { signal: controller.signal, ...props });
+		await clock.advance(Nano.fromMilli(Milli(600)));
+		// A WebSocket winner is still in SETUP, which nothing answers; a WebTransport one connected.
+		controller.abort();
+		const connection = await pending.catch(() => undefined);
+		connection?.abort();
+		return sockets.dials.map((dial) => dial.at - start);
+	} finally {
+		transports.restore();
+		sockets.restore();
+	}
+}
+
+// Each test below uses its own hosts, since the preference outlives the test.
+test("a WebSocket win skips the head start for any path or query on that host and port", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const at = (path: string) => new URL(path, "https://preferred.example.com");
+	try {
+		expect(await raceOnce(clock, at("/a?jwt=one"), "hang", "open")).toEqual([500]);
+		// Another path and a rotated token reach the same server.
+		expect(await raceOnce(clock, at("/b?jwt=two"), "hang", "open")).toEqual([0]);
+		expect(await raceOnce(clock, at("https://preferred.example.com:443/c"), "hang", "open")).toEqual([0]);
+		// Another port is another server.
+		expect(await raceOnce(clock, at("https://preferred.example.com:4443/a"), "hang", "open")).toEqual([500]);
+	} finally {
+		installed.close();
+	}
+});
+
+test("the WebSocket preference is keyed by the server the fallback dials", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const websocket = { url: new URL("https://fallback.example.com/ws") };
+	try {
+		const primary = new URL("https://primary.example.com/");
+		expect(await raceOnce(clock, primary, "hang", "open", { websocket })).toEqual([500]);
+		// Another WebTransport server with the same fallback skips the head start.
+		const secondary = new URL("https://secondary.example.com/");
+		expect(await raceOnce(clock, secondary, "hang", "open", { websocket })).toEqual([0]);
+		// Without the fallback URL, the WebSocket dials the primary, which never lost a race.
+		expect(await raceOnce(clock, primary, "hang", "open")).toEqual([500]);
+	} finally {
+		installed.close();
+	}
+});
+
+test("a WebTransport win restores the head start", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const target = new URL("https://recovered.example.com/");
+	try {
+		expect(await raceOnce(clock, target, "hang", "open")).toEqual([500]);
+		// WebSocket won last, so it dials at once, but WebTransport opens first and wins.
+		expect(await raceOnce(clock, target, { openWhen: sleep(Nano.fromMilli(Milli(100))) }, "hang")).toEqual([0]);
+		expect(await raceOnce(clock, target, "hang", "open")).toEqual([500]);
+	} finally {
 		installed.close();
 	}
 });

@@ -102,6 +102,19 @@ harness_begin() {
     echo "run: $HARNESS_RUN"
 }
 
+# ── artifacts ───────────────────────────────────────────────────────────────
+
+# Keep a build artifact in this run before another build or collection can
+# unlink it. Dereference symlinks: ownership must not depend on the build cache.
+# DEST is relative to HARNESS_RUN; callers use that path for every later load.
+harness_stage() {
+    local dest="$HARNESS_RUN/$1" source="$2"
+    mkdir -p "$(dirname "$dest")" || return $?
+    # Nested compat cells retain their own names without copying the same large
+    # binary every time. A copy also supports run directories on another disk.
+    ln -L "$source" "$dest" 2>/dev/null || cp -L "$source" "$dest"
+}
+
 # ── endpoints ───────────────────────────────────────────────────────────────
 
 # Where port reservations live. Shared across worktrees on purpose: the point is
@@ -130,7 +143,7 @@ harness_valid_port() {
 # Reserve a port for this run, held until it exits, and set HARNESS_PORT.
 #
 # `harness_port <label> [wanted]`. With `wanted` that exact port is taken or the
-# call fails, which is what an explicit INTEROP_PORT/WASM_PORT asks for; without it
+# call fails, which is what an explicit INTEROP_PORT asks for; without it
 # the search walks up from HARNESS_PORT_BASE.
 #
 # The answer lands in a variable rather than on stdout because `$(harness_port)`

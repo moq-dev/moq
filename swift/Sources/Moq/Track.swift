@@ -34,11 +34,6 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         try await ffi.readFrame()
     }
 
-    /// The next best-effort datagram in arrival order. `nil` once the track ends.
-    public func recvDatagram() async throws -> Datagram? {
-        try await ffi.recvDatagram()
-    }
-
     /// The publisher-side properties learned during subscription.
     public func info() -> TrackInfo {
         ffi.info()
@@ -53,14 +48,6 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     /// Cancel all current and future reads.
     public func cancel() {
         ffi.cancel()
-    }
-
-    /// Datagrams in arrival order. Datagram delivery requires a datagram-capable
-    /// transport and wire version; there is no stream fallback.
-    public var datagrams: AsyncThrowingStream<Datagram, Swift.Error> {
-        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
-            try await ffi.recvDatagram()
-        }
     }
 
     /// Groups in arrival order, including out-of-sequence deliveries. The default
@@ -176,17 +163,20 @@ public final class TrackProducer: Sendable {
         GroupProducer(try ffi.createGroup(sequence: sequence))
     }
 
-    /// Write a single-frame group with a timestamp in microseconds.
-    public func writeFrame(_ payload: Data, timestampUs: UInt64? = nil) throws {
-        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
+    /// Declare that groups `start` up to the exclusive `end` will never be produced.
+    /// Readers move past them, and creating a group there then throws.
+    public func skipGroups(start: UInt64, end: UInt64) throws {
+        try ffi.skipGroups(start: start, end: end)
     }
 
-    /// Send a best-effort datagram and return its sequence number.
-    ///
-    /// `timestampUs` is the presentation timestamp in microseconds. Payloads are
-    /// capped at 1200 bytes. There is no stream fallback.
-    public func appendDatagram(_ payload: Data, timestampUs: UInt64? = nil) throws -> UInt64 {
-        try ffi.appendDatagram(frame: Frame(payload: payload, timestampUs: timestampUs))
+    /// Write a single-frame group with a presentation timestamp, or untimed when nil.
+    public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
+    }
+
+    /// The newest group written, at its newest frame, or `nil` before any.
+    public func largest() throws -> Position? {
+        try ffi.largest()
     }
 
     /// Abort the track with an application error code, failing active consumers.
@@ -224,9 +214,21 @@ public final class GroupProducer: Sendable {
         GroupConsumer(try ffi.consume())
     }
 
-    /// Write a frame with a timestamp in microseconds.
-    public func writeFrame(_ payload: Data, timestampUs: UInt64? = nil) throws {
-        try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
+    /// Wait until a frame of `size` bytes fits a window ahead of the fastest reader.
+    ///
+    /// Await it before each `writeFrame` so that reader paces the writer, as TCP
+    /// backpressure does, instead of the group shedding frames it has not taken, which
+    /// fails it with `Evicted`; slower readers are not waited on. It also waits until a reader holds the
+    /// group, and returns once the group is closed so the next write throws why. Throws
+    /// `Closed` after `abort`.
+    public func ready(size: UInt64) async throws {
+        try await ffi.ready(size: size)
+    }
+
+    /// Write a frame with a presentation timestamp, or untimed when nil. Never blocks:
+    /// without `ready`, a writer that outpaces its readers sheds the group's front instead.
+    public func writeFrame(_ payload: Data, timestamp: Timestamp? = nil) throws {
+        try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
     }
 
     /// Mark the group complete. No more frames can be written.

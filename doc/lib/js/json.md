@@ -13,7 +13,7 @@ are the catalog modes on the [hang](/concept/hang#data-tracks) page. Window is
 a third framing for a raw track: both ends opt into it, and a generic catalog
 reader will not pick it up.
 
-- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error. `next()` yields every state in order; `latest()` skips to the newest. Deltas ride one group until a joiner wants a fresh one: give the track a `refresh` ratio (8 is typical) and the producer restates the value in a new group. Without a ratio a group rolls only at its caps.
+- **Snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. A delta before any snapshot is an error. `next()` yields each state in order, skipping every group a newer one supersedes; `latest()` skips to the newest. Deltas ride one group until a joiner wants a fresh one: give the track a `refresh` ratio (8 is typical) and the producer restates the value in a new group. Without a ratio a group rolls only at its caps.
 - **Stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
 - **Window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
@@ -27,23 +27,24 @@ an untimed track (no `timescale`) takes none and reads back without one.
 ```ts
 import { Snapshot } from "@moq/json";
 
-// Hold each state back until the video playhead reaches it.
+// Schedule each state at its capture time.
 const consumer = new Snapshot.Consumer<Telemetry>({ track });
 for await (const { value, at } of consumer) {
     schedule(value, at);
 }
 ```
 
-`next()` buffers every state it has not yielded and skips a group once the
-subscription's `maxDelay` proves it stale. The budget counts media time and
-wall time, or wall time alone for an untimed track. The default of zero keeps
-only the newest group, so subscribe with a `maxDelay` covering how far the
-playhead trails the live edge. Use `latest()` to skip straight to the head.
+`next()` yields every buffered state of the group it is reading and skips a
+group once a newer one supersedes it: the consumer takes the track, a
+`Track.Consumer` such as `broadcast.track(name)`, and subscribes to it itself at
+a zero `delay.max`, so nothing can raise its budget. Use `latest()` to skip
+straight to the head, and `close()` to end the subscription.
 
-A stream rides one group, so the whole log shares `@moq/net`'s group budget:
-32 MiB of payload and 8192 records. An append that might not fit is refused
-before anything is written and leaves the log intact. Once the budget is spent,
-start a new track. Any other failed append aborts the track, so readers see
-the error rather than a log that looks complete.
+A stream rides one group with no record-count or cumulative byte limit. The
+group retains a 32 MiB tail; a reader that falls behind gets `Evicted` rather
+than a truncated log. Each record must still fit the 32 MiB whole-frame limit.
+An oversized record is refused before writing, so the log stays writable.
+Other failed appends abort the track so readers see the error instead of a
+log that looks complete.
 
 The Rust twin is [`moq-json`](/lib/rs/moq-json).

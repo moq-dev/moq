@@ -15,7 +15,7 @@ use std::thread::ThreadId;
 use bytes::Bytes;
 use moq_net::Timestamp;
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Config, Stream};
 use crate::{Error, Frame, I420, Size, Surface};
 
 pub(crate) const NAME: &str = "probe";
@@ -46,6 +46,10 @@ pub(crate) const BLOCKING_FLUSH_NAME: &str = "probe-blocking-flush";
 /// `CVPixelBuffer` on macOS and iOS), CPU pixels elsewhere.
 pub(crate) const NATIVE_NAME: &str = "probe-native";
 
+/// A test decoder standing in for hardware whose device answers that it cannot
+/// decode the stream, so it never opens.
+pub(crate) const REFUSING_NAME: &str = "probe-refusing";
+
 /// What happened to the codec, and where. `open` and `drop` are the pair that
 /// matters: the Windows backend opens a COM apartment in one and closes it in
 /// the other, so they have to land on the same thread.
@@ -55,6 +59,10 @@ static LOG: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 
 #[cfg(not(apple))]
 static FLUSH_ENTERED: AtomicBool = AtomicBool::new(false);
+
+/// Wakes [`flush_entered`] once [`FLUSH_ENTERED`] is set.
+#[cfg(not(apple))]
+static FLUSH_ENTERING: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[cfg(not(apple))]
 static FLUSH_RELEASED: AtomicBool = AtomicBool::new(false);
@@ -85,10 +93,17 @@ pub(crate) fn prepare_blocking_flush() {
 	FLUSH_RELEASED.store(false, Ordering::SeqCst);
 }
 
-/// Whether the blocking flush has started on the codec thread.
+/// Resolves once the blocking flush has started on the codec thread.
 #[cfg(not(apple))]
-pub(crate) fn flush_entered() -> bool {
-	FLUSH_ENTERED.load(Ordering::SeqCst)
+pub(crate) async fn flush_entered() {
+	loop {
+		let mut entering = std::pin::pin!(FLUSH_ENTERING.notified());
+		entering.as_mut().enable();
+		if FLUSH_ENTERED.load(Ordering::SeqCst) {
+			return;
+		}
+		entering.await;
+	}
 }
 
 /// Let the blocking flush finish so the codec thread can be joined.
@@ -136,24 +151,26 @@ pub(crate) struct Single;
 
 pub(crate) struct Native;
 
+pub(crate) struct Refusing;
+
 #[cfg(not(apple))]
 pub(crate) struct BlockingFlush;
 
 impl Probe {
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		record("open");
 		Ok(Box::new(Self))
 	}
 }
 
 impl Buffered {
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self(None)))
 	}
 }
 
 impl Immediate {
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self))
 	}
 }
@@ -176,7 +193,7 @@ impl Backend for Immediate {
 }
 
 impl Single {
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		if SINGLE_OPEN.swap(true, Ordering::SeqCst) {
 			return Err(anyhow::anyhow!("probe: out of decoder sessions").into());
 		}
@@ -205,7 +222,7 @@ impl Drop for Single {
 }
 
 impl Native {
-	pub(crate) fn open(_codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
 		*NATIVE_OPENED.lock().unwrap() = Some(config.clone());
 		Ok(Box::new(Self))
 	}
@@ -242,9 +259,18 @@ impl Backend for Native {
 	}
 }
 
+impl Refusing {
+	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Err(Error::UnsupportedCodec(format!(
+			"probe: this device cannot decode {}",
+			stream.codec.label()
+		)))
+	}
+}
+
 #[cfg(not(apple))]
 impl BlockingFlush {
-	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self))
 	}
 }
@@ -279,6 +305,7 @@ impl Backend for BlockingFlush {
 
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 		FLUSH_ENTERED.store(true, Ordering::SeqCst);
+		FLUSH_ENTERING.notify_waiters();
 		while !FLUSH_RELEASED.load(Ordering::SeqCst) {
 			std::thread::yield_now();
 		}

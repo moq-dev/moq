@@ -4,11 +4,11 @@
 
 use crate::support;
 
-use moq_net::{Error, Hop, Version, origin};
+use moq_net::{Error, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -21,17 +21,16 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 	connect_mock(options).await
 }
 
-/// `carries_epoch`: the wire carries the epoch, as lite-07 and moq-transport with the MoQ
-/// Epoch extension do.
-async fn acquisition(version: &str, carries_epoch: bool) {
+/// `carries_instance`: the wire carries the publisher's instance, as only lite-07 does.
+async fn acquisition(version: &str, carries_instance: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
 	let subscriber = origin(2);
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	let _old = link(version, &publisher, &subscriber, 100).await;
 	let remote = subscriber
 		.consume()
@@ -39,10 +38,11 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
-	let mut announced = subscriber.consume().announced();
+	let mut announced = subscriber.consume().routes();
 	let old_cost = match announced.next().await {
-		Some(moq_net::announce::Event::Start(announce)) => announce.route.cost,
+		Some(moq_net::origin::RouteEvent::Start(announce)) => announce.route.cost(),
 		other => panic!("expected the first route, got {other:?}"),
 	};
 	let mut pending = Box::pin(remote.track("catalog.json").unwrap().subscribe(None));
@@ -53,10 +53,11 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	// The publisher is still available and the old session remains alive. Holding
 	// TRACK_INFO makes the replacement happen during acquisition without sleeps.
 	let _new = link(version, &publisher, &subscriber, 1).await;
-	// An epochless replacement restarts the advertisement; a matching epoch only updates it.
+	// A replacement under a minted instance restarts the advertisement; a carried one only
+	// updates it.
 	let new_cost = match announced.next().await {
-		Some(moq_net::announce::Event::Update(announce)) if carries_epoch => announce.route.cost,
-		Some(moq_net::announce::Event::Restart(announce)) if !carries_epoch => announce.route.cost,
+		Some(moq_net::origin::RouteEvent::Update(announce)) if carries_instance => announce.route.cost(),
+		Some(moq_net::origin::RouteEvent::Restart(announce)) if !carries_instance => announce.route.cost(),
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");
@@ -65,27 +66,27 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	group.write_frame(None, b"catalog".to_vec()).unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
-	if carries_epoch {
-		let mut subscription = result.expect("same epoch must acquire");
+	if carries_instance {
+		let mut subscription = result.expect("the same instance must acquire");
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"catalog");
 	} else {
 		assert!(
 			matches!(result, Err(Error::Unroutable)),
-			"epochless replacement: {:?}",
+			"minted replacement: {:?}",
 			result.err()
 		);
 	}
 }
 
-#[moq_clock::test]
-async fn epochless_replacement_refuses_pending_catalog() {
+#[kio::test]
+async fn minted_replacement_refuses_pending_catalog() {
 	acquisition("moq-lite-06", false).await;
+	acquisition("moq-transport-18", false).await;
+	acquisition("moq-transport-22", false).await;
 }
 
-#[moq_clock::test]
-async fn same_epoch_replacement_acquires_pending_catalog() {
+#[kio::test]
+async fn carried_replacement_acquires_pending_catalog() {
 	acquisition("moq-lite-07-wip", true).await;
-	acquisition("moq-transport-18", true).await;
-	acquisition("moq-transport-22", true).await;
 }

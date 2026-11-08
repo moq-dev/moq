@@ -1,21 +1,24 @@
 //! Intel/AMD VAAPI hardware backend via the `moq-vaapi` crate on Linux.
 //!
-//! `moq-vaapi` is a focused VA-API H.264 encoder vendored and trimmed from
-//! cros-libva + discord/cros-codecs. It emits an Annex-B elementary stream with
-//! in-band SPS/PPS, matching avc3 mode, and labels the color space in the VUI.
+//! `moq-vaapi` is a focused VA-API H.264 and H.265 encoder vendored and trimmed
+//! from cros-libva + discord/cros-codecs. It emits an Annex-B elementary stream
+//! with the parameter sets in band, matching avc3 and hev1, and labels the color
+//! space in the VUI. H.265 is the Main profile.
 //!
-//! As of moq-vaapi 0.0.3 libva is `dlopen`'d at runtime, so a VAAPI-enabled build
+//! libva is `dlopen`'d at runtime, so a VAAPI-enabled build
 //! needs no libva at build time and the binary carries no `NEEDED libva`. A
 //! libva-less host, or a present-but-unusable VA stack (no render node, no usable
 //! driver), makes `Encoder::new` return an error; under automatic selection
 //! [`backend::open`](super::open) then moves on to openh264, like the NVENC backend.
-//! The render node is the one the decoder and the GPU resize share, which
-//! `MOQ_VAAPI_DEVICE` can name; see `frame::vaapi::device`.
+//! The render node is the one the decoder and the GPU resize share, unless that
+//! one cannot encode H.265, and `MOQ_VAAPI_DEVICE` can name it; see
+//! `frame::vaapi::device`.
 //!
 //! A [`Surface::DmaBuf`] is encoded without touching the CPU. An NV12 buffer at
 //! the encoder's size (a VA-API decode, or one [`Surface::resize`] already
-//! scaled on the GPU) is imported and encoded in place when its size is a
-//! whole number of macroblocks. Anything else the driver imports, packed RGB
+//! scaled on the GPU) is imported and encoded in place when the encoder codes
+//! exactly that size, with no padding to whole coding blocks. Anything else the
+//! driver imports, packed RGB
 //! from a PipeWire screen capture above all, goes through the video processor
 //! into the encoder's own surface first. RGB and YUV labelled with another
 //! space are converted into the stream's; unlabelled YUV is taken to be in it.
@@ -31,7 +34,12 @@
 //! Validated on Intel Meteor Lake with iHD 26.1.5: the tests below encode CPU
 //! frames, VA-API decodes handed over as DMA-BUFs, and packed RGB buffers at
 //! and above the encoder's size, decode each stream with openh264, and compare
-//! pixels. They skip on a machine without a VA-API device.
+//! pixels. The H.265 case decodes with the VA-API decoder, since there is no
+//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of
+//! them, ignored ones included, also pass on an AMD RX 9070 with radeonsi (Mesa
+//! 26.2.6). They skip on a machine without a VA-API device, except the ignored
+//! `vaapi_1080p_ladder_stays_on_the_gpu`, which requests hardware explicitly and
+//! fails without it.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -39,7 +47,7 @@ use std::path::Path;
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
-use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
+use super::super::encoder::{Applied, Codec, Config, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
 use crate::color::Matrix;
 use crate::frame::{DmaBuf, DrmFormat, I420, vaapi};
@@ -49,6 +57,7 @@ pub(crate) const NAME: &str = "vaapi";
 
 pub(crate) struct Vaapi {
 	encoder: Encoder,
+	codec: Codec,
 	/// Buffer layouts the driver refused to encode, by format and modifier, so
 	/// each costs one failed attempt rather than one per frame.
 	refused: HashSet<(DrmFormat, u64)>,
@@ -68,7 +77,7 @@ impl Vaapi {
 
 	fn new(config: &Config) -> Result<Self, Error> {
 		let bitrate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
-		let Gop::Keyframe { interval } = config.gop;
+		let interval = config.keyframe_interval();
 		// moq-vaapi derives the VUI's primaries and transfer from the matrix, the
 		// way SD and HD video pair them, so any other pairing is refused.
 		let color = config.resolved_color();
@@ -79,9 +88,14 @@ impl Vaapi {
 		if color != paired.with_range(color.range) {
 			return Err(Error::Unsupported(format!("VA-API cannot signal {color:?}")));
 		}
+		let codec = match config.codec {
+			Codec::H264 => moq_vaapi::Codec::H264,
+			Codec::H265 => moq_vaapi::Codec::H265,
+		};
 		let vaapi = VaapiConfig {
-			device: vaapi::device().map(Path::to_path_buf),
+			device: vaapi::device(codec).map(Path::to_path_buf),
 			color: vaapi::color(color)?,
+			codec,
 			..VaapiConfig::new(
 				config.width,
 				config.height,
@@ -94,13 +108,15 @@ impl Vaapi {
 
 		tracing::info!(
 			encoder = NAME,
+			codec = ?config.codec,
 			device = ?encoder.config().device,
 			width = config.width,
 			height = config.height,
-			"opened H.264 encoder"
+			"opened encoder"
 		);
 		Ok(Self {
 			encoder,
+			codec: config.codec,
 			refused: HashSet::new(),
 			nv12: Vec::new(),
 			#[cfg(test)]
@@ -172,7 +188,7 @@ impl Backend for Vaapi {
 			Vec::new()
 		} else {
 			// moq-vaapi places the IDRs but reports only the bytes.
-			let keyframe = keyframe_annexb(Codec::H264, &annexb);
+			let keyframe = keyframe_annexb(self.codec, &annexb);
 			vec![Encoded::new(Bytes::from(annexb), frame.timestamp, keyframe)]
 		})
 	}
@@ -268,7 +284,7 @@ mod tests {
 			output,
 			..DecodeConfig::new()
 		};
-		decode_backend::open(DecodeCodec::H264, &config).expect("open the decoder")
+		decode_backend::open(&DecodeCodec::H264.into(), &config).expect("open the decoder")
 	}
 
 	/// A static RGBA gradient that varies in both axes, so the chroma planes have
@@ -478,6 +494,58 @@ mod tests {
 		assert_close(&decoded[0], &expected, 10);
 	}
 
+	/// H.265 takes the same GPU path: a packed RGB DMA-BUF is converted on the
+	/// GPU and encoded from there, and the VA-API decoder, the H.265 decoder a
+	/// Linux box without NVIDIA has, gets the picture back.
+	#[test]
+	fn an_rgb_dmabuf_is_encoded_as_h265_on_the_gpu() {
+		// radeonsi encodes H.265 no narrower than 384.
+		let size = Size::new(640, 480);
+		let Ok(mut backend) = Vaapi::new(&Config {
+			kind: EncodeKind::Named(NAME.into()),
+			codec: Codec::H265,
+			..Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap())
+		}) else {
+			eprintln!("skipping: no VA-API H.265 encoder");
+			return;
+		};
+		let rgba = gradient_rgba(size);
+		let expected = I420::from_rgba(&rgba, size.width * 4, size).unwrap();
+		let mut frames = Vec::new();
+		for i in 0..3 {
+			let Some(buffer) = vaapi::testing::bgrx_dmabuf(&rgba, size) else {
+				eprintln!("skipping: no VA-API device to allocate a BGRX surface on");
+				return;
+			};
+			frames.push(Frame::new(Surface::DmaBuf(buffer), at(i)));
+		}
+		let config = DecodeConfig {
+			kind: DecodeKind::Named(NAME.into()),
+			output: Output::Cpu,
+			..DecodeConfig::new()
+		};
+		let mut hardware = decode_backend::open(&DecodeCodec::H265.into(), &config).expect("the VA-API H.265 decoder");
+
+		let mut decoded = Vec::new();
+		for (index, frame) in frames.iter().enumerate() {
+			for encoded in backend.encode(frame, index == 0).expect("encode") {
+				assert_eq!(encoded.keyframe, index == 0, "picture {index} keyframe flag");
+				decoded.extend(
+					hardware
+						.decode(encoded.payload, encoded.timestamp, encoded.keyframe)
+						.expect("decode"),
+				);
+			}
+		}
+		decoded.extend(hardware.flush().expect("flush"));
+		assert_eq!(backend.gpu_frames, 3, "the encoder fell back to the CPU");
+		assert!(backend.refused.is_empty());
+		assert_eq!(decoded.len(), frames.len(), "pictures went missing");
+		for frame in decoded {
+			assert_close(&frame, &expected, 10);
+		}
+	}
+
 	/// A bitrate change reaches the encoder instead of being refused.
 	#[test]
 	fn the_bitrate_can_change_mid_stream() {
@@ -564,6 +632,108 @@ mod tests {
 			let encoded = backend.encode(&frame, true).unwrap();
 			let annexb = &encoded.first().expect("a keyframe").payload;
 			assert_eq!(declared_color(annexb), Some(described), "{size} SPS color description");
+		}
+	}
+}
+
+#[cfg(test)]
+mod hardware_tests {
+	use super::*;
+	use crate::{FrameRate, Output, Size, decode, encode};
+	use moq_net::Timestamp;
+
+	/// Decode one 1080p source and scale/encode every picture at each ladder size.
+	/// Explicitly requested hardware must fail, never skip or accept CPU transfers.
+	/// The tests above check pixels with an independent software decoder; this
+	/// proof deliberately compiles without a software codec.
+	#[test]
+	#[ignore = "requires a VA-API decode/VPP/encode device"]
+	fn vaapi_1080p_ladder_stays_on_the_gpu() {
+		const FRAMES: usize = 12;
+		let size = Size::new(1920, 1080);
+		let mut config = Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap());
+		config.kind = encode::Kind::Hardware;
+		let mut source = encode::Encoder::new(&config).expect("hardware source encoder");
+		assert_eq!(source.name(), NAME, "run on a VA-API host without NVIDIA");
+		let video = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x4d,
+			constraints: 0,
+			level: 40,
+		});
+		let mut config = decode::Config::new();
+		config.kind = decode::Kind::Hardware;
+		config.output = Output::Native;
+		let mut decoder = decode::Decoder::new(&video, &config).expect("hardware source decoder");
+		assert_eq!(decoder.name(), crate::decode::backend::vaapi::NAME);
+
+		let pixels = I420::new(size, vec![128; size.pixels() as usize * 3 / 2]).unwrap();
+		let mut frames = Vec::new();
+		for index in 0..FRAMES {
+			let timestamp = Timestamp::from_micros(index as u64 * 33_333).unwrap();
+			let frame = Frame::new(Surface::I420(pixels.clone()), timestamp);
+			for packet in source.encode(&frame).expect("encode source") {
+				frames.extend(
+					decoder
+						.decode(&packet.payload, packet.timestamp, packet.keyframe)
+						.expect("decode source"),
+				);
+			}
+		}
+		for packet in source.finish().expect("finish source") {
+			frames.extend(
+				decoder
+					.decode(&packet.payload, packet.timestamp, packet.keyframe)
+					.expect("decode source tail"),
+			);
+		}
+		frames.extend(decoder.flush().expect("flush source decoder"));
+		assert_eq!(frames.len(), FRAMES);
+		assert!(
+			frames.iter().all(|frame| matches!(frame.surface, Surface::DmaBuf(_))),
+			"decode downloaded pixels"
+		);
+
+		for size in [Size::new(1280, 720), Size::new(852, 480), Size::new(640, 360)] {
+			let mut config = Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap());
+			config.color = frames[0].surface.color();
+			let mut encoder = Vaapi::new(&config).expect("rung encoder");
+			let mut output = decode::Decoder::new(
+				&video,
+				&decode::Config {
+					kind: decode::Kind::Hardware,
+					output: Output::Native,
+					..decode::Config::new()
+				},
+			)
+			.expect("rung decoder");
+			assert_eq!(output.name(), crate::decode::backend::vaapi::NAME);
+			let mut decoded = Vec::new();
+			for (index, frame) in frames.iter().enumerate() {
+				let scaled = frame
+					.resize(size, &crate::resize::Config::default())
+					.expect("VPP resize");
+				assert!(
+					matches!(scaled.surface, Surface::DmaBuf(_)),
+					"{size}: resize downloaded pixels"
+				);
+				assert_eq!(scaled.size(), size);
+				for packet in encoder.encode(&scaled, index == 0).expect("encode rung") {
+					decoded.extend(
+						output
+							.decode(&packet.payload, packet.timestamp, packet.keyframe)
+							.expect("decode rung"),
+					);
+				}
+			}
+			decoded.extend(output.flush().expect("flush rung decoder"));
+			assert_eq!(encoder.gpu_frames, FRAMES as u64, "{size}: encoder used CPU transfers");
+			assert!(encoder.refused.is_empty());
+			assert_eq!(decoded.len(), FRAMES, "{size}: lost output pictures");
+			assert!(
+				decoded.iter().all(|frame| frame.size() == size),
+				"{size}: wrong output size"
+			);
 		}
 	}
 }

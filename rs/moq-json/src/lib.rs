@@ -1,7 +1,7 @@
 //! JSON publishing over [`moq-net`](moq_net) tracks, in three modes:
 //!
-//! - [`snapshot`]: **lossy**. One JSON value updated over time; `next` yields states inside the
-//!   drift budget, while `latest` skips to the newest state. Superseded groups may be lost.
+//! - [`snapshot`]: **lossy**. One JSON value updated over time; `next` yields states in order,
+//!   while `latest` skips to the newest state. Superseded groups are lost.
 //! - [`stream`]: **lossless**. An ordered append-log of self-contained records; every record is
 //!   preserved and delivered in order, nothing is ever superseded.
 //! - [`window`]: **bounded**. An ordered run of records appended to the back and dropped from the
@@ -16,6 +16,9 @@
 //! (and back), with the encoder saying where the group boundaries fall. Reach for the codec layer
 //! when something else already owns the track, such as a `moq_mux::container::Producer` also
 //! managing a timeline and a catalog estimate.
+//!
+//! The `poll_*` methods are always available. Enable the `async` feature for their generated
+//! async wrappers (`next`, `latest`, and `refresh`); it is off by default.
 
 #![warn(missing_docs)]
 
@@ -23,6 +26,7 @@ mod diff;
 mod merge;
 mod refresh;
 pub mod snapshot;
+mod state;
 pub mod stream;
 mod strict;
 pub mod window;

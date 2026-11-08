@@ -30,17 +30,17 @@ for (const protocol of protocols) {
 			const installed = clock.install();
 			const pair = createMockTransportPair(protocol.alpn);
 			const origin = new Origin();
-			const broadcastPublication = origin.createBroadcast(Path.from("parked"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-			const write = (sequence: number) => {
+			const broadcastRoute = origin.route(Path.from("parked"));
+			const broadcast = broadcastRoute.broadcast;
+			// No publisher limit, so the cache eviction rather than a stale verdict ends a long budget.
+			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+			const write = (sequence: bigint) => {
 				const group = track.createGroup(sequence);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 				group.finish();
 			};
 
-			write(0);
+			write(0n);
 
 			const parked = Promise.withResolvers<void>();
 			const slot = Promise.withResolvers<void>();
@@ -63,9 +63,7 @@ for (const protocol of protocols) {
 			let ended = false;
 			const trying = spyOn(Writer, "tryOpen").mockImplementationOnce(async (...args) => {
 				try {
-					// Isolate eviction from the independent ten-second open fallback.
-					const [quic, options] = args;
-					return await tryOpen(quic, { ...options, timeout: mode === "is evicted" ? null : options.timeout });
+					return await tryOpen(...args);
 				} finally {
 					ended = true;
 				}
@@ -110,28 +108,28 @@ for (const protocol of protocols) {
 			try {
 				await parked.promise;
 				expect(ended).toBe(false);
-				write(1);
+				write(1n);
 				if (mode === "expires") {
 					await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 					expect(ended).toBe(false);
 					await clock.advance(Nano.fromMilli(Milli(1)));
-				} else await clock.advance(Nano.fromMilli(Milli(33_750)));
+				} else await clock.advance(Nano.fromMilli(Milli(45_000)));
 				expect(ended).toBe(true);
 				if (protocol.kind === "lite") {
 					for (;;) {
 						const response = await decodeSubscribeResponse(client.reader, protocol.version);
-						if (!("drop" in response) || response.drop.start !== 0) continue;
+						if (!("drop" in response) || response.drop.start !== 0n) continue;
 						const cause = mode === "expires" ? StreamCode.Old : StreamCode.TooFarBehind;
 						expect(response.drop.error).toBe(protocol.version === Lite.DRAFT_07 ? cause : 0);
 						break;
 					}
 				}
-				// The transport cannot cancel createUnidirectionalStream. A late slot is reset,
-				// never used to transmit the obsolete group's header or frames.
+				// The transport cannot cancel createUnidirectionalStream. A late slot is kept for
+				// the next open, never used to transmit the obsolete group's header or frames.
 				slot.resolve();
 				await clock.advance(Nano.zero);
 				expect(writes).toBe(0);
-				expect(resets).toBe(1);
+				expect(resets).toBe(0);
 			} finally {
 				slot.resolve();
 				close();
@@ -153,11 +151,10 @@ for (const protocol of protocols) {
 		const installed = clock.install();
 		const pair = createMockTransportPair(protocol.alpn);
 		const origin = new Origin();
-		const broadcastPublication = origin.createBroadcast(Path.from("parked"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("parked"));
+		const broadcast = broadcastRoute.broadcast;
 		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-		const write = (sequence: number, frames: number) => {
+		const write = (sequence: bigint, frames: number) => {
 			const group = track.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
@@ -166,7 +163,7 @@ for (const protocol of protocols) {
 		};
 
 		// Two frames, so the second is still unread while the stream's first write waits on credit.
-		write(0, 2);
+		write(0n, 2);
 
 		const blocked = Promise.withResolvers<void>();
 		const credit = Promise.withResolvers<void>();
@@ -223,8 +220,8 @@ for (const protocol of protocols) {
 		}
 		try {
 			await blocked.promise;
-			write(1, 1);
-			await clock.advance(Nano.fromMilli(Milli(33_750)));
+			write(1n, 1);
+			await clock.advance(Nano.fromMilli(Milli(45_000)));
 			// The write already handed to the stream finishes, and the stream is reset after it.
 			credit.resolve();
 			await clock.advance(Nano.zero);

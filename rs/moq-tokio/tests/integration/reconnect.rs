@@ -1,8 +1,7 @@
 //! What ends the reconnect loop, and where a peer's GOAWAY can send it.
 //!
-//! Dials over plain TCP (`tcp://`), which fails fast and locally: no TLS material, no QUIC
-//! handshake, no server. That keeps the assertion about the *budget* rather than about how long a
-//! particular backend takes to give up.
+//! Dials over plain TCP (`tcp://`): no TLS material and no QUIC handshake, so the assertions are
+//! about the loop rather than about how a particular backend connects.
 
 #![cfg(feature = "tcp")]
 
@@ -15,43 +14,6 @@ fn client(backoff: moq_tokio::Backoff) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.backoff = backoff;
 	config.init(Default::default()).expect("failed to init client")
-}
-
-/// A transient failure is retried, escalating, until the budget runs out. The give-up error names
-/// the underlying cause so an operator sees why rather than just "timed out".
-#[tokio::test]
-async fn a_transient_failure_retries_until_the_budget_runs_out() {
-	let mut backoff = moq_tokio::Backoff::default();
-	backoff.initial = Some((Duration::from_millis(20)).into());
-	backoff.max = Some((Duration::from_millis(40)).into());
-	backoff.timeout = Some((Duration::from_millis(200)).into());
-
-	// Nothing listens on port 1, so every attempt is refused: transient as far as this layer knows.
-	let url: url::Url = "tcp://127.0.0.1:1".parse().expect("failed to parse url");
-	let started = tokio::time::Instant::now();
-	let reconnect = client(backoff).connect(url);
-
-	let err = tokio::time::timeout(Duration::from_secs(10), reconnect.closed())
-		.await
-		.expect("reconnect loop never gave up")
-		.expect_err("reconnect loop stopped without an error");
-
-	assert!(
-		matches!(err, moq_tokio::Error::Reconnect(_)),
-		"stopped with {err} rather than exhausting the budget"
-	);
-	assert_ne!(
-		err.to_string(),
-		"reconnect timed out after 200ms",
-		"give-up error lost the underlying cause"
-	);
-	// The budget is spent on sleeping between attempts, so reaching it takes at least most of it.
-	// Jitter draws each delay from the top half of its window, hence half rather than the whole.
-	assert!(
-		started.elapsed() >= Duration::from_millis(100),
-		"gave up after {:?} without retrying",
-		started.elapsed()
-	);
 }
 
 /// The retry window decides whether a new attempt starts, not how long one may take: a handshake
@@ -77,7 +39,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 	let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
 	let _server = tokio::spawn(async move {
 		let origin = moq_tokio::origin::spawn();
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			if let Ok(session) = request.with_publisher(&origin).ok().await {
 				let _ = accepted.send(session);
 			}
@@ -92,7 +54,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 		while let Ok((mut client, _)) = proxy.accept().await {
 			let _ = dialed.send(());
 			tokio::spawn(async move {
-				tokio::time::sleep(HANDSHAKE).await;
+				kio::clock::sleep(HANDSHAKE).await;
 				let mut upstream = tokio::net::TcpStream::connect(server_addr)
 					.await
 					.expect("connect to the server");
@@ -113,7 +75,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 			session.expect("server stopped accepting");
 		}
 		res = connection.closed() => panic!("gave up mid-handshake: {res:?}"),
-		_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never connected"),
+		_ = kio::clock::sleep(Duration::from_secs(30)) => panic!("never connected"),
 	}
 	dials.recv().await.expect("proxy stopped");
 	assert!(dials.try_recv().is_err(), "the first dial was cut short and redialed");
@@ -128,7 +90,7 @@ async fn the_connect_count_advances_on_reconnect() {
 	let url: url::Url = format!("tcp://localhost:{port}/").parse().expect("parse url");
 	let mut connection = quick_client(Default::default()).connect(url);
 
-	let status = tokio::time::timeout(Duration::from_secs(10), connection.status())
+	let status = kio::clock::timeout(Duration::from_secs(10), connection.status())
 		.await
 		.expect("status timed out")
 		.expect("status failed");
@@ -139,9 +101,13 @@ async fn the_connect_count_advances_on_reconnect() {
 	let session = sessions.recv().await.expect("server stopped accepting");
 	drop(session);
 
-	tokio::time::timeout(Duration::from_secs(10), async {
-		while connection.connects() < 2 {
-			tokio::time::sleep(Duration::from_millis(10)).await;
+	// Revisions, not `status()`: a drop and redial between polls would leave the status
+	// reading `Connected`, unchanged, with nothing left to wake it.
+	let monitor = connection.monitor();
+	kio::clock::timeout(Duration::from_secs(10), async {
+		let mut state = monitor.state();
+		while state.connects < 2 {
+			state = monitor.state_changed(state.revision).await.expect("monitor stopped");
 		}
 	})
 	.await
@@ -184,7 +150,7 @@ async fn spawn_server() -> (
 
 	let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 	let handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let origin = moq_tokio::origin::spawn();
 			match request.with_publisher(&origin).ok().await {
 				Ok(session) => {
@@ -219,7 +185,7 @@ async fn a_protocol_violation_ends_reconnect() {
 	let result = tokio::select! {
 		result = connection.closed() => result,
 		_ = sessions.recv() => panic!("redialed after a protocol violation"),
-		_ = tokio::time::sleep(Duration::from_secs(10)) => panic!("protocol failure did not end reconnect"),
+		_ = kio::clock::sleep(Duration::from_secs(10)) => panic!("protocol failure did not end reconnect"),
 	};
 	task.abort();
 	let _ = task.await;
@@ -244,7 +210,7 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 	let url: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("parse url");
 	let connection = quick_client(Default::default()).connect(url);
 
-	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
+	let first = kio::clock::timeout(Duration::from_secs(10), sessions_a.recv())
 		.await
 		.expect("first dial timed out")
 		.expect("server A stopped accepting");
@@ -254,7 +220,7 @@ async fn a_redirect_to_another_host_is_refused_by_default() {
 		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
 		.expect("send goaway");
 
-	let err = tokio::time::timeout(Duration::from_secs(10), connection.closed())
+	let err = kio::clock::timeout(Duration::from_secs(10), connection.closed())
 		.await
 		.expect("the refusal never ended the connection")
 		.expect_err("a refused redirect must end with an error");
@@ -278,7 +244,7 @@ async fn follow_still_honors_a_cross_host_redirect() {
 	let url: url::Url = format!("tcp://localhost:{port_a}/").parse().expect("parse url");
 	let _connection = quick_client(moq_tokio::Redirect::Follow).connect(url);
 
-	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
+	let first = kio::clock::timeout(Duration::from_secs(10), sessions_a.recv())
 		.await
 		.expect("first dial timed out")
 		.expect("server A stopped accepting");
@@ -288,7 +254,7 @@ async fn follow_still_honors_a_cross_host_redirect() {
 		.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
 		.expect("send goaway");
 
-	tokio::time::timeout(Duration::from_secs(10), sessions_b.recv())
+	kio::clock::timeout(Duration::from_secs(10), sessions_b.recv())
 		.await
 		.expect("never followed the redirect")
 		.expect("server B stopped accepting");
@@ -303,7 +269,7 @@ async fn a_refused_redirect_skips_configured_fallbacks() {
 	let fallback: url::Url = format!("tcp://127.0.0.1:{port_b}/").parse().expect("fallback URL");
 	let addrs = moq_tokio::connect::Addrs::new(primary).or(fallback);
 	let connection = quick_client(Default::default()).connect(addrs);
-	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
+	let first = kio::clock::timeout(Duration::from_secs(10), sessions_a.recv())
 		.await
 		.expect("first dial timed out")
 		.expect("server A stopped accepting");
@@ -316,7 +282,7 @@ async fn a_refused_redirect_skips_configured_fallbacks() {
 		.send(moq_net::goaway::Goaway::redirect("tcp://127.0.0.1:1/"))
 		.expect("send goaway");
 
-	let err = tokio::time::timeout(Duration::from_secs(10), connection.closed())
+	let err = kio::clock::timeout(Duration::from_secs(10), connection.closed())
 		.await
 		.expect("the refusal never ended the connection")
 		.expect_err("a refused redirect must end with an error");
@@ -336,7 +302,7 @@ async fn an_empty_goaway_preserves_configured_fallbacks() {
 	let fallback: url::Url = format!("tcp://127.0.0.1:{port_b}/").parse().expect("fallback URL");
 	let addrs = moq_tokio::connect::Addrs::new(primary).or(fallback);
 	let _connection = quick_client(Default::default()).connect(addrs);
-	let first = tokio::time::timeout(Duration::from_secs(10), sessions_a.recv())
+	let first = kio::clock::timeout(Duration::from_secs(10), sessions_a.recv())
 		.await
 		.expect("first dial timed out")
 		.expect("server A stopped accepting");
@@ -346,7 +312,7 @@ async fn an_empty_goaway_preserves_configured_fallbacks() {
 	assert!(task_a.await.expect_err("listener was aborted").is_cancelled());
 	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
 
-	tokio::time::timeout(Duration::from_secs(10), sessions_b.recv())
+	kio::clock::timeout(Duration::from_secs(10), sessions_b.recv())
 		.await
 		.expect("configured fallback was discarded")
 		.expect("server B stopped accepting");
@@ -400,7 +366,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 		let origin = moq_tokio::origin::spawn();
 		// Held, as a draining server does: each one closes when the client leaves it.
 		let mut held = Vec::new();
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let Ok(session) = request.with_publisher(&origin).ok().await else {
 				continue;
 			};
@@ -424,7 +390,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 			session.expect("server stopped accepting");
 		}
 		res = connection.closed() => panic!("gave up during the drain: {res:?}"),
-		_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never landed after the drain"),
+		_ = kio::clock::sleep(Duration::from_secs(30)) => panic!("never landed after the drain"),
 	}
 }
 
@@ -437,16 +403,16 @@ const LIFE: Duration = Duration::from_millis(100);
 /// the client leaves it, as a draining relay does.
 fn bounce(
 	mut sessions: tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
-	log: tokio::sync::mpsc::UnboundedSender<tokio::time::Instant>,
+	log: tokio::sync::mpsc::UnboundedSender<kio::clock::Instant>,
 	uri: impl Fn(usize) -> String + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
 		for n in 0.. {
 			let Some(session) = sessions.recv().await else { return };
-			let _ = log.send(tokio::time::Instant::now());
+			let _ = log.send(kio::clock::now());
 			let uri = uri(n);
 			tokio::spawn(async move {
-				tokio::time::sleep(LIFE).await;
+				kio::clock::sleep(LIFE).await;
 				let _ = session.drain().send(moq_net::goaway::Goaway::redirect(uri));
 				session.closed().await;
 			});
@@ -461,7 +427,7 @@ async fn ping_pong(
 	rotate: bool,
 ) -> (
 	url::Url,
-	tokio::sync::mpsc::UnboundedReceiver<tokio::time::Instant>,
+	tokio::sync::mpsc::UnboundedReceiver<kio::clock::Instant>,
 	Vec<tokio::task::JoinHandle<()>>,
 ) {
 	let (port_a, sessions_a, task_a) = spawn_server().await;
@@ -498,13 +464,13 @@ fn bounced_backoff(max: Duration, timeout: Duration) -> moq_tokio::Backoff {
 /// How long the client took to redial after each of `hops` GOAWAYs: the time between two
 /// accepts, less the [`LIFE`] the first one served before its GOAWAY.
 async fn redial_waits(
-	accepts: &mut tokio::sync::mpsc::UnboundedReceiver<tokio::time::Instant>,
+	accepts: &mut tokio::sync::mpsc::UnboundedReceiver<kio::clock::Instant>,
 	hops: usize,
 ) -> Vec<Duration> {
 	let mut last = accepts.recv().await.expect("never connected");
 	let mut waits = Vec::new();
 	for hop in 0..hops {
-		let next = tokio::time::timeout(Duration::from_secs(10), accepts.recv())
+		let next = kio::clock::timeout(Duration::from_secs(10), accepts.recv())
 			.await
 			.unwrap_or_else(|_| panic!("hop {hop}: never redialed"))
 			.expect("the relays stopped");
@@ -568,7 +534,7 @@ async fn a_redirect_loop_stops_at_the_retry_window() {
 /// and ends the connection, so this fails on a backoff the hops should never take.
 async fn migrates_without_backing_off(
 	connection: moq_tokio::Connection,
-	accepts: &mut tokio::sync::mpsc::UnboundedReceiver<tokio::time::Instant>,
+	accepts: &mut tokio::sync::mpsc::UnboundedReceiver<kio::clock::Instant>,
 	hops: usize,
 ) {
 	tokio::select! {

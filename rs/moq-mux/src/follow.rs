@@ -1,111 +1,89 @@
-//! Following a broadcast across the publisher instances that serve it.
+//! Following a catalog rendition's broadcast across the publisher instances that serve it.
 //!
 //! An announcement is the online and offline signal, so a reader that restarts on each instance
 //! follows [`Instances`] rather than pinning one broadcast as a [`Binding`](crate::Binding) does.
 
-use std::task::Poll;
+use std::task::{Poll, ready};
 
-/// The publisher instances serving a broadcast, as each comes online, takes over, and goes.
+/// The publisher instances serving a rendition's broadcast, as each comes online, takes over,
+/// and goes. Created by [`Source::follow`](crate::Source::follow).
 ///
-/// Built on [`follow`](moq_net::origin::Consumer::follow). Create one
-/// with [`Source::follow`](crate::Source::follow) for a catalog reference, or [`Instances::new`]
-/// for a path.
-pub struct Instances {
-	feed: Feed,
-	/// The instance a reference named, if any.
-	epoch: Option<moq_net::Epoch>,
-	/// The instance handed out last, until it stops serving.
-	current: Option<moq_net::broadcast::Consumer>,
-}
+/// A sibling broadcast is followed through [`Following`](moq_net::origin::Following); the
+/// catalog's own broadcast is handed out once and its end never reported, since a reader
+/// follows its catalog's end itself.
+pub struct Instances(Feed);
 
 enum Feed {
 	/// Every instance announced at a path.
-	Announced(Box<moq_net::origin::Following>),
+	Following {
+		following: Box<moq_net::origin::Following>,
+		/// The instance a reference named, if any.
+		instance: Option<moq_net::Instance>,
+		/// An instance was handed out and its end not reported yet.
+		live: bool,
+	},
 	/// One instance, handed out once.
 	Fixed(Option<moq_net::broadcast::Consumer>),
 }
 
-/// A change to the instance [`Instances`] serves.
-pub enum Event {
-	/// Start on this instance, dropping whatever was read from the one before.
-	Start(moq_net::broadcast::Consumer),
-	/// The instance handed out last stopped serving: idle until the next start.
-	End,
-}
-
 impl Instances {
-	/// Follow the broadcast at `path` through `origin`, handing out only `epoch` when given.
+	/// Follow every instance, handing out only `instance` when given.
 	///
-	/// Unlike [`Source::follow`](crate::Source::follow), this needs no catalog broadcast, so a
-	/// reader can follow the broadcast whose catalog it reads and build a
-	/// [`Source`](crate::Source) for each instance.
-	pub fn new(
-		origin: &moq_net::origin::Consumer,
-		path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
-		epoch: Option<&moq_net::Epoch>,
-	) -> crate::Result<Self> {
-		let announced = origin.follow(path, None)?;
-		Ok(Self::with(Feed::Announced(Box::new(announced)), epoch))
+	/// The path is followed unpinned and each instance checked here, rather than pinned in the
+	/// origin: a hop older than moq-lite 07 mints instances a pin never matches, which
+	/// [`check_instance`](crate::source::check_instance) lets through, and another instance
+	/// winning the path ends the rendition rather than leaving an older one to resolve.
+	pub(crate) fn following(following: moq_net::origin::Following, instance: Option<moq_net::Instance>) -> Self {
+		Self(Feed::Following {
+			following: Box::new(following),
+			instance,
+			live: false,
+		})
 	}
 
-	/// Hand out `broadcast` once and never report its end, which its owner follows.
 	pub(crate) fn fixed(broadcast: moq_net::broadcast::Consumer) -> Self {
-		Self::with(Feed::Fixed(Some(broadcast)), None)
+		Self(Feed::Fixed(Some(broadcast)))
 	}
 
-	fn with(feed: Feed, epoch: Option<&moq_net::Epoch>) -> Self {
-		Self {
-			feed,
-			epoch: epoch.cloned(),
-			current: None,
-		}
-	}
-
-	/// Poll for the next change, registering `waiter` when there is none yet.
+	/// The next change.
 	///
-	/// Each announcement that brings an instance hands it out, so the same one returns after an
-	/// end. Fails once the origin closes, and with any resolution failure, such as a handler
-	/// refusing the path.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Event>> {
-		loop {
-			let next = match &mut self.feed {
-				// Followed unpinned and checked here: a pinned follow waits out an epochless route,
-				// which an epoch reads best effort.
-				Feed::Announced(announced) => announced.poll_available(waiter).map_err(crate::Error::from),
-				Feed::Fixed(broadcast) => match broadcast.take() {
-					Some(broadcast) => Poll::Ready(Ok(broadcast)),
+	/// Returns each instance as it comes online or takes over, and `None` once the path goes
+	/// offline or, with an instance named, another one takes it over; see
+	/// [`Following::available`](moq_net::origin::Following::available). Fails once the origin
+	/// closes, and with any resolution failure, such as a handler refusing the path; the call
+	/// after a refusal waits for the serving route to change.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<moq_net::broadcast::Consumer>>> {
+		let (following, instance, live) = match &mut self.0 {
+			Feed::Following {
+				following,
+				instance,
+				live,
+			} => (following, instance, live),
+			Feed::Fixed(broadcast) => {
+				return match broadcast.take() {
+					Some(broadcast) => Poll::Ready(Ok(Some(broadcast))),
 					None => Poll::Pending,
-				},
-			};
-			if let Poll::Ready(next) = next {
-				let broadcast = next?;
-				if crate::source::check_epoch(self.epoch.as_ref(), &broadcast).is_err() {
-					tracing::debug!(path = %broadcast.info().path, "skipping an instance of another epoch");
-					match self.current.take() {
-						Some(_) => return Poll::Ready(Ok(Event::End)),
-						None => continue,
-					}
-				}
-				// A fixed instance ends with its owner, which follows that itself.
-				if let Feed::Announced(_) = self.feed {
-					self.current = Some(broadcast.clone());
-				}
-				return Poll::Ready(Ok(Event::Start(broadcast)));
+				};
 			}
-
-			if let Some(current) = &self.current
-				&& current.poll_closed(waiter).is_ready()
-			{
-				self.current = None;
-				return Poll::Ready(Ok(Event::End));
+		};
+		loop {
+			match ready!(following.poll_available(waiter))? {
+				Some(broadcast) if crate::source::check_instance(instance.as_ref(), &broadcast).is_ok() => {
+					*live = true;
+					return Poll::Ready(Ok(Some(broadcast)));
+				}
+				Some(broadcast) => {
+					tracing::debug!(path = %broadcast.info().path, "skipping a broadcast of another instance");
+				}
+				None => {}
 			}
-			return Poll::Pending;
+			// Report the end of what was handed out once, whether it went offline or another
+			// instance took over.
+			if std::mem::take(live) {
+				return Poll::Ready(Ok(None));
+			}
 		}
-	}
-
-	/// The next change; see [`Self::poll_next`].
-	pub async fn next(&mut self) -> crate::Result<Event> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 }
 
@@ -122,25 +100,21 @@ mod tests {
 		}
 	}
 
-	fn route(epoch: &moq_net::Epoch) -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_epoch(epoch.clone())
+	fn route(instance: &moq_net::Instance) -> moq_net::origin::RouteOptions {
+		moq_net::origin::RouteOptions::default().with_instance(instance.clone(), 0)
 	}
 
 	/// The next change a follower reports, which must arrive within the origin's update hold.
 	async fn followed(follow: &mut Instances) -> Option<moq_net::broadcast::Consumer> {
-		let next = tokio::time::timeout(std::time::Duration::from_secs(1), follow.next())
+		kio::clock::timeout(std::time::Duration::from_secs(1), follow.next())
 			.await
 			.expect("no change")
-			.expect("the follow failed");
-		match next {
-			Event::Start(broadcast) => Some(broadcast),
-			Event::End => None,
-		}
+			.expect("the follow failed")
 	}
 
 	/// The follower stays quiet past the origin's update hold.
 	async fn quiet(follow: &mut Instances) {
-		if tokio::time::timeout(std::time::Duration::from_secs(1), follow.next())
+		if kio::clock::timeout(std::time::Duration::from_secs(1), follow.next())
 			.await
 			.is_ok()
 		{
@@ -153,13 +127,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_follow_starts_late_and_survives_an_end() {
 		let origin = produce_origin();
-		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		let _catalog = origin.route("a/pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let mut follow = source.follow(Some(&Relative::new("./source").unwrap()), None).unwrap();
 		quiet(&mut follow).await;
 
-		let first = origin.publish("a/source", Default::default()).unwrap();
+		let first = origin.route("a/source", Default::default()).unwrap();
 		let started = followed(&mut follow).await.expect("a start");
 		assert_eq!(started.info().path.as_str(), "a/source");
 
@@ -167,31 +141,31 @@ mod tests {
 		assert!(followed(&mut follow).await.is_none(), "an end");
 		quiet(&mut follow).await;
 
-		let _second = origin.publish("a/source", Default::default()).unwrap();
+		let _second = origin.route("a/source", Default::default()).unwrap();
 		let restarted = followed(&mut follow).await.expect("a start");
 		assert!(!restarted.is_clone(&started));
 	}
 
-	/// A replacement restarts a reference that names no epoch, and ends one that names the old
-	/// instance until that instance serves again.
+	/// A replacement restarts a reference that names no instance, and ends one that names the
+	/// old instance until that stream serves again.
 	#[tokio::test(start_paused = true)]
-	async fn a_follow_restarts_only_without_an_epoch() {
+	async fn a_follow_restarts_only_without_an_instance() {
 		let origin = produce_origin();
-		let (old_epoch, new_epoch) = (moq_net::Epoch::mint(), moq_net::Epoch::mint());
-		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
-		let _old = origin.publish("a/source", route(&old_epoch)).unwrap();
+		let (old_instance, new_instance) = (moq_net::Instance::random(), moq_net::Instance::random());
+		let _catalog = origin.route("a/pub", Default::default()).unwrap();
+		let _old = origin.route("a/source", route(&old_instance)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let rel = Relative::new("./source").unwrap();
 		let mut any = source.follow(Some(&rel), None).unwrap();
-		let mut named = source.follow(Some(&rel), Some(&old_epoch)).unwrap();
+		let mut named = source.follow(Some(&rel), Some(&old_instance)).unwrap();
 		let old = followed(&mut any).await.unwrap();
 		assert!(followed(&mut named).await.unwrap().is_clone(&old));
 
-		let new = origin.publish("a/source", route(&new_epoch)).unwrap();
+		let new = origin.route("a/source", route(&new_instance)).unwrap();
 		let replaced = followed(&mut any).await.unwrap();
-		assert_eq!(replaced.info().epoch.as_ref(), Some(&new_epoch));
-		assert!(followed(&mut named).await.is_none(), "another epoch ends it");
+		assert_eq!(replaced.info().instance.as_ref(), Some(&new_instance));
+		assert!(followed(&mut named).await.is_none(), "another instance ends it");
 		quiet(&mut named).await;
 		// The old instance still serves the subscriptions already on it.
 		assert!(!old.is_closed());
@@ -199,36 +173,41 @@ mod tests {
 		// The replacement goes and the old instance wins again.
 		drop(new);
 		let back = followed(&mut named).await.unwrap();
-		assert_eq!(back.info().epoch.as_ref(), Some(&old_epoch));
+		assert_eq!(back.info().instance.as_ref(), Some(&old_instance));
 		let back = followed(&mut any).await.unwrap();
-		assert_eq!(back.info().epoch.as_ref(), Some(&old_epoch));
+		assert_eq!(back.info().instance.as_ref(), Some(&old_instance));
 	}
 
-	/// An epoch is best effort over an epochless route, which cannot prove another instance.
+	/// A reference naming an instance still follows a sibling whose instance an older hop
+	/// minted, which proves nothing either way.
 	#[tokio::test(start_paused = true)]
-	async fn a_follow_reads_an_epochless_route_with_an_epoch() {
+	async fn a_named_instance_follows_a_minted_one() {
 		let origin = produce_origin();
-		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		let _catalog = origin.route("a/pub", Default::default()).unwrap();
+		let minted: moq_net::Instance = "~minted".parse().unwrap();
+		assert!(minted.is_minted());
+		let _sibling = origin.route("a/source", route(&minted)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
-		let mut named = source
-			.follow(Some(&Relative::new("./source").unwrap()), Some(&moq_net::Epoch::mint()))
+		let named = moq_net::Instance::random();
+		let mut follow = source
+			.follow(Some(&Relative::new("./source").unwrap()), Some(&named))
 			.unwrap();
-		let _sibling = origin.publish("a/source", Default::default()).unwrap();
-		assert!(followed(&mut named).await.is_some());
+		let served = followed(&mut follow).await.expect("the minted sibling");
+		assert_eq!(served.info().instance.as_ref(), Some(&minted));
 	}
 
 	/// A self-reference reads only the catalog instance, whatever replaces it at the path.
 	#[tokio::test(start_paused = true)]
 	async fn a_follow_of_the_catalog_keeps_its_instance() {
 		let origin = produce_origin();
-		let old = origin.publish("a/pub", Default::default()).unwrap();
+		let old = origin.route("a/pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let mut follow = source.follow(Some(&Relative::new("./pub").unwrap()), None).unwrap();
 		assert!(followed(&mut follow).await.unwrap().is_clone(&source.broadcast()));
 
-		let _new = origin.publish("a/pub", Default::default()).unwrap();
+		let _new = origin.route("a/pub", Default::default()).unwrap();
 		quiet(&mut follow).await;
 		// Its end is the catalog's, which the catalog's reader sees.
 		drop(old);

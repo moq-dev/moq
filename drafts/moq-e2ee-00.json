@@ -21,9 +21,9 @@
 		"max_grouped_payload": 33554432,
 		"max_grouped_plaintext": 33554416,
 		"max_datagram_body": 1200,
-		"max_datagram_header": 24,
-		"max_datagram_payload": 1176,
-		"max_datagram_plaintext": 1160
+		"max_datagram_header": 28,
+		"max_datagram_payload": 1172,
+		"max_datagram_plaintext": 1156
 	},
 	"generation": {
 		"context": "6578616d706c652e636f6d2f6d656574696e672d313233",
@@ -303,7 +303,7 @@
 			"nonce": "000000000000006300000000",
 			"plaintext": "6f707573",
 			"payload": "db04d9e65485aa79895ee39b7bc159165fec8db3",
-			"payload_limit": 1176,
+			"payload_limit": 1172,
 			"key": "c9695fc6ede7da6db6fde74c7a4645b4"
 		}
 	],
@@ -745,8 +745,8 @@
 			"key": "c9695fc6ede7da6db6fde74c7a4645b4",
 			"group": 99,
 			"frame": 0,
-			"plaintext_len": 1161,
-			"payload_limit": 1176
+			"plaintext_len": 1157,
+			"payload_limit": 1172
 		},
 		{
 			"id": "short-payload",

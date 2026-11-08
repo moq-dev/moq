@@ -6,18 +6,20 @@ The server, its socket, and its configuration live under --dir, and only the
 command's process tree sees them: the desktop sound server and its settings are
 untouched, and no physical device is opened. ALSA's default PCM routes to the
 server, so the production ALSA/cpal backend plays into the null sink, which
-clocks it in real time. Exits with the command's status.
+clocks it in real time. SIGINT and SIGTERM go to the command, and this exits
+with its status.
 """
 
 import argparse
 import os
-from pathlib import Path
 import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 
 def run():
@@ -51,6 +53,11 @@ def run():
         "DISPLAY": "",
         "WAYLAND_DISPLAY": "",
     }
+    # The daemon claims org.PulseAudio1 even without a D-Bus module. With no
+    # session address (and no DISPLAY to autolaunch one), it uses only our socket.
+    # Keep the wrapped command's session bus available for its other services.
+    daemon_env = env.copy()
+    daemon_env.pop("DBUS_SESSION_BUS_ADDRESS", None)
 
     # By default the null sink renders 2 s ahead and sleeps through it, and a new stream does not
     # rewind that, so a stream's first callback waits up to 2 s: Firefox reports its AudioContext
@@ -58,11 +65,18 @@ def run():
     # milliseconds, as a real device does.
     pulse = subprocess.Popen(
         [
-            "pulseaudio", "--daemonize=no", "--use-pid-file=no", "--exit-idle-time=-1",
-            "--log-level=info", "--log-target=stderr", "-n",
+            "pulseaudio",
+            "--daemonize=no",
+            "--use-pid-file=no",
+            "--exit-idle-time=-1",
+            "--log-level=info",
+            "--log-target=stderr",
+            "-n",
             f"--load=module-native-protocol-unix socket={socket} auth-anonymous=1",
             "--load=module-null-sink sink_name=moq-null rate=48000 channels=2 norewinds=1",
-        ], env=env, stderr=subprocess.PIPE,
+        ],
+        env=daemon_env,
+        stderr=subprocess.PIPE,
     )
     try:
         assert pulse.stderr is not None
@@ -82,8 +96,13 @@ def run():
         # The rest of its log is drained into the file, so a full pipe never stalls it.
         forward = threading.Thread(target=shutil.copyfileobj, args=(pulse.stderr, log), daemon=True)
         forward.start()
+        child = subprocess.Popen(command, env=env)
+        # Ctrl-C and termination are the command's to handle, such as a player writing its last
+        # metrics sample, so the server outlives it and the command's status stands.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, lambda signum, _frame: child.send_signal(signum))
         try:
-            return subprocess.run(command, env=env).returncode
+            return child.wait()
         finally:
             pulse.terminate()
             try:

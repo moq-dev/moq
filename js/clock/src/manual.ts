@@ -106,6 +106,9 @@ export class Manual {
 	/**
 	 * Fire timers like repeated `fire` calls until `work` settles, then settle the same way.
 	 * Time stops at the deadline being fired when `work` settles, and no wait outlives the call.
+	 * Promise-based I/O such as a stream delivery lands before each deadline; a dynamic `import()`
+	 * may not, so load modules first. Await it directly: bun's `expect(...).rejects` runs it nested,
+	 * ahead of microtasks the caller already queued.
 	 */
 	async drive<T>(work: PromiseLike<T>): Promise<T> {
 		if (this.#driving) throw new Error("time driver already pending");

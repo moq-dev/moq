@@ -6,21 +6,21 @@
 //! browser one. Durations are milliseconds as floats. `at` is this process's
 //! monotonic clock from the first sample, `render` the device's clock, and
 //! `timestamp` the media clock; fields this player cannot read are left out
-//! rather than written as zero.
+//! rather than written as zero. `comfort` and `utterances` have no browser
+//! counterpart: they show how a declared silence played, for push-to-talk.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
+use kio::clock::Instant;
 use moq_audio::playback::{Observation, Observer};
-use moq_clock::Instant;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use super::timeline::Presentation;
+use moq_mux::timeline::Consumer;
 
 /// How often a sample is taken, the browser probe's interval.
 const INTERVAL: Duration = Duration::from_millis(250);
@@ -46,10 +46,22 @@ struct Sample {
 	quanta: Option<u64>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	quiet: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	comfort: Option<f64>,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	gaps: Vec<Gap>,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	stalls: Vec<Stall>,
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	utterances: Vec<Utterance>,
+}
+
+/// Audio resuming after a declared silence: when it was written, and the media
+/// timestamp of its first sample.
+#[derive(Serialize)]
+struct Utterance {
+	at: f64,
+	timestamp: f64,
 }
 
 #[derive(Serialize)]
@@ -77,6 +89,7 @@ struct Totals {
 	clock: Duration,
 	quanta: u64,
 	quiet: u64,
+	comfort: Duration,
 }
 
 impl Totals {
@@ -85,6 +98,7 @@ impl Totals {
 			clock: observation.clock,
 			quanta: observation.quanta,
 			quiet: observation.quiet,
+			comfort: observation.comfort,
 		}
 	}
 }
@@ -92,31 +106,34 @@ impl Totals {
 /// The writer, fed an [`Observer`] each time playback opens a speaker.
 pub(super) struct Metrics {
 	file: BufWriter<File>,
-	presentation: Arc<Mutex<Presentation>>,
+	presentation: Consumer,
 	observers: mpsc::UnboundedReceiver<Observer>,
 	current: Option<(Observer, Totals)>,
 	/// What closed engines counted, added to the current one's totals.
 	base: Totals,
+	/// Utterances since the last sample.
+	utterances: Vec<Utterance>,
 	start: Instant,
-	interval: moq_clock::Interval,
+	interval: kio::clock::Interval,
 }
 
 impl Metrics {
 	/// Start writing to `path`, returning where to send each new speaker's observer.
 	pub(super) fn create(
 		path: &Path,
-		presentation: Arc<Mutex<Presentation>>,
+		presentation: Consumer,
 	) -> anyhow::Result<(Self, mpsc::UnboundedSender<Observer>)> {
 		let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
 		let (observe, observers) = mpsc::unbounded_channel();
-		let mut interval = moq_clock::interval(INTERVAL);
-		interval.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
+		let mut interval = kio::clock::interval(INTERVAL);
+		interval.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
 		let metrics = Self {
 			file: BufWriter::new(file),
 			presentation,
 			observers,
 			current: None,
 			base: Totals::default(),
+			utterances: Vec::new(),
 			start: Instant::now(),
 			interval,
 		};
@@ -127,6 +144,14 @@ impl Metrics {
 	pub(super) async fn tick(&mut self) -> anyhow::Result<()> {
 		self.interval.tick().await;
 		self.sample()
+	}
+
+	/// Note audio resuming after a declared silence at media `timestamp`.
+	pub(super) fn utterance(&mut self, timestamp: Duration) {
+		self.utterances.push(Utterance {
+			at: ms(Instant::now().duration_since(self.start)),
+			timestamp: ms(timestamp),
+		});
 	}
 
 	/// End the measurement: close any gap still open and write one last sample.
@@ -140,7 +165,7 @@ impl Metrics {
 			// The audio thread closes the gap on its next buffer. One that never
 			// comes is a device that stopped pulling, which the render clock
 			// already shows, so the wait is bounded rather than hung on it.
-			if moq_clock::timeout(FINISH_WAIT, observer.finish()).await.is_err() {
+			if kio::clock::timeout(FINISH_WAIT, observer.finish()).await.is_err() {
 				tracing::warn!("the speaker never closed out the measurement; the last gap may be missing");
 			}
 		}
@@ -162,6 +187,7 @@ impl Metrics {
 					clock: base.clock + totals.clock,
 					quanta: base.quanta + totals.quanta,
 					quiet: base.quiet + totals.quiet,
+					comfort: base.comfort + totals.comfort,
 				};
 			}
 			self.current = Some((next, self.base));
@@ -178,7 +204,7 @@ impl Metrics {
 		// Read straight after the device clock, so the two pair up.
 		let now = Instant::now();
 		let (playhead, target) = {
-			let presentation = self.presentation.lock().unwrap();
+			let presentation = &self.presentation;
 			(presentation.playhead(now), presentation.target())
 		};
 
@@ -191,8 +217,10 @@ impl Metrics {
 			output_latency: observation.as_ref().and_then(|(o, _)| o.latency).map(ms),
 			quanta: observation.as_ref().map(|(o, base)| base.quanta + o.quanta),
 			quiet: observation.as_ref().map(|(o, base)| base.quiet + o.quiet),
+			comfort: observation.as_ref().map(|(o, base)| ms(base.comfort + o.comfort)),
 			gaps,
 			stalls,
+			utterances: std::mem::take(&mut self.utterances),
 		};
 		serde_json::to_writer(&mut self.file, &sample)?;
 		self.file.write_all(b"\n")?;

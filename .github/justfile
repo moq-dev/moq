@@ -1,8 +1,31 @@
 set working-directory := '..'
 
-# Build and publish the development environment to nix.moq.dev.
+# Build and publish the development environment and @moq/libav to nix.moq.dev.
 cache:
     bash sh/gh/cache.sh
+
+# Publish Smoke's runtime packages and their build artifacts to nix.moq.dev.
+cache-runtime:
+    bash sh/gh/cache-runtime.sh
+
+# Print the newest main commit whose Cache push run succeeded: its closures are all on nix.moq.dev.
+cache-rev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rev=$(gh run list --repo moq-dev/moq --workflow cache.yml --branch main --event push \
+        --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+    if [[ -z "$rev" ]]; then
+        echo "no successful Cache run found on main" >&2
+        exit 1
+    fi
+    echo "$rev"
+
+# Keep the newest cached commit's closures on nix.moq.dev past the bucket's expiry.
+cache-refresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rev=$(just gh cache-rev)
+    just infra nix refresh nix-ci-moq-dev "$rev"
 
 # Build the runner image with a temporary policy on a disposable hosted runner.
 runner-vm-ci:
@@ -17,20 +40,35 @@ runner-vm-ci:
     trap 'sudo apparmor_parser --remove "$profile"' EXIT
     just gh runner-vm
 
+# Install the persistent host profile that lets Nix store unshare map user namespaces.
+runner-userns:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+        echo "runner-userns is persistent host policy; a hosted runner uses runner-vm-ci" >&2
+        exit 1
+    fi
+    sudo install -m 0644 nix/runner/nix-builder-unshare /etc/apparmor.d/nix-builder-unshare
+    sudo apparmor_parser --replace /etc/apparmor.d/nix-builder-unshare
+
 # Build and test the persistent NixOS runner VM on x86_64 Linux.
 runner-vm:
     bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
 
-# Lint GitHub Actions workflows, their alert coverage, and that every step runs a recipe.
+# Lint GitHub Actions workflows, their security, their alert coverage, that every step runs a recipe, and that every opt-in test has a caller.
 check:
+    python3 sh/version.py
     actionlint
+    zizmor --offline --quiet .github
     sh/gh/alert.sh check-coverage
-    bun test sh/gh/alert.test.ts
+    bun test ./sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts
+    python3 sh/gh/test-inventory.py
     python3 bench/relay.test.py
 
-# Tests of repository tooling; every `just check` and `just ci` runs them.
+# Repository tooling tests; run every ordinary test file whole in the merge gate.
 test:
+    python3 sh/version.test.py
     python3 sh/local.test.py
     python3 test/smoke/runner.test.py
     python3 sh/coverage.test.py
@@ -40,30 +78,42 @@ test:
     python3 bench/compare.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
+    python3 bench/fanout.test.py
+    python3 bench/lock.test.py
+    python3 bench/local.test.py
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/large-files.test.py
+    python3 sh/text.test.py
     python3 sh/dispatch-query.test.py
-    python3 sh/dispatch-query.test.py --bench
-    bun test sh/gh/setup.test.ts
+    python3 sh/gh/test-inventory.test.py
+    bun test ./sh/gh/setup.test.ts
     bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/gh/ffi.test.py
-    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts
+    bun test ./sh/gh/ffi.test.ts ./sh/gh/cpp.test.ts ./sh/gh/publish.test.ts
     python3 sh/rs/package-rename.test.py
     python3 sh/dart/build.test.py
+    python3 sh/kt/gradle.test.py
     python3 sh/rs/select.test.py
+    python3 sh/rs/config.test.py
+    python3 sh/rs/hakari.test.py
+    python3 sh/rs/test-lints.test.py
+    python3 sh/js/install.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
-    python3 sh/rs/test-lints.test.py
     python3 sh/gh/nightly.test.py
     python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
     python3 sh/gh/ts-paths.test.py
     sh/go/publish-wrapper.test.sh
-    bash .claude/hooks/direnv.test.sh
     python3 sh/rs/uring.test.py
+
+# Tooling integration tests and selector timing, run nightly outside the merge gate.
+test-integration:
+    bash sh/local.sh python3 bench/build.slow.test.py
+    python3 sh/dispatch-query.test.py --bench
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
 [positional-arguments]

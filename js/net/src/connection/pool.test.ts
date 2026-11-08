@@ -3,21 +3,18 @@ import { type Installed, Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { Producer as OriginProducer, type Table } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Stream } from "../stream.ts";
+import { Stream, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import { connect } from "./connect.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Reload } from "./reload.ts";
 
-function publish(origin: Pick<Table, "createBroadcast">, path: Path.Valid) {
-	const broadcastPublication = origin.createBroadcast(path);
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
-	return broadcast;
+function publish(origin: Pick<Table, "route">, path: Path.Valid) {
+	return origin.route(path).broadcast;
 }
 
 const url = new URL("https://example.com/pool");
@@ -262,16 +259,16 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 			announcement = event;
 		});
 		const prefix = Path.from("on-demand");
-		const route = table.requestsRoute(prefix);
+		const route = table.routePrefix(prefix);
 		await advance();
-		expect(announcement).toMatchObject({ kind: "start", prefix });
+		expect(announcement).toMatchObject({ kind: "present", prefix });
 		let withdrawal: unknown;
 		void live.next().then((event) => {
 			withdrawal = event;
 		});
 		route.close();
 		await advance();
-		expect(withdrawal).toMatchObject({ kind: "end", prefix });
+		expect(withdrawal).toMatchObject({ kind: "absent", prefix });
 		live.close();
 	} finally {
 		handle.close();
@@ -601,11 +598,77 @@ test("pooled probe readers share demand and carry it through reconnects", async 
 	}
 });
 
+/**
+ * Play a lite-06 peer on `server` that advertises PROBE `Increase`, returning each PROBE
+ * target it reads, with 0 for a retraction.
+ */
+function increasePeer(server: MockTransport): number[] {
+	const version = Lite.Version.DRAFT_06;
+	const targets: number[] = [];
+	const readProbe = async (stream: Stream) => {
+		if ((await stream.reader.u53()) !== Lite.StreamId.Probe) return;
+		for (;;) {
+			const probe = await Lite.Probe.decodeMaybe(stream.reader, version);
+			if (!probe) return;
+			targets.push(probe.bitrate ?? 0);
+		}
+	};
+	const run = async () => {
+		const setup = await Writer.open(server, { version });
+		await setup.u53(Lite.DataType.Setup);
+		await new Lite.Setup({ probe: Lite.ProbeLevel.Increase }).encode(setup, version);
+		setup.close();
+		for (;;) {
+			const stream = await Stream.accept(server, version);
+			if (!stream) return;
+			// The session's end ends every read.
+			void readProbe(stream).catch(() => {});
+		}
+	};
+	void run().catch(() => {});
+	return targets;
+}
+
+test("pooled viewers send their summed target to an Increase peer across a reconnect", async () => {
+	const peers: { server: MockTransport; targets: number[] }[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		peers.push({ server: pair.server, targets: increasePeer(pair.server) });
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const first = new Connection({ url });
+	const second = new Connection({ url });
+	try {
+		await advance();
+		const one = first.viewers.peek()?.watch(3_000_000);
+		const two = second.viewers.peek()?.watch(2_000_000);
+		await advance();
+		expect(peers).toHaveLength(1);
+		expect(peers[0].targets.at(-1)).toBe(5_000_000);
+
+		peers[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
+		await advance(2_000);
+		expect(peers).toHaveLength(2);
+		expect(peers[1].targets).toEqual([5_000_000]);
+
+		// The new session follows the live handles, not a snapshot of them.
+		one?.close();
+		await advance();
+		expect(peers[1].targets).toEqual([5_000_000, 2_000_000]);
+		two?.close();
+	} finally {
+		first.close();
+		second.close();
+		await advance(linger);
+	}
+});
+
 test("a handle's announcements sync with the shared origin", async () => {
 	stubTransports();
 
 	const handle = new Connection({ url });
-	const watch = handle.announced();
+	const watch = handle.routes();
 	expect(watch.synced.peek()).toBe(false);
 
 	await advance();

@@ -2,31 +2,16 @@ use std::ops::Deref;
 
 use web_transport_proto::{ConnectRequest, ConnectResponse, VarInt};
 
-use thiserror::Error;
+/// CONNECT headers can carry credentials under any name, so log only routing metadata.
+struct Request<'a>(&'a ConnectRequest);
 
-#[derive(Error, Debug, Clone)]
-#[non_exhaustive]
-pub enum ConnectError {
-	#[error("quic stream was closed early")]
-	UnexpectedEnd,
-
-	#[error("protocol error: {0}")]
-	ProtoError(#[from] web_transport_proto::ConnectError),
-
-	#[error("connection error")]
-	ConnectionError(#[from] crate::quic::driver::connection::Error),
-
-	#[error("read error")]
-	ReadError(#[from] crate::quic::driver::ReadError),
-
-	#[error("write error")]
-	WriteError(#[from] crate::quic::driver::WriteError),
-
-	#[error("http error status: {0}")]
-	ErrorStatus(http::StatusCode),
-
-	#[error("server returned protocol not in request: {0}")]
-	ProtocolMismatch(String),
+impl std::fmt::Debug for Request<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("ConnectRequest")
+			.field("url", &crate::RedactedUrl::new(&self.0.url))
+			.field("protocols", &self.0.protocols)
+			.finish()
+	}
 }
 
 /// An HTTP/3 CONNECT request/response for establishing a WebTransport session.
@@ -35,32 +20,32 @@ pub struct Connecting {
 	pub request: ConnectRequest,
 
 	// A reference to the send/recv stream, so we don't close it until dropped.
-	pub(crate) send: crate::quic::driver::SendStream,
-	pub(crate) recv: crate::quic::driver::RecvStream,
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
 }
 
 impl Connecting {
-	pub async fn accept(conn: &crate::quic::driver::connection::Connection) -> Result<Self, ConnectError> {
+	pub async fn accept(conn: &crate::quic::driver::connection::Connection) -> Result<Self, super::Error> {
 		// Accept the stream that will be used to send the HTTP CONNECT request.
 		// If they try to send any other type of HTTP request, we will error out.
 		let (send, mut recv) = conn.accept_bi().await?;
 
 		let request = web_transport_proto::ConnectRequest::read(&mut recv).await?;
-		tracing::debug!(?request, "received CONNECT request");
+		tracing::debug!(request = ?Request(&request), "received CONNECT request");
 
 		// The request was successfully decoded, so we can send a response.
 		Ok(Self { request, send, recv })
 	}
 
 	// Called by the server to send a response to the client and establish the session.
-	pub async fn respond(mut self, response: impl Into<ConnectResponse>) -> Result<Connected, ConnectError> {
+	pub async fn respond(mut self, response: impl Into<ConnectResponse>) -> Result<Connected, super::Error> {
 		let response = response.into();
 
 		// Validate that our protocol was in the client's request.
 		if let Some(protocol) = &response.protocol
 			&& !self.request.protocols.contains(protocol)
 		{
-			return Err(ConnectError::ProtocolMismatch(protocol.clone()));
+			return Err(super::HandshakeError::Protocol(protocol.clone()).into());
 		}
 
 		tracing::debug!(?response, "sending CONNECT response");
@@ -74,9 +59,9 @@ impl Connecting {
 		})
 	}
 
-	pub async fn reject(self, status: http::StatusCode) -> Result<(), ConnectError> {
-		let mut connect = self.respond(status).await?;
-		connect.send.finish().ok();
+	pub async fn reject(self, status: http::StatusCode) -> Result<(), super::Error> {
+		let connect = self.respond(status).await?;
+		connect.send.finish();
 		Ok(())
 	}
 }
@@ -97,8 +82,8 @@ pub struct Connected {
 	pub response: ConnectResponse,
 
 	// A reference to the send/recv stream, so we don't close it until dropped.
-	pub(crate) send: crate::quic::driver::SendStream,
-	pub(crate) recv: crate::quic::driver::RecvStream,
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
 }
 
 impl Connected {
@@ -109,13 +94,13 @@ impl Connected {
 	pub async fn open(
 		conn: &crate::quic::driver::connection::Connection,
 		request: impl Into<ConnectRequest>,
-	) -> Result<Self, ConnectError> {
+	) -> Result<Self, super::Error> {
 		let request = request.into();
 
 		// Create a new stream that will be used to send the CONNECT frame.
 		let (mut send, mut recv) = conn.open_bi(Default::default()).await?;
 
-		tracing::debug!(?request, "sending CONNECT request");
+		tracing::debug!(request = ?Request(&request), "sending CONNECT request");
 		request.write(&mut send).await?;
 
 		let response = web_transport_proto::ConnectResponse::read(&mut recv).await?;
@@ -123,14 +108,14 @@ impl Connected {
 
 		// Throw an error if we didn't get a 200 OK.
 		if response.status != http::StatusCode::OK {
-			return Err(ConnectError::ErrorStatus(response.status));
+			return Err(super::HandshakeError::Status(response.status).into());
 		}
 
 		// Validate that the server's protocol was in our request.
 		if let Some(protocol) = &response.protocol
 			&& !request.protocols.contains(protocol)
 		{
-			return Err(ConnectError::ProtocolMismatch(protocol.clone()));
+			return Err(super::HandshakeError::Protocol(protocol.clone()).into());
 		}
 
 		Ok(Self {

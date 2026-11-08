@@ -13,8 +13,8 @@ use super::args::Args;
 use super::media::Media;
 use super::metrics::Metrics;
 use super::output::Output;
-use super::timeline::Presentation;
 use super::window::Event;
+use moq_mux::timeline::Producer as Presentation;
 
 /// The speaker and the run loop's events, plus `--metrics`' observer feed.
 #[derive(Clone)]
@@ -51,10 +51,10 @@ pub(crate) async fn run(
 	mut network: tokio::task::JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
 	let (events, mut received) = mpsc::unbounded_channel();
-	let presentation = Arc::new(Mutex::new(Presentation::new(args.video_delay())));
+	let presentation = Presentation::new(args.video_delay());
 	let (mut metrics, observe) = match &args.metrics {
 		Some(path) => {
-			let (metrics, observe) = Metrics::create(path, presentation.clone())?;
+			let (metrics, observe) = Metrics::create(path, presentation.consume())?;
 			(Some(metrics), Some(observe))
 		}
 		None => (None, None),
@@ -83,6 +83,11 @@ pub(crate) async fn run(
 				Some(Event::Wake) => {}
 				Some(Event::Ended | Event::Finished) => break Ok(()),
 				Some(Event::Failed(error)) => break Err(anyhow::anyhow!(error)),
+				Some(Event::Utterance(timestamp)) => {
+					if let Some(metrics) = &mut metrics {
+						metrics.utterance(timestamp);
+					}
+				}
 				None => break Err(anyhow::anyhow!("audio playback event channel closed")),
 			},
 			result = &mut media, if !completed => {
@@ -133,7 +138,7 @@ mod tests {
 			metrics: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};
@@ -148,6 +153,7 @@ mod tests {
 	/// measure filled in.
 	#[tokio::test]
 	async fn metrics_write_a_final_sample() {
+		kio::clock::host_time();
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("play.ndjson");
 		let producer = moq_tokio::origin::spawn();
@@ -156,7 +162,7 @@ mod tests {
 			metrics: Some(path.clone()),
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};
@@ -182,7 +188,7 @@ mod tests {
 			metrics: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};

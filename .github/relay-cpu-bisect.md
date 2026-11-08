@@ -1,0 +1,207 @@
+# Relay CPU bisect
+
+Relay instructions per delivered frame between [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95) ([moq-dev/moq#5926](https://github.com/moq-dev/moq/pull/5926) as merged) and `main`: [c68c931025](https://github.com/moq-dev/moq/commit/c68c931025) for the bisect on the 24-core host, and [fa9c1bf2a7](https://github.com/moq-dev/moq/commit/fa9c1bf2a7) for the session re-measure and the re-pair on the quiet test host. Per-cell counts, delivery, loss, host load, and source markers are in [the evidence](relay-cpu-bisect.json). The [first checkpoint](https://github.com/moq-dev/moq/blob/8c62afd3195a3307054120226b54e3309a5dbc1f/.github/relay-cpu-bisect.md) and its [per-cell evidence](https://github.com/moq-dev/moq/blob/8c62afd3195a3307054120226b54e3309a5dbc1f/.github/relay-cpu-bisect.json) are superseded.
+
+## Method
+
+`just bench-profile instructions` counts the relay's user and kernel instructions over a five-second window after seven seconds of warmup, divided by the frames the generator's 500 ms reports interpolate over the same window. Builds use the profiling profile with frame pointers and `moq-relay/io-uring,moq-bench/uring`; the relay runs four workers on cores 4-7 and the generator on cores 0-3. Chat is one publisher, 2,000 viewers, 10 fps, one 300-byte frame per group; video is the `video` workload at 960 delivered frames/s.
+
+One run measures several revisions: every round counts each base and `main` back to back, rotating which goes first. Each revision builds once into its own target and checkout, so later runs reuse it. Every run on the 24-core host passed through `quest gate`, and each cell records the host's highest one-minute load during its window. The runs on the quiet test host `nixos2`, which has no `quest`, each started only after 80 seconds at a one-minute load under 2.5 with no other process above half a core.
+
+Three findings shaped the method during this attempt:
+
+- **Host load batches instructions down.** A relay contending with other work handles more frames per wakeup, so each costs fewer instructions: in [run.2DucdO](relay-cpu-bisect.json)'s third round, four revisions read 6-12k lower at load 9-19 than in the two rounds at load 2-5, three read the same, and the two at load 31-56 lost groups. Absolute counts from different sessions are not comparable: the first checkpoint read [55f6ed2292](https://github.com/moq-dev/moq/commit/55f6ed229250d17fc99389237659906d011d8a94) at 142.7k against 169-175k here. Only cells from one run, in a quiet stretch, are compared below. The 24-CPU host's load rose to 20-250 during several runs, from other work.
+- **The generator is pinned.** From run.1KRu4S on, `BENCH_GENERATOR=21d6da9fc1` drives every relay, so later client changes cannot move what an old relay spends. With main's generator (run.BIL6LP), five of the seven relays it shares with run.qYPSii's quiet round read within 3k of the pinned figures; [0c2a798de5](https://github.com/moq-dev/moq/commit/0c2a798de5c2e9abb29815b86f945b0a980e5345) and [55f6ed2292](https://github.com/moq-dev/moq/commit/55f6ed229250d17fc99389237659906d011d8a94) read 7k and 11k lower.
+- **Counting runs with the sampler off.** From run.qYPSii on, fixed-period stacks (period 2,000,003) come from the five seconds after the counter window, so sampling interrupts stay out of the counts. No measurable bias was found: [55f6ed2292](https://github.com/moq-dev/moq/commit/55f6ed229250d17fc99389237659906d011d8a94) read 167-171k with concurrent sampling and 175k without.
+
+These are sampled-delivery estimates on a shared host. No confidence interval is claimed.
+
+## Chat on io\_uring
+
+The quiet round of run.qYPSii (one-minute load 2-4, every cell at 20,000 frames/s with no loss):
+
+| Revision | kinstr/frame | `learn_end` | `Cursor::probe` | forward drop | syscall leaf |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95), old endpoint | 117.7 | 0% | 0% | 7.1% | 24.5% |
+| [e84ffb3de3](https://github.com/moq-dev/moq/commit/e84ffb3de3139f7245bed5697754fd6add9a022e), before [moq-dev/moq#6224](https://github.com/moq-dev/moq/pull/6224) | 135.7 | 0% | 0% | 7.6% | 21.6% |
+| [0c2a798de5](https://github.com/moq-dev/moq/commit/0c2a798de5c2e9abb29815b86f945b0a980e5345) | 169.8 | 15.4% | 0% | 11.7% | 27.5% |
+| [55f6ed2292](https://github.com/moq-dev/moq/commit/55f6ed229250d17fc99389237659906d011d8a94), before [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171) | 174.6 | 17.5% | 0% | 11.7% | 31.6% |
+| [991572d636](https://github.com/moq-dev/moq/commit/991572d636d264c6189a3477849d2969e689f55c) | 204.7 | 15.5% | 7.7% | 20.1% | 35.0% |
+| [2fff7ea7ae](https://github.com/moq-dev/moq/commit/2fff7ea7ae4eff1ac984c1f1af6894e3529f1cf3) | 214.0 | 17.0% | 7.6% | 24.0% | 32.7% |
+| [21d6da9fc1](https://github.com/moq-dev/moq/commit/21d6da9fc108b48373a961f34e43c3fcd38b0146), first checkpoint's control | 176.2 | 1.3% | 7.3% | 21.2% | 22.3% |
+| `main` | 148.8 | 0.5% | 6.6% | 14.4% | 17.7% |
+
+Markers are inclusive shares of the fixed-period samples; they overlap and are not additive. The two larger rises account for most of the peak, and `main` has already removed both:
+
+- **[moq-dev/moq#6224](https://github.com/moq-dev/moq/pull/6224), 26k of a +34k step, accidental, fixed.** Its `Reader::learn_end` polled each subscriber's finish through the track lock on every forward-drop pass (`poll_forward_drop` → `Subscriber::poll_drop` → `Reader::poll_serving` → `sync` → `learn_end`). It takes 10-18% of all relay instructions from [fd59eb18a5](https://github.com/moq-dev/moq/commit/fd59eb18a50f6e0ac819e73d941a3832cbdac91f), the PR's merge, through [2fff7ea7ae](https://github.com/moq-dev/moq/commit/2fff7ea7ae4eff1ac984c1f1af6894e3529f1cf3), and none at its parent ([run.16AJUb](relay-cpu-bisect.json) has every point in the interval). [moq-dev/moq#7532](https://github.com/moq-dev/moq/pull/7532) brought it to 0.5% on `main`.
+- **[moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171) and the changes after it, +39k to [2fff7ea7ae](https://github.com/moq-dev/moq/commit/2fff7ea7ae4eff1ac984c1f1af6894e3529f1cf3), mostly fixed.** Dynamic tracks added `Cursor::probe`, 15.8k at [991572d636](https://github.com/moq-dev/moq/commit/991572d636d264c6189a3477849d2969e689f55c) and 9.8k on `main` (below). The rest is track lock contention: futex syscalls and the forward-drop path. [moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493) took the fanout subscribers off the shared lock, and `main`'s syscall leaf is now below the old endpoint's (26.3k against 28.8k).
+- **[cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95) to [e84ffb3de3](https://github.com/moq-dev/moq/commit/e84ffb3de3139f7245bed5697754fd6add9a022e), +18k, a staircase of feature steps.** The first checkpoint measured [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929)'s per-reader ranges and time anchors at +6k. Runs eVjz2w and 2DucdO (main's generator, load 2-5 in the rounds used) put about +6k across [moq-dev/moq#5928](https://github.com/moq-dev/moq/pull/5928) (compressed tracks) and [moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129) (a subscriber reads only its ranges' frames), and +12k across [2d73eea67d](https://github.com/moq-dev/moq/commit/2d73eea67d083ecf18938f4fc7c4842118eb87cf) to [e84ffb3de3](https://github.com/moq-dev/moq/commit/e84ffb3de3139f7245bed5697754fd6add9a022e). Relay runs on the quiet test host put that step on public ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111), +10.5k), and none on in-tree qmux, receive leases, or signed priorities; see [below](#qmux-receive-leases-and-public-ingest-on-the-relay).
+- **[moq-dev/moq#7530](https://github.com/moq-dev/moq/pull/7530) moved io\_uring submission, not cost.** `udp::send` doubled after [21d6da9fc1](https://github.com/moq-dev/moq/commit/21d6da9fc108b48373a961f34e43c3fcd38b0146) because each turn now submits its queued sends inside `Shared::push_inner`, while total syscall instructions fell from 39.2k to 26.3k per frame.
+
+## Main against the old endpoint
+
+Re-paired on the quiet test host `nixos2` (an i7-8700: relay on CPUs 0-3, generator on 4, 5, 10, and 11), against `main` at [fa9c1bf2a7](https://github.com/moq-dev/moq/commit/fa9c1bf2a7) with the probe fast path, the pinned generator, and a fixed sampling period of 2,000,003:
+
+| Workload, runtime | Run | [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95) | `main` | `main` / old | Highest load |
+| --- | --- | ---: | ---: | ---: | ---: |
+| chat, io\_uring | S0G1Z7 | 111.8 \[110.4-113.2] | 142.6 \[140.9-142.9] | 1.28 | 2.6 |
+| chat, tokio workers | 4U16wN | 133.8 \[131.2-134.1] | 146.9 \[144.5-147.5] | 1.10 | 5.9 |
+| video, io\_uring | TZ2ODR | 99.2 \[97.4-102.2] | 110.8 \[108.6-112.9] | 1.12 | 1.1 |
+| video, tokio workers | 6xoc9u | 136.5 \[128.7-139.8] | 121.6 \[118.6-124.1] | 0.89 | 1.6 |
+
+Medians of the quiet cells in four rounds, min-max in brackets: every cell used delivered its workload's rate within 2% with no loss, at a one-minute load of at most 6. Two cells were dropped: the old endpoint's fourth chat round on io\_uring (load 8.5) and its second on the tokio workers (load 8.7, 3.9% short of the rate). Run ssZrgC's `main` (142.3 \[141.6-143.1], three rounds) agrees within 0.3k with run S0G1Z7's.
+
+The earlier pairing on the 24-core host, at load up to 40 for the video rows, read chat 1.26 on io\_uring and 1.31 on the tokio workers, and video 1.14 and 0.96. Only chat on the tokio workers moved by more than those runs' spread, and its earlier run reached load 23 on another host, so the change is not attributed. Chat on io\_uring remains the workload furthest above the old endpoint. By the nearest named function, chat's growth on `main` at [c68c931025](https://github.com/moq-dev/moq/commit/c68c931025), before the fast path, falls in the same places on io\_uring (run.qYPSii) and the tokio workers (run.IV47ua), in instructions per frame:
+
+| Growth on `main` | io\_uring | tokio | Introduced by |
+| --- | ---: | ---: | --- |
+| `Cursor::probe` and `Misses::judge` for every peek | 8.6k | 8.7k | [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), fills for misses |
+| `Cursor` `sync`, `poll_drift`, `poll_peek`, `TrackState::live_edge` and `live` | 11.0k | 9.0k | [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) and its successors, per-reader ranges and time anchors |
+| kio `Tasks::poll_each`, `WaiterList::register` growth, `Waiters::release` | 10.7k | 11.5k | kio's task and waiter rework, including [moq-dev/moq#7340](https://github.com/moq-dev/moq/pull/7340) and [moq-dev/moq#7532](https://github.com/moq-dev/moq/pull/7532) |
+| `Subscriber` `poll_drop`, `take`, `poll_peek_group` growth | 5.0k | 4.7k | forward drops and resume |
+| `SubscribeServe::poll`, `Writer::poll_close`, transport `poll_closed` | 5.6k | 6.6k | lite publisher serving |
+
+The rows are self cost under the named function, including the std and libc leaves below it; they add to more than the net growth because other paths shrank. `Cursor::probe` reads the subscription, takes the track's shared state lock to judge misses, clones the track's fills, and runs the ask and resolve loop on every peek, even for a live reader that took every group as it arrived and never misses one. That work pays for relay backfill of missed groups, but the chat workload never needs it.
+
+## Exact counts by commit
+
+Relay counts move 5-20% with host load, so a step of a few thousand instructions can't be pinned to one commit from them. `just bench-fanout` (see `bench/README.md`) counts the chat fan-out on one pinned thread instead, against a run of zero cycles, so repeated counts agree within a few instructions per group:
+
+- `model`: one finished group a cycle through the track model, which every subscriber takes. It builds against every revision back to [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+- `session`: a publisher session into a relay origin and a viewer session out of it per subscriber, over the in-memory transport. It counts publisher, relay, and viewers together, without QUIC, and builds back to [moq-dev/moq#7027](https://github.com/moq-dev/moq/pull/7027)'s `kio::clock` (2026-11-01).
+
+At 512 subscribers, in instructions per delivered group, the model path cost 4,285 at the old endpoint and 13,300 on `main`, 3.1x; its growth is about 9k of the relay's per-frame growth on chat. The features the maintainer asked about, each against its parent (model, built with frame pointers):
+
+| Feature | Parent | Merge | Change |
+| --- | ---: | ---: | ---: |
+| Per-reader ranges and time anchors, [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) | 4,411 | 5,313 | +902 |
+| Compressed tracks, [moq-dev/moq#5928](https://github.com/moq-dev/moq/pull/5928) | 5,579 | 5,612 | +33 |
+| A subscriber reads only its ranges' frames, [moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129) | 5,604 | 5,787 | +183 |
+| Signed priorities, [moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142) | 5,888 | 5,816 | -72 |
+| Public ingest, [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111) | 5,816 | 6,016 | +200 |
+| The m0 simplification audit, [moq-dev/moq#6108](https://github.com/moq-dev/moq/pull/6108) | 6,017 | 6,017 | 0 |
+
+In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)) and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) are QUIC-level, which neither scenario reaches. Relay runs attribute them [below](#qmux-receive-leases-and-public-ingest-on-the-relay). The model path barely moved before [e84ffb3de3](https://github.com/moq-dev/moq/commit/e84ffb3de3139f7245bed5697754fd6add9a022e) (5,840) and then grew in a few large steps, each against its parent (run.TmGdFy, one build profile throughout):
+
+| Commit | Model | Session |
+| --- | ---: | ---: |
+| Dynamic tracks serve fills for misses, [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171) | +4,264 | |
+| Refill groups evicted before a reader took them, [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339) | +1,154 | |
+| Lite-07 frame bounds, timed datagram admission, layered windows, [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) | +876 | +3,054 |
+| Fill linearly in range count and span, [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995) | +558 | +3,290 |
+| Close the relay demand gaps, [moq-dev/moq#7052](https://github.com/moq-dev/moq/pull/7052) | +365 | |
+| Bounded reads end through routes, [c68c931025](https://github.com/moq-dev/moq/commit/c68c931025) | +275 | +450 |
+| An idle track read parks without walking the read path, [3c0dd8a2af](https://github.com/moq-dev/moq/commit/3c0dd8a2af) | +213 | -3,142 |
+| Take a reserved group without asking its cursor again, [68fb455bac](https://github.com/moq-dev/moq/commit/68fb455bac) | +204 | -455 |
+
+The session column starts at the 2026-11-01 harness; blank cells predate it. [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)'s session cost is the probe's walk of the live groups (`TrackState::live`, +4.0k inclusive) on both the reader's cursor and its forward-drop cursor.
+
+## Fixes in moq-dev/moq#7605
+
+Each is its own commit, counted in one run (run.s6IjbN in the evidence) at 512 subscribers per delivered group, each row on top of the one above:
+
+| Change | Model | Session |
+| --- | ---: | ---: |
+| `main` | 13,300 | 120,948 |
+| A live reader's probe skips the fills while it misses nothing | 10,477 (-2,823) | 114,139 (-6,809) |
+| A window with one set of runs reads without growing across two | 10,126 (-351) | 113,133 (-1,007) |
+| All of them | 10,126 (-23.9%) | 113,133 (-6.5%) |
+
+Against `main` at [619df6e1b3](https://github.com/moq-dev/moq/commit/619df6e1b3) (run.evL1wx), after merging it: model 13,368 to 10,119 (-24.3%), session 121,114 to 113,143 (-6.6%).
+
+`Cursor::probe` is the relay's check for groups a reader has missed. Each time a subscriber asks for its next group, the probe looks at what arrived on the track since its last look and decides whether any group the reader still wants has left the cache without the live feed delivering it (evicted, skipped, or from before the feed started), and asks upstream to fill those. A live reader that takes each group as it arrives never has such a gap, yet it paid for the whole check on every group: locking the subscription and the track's shared state, cloning the track's fills, walking the arrival ledger, checking each new group for holes, and running the ask-and-answer loop. Each time the cache aged out an old group, the eviction also landed with every reader, all of which had already taken it, and forced each one to re-run the full check. The fast path judges a group the arrival walk serves without the hole, backfill, and ledger passes, skips the subscription, fills, and answers when nothing is asked or owed, and starts each reader's eviction inbox above what it handed out. It recovers most of [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)'s and [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)'s cost.
+
+kio's `WaiterList::register` was the session path's second-largest self cost: 7.2k per group. A waiter recorded 8 lists, and a relay session's control and serving tasks parked on more, so every list past the eighth took a duplicate entry on every poll. Remembering 16 cut the session by 4,424 (-3.9%) and was initially reverted after two moq-net integration tests failed. [moq-dev/moq#7789](https://github.com/moq-dev/moq/pull/7789) fixes the front's metadata/abort ordering and the quiet-catalog test's detached handshake, then raises the record limit to 16; its paired session measurement is recorded in that PR. Forcing every idle gate to walk still reproduced both failures, so the suspected idle-gate wake dependency did not explain them. The per-group costs this report attributes and nothing here cut are accepted in the [release performance report](release-perf.md).
+
+On the quiet test host (run.we4umM, one-minute load at most 4.7), chat over io\_uring went from 154.5k \[154.1-155.0] instructions per frame on `main` to 148.9k \[148.3-150.8] with the probe and window changes (-3.6%), four rounds each, every cell at 20,000 frames/s with no loss. The relay's QUIC, crypto, and syscalls are most of its cost, so the model's -23% shows as a few percent there.
+
+## The ranged reads' session cost on `main`
+
+[moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995) and [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) each added about 3k instructions per group to the session when they landed. Run 4rAIYS counts each against its parent again, beside `main` at [fa9c1bf2a7](https://github.com/moq-dev/moq/commit/fa9c1bf2a7), with callgrind attribution (512 subscribers, per delivered group):
+
+| Change | Parent | Merge | Change |
+| --- | ---: | ---: | ---: |
+| Fill linearly in range count and span, [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995) | 140,202 | 143,490 | +3,288 |
+| Layered windows, [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542) | 116,810 | 119,859 | +3,049 |
+
+Neither cost is in the probe's judgement, so the fast path left both in place:
+
+- **[moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995), the live index's walk.** It indexed the live feed's groups apart from fetched backfill, so every search for live content (`TrackState::live`) walked a chain of two flattened options where it had walked the cache's range. The walk's callers are the drift edge each read measures (`poll_drift` → `drift_edge` → `live_edge`) and the arrival walk, on the reader's cursor and its forward-drop cursor alike; the judgement never calls it. It still cost 2,840 inclusive per group on `main`, as at [moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542)'s merge (2,817). The probe's own share of the PR (+1,115 self) did fall with the fast path: the probe's self cost went from 4,343 at the merge to 1,842 on `main`.
+- **[moq-dev/moq#7542](https://github.com/moq-dev/moq/pull/7542), layered window queries.** A window answers each query from its shared fixed runs and a layer of moving ones (`runs::Layered::first` and `last`): +3,810 inclusive at the merge, less about 800 in the range-map queries they replaced. [moq-dev/moq#7605](https://github.com/moq-dev/moq/pull/7605)'s single-set fast path brought them to 2,117 on `main`, about 40 queries per delivery at about 50 instructions each, from the forward-drop walk, peeks, admission, and the probe. That is the number of window queries a per-reader window answers, not a walk, so it is accepted in the [release performance report](release-perf.md).
+
+`TrackState::live` now walks either the cache or the live index through one branch per call, and the drift edge's single-run search scans it statically rather than through a `dyn` iterator (run.m71Z8E, against `main` at [fa9c1bf2a7](https://github.com/moq-dev/moq/commit/fa9c1bf2a7)):
+
+| Scenario | `main` | Live walk | Change |
+| --- | ---: | ---: | ---: |
+| Model | 9,637 | 9,367 | -270 (-2.8%) |
+| Session | 110,014 | 109,123 | -891 (-0.8%) |
+
+## qmux, receive leases, and public ingest on the relay
+
+In-tree qmux ([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)) and receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) are QUIC-level, so only relay runs reach them. On the quiet test host, chat over io\_uring, each against its parent in one run (run.ssZrgC, three rounds, load at most 3.5):
+
+| Change | Parent | Merge | Change |
+| --- | ---: | ---: | ---: |
+| In-tree qmux, [moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231) | 121.3 \[120.2-123.0] | 119.4 \[116.5-122.6] | -1.9 |
+| Receive leases, [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878) | 134.4 \[130.9-134.4] | 135.2 \[135.1-136.5] | +0.8 |
+
+Neither costs measurably: each change is inside its own rounds' spread. The rise between them, +15.0k in that run, sits at public ingest. Run YxLYgw measured every candidate in that interval in one run (three rounds; the medians use the cells at load 6 or less, and the step shows in every round, loaded cells included):
+
+| Revision | kinstr/frame |
+| --- | ---: |
+| [72259ab3cc](https://github.com/moq-dev/moq/commit/72259ab3cc), in-tree qmux merged | 119.5 |
+| [d44813cb70](https://github.com/moq-dev/moq/commit/d44813cb70), before signed priorities | 120.5 \[118.5-122.4] |
+| [b4dfafac88](https://github.com/moq-dev/moq/commit/b4dfafac88), signed priorities, [moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142) | 119.6 \[117.7-121.5] |
+| [1f5caa7026](https://github.com/moq-dev/moq/commit/1f5caa7026), a GSO batch ends on a short first datagram, [moq-dev/moq#6279](https://github.com/moq-dev/moq/pull/6279) | 120.5 \[118.7-122.3] |
+| [28a8c9a7a6](https://github.com/moq-dev/moq/commit/28a8c9a7a6), before public ingest | 118.9 \[118.0-120.6] |
+| [9f9149812c](https://github.com/moq-dev/moq/commit/9f9149812c), public ingest, [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111) | 129.4 \[128.0-130.9] |
+| [a9a85580a4](https://github.com/moq-dev/moq/commit/a9a85580a4), the m0 simplification audit, [moq-dev/moq#6108](https://github.com/moq-dev/moq/pull/6108) | 128.9 \[128.4-129.5] |
+| [43fc9251d7](https://github.com/moq-dev/moq/commit/43fc9251d7), before receive leases | 130.1 \[126.4-133.8] |
+
+Public ingest added +10.5k per frame here, against +200 per group through the model, because the model scenario never reads a frame. It stopped withholding groups: every group joins arrival order when created, so each viewer's read reaches a group before its first frame and blocks on it. By function (rounds 2 and 3), the rise is each viewer's group serving (`GroupServe`, +5.3k inclusive: `group::Consumer::poll_read_frame` and the new `poll_next_frame`, with the expiry checks a blocked read runs, `poll_expired_if_blocked`, `poll_expired_while_pending`, `Recover::poll_budget`, and `watch_landing`), new track-state lock polls in the forward-drop, receive, and staleness paths (+3.8k), and the lock and unlock leaves (+2.0k self).
+
+## Public ingest's per-viewer read on `main`
+
+Decided 2026-11-05 (maintainer): keep cutting public ingest's relay cost. The in-process session reads every frame, so it reaches the read path public ingest opened. Counted at 512 subscribers per delivered group, each change against the commit before it:
+
+| Change | Session | Change |
+| --- | ---: | ---: |
+| This branch at [45351ac1d8](https://github.com/moq-dev/moq/commit/45351ac1d8) (`main` at [246916845a](https://github.com/moq-dev/moq/commit/246916845a)) | 110,581 | |
+| A blocked read asks the reader's budget only once a group landed above it | 109,968 | -613 |
+| A reader's drop poll with nothing to report returns at once | 108,803 | -1,166 |
+| A drop poll right after a receive only collects what the receive queued, and the frame read inlines again | 106,833 | -1,992 |
+| A prefetched frame is read before the idle gate | 106,853 | 0 |
+| All of them (run 1gKfjA; callgrind 105,665 to 101,955) | 106,852 | -3,729 (-3.4%) |
+
+Each change is counted against the row above in its own run (N037x9, vS3CAR, DV13e7, lr8Dpl), and the total in one run. A chat group has one frame, so the prefetch change shows only in the `group` drain below.
+
+- **The budget.** A read that blocks before its group's first frame judges the group's expiry. `Consumer::poll_expiry` asked the logical reader's budget (`Recover::poll_budget`: the reader's lock and a sync of its mirrored preferences) before `is_expired`, which answers false without the budget until a group lands above. The sync is redundant there: a preference update mirrors into every copy at once (`Mirror::sync`), a route change syncs every reader (`serve_from`), and the landing that makes the budget matter wakes the read through `watch_landing`, which then asks the budget. `is_expired` now takes the `Recover` and asks only past that check.
+- **The forward drop.** The relay's track side polls the reader for runs to report (`TrackRun::poll_forward_drop`) on each track wake, and again after a receive that parked, to collect a stale skip the receive's probe queued without a wake. Each poll judged every copy (`Reader::let_go`) with nothing to report, and the second probed the live edge again (`Cursor::poll_drift` and `probe`) right after the receive had, with the same waiter. The reader now returns once nothing is queued, and the second poll only collects. Drop probes fall from 5 to 3 per delivered group.
+
+What remains of each viewer's live read is accepted in the [release performance report](release-perf.md): about 3.5k per delivered group in the drop poll's probe and 3.5k in the receive's (three each, one wake of each kind), and 0.9k in the expiry checks of a read that blocks before its first frame and of a group waiting for stream credit, which park on the next landing.
+
+## `group_relay_frames` since `e7a5c10`
+
+[Fastest-reader pacing](https://github.com/moq-dev/moq/pull/7664)'s comparison found `group_relay_frames` about 15% slower at [f37d964dd3](https://github.com/moq-dev/moq/commit/f37d964dd3) than at [e7a5c10913](https://github.com/moq-dev/moq/commit/e7a5c10913) on a loaded host. The original `group` fan-out scenario counted the same drain (every subscriber reads a finished 512-frame group in 16-frame batches), per drained group (runs yLeXzU, S9A3hY, R849HM):
+
+| Revision | Instructions | Change |
+| --- | ---: | ---: |
+| [e7a5c10913](https://github.com/moq-dev/moq/commit/e7a5c10913) | 149,368 | |
+| [b51eb8cdec](https://github.com/moq-dev/moq/commit/b51eb8cdec), before pacing | 149,368 | |
+| [7ad8d426e0](https://github.com/moq-dev/moq/commit/7ad8d426e0), pacing, [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388) | 152,375 | +3,007 (+2.0%) |
+| [ad3ca7784a](https://github.com/moq-dev/moq/commit/ad3ca7784a), before idle frame reads | 152,375 | |
+| [25ff6e9754](https://github.com/moq-dev/moq/commit/25ff6e9754), idle frame reads, [moq-dev/moq#7504](https://github.com/moq-dev/moq/pull/7504) | 171,694 | +19,319 (+12.7%) |
+| [8b46ba5b33](https://github.com/moq-dev/moq/commit/8b46ba5b33), smaller group consumers, [moq-dev/moq#7791](https://github.com/moq-dev/moq/pull/7791) | 172,205 | +511 |
+| [f37d964dd3](https://github.com/moq-dev/moq/commit/f37d964dd3) | 172,205 | |
+| This branch at [45351ac1d8](https://github.com/moq-dev/moq/commit/45351ac1d8) | 173,231 | +1,026 |
+| This PR (run 1gKfjA) | 135,396 | -37,835 (-21.8%) |
+
+The +15.3% matches the wall-clock report. Nine other candidates between pacing and `f37d964dd3` count the same as their predecessor. [moq-dev/moq#7504](https://github.com/moq-dev/moq/pull/7504) put an idle gate in front of every frame read and split the read into a second out-of-line layer called from two branches, so each frame paid a call frame and the gate's bookkeeping, about 38 instructions on top of about 297. A frame already in the reader's prefetched batch now returns before the gate, the drift budget, or a route, none of which can apply to it (a read parks only with its batch drained, and a copy adopted mid-group starts empty); what remains below has one call site. The drain is now 9.4% below `e7a5c10913`, pacing included.
+
+The counts above used the whole-frame batch reader before the maintainer made it private. `group_relay_objects` (renamed to prevent comparisons with the old frame-batch IDs) and the `group` scenario now use the relay's `poll_read_objects` through the hidden `fuzz::ObjectBatch` helper, retaining object metadata. These historical counts do not measure that revised harness. Pacing's isolated 2.0% cost was accepted and its dedicated quest removed.
+
+The revised object-batch harness at [531c52d90a](https://github.com/moq-dev/moq/commit/531c52d90a72a73c38d88d63c4315bfa36143f65) measures 144,907, 144,901, and 144,900 instructions per drained group at 1, 8, and 64 subscribers (`just bench-fanout "" group "1 8 64"`, run Qn1sqT). This is the new harness's baseline, with no historical comparison.
+
+## Validation
+
+Every count, delivery estimate, loss figure, and host load cited here is in [the evidence](relay-cpu-bisect.json), keyed by run artifact. Raw captures (`perf.data`, folded stacks, reports) stay in the measuring checkout's ignored `.tmp/bench/`; the per-function figures for public ingest are recorded with run YxLYgw.

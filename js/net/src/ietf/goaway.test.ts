@@ -1,11 +1,10 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { SessionCode, StreamCode, StreamError } from "../error.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { wireOf } from "../wire.ts";
 import { AuthMessage, AuthOk, IetfAuthWire } from "./auth.ts";
 import { Connection } from "./connection.ts";
 import { GoAway } from "./goaway.ts";
@@ -22,6 +21,7 @@ for (const [version, alpn, requestId] of [
 	[Version.DRAFT_22, ALPN.DRAFT_22, undefined],
 ] as const) {
 	test(`a ${alpn} GOAWAY surfaces its URI and deadline without closing the session`, async () => {
+		using clock = manual();
 		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.client, { version });
 		const peer = await Stream.accept(pair.server, version);
@@ -35,21 +35,15 @@ for (const [version, alpn, requestId] of [
 			client: true,
 		});
 
-		let closed = false;
-		void connection.closed.then(() => {
-			closed = true;
-		});
-
 		try {
 			await peer.writer.u53(GoAway.id);
 			await new GoAway({ newSessionUri: "", timeout: 5000n, requestId }).encode(peer.writer, version);
 
-			const drain = await wireOf(connection).goaway;
+			const drain = await connection.draining;
 			expect(drain.uri).toBe("");
 			expect(drain.timeout).toBe(Milli(5000));
 
-			await new Promise((resolve) => setTimeout(resolve, 20));
-			expect(closed).toBe(false);
+			expect(await settlesWithin(connection.closed, clock, Milli(20))).toBe(false);
 		} finally {
 			connection.abort();
 		}
@@ -57,6 +51,7 @@ for (const [version, alpn, requestId] of [
 }
 
 test("a server rejects a client GOAWAY that names a redirect", async () => {
+	using clock = manual();
 	const version = Version.DRAFT_18;
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const control = await Stream.open(pair.client, { version });
@@ -71,16 +66,10 @@ test("a server rejects a client GOAWAY that names a redirect", async () => {
 		client: false,
 	});
 
-	let closed = false;
-	void connection.closed.then(() => {
-		closed = true;
-	});
-
 	try {
 		await peer.writer.u53(GoAway.id);
 		await new GoAway({ newSessionUri: "https://other.example/", timeout: 0n }).encode(peer.writer, version);
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		expect(closed).toBe(true);
+		expect(await settlesWithin(connection.closed, clock, Milli(50))).toBe(true);
 	} finally {
 		connection.abort();
 	}
@@ -137,12 +126,12 @@ for (const [version, alpn] of [
 			client: true,
 		});
 		// A caller may close immediately on a redirect, so the protocol error must win.
-		void wireOf(connection).goaway.then(() => connection.abort());
+		void connection.draining.then(() => connection.abort());
 		const frame = version === Version.DRAFT_18 ? [0x10, 0, 3, 0, 0, 0] : [0x10, 0, 2, 0, 0];
 		try {
 			await peer.writer.write(new Uint8Array([...frame, ...frame]));
 			expect((await pair.server.closed).closeCode).toBe(SessionCode.ProtocolViolation);
-			expect(wireOf(connection).goaway.peek()).toBeUndefined();
+			expect(connection.draining.peek()).toBeUndefined();
 		} finally {
 			connection.abort();
 		}
@@ -210,7 +199,7 @@ for (const [version, alpn] of [
 			version,
 			client: true,
 		});
-		const announced = connection.announced();
+		const announced = connection.routes();
 		try {
 			const request = await Stream.accept(pair.server, version);
 			if (!request) throw new Error("no namespace subscription");
@@ -236,7 +225,7 @@ for (const [version, alpn] of [
 		const control = await Stream.open(pair.server, { version });
 		await Stream.accept(pair.client, version);
 		const origin = new OriginProducer();
-		origin.createBroadcast(Path.from("room")).announce();
+		origin.route(Path.from("room"), { hidden: true }).announce();
 		const connection = new Connection({
 			url: new URL("https://relay.example/"),
 			quic: pair.server,
@@ -262,11 +251,12 @@ for (const [version, alpn] of [
 
 	for (const end of ["FIN", "reset"] as const) {
 		test(`${alpn} an idle advertisement whose answer ends by ${end} is offered again`, async () => {
+			using clock = manual();
 			const pair = createMockTransportPair(alpn);
 			const control = await Stream.open(pair.server, { version });
 			await Stream.accept(pair.client, version);
 			const origin = new OriginProducer();
-			origin.createBroadcast(Path.from("room")).announce();
+			origin.route(Path.from("room"), { hidden: true }).announce();
 			const connection = new Connection({
 				url: new URL("https://relay.example/"),
 				quic: pair.server,
@@ -289,7 +279,8 @@ for (const [version, alpn] of [
 				await new RequestOk().encode(first.writer, version);
 				if (end === "reset") first.writer.reset(new StreamError(StreamCode.Cancel));
 				else first.writer.close();
-				await offered();
+				// The offer comes back after the retry backoff.
+				await clock.drive(offered());
 			} finally {
 				connection.abort();
 				origin.close();

@@ -11,7 +11,7 @@
 //! both assign, but not all of it.
 
 use super::Version;
-use crate::{SessionError, StreamError};
+use crate::{Error, SessionError, StreamError};
 
 /// An implementation-specific error: the stream died on our side, with no registry entry
 /// for why.
@@ -31,6 +31,22 @@ const GOING_AWAY: u32 = 0x4;
 
 /// The subscription outran the publisher's resource limits.
 const TOO_FAR_BEHIND: u32 = 0x5;
+
+/// The authorization token for the request has expired.
+///
+/// Sent only on the streams of a request whose own request token's grant lapsed (see
+/// [`token_expired`]), which no [`StreamError`] names: [`to_stream_code`] never returns it,
+/// and [`from_stream_code`] keeps it [`StreamError::Unknown`], so a relay passes an
+/// upstream's expiry on as INTERNAL_ERROR rather than telling its own peer that its token
+/// lapsed. The same 0x7 in drafts 18, 20, and 22.
+pub(crate) const EXPIRED_AUTH_TOKEN: u32 = 0x7;
+
+/// Whether `err`, ending a request's token grant, says the token expired: its deadline
+/// passing, or the acceptor revoking it as expired. Only such an end sends
+/// [`EXPIRED_AUTH_TOKEN`].
+pub(crate) fn token_expired(err: &Error) -> bool {
+	matches!(err, Error::Expired | Error::Session(SessionError::Expired))
+}
 
 /// The track's content could not be parsed.
 const MALFORMED_TRACK: u32 = 0x12;
@@ -63,7 +79,7 @@ pub fn to_stream_code(err: &StreamError) -> u32 {
 /// A code the drafts do not assign stays [`StreamError::Unknown`], which surfaces as
 /// [`Error::Stream`](crate::Error::Stream): an error, but never one given a meaning it did
 /// not carry. That includes the codes this crate has no local counterpart for
-/// (UNKNOWN_OBJECT_STATUS, EXCESSIVE_LOAD) and every value a later
+/// (UNKNOWN_OBJECT_STATUS, [`EXPIRED_AUTH_TOKEN`], EXCESSIVE_LOAD) and every value a later
 /// draft may add.
 pub fn from_stream_code(code: u32) -> StreamError {
 	match code {
@@ -137,9 +153,6 @@ pub(crate) mod request {
 	/// The endpoint is overloaded and cannot process the request.
 	pub(crate) const EXCESSIVE_LOAD: u64 = 0x9;
 
-	/// A SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS prefix overlapping an established one.
-	pub(crate) const PREFIX_OVERLAP: u64 = 0x30;
-
 	/// A GOAWAY is draining the session, so no new request is accepted.
 	const GOING_AWAY: u64 = 0x6;
 
@@ -206,12 +219,7 @@ pub(crate) mod request {
 			| Error::Session(SessionError::Version | SessionError::Unsupported) => {
 				return NOT_SUPPORTED;
 			}
-			// moq-transport has no code for a FETCH that reached a datagram, which is never
-			// cached, so it is a group that is not there. NOT_SUPPORTED would claim the peer
-			// does not implement FETCH at all.
-			Error::NotFound
-			| Error::NotFetchable
-			| Error::Stream(StreamError::NotFound | StreamError::NotFetchable) => return DOES_NOT_EXIST,
+			Error::NotFound | Error::Stream(StreamError::NotFound) => return DOES_NOT_EXIST,
 			Error::InvalidRange => invalid_range(kind),
 			Error::InvalidJoiningRequestId => invalid_joining_request_id(kind, version),
 			// A path with no route is one we will not carry. A subscriber that asked for it
@@ -240,6 +248,20 @@ pub(crate) mod request {
 		registered.unwrap_or(INTERNAL_ERROR)
 	}
 
+	/// The Retry Interval, in milliseconds, for a refusal with `err` that reads `code` on the wire.
+	///
+	/// A refusal asking again may pass invites the backoff a refused token starts from. 0 asks the
+	/// peer never to retry a verdict, which would repeat. The code must leave the request open
+	/// too: a failed session can carry a verdict (UNAUTHORIZED, NOT_SUPPORTED), and UNINTERESTED
+	/// tells an offer to stop. EXCESSIVE_LOAD may pass whatever the error, once the load drops.
+	pub(crate) fn retry_interval(err: &Error, code: u64) -> u64 {
+		match code == EXCESSIVE_LOAD || err.retryable() && matches!(code, INTERNAL_ERROR | DOES_NOT_EXIST | GOING_AWAY)
+		{
+			true => crate::auth::RETRY_INITIAL.as_millis() as u64,
+			false => 0,
+		}
+	}
+
 	/// Read a rejection code received on the negotiated draft.
 	///
 	/// A code the draft does not assign for this request, INTERNAL_ERROR included, stays
@@ -265,7 +287,7 @@ pub(crate) mod request {
 	mod tests {
 		use super::*;
 
-		const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
+		const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 		const KINDS: [Kind; 6] = [
 			Kind::Subscribe,
@@ -279,7 +301,7 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 15] = [
+		const EVERY_ERROR: [Error; 14] = [
 			Error::Duplicate,
 			Error::Unauthorized,
 			Error::Expired,
@@ -287,7 +309,6 @@ pub(crate) mod request {
 			Error::Unsupported,
 			Error::Session(SessionError::Unsupported),
 			Error::NotFound,
-			Error::NotFetchable,
 			Error::InvalidRange,
 			Error::InvalidJoiningRequestId,
 			Error::Unroutable,
@@ -296,6 +317,29 @@ pub(crate) mod request {
 			Error::UnsupportedExtension,
 			Error::Remote(0x30),
 		];
+
+		/// Only a refusal that asking again may pass invites a retry. An unroutable offer reads
+		/// UNINTERESTED, which tells the peer to stop offering, and a session failing with a
+		/// verdict (`Session(Unsupported)`) keeps it, so neither does.
+		#[test]
+		fn only_a_refusal_that_may_pass_invites_a_retry() {
+			let retry = crate::auth::RETRY_INITIAL.as_millis() as u64;
+			for version in ALL {
+				for kind in KINDS {
+					for err in EVERY_ERROR {
+						let code = to_code(&err, kind, version);
+						let expected = match err {
+							Error::GoingAway => retry,
+							Error::Unroutable if matches!(kind, Kind::Subscribe | Kind::Fetch | Kind::TrackStatus) => {
+								retry
+							}
+							_ => 0,
+						};
+						assert_eq!(retry_interval(&err, code), expected, "{version:?} {kind:?} {err:?}");
+					}
+				}
+			}
+		}
 
 		/// A relay bridging a moq-lite revocation onto a moq-transport request refuses it as
 		/// UNAUTHORIZED, the same as a local refusal.
@@ -326,15 +370,6 @@ pub(crate) mod request {
 
 			// A broadcast with no route is, to the peer that asked for it, not here either.
 			assert_eq!(to_code(&Error::Unroutable, Kind::Subscribe, Version::Draft22), 0x10);
-
-			// So is a datagram group: never cached, so a FETCH reaching one finds nothing, and
-			// NOT_SUPPORTED would say the endpoint has no FETCH at all.
-			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft22), 0x10);
-			// Including a lite-07 upstream's NOT_FETCHABLE, bridged by a relay.
-			assert_eq!(
-				to_code(&Error::Stream(StreamError::NotFetchable), Kind::Fetch, Version::Draft22),
-				0x10
-			);
 		}
 
 		/// A refused route says UNINTERESTED to the requests that offer content.
@@ -547,7 +582,6 @@ mod tests {
 	fn unregistered_conditions_are_internal() {
 		for err in [
 			StreamError::NotFound,
-			StreamError::NotFetchable,
 			StreamError::Unroutable,
 			StreamError::Old,
 			StreamError::Evicted,
@@ -596,7 +630,7 @@ mod tests {
 
 	/// Every stream error this crate can hold, so the conformance check below covers the
 	/// whole space rather than the variants someone remembered. A new variant belongs here.
-	const EVERY_ERROR: [StreamError; 20] = [
+	const EVERY_ERROR: [StreamError; 19] = [
 		StreamError::Session(SessionError::Cancel),
 		StreamError::Internal,
 		StreamError::Cancel,
@@ -606,7 +640,6 @@ mod tests {
 		StreamError::TooFarBehind,
 		StreamError::MalformedTrack,
 		StreamError::NotFound,
-		StreamError::NotFetchable,
 		StreamError::Unroutable,
 		StreamError::Old,
 		StreamError::Evicted,

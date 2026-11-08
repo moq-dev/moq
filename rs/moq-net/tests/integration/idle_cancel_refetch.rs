@@ -7,25 +7,32 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast
-		.create_track("audio", moq_net::track::Info::default().with_timescale(None))
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"audio",
+			moq_net::track::Info::default().with_timescale(None).with_max_age(None),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
 
 	let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 	g0.write_frame(None, &b"0a"[..]).unwrap();
@@ -40,23 +47,24 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let _pair = connect_mock(options).await;
 
 	let consumer = client.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
+		.unwrap()
 		.unwrap()
 		.unwrap();
 
 	{
-		let mut subscriber = moq_clock::timeout(TIMEOUT, remote.track("audio").unwrap().subscribe(None))
+		let mut subscriber = kio::clock::timeout(TIMEOUT, remote.track("audio").unwrap().subscribe(None))
 			.await
 			.unwrap()
 			.unwrap();
-		let mut group = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
 		assert_eq!(group.sequence, 1);
-		let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -65,7 +73,7 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	}
 
 	// The relay cancels the idle upstream subscription.
-	moq_clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
 		.await
 		.unwrap()
 		.unwrap();
@@ -77,13 +85,13 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 
 	let track = remote.track("audio").unwrap();
 	let _feed = track.subscribe(None);
-	let mut group = moq_clock::timeout(TIMEOUT, track.fetch_group(1, None))
+	let mut group = kio::clock::timeout(TIMEOUT, track.fetch_group(1, None))
 		.await
 		.unwrap()
 		.unwrap();
 	let mut frames = Vec::new();
 	loop {
-		match moq_clock::timeout(TIMEOUT, group.read_frame())
+		match kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("group 1 hangs")
 		{

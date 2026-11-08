@@ -105,8 +105,8 @@ pub enum Error {
 	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
 	KeylogUnset,
 
-	/// A zero `connect.backoff.healthy`, which would count every session as healthy.
-	#[error("connect.backoff.healthy must be non-zero")]
+	/// A zero `Backoff::healthy`, which would count every session as healthy.
+	#[error("the healthy backoff bar must be non-zero")]
 	BackoffHealthy,
 
 	/// The config was parsed from released spellings that no longer work. The
@@ -161,14 +161,9 @@ pub enum Error {
 		websocket: Arc<Error>,
 	},
 
-	/// An `iroh://` URL was dialed but the client was built without an Iroh endpoint.
-	#[cfg(feature = "iroh")]
-	#[error("Iroh support is not enabled")]
-	IrohDisabled,
-
-	/// A client CA or pinned peers were configured on a stream-only server, which has no QUIC listener to verify them.
+	/// A client CA or pinned peers were configured on a server with no QUIC or `tls://` listener to verify them.
 	#[error(
-		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate"
+		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen) or a TLS TCP listener (--listen-tcp-tls); the plaintext TCP and Unix listeners never ask for a client certificate"
 	)]
 	MtlsUnsupported,
 
@@ -230,6 +225,12 @@ pub enum Error {
 	#[error("panicked")]
 	Panic,
 
+	/// A listener's endpoint stopped, so [`Listener::accept`](crate::Listener::accept) can never
+	/// yield another session. The endpoint's own failure is logged where it happened.
+	#[cfg(feature = "_transport")]
+	#[error("the {0} listener stopped accepting")]
+	Accept(crate::Transport),
+
 	/// Loading certificates or building the TLS config failed.
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),
@@ -238,11 +239,6 @@ pub enum Error {
 	#[cfg(feature = "quic")]
 	#[error(transparent)]
 	Quic(Arc<crate::quic::Error>),
-
-	/// The Iroh backend failed.
-	#[cfg(feature = "iroh")]
-	#[error(transparent)]
-	Iroh(Arc<crate::iroh::Error>),
 
 	/// The WebSocket fallback transport failed.
 	#[cfg(feature = "websocket")]
@@ -259,10 +255,11 @@ pub enum Error {
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
 
-	/// The WebRTC data channel transport failed.
-	#[cfg(feature = "webrtc")]
-	#[error(transparent)]
-	WebRtc(Arc<crate::webrtc::Error>),
+	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
+	/// such as a rate cap, which qmux cannot pace.
+	#[cfg(feature = "qmux")]
+	#[error("qmux refused the session limits: {0}")]
+	QmuxLimits(String),
 }
 
 impl Error {
@@ -273,13 +270,8 @@ impl Error {
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
 			Self::MoqNet(err) => matches!(
-				moq_net::SessionError::from(err),
-				moq_net::SessionError::Unauthorized
-					| moq_net::SessionError::Expired
-					| moq_net::SessionError::MalformedAuthToken
-					| moq_net::SessionError::ProtocolViolation
-					| moq_net::SessionError::KeyValueFormatting
-					| moq_net::SessionError::InvalidRequestId
+				moq_net::reconnect::Verdict::from(err),
+				moq_net::reconnect::Verdict::Refused | moq_net::reconnect::Verdict::Fatal
 			),
 			Self::Tls(err) => err.is_terminal(),
 			Self::NoBackend(_)
@@ -303,17 +295,6 @@ impl Error {
 			),
 			#[cfg(all(feature = "uds", unix))]
 			Self::Unix(err) => matches!(err.as_ref(), crate::unix::Error::MissingPath),
-			#[cfg(feature = "iroh")]
-			Self::IrohDisabled => true,
-			#[cfg(feature = "iroh")]
-			Self::Iroh(err) => matches!(
-				err.as_ref(),
-				crate::iroh::Error::MissingHost
-					| crate::iroh::Error::InvalidEndpointId(_)
-					| crate::iroh::Error::InvalidUrl
-					| crate::iroh::Error::Url(_)
-					| crate::iroh::Error::NoVersions
-			),
 			_ => self.is_auth(),
 		}
 	}
@@ -376,6 +357,20 @@ impl Error {
 	}
 }
 
+/// What a connection reports when moq-net's reconnect policy fails an attempt or gives up.
+#[cfg(feature = "net")]
+impl From<moq_net::reconnect::Failure> for Error {
+	fn from(failure: moq_net::reconnect::Failure) -> Self {
+		use moq_net::reconnect::Failure;
+		match failure {
+			Failure::Timeout(timeout) => Self::ConnectTimeout(timeout),
+			Failure::Refused(reason) => Self::RefusedRedirect(reason.to_string()),
+			Failure::Fixed => Self::PinnedRedirect,
+			failure => Self::Reconnect(failure.to_string()),
+		}
+	}
+}
+
 // The wrapped sources aren't `Clone`, so `#[from]` can't store them behind `Arc`
 // directly. These hand-written conversions keep `?` ergonomic at the call sites.
 impl From<std::io::Error> for Error {
@@ -408,13 +403,6 @@ impl From<crate::quic::Error> for Error {
 	}
 }
 
-#[cfg(feature = "iroh")]
-impl From<crate::iroh::Error> for Error {
-	fn from(err: crate::iroh::Error) -> Self {
-		Self::Iroh(Arc::new(err))
-	}
-}
-
 #[cfg(feature = "websocket")]
 impl From<crate::websocket::Error> for Error {
 	fn from(err: crate::websocket::Error) -> Self {
@@ -437,13 +425,6 @@ impl From<crate::tcp::Error> for Error {
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
-	}
-}
-
-#[cfg(feature = "webrtc")]
-impl From<crate::webrtc::Error> for Error {
-	fn from(err: crate::webrtc::Error) -> Self {
-		Self::WebRtc(Arc::new(err))
 	}
 }
 

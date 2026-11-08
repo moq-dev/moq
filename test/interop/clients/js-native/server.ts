@@ -17,17 +17,17 @@ const version = (0xff000000 + Number(name.split("-").at(-1))) as Ietf.IetfVersio
 const alpns = [`moqt-${Number(version) - 0xff000000}`];
 const extensions = Extensions.offered();
 const origin = new Moq.Origin.Producer();
-const broadcastPublication = origin.createBroadcast(Moq.Path.from("handover"));
-const broadcast = broadcastPublication.broadcast;
+const broadcastRoute = origin.route(Moq.Path.from("handover"), { hidden: true });
+const broadcast = broadcastRoute.broadcast;
 const video = broadcast.createTrack("video");
-broadcastPublication.announce({ epoch: Moq.Epoch.mint() });
-const markerPublication = origin.createBroadcast(Moq.Path.from("replacement"));
-const marker = markerPublication.broadcast;
+broadcastRoute.announce();
+const markerRoute = origin.route(Moq.Path.from("replacement"), { hidden: true });
+const marker = markerRoute.broadcast;
 const ready = marker.createTrack("ready");
 const markerGroup = ready.appendGroup();
 markerGroup.writeFrame({ payload: new Uint8Array([42]) });
 markerGroup.finish();
-markerPublication.announce();
+markerRoute.announce();
 
 type Socket = {
 	protocol: string;
@@ -143,7 +143,7 @@ try {
 	next.writeFrame({ payload: new Uint8Array(32).fill(1) });
 	next.finish();
 	assert.equal((await commands.next()).value, "done");
-	console.error("js goaway redirect resumed");
+	console.error("js goaway redirect restarted");
 } finally {
 	lines.close();
 	initial?.connection.abort();

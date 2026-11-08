@@ -1,4 +1,4 @@
-use moq_clock::Wall;
+use kio::clock::Wall;
 use serde::{Deserialize, Serialize};
 use serde_with::base64::{Base64, UrlSafe};
 use serde_with::formats::Unpadded;
@@ -15,11 +15,14 @@ use crate::lease::Reason;
 /// query parameter is special and a credential can be whatever the server understands. The same shape carries
 /// every [`Event`]; an `end` adds what the session did.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct Request {
 	/// Random 128-bit hex, unique per session; the key every event for it shares.
 	pub id: String,
+
+	/// The attached credential this event concerns; absent for the connection itself.
+	pub auth: Option<String>,
 
 	/// Which lifecycle event this is, with what an `end` carries.
 	#[serde(flatten)]
@@ -66,6 +69,28 @@ pub struct Request {
 	pub tls: Option<Peer>,
 }
 
+impl std::fmt::Debug for Request {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Request")
+			.field("id", &self.id)
+			.field("event", &self.event)
+			.field("node", &self.node)
+			.field("transport", &self.transport)
+			.field("remote", &self.remote)
+			.field("local", &self.local)
+			.field("server_name", &self.server_name)
+			.field("alpn", &self.alpn)
+			.field("path", &self.path)
+			// The contract permits credentials under any query key.
+			.field("query", &self.query.as_ref().map(|_| "..."))
+			.field("token", &self.token)
+			.field("role", &self.role)
+			.field("implementation", &self.implementation)
+			.field("tls", &self.tls)
+			.finish()
+	}
+}
+
 impl Request {
 	/// A `connect` for a fresh session, minting a random 128-bit hex id.
 	///
@@ -73,10 +98,11 @@ impl Request {
 	/// `#[non_exhaustive]`, so this stays the way to build one as fields are added.
 	pub fn new(node: impl Into<String>, transport: Transport, path: impl Into<String>) -> Self {
 		let mut bytes = [0u8; 16];
-		aws_lc_rs::rand::fill(&mut bytes).expect("failed to generate a session id");
+		rind::rand::fill(&mut bytes).expect("failed to generate a session id");
 		let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 		Self {
 			id,
+			auth: None,
 			event: Event::Connect,
 			node: node.into(),
 			transport,
@@ -96,13 +122,19 @@ impl Request {
 
 /// A credential from a moq-transport SETUP's `AUTHORIZATION TOKEN` option, unparsed.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Token {
 	/// The moq-transport Token Type, naming how [`value`](Self::value) is encoded.
 	pub kind: u64,
 	/// The token bytes, base64url without padding on the wire.
 	#[serde_as(as = "Base64<UrlSafe, Unpadded>")]
 	pub value: Vec<u8>,
+}
+
+impl std::fmt::Debug for Token {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "Token(kind={}, <{} bytes>)", self.kind, self.value.len())
+	}
 }
 
 impl Token {
@@ -131,6 +163,8 @@ pub enum Event {
 		/// What it moved.
 		bytes: Bytes,
 	},
+	/// Another credential asks to join the connection, identified by `auth`.
+	Attach,
 }
 
 /// How a session reached the relay, including QUIC, relay HTTP, and gateways.
@@ -140,8 +174,6 @@ pub enum Event {
 pub enum Transport {
 	/// A native QUIC connection.
 	Quic,
-	/// An Iroh QUIC connection.
-	Iroh,
 	/// A WebSocket connection using qmux framing.
 	WebSocket,
 	/// A TCP connection using qmux framing, plaintext or TLS.
@@ -169,7 +201,6 @@ impl Transport {
 	pub const fn as_str(self) -> &'static str {
 		match self {
 			Self::Quic => "quic",
-			Self::Iroh => "iroh",
 			Self::WebSocket => "websocket",
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
@@ -212,8 +243,17 @@ pub struct Peer {
 	pub name: String,
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
+	/// SHA-256 of the leaf, then of each certificate the leaf provably descends from,
+	/// nearest first, hex, ending at the root the relay's listener verified it against
+	/// whether or not the client sent it. A certificate only lands here when its key
+	/// signed a link up from the leaf, so a client cannot claim an intermediate by
+	/// sending it.
+	///
+	/// Empty from a relay that predates it: read that as the leaf alone.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub chain: Vec<String>,
 	/// The certificate's notAfter.
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	pub expires: Option<Wall>,
 	/// The issuer's distinguished name.
 	pub issuer: String,
@@ -244,6 +284,7 @@ mod tests {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
+			chain: vec!["ab".repeat(32), "cd".repeat(32)],
 			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			issuer: "CN=cluster".into(),
 		});
@@ -287,6 +328,7 @@ mod tests {
 		assert_eq!(json["role"], "publisher");
 		assert_eq!(json["remote"], "203.0.113.9:4433");
 		assert_eq!(json["tls"]["expires"], 4_102_444_800_i64);
+		assert_eq!(json["tls"]["chain"][1], "cd".repeat(32));
 		assert!(json.get("reason").is_none());
 		assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
 	}

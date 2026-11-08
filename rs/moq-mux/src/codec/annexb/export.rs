@@ -69,7 +69,7 @@ impl<S: Stream, C: Codec> Export<S, C> {
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.media())?,
+				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot.without_ext())?,
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
@@ -181,7 +181,7 @@ mod tests {
 	use bytes::Bytes;
 
 	async fn next<S: Stream>(export: &mut Export<S>) -> Bytes {
-		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+		kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 			.await
 			.expect("a frame is ready")
 			.unwrap()
@@ -241,13 +241,13 @@ mod tests {
 		moving.point("b", None, SPS);
 		moving.b.write(marked_frame(0, 0xb1)).unwrap();
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 				.await
 				.is_err()
 		);
 		moving.b.write(marked_frame(30, 0xb2)).unwrap();
 		assert!(matches!(
-			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 				.await
 				.unwrap(),
 			Err(crate::Error::RenditionRewound { .. })

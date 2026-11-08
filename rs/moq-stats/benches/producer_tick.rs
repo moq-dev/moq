@@ -25,6 +25,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -35,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, origin, stats};
+use moq_net::{origin, stats};
 use moq_stats::produce::bench::{Driver, FrameBytes};
 
 struct Counter;
@@ -94,8 +95,8 @@ struct Relay {
 	driver: Driver,
 	_origin: origin::Producer,
 	_origin_driver: origin::Driver,
-	_publishers: Vec<origin::Publication>,
-	_cursors: Vec<announce::Consumer>,
+	_publishers: Vec<origin::Route>,
+	_cursors: Vec<origin::Routes>,
 	_sessions: Vec<stats::Session>,
 	_held: Vec<moq_net::track::Subscriber>,
 }
@@ -120,7 +121,7 @@ impl Relay {
 			.iter()
 			.map(|path| {
 				origin
-					.publish(path.as_str(), origin::Route::default())
+					.route(path.as_str(), moq_net::origin::RouteOptions::default())
 					.expect("publish path")
 			})
 			.collect();
@@ -130,7 +131,7 @@ impl Relay {
 			.map(|tier| {
 				let tier = stats::Tier::new(moq_net::Path::new(&format!("t{tier}")).unwrap());
 				let session = registry.tier(tier.clone()).session(moq_net::Path::from_static("root"));
-				let mut cursor = origin.consume().with_stats(session.clone()).announced();
+				let mut cursor = origin.consume().with_stats(session.clone()).routes();
 				while cursor.next().now_or_never().flatten().is_some() {}
 				cursors.push(cursor);
 				sessions.push(session);

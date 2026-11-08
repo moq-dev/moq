@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import * as Moq from "@moq/net";
 
 // Bun cannot load the blob-URL worklet import used by the audio decoder. This test never provides
@@ -18,13 +18,14 @@ test("audio downloads only while the tile is active and audible", async () => {
 
 	const connection = new Moq.Connection({ enabled: false });
 	const origin = new Moq.Origin.Producer();
+	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
 	const game = new Game({
 		sessionId: "test",
 		connection,
 		origin,
+		endpoint,
 		expanded: new Moq.Signals.Signal<string | undefined>(undefined),
 		gamePrefix: "game",
-		viewerPrefix: "viewer",
 	});
 
 	try {
@@ -42,6 +43,117 @@ test("audio downloads only while the tile is active and audible", async () => {
 		expect(game.audioDecoder.in.enabled.peek()).toBe(false);
 	} finally {
 		game.close();
+		endpoint.close();
+		origin.close();
+		connection.close();
+		if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+		else Reflect.deleteProperty(globalThis, "document");
+	}
+});
+
+test("status skips values that fail the schema and ends when the track errors", async () => {
+	const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+	Object.defineProperty(globalThis, "document", { configurable: true, value: new EventTarget() });
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const refused = () => warn.mock.calls.filter(([msg]) => msg === "Invalid status:").length;
+
+	const connection = new Moq.Connection({ enabled: false });
+	const origin = new Moq.Origin.Producer();
+	const publication = origin.route(Moq.Path.from("game", "test"));
+	const track = publication.broadcast.createTrack("status");
+
+	// One finished group per status, so between statuses the loop waits on the next group.
+	const publish = (value: unknown) => {
+		const group = track.appendGroup();
+		group.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
+		group.finish();
+	};
+
+	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
+	const game = new Game({
+		sessionId: "test",
+		connection,
+		origin,
+		endpoint,
+		expanded: new Moq.Signals.Signal<string | undefined>(undefined),
+		gamePrefix: "game",
+	});
+
+	try {
+		// A value that fails the schema is refused and the loop keeps reading.
+		publish({ buttons: "a" });
+		await settle(30);
+		expect(game.status.peek()).toBeUndefined();
+		expect(refused()).toBe(1);
+
+		const valid = { buttons: ["a"], players: 0 };
+		publish(valid);
+		await settle(30);
+		expect(game.status.peek()).toEqual(valid);
+
+		// A track closed with an error throws on every read, so the loop ends instead of spinning.
+		track.abort(new Error("boom"));
+		await settle(30);
+		expect(refused()).toBe(1);
+		expect(error.mock.calls.filter(([msg]) => msg === "spawn error")).toHaveLength(1);
+	} finally {
+		game.close();
+		endpoint.close();
+		origin.close();
+		connection.close();
+		warn.mockRestore();
+		error.mockRestore();
+		if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+		else Reflect.deleteProperty(globalThis, "document");
+	}
+});
+
+test("input opens a session that carries commands up and latency down until deactivated", async () => {
+	const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+	Object.defineProperty(globalThis, "document", { configurable: true, value: new EventTarget() });
+
+	const connection = new Moq.Connection({ enabled: false });
+	// The session waits for a live connection; the endpoints share one origin instead of a relay.
+	Object.defineProperty(connection, "status", { value: new Moq.Signals.Signal("connected") });
+	const origin = new Moq.Origin.Producer();
+	const emulator = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "test");
+	const endpoint = new Moq.Socket.Endpoint(origin, Moq.Path.from("game"), "viewer-test");
+	const game = new Game({
+		sessionId: "test",
+		connection,
+		origin,
+		endpoint,
+		expanded: new Moq.Signals.Signal<string | undefined>(undefined),
+		gamePrefix: "game",
+	});
+
+	try {
+		game.hovered.set(true);
+		game.heldButtons.add("a");
+		game.sendButtons();
+
+		const incoming = await emulator.acceptTrack();
+		expect(incoming.peer).toBe("viewer-test");
+		const session = await incoming.accept();
+		const commands = session.consumer.ordered();
+		const command = await (await commands.nextGroup())?.readJson();
+		expect(command).toEqual({ type: "buttons", buttons: ["a"], timestamps: [] });
+
+		const latency = [{ label: "input", ms: 42 }];
+		session.producer.writeFrame({ payload: new TextEncoder().encode(JSON.stringify({ latency })) });
+		await settle(30);
+		expect(game.latency.peek()).toEqual(latency);
+
+		// Leaving the tile ends the session, so the emulator counts this viewer gone.
+		game.hovered.set(false);
+		expect(await commands.nextGroup()).toBeUndefined();
+		await settle();
+		expect(game.latency.peek()).toBeUndefined();
+	} finally {
+		game.close();
+		endpoint.close();
+		emulator.close();
 		origin.close();
 		connection.close();
 		if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);

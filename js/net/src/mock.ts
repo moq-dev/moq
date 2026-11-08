@@ -4,6 +4,8 @@
  * Creates paired client/server transports connected by in-memory streams.
  */
 
+import { Manual, Milli, Nano } from "@moq/clock";
+import type { Getter } from "@moq/signals";
 import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";
 import type { Frame } from "./group.ts";
@@ -13,6 +15,35 @@ import { Timestamp } from "./time.ts";
 /** A UTF-8 text frame stamped `timestamp` (now by default), for a test writing to a timed track. */
 export function textFrame(text: string, timestamp = Timestamp.now()): Frame {
 	return { payload: new TextEncoder().encode(text), timestamp };
+}
+
+/** A Manual clock installed in this realm until disposed, for a test that moves time itself. */
+export function manual(): Manual & Disposable {
+	const clock = new Manual();
+	const installed = clock.install();
+	return Object.assign(clock, { [Symbol.dispose]: () => installed.close() });
+}
+
+/** Whether `work` settles once everything pending has run and `clock` has advanced `duration`. */
+export async function settlesWithin(
+	work: PromiseLike<unknown>,
+	clock: Manual,
+	duration = Milli.zero,
+): Promise<boolean> {
+	let settled = false;
+	const done = () => {
+		settled = true;
+	};
+	Promise.resolve(work).then(done, done);
+	await clock.advance(Nano.fromMilli(duration));
+	return settled;
+}
+
+/** Resolves with `getter`'s value once `ready` holds for it, for a test awaiting a state change. */
+export async function waitFor<T>(getter: Getter<T>, ready: (value: T) => boolean): Promise<T> {
+	let value = getter.peek();
+	while (!ready(value)) value = await getter.changed();
+	return value;
 }
 
 /**
@@ -132,7 +163,11 @@ export class MockTransport implements WebTransport {
 	 * re-rank), so a test can assert how the wire layer prioritized it. The mock always
 	 * delivers in creation order, so nothing else observes it.
 	 */
-	readonly sendStreams: { uni: SendStream[]; bidi: SendStream[] } = { uni: [], bidi: [] };
+	readonly sendStreams: { uni: SendStream[]; bidi: SendStream[]; datagrams: SendStream[] } = {
+		uni: [],
+		bidi: [],
+		datagrams: [],
+	};
 
 	#closeResolve!: (info: WebTransportCloseInfo) => void;
 	#bidiController!: ReadableStreamDefaultController<WebTransportBidirectionalStream>;
@@ -185,20 +220,21 @@ export class MockTransport implements WebTransport {
 						},
 					})
 				: undefined;
-			const writable = new WritableStream<Uint8Array>({
-				write: (chunk) => {
-					const peer = this.#peer;
-					if (!peer) return;
-					const controller = peer.#datagramController;
-					if (!controller) return;
-					try {
-						// Copy so the caller's scratch buffer reuse can't corrupt queued data.
-						controller.enqueue(new Uint8Array(chunk));
-					} catch {
-						// Peer closed; drop (datagrams are best-effort).
-					}
-				},
-			});
+			const writable = () =>
+				new WritableStream<Uint8Array>({
+					write: (chunk) => {
+						const peer = this.#peer;
+						if (!peer) return;
+						const controller = peer.#datagramController;
+						if (!controller) return;
+						try {
+							// Copy so the caller's scratch buffer reuse can't corrupt queued data.
+							controller.enqueue(new Uint8Array(chunk));
+						} catch {
+							// Peer closed; drop (datagrams are best-effort).
+						}
+					},
+				});
 			const datagrams: {
 				readable?: ReadableStream<Uint8Array>;
 				writable?: WritableStream<Uint8Array>;
@@ -207,7 +243,7 @@ export class MockTransport implements WebTransport {
 				outgoingHighWaterMark: number;
 				incomingMaxAge: null;
 				outgoingMaxAge: null;
-				createWritable?: () => WritableStream<Uint8Array>;
+				createWritable?: (options?: WebTransportSendStreamOptions) => SendStream;
 			} = {
 				readable,
 				incomingHighWaterMark: 0,
@@ -217,9 +253,10 @@ export class MockTransport implements WebTransport {
 				maxDatagramSize: 1200,
 			};
 			if (datagramWritable === "writable") {
-				datagrams.writable = writable;
+				datagrams.writable = writable();
 			} else if (datagramWritable === "createWritable") {
-				datagrams.createWritable = () => writable;
+				datagrams.createWritable = (options) =>
+					this.#sendStream(writable(), this.sendStreams.datagrams, options);
 			}
 			this.datagrams = datagrams as WebTransportDatagramDuplexStream;
 		} else {

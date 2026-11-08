@@ -41,7 +41,11 @@ async fn main() -> anyhow::Result<()> {
 		.established()
 		.await?;
 
-	let broadcast = consumer.follow(&args[2], None)?.available().await?;
+	let broadcast = consumer
+		.follow(&args[2], None)?
+		.available()
+		.await?
+		.context("went offline before serving")?;
 	let source = moq_mux::Source::new(consumer, broadcast.clone());
 	let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await?;
 	// A lazy publisher (the browser) may add audio in a later catalog update.
@@ -86,7 +90,9 @@ async fn decode(
 	let mut log = create("txt")?;
 	let mut pcm = create("pcm")?;
 
-	let rendition = source.resolve(audio.broadcast.as_ref(), audio.epoch.as_ref()).await?;
+	let rendition = source
+		.resolve(audio.broadcast.as_ref(), audio.instance.as_ref())
+		.await?;
 	let mut options = moq_audio::decode::Options::new();
 	options.output.format = moq_audio::Format::F32;
 	// How far the read may fall behind live before it skips. A gap fails the run, which a reader
@@ -94,7 +100,7 @@ async fn decode(
 	// runtime starved by the others can fall a second behind. That is this reader's speed, not the
 	// delivery under test. A track's max-age caps it, so interop.sh's Rust publisher keeps its
 	// media at least this long.
-	options.max_delay = Duration::from_secs(5);
+	options.delay.max = Some(Duration::from_secs(5));
 	let mut decoder = moq_audio::decode::Consumer::new(&rendition, audio, name, options).await?;
 	let rate = decoder.sample_rate();
 	let channels = decoder.layout().channels();

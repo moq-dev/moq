@@ -1,11 +1,12 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import moq
 import pytest
 
 from moq_carla_sim import publish
-from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry
+from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry, handle
 from moq_carla_sim.publish import (
     Collision,
     Motion,
@@ -25,8 +26,6 @@ def status(**overrides) -> Status:
         estop_by=None,
         autonomous=False,
         driver=None,
-        sequence=None,
-        media_pipeline={},
         location=None,
         map_name=None,
         telemetry=None,
@@ -57,6 +56,7 @@ def test_malformed_timestamp_does_not_drop_driver_command() -> None:
                 {"label": "received", "ts": 12.5},
             ],
         },
+        "s1",
     )
 
     assert command is not None
@@ -70,6 +70,7 @@ def test_only_the_players_pipeline_stages_are_kept() -> None:
     command = parse_command(
         "driver",
         {"type": "drive", "sequence": 1, "timestamps": [*stages, *junk, {"label": "received", "ts": 9.0}]},
+        "s1",
     )
 
     assert command is not None
@@ -80,7 +81,7 @@ def test_only_the_players_pipeline_stages_are_kept() -> None:
 
 
 def test_respawn_command_is_carla_only_control_input() -> None:
-    command = parse_command("driver", {"type": "respawn", "sequence": 8})
+    command = parse_command("driver", {"type": "respawn", "sequence": 8}, "s1")
 
     assert command is not None
     assert command.kind == "respawn"
@@ -89,12 +90,15 @@ def test_respawn_command_is_carla_only_control_input() -> None:
 
 
 def test_status_names_the_driver_that_latched_estop() -> None:
-    payload = status_payload(status(estopped=True, estop_by="bystander", driver="holder", sequence=4))
+    payload = status_payload(status(estopped=True, estop_by="bystander", driver="holder"))
 
     assert payload["driver"] == "holder"
     assert payload["estop_by"] == "bystander"
     assert payload["mode"] == "simulated"
     assert payload["capabilities"] == ["respawn"]
+    # Acknowledgements are the holder's alone, on its own session.
+    assert "sequence" not in payload
+    assert "media_pipeline" not in payload
 
 
 def test_status_carries_the_map_and_a_rounded_pose() -> None:
@@ -165,84 +169,109 @@ def test_status_omits_only_the_collision_a_truck_has_not_had() -> None:
 def test_a_closed_status_track_fails_the_session() -> None:
     """Status republishes on a timer, so a swallowed failure would spin forever."""
 
-    def closed(_payload: object) -> None:
+    def closed(_payload: object, _timestamp: object) -> None:
         raise moq.Error("track closed")
 
     publisher = publish.StatusPublisher.__new__(publish.StatusPublisher)
+    publisher._catalog = SimpleNamespace(now=lambda: SimpleNamespace(value=0, scale=1_000))
     publisher._producer = SimpleNamespace(update=closed)
 
     with pytest.raises(moq.Error):
         publisher.publish({})
 
 
-class Announcements:
-    """A scripted announcement stream. `send` returns once the watcher has
-    handled the event and come back for the next one."""
+class Session:
+    """One accepted driver session: controls the driver sends, replies the truck writes."""
+
+    def __init__(self, id: str) -> None:
+        self.session = id
+        self.consumer = self
+        self.producer = self
+        self.subscription = None
+        self.replies: list[dict] = []
+        self.finished = False
+        self._frames: asyncio.Queue = asyncio.Queue()
+
+    def send(self, message) -> None:
+        payload = message if isinstance(message, bytes) else json.dumps(message).encode()
+        self._frames.put_nowait(SimpleNamespace(payload=payload))
+
+    def end(self, error: BaseException | None = None) -> None:
+        self._frames.put_nowait(error)
+
+    def update(self, subscription) -> None:
+        self.subscription = subscription
+
+    async def read_frame(self):
+        frame = await self._frames.get()
+        if isinstance(frame, BaseException):
+            raise frame
+        return frame
+
+    def write_frame(self, payload: bytes) -> None:
+        if self.finished:
+            raise moq.Error("session closed")
+        self.replies.append(json.loads(payload))
+
+    def finish(self) -> None:
+        self.finished = True
+
+
+class Incoming:
+    """A dial claiming `peer`; accepting it fails the return-routability check when forged."""
+
+    def __init__(self, peer: str, session: Session | None) -> None:
+        self.peer = peer
+        self._session = session
+
+    async def accept(self) -> Session:
+        if self._session is None:
+            raise moq.Error("not dialed")
+        return self._session
+
+
+class Endpoint:
+    """A truck's endpoint, handing out scripted dials."""
 
     def __init__(self) -> None:
-        self._events: asyncio.Queue = asyncio.Queue()
-        self._idle = asyncio.Event()
+        self.dials: asyncio.Queue = asyncio.Queue()
+        self.opened: list[tuple[str, str]] = []
+        self.closed = False
 
-    async def __aenter__(self):
+    def __call__(self, origin, prefix: str, id: str) -> "Endpoint":
+        self.opened.append((prefix, id))
+        return self
+
+    async def __aenter__(self) -> "Endpoint":
         return self
 
     async def __aexit__(self, *_exc) -> None:
-        pass
+        self.closed = True
 
-    def __aiter__(self):
-        return self
+    async def accept_track(self) -> Incoming:
+        return await self.dials.get()
 
-    async def __anext__(self):
-        if self._events.empty():
-            self._idle.set()
-        event = await self._events.get()
-        self._idle.clear()
-        return event
-
-    async def send(self, kind: type, path: str, epoch: str | None) -> None:
-        self._idle.clear()
-        self._events.put_nowait(kind(SimpleNamespace(prefix=path, route=SimpleNamespace(epoch=epoch))))
-        await self._idle.wait()
+    def dial(self, peer: str, id: str | None) -> Session | None:
+        session = None if id is None else Session(id)
+        self.dials.put_nowait(Incoming(peer, session))
+        return session
 
 
-class Drivers:
-    """A relay holding driver broadcasts: each request serves one drive command
-    numbered by how many requests came before it, then stays open."""
-
-    def __init__(self) -> None:
-        self.announcements = Announcements()
-        self.requested: list[str] = []
-
-    def announced(self, prefix: str, *, filter: str):
-        assert (prefix, filter) == ("viewer/carla/truck1", "*")
-        return self.announcements
-
-    async def request(self, path: str):
-        self.requested.append(path)
-        sequence = len(self.requested)
-
-        async def control():
-            yield {"type": "drive", "sequence": sequence, "throttle": 0.5}
-            await asyncio.Event().wait()
-
-        async def subscribe_track(name: str):
-            assert name == "control"
-            return control()
-
-        return SimpleNamespace(subscribe_track=subscribe_track)
-
-
-async def watching(scenario) -> None:
-    """Run `scenario(relay, commands, gate)` against a live `watch_drivers`."""
-    relay = Drivers()
+async def serving(scenario, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run `scenario(endpoint, drivers, commands, gate)` against a live `Drivers`."""
+    endpoint = Endpoint()
+    monkeypatch.setattr(moq.socket, "Endpoint", endpoint, raising=False)
     commands: asyncio.Queue = asyncio.Queue()
-    watcher = asyncio.create_task(publish.watch_drivers(relay, "viewer/carla/truck1", commands))
+    drivers = publish.Drivers("truck1", commands)
+    task = asyncio.create_task(drivers.run(SimpleNamespace()))
     try:
-        await scenario(relay, commands, Drive())
+        await scenario(endpoint, drivers, commands, Drive())
     finally:
-        watcher.cancel()
+        task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await watcher
+            await task
+    assert endpoint.opened == [("carla", "truck1")]
+    assert endpoint.closed
 
 
 async def next_command(commands: asyncio.Queue, gate: Drive):
@@ -251,70 +280,164 @@ async def next_command(commands: asyncio.Queue, gate: Drive):
     return command
 
 
-def test_a_driver_run_keeps_the_lease_across_route_updates() -> None:
-    """An update is the same run re-priced: no second subscription, no release."""
+DRIVE = {"type": "drive", "sequence": 1, "throttle": 0.5}
 
-    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "e1")
+
+def test_a_driver_whose_session_ends_loses_the_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        session = endpoint.dial("driver-abc", "s1")
+        session.send(DRIVE)
         command = await next_command(commands, gate)
-        assert (command.kind, command.driver_id, command.epoch) == ("drive", "abc", "e1")
-        assert gate.driver == "abc"
+        assert (command.kind, command.driver_id, command.session) == ("drive", "driver-abc", "s1")
+        assert gate.driver == handle("s1")
 
-        await relay.announcements.send(moq.AnnounceEventUpdate, "viewer/carla/truck1/abc", "e1")
-        assert commands.empty()
-        assert gate.driver == "abc"
-        assert relay.requested == ["viewer/carla/truck1/abc"]
-
-    asyncio.run(watching(scenario))
-
-
-def test_a_driver_whose_broadcast_ends_loses_the_lease() -> None:
-    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "e1")
-        await next_command(commands, gate)
-        assert gate.driver == "abc"
-
-        await relay.announcements.send(moq.AnnounceEventEnd, "viewer/carla/truck1/abc", "e1")
+        session.end()
         left = await next_command(commands, gate)
-        assert (left.kind, left.epoch) == ("driver_left", "e1")
+        assert (left.kind, left.session) == ("driver_left", "s1")
+        assert gate.driver is None
+        assert session.finished
+
+    asyncio.run(serving(scenario, monkeypatch))
+
+
+def test_a_failed_session_still_releases_its_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        session = endpoint.dial("driver-abc", "s1")
+        session.send(DRIVE)
+        await next_command(commands, gate)
+
+        session.end(moq.Error("reset"))
+        left = await next_command(commands, gate)
+        assert (left.kind, left.session) == ("driver_left", "s1")
         assert gate.driver is None
 
-    asyncio.run(watching(scenario))
+    asyncio.run(serving(scenario, monkeypatch))
 
 
-@pytest.mark.parametrize("kind", ["restart", "update"])
-def test_a_driver_that_restarts_under_a_new_epoch_is_a_new_driver(kind: str) -> None:
-    """The old run's lease ends with it, even though the path and id are the same.
+def test_shutdown_never_waits_on_a_full_command_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shutdown stops the gate first, so a pump cancelled then must not wait to report its departure."""
 
-    A new epoch is a restart whether the relay says so or reports it as an update.
-    """
-    event = moq.AnnounceEventRestart if kind == "restart" else moq.AnnounceEventUpdate
+    async def scenario() -> None:
+        endpoint = Endpoint()
+        monkeypatch.setattr(moq.socket, "Endpoint", endpoint, raising=False)
+        commands: asyncio.Queue = asyncio.Queue(maxsize=1)
+        drivers = publish.Drivers("truck1", commands)
+        task = asyncio.create_task(drivers.run(SimpleNamespace()))
+        session = endpoint.dial("driver-abc", "s1")
+        session.send(DRIVE)
+        session.send(DRIVE)
+        # The queue is full and the second control is waiting for room.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert commands.full()
 
-    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc", "e1")
+        task.cancel()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=1)
+        assert session.finished
+
+    asyncio.run(scenario())
+
+
+def test_a_new_session_of_the_same_driver_is_a_new_driver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lease is one session: an endpoint posing under the holder's id never continues it."""
+
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        first = endpoint.dial("driver-abc", "s1")
+        first.send(DRIVE)
         await next_command(commands, gate)
 
-        await relay.announcements.send(event, "viewer/carla/truck1/abc", "e2")
-        received = [await next_command(commands, gate) for _ in range(2)]
-        assert {(command.kind, command.epoch) for command in received} == {("driver_left", "e1"), ("drive", "e2")}
-        assert relay.requested == ["viewer/carla/truck1/abc"] * 2
+        second = endpoint.dial("driver-abc", "s2")
+        second.send({**DRIVE, "throttle": 1.0})
+        command = await next_command(commands, gate)
+        assert command.session == "s2"
+        assert not gate.holds(command)
 
-        # Whichever order those two arrived in, the new run holds the lease
-        # by its next command, and the old run can no longer release it.
-        assert not gate.holds(Command(kind="drive", driver_id="abc", epoch="e1"))
-        gate.apply(Command(kind="drive", driver_id="abc", epoch="e2", sequence=3, state=DriveState()))
-        assert gate.holds(Command(kind="drive", driver_id="abc", epoch="e2"))
-        assert not gate.apply(Command(kind="driver_left", driver_id="abc", epoch="e1"))
-        assert gate.driver == "abc"
+        second.end()
+        assert (await next_command(commands, gate)).kind == "driver_left"
+        assert gate.driver == handle("s1")
+        assert gate.holds(Command(kind="drive", driver_id="driver-abc", session="s1"))
 
-    asyncio.run(watching(scenario))
+    asyncio.run(serving(scenario, monkeypatch))
 
 
-def test_only_direct_children_of_the_prefix_are_drivers() -> None:
-    async def scenario(relay: Drivers, commands: asyncio.Queue, gate: Drive) -> None:
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla", None)
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck1/abc/deeper", None)
-        await relay.announcements.send(moq.AnnounceEventStart, "viewer/carla/truck10", None)
-        assert relay.requested == []
+def test_a_second_session_under_an_open_driver_and_session_id_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        first = endpoint.dial("driver-abc", "s1")
+        first.send(DRIVE)
+        await next_command(commands, gate)
 
-    asyncio.run(watching(scenario))
+        copy = endpoint.dial("driver-abc", "s1")
+        copy.send({**DRIVE, "throttle": 1.0})
+        first.send({**DRIVE, "sequence": 2})
+        command = await next_command(commands, gate)
+        assert command.sequence == 2
+        assert copy.finished
+        assert commands.empty()
+        drivers.reply(command, {"sequence": 2})
+        assert first.replies == [{"sequence": 2}]
+
+    asyncio.run(serving(scenario, monkeypatch))
+
+
+def test_a_forged_dial_never_reaches_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        endpoint.dial("driver-forged", None)
+        session = endpoint.dial("driver-abc", "s1")
+        session.send(DRIVE)
+        command = await next_command(commands, gate)
+        assert command.driver_id == "driver-abc"
+        assert commands.empty()
+
+    asyncio.run(serving(scenario, monkeypatch))
+
+
+def test_a_malformed_control_is_dropped_and_the_session_keeps_going(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        session = endpoint.dial("driver-abc", "s1")
+        session.send(b"\xff not json")
+        session.send(["not", "a", "command"])
+        session.send(DRIVE)
+        command = await next_command(commands, gate)
+        assert command.kind == "drive"
+
+    asyncio.run(serving(scenario, monkeypatch))
+
+
+def test_a_late_control_never_blocks_a_newer_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The truck reads oldest first, skipping a control one heartbeat behind the newest."""
+
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        session = endpoint.dial("driver-abc", "s1")
+        session.send(DRIVE)
+        await next_command(commands, gate)
+        assert session.subscription == moq.Subscription(
+            delay=moq.Delay(max=publish.CONTROL_DELAY), order=moq.Order.ASCENDING
+        )
+
+    asyncio.run(serving(scenario, monkeypatch))
+
+
+def test_replies_reach_only_their_own_open_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario(endpoint: Endpoint, drivers, commands: asyncio.Queue, gate: Drive) -> None:
+        first = endpoint.dial("driver-abc", "s1")
+        second = endpoint.dial("driver-def", "s2")
+        first.send(DRIVE)
+        second.send(DRIVE)
+        await next_command(commands, gate)
+        await next_command(commands, gate)
+
+        drivers.reply(Command(kind="drive", driver_id="driver-abc", session="s1"), {"sequence": 1})
+        assert first.replies == [{"sequence": 1}]
+        assert second.replies == []
+        # A session id is the dialer's pick, so only the pair names a session.
+        drivers.reply(Command(kind="drive", driver_id="driver-def", session="s1"), {"sequence": 9})
+        assert first.replies == [{"sequence": 1}]
+        assert second.replies == []
+
+        first.end()
+        await next_command(commands, gate)
+        # The pump releasing the lease may race a reply to the gone session.
+        drivers.reply(Command(kind="drive", driver_id="driver-abc", session="s1"), {"sequence": 2})
+        assert first.replies == [{"sequence": 1}]
+
+    asyncio.run(serving(scenario, monkeypatch))

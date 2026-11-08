@@ -32,9 +32,10 @@ async fn main() -> anyhow::Result<()> {
 	ensure!(args.len() == 3, "usage: interop-goaway VERSION node|bun");
 	let version: moq_net::Version = args[1].parse().map_err(anyhow::Error::msg)?;
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast("handover")?;
-	let mut track = broadcast.create_track("video", moq_net::track::Info::default())?;
-	broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
+	let route = origin.route("handover", moq_net::origin::RouteOptions::default())?;
+	let mut track = route
+		.broadcast()
+		.create_track("video", moq_net::track::Info::default())?;
 	let (mut first, first_url) = endpoint(&origin, version).await?;
 	let (mut second, second_url) = endpoint(&origin, version).await?;
 	let script = concat!(
@@ -76,12 +77,12 @@ async fn main() -> anyhow::Result<()> {
 	let _ = session.closed().await;
 	write(&mut track, 2)?;
 	ensure!(
-		output.next_line().await?.as_deref() == Some("goaway resumed"),
-		"JS subscription did not resume"
+		output.next_line().await?.as_deref() == Some("goaway restarted"),
+		"JS subscription did not restart"
 	);
 	ensure!(child.wait().await?.success(), "JS client failed");
 	replacement.abort(moq_net::Error::Cancel);
 	let _ = replacement.closed().await;
-	eprintln!("goaway redirect resumed {version}");
+	eprintln!("goaway redirect restarted {version}");
 	Ok(())
 }

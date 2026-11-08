@@ -1,9 +1,9 @@
 //! One track's object keys, listed once and extended after its newest key.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use futures::TryStreamExt;
-use moq_net::Timescale;
+use moq_net::{Timescale, Timestamp};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 
@@ -13,11 +13,15 @@ use crate::{Error, Info, Result};
 /// Where an object starts: its first sequence and that sequence's first frame index.
 pub(super) type Start = (u64, u64);
 
+/// One listed object: where it starts, its first frame's timestamp on a timed track, and
+/// its key.
+pub(super) type Listing = (Start, Option<u64>, Path);
+
 /// What one listing of a track's directory found.
 #[derive(Default)]
 pub(super) struct Listed {
 	/// The objects new since the cursor, oldest first.
-	pub objects: Vec<(Start, Path)>,
+	pub objects: Vec<Listing>,
 	/// The track's `end`, when asked for.
 	pub end: Option<End>,
 }
@@ -26,7 +30,13 @@ pub(super) struct Listed {
 pub(super) struct Index {
 	pub dir: Path,
 	pub timescale: Option<Timescale>,
-	objects: BTreeMap<Start, Path>,
+	/// Each object's first frame timestamp, on a timed track, and key.
+	objects: BTreeMap<Start, (Option<u64>, Path)>,
+	/// Each timed object starting a group, by that group's start timestamp with where it
+	/// starts, so a time finds the newest such object at or before it in one lookup. Group
+	/// starts never rewind, so they sort as the objects do. An object continuing a group is
+	/// left out: its first frame says nothing about where the groups after it start.
+	times: BTreeSet<(u64, Start)>,
 	/// The newest key listed, which the next listing starts after.
 	cursor: Path,
 }
@@ -38,6 +48,7 @@ impl Index {
 			dir,
 			timescale: super::track::timescale(info)?,
 			objects: BTreeMap::new(),
+			times: BTreeSet::new(),
 			cursor,
 		})
 	}
@@ -52,9 +63,14 @@ impl Index {
 	}
 
 	/// Take in the objects a listing after [`Self::cursor`] found.
-	pub fn extend(&mut self, objects: &[(Start, Path)]) {
-		for (start, path) in objects {
-			self.objects.insert(*start, path.clone());
+	pub fn extend(&mut self, objects: &[Listing]) {
+		for (start, pts, path) in objects {
+			self.objects.insert(*start, (*pts, path.clone()));
+			if let Some(pts) = pts
+				&& start.1 == 0
+			{
+				self.times.insert((*pts, *start));
+			}
 			self.cursor = path.clone();
 		}
 	}
@@ -63,7 +79,7 @@ impl Index {
 	pub fn newest(&self) -> Option<(Start, Path)> {
 		self.objects
 			.last_key_value()
-			.map(|(start, path)| (*start, path.clone()))
+			.map(|(start, (_, path))| (*start, path.clone()))
 	}
 
 	/// The objects holding group `sequence` from frame `frame` on, oldest first: the last one
@@ -71,11 +87,11 @@ impl Index {
 	/// object after them, which bounds a gap.
 	pub fn holding(&self, sequence: u64, frame: u64) -> (Vec<(Start, Path)>, Option<Start>) {
 		let mut holding = Vec::new();
-		if let Some((start, path)) = self.objects.range(..=(sequence, frame)).next_back() {
+		if let Some((start, (_, path))) = self.objects.range(..=(sequence, frame)).next_back() {
 			holding.push((*start, path.clone()));
 		}
 		let mut after = None;
-		for (start, path) in self.objects.range((sequence, frame.saturating_add(1))..) {
+		for (start, (_, path)) in self.objects.range((sequence, frame.saturating_add(1))..) {
 			if start.0 != sequence {
 				after = Some(*start);
 				break;
@@ -85,9 +101,53 @@ impl Index {
 		(holding, after)
 	}
 
+	/// The objects that may hold the newest group starting at or before `pts`, newest first:
+	/// from the newest object starting a group at or before it, or the oldest object when none
+	/// does, up to the next object starting a group after it, which holds only later groups.
+	/// One continuing a group the next object still continues starts none, so it is skipped.
+	/// Empty on an untimed track.
+	pub fn around(&self, pts: Timestamp) -> Vec<(Start, Path)> {
+		let Some(timescale) = self.timescale else {
+			return Vec::new();
+		};
+		// A stored timestamp is whole, so it is at or before `pts` exactly when it is at or
+		// before `pts` rounded down to the track's timescale.
+		let limit = u64::try_from(pts.as_scale(timescale)).unwrap_or(u64::MAX);
+		let from = self
+			.times
+			.range(..=(limit, (u64::MAX, u64::MAX)))
+			.next_back()
+			.map_or((0, 0), |(_, start)| *start);
+
+		let mut around = Vec::new();
+		let mut objects = self.objects.range(from..).peekable();
+		while let Some((start, (first, path))) = objects.next() {
+			if start.1 == 0 && first.is_some_and(|first| first > limit) {
+				break;
+			}
+			let continued = start.1 > 0 && objects.peek().is_some_and(|(next, _)| next.0 == start.0);
+			if !continued {
+				around.push((*start, path.clone()));
+			}
+		}
+		around.reverse();
+		around
+	}
+
+	/// The object just after the one starting at `start`, or the oldest for `None`.
+	pub fn after(&self, start: Option<Start>) -> Option<(Start, Path)> {
+		let (start, (_, path)) = match start {
+			Some(start) => self.objects.range((start.0, start.1.saturating_add(1))..).next()?,
+			None => self.objects.first_key_value()?,
+		};
+		Some((*start, path.clone()))
+	}
+
 	/// Forget an object the store no longer has, such as one a DVR pruned.
 	pub fn forget(&mut self, start: Start) {
-		self.objects.remove(&start);
+		if let Some((Some(pts), _)) = self.objects.remove(&start) {
+			self.times.remove(&(pts, start));
+		}
 	}
 }
 
@@ -117,7 +177,9 @@ pub(super) async fn list<S: ObjectStore>(
 		match Name::parse(filename, timed)? {
 			Name::Info => {}
 			Name::End => found = Some(meta.location),
-			Name::Object(start) => listed.objects.push(((start.group, start.frame), meta.location)),
+			Name::Object(start) => listed
+				.objects
+				.push(((start.group, start.frame), start.pts, meta.location)),
 		}
 	}
 	listed.objects.sort();

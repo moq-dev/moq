@@ -40,8 +40,9 @@ export namespace Audio {
 		get capture(): Audio.Capture | undefined;
 		close(): void;
 		codec: Signals.Signal<Audio.Codec>;
-		groupDuration: Signals.Signal<Clock.Milli>;
 		readonly in: Signals.Readonlys<Audio.EncoderInput>;
+		join: Signals.Signal<Clock.Milli>;
+		muted: Signals.Signal<boolean>;
 		readonly name: string;
 		readonly out: Signals.Readonlys<Audio.EncoderOutput>;
 		volume: Signals.Signal<number>;
@@ -54,14 +55,15 @@ export namespace Audio {
 	};
 	export type EncoderOutput = {
 		active: Signals.Signal<boolean>;
-		catalog: Signals.Signal<Hang.Catalog.Audio.AudioConfig | undefined>;
+		catalog: Signals.Signal<Hang.Catalog.AudioConfig | undefined>;
 		error: Signals.Signal<Error | undefined>;
 		root: Signals.Signal<AudioNode | undefined>;
 		stats: Signals.Signal<Audio.Stats>;
 	};
 	export type EncoderProps = Signals.Inputs<Audio.EncoderInput> & {
 		codec?: Audio.Codec | Signals.Signal<Audio.Codec>;
-		groupDuration?: Clock.Milli | Signals.Signal<Clock.Milli>;
+		join?: Clock.Milli | Signals.Signal<Clock.Milli>;
+		muted?: boolean | Signals.Signal<boolean>;
 		volume?: number | Signals.Signal<number>;
 	};
 	export interface Format {
@@ -78,7 +80,7 @@ export namespace Audio {
 		packetlossperc?: number;
 		useinbandfec?: boolean;
 	};
-	export type Rendition = import("@moq/publish").Rendition<Hang.Catalog.Audio.AudioConfig>;
+	export type Rendition = import("@moq/publish").Rendition<Hang.Catalog.AudioConfig>;
 	export interface SampleSource {
 		channelCount: number;
 		kind: Audio.Kind;
@@ -90,10 +92,9 @@ export namespace Audio {
 		kind: Audio.Kind;
 		track: Audio.StreamTrack;
 	}
-	export interface Stats {
-		bytes: number;
-		frames: number;
-	}
+	export type Stats = Required<Pick<Hang.Stats.RenditionInput, "frames" | "bytes">> & {
+		bitrate?: NonNullable<Hang.Stats.RenditionInput["bitrate"]>;
+	};
 	export interface StreamTrack extends MediaStreamTrack {
 		clone(): Audio.StreamTrack;
 		getSettings(): Audio.TrackSettings;
@@ -117,13 +118,14 @@ export namespace Audio {
 export class Broadcast {
 	constructor(props?: Signals.Inputs<BroadcastInput>);
 	static readonly CATALOG_TRACK: "catalog.json";
-	audio(name: string): Rendition<Hang.Catalog.Audio.AudioConfig>;
+	audio(name: string): Rendition<Hang.Catalog.AudioConfig>;
 	readonly catalog: CatalogProducer;
 	close(): void;
 	readonly in: Signals.Readonlys<BroadcastInput>;
+	readonly join: Signals.Signal<Clock.Milli | undefined>;
 	readonly net: Signals.Getter<Net.Broadcast.Producer | undefined>;
 	text(name: string): Rendition<Hang.Catalog.TextConfig>;
-	video(name: string): Rendition<Hang.Catalog.Video.VideoConfig>;
+	video(name: string): Rendition<Hang.Catalog.VideoConfig>;
 }
 
 export type BroadcastInput = {
@@ -132,13 +134,16 @@ export type BroadcastInput = {
 		height: number;
 		width: number;
 	} | undefined>;
+	echo: Signals.Getter<Net.Path.Relative | undefined>;
 	enabled: Signals.Getter<boolean>;
 	flip: Signals.Getter<boolean>;
-	maxAge: Signals.Getter<Clock.Milli | undefined>;
+	maxAge: Signals.Getter<Clock.Milli | null | undefined>;
 	name: Signals.Getter<Net.Path.Valid>;
-	onDemand: Signals.Getter<boolean>;
+	onDemand: Signals.Getter<boolean | undefined>;
 	origin: Signals.Getter<Net.Origin.Table | undefined>;
+	probe: Signals.Getter<Net.Connection.Probe | undefined>;
 	rotation: Signals.Getter<number>;
+	stats: Signals.Getter<boolean>;
 };
 
 export class CatalogProducer {
@@ -149,16 +154,8 @@ export class CatalogProducer {
 
 export * as Clock from "@moq/clock";
 
-export class Fanout<T> {
-	constructor(source: ReadableStream<T>, props?: FanoutProps<T>);
-	close(): void;
+export interface Fanout<T> {
 	subscribe(effect: Signals.Effect, queue?: number): ReadableStream<T>;
-}
-
-export interface FanoutProps<T> {
-	clone?: (value: T) => T;
-	queue?: number;
-	release?: (value: T) => void;
 }
 
 export * as Hang from "@moq/hang";
@@ -211,11 +208,18 @@ export namespace Preview {
 }
 
 export class Rendition<Config> {
-	constructor();
 	close(): void;
 	readonly config: Signals.Signal<Config | undefined>;
+	readonly join: Signals.Signal<Clock.Milli | undefined>;
 	readonly kind: Kind;
 	readonly name: string;
+	readonly stats: Signals.Signal<{
+		bitrate?: number | null | undefined;
+		bytes?: number | undefined;
+		frames?: number | undefined;
+		keyframes?: number | undefined;
+		skipped?: number | undefined;
+	} | undefined>;
 	readonly track: Signals.Getter<Net.Track.Producer | undefined>;
 }
 
@@ -350,7 +354,7 @@ export namespace Video {
 		bitrateScale?: number;
 		codec?: string;
 		frameRate?: number;
-		keyframeInterval?: Clock.Milli;
+		join?: Clock.Milli;
 		maxBitrate?: number;
 		maxPixels?: number;
 		maxScale?: number;
@@ -376,7 +380,7 @@ export namespace Video {
 	};
 	export type EncoderOutput = {
 		active: Signals.Signal<boolean>;
-		catalog: Signals.Signal<Hang.Catalog.Video.VideoConfig | undefined>;
+		catalog: Signals.Signal<Hang.Catalog.VideoConfig | undefined>;
 		error: Signals.Signal<Error | undefined>;
 		resolved: Signals.Signal<VideoEncoderConfig | undefined>;
 		stats: Signals.Signal<Video.Stats>;
@@ -388,17 +392,15 @@ export namespace Video {
 		frameRate?: number;
 		frames: ReadableStream<VideoFrame>;
 	}
-	export type Rendition = import("@moq/publish").Rendition<Hang.Catalog.Video.VideoConfig>;
+	export type Rendition = import("@moq/publish").Rendition<Hang.Catalog.VideoConfig>;
 	export type Source = Video.StreamTrack | Video.SourceConfig | Video.FrameSource;
 	export interface SourceConfig {
 		scale?: number;
 		track: Video.StreamTrack;
 	}
-	export interface Stats {
-		bytes: number;
-		frames: number;
-		keyframes: number;
-	}
+	export type Stats = Required<Pick<Hang.Stats.RenditionInput, "frames" | "bytes" | "keyframes" | "skipped">> & {
+		bitrate?: NonNullable<Hang.Stats.RenditionInput["bitrate"]>;
+	};
 	export interface StreamTrack extends MediaStreamTrack {
 		clone(): Video.StreamTrack;
 		getSettings(): Video.TrackSettings;

@@ -2,11 +2,9 @@
 
 use std::{fmt, sync::Arc};
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use rustls::client::WebPkiServerVerifier;
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-use crate::crypto::rustls::{QuicClientConfig, configured_provider};
+use crate::crypto::rustls::{QuicClientConfig, provider};
 use crate::{
 	MAX_CID_SIZE, RandomConnectionIdGenerator, TokenMemoryCache, TokenStore, Version,
 	cid_generator::ConnectionIdGenerator, crypto, shared::ConnectionId, transport,
@@ -22,7 +20,7 @@ pub struct Config {
 	pub transport: transport::Config,
 
 	/// Cryptographic configuration to use
-	pub crypto: Arc<dyn crypto::ClientConfig>,
+	pub(crate) crypto: Arc<dyn crypto::ClientConfig>,
 
 	/// QUIC protocol version to use
 	pub version: Version,
@@ -35,8 +33,8 @@ pub struct Config {
 }
 
 impl Config {
-	/// Dial with `crypto` and the default settings
-	pub fn new(crypto: Arc<dyn crypto::ClientConfig>) -> Self {
+	/// Dial with any crypto, such as the fuzz target's plaintext
+	pub(crate) fn from_crypto(crypto: Arc<dyn crypto::ClientConfig>) -> Self {
 		Self {
 			transport: transport::Config::default(),
 			crypto,
@@ -47,15 +45,29 @@ impl Config {
 	}
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl Config {
+	/// Run the handshake with `tls` and the default settings
+	///
+	/// The config must enable TLS 1.3, or connecting fails with [`ConnectError::Tls`].
+	/// Early data stays off: if `tls` enables it, the connection uses a copy that does not.
+	///
+	/// [`ConnectError::Tls`]: crate::endpoint::ConnectError::Tls
+	pub fn new(tls: Arc<rustls::ClientConfig>) -> Self {
+		Self::from_crypto(Arc::new(QuicClientConfig::new(tls)))
+	}
+
 	/// Dial trusting the specified trust anchors
-	pub fn with_root_certificates(
-		roots: Arc<rustls::RootCertStore>,
-	) -> Result<Self, rustls::client::VerifierBuilderError> {
-		Ok(Self::new(Arc::new(QuicClientConfig::new(
-			WebPkiServerVerifier::builder_with_provider(roots, configured_provider()).build()?,
-		))))
+	///
+	/// A CPU that rind cannot run on, and a root store the verifier refuses, both arrive in
+	/// [`rustls::Error::Other`]: downcast it to
+	/// [`UnsupportedCpu`](moq_crypto::cpu::UnsupportedCpu) or
+	/// [`VerifierBuilderError`](rustls::client::VerifierBuilderError).
+	pub fn with_root_certificates(roots: Arc<rustls::RootCertStore>) -> Result<Self, rustls::Error> {
+		let provider = provider()?;
+		let verifier = WebPkiServerVerifier::builder_with_provider(roots, provider.clone())
+			.build()
+			.map_err(|err| rustls::Error::Other(rustls::OtherError(Arc::new(err))))?;
+		Ok(Self::new(Arc::new(QuicClientConfig::inner(provider, verifier))))
 	}
 }
 

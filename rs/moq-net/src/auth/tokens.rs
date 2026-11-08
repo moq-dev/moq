@@ -64,12 +64,11 @@ pub struct EmptyToken;
 /// The first is the connection credential, which each dial carries in SETUP or its URL,
 /// unless the URL already has a `?jwt=`. Every other token rides its own AUTH stream on the
 /// sessions of [`handle`](Self::handle), widening the grant. Replacing them presents the new
-/// ones on the live session at once, withdrawing the ones they replace only after every new
-/// one has its answer, so the grant never narrows in between.
+/// ones on the live session at once, withdrawing the granted ones they replace only after
+/// every new one has its answer, so the grant never narrows in between.
 ///
-/// A reconnect loop builds each session on [`handle`](Self::handle), calls
-/// [`dial`](Self::dial) before each dial and [`connected`](Self::connected) once it
-/// succeeds, and aborts the handle when it gives up.
+/// [`Reconnect::with_tokens`](crate::Reconnect::with_tokens) presents them on every dial,
+/// whose sessions are built on [`handle`](Self::handle); aborting the handle ends the policy.
 ///
 /// Cheap to clone; every clone shares one set.
 #[derive(Clone)]
@@ -78,13 +77,13 @@ pub struct Tokens {
 }
 
 /// What one dial presents, from [`Tokens::dial`].
-pub struct Dial {
+pub(crate) struct Dial {
 	/// The URL to dial, carrying the connection credential in its query when an offered
 	/// version has no SETUP token.
-	pub url: Url,
+	pub(crate) url: Url,
 	/// The connection credential for [`Client::with_token`](crate::Client::with_token), unless
 	/// the URL brought its own.
-	pub token: Option<crate::setup::Token>,
+	pub(crate) token: Option<crate::setup::Token>,
 	generation: u64,
 }
 
@@ -128,7 +127,19 @@ impl Tokens {
 		state.hold();
 	}
 
-	/// Poll for the peer's answer to the tokens set last; see [`answered`](Self::answered).
+	/// The peer's first verdict on the tokens the last [`set`](Self::set) newly presented,
+	/// or on the initial tokens before any set: `Ok` once each is granted, in band or as the
+	/// connection credential a later dial carried.
+	///
+	/// A token the set kept, the connection credential included, counts only once the peer
+	/// refuses it. Nothing is re-checked after the answer: a later revocation, or a new
+	/// session that refuses a token an earlier one granted, does not change it.
+	///
+	/// # Errors
+	///
+	/// The peer's refusal of a token as [`Error::Session`], [`Error::Unsupported`] when the
+	/// session cannot carry an in-band token, or the connection's end, such as a refused dial.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		let answer = |state: &State| {
 			state
@@ -147,26 +158,9 @@ impl Tokens {
 		Poll::Ready(answer(&state).expect("checked answered"))
 	}
 
-	/// Wait for the peer's first verdict on the tokens the last [`set`](Self::set) newly
-	/// presented, or on the initial tokens before any set: `Ok` once each is granted, in band
-	/// or as the connection credential a later dial carried.
-	///
-	/// A token the set kept, the connection credential included, counts only once the peer
-	/// refuses it. Nothing is re-checked after the answer: a later revocation, or a new
-	/// session that refuses a token an earlier one granted, does not change it.
-	///
-	/// # Errors
-	///
-	/// The peer's refusal of a token as [`Error::Session`], [`Error::Unsupported`] when the
-	/// session cannot carry an in-band token, or the connection's end, such as a refused dial.
-	#[cfg(feature = "async")]
-	pub async fn answered(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_answered(waiter)).await
-	}
-
 	/// Decide what a dial to `url` offering `versions` presents, and hold every other token in
 	/// band on the session it builds. Call it before each dial.
-	pub fn dial(&self, url: &Url, versions: &crate::Versions) -> Dial {
+	pub(crate) fn dial(&self, url: &Url, versions: &crate::Versions) -> Dial {
 		let mut state = self.handle.state.lock();
 		state.record();
 		let configured = state.configured.as_mut().expect("built by Tokens::new");
@@ -187,7 +181,7 @@ impl Tokens {
 	/// connected, whose own answer to the connection credential then counts. A session built
 	/// on another handle answers nothing here.
 	#[cfg(feature = "async")]
-	pub fn connected(&self, session: &crate::Session) {
+	pub(crate) fn connected(&self, session: &crate::Session) {
 		if session.auth().state.same_channel(&self.handle.state) {
 			self.connect(session.credential());
 		}
@@ -214,7 +208,7 @@ impl Tokens {
 
 	/// Whether the tokens changed since `dial` read them, so a refusal of its credential earns
 	/// another dial.
-	pub fn changed(&self, dial: &Dial) -> bool {
+	pub(crate) fn changed(&self, dial: &Dial) -> bool {
 		let state = self.handle.state.read();
 		state.configured.as_ref().expect("built by Tokens::new").generation != dial.generation
 	}
@@ -406,8 +400,14 @@ impl State {
 			if self.configured(id) {
 				continue;
 			}
-			// A refused token has nothing left to keep the grant wide.
-			match self.tokens.get(&id).is_some_and(|entry| entry.ended.is_none()) {
+			// Only a token holding a grant keeps the grant wide; one refused or unanswered, such
+			// as one retrying while its backend fails, is withdrawn at once so repeated sets
+			// never pile up retrying streams.
+			let granted = self
+				.links
+				.values()
+				.any(|link| link.slots.get(&id).is_some_and(|slot| slot.grant.is_some()));
+			match granted {
 				true => self.configured.as_mut().expect("checked configured").retiring.push(id),
 				false => self.withdraw(id),
 			}
@@ -649,6 +649,47 @@ mod tests {
 		session.link.granted(id(&set, "new"), Grant::all());
 		ok(&set);
 		assert!(!presented(&set, old), "the replaced token was never withdrawn");
+	}
+
+	/// A replacement replaced again before its answer added nothing to the grant, so it is
+	/// withdrawn at once: sets while a backend keeps failing never pile up retrying tokens.
+	#[test]
+	fn an_unanswered_replacement_is_withdrawn_when_replaced() {
+		let set = Tokens::new(tokens(&["connection", "old"]));
+		let session = dial(&set, true, false);
+		session.grant_credential();
+		let old = id(&set, "old");
+		session.link.granted(old, Grant::all());
+
+		set.set(tokens(&["connection", "first"]));
+		let first = id(&set, "first");
+		session.refuse(first, SessionError::Internal);
+		set.set(tokens(&["connection", "second"]));
+		assert!(!presented(&set, first), "the unanswered replacement is still presented");
+		assert!(presented(&set, old), "the granted token was withdrawn before an answer");
+		assert_eq!(set.handle.state.read().configured.as_ref().unwrap().retiring, [old]);
+
+		session.link.granted(id(&set, "second"), Grant::all());
+		ok(&set);
+		assert!(!presented(&set, old));
+	}
+
+	/// A token first taken only for requests, then granted on a session with AUTH, keeps the
+	/// grant wide until its replacement answers.
+	#[test]
+	fn a_token_granted_after_a_requests_answer_retires() {
+		let set = Tokens::new(tokens(&["connection", "old"]));
+		let first = dial(&set, false, true);
+		let old = id(&set, "old");
+		first.lost();
+		let session = dial(&set, true, false);
+		session.grant_credential();
+		session.link.granted(old, Grant::all());
+
+		set.set(tokens(&["connection", "new"]));
+		assert!(presented(&set, old), "withdrawn before its replacement was answered");
+		session.link.granted(id(&set, "new"), Grant::all());
+		assert!(!presented(&set, old));
 	}
 
 	/// A replacement is authoritative: its refusal is the answer, and still withdraws what it

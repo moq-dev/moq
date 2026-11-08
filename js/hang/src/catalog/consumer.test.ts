@@ -45,6 +45,12 @@ test("the shared containment check covers every section carrying a broadcast ref
 		expect(() => checkResolvable(reference("../../x"), base)).toThrow(EscapingBroadcast);
 		expect(checkResolvable(reference("../x"), base)).toBeDefined();
 	}
+
+	// An include is a whole broadcast, keyed directly under its section.
+	const include = (broadcast: string) =>
+		({ include: { entry: { broadcast: Moq.Path.normalizeRelative(broadcast) } } }) as Root;
+	expect(() => checkResolvable(include("../../x"), base)).toThrow(EscapingBroadcast);
+	expect(checkResolvable(include("../x"), base)).toBeDefined();
 });
 
 test("watch yields a catalog with many renditions", async () => {
@@ -81,11 +87,11 @@ function referencing(broadcast: string): Root {
 // Watch the catalog of `room/alice`, published through an origin and requested from it.
 async function watchRequested(root: Root) {
 	const origin = new Moq.Origin.Producer();
-	const broadcastPublication = origin.createBroadcast(Moq.Path.from("room/alice"));
-	const broadcast = broadcastPublication.broadcast;
+	const broadcastRoute = origin.route(Moq.Path.from("room/alice"), { hidden: true });
+	const broadcast = broadcastRoute.broadcast;
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
-	broadcastPublication.announce();
+	broadcastRoute.announce();
 	const request = origin.request(Moq.Path.from("room/alice"));
 	const active = request.active.peek();
 	if (!active) throw new Error("request did not resolve");

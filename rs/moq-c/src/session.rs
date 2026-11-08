@@ -95,6 +95,7 @@ impl Connect {
 			.clone()
 			.init(self.config.quic.clone())
 			.map_err(|err| Error::InvalidConfig(err.to_string()))?;
+		client = client.with_reconnect(!self.config.once);
 		if let Some(publish) = &self.publish {
 			client = client.with_publisher(&publish.producer);
 		}
@@ -157,14 +158,16 @@ impl Session {
 			let _publish = publish;
 			let _consume = consume;
 
-			// A panic ends only this session, reported through the terminal callback.
-			let res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
+			// A panic ends only this session, reported through the terminal callback. Boxed so
+			// each wrapper holds a pointer: unoptimized builds otherwise copy the future into
+			// every layer's frame, overflowing the runtime thread's stack.
+			let res = ffi::run(publish_driver.watch(consume_driver.watch(Box::pin(async move {
 				tokio::select! {
 					// close() requested: drain what the session queued, then close it.
 					_ = closed => reconnect.clone().close().await.map_err(map_connect_error),
 					res = Self::report(callback, &reconnect, &monitor) => res,
 				}
-			})))
+			}))))
 			.await;
 			// The terminal callback waits for the close to reach the peer, so a caller that exits
 			// on it doesn't leave the peer to time the connection out.
@@ -221,13 +224,14 @@ impl Session {
 			let _publish = publish;
 			let _consume = consume;
 
-			// A panic ends only this session, reported through the terminal callback.
-			let mut res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
+			// A panic ends only this session, reported through the terminal callback. Boxed
+			// like the dialed session's.
+			let mut res = ffi::run(publish_driver.watch(consume_driver.watch(Box::pin(async move {
 				tokio::select! {
 					_ = closed => Ok(()),
 					res = Self::serve(id, callback, request) => res,
 				}
-			})))
+			}))))
 			.await;
 
 			let entry = State::lock().session.task.remove(id);
@@ -291,6 +295,37 @@ impl Session {
 		match self.link(id)? {
 			Link::Dialed { connection, .. } => Ok(connection.allocator()),
 			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.allocator()),
+		}
+	}
+
+	/// The session's viewers, whose summed ceilings it sends as its PROBE target. A dialed
+	/// session's survive reconnects, reading no estimate while offline.
+	///
+	/// Errors with [`Error::Offline`] for an accepted session still in SETUP.
+	pub fn viewers(&self, id: Id) -> Result<moq_net::bandwidth::Viewers, Error> {
+		match self.link(id)? {
+			Link::Dialed { connection, .. } => Ok(connection.viewers()),
+			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.viewers()),
+		}
+	}
+
+	/// The grants the session's peer gave it. A dialed session's survive reconnects.
+	///
+	/// Errors with [`Error::Offline`] for an accepted session still in SETUP.
+	pub fn auth(&self, id: Id) -> Result<moq_net::auth::Handle, Error> {
+		match self.link(id)? {
+			Link::Dialed { connection, .. } => Ok(connection.auth()),
+			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.auth()),
+		}
+	}
+
+	/// The tokens a dialed session presents. An accepted session presents none.
+	pub fn tokens(&self, id: Id) -> Result<moq_net::auth::Tokens, Error> {
+		match self.link(id)? {
+			Link::Dialed { connection, .. } => Ok(connection.tokens()),
+			Link::Accepted(_) => Err(Error::Unsupported(
+				"a server-accepted session presents no tokens".into(),
+			)),
 		}
 	}
 

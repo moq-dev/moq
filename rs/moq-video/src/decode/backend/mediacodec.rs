@@ -34,7 +34,7 @@ use ndk::media::media_codec::{self, DequeuedInputBufferResult, DequeuedOutputBuf
 use ndk::media::media_format::MediaFormat;
 use ndk::media_error::MediaError;
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::frame::{
 	Surface,
 	android::{HardwareBuffer, Reader},
@@ -115,11 +115,36 @@ pub(crate) struct MediaCodec {
 	image_generation: u64,
 	/// Codec output buffers released for rendering but not yet acquired as images.
 	pending_images: usize,
-	/// Whether this stream has accepted any input and therefore needs EOS.
-	fed: bool,
+	/// Whether the codec holds a stream to drain, or failed for good.
+	input: Input,
 	/// Whether the last acquire found every slot held, so the stall is reported
 	/// once on the way in rather than on every poll.
 	stalled: bool,
+}
+
+/// Where the codec's input stands between flushes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Input {
+	/// Nothing has gone in since the codec started or was last flushed, so
+	/// there is no tail to drain.
+	Idle,
+	/// Access units have gone in, so a flush signals end of stream and drains.
+	Fed,
+	/// A flush could not take the codec back out of end of stream, so it
+	/// refuses input for good.
+	Failed,
+}
+
+impl Input {
+	/// Fails once the codec can take no more input.
+	fn check(self) -> Result<(), Error> {
+		match self {
+			Input::Failed => Err(Error::CodecGone(
+				"the MediaCodec decoder failed a drain and takes no more input".into(),
+			)),
+			Input::Idle | Input::Fed => Ok(()),
+		}
+	}
 }
 
 #[derive(Default)]
@@ -155,7 +180,8 @@ impl MediaCodec {
 	/// `config` is accepted for signature parity: MediaCodec decodes at the
 	/// stream's native size and has no scaler to point
 	/// [`Config::scale_hint`](crate::decode::Config) at.
-	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		let codec = stream.codec;
 		let mime = match codec {
 			Codec::H264 => MIME_H264,
 			Codec::H265 => MIME_H265,
@@ -210,7 +236,7 @@ impl MediaCodec {
 			images,
 			image_generation: 0,
 			pending_images: 0,
-			fed: false,
+			input: Input::Idle,
 			stalled: false,
 		}))
 	}
@@ -253,7 +279,7 @@ impl MediaCodec {
 					self.codec
 						.queue_input_buffer(buffer, 0, access_unit.len(), time, 0)
 						.map_err(|e| codec_err("queue an input buffer", e))?;
-					self.fed = true;
+					self.input = Input::Fed;
 					true
 				}
 				DequeuedInputBufferResult::TryAgainLater => false,
@@ -370,10 +396,6 @@ impl MediaCodec {
 	/// Signal end of input and wait until every delayed output buffer is released.
 	fn drain_tail(&mut self) -> Result<Vec<Frame>, Error> {
 		let mut out = Vec::new();
-		if !self.fed {
-			return Ok(out);
-		}
-
 		self.signal_end_of_input(&mut out)?;
 		let mut ended = false;
 		for _ in 0..DRAIN_ROUNDS {
@@ -441,6 +463,7 @@ impl MediaCodec {
 
 impl Backend for MediaCodec {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+		self.input.check()?;
 		let mut out = Vec::new();
 		// Collect what the codec finished while the caller was elsewhere, which is
 		// also what frees the input buffer the submission below needs.
@@ -451,15 +474,28 @@ impl Backend for MediaCodec {
 	}
 
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		let out = self.drain_tail()?;
-		if self.fed {
-			// EOS leaves the codec refusing input. Synchronous MediaCodec resumes after
-			// flush without another start call, and the front end requires the next
-			// access unit to be a keyframe after this method returns.
-			self.codec.flush().map_err(|e| codec_err("flush", e))?;
-			self.fed = false;
+		self.input.check()?;
+		if self.input == Input::Idle {
+			return Ok(Vec::new());
 		}
-		Ok(out)
+
+		// Flushed whatever the drain did: one that never saw end of stream still
+		// left EOS signalled, or the codec somewhere short of it, and only a flush
+		// takes either back. Synchronous MediaCodec resumes after it without
+		// another start call, and the front end requires the next access unit to
+		// be a keyframe after this method returns.
+		let tail = self.drain_tail();
+		// Whatever the codec still held is dropped by the flush, so no image is
+		// owed any more.
+		self.pending_images = 0;
+		if let Err(err) = self.codec.flush() {
+			self.input = Input::Failed;
+			return Err(codec_err("flush", err));
+		}
+		// A failed drain may leave a render queued on the reader, which the next
+		// stream would take for its own, so the decoder is not reused.
+		self.input = if tail.is_ok() { Input::Idle } else { Input::Failed };
+		tail
 	}
 
 	fn name(&self) -> &str {
@@ -536,11 +572,11 @@ fn reader_err(what: &str, error: MediaError) -> Error {
 mod tests {
 	use super::*;
 
-	/// The hardware round trip: encode a picture with the MediaCodec encoder and
+	/// The round trip: encode a picture with the MediaCodec encoder and
 	/// decode it back, which is the only way to see that the surface output path
 	/// produces a frame at all.
 	#[test]
-	#[ignore = "needs an Android device with MediaCodec H.264 hardware"]
+	#[ignore = "needs an Android device or emulator: just rs android-test"]
 	fn decodes_what_the_encoder_produced() {
 		use crate::encode::{Config as EncodeConfig, Kind as EncodeKind};
 
@@ -551,7 +587,7 @@ mod tests {
 
 		let i420 = crate::I420::new(size, vec![0x80; crate::I420::len(size).unwrap()]).unwrap();
 
-		let mut decoder = MediaCodec::open(Codec::H264, &Config::new()).expect("a MediaCodec decoder");
+		let mut decoder = MediaCodec::open(&Codec::H264.into(), &Config::new()).expect("a MediaCodec decoder");
 		let mut frames = Vec::new();
 		for index in 0..30u64 {
 			let timestamp = Timestamp::from_micros(index * 33_333).unwrap();

@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::{Hop, Timescale, Timestamp, Version, kio, origin, track};
+use moq_net::{Timescale, Timestamp, Version, kio, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
 
@@ -19,7 +19,7 @@ const VERSIONS: [&str; 3] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22
 const GROUPS: u64 = 5;
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	origin
 }
@@ -30,11 +30,19 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let publisher = origin(1);
 	let relay = origin(2);
 	let viewer = origin(3);
-	let broadcast = publisher.create_broadcast("live").unwrap();
-	let source = broadcast
-		.create_track("audio", track::Info::default().with_timescale(Timescale::MILLI))
+	let broadcast = publisher
+		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let source = broadcast
+		.broadcast()
+		.create_track(
+			"audio",
+			track::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.with_max_age(None),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
 
 	let mut upstream = MockConnectOptions::new(version);
 	upstream.client_publish = Some(publisher.consume());
@@ -55,9 +63,9 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let consumer = viewer.consume();
 	crate::support::announced(&consumer, "live").await;
 	let remote = consumer.request("live", None).await.unwrap();
-	let subscription = track::Subscription::default().with_max_delay(budget);
+	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
 	let mut reader = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
-	moq_clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
+	kio::clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
 
 	*gate.write().ok().unwrap() = false;
 	for sequence in 0..GROUPS {
@@ -66,14 +74,14 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 			.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
 			.unwrap();
 		group.finish().unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 	}
 	source.finish().unwrap();
 	*gate.write().ok().unwrap() = true;
 
 	// Read until the track ends, so a skipped group can't be one that merely arrived late.
 	let mut got = BTreeSet::new();
-	while let Some(mut group) = moq_clock::timeout(TIMEOUT, reader.recv_group())
+	while let Some(mut group) = kio::clock::timeout(TIMEOUT, reader.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the track never finished"))
 		.unwrap()
@@ -89,7 +97,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	got
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_stalled_reader_keeps_every_group_its_budget_covers() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
@@ -100,7 +108,7 @@ async fn a_stalled_reader_keeps_every_group_its_budget_covers() {
 
 /// The stall backs up the relay: with a budget shorter than it, the groups that waited for
 /// credit past the budget are skipped. Group 0 took the one free credit as the stall began.
-#[moq_clock::test]
+#[kio::test]
 async fn a_budget_shorter_than_the_stall_skips_what_waited_past_it() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();

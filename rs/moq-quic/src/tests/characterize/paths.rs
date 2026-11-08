@@ -1,7 +1,5 @@
 //! Packet-level defenses and path changes
 
-use std::any::Any;
-
 use super::*;
 use crate::crypto::{self, KeyPair, Keys};
 
@@ -65,10 +63,10 @@ impl crypto::Session for LimitedSession {
 	fn initial_keys(&self, dst_cid: ConnectionId, side: Side) -> Keys {
 		limit(self.0.initial_keys(dst_cid, side))
 	}
-	fn handshake_data(&self) -> Option<Box<dyn Any>> {
+	fn handshake_data(&self) -> Option<crypto::HandshakeData> {
 		self.0.handshake_data()
 	}
-	fn peer_identity(&self) -> Option<Box<dyn Any>> {
+	fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
 		self.0.peer_identity()
 	}
 	fn is_handshaking(&self) -> bool {
@@ -104,7 +102,8 @@ impl crypto::Session for LimitedSession {
 fn aead_integrity_limit() {
 	let _guard = subscribe();
 	let mut pair = pair_with(|_| {});
-	let mut config = client::Config::new(Arc::new(Limited(Arc::new(client_crypto()))));
+	let quic = Arc::new(crypto::rustls::QuicClientConfig::new(Arc::new(client_crypto())));
+	let mut config = client::Config::from_crypto(Arc::new(Limited(quic)));
 	config.transport = transport();
 	let (client_ch, server_ch) = pair.connect_with(config);
 
@@ -146,7 +145,7 @@ fn duplicate_packet_is_discarded() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(MSG).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..]).unwrap();
 	pair.drive_client();
 	assert_eq!(pair.server.inbound.len(), 1);
 	let duplicate = pair.server.inbound[0].clone();
@@ -159,8 +158,8 @@ fn duplicate_packet_is_discarded() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
-	assert_eq!(chunks.next(usize::MAX), Err(ReadError::Blocked));
-	let _ = chunks.finalize();
+	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
+	chunks.finalize();
 }
 
 /// Rebuilds a Retry datagram with `src_cid`, under a valid integrity tag
@@ -297,26 +296,21 @@ fn path_validation_failure_reverts() {
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), new);
 
 	// Nothing the server sends arrives, and the client stays silent
-	let mut updates = Vec::new();
 	while pair.server_conn_mut(server_ch).remote_address() == new {
 		pair.server.outbound.clear();
 		pair.time = pair.server.next_wakeup().expect("validation times out");
 		let now = pair.time;
 		pair.server.drive(now, old);
-		while let Some(event) = pair.server_conn_mut(server_ch).poll() {
-			updates.push(event);
-		}
 	}
 	pair.server.outbound.clear();
 	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), old);
-	assert_matches!(updates.as_slice(), [.., Event::PathUpdated]);
 
 	// The connection still works on the old path
 	let s = pair
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(MSG).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..]).unwrap();
 	pair.drive();
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
 }

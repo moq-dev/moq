@@ -15,7 +15,7 @@
 //! Run with `cargo bench -p moq-net --features fuzz --bench interests`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use moq_net::{Hop, Pattern, Patterns, announce, fuzz, origin};
+use moq_net::{Pattern, Patterns, fuzz, origin};
 
 /// `(watches, sessions)` shapes.
 const SHAPES: [(usize, usize); 4] = [(10, 10), (1_000, 10), (10, 1_000), (1_000, 1_000)];
@@ -26,16 +26,16 @@ const SHAPES: [(usize, usize); 4] = [(10, 10), (1_000, 10), (10, 1_000), (1_000,
 struct Table {
 	producer: origin::Producer,
 	_driver: origin::Driver,
-	_watches: Vec<announce::Consumer>,
+	_watches: Vec<origin::Routes>,
 	sessions: Vec<fuzz::Interests>,
 }
 
 fn table(watches: usize, sessions: usize) -> Table {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(1).unwrap()));
 	let mut held: Vec<_> = (0..watches)
-		.map(|i| scoped(&producer, &format!("other/{i}")).announced())
+		.map(|i| scoped(&producer, &format!("other/{i}")).routes())
 		.collect();
-	held.push(scoped(&producer, "room").announced());
+	held.push(scoped(&producer, "room").routes());
 	let sessions: Vec<_> = (0..sessions).map(|_| fuzz::interests(&producer)).collect();
 	for session in &sessions {
 		session.drain();
@@ -59,11 +59,16 @@ fn bench_uncovered(c: &mut Criterion) {
 	let mut group = c.benchmark_group("interests/uncovered");
 	for (watches, sessions) in SHAPES {
 		let id = BenchmarkId::from_parameter(format!("{watches}w_{sessions}s"));
+		// Criterion calls the closure once per sample, so the fixture is built on the first call and kept.
+		let mut fixture = None;
 		group.bench_function(id, |b| {
-			let table = table(watches, sessions);
-			let incoming = scoped(&table.producer, "incoming");
+			let (table, incoming) = fixture.get_or_insert_with(|| {
+				let table = table(watches, sessions);
+				let incoming = scoped(&table.producer, "incoming");
+				(table, incoming)
+			});
 			b.iter(|| {
-				drop(incoming.announced());
+				drop(incoming.routes());
 				for session in &table.sessions {
 					assert_eq!(session.drain(), 2);
 				}
@@ -77,11 +82,15 @@ fn bench_covered(c: &mut Criterion) {
 	let mut group = c.benchmark_group("interests/covered");
 	for (watches, sessions) in SHAPES {
 		let id = BenchmarkId::from_parameter(format!("{watches}w_{sessions}s"));
+		let mut fixture = None;
 		group.bench_function(id, |b| {
-			let table = table(watches, sessions);
-			let incoming = scoped(&table.producer, "room/incoming");
+			let (table, incoming) = fixture.get_or_insert_with(|| {
+				let table = table(watches, sessions);
+				let incoming = scoped(&table.producer, "room/incoming");
+				(table, incoming)
+			});
 			b.iter(|| {
-				drop(incoming.announced());
+				drop(incoming.routes());
 			});
 			for session in &table.sessions {
 				assert_eq!(session.drain(), 0);

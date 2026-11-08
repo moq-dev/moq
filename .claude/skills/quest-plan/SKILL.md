@@ -4,4 +4,4 @@ description: Scope and create quests through an interactive interview. Use when 
 ---
 
 Run `quest skill plan` and follow its output.
-If `quest` is not installed, follow https://github.com/kixelated/quest/blob/main/SETUP.md first.
+If `quest` is not installed, follow https://github.com/moq-dev/quest/blob/main/SETUP.md first.

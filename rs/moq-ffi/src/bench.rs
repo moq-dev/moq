@@ -5,7 +5,7 @@
 //! runs the same rounds on moq-net, below moq-ffi's handles and runtime.
 
 use crate::consumer::MoqTrackConsumer;
-use crate::media::MoqFrame;
+use crate::media::{MoqFrame, MoqTimestamp};
 use crate::origin::{MoqOriginConfig, MoqOriginProducer};
 use crate::producer::{MoqBroadcastProducer, MoqTrackInfo, MoqTrackProducer};
 
@@ -98,7 +98,7 @@ impl Report {
 		Fut: Future<Output = ()>,
 	{
 		// The test runs many budgets back to back, so a wedged read is caught per round, not by nextest.
-		let mut run = |n| tokio::time::timeout(ROUND_TIMEOUT, round(n));
+		let mut run = |n| kio::clock::timeout(ROUND_TIMEOUT, round(n));
 		for n in 0..WARMUP {
 			run(n).await.expect("round wedged");
 		}
@@ -165,7 +165,10 @@ async fn ffi_round(
 				let mut read = Vec::with_capacity(frames);
 				for _ in 0..frames {
 					let frame = group.read_frame().await.unwrap().expect("group ended");
-					read.push((frame.payload, frame.timestamp_us));
+					let timestamp = frame
+						.timestamp
+						.map(|t| moq_net::Timestamp::try_from(t).unwrap().as_micros() as u64);
+					read.push((frame.payload, timestamp));
 				}
 				read
 			})
@@ -176,7 +179,10 @@ async fn ffi_round(
 		for f in 0..case.frames() {
 			let frame = MoqFrame {
 				payload: payload.to_vec(),
-				timestamp_us: Some(n * case.frames() as u64 + f as u64),
+				timestamp: Some(MoqTimestamp {
+					value: n * case.frames() as u64 + f as u64,
+					scale: 1_000_000,
+				}),
 			};
 			group.write_frame(frame).unwrap();
 		}
@@ -238,10 +244,20 @@ async fn rust_ffi() {
 		let origin = MoqOriginProducer::new(MoqOriginConfig {
 			cache_capacity_bytes: Some(CACHE_BYTES),
 		});
-		let broadcast = origin.create_broadcast("bench".into()).unwrap().broadcast();
+		let route = origin
+			.route(
+				"bench".into(),
+				crate::origin::MoqRouteOptions {
+					hidden: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		let broadcast = route.broadcast().unwrap();
 		let timed = MoqTrackInfo {
 			priority: 0,
 			max_age: None,
+			max_age_unlimited: false,
 			refresh: None,
 			timescale: Some(1_000_000),
 			compress: false,
@@ -282,7 +298,8 @@ async fn rust_net() {
 		config.pool = moq_net::cache::Pool::new(cache);
 		let (origin, driver) = moq_net::origin::Producer::new(config);
 		let driver = tokio::spawn(moq_net::time::run(driver));
-		let broadcast = origin.create_broadcast("bench").unwrap();
+		let route = origin.route("bench", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let broadcast = route.broadcast();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
 		let tracks: Vec<_> = (0..case.publishers)
 			.map(|p| broadcast.create_track(p.to_string(), Some(info.clone())).unwrap())
@@ -312,4 +329,84 @@ async fn rust_net() {
 async fn benchmark_ffi() {
 	rust_ffi().await;
 	rust_net().await;
+}
+
+/// Wake only `active` children while independently growing the background population.
+/// The acknowledged turn measures actual root dispatch, including its per-child wakes.
+#[tokio::test]
+#[ignore = "benchmark: nightly ignored tests"]
+async fn benchmark_background() {
+	let mut report = Report::default();
+	for held in [1, 64, 1024, 8192] {
+		for active in [1, 8, 64] {
+			if active > held {
+				continue;
+			}
+			let ack = kio::Queue::new();
+			let mut pulses = Vec::new();
+			let mut children = Vec::new();
+			for _ in 0..held {
+				let pulse = kio::Producer::new(0u64);
+				let reader = pulse.consume();
+				let ack = ack.clone();
+				children.push(crate::ffi::Background::new(async move {
+					let mut previous = 0;
+					while let Ok(next) = kio::wait(|waiter| {
+						reader.poll(waiter, |value| {
+							if **value > previous {
+								std::task::Poll::Ready(**value)
+							} else {
+								std::task::Poll::Pending
+							}
+						})
+					})
+					.await
+					{
+						previous = next;
+						ack.try_push(()).unwrap();
+					}
+					Ok(())
+				}));
+				pulses.push(pulse);
+			}
+			let round = |n| {
+				let (pulses, ack) = (&pulses, &ack);
+				async move {
+					for pulse in &pulses[..active] {
+						*pulse
+							.write()
+							.unwrap_or_else(|_| unreachable!("benchmark owns the pulse")) = n;
+					}
+					for _ in 0..active {
+						ack.pop().await.unwrap();
+					}
+				}
+			};
+			for n in 1..=WARMUP {
+				round(n).await;
+			}
+			let (start, cpu_start, budget) = (Instant::now(), cpu(), budget());
+			let mut rounds = 0;
+			while start.elapsed() < budget {
+				kio::clock::timeout(ROUND_TIMEOUT, round(WARMUP + rounds + 1))
+					.await
+					.expect("root wedged");
+				rounds += 1;
+			}
+			let elapsed = start.elapsed();
+			let cpu_used = cpu() - cpu_start;
+			let name = format!("held={held}/active={active}");
+			report.push(format!("turn/{name}"), "ns", elapsed.as_nanos() as f64 / rounds as f64);
+			report.push(
+				format!("cpu/{name}"),
+				"ns",
+				cpu_used.as_nanos() as f64 / (rounds * active as u64) as f64,
+			);
+			drop(pulses);
+			for child in children {
+				child.finished().await.unwrap();
+			}
+		}
+	}
+	report.write("rust-background");
 }

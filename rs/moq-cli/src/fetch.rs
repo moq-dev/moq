@@ -6,8 +6,8 @@ use std::time::Duration;
 use anyhow::Context;
 use base64::Engine;
 use hang::moq_net;
-use moq_clock::Instant;
-use moq_clock::timeout_at;
+use kio::clock::Instant;
+use kio::clock::timeout_at;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::args::MoqSide;
@@ -122,7 +122,8 @@ async fn fetch_from<C>(
 			.follow(path, None)?
 			.available()
 			.await
-			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?;
+			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?
+			.context("went offline before serving")?;
 		let track = broadcast.track(&args.track)?;
 		let mut group = moq_relay::fetch_group(&track, args.group)
 			.await
@@ -166,9 +167,12 @@ mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
 
-	/// A millisecond track: the frames written here carry timestamps.
+	/// A millisecond track: the frames written here carry timestamps. It sets no publisher max
+	/// age, so a fetch still reaches its superseded groups.
 	fn timed() -> moq_net::track::Info {
-		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+		moq_net::track::Info::default()
+			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(None)
 	}
 
 	/// The frames of each finished group on the `data` track.
@@ -183,7 +187,7 @@ mod tests {
 	struct Fixture {
 		origin: moq_net::origin::Producer,
 		_keep: (
-			moq_net::origin::Publication,
+			moq_net::origin::Route,
 			Vec<moq_net::track::Producer>,
 			moq_net::group::Producer,
 		),
@@ -192,10 +196,11 @@ mod tests {
 	impl Fixture {
 		async fn new() -> Self {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin.create_broadcast("demo").expect("broadcast");
-			broadcast.announce(Default::default()).expect("announce");
+			let broadcast = origin
+				.route("demo", moq_net::origin::RouteOptions::default())
+				.expect("broadcast");
 
-			let data = broadcast.create_track("data", timed()).expect("data track");
+			let data = broadcast.broadcast().create_track("data", timed()).expect("data track");
 			for sequence in 0..3 {
 				let mut group = data.append_group().expect("group");
 				for frame in frames(sequence) {
@@ -203,8 +208,11 @@ mod tests {
 				}
 				group.finish().expect("finish");
 			}
-			let empty = broadcast.create_track("empty", timed()).expect("empty track");
-			let live = broadcast.create_track("live", timed()).expect("live track");
+			let empty = broadcast
+				.broadcast()
+				.create_track("empty", timed())
+				.expect("empty track");
+			let live = broadcast.broadcast().create_track("live", timed()).expect("live track");
 			let mut open = live.append_group().expect("open group");
 			open.write_frame(moq_net::Timestamp::ZERO, b"first".as_ref())
 				.expect("frame");
@@ -241,13 +249,13 @@ mod tests {
 		/// Kept so the published broadcast, its tracks, and the open group stay live.
 		_publisher: (moq_tokio::Connection, Fixture),
 		/// Kept so the relay's hidden broadcast and its track stay live.
-		_hidden: (moq_net::origin::Publication, moq_net::track::Producer),
+		_hidden: (moq_net::origin::Route, moq_net::track::Producer),
 	}
 
 	impl NetworkFixture {
 		/// Publish [`Fixture`]'s `demo` through a relay that also holds `.hidden`.
 		async fn new() -> Self {
-			let _ = moq_tokio::crypto::install_default();
+			moq_tokio::crypto::install_default().unwrap();
 			let fixture = moq_relay::test_relay().await.expect("test relay");
 			// A dot-prefixed broadcast on the relay itself, like its `.stats`, which
 			// announce listings hide unless asked for by name.
@@ -255,10 +263,9 @@ mod tests {
 				.relay
 				.cluster()
 				.origin
-				.create_broadcast(".hidden")
+				.route(".hidden", moq_net::origin::RouteOptions::default())
 				.expect("hidden broadcast");
-			hidden.announce(Default::default()).expect("announce hidden");
-			let secret = hidden.create_track("data", timed()).expect("hidden track");
+			let secret = hidden.broadcast().create_track("data", timed()).expect("hidden track");
 			let mut group = secret.append_group().expect("group");
 			group
 				.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())
@@ -335,8 +342,6 @@ mod tests {
 	fn net() -> crate::Net {
 		crate::Net {
 			quic: Default::default(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		}
 	}
 

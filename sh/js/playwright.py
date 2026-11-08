@@ -3,10 +3,9 @@
 
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPENDENCIES = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
@@ -15,7 +14,8 @@ DEPENDENCIES = ("dependencies", "devDependencies", "peerDependencies", "optional
 def check(root, version):
     files = subprocess.check_output(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "package.json", "**/package.json"],
-        cwd=root, text=True
+        cwd=root,
+        text=True,
     ).splitlines()
     problems = []
     for name in files:

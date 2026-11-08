@@ -10,13 +10,13 @@ const SAMPLE_RATE = 48000;
 //   -filter_complex amerge -c:a aac -b:a 64k -f adts libav.test.aac
 const FIXTURE = new URL("./libav.test.aac", import.meta.url);
 
-// Strip the ADTS headers: a hang catalog carries the AudioSpecificConfig and frames are raw.
-function rawFrames(adts: Uint8Array): Uint8Array[] {
+// A description selects raw blocks; without one, each packet keeps its ADTS header.
+function aacFrames(adts: Uint8Array, raw: boolean): Uint8Array[] {
 	const frames: Uint8Array[] = [];
 	for (let i = 0; i < adts.length; ) {
 		const length = ((adts[i + 3] & 0x03) << 11) | (adts[i + 4] << 3) | (adts[i + 5] >> 5);
 		const header = adts[i + 1] & 0x01 ? 7 : 9;
-		frames.push(adts.subarray(i + header, i + length));
+		frames.push(adts.subarray(i + (raw ? header : 0), i + length));
 		i += length;
 	}
 	return frames;
@@ -38,7 +38,6 @@ function power(samples: Float32Array, frequency: number): number {
 test("the fallback decodes AAC without a native AudioDecoder", async () => {
 	// The premise: Bun ships no WebCodecs, so this runs entirely on the libav fallback.
 	expect(globalThis.AudioDecoder).toBeUndefined();
-	expect(await polyfill()).toBe(true);
 
 	const config: AudioDecoderConfig = {
 		codec: "mp4a.40.2",
@@ -46,50 +45,75 @@ test("the fallback decodes AAC without a native AudioDecoder", async () => {
 		numberOfChannels: 2,
 		description: audioSpecificConfig(SAMPLE_RATE, 2),
 	};
+
+	// The polyfill library installs its own AudioDecoder, which refuses AAC, before its load
+	// finishes. A caller arriving in that window must still get the AAC-capable one.
+	let installed: typeof AudioDecoder | undefined;
+	let early: Promise<boolean | undefined> | undefined;
+	Object.defineProperty(globalThis, "AudioDecoder", {
+		configurable: true,
+		get: () => installed,
+		set: (value: typeof AudioDecoder) => {
+			installed = value;
+			// Ask once the library has installed every global, as a concurrent caller would see them.
+			early ??= Promise.resolve()
+				.then(polyfill)
+				.then(async () => (await AudioDecoder.isConfigSupported(config)).supported);
+		},
+	});
+	try {
+		expect(await polyfill()).toBe(true);
+	} finally {
+		Object.defineProperty(globalThis, "AudioDecoder", { configurable: true, writable: true, value: installed });
+	}
+	expect(await early).toBe(true);
+
 	expect((await AudioDecoder.isConfigSupported(config)).supported).toBe(true);
 	for (const codec of ["mp4a.40.02", "mp4a.40.5", "mp4a.40.05", "mp4a.40.29", "mp4a.67"]) {
 		expect((await AudioDecoder.isConfigSupported({ ...config, codec })).supported).toBe(true);
 	}
 
-	const planes: Float32Array[][] = [[], []];
-	let failure: Error | undefined;
-	const decoder = new AudioDecoder({
-		output: (data) => {
-			for (const [index, plane] of planes.entries()) {
-				const samples = new Float32Array(data.numberOfFrames);
-				data.copyTo(samples, { planeIndex: index, format: "f32-planar" });
-				plane.push(samples);
-			}
-			data.close();
-		},
-		error: (error) => {
-			failure = error;
-		},
-	});
-	decoder.configure(config);
+	for (const raw of [true, false]) {
+		const planes: Float32Array[][] = [[], []];
+		let failure: Error | undefined;
+		const decoder = new AudioDecoder({
+			output: (data) => {
+				for (const [index, plane] of planes.entries()) {
+					const samples = new Float32Array(data.numberOfFrames);
+					data.copyTo(samples, { planeIndex: index, format: "f32-planar" });
+					plane.push(samples);
+				}
+				data.close();
+			},
+			error: (error) => {
+				failure = error;
+			},
+		});
+		decoder.configure({ ...config, description: raw ? config.description : undefined });
 
-	const frames = rawFrames(new Uint8Array(await Bun.file(FIXTURE).arrayBuffer()));
-	for (const [index, data] of frames.entries()) {
-		decoder.decode(
-			new EncodedAudioChunk({ type: "key", timestamp: (index * 1024 * 1_000_000) / SAMPLE_RATE, data }),
-		);
-	}
-	await decoder.flush();
-	decoder.close();
-	expect(failure).toBeUndefined();
-
-	const [left, right] = planes.map((chunks) => {
-		const out = new Float32Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
-		let offset = 0;
-		for (const chunk of chunks) {
-			out.set(chunk, offset);
-			offset += chunk.length;
+		const frames = aacFrames(new Uint8Array(await Bun.file(FIXTURE).arrayBuffer()), raw);
+		for (const [index, data] of frames.entries()) {
+			decoder.decode(
+				new EncodedAudioChunk({ type: "key", timestamp: (index * 1024 * 1_000_000) / SAMPLE_RATE, data }),
+			);
 		}
-		return out;
-	});
-	expect(left.length).toBe(frames.length * 1024);
-	expect(power(left, 440)).toBeGreaterThan(100 * power(left, 880));
-	expect(power(right, 880)).toBeGreaterThan(100 * power(right, 440));
+		await decoder.flush();
+		decoder.close();
+		expect(failure).toBeUndefined();
+
+		const [left, right] = planes.map((chunks) => {
+			const out = new Float32Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
+			let offset = 0;
+			for (const chunk of chunks) {
+				out.set(chunk, offset);
+				offset += chunk.length;
+			}
+			return out;
+		});
+		expect(left.length).toBe(frames.length * 1024);
+		expect(power(left, 440)).toBeGreaterThan(100 * power(left, 880));
+		expect(power(right, 880)).toBeGreaterThan(100 * power(right, 440));
+	}
 });
 
 // Runs on the polyfill's AudioData, which libopus decodes into. After the AAC test, which needs Bun's

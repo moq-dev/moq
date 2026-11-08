@@ -1,0 +1,34 @@
+# [M] MediaCodec AAC encode on Android
+
+## Goal
+
+On Android, `Codec::Aac` encodes through `AMediaCodec` at the input's layout
+where the device's encoder supports it.
+
+## Plan
+
+Rust owns capture and codecs on mobile, settled in the 2026-09-30 audit, so this backend is
+the Android audio codec path.
+
+The audio counterpart of `rs/moq-video/src/encode/backend/mediacodec.rs`,
+behind the `mediacodec` feature and the encode seam.
+
+- `audio/mp4a-latm` with `KEY_AAC_PROFILE` = LC. The catalog ASC is
+  synthesized at construction per the encode seam, since `csd-0` only arrives
+  with the first output buffer; assert the two match.
+- MediaCodec pipelines output. Reuse the flush and zero-or-more packet
+  return from the m2 seam; do not design another encoder seam.
+- Multichannel is device-dependent; probe the encoder's capabilities at open
+  and refuse a layout it does not list.
+- Round-trip regression through the MediaCodec decoder; runtime proof on a
+  device or emulator through `just rs android-test`, as in the decode quest.
+
+This backend implements the zero-or-more packet return and `flush` that
+[audio-codec-seam](/quest/m2/audio-codec-seam.md) lands in m2 before the cut
+(decided 2026-11-07, maintainer, /quest-plan from the API sweep of open PRs
+and remaining quests), so it adds no break and waits on no other encoder backend; its round-trip test still needs its platform decoder.
+
+## Required
+
+- [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - the encoder API this backend implements
+- [MediaCodec decode](/quest/m5/audio-decode-mediacodec.md) - the round-trip regression decodes through it

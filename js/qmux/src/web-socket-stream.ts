@@ -1,7 +1,7 @@
 /** A ponyfill for the WHATWG [`WebSocketStream`][spec] API.
  *
- * `WebSocketStream` exposes a WebSocket as a pair of streams —
- * `{ readable, writable }` — with backpressure on the writable. It currently
+ * `WebSocketStream` exposes a WebSocket as a pair of streams -
+ * `{ readable, writable }` - with backpressure on the writable. It currently
  * ships only in Chromium. This module wraps a plain `WebSocket` to present the
  * same surface (`opened`, `closed`, `close()`), applying write backpressure by
  * polling `bufferedAmount` against a configurable high-water mark.
@@ -57,7 +57,7 @@ export interface WebSocketStreamLike {
 	/** Close the connection, with an optional code and reason. */
 	close(closeInfo?: WebSocketStreamCloseInfo): void;
 	/** Ponyfill-only: resize the write-backpressure high-water mark at runtime.
-	 *  Absent on the native API, which sizes its own send buffer — callers should treat it as optional. */
+	 *  Absent on the native API, which sizes its own send buffer - callers should treat it as optional. */
 	setHighWaterMark?(bytes: number): void;
 }
 
@@ -143,8 +143,8 @@ function validCloseCode(code: number | undefined): code is number {
 /** Resolve once `bufferedAmount` drains below the mark (write backpressure).
  *  The mark is read live via `highWaterMark()` on every check, so a runtime
  *  resize (see {@link WebSocketStream.setHighWaterMark}) takes effect mid-drain.
- *  Returns `undefined` synchronously when there's already room — no microtask
- *  on the hot path, so `writer.ready` stays resolved when the socket is keeping up. */
+ *  Returns `undefined` synchronously when there's already room - no microtask
+ *  on the hot path. */
 function drain(ws: WebSocketLike, highWaterMark: () => number): Promise<void> | undefined {
 	if (ws.bufferedAmount <= highWaterMark()) return undefined;
 	return (async () => {
@@ -155,6 +155,11 @@ function drain(ws: WebSocketLike, highWaterMark: () => number): Promise<void> | 
 			await sleep(Nano.fromMilli(Milli(10)));
 		}
 	})();
+}
+
+/** The bytes `chunk` adds to `bufferedAmount`. */
+function byteLength(chunk: WebSocketStreamData): number {
+	return typeof chunk === "string" ? new TextEncoder().encode(chunk).byteLength : chunk.byteLength;
 }
 
 /** A `WebSocketStream` implemented over a plain `WebSocket`. */
@@ -198,16 +203,37 @@ export class WebSocketStream implements WebSocketStreamLike {
 			cancel: () => ws.close(),
 		});
 
-		const writable = new WritableStream<WebSocketStreamData>({
-			write: (chunk) => {
-				ws.send(chunk);
-				return drain(ws, () => this.#highWaterMark);
+		// Bytes written to the writable but not yet handed to the socket, and each queued
+		// chunk's size as measured on entry, since a resizable buffer can change it later.
+		let queued = 0;
+		const sizes: number[] = [];
+		const writable = new WritableStream<WebSocketStreamData>(
+			{
+				write: (chunk) => {
+					queued -= sizes.shift() ?? 0;
+					ws.send(chunk);
+					return drain(ws, () => this.#highWaterMark);
+				},
+				// A WebSocket has no half-close, so closing/aborting the writable closes
+				// the whole socket. Without this, `writer.close()` would leave it open.
+				close: () => ws.close(),
+				abort: () => ws.close(),
 			},
-			// A WebSocket has no half-close, so closing/aborting the writable closes
-			// the whole socket. Without this, `writer.close()` would leave it open.
-			close: () => ws.close(),
-			abort: () => ws.close(),
-		});
+			{
+				// A chunk counts only when it takes the backlog past the mark, so `desiredSize`
+				// reaches 0 only once the socket is behind. Counting every chunk would report
+				// backpressure for each write in flight, however small the backlog.
+				highWaterMark: 1,
+				// The DOM typing admits `undefined`, which a WebSocket can't send.
+				size: (chunk) => {
+					if (chunk === undefined) throw new TypeError("WebSocketStream cannot send undefined");
+					const size = byteLength(chunk);
+					sizes.push(size);
+					queued += size;
+					return ws.bufferedAmount + queued > this.#highWaterMark ? 1 : 0;
+				},
+			},
+		);
 
 		ws.onopen = () => {
 			opened.resolve({ readable, writable, extensions: ws.extensions, protocol: ws.protocol });
@@ -239,7 +265,7 @@ export class WebSocketStream implements WebSocketStreamLike {
 		};
 
 		// An adopted socket may already have finished (or missed) its handshake, in
-		// which case `onopen`/`onclose` will never fire — settle from readyState.
+		// which case `onopen`/`onclose` will never fire - settle from readyState.
 		if (ws.readyState !== CONNECTING) {
 			if (ws.readyState === OPEN) {
 				opened.resolve({ readable, writable, extensions: ws.extensions, protocol: ws.protocol });
@@ -259,13 +285,13 @@ export class WebSocketStream implements WebSocketStreamLike {
 		}
 	}
 
-	/** Wrap a socket that already exists — typically one a server accepted from an
+	/** Wrap a socket that already exists - typically one a server accepted from an
 	 *  HTTP upgrade (`Deno.upgradeWebSocket`, `ws`, ...), where there is no URL to
 	 *  dial and the handshake (including subprotocol selection) is already done.
 	 *
 	 *  Ownership transfers: this overwrites the socket's `onopen`/`onmessage`/
 	 *  `onerror`/`onclose` handlers, so adopt it before anything else reads from
-	 *  it — messages delivered before adoption are dropped by the platform, not
+	 *  it - messages delivered before adoption are dropped by the platform, not
 	 *  buffered. A socket that is already open resolves {@link opened} without
 	 *  waiting for an `onopen` that has already fired (or was never going to).
 	 *

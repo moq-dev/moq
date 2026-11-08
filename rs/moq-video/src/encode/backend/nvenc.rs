@@ -44,7 +44,7 @@ use moq_nvenc::sys::nvEncodeAPI::{
 };
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
-use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
+use super::super::encoder::{Applied, Codec, Config, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
 use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::{Surface, cuda, interleave_uv, vulkan};
@@ -114,7 +114,7 @@ impl Nvenc {
 			.map_err(|e| Error::Codec(anyhow::anyhow!("NVENC preset config: {e}")))?;
 
 		let cfg = &mut preset.presetCfg;
-		let Gop::Keyframe { interval } = config.gop;
+		let interval = config.keyframe_interval();
 		cfg.gopLength = interval;
 		cfg.frameIntervalP = 1; // no B-frames
 		cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
@@ -731,7 +731,7 @@ mod tests {
 		}
 		let mut config = crate::encode::Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(NAME.into());
-		config.gop = Gop::Keyframe { interval: 3 };
+		config.join = std::time::Duration::from_millis(100);
 		let Ok(mut encoder) = crate::encode::Encoder::new(&config) else {
 			return;
 		};
@@ -797,7 +797,8 @@ mod tests {
 			kind: crate::decode::Kind::Software,
 			..crate::decode::Config::new()
 		};
-		let mut decoder = crate::decode::backend::open(crate::decode::backend::Codec::H264, &decode_config).unwrap();
+		let mut decoder =
+			crate::decode::backend::open(&crate::decode::backend::Codec::H264.into(), &decode_config).unwrap();
 
 		// A static image, so every decoded frame equals the input regardless of
 		// decoder latency or frame reordering.
@@ -854,7 +855,7 @@ mod tests {
 		let mut config = crate::encode::Config::new(w, h, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = crate::encode::Kind::Named(NAME.into());
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_bps(4_000_000));
-		config.gop = Gop::Keyframe { interval: 30 };
+		config.join = std::time::Duration::from_secs(1);
 		let mut encoder = crate::encode::Encoder::new(&config).ok()?;
 
 		let mut idrs = Vec::new();

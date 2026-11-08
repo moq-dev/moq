@@ -1,4 +1,3 @@
-#[cfg(test)]
 use std::cmp::Ordering;
 use std::ops::Range;
 
@@ -58,8 +57,7 @@ impl ArrayRangeSet {
 		self.0.len()
 	}
 
-	#[cfg(test)]
-	pub(super) fn contains(&self, x: u64) -> bool {
+	pub(crate) fn contains(&self, x: u64) -> bool {
 		self.0
 			.binary_search_by(|range| {
 				if range.end <= x {

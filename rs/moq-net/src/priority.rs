@@ -526,6 +526,11 @@ impl PriorityHandle {
 /// stream sits below.
 pub const RECV_CONTROL: i64 = i64::MAX;
 
+/// The receive priority of a group stream held unread until a control message says how to
+/// read it, such as its subscription's TRACK_INFO: below every other stream, so a full
+/// receive window stops it first and the control message it waits on still gets credit.
+pub const RECV_PARKED: i64 = i64::MIN;
+
 /// The receive priority of a group stream: always below a control stream or an
 /// unidentified one, ranked by its subscription's `priority` and then its `order`, like the
 /// sender ranks it. A [`Order::Descending`] subscription gives up its oldest group first,
@@ -609,8 +614,8 @@ mod tests {
 		}
 	}
 
-	/// Every group sits below an unidentified stream, and so below a control stream, with
-	/// more urgent subscriptions and then newer groups kept longer.
+	/// Every group sits below an unidentified stream, and so below a control stream, and above
+	/// a parked one, with more urgent subscriptions and then newer groups kept longer.
 	#[test]
 	fn recv_group_stays_below_unidentified_streams() {
 		for order in [Order::Descending, Order::Ascending] {
@@ -619,8 +624,8 @@ mod tests {
 			assert!(recv_group(i8::MIN, u64::MAX, order) < recv_group(-1, 0, order));
 			assert!(recv_group(i8::MAX, 0, order) < 0);
 			assert!(recv_group(i8::MAX, u64::MAX, order) < 0);
-			assert!(recv_group(i8::MIN, 0, order) > i64::MIN);
-			assert!(recv_group(i8::MIN, u64::MAX, order) > i64::MIN);
+			assert!(recv_group(i8::MIN, 0, order) > RECV_PARKED);
+			assert!(recv_group(i8::MIN, u64::MAX, order) > RECV_PARKED);
 		}
 		// The group the subscription would deliver last is the first to go.
 		assert!(recv_group(0, 0, Order::Descending) < recv_group(0, 1, Order::Descending));
@@ -929,7 +934,7 @@ mod tests {
 		assert_eq!(low_track_high_group.current(), 4); // track=-78, group=100
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn test_watch_notification_on_overflow_promotion() {
 		let queue = PriorityQueue::default();
 
@@ -941,10 +946,10 @@ mod tests {
 		assert_eq!(overflow_item.current(), u8::MAX);
 
 		// Spawn task to wait for promotion from overflow
-		let task = moq_clock::sim::spawn(async move { overflow_item.next().await });
+		let task = kio::clock::sim::spawn(async move { overflow_item.next().await });
 
 		// Give the task time to start waiting
-		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Drop highest priority item, which should promote from overflow
 		fillers.remove(0);
@@ -1046,7 +1051,7 @@ mod tests {
 		assert_eq!(handles[1].current(), 0);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn test_notification_on_demotion_to_overflow() {
 		let queue = PriorityQueue::default();
 
@@ -1058,9 +1063,9 @@ mod tests {
 		assert_eq!(at_edge.current(), 254);
 
 		// Spawn task to wait for demotion notification
-		let task = moq_clock::sim::spawn(async move { at_edge.next().await });
+		let task = kio::clock::sim::spawn(async move { at_edge.next().await });
 
-		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Insert very high priority item, kicking at_edge to overflow
 		let _high = queue.insert(live(127, 1000));
@@ -1113,7 +1118,7 @@ mod tests {
 		assert_eq!(s1_g1.current(), 3);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn test_steer_track_notifies_other_handles() {
 		let queue = PriorityQueue::default();
 
@@ -1124,8 +1129,8 @@ mod tests {
 		assert_eq!(h_low.current(), 1);
 
 		// Wait for a change notification on h_low while another handle's steer runs.
-		let task = moq_clock::sim::spawn(async move { h_low.next().await });
-		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
+		let task = kio::clock::sim::spawn(async move { h_low.next().await });
+		kio::clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Demote h_high below h_low.
 		h_high.steer(-118, Order::Descending);
@@ -1223,7 +1228,7 @@ mod tests {
 		assert_eq!(low.current(), 2);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn test_steer_track_notifies_swapped_overflow_item() {
 		let queue = PriorityQueue::default();
 
@@ -1236,8 +1241,8 @@ mod tests {
 		let mut f1 = fillers.remove(0);
 		assert_eq!(f1.current(), u8::MAX);
 
-		let task = moq_clock::sim::spawn(async move { f1.next().await });
-		moq_clock::sim::yield_now().await;
+		let task = kio::clock::sim::spawn(async move { f1.next().await });
+		kio::clock::sim::yield_now().await;
 
 		// Demoting top below every filler swaps it with f1 in overflow.
 		top.steer(-128, Order::Descending);

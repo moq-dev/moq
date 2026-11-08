@@ -201,8 +201,8 @@ sequence header opens each access unit.
 Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
 unset, so that size is borrowed rather than specified. A stream with no parameters
-at all is refused by name rather than skipped, which fails the check: MPEG-1/2
-video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
+at all is refused by name rather than skipped, which fails the check: MPEG-1
+video, MPEG-4 part 2, and HEVC beyond Main/Main 10. Sections and private data
 (SCTE-35, teletext) are listed as not graded; passing elementary-stream buffers
 does not establish conformance for them.
 
@@ -598,6 +598,29 @@ rebase.
 | `recovery-point-sei` | shape | each recovery point keeps its SEI |
 | `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
 
+## Input health
+
+Import's timing counters grade the encoder's insertion. Each program's health
+clock follows its PCR and, across a stall, the packets the multiplex carries at
+the constant rate the PCR measured, so a stalled PCR cannot freeze PAT, PMT or
+PTS checks, and delivery batching or delay counts nothing. Before a rate is
+measured, or on VBR input, the clock falls back to arrival once each input
+chunk is read: that diagnoses ingestion, upstream delays included. A fully
+stopped input adds no time, by timer or at EOF. PCR accuracy is not certified.
+
+| Coverage | Automated evidence (`just rs test -p moq-mux`) |
+| --- | --- |
+| Measured multiplex, PCR absent or frozen while tables/PES continue or stop | [`health::test::a_measured_multiplex_times_a_stalled_pcr_by_its_packets`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Unmeasured input, the same on arrival | [`health::test::a_stalled_pcr_does_not_freeze_timing_checks`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Clean feed delivered in delayed batches, measured or not | [`health::test::batched_delivery_of_a_clean_feed_counts_nothing`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Fully stopped input, judged by what resumes it or ended at EOF | [`health::test::a_stopped_input_is_judged_by_what_resumes_it`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Input held behind a suspected clock step keeps its arrival | [`health::test::held_input_is_graded_at_its_own_arrival`](../../rs/moq-mux/src/container/ts/health.rs) |
+| Shared PES PID, stalled owner or shared PCR PID; each input fault counted once | [`programs::test::a_stalled_owner_cannot_hide_a_shared_pids_outage`](../../rs/moq-mux/src/container/ts/programs.rs) |
+
+These paused-time tests run in the Rust PR gate. `ts_stalled` in the
+[`TS ingest benchmark`](../../rs/moq-mux/benches/ts_programs.rs) sweeps program
+fanout and input batching independently.
+
 ## Programs without video
 
 `just test ts --clockless audio-scte35`, `--clockless sections`, and
@@ -727,6 +750,18 @@ carry its own PAT and PMT, sent after the picture before it. Its graders' failur
 paths run beside it, and `just rs ts-recovery` runs two minutes of the same faults
 nightly, failing if the latency drifts and keeping a failing arm's export and
 ledgers under `$HARNESS_RUNS/ts-recovery/`.
+
+Semantic loss also has paused-clock wire checks in `export_test.rs` and
+`recovery_test.rs`:
+
+| Case | Contract | Test |
+|---|---|---|
+| Skipped groups, short or longer than PCR backfill | Padded continuing-clock holes stay unflagged; only the first PCR after skipped slots flags the jump; PAT/PMT versions stay unchanged; importer Health reports no unflagged PCR jump | `a_skipped_group_flags_the_clock` |
+| Disjoint A/V outages with different decode reserves | Padded continuing-clock holes carry no flag | `disjoint_outages_across_both_tracks_keep_the_clock` |
+| Same-instance route handoff after a gap | Only a clock jump flags the PCR, with no program change | `a_follower_continues_through_a_same_instance_handoff_after_a_gap` |
+
+These run in `just rs test -p moq-mux --lib` and the selected Rust CI gate.
+The raw lane retains the unchanged-packet loss contract below.
 
 ### Lossy path (`--loss`)
 
@@ -920,7 +955,7 @@ claiming the CBR PCR-accuracy profile.
 ## CI
 
 The round-trip rig explicitly negotiates `moq-lite-07-wip` on the relay,
-publisher and subscribers. Its publisher epochs allow acquisition to continue
+publisher and subscribers. Its stream instances allow acquisition to continue
 when a session is replaced. Production defaults remain unchanged: Lite-06
 cannot prove publisher identity across session replacement and must refuse a
 pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` covers both

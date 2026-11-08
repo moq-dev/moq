@@ -20,10 +20,13 @@
 
 mod api;
 mod audio;
+mod auth;
 mod bandwidth;
 mod client;
 mod consume;
+mod datagram;
 mod decode;
+mod encoder;
 mod error;
 mod ffi;
 mod id;
@@ -31,17 +34,22 @@ mod origin;
 mod publish;
 mod server;
 mod session;
+mod socket;
 mod state;
 mod task;
 mod video;
 
 pub use api::*;
 pub use audio::*;
+pub use auth::*;
 pub use bandwidth::*;
+pub use datagram::*;
 pub use decode::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
+pub use encoder::*;
 pub use error::*;
-pub use ffi::{moq_state_callback, moq_status_callback};
+pub use ffi::{moq_follow_callback, moq_state_callback, moq_status_callback};
 pub use id::*;
+pub use socket::*;
 pub use video::*;
 
 pub(crate) use client::*;
@@ -53,9 +61,4 @@ pub(crate) use session::*;
 pub(crate) use state::*;
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod test;

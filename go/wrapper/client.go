@@ -99,7 +99,7 @@ type QUICConfig struct {
 	MaxStreams uint64
 	// IdleTimeout is how long an idle connection survives before it is dropped.
 	IdleTimeout *time.Duration
-	// KeepAlive is the keep-alive ping interval. Zero disables it.
+	// KeepAlive is the keep-alive ping interval. Zero uses the default.
 	KeepAlive *time.Duration
 	// GSO toggles UDP generic segmentation offload, which batches sends into one syscall.
 	GSO *bool
@@ -300,31 +300,31 @@ func Dial(ctx context.Context, url string, config ClientConfig) (*Client, error)
 	return c, nil
 }
 
-// CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
+// Route creates a route at exactly path on the publish origin, owning a new broadcast to fill.
 //
-// See [OriginProducer.CreateBroadcast].
-func (c *Client) CreateBroadcast(path string) (*Publication, error) {
-	return c.publisher.CreateBroadcast(path)
+// See [OriginProducer.Route].
+func (c *Client) Route(path string, options RouteOptions) (*Route, error) {
+	return c.publisher.Route(path, options)
 }
 
-// Announced streams routes announced by the remote under a pattern scope.
+// Announced lists the paths the remote announces under a pattern scope, as each becomes present or absent.
 func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(options)
 }
 
-// Follow follows path, resolving each publisher instance that serves it. A
-// non-nil epoch follows only that instance.
-func (c *Client) Follow(path string, epoch *string) (*Following, error) {
-	return c.consumer.Follow(path, epoch)
+// Follow follows path, resolving each stream that serves it. A non-nil
+// instance follows only that stream.
+func (c *Client) Follow(path string, instance *string) (*Following, error) {
+	return c.consumer.Follow(path, instance)
 }
 
 // Request resolves one publisher instance of the broadcast at path as soon as
 // it can be served: an existing exact-path broadcast, a covering announced
 // route, or a dynamic fallback on the origin, or an error. Unlike Follow, it
-// does not wait for a future announcement. A non-nil epoch refuses any other
-// instance.
-func (c *Client) Request(ctx context.Context, path string, epoch *string) (*BroadcastConsumer, error) {
-	return c.consumer.Request(ctx, path, epoch)
+// does not wait for a future announcement. A non-nil instance refuses any other
+// stream.
+func (c *Client) Request(ctx context.Context, path string, instance *string) (*BroadcastConsumer, error) {
+	return c.consumer.Request(ctx, path, instance)
 }
 
 // Session returns the underlying session. Hold the client (or session) to keep

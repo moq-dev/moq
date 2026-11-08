@@ -53,11 +53,13 @@ pub(crate) enum Target {
 }
 
 impl Target {
-	/// A fixed target for `Some`, otherwise the estimator floored at `advertised`.
-	pub(crate) fn new(delay: Option<Duration>, advertised: Option<Duration>) -> Self {
-		match delay {
-			Some(delay) => Self::Fixed(millis(delay)),
-			None => Self::Auto(Box::new(Estimator::new(advertised.map_or(0.0, millis)))),
+	/// The estimator floored at `delay` and `advertised` when `estimate`, otherwise `delay` fixed.
+	pub(crate) fn new(delay: Duration, estimate: bool, advertised: Option<Duration>) -> Self {
+		match estimate {
+			false => Self::Fixed(millis(delay)),
+			true => Self::Auto(Box::new(Estimator::new(millis(
+				advertised.unwrap_or_default().max(delay),
+			)))),
 		}
 	}
 
@@ -65,6 +67,13 @@ impl Target {
 	pub(crate) fn observe(&mut self, arrival: f64, media: f64) {
 		if let Self::Auto(estimator) = self {
 			estimator.observe(arrival, media);
+		}
+	}
+
+	/// Mark a declared end between the previous observation and the next. A fixed target ignores it.
+	pub(crate) fn end(&mut self) {
+		if let Self::Auto(estimator) = self {
+			estimator.end();
 		}
 	}
 
@@ -258,6 +267,8 @@ pub(crate) struct Estimator {
 	interval: f64,
 	/// The largest delay seen in that interval.
 	peak: f64,
+	/// A declared end precedes the next measured observation, so the silence before it is not idle.
+	ended: bool,
 
 	histogram: [f64; BUCKETS],
 	/// How much of the histogram is still the prior's rather than evidence.
@@ -274,6 +285,7 @@ impl Estimator {
 			origin: None,
 			interval: 0.0,
 			peak: 0.0,
+			ended: false,
 			histogram: std::array::from_fn(prior),
 			prior: 1.0,
 		}
@@ -307,6 +319,7 @@ impl Estimator {
 		};
 
 		let interval = ((arrival - origin) / RESAMPLE).floor();
+		let resumed = std::mem::take(&mut self.ended);
 		if interval <= self.interval {
 			self.peak = self.peak.max(delay);
 			return;
@@ -314,13 +327,31 @@ impl Estimator {
 
 		self.fold(Some(((self.peak / BUCKET).floor() as usize).min(BUCKETS - 1)));
 
-		let idle = f64::min(interval - self.interval - 1.0, IDLE_MAX);
-		for _ in 0..idle as u32 {
-			self.fold(None);
+		if resumed {
+			// A silence the publisher declared says nothing about the path, so the
+			// estimate keeps what it had and a fresh interval starts here.
+			self.origin = Some(arrival);
+			self.interval = 0.0;
+		} else {
+			// An interval with no arrival relaxes the estimate toward the prior.
+			let idle = f64::min(interval - self.interval - 1.0, IDLE_MAX);
+			for _ in 0..idle as u32 {
+				self.fold(None);
+			}
+			self.interval = interval;
 		}
-
-		self.interval = interval;
 		self.peak = delay;
+	}
+
+	/// A declared end lies between the previous observation and the next, so the
+	/// silence it declares does not relax the estimate the way an unexplained gap
+	/// does. Called before observing the first frame after the end, not at the
+	/// marker, since the stopped encoder's final packets may still follow it.
+	fn end(&mut self) {
+		// Before any observation there is no interval for the silence to stretch.
+		if self.origin.is_some() {
+			self.ended = true;
+		}
 	}
 
 	fn target(&self) -> f64 {
@@ -374,6 +405,9 @@ pub(crate) mod tests {
 		pub delay: Option<f64>,
 		pub arrival: Vec<f64>,
 		pub media: Vec<f64>,
+		/// Indices of the frames observed right after a declared end.
+		#[serde(default)]
+		pub ends: Vec<usize>,
 		pub target: Vec<(usize, f64)>,
 	}
 
@@ -412,7 +446,7 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 11] = [
+	const CORPUS: [&str; 12] = [
 		"advertised",
 		"backlog",
 		"buildup",
@@ -421,6 +455,7 @@ pub(crate) mod tests {
 		"idle",
 		"paced",
 		"reorder",
+		"silence",
 		"spike",
 		"straggler",
 		"tunein",
@@ -430,11 +465,18 @@ pub(crate) mod tests {
 	fn conforms_to_the_corpus() {
 		for name in CORPUS {
 			let case = case(name);
-			let mut target = Target::new(case.delay.map(duration), case.advertised.map(duration));
+			let mut target = Target::new(
+				case.delay.map_or(Duration::ZERO, duration),
+				case.delay.is_none(),
+				case.advertised.map(duration),
+			);
 			target.set_frame(case.frame);
 
 			let series = case.series();
 			for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
+				if case.ends.contains(&index) {
+					target.end();
+				}
 				target.observe(arrival, media);
 				let actual = target.millis();
 				assert!(
@@ -450,7 +492,7 @@ pub(crate) mod tests {
 	/// ahead of it must not carry the media-time gap into the target.
 	#[test]
 	fn a_timestamp_jump_is_not_a_delay() {
-		let mut target = Target::new(None, None);
+		let mut target = Target::new(Duration::ZERO, true, None);
 		target.set_frame(20.0);
 		target.observe(0.0, 0.0);
 		for i in 0..500 {
@@ -459,16 +501,31 @@ pub(crate) mod tests {
 		assert_eq!(target.millis(), 40.0);
 	}
 
+	/// A cold estimator has no interval for a silence to stretch, so an end before
+	/// the first observation must not linger and excuse the first unexplained gap.
+	#[test]
+	fn an_end_before_any_observation_is_ignored() {
+		let mut target = Target::new(Duration::ZERO, true, None);
+		target.set_frame(20.0);
+		target.end();
+		for i in 0..500 {
+			target.observe(50.0 + i as f64 * 20.0, i as f64 * 20.0);
+		}
+		let settled = target.millis();
+		target.observe(50.0 + 500.0 * 20.0 + 30_000.0, 500.0 * 20.0 + 30_000.0);
+		assert!(target.millis() > settled);
+	}
+
 	#[test]
 	fn an_advertised_span_floors_rather_than_adds() {
-		let target = Target::new(None, Some(Duration::from_millis(200)));
+		let target = Target::new(Duration::ZERO, true, Some(Duration::from_millis(200)));
 		// The prior reads 100 ms, under the advertised 200 ms.
 		assert_eq!(target.millis(), 200.0);
 	}
 
 	#[test]
 	fn the_measured_term_is_bounded_by_the_histogram() {
-		let mut target = Target::new(None, None);
+		let mut target = Target::new(Duration::ZERO, true, None);
 		target.set_frame(20.0);
 		// A frame every 20 ms of media arriving a whole second apart: every interval
 		// sees a delay far past the last bucket.

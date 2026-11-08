@@ -8,7 +8,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::track::{Info, Subscription};
-use moq_net::{Hop, Timescale, Version, origin};
+use moq_net::{Timescale, Version, origin};
 use support::harness::peer;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -19,7 +19,7 @@ const LOW: i8 = -100;
 const HIGH: i8 = 100;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -27,7 +27,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 /// Wait until the subscription `track` serves asks for `want`.
 async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), String> {
 	let mut track = track.clone();
-	let reached = moq_clock::timeout(TIMEOUT, async {
+	let reached = kio::clock::timeout(TIMEOUT, async {
 		while track
 			.subscription()
 			.is_none_or(|subscription| subscription.priority != want)
@@ -48,11 +48,14 @@ async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), Stri
 /// publisher sees the priority rise and fall back.
 async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let relay_origin = produce_origin(2);
 	let subscriber = produce_origin(3);
@@ -65,14 +68,15 @@ async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	}
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
-		.expect("broadcast resolves");
+		.expect("broadcast resolves")
+		.unwrap();
 	let subscribe = |priority: i8| {
 		let track = remote.track("video").unwrap();
 		async move {
-			moq_clock::timeout(
+			kio::clock::timeout(
 				TIMEOUT,
 				track.subscribe(Subscription::default().with_priority(priority)),
 			)
@@ -95,7 +99,7 @@ async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	Ok(())
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn upstream_priority_follows_the_subscribers() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {

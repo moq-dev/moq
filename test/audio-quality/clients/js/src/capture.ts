@@ -1,6 +1,6 @@
 /** Capture arrivals before the player's container orders or skips them. @module */
 
-import { Milli } from "@moq/clock";
+import { Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Cmaf from "@moq/hang/cmaf";
 import * as Container from "@moq/hang/container";
@@ -52,7 +52,7 @@ export class Capture {
 				if (!active) return;
 				const track = active.track(name).subscribe({
 					priority: Catalog.PRIORITY.audio,
-					maxDelay: subscribed(input.delay.peek(), input.maxDelay.peek()),
+					delay: { max: subscribed(input.delay.peek(), input.maxDelay.peek()) },
 				});
 				const groups = new Set<Group.Consumer>();
 				effect.cleanup(() => {
@@ -62,7 +62,7 @@ export class Capture {
 				effect.run((inner) =>
 					track.update({
 						priority: Catalog.PRIORITY.audio,
-						maxDelay: subscribed(inner.get(input.delay), inner.get(input.maxDelay)),
+						delay: { max: subscribed(inner.get(input.delay), inner.get(input.maxDelay)) },
 					}),
 				);
 				effect.spawn(async () => {
@@ -140,7 +140,7 @@ export async function* arrivals(
 	try {
 		for (;;) {
 			const next = await group.readFrame();
-			const at = performance.now();
+			const at = Nano.toMilli(Nano(now()));
 			if (!next) return;
 			for (const frame of decoder.decode(next.payload, next.timestamp)) {
 				if (decoder.end?.(frame) !== undefined) continue;
@@ -148,7 +148,7 @@ export async function* arrivals(
 				if (duration === undefined || !Number.isFinite(duration) || duration <= 0) {
 					throw new Error(`no encoded frame duration for ${config.codec}`);
 				}
-				yield [at, Milli.fromMicro(frame.timestamp), group.sequence, duration];
+				yield [at, Milli.fromMicro(frame.timestamp), Number(group.sequence), duration];
 			}
 		}
 	} finally {

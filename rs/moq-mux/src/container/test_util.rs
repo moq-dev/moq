@@ -109,7 +109,7 @@ pub(crate) struct Moving {
 	/// `other`'s track `a`.
 	pub(crate) other: crate::container::Producer<crate::catalog::hang::Container>,
 	origin: moq_net::origin::Producer,
-	_broadcasts: [moq_net::origin::Publication; 2],
+	_broadcasts: [moq_net::origin::Route; 2],
 }
 
 impl Moving {
@@ -119,8 +119,8 @@ impl Moving {
 
 	pub(crate) fn new() -> Self {
 		let origin = crate::source::produce_origin();
-		let live = origin.publish("live", Default::default()).unwrap();
-		let other = origin.publish("other", Default::default()).unwrap();
+		let live = origin.route("live", Default::default()).unwrap();
+		let other = origin.route("other", Default::default()).unwrap();
 		let catalog =
 			crate::catalog::Producer::new(&mut live.broadcast().clone(), crate::catalog::Config::default()).unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
@@ -253,11 +253,12 @@ pub(crate) async fn published<E>(
 
 	let mut out = std::collections::BTreeMap::new();
 	for (name, container) in containers {
-		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
 		let track = consumer.track(&name).unwrap().subscribe(replay).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, container);
 		let mut timestamps = Vec::new();
-		while let Some(frame) = tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_frame())
+		while let Some(frame) = kio::clock::timeout(std::time::Duration::from_secs(5), reader.read_frame())
 			.await
 			.expect("the importer finished its tracks")
 			.unwrap()
@@ -275,12 +276,7 @@ pub(crate) struct Clocks(crate::catalog::hang::Consumer);
 impl Clocks {
 	/// Subscribe before importing, so the first snapshot is not missed.
 	pub(crate) async fn subscribe(consumer: &moq_net::broadcast::Consumer) -> Self {
-		let track = consumer
-			.track(hang::Catalog::DEFAULT_NAME)
-			.unwrap()
-			.subscribe(None)
-			.await
-			.unwrap();
+		let track = consumer.track(hang::Catalog::DEFAULT_NAME).unwrap();
 		Self(crate::catalog::hang::Consumer::new(track))
 	}
 
@@ -290,7 +286,7 @@ impl Clocks {
 		let mut clocks = Vec::new();
 		while let std::task::Poll::Ready(catalog) = self.0.poll_next(&waiter) {
 			let Some(catalog) = catalog.unwrap() else { break };
-			clocks.push(catalog.clock);
+			clocks.push(catalog.media.clock);
 		}
 		clocks
 	}
@@ -321,7 +317,7 @@ pub(crate) fn common_offset(
 
 /// An origin at `hop`, its driver spawned.
 pub(crate) fn origin(hop: u64) -> moq_net::origin::Producer {
-	let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+	let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
 	producer
@@ -358,9 +354,10 @@ impl Link {
 			gate: gate.clone(),
 			answers: true,
 		};
+		// `from` may be a middle hop, so it forwards what it learned as well as its own.
 		let client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_publisher(from.consume());
+			.with_publisher(from.consume().with_proxy(true));
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_subscriber(to.clone());
@@ -412,7 +409,7 @@ impl Link {
 			.with_subscriber(to.clone());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_publisher(from.consume());
+			.with_publisher(from.consume().with_proxy(true));
 		let sessions = tokio::join!(
 			async {
 				let (session, driver) = client
@@ -501,17 +498,6 @@ impl moq_net::transport::poll::Session for Gated {
 		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
 	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
 		self.inner.poll_open_bi(waiter, options)
-	}
-
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: moq_net::transport::poll::SendOptions<
-			'_,
-			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
-		>,
-	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
-		self.inner.poll_open_request(waiter, options)
 	}
 
 	fn send_group(&self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {

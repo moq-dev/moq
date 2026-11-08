@@ -19,6 +19,7 @@ use crate::bandwidth::{MoqAllocator, MoqReservation};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
+use crate::media::MoqTimestamp;
 
 /// A CPU pixel layout: what [`MoqVideoProducer::write`] is fed, and what
 /// [`MoqVideoDecodedFrame::pixels`] converts to.
@@ -117,8 +118,8 @@ pub struct MoqVideoEncoderInput {
 	pub width: u32,
 	/// Encoded height in pixels. Must be even.
 	pub height: u32,
-	/// Nominal frames per second, used for the codec time base and the default
-	/// bitrate and keyframe interval. Must be non-zero.
+	/// Nominal frames per second, used for the codec time base, the default
+	/// bitrate, and rounding the join to whole frames. Must be non-zero.
 	pub framerate: MoqVideoFrameRate,
 }
 
@@ -131,9 +132,11 @@ pub struct MoqVideoEncoderOutput {
 	/// and framerate.
 	#[uniffi(default = None)]
 	pub bitrate: Option<u64>,
-	/// How encoded pictures are divided into independently decodable groups.
+	/// The time between join points: a keyframe opens a group this often,
+	/// rounded to whole frames. `None` keyframes every two seconds; zero is
+	/// refused.
 	#[uniffi(default = None)]
-	pub gop: Option<MoqVideoGop>,
+	pub join: Option<std::time::Duration>,
 	/// Encoder implementation preference. Pass
 	/// [`MoqVideoEncoderKind::Auto`] unless you need a specific backend.
 	pub kind: MoqVideoEncoderKind,
@@ -163,24 +166,6 @@ pub struct MoqVideoProducerOptions {
 	pub lower: Option<Arc<MoqVideoProducer>>,
 }
 
-/// How the encoded stream is divided into independently decodable groups.
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum MoqVideoGop {
-	/// Start a group with a keyframe every `interval` frames.
-	Keyframe {
-		/// The number of frames between keyframes.
-		interval: u32,
-	},
-}
-
-impl From<MoqVideoGop> for moq_video::encode::Gop {
-	fn from(gop: MoqVideoGop) -> Self {
-		match gop {
-			MoqVideoGop::Keyframe { interval } => Self::Keyframe { interval },
-		}
-	}
-}
-
 /// One raw video frame: pixels plus a presentation timestamp.
 ///
 /// The pixel format and resolution are fixed by [`MoqVideoEncoderInput`] at
@@ -188,8 +173,8 @@ impl From<MoqVideoGop> for moq_video::encode::Gop {
 /// that layout.
 #[derive(uniffi::Record)]
 pub struct MoqVideoFrame {
-	/// Presentation timestamp, in microseconds.
-	pub timestamp_us: u64,
+	/// Presentation timestamp.
+	pub timestamp: MoqTimestamp,
 	/// The pixels, in the configured layout.
 	pub data: Vec<u8>,
 }
@@ -197,8 +182,8 @@ pub struct MoqVideoFrame {
 /// One access unit emitted by a codec-only video encoder.
 #[derive(uniffi::Record)]
 pub struct MoqVideoPacket {
-	/// Presentation timestamp in microseconds.
-	pub timestamp_us: u64,
+	/// Presentation timestamp.
+	pub timestamp: MoqTimestamp,
 	/// Encoded access-unit payload.
 	pub data: Vec<u8>,
 	/// Whether the access unit starts from a keyframe.
@@ -209,7 +194,7 @@ fn video_packets(packets: Vec<moq_video::encode::Encoded>) -> Vec<MoqVideoPacket
 	packets
 		.into_iter()
 		.map(|packet| MoqVideoPacket {
-			timestamp_us: packet.timestamp.as_micros() as u64,
+			timestamp: packet.timestamp.into(),
 			data: packet.payload.to_vec(),
 			keyframe: packet.keyframe,
 		})
@@ -225,8 +210,8 @@ fn video_encoder_config(
 	config.codec = output.codec.into();
 	config.kind = output.kind.clone().into();
 	config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
-	if let Some(gop) = output.gop {
-		config.gop = gop.into();
+	if let Some(join) = output.join {
+		config.join = join;
 	}
 	Ok(config)
 }
@@ -259,7 +244,7 @@ impl MoqVideoEncoder {
 			MoqVideoPixelFormat::I420 => moq_video::Surface::I420(moq_video::I420::new(self.size, frame.data)?),
 			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, self.size)?,
 		};
-		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
+		let frame = moq_video::Frame::new(surface, frame.timestamp.try_into()?);
 		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
 		Ok(video_packets(block_on(
 			guard.as_mut().ok_or(MoqError::Closed)?.encode(frame),
@@ -420,7 +405,7 @@ impl VideoProducer {
 		let Some(encoder) = self.encoder.as_mut() else {
 			return Ok(());
 		};
-		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
+		let frame = moq_video::Frame::new(surface, frame.timestamp.try_into()?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
 		let encoded = block_on(encoder.encode(frame))?;
@@ -498,7 +483,7 @@ impl VideoProducer {
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
@@ -625,7 +610,7 @@ impl MoqVideoProducer {
 	/// Cut a new group at the next written frame.
 	///
 	/// Optional. The encoder already keyframes every
-	/// [`gop`](MoqVideoEncoderOutput::gop) frames, and each of those cuts a
+	/// [`join`](MoqVideoEncoderOutput::join), and each of those cuts a
 	/// group, so a subscriber can always join without you calling this. Reach for
 	/// it only to place the boundaries yourself: aligning groups with something
 	/// the encoder cannot see, such as a scene change, a source switch, or
@@ -784,7 +769,7 @@ impl MoqVideoProducer {
 		// closes its encoder before this one opens, so only one codec session is live.
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
-		let gop = config.gop.duration(config.framerate);
+		let join = config.effective_join();
 		let ceiling = video_ceiling(&config, &rendition);
 		if let Some((_, below, _)) = &lower
 			&& *below >= ceiling
@@ -817,7 +802,7 @@ impl MoqVideoProducer {
 			};
 			Ok(moq_video::encode::Producer::with_track(
 				track,
-				state.catalog.reserve().with_hls_hint(gop),
+				state.catalog.reserve().with_interval(join),
 				rendition,
 			)?)
 		})?;
@@ -1043,11 +1028,13 @@ pub struct MoqVideoDecoderOutput {
 	/// dimensions rather than assuming this took. Both dimensions must be even.
 	#[uniffi(default = None)]
 	pub resize: Option<crate::media::MoqDimensions>,
-	/// Upper bound on buffering before skipping a stalled group. Same knob as
-	/// [`MoqAudioDecoderOutput::max_delay`](crate::audio::MoqAudioDecoderOutput::max_delay).
-	/// `None` keeps the moq-mux default of zero (skip aggressively).
+	/// How far behind the live edge to play: where a cold join starts and when a
+	/// stalled group is skipped. Same knob as
+	/// [`MoqAudioDecoderOutput::delay`](crate::audio::MoqAudioDecoderOutput::delay).
+	/// `None` keeps the moq-mux default of zero for both (start at the newest group,
+	/// skip aggressively).
 	#[uniffi(default = None)]
-	pub max_delay: Option<std::time::Duration>,
+	pub delay: Option<crate::consumer::MoqDelay>,
 	/// Keep each frame in the surface its decoder produced, for
 	/// [`MoqVideoDecodedFrame::surface`]. `false`, the default, downloads every
 	/// frame to CPU memory as it is decoded, so
@@ -1058,6 +1045,10 @@ pub struct MoqVideoDecoderOutput {
 	/// [`MoqError::Unsupported`] elsewhere.
 	#[uniffi(default = false)]
 	pub surface: bool,
+	/// Where to start on a track that already holds groups, or `None` for the oldest. Same
+	/// knob as [`MoqAudioDecoderOutput::start`](crate::audio::MoqAudioDecoderOutput::start).
+	#[uniffi(default = None)]
+	pub start: Option<crate::media::MoqDecodeStart>,
 }
 
 /// A borrowed platform handle to a decoded frame's surface, from
@@ -1090,10 +1081,9 @@ pub struct MoqVideoDecodedFrame {
 
 #[uniffi::export]
 impl MoqVideoDecodedFrame {
-	/// Presentation timestamp, in microseconds.
-	pub fn timestamp_us(&self) -> u64 {
-		// A decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
-		self.frame.timestamp.as_micros() as u64
+	/// Presentation timestamp.
+	pub fn timestamp(&self) -> MoqTimestamp {
+		self.frame.timestamp.into()
 	}
 
 	/// Frame width in pixels: what the stream decoded to, since `resize` is only
@@ -1157,8 +1147,8 @@ pub enum MoqVideoRead {
 	/// Every picture from before the loss precedes it, and what follows does not continue
 	/// what came before.
 	Gap {
-		/// The furthest presentation point already read, in microseconds.
-		timestamp_us: u64,
+		/// The furthest presentation point already read.
+		timestamp: MoqTimestamp,
 		/// An upper bound on how long until the next picture resumes.
 		duration: std::time::Duration,
 	},
@@ -1167,28 +1157,23 @@ pub enum MoqVideoRead {
 	/// The stopped encoder's last pictures precede it; what follows comes from a fresh
 	/// encoder.
 	End {
-		/// Where the stopped encoder's media stops, in microseconds.
-		end_us: u64,
+		/// Where the stopped encoder's media stops.
+		end: MoqTimestamp,
 	},
 }
 
-impl TryFrom<moq_video::decode::Read> for MoqVideoRead {
-	type Error = MoqError;
-
-	fn try_from(read: moq_video::decode::Read) -> Result<Self, MoqError> {
-		use crate::consumer::timestamp_us;
-		Ok(match read {
+impl From<moq_video::decode::Read> for MoqVideoRead {
+	fn from(read: moq_video::decode::Read) -> Self {
+		match read {
 			moq_video::decode::Read::Frame(frame) => Self::Frame {
 				frame: Arc::new(MoqVideoDecodedFrame { frame }),
 			},
 			moq_video::decode::Read::Gap { timestamp, duration } => Self::Gap {
-				timestamp_us: timestamp_us(timestamp)?,
+				timestamp: timestamp.into(),
 				duration: crate::ffi::duration(duration.into()),
 			},
-			moq_video::decode::Read::End { end } => Self::End {
-				end_us: timestamp_us(end)?,
-			},
-		})
+			moq_video::decode::Read::End { end } => Self::End { end: end.into() },
+		}
 	}
 }
 
@@ -1198,7 +1183,7 @@ struct VideoConsumerInner {
 
 impl VideoConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqVideoRead>, MoqError> {
-		self.consumer.read().await?.map(MoqVideoRead::try_from).transpose()
+		Ok(self.consumer.read().await?.map(MoqVideoRead::from))
 	}
 }
 
@@ -1230,11 +1215,20 @@ impl MoqVideoConsumer {
 /// is rejected here; a recognized one the native backends can't open is rejected when the decoder
 /// opens, which is still before the first frame.
 fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::VideoConfig, MoqError> {
-	let codec: hang::catalog::VideoCodec = catalog_video.codec.parse().map_err(|_| MoqError::Unsupported)?;
-	// Parsing is total: an unrecognized name becomes `Unknown` rather than failing. Reject it here
-	// so a typo in the catalog is an error at subscribe, not an opaque backend failure later.
+	if !catalog_video.enabled {
+		return Err(MoqError::NotFound);
+	}
+	let codec = catalog_video
+		.codec
+		.parse::<hang::catalog::VideoCodec>()
+		.map_err(|err| MoqError::UnsupportedConfig {
+			reason: format!("{err}"),
+		})?;
+
 	if matches!(codec, hang::catalog::VideoCodec::Unknown(_)) {
-		return Err(MoqError::Unsupported);
+		return Err(MoqError::UnsupportedConfig {
+			reason: format!("unknown video codec: {codec}"),
+		});
 	}
 
 	let mut config = hang::catalog::VideoConfig::new(codec);
@@ -1253,6 +1247,7 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 	config.preference = catalog_video.preference;
 	config.framerate = catalog_video.framerate;
 	config.container = catalog_video.container.into();
+	config.warmup = catalog_video.warmup;
 	Ok(config)
 }
 
@@ -1277,13 +1272,12 @@ impl MoqVideoConsumer {
 	///
 	/// `catalog_video` comes from the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec is read
-	/// from it. Errors if no native backend handles that codec, rather than failing on the first
-	/// frame. Also fails with [`MoqError::Unsupported`] when
+	/// from it. A codec or description this build cannot decode, or a stream every decoder's device
+	/// refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
 	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
 	///
-	/// A [disabled](crate::media::MoqVideo::enabled) rendition subscribes too, and decodes once its
-	/// publisher re-enables it. Don't pick one, but keep one already playing while no enabled
-	/// rendition is on offer.
+	/// A [disabled](crate::media::MoqVideo::enabled) rendition returns [`MoqError::NotFound`]: no
+	/// frames are coming.
 	///
 	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqVideo::track), or `id`
 	/// when unset, is subscribed in the broadcast its
@@ -1298,14 +1292,20 @@ impl MoqVideoConsumer {
 		// Reject the codec and output before resolving: resolving reaches the origin, which can
 		// invoke a dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_video.broadcast.clone();
-		let epoch = catalog_video.epoch.clone();
+		let instance = catalog_video.instance.clone();
 		let cfg = video_config(catalog_video)?;
 		let mut options = moq_video::decode::Options::default();
 		options.decoder.output = decoder_output(output.surface, HAS_SURFACE)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
+		let resolved = broadcast
+			.resolve_inner(reference.as_deref(), instance.as_deref())
+			.await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
-		options.max_delay = output.max_delay.unwrap_or_default();
+		options.delay = output.delay.map(Into::into).unwrap_or_default();
+		options.start = match output.start.unwrap_or_default() {
+			crate::media::MoqDecodeStart::Oldest => moq_video::decode::Start::Oldest,
+			crate::media::MoqDecodeStart::Latest => moq_video::decode::Start::Latest,
+		};
 
 		let consumer = broadcast
 			.driver
@@ -1328,7 +1328,7 @@ mod decode_tests {
 			preference: 0,
 			label: None,
 			broadcast: None,
-			epoch: None,
+			instance: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,
@@ -1341,15 +1341,29 @@ mod decode_tests {
 			enabled: true,
 			framerate: Some(30.0),
 			container: MoqContainer::Legacy,
+			warmup: None,
 		}
 	}
 
-	/// A consumer holds a disabled rendition it already plays, so one converts like any other.
+	/// The max-delay decoder opens only for a catalog warmup, so it must survive the trip through
+	/// the FFI record.
 	#[test]
-	fn video_config_accepts_disabled_renditions() {
+	fn video_config_keeps_the_warmup() {
+		let mut video = catalog_video("vp8");
+		video.warmup = Some(std::time::Duration::from_millis(500));
+		assert_eq!(
+			video_config(video).unwrap().warmup,
+			Some(std::time::Duration::from_millis(500))
+		);
+	}
+
+	#[test]
+	fn video_config_refuses_disabled_renditions() {
 		let mut config = catalog_video("avc1.64001f");
 		config.enabled = false;
 		config.preference = -1;
+		assert!(matches!(video_config(config.clone()), Err(MoqError::NotFound)));
+		config.enabled = true;
 		assert_eq!(video_config(config).unwrap().preference, -1);
 	}
 
@@ -1365,7 +1379,7 @@ mod decode_tests {
 	#[test]
 	fn video_config_rejects_an_unknown_codec() {
 		let error = video_config(catalog_video("nope")).unwrap_err();
-		assert!(matches!(error, MoqError::Unsupported));
+		assert!(matches!(error, MoqError::UnsupportedConfig { .. }));
 	}
 }
 
@@ -1378,7 +1392,7 @@ mod finish_tests {
 		let output = MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: None,
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		};
 		for (numerator, denominator) in [(30_000, 1001), (60_000, 2002), (24_000, 1001)] {
@@ -1432,13 +1446,18 @@ mod finish_tests {
 			MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
 				bitrate: Some(500_000),
-				gop: None,
+				join: None,
 				kind: MoqVideoEncoderKind::Software,
 			},
 		)
 		.unwrap();
+		// NTSC frame times, which no microsecond count holds exactly.
+		let ntsc = |i: u64| MoqTimestamp {
+			value: i * 1001,
+			scale: 30_000,
+		};
 		let picture = |i: u64| MoqVideoFrame {
-			timestamp_us: i * 1_001_000 / 30,
+			timestamp: ntsc(i),
 			data: vec![(i * 40) as u8; (width * height * 3 / 2) as usize],
 		};
 
@@ -1452,9 +1471,9 @@ mod finish_tests {
 		packets.extend(encoder.encode(picture(3)).unwrap());
 		packets.extend(encoder.finish().unwrap());
 
-		let keyframes: Vec<u64> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp_us).collect();
+		let keyframes: Vec<MoqTimestamp> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp).collect();
 		assert_eq!(packets.len(), 4, "one access unit per picture");
-		assert_eq!(keyframes, [0, 3 * 1_001_000 / 30], "keyframes at the start and the cut");
+		assert_eq!(keyframes, [ntsc(0), ntsc(3)], "keyframes at the start and the cut");
 		assert!(packets.iter().all(|p| !p.data.is_empty()), "an empty access unit");
 		assert!(matches!(encoder.encode(picture(4)), Err(MoqError::Closed)));
 	}
@@ -1478,7 +1497,7 @@ mod finish_tests {
 		let output = MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: Some(4_000_000),
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		};
 		let video = crate::video::MoqVideoProducer::new(
@@ -1557,7 +1576,7 @@ mod follow_tests {
 		});
 		assert_eq!(moved, Ok(None));
 
-		let retried = moq_clock::timeout(Duration::from_secs(60), follower.next())
+		let retried = kio::clock::timeout(Duration::from_secs(60), follower.next())
 			.await
 			.expect("the dropped target is asked for again");
 		assert_eq!(retried.unwrap(), Target::Enabled(Rate::from_mbps(2)));
@@ -1572,7 +1591,7 @@ mod follow_tests {
 
 	/// Retune at every target until the follower goes a minute without one.
 	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
-		while let Ok(bitrate) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+		while let Ok(bitrate) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
 	}
@@ -1672,14 +1691,17 @@ mod rung_tests {
 		MoqVideoEncoderOutput {
 			codec: MoqVideoCodec::H264,
 			bitrate: Some(bitrate),
-			gop: None,
+			join: None,
 			kind: MoqVideoEncoderKind::Software,
 		}
 	}
 
 	fn frame(i: u64) -> MoqVideoFrame {
 		MoqVideoFrame {
-			timestamp_us: i * 33_333,
+			timestamp: MoqTimestamp {
+				value: i * 33_333,
+				scale: 1_000_000,
+			},
 			data: vec![(i * 40) as u8; 320 * 240 * 3 / 2],
 		}
 	}
@@ -1857,10 +1879,11 @@ mod rung_tests {
 			.subscribe_track(
 				"high".into(),
 				Some(crate::consumer::MoqSubscription {
-					priority: 0,
-					max_delay: None,
-					ranges: None,
-					order: None,
+					delay: crate::consumer::MoqDelay {
+						min: Some(std::time::Duration::ZERO),
+						max: None,
+					},
+					..crate::consumer::moq_subscription_defaults()
 				}),
 			)
 			.await

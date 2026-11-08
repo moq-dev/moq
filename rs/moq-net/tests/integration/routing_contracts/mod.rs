@@ -1,6 +1,6 @@
 //! Deterministic counterexamples for the per-origin routing contract.
 //!
-//! Each fixture runs one scenario from `quest/m1/cluster-routing/routes.md`
+//! Each fixture runs one scenario from `quest/m2/cluster-routing/routes/README.md`
 //! against [`model`], under the rule that fails and the rule that holds. The
 //! model is a reference for the contract, not the relay: when lite-07's route
 //! layer lands, these topologies become its acceptance tests. Failover fixtures
@@ -398,7 +398,7 @@ fn overflow_is_unreachable() {
 
 // Forwarding progress: path-only requests reselect the origin at every hop.
 
-/// Three relays in a ring, each next to its own importer of one epoch, and each
+/// Three relays in a ring, each next to its own importer of one instance, and each
 /// giving its clockwise link `priority`.
 fn priority_ring(priority: i8) -> Net {
 	let mut net = Net::new(Config::default(), 6);
@@ -434,7 +434,7 @@ fn local_priorities_loop_path_only_requests() {
 
 /// The same ring with every relay subscribing at once. Each forwarded request
 /// joins the subscription its neighbor already opened, and no source feeds the
-/// cycle. Joining by path or by epoch deadlocks; joining only a subscription to
+/// cycle. Joining by path or by instance deadlocks; joining only a subscription to
 /// the same identity, or one within the request's bound, does not.
 #[test]
 fn aggregation_cycles_starve_without_a_forwarding_constraint() {
@@ -445,7 +445,7 @@ fn aggregation_cycles_starve_without_a_forwarding_constraint() {
 		"live/x",
 		&all,
 		Forward::Pinned,
-		Aggregate::Epoch
+		Aggregate::Instance
 	)));
 	for (mode, aggregate) in [
 		(Forward::Pinned, Aggregate::Identity),
@@ -459,12 +459,12 @@ fn aggregation_cycles_starve_without_a_forwarding_constraint() {
 	}
 }
 
-/// Without an epoch, the serving identity is the instance. A relay that picks
-/// another epochless origin within the requester's bound splices a different
+/// Under another instance, the serving identity is the instance. A relay that picks
+/// another unnamed origin within the requester's bound splices a different
 /// publisher under the requester's announced one, with no Restart. Only a
 /// request naming the identity keeps the instance the requester announced.
 #[test]
-fn epochless_reselection_splices_another_publisher() {
+fn reselection_without_an_instance_splices_another_publisher() {
 	let (edge, core, first, second) = (0, 1, 2, 3);
 	let mut net = Net::new(Config::default(), 4);
 	net.join(edge, core, 1);
@@ -526,7 +526,7 @@ fn overlapping_wildcards_loop_where_specific_claims_are_unheard() {
 }
 
 /// A deterministic sweep over small random meshes: priorities, overlapping
-/// wildcards, epochs, and claims some nodes have not heard. Pinned and bounded
+/// wildcards, instances, and claims some nodes have not heard. Pinned and bounded
 /// requests never loop or deadlock; path-only requests and the wire-free
 /// downstream condition do. A pinned request always arrives, while a bounded
 /// one stalls where a transit hop has not heard the claim.
@@ -621,8 +621,8 @@ fn random_mesh(rng: &mut XorShift) -> Net {
 		net.join(origin, rng.next(RELAYS as u64) as usize, 1);
 		net.originate(origin, origin as u64, 0);
 		let prefix = prefixes[rng.next(3) as usize];
-		let epoch = if rng.chance(50) { Some(1) } else { None };
-		let claim = net.claim(origin as u64, prefix, rng.next(3), epoch);
+		let instance = if rng.chance(50) { Some(1) } else { None };
+		let claim = net.claim(origin as u64, prefix, rng.next(3), instance);
 		for relay in 0..RELAYS {
 			if rng.chance(20) {
 				net.hide(relay, claim);
@@ -1109,8 +1109,8 @@ fn transit_priority_depends_on_arrival_order() {
 /// claims outside the forger's namespace, and its seqno outlives it: after it
 /// leaves, the victim's real routes are refused until the victim counts past
 /// the forged seqno. Filed under `hash(subject, id)`, the forgery serves only
-/// claims inside the forger's scope. The forger's own proven identity stays
-/// bare either way.
+/// claims inside the forger's scope. The forger's own identity is filed the
+/// same way, so declaring the victim's identity as its own gains it nothing more.
 #[test]
 fn forged_identity_hijacks_claims_outside_the_forgers_scope() {
 	for scoped_admission in [false, true] {
@@ -1137,7 +1137,13 @@ fn forged_identity_hijacks_claims_outside_the_forgers_scope() {
 
 		net.forge(forger, 7, 1000);
 		assert!(net.run());
-		assert!(net.route(core, 3).is_some(), "a connection's own identity is bare");
+		let own = if scoped_admission { qualified("forger", 3) } else { 3 };
+		assert!(net.route(core, own).is_some());
+		assert_eq!(
+			net.route(core, 3).is_some(),
+			!scoped_admission,
+			"a scoped connection's own identity is qualified"
+		);
 		let served = served_by(&net.request(core, "other/x", Forward::Pinned));
 		if scoped_admission {
 			assert_eq!(served, Some((7, victim)));
@@ -1165,8 +1171,8 @@ fn forged_identity_hijacks_claims_outside_the_forgers_scope() {
 /// subject. Both CDN relays file the local origin under one key, so it survives
 /// losing an uplink: the first hop keeps its identity and the request follows
 /// the other uplink, named as the local relay knows it. Claims outside the
-/// scope are refused under that key, and the local relay's own identity stays
-/// bare.
+/// scope are refused under that key. The local relay's own identity is filed
+/// under the same key, so its own broadcast fails over the same way.
 #[test]
 fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	let (c1, c2, l1, l2, origin) = (0, 1, 2, 3, 4);
@@ -1182,13 +1188,38 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	net.originate(l1, 20, 0);
 	net.claim(9, "local/", 0, None);
 	net.claim(9, "cdn/", 0, None);
+	net.claim(20, "local/l1/", 0, None);
 	assert!(net.run());
 
 	let key = qualified(LOCAL.subject, 9);
 	assert!(net.route(c1, 9).is_none());
 	assert_eq!(net.route(c1, key).and_then(|route| route.next), Some(l1));
 	assert_eq!(net.route(c2, key).and_then(|route| route.next), Some(l2));
-	assert_eq!(net.route(c1, 20).and_then(|route| route.next), Some(l1));
+	let own = qualified(LOCAL.subject, 20);
+	assert!(
+		net.route(c1, 20).is_none(),
+		"the local relay's own identity is qualified"
+	);
+	assert_eq!(net.route(c1, own).and_then(|route| route.next), Some(l1));
+	assert_eq!(net.resolve(c2, "local/l1/x"), Some(own));
+
+	// The local relay loses its direct uplink, and its own broadcast fails over through its sibling.
+	net.disconnect(l1, c1);
+	assert!(net.run());
+	assert!(net.starved(c1, own), "the detour is longer than the lost uplink");
+	// Its own set of sessions changed, so the origin advances its seqno.
+	net.bump(l1);
+	assert!(net.run());
+	assert_eq!(net.resolve(c1, "local/l1/x"), Some(own));
+	assert_eq!(
+		net.request(c1, "local/l1/x", Forward::Pinned),
+		Outcome::Served {
+			by: 20,
+			path: vec![c1, c2, l2, l1]
+		}
+	);
+	net.connect(l1, c1);
+	assert!(net.run());
 	assert_eq!(net.resolve(c2, "local/x"), Some(key));
 	assert_eq!(
 		net.request(c2, "local/x", Forward::Pinned),
@@ -1212,10 +1243,10 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	);
 
 	// A retracted identity leaves no alias behind.
-	assert_eq!(net.aliases(c1), 1);
+	assert_eq!(net.aliases(c1), 2, "the origin's and the local relay's own");
 	net.kill(origin);
 	assert!(net.run());
-	assert_eq!(net.aliases(c1), 0);
+	assert_eq!(net.aliases(c1), 1);
 }
 
 /// A local relay missing its `upstream` mark leaks CDN routes back to the CDN,

@@ -1,4 +1,3 @@
-import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order } from "../track.ts";
@@ -46,18 +45,27 @@ function decodeGroupOrder(value: number): Order {
 }
 
 /**
- * How this implementation joins a live track: at the current group, from its first object,
- * as the Rust subscriber does.
+ * Join at a known absolute start, or at the current group's first object as Rust does.
  *
- * The subscription itself starts at the next object (draft 18's Largest Object), and the
+ * A live subscription starts at the next object (draft 18's Largest Object), and the
  * group's head comes on a fetch stream. Draft 22 asks for it with a fill one group back from
  * the next, its current-group join (section 3.5); earlier drafts have no fill, so the
  * subscriber sends a Relative Joining FETCH once SUBSCRIBE_OK names Largest. Spelling the
  * filter keeps a peer from reading an absent one its own way.
+ *
+ * A start of group 0 is filterless on every draft, which our publishers serve from the start
+ * of the latest group; the copy's fills fetch the groups below it as one range FETCH. Draft 20
+ * has no absolute {0, 0} distinct from no filter, so no draft spells one.
  */
-export function joinFilter(version: IetfVersion): { filter: Filter.Filter; fill?: Filter.Fill } {
+export function joinFilter(version: IetfVersion, start?: bigint): { filter: Filter.Filter; fill?: Filter.Fill } {
+	if (start === 0n) return { filter: { kind: "unfiltered" } };
+	// Open-ended, since REQUEST_UPDATE carries no range here: a finite end would hold the
+	// subscription short when another reader later widens the track's demand.
+	if (start !== undefined) {
+		return { filter: { kind: "absolute", startGroup: start, startObject: 0n } };
+	}
 	const filter: Filter.Filter = { kind: "nextObject" };
-	if (!Filter.isDraft22(version)) return { filter };
+	if (!Filter.isDraft20(version)) return { filter };
 	return { filter, fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false } };
 }
 
@@ -92,12 +100,6 @@ export class Subscribe {
 	/** Whether RENDEZVOUS_TIMEOUT requested a wait; never encoded. */
 	rendezvous: boolean;
 
-	/**
-	 * The publisher instance the subscriber expects (EPOCH, MoQ Epoch). Only a
-	 * session that negotiated the extension names one; the session refuses one otherwise.
-	 */
-	epoch?: Epoch.Valid;
-
 	constructor({
 		requestId,
 		trackNamespace,
@@ -111,7 +113,6 @@ export class Subscribe {
 		forward,
 		rangeFilters,
 		rendezvous,
-		epoch,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
@@ -125,7 +126,6 @@ export class Subscribe {
 		forward?: boolean;
 		rangeFilters?: boolean;
 		rendezvous?: boolean;
-		epoch?: Epoch.Valid;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
@@ -139,7 +139,6 @@ export class Subscribe {
 		this.forward = forward ?? true;
 		this.rangeFilters = rangeFilters ?? false;
 		this.rendezvous = rendezvous ?? false;
-		this.epoch = epoch;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -151,12 +150,15 @@ export class Subscribe {
 		params.maxAge = this.maxAge;
 		params.groupOrder = encodeGroupOrder(this.groupOrder);
 		params.forward = this.forward;
-		params.subscriptionFilter = this.filter;
+		// Unfiltered is the absent parameter, which a publisher reads as a live join.
+		if (this.filter.kind !== "unfiltered") {
+			params.subscriptionFilter = this.filter;
+		}
 
 		// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-22. An older peer reads
 		// either as an unknown parameter, which is a protocol violation, so they are
 		// dropped rather than downgraded.
-		if (Filter.isDraft22(version)) {
+		if (Filter.isDraft20(version)) {
 			if (this.fill) {
 				params.fillParameters = Filter.encodeFill(this.fill, version);
 			}
@@ -165,7 +167,6 @@ export class Subscribe {
 				params.includeProperties = false;
 			}
 		}
-		params.epoch = this.epoch;
 
 		await params.encode(w, version);
 	}
@@ -190,7 +191,7 @@ export class Subscribe {
 		// additions. An unknown message parameter is a protocol violation, so
 		// they stay rejected on the drafts that predate them rather than being quietly
 		// tolerated.
-		const draft22 = Filter.isDraft22(version);
+		const draft22 = Filter.isDraft20(version);
 		if ((params.fillParameters !== undefined || params.includeProperties !== undefined) && !draft22) {
 			throw new Error("FILL_PARAMETERS and INCLUDE_PROPERTIES need draft-22");
 		}
@@ -220,7 +221,6 @@ export class Subscribe {
 			forward: params.forward ?? true,
 			rangeFilters: params.rangeFilters,
 			rendezvous: (params.vars.get(0x04n) ?? 0n) > 0n,
-			epoch: params.epoch,
 		});
 	}
 }

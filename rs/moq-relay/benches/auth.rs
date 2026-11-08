@@ -34,7 +34,7 @@ impl Drop for Fixture {
 
 impl Fixture {
 	async fn new(sessions: usize, tokens: usize) -> Self {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let (auth, mut admissions) = auth::Auth::embedded("bench");
 		let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
 		let decider = tokio::spawn(async move {
@@ -58,10 +58,11 @@ impl Fixture {
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
-		let cluster = cluster::Cluster::new(Default::default()).unwrap();
+		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
+		tokio::spawn(driver.run());
 		let listener = tokio::spawn(async move {
 			let mut serving = tokio::task::JoinSet::new();
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let connection = Connection::new(request, cluster.clone(), auth.clone());
 				serving.spawn(async move {
 					connection.run().await;
@@ -82,7 +83,7 @@ impl Fixture {
 			producers.push(receive.recv().await.unwrap().1);
 			let auth = connection.auth();
 			let added = futures::future::join_all((0..tokens).map(|index| auth.add(format!("token{index}")))).await;
-			let added: Vec<_> = added.into_iter().map(|added| added.unwrap().0).collect();
+			let added: Vec<_> = added.into_iter().map(|added| added.unwrap()).collect();
 			if session == 0 {
 				// `add` resolves once the peer grants the token, so its grant is already current.
 				let observed = added.last().unwrap().grant();
@@ -164,16 +165,17 @@ impl Drop for Queue {
 
 impl Queue {
 	async fn new() -> Self {
-		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let _ = rind_rustls::default_provider().unwrap().install_default();
 		let (auth, mut admissions) = auth::Auth::embedded("bench");
 		let mut config = moq_tokio::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 		let port = server.tcp_local_addr().unwrap().port();
-		let cluster = cluster::Cluster::new(Default::default()).unwrap();
+		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
+		tokio::spawn(driver.run());
 		let listener = tokio::spawn(async move {
 			let mut serving = tokio::task::JoinSet::new();
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let connection = Connection::new(request, cluster.clone(), auth.clone());
 				serving.spawn(async move {
 					connection.run().await;

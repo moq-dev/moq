@@ -1,9 +1,10 @@
-import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "../hop.ts";
+import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { decodeEpoch, encodeEpoch } from "./epoch.ts";
+import { SEGMENT_BYTES } from "../util/limits.ts";
+import { decodeRoute, encodeRoute } from "./instance.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
@@ -44,22 +45,22 @@ export type Base = { distance: bigint; keep: number };
  * An announcement on the Announce Stream, advertising or retracting a broadcast.
  *
  * On lite-06+ these are independently-typed messages (`ANNOUNCE_START`, `ANNOUNCE_END`,
- * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each framed as
- * `Type | Length | Body` like the subscribe stream's responses. Each `active`
- * (ANNOUNCE_START) implicitly assigns the next announce id (a per-stream ordinal starting
- * at 0); the others reference that id instead of repeating the path. Older versions send
+ * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each framed as `Type | Length | Body`
+ * like the subscribe stream's responses. Each `active` (ANNOUNCE_START) implicitly assigns the
+ * next announce id (a per-stream ordinal starting at 0); the others reference that id instead of repeating the path. Older versions send
  * a single ANNOUNCE_BROADCAST message that retracts by path (`ended`).
  */
 export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
-	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The epoch
-	 * (lite-07+) changes only with a `restart`. */
+	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The instance
+	 * and epoch (lite-07+) change only with a `restart`. */
 	| {
 			status: "active";
 			suffix: Path.Valid;
-			epoch?: Epoch.Valid;
+			instance?: Instance.Valid;
+			epoch?: bigint;
 			hops: Hop[];
 			cost?: Cost;
 			pathBase?: Base;
@@ -73,10 +74,18 @@ export type AnnounceBroadcast =
 	/** Lite06+: atomically replace the metadata of the announcement with this id (e.g. a
 	 * new hop chain after a relay failover, or a route whose cost moved). The id stays live. */
 	| { status: "update"; id: bigint; hops: Hop[]; cost?: Cost; hopBase?: Base }
-	/** Lite07+: another publisher instance replaces the announcement with this id, under
-	 * the epoch given (or none). What the receiver resolved under its prefix is the old
-	 * instance. The id stays live. */
-	| { status: "restart"; id: bigint; epoch?: Epoch.Valid; hops: Hop[]; cost?: Cost; hopBase?: Base }
+	/** Lite07+: the announcement with this id now serves the instance and epoch given. Another
+	 * instance is another stream, so what the receiver resolved under its prefix is stale; a
+	 * higher epoch of the same one continues it. The id stays live. */
+	| {
+			status: "restart";
+			id: bigint;
+			instance?: Instance.Valid;
+			epoch?: bigint;
+			hops: Hop[];
+			cost?: Cost;
+			hopBase?: Base;
+	  }
 	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
 	| { status: "skipped" }
 	/** Lite07+: the initial set has been delivered. */
@@ -220,7 +229,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 	switch (msg.status) {
 		case "active":
 			await encodePath(w, version, msg.suffix, msg.pathBase);
-			await encodeEpoch(w, version, msg.epoch);
+			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
@@ -234,7 +243,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			break;
 		case "restart":
 			await w.u62(msg.id);
-			await encodeEpoch(w, version, msg.epoch);
+			await encodeRoute(w, version, msg.instance, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
@@ -275,9 +284,9 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 	switch (typ) {
 		case ANNOUNCE_START: {
 			const path = await decodePath(r, version);
-			const epoch = await decodeEpoch(r, version);
+			const served = await decodeRoute(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "active", ...path, epoch, ...hops, cost: await decodeRouteCost(r, version) };
+			return { status: "active", ...path, ...served, ...hops, cost: await decodeRouteCost(r, version) };
 		}
 		case SYNCED:
 			if (!hasSynced(version)) break;
@@ -293,9 +302,9 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			// Unknown before lite-07: skipped below like any other.
 			if (!hasAnnounceRestart(version)) break;
 			const id = await r.u62();
-			const epoch = await decodeEpoch(r, version);
+			const served = await decodeRoute(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "restart", id, epoch, ...hops, cost: await decodeRouteCost(r, version) };
+			return { status: "restart", id, ...served, ...hops, cost: await decodeRouteCost(r, version) };
 		}
 	}
 	// Skip the length-prefixed body so an earlier Lite06 build negotiating
@@ -515,8 +524,10 @@ export class AnnounceInit {
 		}
 	}
 
-	static async #decode(r: Reader): Promise<AnnounceInit> {
+	static async #decode(r: Reader, budget: number): Promise<AnnounceInit> {
 		const count = await r.u53();
+		// Refused before decoding any, so the set grows no larger than what may be announced.
+		if (count > budget) throw new Error(`announce init lists ${count} broadcasts with ${budget} slots left`);
 		const suffixes: Path.Valid[] = [];
 		for (let i = 0; i < count; i++) {
 			suffixes.push(Path.decode(await r.string()));
@@ -524,17 +535,19 @@ export class AnnounceInit {
 		return new AnnounceInit(suffixes);
 	}
 
-	// The whole initial set in one message, so it scales with the publisher's broadcasts.
-	static readonly MAX_SIZE = 64 * 1024 * 1024;
+	// The whole initial set in one message, capped like Rust's so it fits one storage segment
+	// (1 MiB) with its type and size prefixes. A larger set is refused on both ends.
+	static readonly MAX_SIZE = SEGMENT_BYTES - 16;
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceInit.#guard(version);
 		return Message.encode(w, this.#encode.bind(this), { max: AnnounceInit.MAX_SIZE });
 	}
 
-	static async decode(r: Reader, version: Version): Promise<AnnounceInit> {
+	/** Decode the initial set, refusing one that lists more than `budget` broadcasts. */
+	static async decode(r: Reader, version: Version, budget: number): Promise<AnnounceInit> {
 		AnnounceInit.#guard(version);
-		return Message.decode(r, AnnounceInit.#decode, AnnounceInit.MAX_SIZE);
+		return Message.decode(r, (r) => AnnounceInit.#decode(r, budget), AnnounceInit.MAX_SIZE);
 	}
 }
 

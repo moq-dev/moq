@@ -32,6 +32,7 @@ function open(): {
 				stalled,
 				anchored: timestamp !== undefined,
 				underruns: 0,
+				silent: false,
 				epoch,
 			};
 			const handled = new Promise<void>((resolve) =>
@@ -432,7 +433,7 @@ function fake(delay: Milli, buffered = false) {
 		buffered,
 	});
 	const state = (timestamp: Micro, stalled: boolean, epoch: number) => {
-		const data: State = { type: "state", timestamp, stalled, anchored: true, underruns: 0, epoch };
+		const data: State = { type: "state", timestamp, stalled, anchored: true, underruns: 0, silent: false, epoch };
 		port.dispatchEvent(new MessageEvent("message", { data }));
 	};
 	return { buffer, sent, state };

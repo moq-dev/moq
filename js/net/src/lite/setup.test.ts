@@ -231,6 +231,22 @@ test("SETUP refuses an empty token", async () => {
 	await expect(Setup.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
 });
 
+test("SETUP route key round-trips on lite-07 only, at exactly 96 bytes", async () => {
+	const proof = new Uint8Array(96).fill(7);
+	const msg = new Setup({ routeKey: proof });
+	const wire = await bytes((w) => msg.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	const got = await Setup.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.routeKey).toEqual(proof);
+
+	await expect(bytes((w) => msg.encode(w, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
+	// An older version ignores the parameter like any unknown one.
+	expect((await decodeParam(0x8n, proof, Version.DRAFT_06)).routeKey).toBeUndefined();
+
+	const short = new Setup({ routeKey: new Uint8Array(95) });
+	await expect(bytes((w) => short.encode(w, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
+	await expect(decodeParam(0x8n, new Uint8Array(95), Version.DRAFT_07)).rejects.toThrow();
+});
+
 test("older SETUP versions ignore the unknown Implementation parameter before parsing it", async () => {
 	for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		for (const value of [new TextEncoder().encode("x/1"), new Uint8Array([0xff])]) {

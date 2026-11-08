@@ -2,7 +2,7 @@
 //!
 //! Wraps the `boytacean` emulator library, adding per-viewer button tracking
 //! for crowd-control input. A button is pressed on the emulator as long as
-//! at least one viewer is holding it (union semantics — "anarchy mode").
+//! at least one viewer is holding it (union semantics - "anarchy mode").
 
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -64,7 +64,7 @@ pub struct Emulator {
 	gb: GameBoy,
 	rom: Vec<u8>,
 	/// Per-viewer held buttons.
-	viewers: HashMap<String, HashSet<Button>>,
+	viewers: HashMap<crate::input::ViewerId, HashSet<Button>>,
 }
 
 impl Emulator {
@@ -137,14 +137,14 @@ impl Emulator {
 	}
 
 	/// Set the full button state for a viewer, replacing any previous state.
-	pub fn set_buttons(&mut self, viewer_id: &str, buttons: HashSet<Button>) {
-		self.viewers.insert(viewer_id.to_string(), buttons);
+	pub fn set_buttons(&mut self, viewer: crate::input::ViewerId, buttons: HashSet<Button>) {
+		self.viewers.insert(viewer, buttons);
 		self.sync_buttons();
 	}
 
-	/// A viewer disconnected — remove their button state.
-	pub fn viewer_left(&mut self, viewer_id: &str) {
-		self.viewers.remove(viewer_id);
+	/// A viewer disconnected - remove their button state.
+	pub fn viewer_left(&mut self, viewer: crate::input::ViewerId) {
+		self.viewers.remove(&viewer);
 		self.sync_buttons();
 	}
 

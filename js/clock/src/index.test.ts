@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+// biome-ignore lint/style/noRestrictedImports: a host task that bypasses the installed Manual clock.
 import { setTimeout as hostTimeout } from "node:timers/promises";
 import {
 	Elapsed,
@@ -20,6 +21,7 @@ import {
 	wall,
 	yieldNow,
 } from "./index.ts";
+import { hostTime } from "./test.ts";
 
 const installs: Installed[] = [];
 afterEach(() => {
@@ -208,6 +210,7 @@ test("an interval cancels pending ticks, refuses concurrent ticks and stays clos
 });
 
 test("the host clock counts from the performance time origin", () => {
+	// biome-ignore lint/style/noRestrictedGlobals: checks the host backend against the global it wraps.
 	const host = performance;
 	const before = host.now();
 	const at = Nano.toMilli(Instant.durationSince(now(), Instant.zero));
@@ -217,6 +220,7 @@ test("the host clock counts from the performance time origin", () => {
 });
 
 test("an unreferenced sleep still completes on the host", async () => {
+	hostTime(); // tests the host backend itself
 	await sleep(Nano.fromMilli(Milli(1)), { ref: false });
 });
 

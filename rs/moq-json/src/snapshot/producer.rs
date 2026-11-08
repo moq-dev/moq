@@ -30,7 +30,7 @@ fn take<T>(inner: &Mutex<Inner<T>>) -> MutexGuard<'_, Inner<T>> {
 /// encoder emits a snapshot. When something else already owns the track, use the [`Encoder`]
 /// directly.
 ///
-/// A group runs until a joiner wants a fresh one, which [`refresh`](Self::refresh) answers, or until
+/// A group runs until a joiner wants a fresh one, which [`poll_refresh`](Self::poll_refresh) answers, or until
 /// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
 /// when creating it, or joins never ask.
 ///
@@ -81,7 +81,7 @@ impl<T: Serialize> Producer<T> {
 				},
 				encoder: Encoder::new(config),
 				at: None,
-				aborted: None,
+				state: crate::state::State::Open,
 			})),
 			_marker: PhantomData,
 		}
@@ -97,11 +97,7 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
 	/// beside the updates. Errors once the track is closed.
-	pub async fn refresh(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_refresh(waiter)).await
-	}
-
-	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
 		take(&self.inner).poll_refresh(waiter)
 	}
@@ -192,7 +188,7 @@ impl<T: Serialize> Producer<T> {
 
 	/// Finish the open group, so the deltas already written stop being provisional.
 	///
-	/// No replacement group opens until the next [`update`](Self::update) or [`refresh`](Self::refresh), which emits a full
+	/// No replacement group opens until the next [`update`](Self::update) or [`poll_refresh`](Self::poll_refresh), which emits a full
 	/// snapshot as its first frame even when the value is unchanged. A consumer joining at that group
 	/// therefore reads the whole value without the deltas that preceded it.
 	///
@@ -305,17 +301,14 @@ struct Inner<T> {
 	/// older timestamp than its group's first frame, and a new group may not start before that one.
 	at: Option<moq_net::Timestamp>,
 
-	/// Why this producer aborted the track, so [`Producer::modify`] can report the cause rather than
-	/// the closed track it left behind.
-	aborted: Option<Error>,
+	/// Whether this producer still publishes, or how it ended the track.
+	state: crate::state::State,
 }
 
 impl<T> Inner<T> {
 	/// Refuse further edits once the track can't take another group.
 	fn open(&self) -> Result<()> {
-		if let Some(err) = &self.aborted {
-			return Err(err.clone());
-		}
+		self.state.check()?;
 
 		// The same test `append_group` applies: a boundary declared ahead of the live edge still
 		// admits the groups below it. The largest counts every group, even an empty one, so the
@@ -344,7 +337,7 @@ impl<T> Inner<T> {
 		self.track.group = None;
 		// Idempotent: a track that is already closed keeps its first reason.
 		let _ = self.track.inner.clone().abort(reason);
-		self.aborted = Some(err);
+		self.state.abort(err);
 	}
 
 	/// Finish the open group, leaving the next update to open a replacement with a full snapshot.
@@ -362,6 +355,8 @@ impl<T> Inner<T> {
 
 impl<T: Serialize> Inner<T> {
 	fn update(&mut self, payload: Timed<&T>) -> Result<Option<usize>> {
+		self.open()?;
+		let timestamp = self.track.rescale(payload.at)?;
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
 
@@ -373,7 +368,6 @@ impl<T: Serialize> Inner<T> {
 		// resynchronizes with a fresh snapshot. Most failures kill the track outright, but a rejected
 		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
 		// The value stays the last one written, so a refresh restates that rather than the rejection.
-		let timestamp = payload.at;
 		track.write(timestamp, &frame)?;
 		let size = frame.payload.len();
 		frame.commit();
@@ -398,11 +392,22 @@ impl<T: Serialize> Inner<T> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
+		match &self.state {
+			crate::state::State::Open => {}
+			crate::state::State::Finished => return Ok(()),
+			crate::state::State::Aborted(err) => return Err(err.clone()),
+		}
 		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
 		// Any further update fails on the closed track, but it has to fail as an error rather than by
 		// writing a delta with no group to hold it.
 		self.encoder.reset();
-		self.track.finish()
+		if let Err(err) = self.track.finish() {
+			// Half-finished, the track could still take groups, so it ends with the cause instead.
+			self.abort(err.clone());
+			return Err(err);
+		}
+		self.state = crate::state::State::Finished;
+		Ok(())
 	}
 }
 
@@ -430,7 +435,18 @@ impl Track {
 		Ok(())
 	}
 
-	/// Write one encoded frame at `timestamp`, rolling a group when it's a snapshot.
+	/// `timestamp` at the track's timescale, or [`moq_net::Error::TimestampMismatch`] when it is
+	/// missing on a timed track, present on an untimed one, or beyond what the scale can hold.
+	///
+	/// An update checks this before encoding. Found by `write_frame` instead, the mismatch would
+	/// come after a snapshot published its group, leaving an empty newest group in place of the
+	/// last value, and the dropped frame would reset the encoder, rolling a group for nothing.
+	fn rescale(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
+		Ok(self.inner.info().rescale(timestamp)?)
+	}
+
+	/// Write one encoded frame at a timestamp already [rescaled](Self::rescale) to the track, rolling a
+	/// group when it's a snapshot.
 	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
 		// Check before touching a group. `write_snapshot` closes the previous group and publishes a
 		// new one before the frame is written, so discovering the limit inside `write_frame` would
@@ -438,10 +454,6 @@ impl Track {
 		// value would be lost even though this update reported an error.
 		if encoded.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
-		}
-		// The same goes for a timestamp that doesn't match the track.
-		if timestamp.is_some() != self.inner.info().timescale.is_some() {
-			return Err(moq_net::Error::TimestampMismatch.into());
 		}
 
 		match encoded.keyframe {
@@ -490,7 +502,10 @@ impl Track {
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
-		self.inner.finish()?;
+		// Another handle may have declared the end already, which stands.
+		if self.inner.finished().is_none() {
+			self.inner.finish()?;
+		}
 		Ok(())
 	}
 }

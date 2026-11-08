@@ -4,14 +4,13 @@
  */
 
 import { Manual } from "@moq/clock";
-import { Once } from "@moq/signals";
 import { announcedView } from "../src/announced.test-util";
 import * as Announce from "../src/announced.ts";
 import { AuthSession } from "../src/auth_session.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import type { Established } from "../src/connection/established.ts";
 import { forwardAnnounced } from "../src/connection/forward.ts";
-import { Route } from "../src/hop.ts";
+import { WireRoute } from "../src/hop.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { registerWire } from "../src/wire.ts";
@@ -35,7 +34,6 @@ class FakeSession {
 	constructor() {
 		registerWire(this, {
 			consume: () => new BroadcastProducer().consume(),
-			goaway: new Once(),
 			exclusive: false,
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
@@ -44,7 +42,7 @@ class FakeSession {
 		});
 	}
 
-	announced(): Announce.Consumer {
+	routes(): Announce.Routes {
 		const stream = new Announce.Producer();
 		this.streams.push(stream);
 		// This peer has no initial routes; later announcements are live updates.
@@ -54,7 +52,7 @@ class FakeSession {
 }
 
 const announce = (stream: Announce.Producer, prefix: Path.Valid, cost: bigint, kind: "start" | "update") =>
-	stream.append({ prefix, captures: undefined, kind, route: Route.normalize({ cost }) });
+	stream.append({ prefix, captures: undefined, kind, route: WireRoute.normalize({ cost }) });
 
 console.log("touched,heads,routes,update_us");
 for (const touched of ["covering", "single"] as const) {

@@ -50,7 +50,6 @@ test("shared default builds cover each consumer exactly once", async () => {
 test("wrapper gates preserve trusted tag inputs and inspect only their publisher", async () => {
 	for (const [file, language, first] of [
 		["go", "go", "build"],
-		["kt-lib", "kotlin", "check-version"],
 		["swift-lib", "swift", "build"],
 	]) {
 		const wrapper = await read(`release-${file}`);
@@ -78,11 +77,9 @@ const PROTECTED = /^moq-(relay|cli|boy|c|gst|ffi|dart)-v$/;
 test("privileged workflow_run jobs require a protected release tag before running its code", async () => {
 	for (const [file, job] of [
 		["release-go", "ffi-release"],
-		["release-kt-lib", "ffi-release"],
 		["release-swift-lib", "ffi-release"],
 		["release-py", "build"],
 		["release-brew", "publish"],
-		["release-winget", "publish"],
 	]) {
 		const gated = (await read(file)).jobs[job];
 		// Every accepted head_branch prefix must be one the `release tags` ruleset

@@ -13,6 +13,7 @@ import { Derived, Effect, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
 import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import { formatDuration, parseDuration } from "./duration";
+import { checkName, Echo } from "./echo";
 import { Player } from "./player";
 import type { Delay, Sync } from "./sync";
 import type * as Text from "./text";
@@ -61,10 +62,13 @@ const OBSERVED = [
 	"follow",
 	// Renamed to `follow`, observed only to refuse it.
 	"announced",
-	"delay",
+	// Renamed to `lookahead`, observed only to refuse it.
 	"buffer",
+	"delay",
+	"lookahead",
 	"catalog-format",
 	"captions",
+	"echo",
 ] as const;
 
 // Parse visibility, with the default only when the attribute is absent.
@@ -95,12 +99,22 @@ function parseDelay(value: string | null): Delay {
 	throw invalidAttribute("delay", value, '"auto", "instant", or a duration like "300ms"');
 }
 
-// Parse the `buffer` attribute: a duration, or zero when absent.
-function parseBuffer(value: string | null): Milli {
+// Parse the `lookahead` attribute: a duration, or zero when absent.
+function parseLookahead(value: string | null): Milli {
 	if (value === null) return Milli.zero;
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
-	throw invalidAttribute("buffer", value, 'a duration like "30s"');
+	throw invalidAttribute("lookahead", value, 'a duration like "30s"');
+}
+
+// Parse the `echo` attribute: the viewer's feedback name, one visible path segment, or undefined when absent.
+function parseEcho(value: string | null): string | undefined {
+	if (value === null) return undefined;
+	try {
+		return checkName(value);
+	} catch {
+		throw invalidAttribute("echo", value, "one path segment not starting with `.`, any `\\` doubled");
+	}
 }
 
 /** Parse the element's catalog-format attribute, refusing unknown formats. */
@@ -131,7 +145,7 @@ export default class MoqWatch extends HTMLElement {
 	 * The relay connection, shared with every other element on the page pointing at the
 	 * same URL. Its `origin` is where the broadcasts live.
 	 */
-	connection: Moq.Connection;
+	readonly connection: Moq.Connection;
 
 	/** Headless playback pipeline behind this element. */
 	readonly player: Player;
@@ -148,13 +162,13 @@ export default class MoqWatch extends HTMLElement {
 	readonly renderer: Video.Renderer;
 
 	/** Plays decoded samples through the speakers. */
-	emitter: Audio.Emitter;
+	readonly emitter: Audio.Emitter;
 
 	/** Selects the caption track. `text.out.available` lists the renditions for a picker. */
-	text: Text.Source;
+	readonly text: Text.Source;
 
 	/** Renders the selected text cues into an overlay above the canvas. */
-	textRenderer: Text.Renderer;
+	readonly textRenderer: Text.Renderer;
 
 	/** Keeps audio and video playing at the configured delay. */
 	readonly sync: Sync;
@@ -169,7 +183,7 @@ export default class MoqWatch extends HTMLElement {
 		// How far playback trails the live edge.
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
-		buffer: new Signal<Milli>(Milli.zero),
+		lookahead: new Signal<Milli>(Milli.zero),
 		video: {
 			// The desired video rendition (resolution/bitrate cap).
 			target: new Signal<Video.Target | undefined>(undefined),
@@ -184,6 +198,10 @@ export default class MoqWatch extends HTMLElement {
 			volume: new Signal(0.5),
 			muted: new Signal(false),
 		},
+		viewer: {
+			// The viewer ceiling in bits per second instead of the catalog's, or 0 to claim none.
+			max: new Signal<number | undefined>(undefined),
+		},
 		text: {
 			// The selected caption track name, or undefined for off (the default; captions are opt-in).
 			target: new Signal<string | undefined>(undefined),
@@ -195,6 +213,7 @@ export default class MoqWatch extends HTMLElement {
 	#follow = new Signal(true);
 	#catalogFormat = new Signal<CatalogFormat | undefined>(undefined);
 	#catalog = new Signal<Catalog.Root | undefined>(undefined);
+	#echo = new Signal<string | undefined>(undefined);
 
 	// The canvas element to render into.
 	#canvas = new Signal<HTMLCanvasElement | undefined>(undefined);
@@ -231,7 +250,6 @@ export default class MoqWatch extends HTMLElement {
 
 		this.player = new Player({
 			origin: this.connection.origin,
-			probe: this.connection.probe,
 			enabled: this.#enabled,
 			name: this.#name,
 			follow: this.#follow,
@@ -252,9 +270,21 @@ export default class MoqWatch extends HTMLElement {
 					(muted, volume) => muted || volume === 0,
 				),
 			},
+			viewer: { ...this.controls.viewer, viewers: this.connection.viewers },
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
 		this.signals.cleanup(() => this.player.close());
+
+		// Owned here rather than by the player, which only reads its origin: feedback publishes into it.
+		const echo = new Echo({
+			broadcast: this.player.broadcast,
+			origin: this.connection.origin,
+			enabled: this.#enabled,
+			name: this.#echo,
+			probe: this.connection.probe,
+			sources: [this.player.video, this.player.audio],
+		});
+		this.signals.cleanup(() => echo.close());
 		this.broadcast = this.player.broadcast;
 		this.video = this.player.video;
 		this.audio = this.player.audio;
@@ -311,11 +341,14 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run((effect) => this.#reflect(effect, "follow", effect.get(this.#follow) ? "" : "false"));
 		this.signals.run((effect) => this.#reflect(effect, "catalog-format", effect.get(this.#catalogFormat)));
 		this.signals.run((effect) => this.#reflect(effect, "captions", effect.get(this.controls.text.target)));
+		this.signals.run((effect) => this.#reflect(effect, "echo", effect.get(this.#echo)));
 		this.signals.run((effect) => {
 			const delay = effect.get(this.controls.delay);
 			this.#reflect(effect, "delay", typeof delay === "number" ? formatDuration(delay) : delay);
 		});
-		this.signals.run((effect) => this.#reflect(effect, "buffer", formatDuration(effect.get(this.controls.buffer))));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "lookahead", formatDuration(effect.get(this.controls.lookahead))),
+		);
 
 		// Track the element's rendered size and feed it into the rendition picker,
 		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
@@ -390,10 +423,14 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "announced" && newValue !== null)
 				throw new Error("moq-watch: `announced` was renamed to `follow`");
 			else if (name === "announced") this.#accept("announced");
+			else if (name === "buffer" && newValue !== null)
+				throw new Error("moq-watch: `buffer` was renamed to `lookahead`");
+			else if (name === "buffer") this.#accept("buffer");
 			else if (name === "delay") this.delay = parseDelay(newValue);
-			else if (name === "buffer") this.buffer = parseBuffer(newValue);
+			else if (name === "lookahead") this.lookahead = parseLookahead(newValue);
 			else if (name === "catalog-format") this.catalogFormat = parseCatalogFormat(newValue);
 			else if (name === "captions") this.captions = newValue || undefined;
+			else if (name === "echo") this.echo = parseEcho(newValue);
 			else {
 				const exhaustive: never = name;
 				throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -544,19 +581,19 @@ export default class MoqWatch extends HTMLElement {
 	/**
 	 * Future-dated media held beyond the live edge before playback skips ahead, in milliseconds.
 	 *
-	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up a
-	 * buffer from future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
-	 * once they would sit further than `delay + buffer` past the playhead. Call `reset()` at each
-	 * utterance boundary.
+	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up
+	 * future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
+	 * once they would sit further than `delay + lookahead` past the playhead. Call `reset()` at each
+	 * utterance boundary. Not a jitter buffer: live streams leave it at zero and tune `delay`.
 	 */
-	get buffer(): Milli {
-		return this.controls.buffer.peek();
+	get lookahead(): Milli {
+		return this.controls.lookahead.peek();
 	}
 
-	set buffer(value: Milli) {
-		if (typeof value !== "number") throw invalidAttribute("buffer", value, "non-negative milliseconds");
-		this.controls.buffer.set(parseBuffer(formatDuration(value)));
-		this.#accept("buffer");
+	set lookahead(value: Milli) {
+		if (typeof value !== "number") throw invalidAttribute("lookahead", value, "non-negative milliseconds");
+		this.controls.lookahead.set(parseLookahead(formatDuration(value)));
+		this.#accept("lookahead");
 	}
 
 	/**
@@ -601,6 +638,23 @@ export default class MoqWatch extends HTMLElement {
 	set captions(value: string | undefined) {
 		this.controls.text.target.set(value || undefined);
 		this.#accept("captions");
+	}
+
+	/**
+	 * The viewer's feedback name, mirrored by the `echo` attribute; undefined (the default) publishes
+	 * no feedback. Once the watched catalog solicits feedback with an `echo` section, the element
+	 * publishes `<name>.echo` under its path, reporting what each rendition received and played.
+	 * Each element publishes its own: a second element on one connection that resolves the same
+	 * feedback path publishes nothing and warns until the first one leaves, so give each its own
+	 * name. One visible path segment: a `/` or a leading `.` is refused.
+	 */
+	get echo(): string | undefined {
+		return this.#echo.peek();
+	}
+
+	set echo(value: string | undefined) {
+		this.#echo.set(parseEcho(value ?? null));
+		this.#accept("echo");
 	}
 }
 

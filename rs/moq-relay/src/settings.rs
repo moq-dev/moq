@@ -39,9 +39,6 @@ pub struct Settings {
 	web: Web,
 
 	#[usage(flatten)]
-	acme: Acme,
-
-	#[usage(flatten)]
 	stats: Stats,
 
 	#[cfg(feature = "stun")]
@@ -56,10 +53,6 @@ pub struct Settings {
 
 	#[usage(env = "MOQ_DRAIN_TIMEOUT", cli("--drain-timeout"))]
 	drain_timeout: Option<String>,
-
-	#[cfg(feature = "iroh")]
-	#[usage(flatten)]
-	iroh: moq_tokio::settings::Iroh,
 }
 
 #[derive(usage_rs::Config)]
@@ -78,8 +71,8 @@ struct Runtime {
 #[derive(usage_rs::Config)]
 #[usage(prefix = "cluster")]
 struct Cluster {
-	#[usage(env = "MOQ_CLUSTER_ID", cli("--cluster-id"))]
-	id: Option<u64>,
+	#[usage(env = "MOQ_CLUSTER_ROUTE_KEY", cli("--cluster-route-key"))]
+	route_key: Option<String>,
 
 	#[usage(env = "MOQ_CLUSTER_MAX_HOPS", cli("--cluster-max-hops"))]
 	max_hops: Option<usize>,
@@ -195,25 +188,6 @@ struct WebHttps {
 
 	#[usage(env = "MOQ_WEB_HTTPS_ROOT", cli("--web-https-root"), parse = "list_by_comma")]
 	root: Option<Vec<String>>,
-}
-
-#[derive(usage_rs::Config)]
-#[usage(prefix = "acme")]
-struct Acme {
-	#[usage(env = "MOQ_ACME_DOMAINS", cli("--acme-domains"), parse = "list_by_comma")]
-	domains: Option<Vec<String>>,
-
-	#[usage(env = "MOQ_ACME_CONTACT", cli("--acme-contact"), parse = "list_by_comma")]
-	contact: Option<Vec<String>>,
-
-	#[usage(env = "MOQ_ACME_CACHE", cli("--acme-cache"))]
-	cache: Option<String>,
-
-	#[usage(env = "MOQ_ACME_DIRECTORY", cli("--acme-directory"))]
-	directory: Option<String>,
-
-	#[usage(env = "MOQ_ACME_TIMEOUT", cli("--acme-timeout"))]
-	timeout: Option<String>,
 }
 
 #[derive(usage_rs::Config)]

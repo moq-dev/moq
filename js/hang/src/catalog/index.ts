@@ -1,22 +1,25 @@
 /**
  * JSON catalog schema and types describing a broadcast's tracks: audio/video decoder configs for
- * WebCodecs, container format, rendition layout and HLS records, the root `clock`,
- * plus the `json` and `binary` data sections and optional `stats` and `echo` discovery.
+ * WebCodecs, container format, rendition layout, the `media` section (the broadcast's `clock` and
+ * `join` interval),
+ * plus the `json` and `binary` data sections, optional `stats` and `echo` discovery, and
+ * broadcasts listed in `include` without opening them.
  *
  * @module
  */
 
+import type * as z from "zod/mini";
 import * as audio from "./audio";
 import * as video from "./video";
 
-/** Audio schemas and quality ordering. */
-export { audio as Audio };
+/** Audio quality ordering. */
+export const Audio = { ranked: audio.ranked };
 /** The catalog audio section. */
-export type Audio = audio.Audio;
-/** Video schemas and quality ordering. */
-export { video as Video };
+export type Audio = z.infer<typeof audio.AudioSchema>;
+/** Video quality ordering. */
+export const Video = { ranked: video.ranked };
 /** The catalog video section. */
-export type Video = video.Video;
+export type Video = z.infer<typeof video.VideoSchema>;
 
 export type { AudioConfig } from "./audio";
 export { AudioConfigSchema, AudioSchema } from "./audio";
@@ -26,9 +29,10 @@ export * from "./container";
 export * from "./echo";
 export * from "./format";
 export * from "./hex";
-export * from "./hls";
+export * from "./include";
 export * from "./integers";
 export * from "./json";
+export * from "./media";
 export * from "./mode";
 export * from "./path";
 export * from "./priority";

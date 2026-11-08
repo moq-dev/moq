@@ -34,7 +34,7 @@
 //! from an implementation that also ran on a Pi Zero 2 W and a Pi 3; those two
 //! have not been re-run with this port.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -64,7 +64,7 @@ use moq_v4l::sys::{
 	v4l2_mpeg_video_header_mode_V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
 };
 
-use super::super::encoder::{Applied, Codec, Config, Gop};
+use super::super::encoder::{Applied, Codec, Config};
 use super::{Backend, Encoded, keyframe_annexb};
 use crate::v4l2::{self, Dequeue, Device, Dir, Planes, Queue, Rect, Request, Role};
 use crate::{Error, Frame, Size};
@@ -120,6 +120,7 @@ pub(crate) struct V4l2 {
 	size: Size,
 	/// Frames the driver has taken and not yet answered with an access unit.
 	pending: Pending,
+	phase: Phase,
 	/// Whether the driver takes `VIDIOC_ENCODER_CMD`. Cleared the first time it
 	/// refuses one, after which a flush can only take what the codec has already
 	/// finished.
@@ -128,6 +129,26 @@ pub(crate) struct V4l2 {
 	/// open so a cut on a driver without it is refused up front rather than
 	/// discovered on the frame it was meant for.
 	cuts: bool,
+}
+
+/// Whether the queues stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+	/// Neither queue streams: no frame has gone in since open or since a drain
+	/// that failed stopped them. The next frame starts both.
+	Stopped,
+	/// Both queues stream.
+	Streaming,
+	/// The queues could not be started or stopped, so the encoder takes no
+	/// more frames.
+	Failed,
+}
+
+/// The error every call reports once the encoder has failed.
+fn failed() -> Error {
+	Error::Codec(anyhow::anyhow!(
+		"the V4L2 encoder could not start or stop its queues and takes no more frames"
+	))
 }
 
 impl V4l2 {
@@ -145,8 +166,10 @@ impl V4l2 {
 			v4l2_mpeg_video_h264_profile_V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE as i32,
 		)?;
 		device.set_control(V4L2_CID_MPEG_VIDEO_H264_LEVEL, h264_level(config)?)?;
-		let Gop::Keyframe { interval } = config.gop;
-		device.set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, interval.min(i32::MAX as u32) as i32)?;
+		device.set_control(
+			V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+			config.keyframe_interval().min(i32::MAX as u32) as i32,
+		)?;
 		set_bitrate(&device, config.resolved_bitrate().as_bps())?;
 		// Constant rate is what a live uplink wants: the congestion controller
 		// already owns the rate, and a variable-rate encoder would spend it on the
@@ -253,6 +276,7 @@ impl V4l2 {
 			planes,
 			size,
 			pending: Pending::default(),
+			phase: Phase::Stopped,
 			drainable: true,
 			cuts,
 		}))
@@ -263,12 +287,50 @@ impl V4l2 {
 	/// bcm2835-codec wants the first OUTPUT buffer queued before `STREAMON` and
 	/// the CAPTURE queue started last. The ordering is legal on every driver, so
 	/// it is unconditional rather than a quirk to detect.
+	///
+	/// A start that fails partway is stopped again, so the next frame starts
+	/// from the same place rather than finding one queue streaming without the
+	/// other.
 	fn start(&mut self) -> Result<(), Error> {
+		match self.start_queues() {
+			Ok(()) => {
+				self.phase = Phase::Streaming;
+				Ok(())
+			}
+			Err(err) => {
+				self.stop()?;
+				Err(err)
+			}
+		}
+	}
+
+	fn start_queues(&mut self) -> Result<(), Error> {
 		self.raw.stream_on(&self.device)?;
 		while let Some(index) = self.coded.take_free() {
 			self.coded.queue(&self.device, index, &[], Duration::ZERO)?;
 		}
 		self.coded.stream_on(&self.device)
+	}
+
+	/// Stop both queues, which takes every buffer back from the driver and ends
+	/// a drain in progress, or leave the encoder [`Phase::Failed`].
+	///
+	/// Stopping is the only way out of a drain that did not finish:
+	/// `V4L2_ENC_CMD_START` fails with `EBUSY` while one is in progress. Stopping
+	/// CAPTURE also resets the encoder, so the next frame begins a stream that
+	/// needs nothing from before. See
+	/// `Documentation/userspace-api/media/v4l/dev-encoder.rst`, "Drain" and
+	/// "Reset".
+	fn stop(&mut self) -> Result<(), Error> {
+		self.phase = Phase::Failed;
+		self.raw.stop(&self.device)?;
+		self.coded.stop(&self.device)?;
+		// Frames the driver handed back unencoded, which no access unit answers,
+		// and a header carried for a stream the reset encoder starts over.
+		self.pending.forget();
+		self.pending.header = None;
+		self.phase = Phase::Stopped;
+		Ok(())
 	}
 
 	/// Take a raw buffer, waiting for the driver to release one if it holds them
@@ -368,11 +430,13 @@ impl V4l2 {
 	/// boundary would time out and take the broadcast with it. bcm2835-codec
 	/// happens to be one-in-one-out, so a Pi would not have shown this.
 	fn drain_tail(&mut self) -> Result<Vec<Encoded>, Error> {
-		// The sequence needs both queues streaming. `VIDIOC_ENCODER_CMD` succeeds
-		// without starting one otherwise, and there is nothing to drain before the
-		// first frame anyway.
-		if !self.raw.streaming() || !self.coded.streaming() {
-			return Ok(Vec::new());
+		match self.phase {
+			Phase::Failed => return Err(failed()),
+			// The sequence needs both queues streaming. `VIDIOC_ENCODER_CMD`
+			// succeeds without starting one otherwise, and nothing is held
+			// before a frame goes in anyway.
+			Phase::Stopped => return Ok(Vec::new()),
+			Phase::Streaming => {}
 		}
 
 		if self.drainable
@@ -395,8 +459,17 @@ impl V4l2 {
 		}
 	}
 
-	/// Run the rest of the drain sequence, up to and including the restart.
+	/// Run the rest of the drain sequence, up to and including the restart, or
+	/// stop both queues when it fails.
 	fn drain_to_last(&mut self) -> Result<Vec<Encoded>, Error> {
+		let drained = self.resume_after_last();
+		if drained.is_err() {
+			self.stop()?;
+		}
+		drained
+	}
+
+	fn resume_after_last(&mut self) -> Result<Vec<Encoded>, Error> {
 		let mut out = Vec::new();
 		let mut deadline = Instant::now() + FLUSH_TIMEOUT;
 		loop {
@@ -464,6 +537,9 @@ impl V4l2 {
 
 impl Backend for V4l2 {
 	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+		if self.phase == Phase::Failed {
+			return Err(failed());
+		}
 		if frame.size() != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"V4L2 encoder opened for {} was given a {} frame",
@@ -499,7 +575,7 @@ impl Backend for V4l2 {
 		self.raw.queue(&self.device, index, &bytesused, key)?;
 		self.pending.queued(key, frame.timestamp);
 
-		if !self.raw.streaming() {
+		if self.phase == Phase::Stopped {
 			self.start()?;
 		}
 

@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::decode::Read;
 use crate::ffi::OnStatus;
-use crate::{moq_decode_gap, moq_decode_read_kind, moq_decode_start};
+use crate::{moq_decode_gap, moq_decode_read_kind, moq_decode_start, moq_timestamp};
 
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
@@ -118,17 +118,19 @@ pub struct moq_audio_decoder_output {
 	/// layout as `moq_audio_encoder_input.channels` describes, and the decoder
 	/// remixes to it.
 	pub channels: u32,
-	/// Upper bound on buffering before skipping a stalled group, in
-	/// microseconds. Same congestion-control knob as
-	/// `moq_consume_audio`'s `max_delay_us`. 0 = skip
-	/// aggressively (the moq-mux default); set to your playout
-	/// buffer (tens to a few hundred ms) for a softer skip. This bounds
-	/// group staleness rather than setting a minimum playout delay.
-	pub max_delay_us: u64,
+	/// How far behind the live edge to play. Same knob as `moq_consume_audio`'s
+	/// `delay`. `min_us` floors the playout delay, which is otherwise measured
+	/// from arrival timing, and sets where a cold join starts. `max_us` bounds
+	/// group staleness and adds no buffering. Zeroed: start at the newest group
+	/// and skip aggressively (the moq-mux default).
+	pub delay: crate::api::moq_delay,
 	/// `moq_decode_start` discriminant: where to start on a track that already
 	/// holds groups. 0 = the oldest, decoding everything cached; a live player
 	/// sets `MOQ_DECODE_START_LATEST`.
 	pub start: u32,
+	/// Hold exactly `delay.min_us` as the playout delay. False measures it from arrival
+	/// timing, never below `delay.min_us`, and reports it in each read's `delay_us`.
+	pub fixed: bool,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -138,8 +140,8 @@ pub struct moq_audio_decoder_output {
 /// (the publisher copies before returning).
 #[repr(C)]
 pub struct moq_audio_frame {
-	/// The presentation timestamp in microseconds.
-	pub timestamp_us: u64,
+	/// The presentation timestamp.
+	pub timestamp: moq_timestamp,
 	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
 	/// The length in bytes of `data`.
@@ -157,11 +159,16 @@ pub struct moq_audio_read {
 	/// The lost span, for [moq_decode_read_kind::MOQ_DECODE_READ_GAP]. What follows does
 	/// not continue what came before.
 	pub gap: moq_decode_gap,
-	/// Where the stopped encoder's media stops in microseconds, for
+	/// Where the stopped encoder's media stops, for
 	/// [moq_decode_read_kind::MOQ_DECODE_READ_END]. Frames that follow and start before it
 	/// are the stopped encoder's remaining media; the first at or past it comes from a fresh
 	/// encoder.
-	pub end_us: u64,
+	pub end: moq_timestamp,
+	/// The playout delay in microseconds to hold ahead of the playhead when this read was
+	/// delivered: `delay.min`, or unless `fixed`, the estimate from every frame read so far.
+	/// The estimate measures when each read is delivered, so handle reads promptly and let
+	/// the playback buffer absorb the jitter, rather than pacing them to the speaker.
+	pub delay_us: u64,
 }
 
 // ---- State extensions (used internally by lib.rs) ----
@@ -189,7 +196,8 @@ impl crate::publish::Abort for AudioProducer {
 pub struct Audio {
 	producers: NonZeroSlab<AudioProducer>,
 	consumer_tasks: NonZeroSlab<Task>,
-	reads: NonZeroSlab<Read<moq_audio::Frame>>,
+	/// Each read with the playout delay when it was delivered.
+	reads: NonZeroSlab<(Read<moq_audio::Frame>, std::time::Duration)>,
 }
 
 impl Audio {
@@ -258,6 +266,7 @@ impl Audio {
 	) -> Result<Id, Error> {
 		let crate::consume::Rendition {
 			broadcast,
+			origin,
 			config: catalog,
 			name,
 			driver,
@@ -268,10 +277,18 @@ impl Audio {
 		self.consumer_tasks.spawn(
 			on_frame,
 			|state| &mut state.audio.consumer_tasks,
-			|close| async move {
+			|mut close| async move {
 				driver
 					.watch(async move {
-						let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
+						// The rendition may live in a sibling broadcast that is never announced, and
+						// SUBSCRIBE_OK may never come, so the close races both steps.
+						let setup = async {
+							let broadcast = crate::consume::Rendition::resolve(broadcast, origin, &catalog).await?;
+							Ok(moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?)
+						};
+						let Some(consumer) = crate::consume::Consume::until_closed(&mut close, setup).await? else {
+							return Ok(());
+						};
 						Self::run(on_frame, consumer, close).await
 					})
 					.await
@@ -292,7 +309,7 @@ impl Audio {
 				read = consumer.read() => match read {
 					Ok(Some(moq_audio::decode::Read::Frame(frame))) => Read::Frame(frame),
 					Ok(Some(moq_audio::decode::Read::Gap { timestamp, duration })) => Read::gap(timestamp, duration)?,
-					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end)?,
+					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end),
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather
@@ -306,7 +323,7 @@ impl Audio {
 			};
 
 			// Hold the lock only to buffer the read; release it before the callback.
-			let read_id = State::lock().audio.reads.insert(read)?;
+			let read_id = State::lock().audio.reads.insert((read, consumer.delay()))?;
 			callback.call(Ok(read_id));
 		}
 	}
@@ -318,20 +335,16 @@ impl Audio {
 
 	/// Borrow a delivered read, and a frame's samples, until its handle is freed.
 	pub fn read_info(&self, id: Id, dst: &mut moq_audio_read) -> Result<(), Error> {
-		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
-		let (kind, gap, end_us) = read.info();
+		let (read, delay) = self.reads.get(id).ok_or(Error::FrameNotFound)?;
+		let (kind, gap, end) = read.info();
 		let frame = match read {
 			Read::Frame(frame) => moq_audio_frame {
-				// The C ABI carries plain microseconds, so flatten the scaled
-				// `Timestamp` here at the boundary. Saturating rather than erroring:
-				// this is a getter on a frame we already decoded, and a u64 overflow
-				// needs a timestamp ~580,000 years out.
-				timestamp_us: u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX),
+				timestamp: frame.timestamp.into(),
 				data: frame.data.as_ptr(),
 				data_size: frame.data.len(),
 			},
 			_ => moq_audio_frame {
-				timestamp_us: 0,
+				timestamp: moq_timestamp::default(),
 				data: std::ptr::null(),
 				data_size: 0,
 			},
@@ -340,7 +353,8 @@ impl Audio {
 			kind,
 			frame,
 			gap,
-			end_us,
+			end,
+			delay_us: delay.as_micros().try_into().unwrap_or(u64::MAX),
 		};
 		Ok(())
 	}
@@ -433,9 +447,11 @@ pub extern "C" fn moq_encode_audio_reservation(producer: u32) -> i32 {
 	})
 }
 
-/// Watch whether the encoded audio track has subscribers, so the microphone and
-/// encoder run only while someone listens. See [`crate::moq_publish_media_demand`]
-/// for the callback contract.
+/// Watch whether the encoded audio track has subscribers. The encoder publishes every
+/// sample written, subscribed or not; opting in to run the microphone and encoder
+/// only while someone listens saves that work but leaves a late subscriber nothing
+/// to fetch from before it arrived. See [`crate::moq_publish_media_demand`] for the
+/// callback contract.
 ///
 /// Returns a non-zero watcher handle on success, or a negative code on failure.
 ///
@@ -478,9 +494,7 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
-		// The C ABI carries plain microseconds; scale them at the boundary.
-		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_audio::Error::from)?;
-		let owned = moq_audio::Frame::new(Bytes::copy_from_slice(data), timestamp);
+		let owned = moq_audio::Frame::new(Bytes::copy_from_slice(data), frame.timestamp.try_into()?);
 
 		let producer = State::lock().audio.producer(producer)?;
 		producer
@@ -489,6 +503,25 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 			.ok_or(Error::MediaNotFound)?
 			.producer
 			.write(&owned)?;
+		Ok(())
+	})
+}
+
+/// Re-anchor an audio producer's timeline to the next frame's timestamp.
+///
+/// Call this before writing after an idle gap, so the gap stays visible in the audio PTS
+/// instead of being compressed out by the running sample count.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_encode_audio_reanchor(producer: u32) -> i32 {
+	ffi::enter(move || {
+		let producer = ffi::parse_id(producer)?;
+		let producer = State::lock().audio.producer(producer)?;
+		producer
+			.lock()
+			.as_mut()
+			.ok_or(Error::MediaNotFound)?
+			.producer
+			.reanchor();
 		Ok(())
 	})
 }
@@ -533,6 +566,10 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// model. TODO: a future API will pick the right rendition
 /// automatically (ABR).
 ///
+/// A rendition's codec, layout, or description refused during setup reports
+/// [`MOQ_ERROR_UNSUPPORTED_CONFIG`](crate::MOQ_ERROR_UNSUPPORTED_CONFIG) on the terminal callback.
+/// An unsupported output channel count returns that code directly, without a callback.
+///
 /// Returns a non-zero handle on success or a negative error code.
 ///
 /// `on_read` is called with a positive read id per decoded frame, gap, or encoder
@@ -571,8 +608,10 @@ pub unsafe extern "C" fn moq_decode_audio(
 		config.output.sample_rate = zeroable(raw.sample_rate);
 		config.output.layout = zeroable(raw.channels)
 			.map(moq_audio::Layout::from_channels)
-			.transpose()?;
-		config.max_delay = Duration::from_micros(raw.max_delay_us);
+			.transpose()
+			.map_err(|err| Error::UnsupportedConfig(err.to_string()))?;
+		config.delay = raw.delay.into();
+		config.estimate = !raw.fixed;
 
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 

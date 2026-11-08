@@ -175,7 +175,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 		_session: session,
 	};
 
-	let geo = match moq_clock::timeout(FORMAT_TIMEOUT, geo_rx).await {
+	let geo = match kio::clock::timeout(FORMAT_TIMEOUT, geo_rx).await {
 		Ok(Ok(result)) => result?,
 		Ok(Err(_)) => {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -190,7 +190,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 		}
 	};
 
-	let first = match moq_clock::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
+	let first = match kio::clock::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
 		Ok(Ok(Some(frame))) => frame,
 		Ok(Err(error)) => return Err(error),
 		Ok(Ok(None)) | Err(_) => {
@@ -2249,7 +2249,7 @@ mod tests {
 	/// needs a desktop session, PipeWire, and a human clicking the picker dialog:
 	/// `cargo test -p moq-video --features pipewire portal_capture -- --ignored`.
 	#[tokio::test]
-	#[ignore = "needs a desktop portal and a human at the picker; see quest/m3/video-hardware.md"]
+	#[ignore = "needs a desktop portal and a human at the picker; see quest/m5/video-hardware.md"]
 	async fn portal_captures_frames() {
 		let mut stream = match open(&Config::default(), &portal::Selection::new(portal::Kind::Screen)).await {
 			Ok(stream) => stream,

@@ -6,7 +6,7 @@ use std::task::Poll;
 /// A worker's transport, usable where moq-net wants a `Send` one.
 ///
 /// moq-net boxes every transport with a native `Send` bound, which a worker's
-/// `!Send` [`Session`](super::Session) cannot meet, so wrap the session in this
+/// `!Send` session cannot meet, so wrap the session in this
 /// before `Server::accept_request` or `Client::connect`. The session, its
 /// streams, and its send groups never leave the worker that polls them, so
 /// this checks the thread on every use and panics anywhere else instead of
@@ -62,16 +62,6 @@ impl<S: poll::Session> poll::Session for Local<S> {
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
-	fn poll_open_request(
-		&self,
-		waiter: &kio::Waiter,
-		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
-	) -> Poll<Result<Option<poll::BiStreams<Self>>, Self::Error>> {
-		self.0
-			.poll_open_request(waiter, unwrap(options))
-			.map_ok(|streams| streams.map(|(send, recv)| (Local::new(send), Local::new(recv))))
-	}
-
 	fn send_group(&self, priority: i64) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
 		self.0.send_group(priority).map(Local::new)
 	}
@@ -119,6 +109,22 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn probe(&self) -> Option<moq::Probe> {
 		self.0.probe()
 	}
+
+	fn receive_window(&self) -> Option<moq::ReceiveWindow> {
+		self.0.receive_window()
+	}
+
+	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
+		self.0.set_limits(limits)
+	}
+
+	fn stream_credit(&self, dir: moq::Dir) -> Option<moq::StreamCredit> {
+		self.0.stream_credit(dir)
+	}
+
+	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+		self.0.export_keying_material(label, context)
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
@@ -152,6 +158,10 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_closed(waiter)
 	}
+
+	fn acknowledged(&self) -> Option<bool> {
+		self.0.acknowledged()
+	}
 }
 
 impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
@@ -171,6 +181,10 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 
 	fn stop(&mut self, code: u32) {
 		self.0.stop(code)
+	}
+
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		self.0.poll_reset(waiter)
 	}
 
 	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
@@ -194,7 +208,7 @@ mod tests {
 	#[test]
 	fn meets_the_boxed_driver_bounds() {
 		fn boxable<S: poll::Boxable>() {}
-		boxable::<Local<super::super::Session<crate::quic::web::Session>>>();
+		boxable::<Local<crate::quic::web::Session>>();
 	}
 
 	/// Touching it off its thread fails loud rather than racing the worker.

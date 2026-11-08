@@ -210,11 +210,6 @@ pub enum StreamError {
 	#[error("not found")]
 	NotFound,
 
-	/// A FETCH reached a datagram, which is never cached. Sent on moq-lite-07
-	/// and later; an earlier version sends [`NotFound`](Self::NotFound) instead.
-	#[error("not fetchable")]
-	NotFetchable,
-
 	/// The broadcast is neither announced nor served, so there is no route to it.
 	#[error("unroutable")]
 	Unroutable,
@@ -223,8 +218,9 @@ pub enum StreamError {
 	#[error("old")]
 	Old,
 
-	/// The group was dropped under memory pressure. Unlike [`Old`](Self::Old) it was still
-	/// current, so it can be re-fetched.
+	/// The group, or the frames a reader still needed from its front, was dropped under
+	/// memory pressure. Unlike [`Old`](Self::Old) it was still current, so it can be
+	/// re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -236,7 +232,7 @@ pub enum StreamError {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A group grew past its cache budget and was aborted.
+	/// A group could not make room for a write, even by shedding its front, and was aborted.
 	#[error("group too large")]
 	GroupTooLarge,
 
@@ -282,7 +278,6 @@ impl StreamError {
 			Self::WrongSize => 0x37,
 			Self::FrameTooLarge => 0x38,
 			Self::TimestampMismatch => 0x39,
-			Self::NotFetchable => 0x3a,
 			Self::Unauthorized => 0x3b,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
@@ -315,7 +310,6 @@ impl StreamError {
 			0x37 => Self::WrongSize,
 			0x38 => Self::FrameTooLarge,
 			0x39 => Self::TimestampMismatch,
-			0x3a => Self::NotFetchable,
 			0x3b => Self::Unauthorized,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
@@ -377,18 +371,19 @@ pub enum Error {
 	#[error("broadcast path contains a navigation segment")]
 	NavigationSegment,
 
-	/// A path was spelled with a leading, trailing, or doubled `/`.
-	#[error("path contains an empty segment")]
-	EmptySegment,
-
-	/// A path was spelled with a `\` before anything but `\` or `/`.
-	#[error(r"path contains a `\` that escapes neither `\` nor `/`")]
-	InvalidEscape,
+	/// A string is not a valid path, such as one with an empty segment.
+	#[error(transparent)]
+	Path(crate::path::Error),
 
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
 	Duplicate,
+
+	/// A group was created at a sequence its track declared skipped: a skip says the
+	/// sequence will never be produced, so it is final. See `track::Producer::skip_groups`.
+	#[error("sequence was skipped")]
+	Skipped,
 
 	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
 	/// by either side, as `Session::closed` reports it. Not a failure.
@@ -417,15 +412,11 @@ pub enum Error {
 	#[error("not found")]
 	NotFound,
 
-	/// A FETCH reached a datagram, which is never cached.
-	#[error("not fetchable")]
-	NotFetchable,
-
 	/// A joining FETCH named a request that is not an active subscription.
 	#[error("invalid joining request ID")]
 	InvalidJoiningRequestId,
 
-	/// A FETCH range is empty or lies beyond the published objects.
+	/// A range is empty, lies beyond the published objects, or ends at the oldest group.
 	#[error("invalid fetch range")]
 	InvalidRange,
 
@@ -483,9 +474,8 @@ pub enum Error {
 
 	/// The reader asked for a frame the group never held: below
 	/// [`crate::group::Producer::start_at`]. Named from the consumer's side; distinct
-	/// from [`Self::GroupTooLarge`], which aborts the whole group when a write exceeds
-	/// the cache budget, and from [`Self::Evicted`], which drops a whole group under the
-	/// pool's memory pressure.
+	/// from [`Self::Evicted`], for frames the group held but shed from its front or
+	/// dropped whole under memory pressure.
 	#[error("lagged")]
 	Lagged,
 
@@ -493,9 +483,10 @@ pub enum Error {
 	#[error("frame too large")]
 	FrameTooLarge,
 
-	/// A write would grow the group past its cache budget (byte size or frame count).
-	/// The write is refused and the group is aborted, so every reader sees the same
-	/// failure rather than a prefix some of them missed.
+	/// A write could not make room in the group even by shedding its front: what is left,
+	/// such as the frame in flight, already fills the live tail
+	/// ([`MAX_CACHE_BYTES`](crate::group::MAX_CACHE_BYTES)). The write is refused and the
+	/// group is aborted.
 	#[error("group too large")]
 	GroupTooLarge,
 
@@ -507,8 +498,9 @@ pub enum Error {
 
 	/// The group was evicted under memory pressure: by its own track to pay eviction debt
 	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
-	/// messages spent its receive window. Unlike [`Self::Old`], the group was still within
-	/// the publisher's window; it can be re-fetched.
+	/// messages spent its receive window. Also a read of a frame the group shed from its
+	/// front, past its live tail or under that debt. Unlike [`Self::Old`], the group was
+	/// still fresh under the publisher's max age; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -555,10 +547,6 @@ pub enum Error {
 	/// The underlying connection reached its transport idle deadline.
 	#[error("transport idle timeout")]
 	IdleTimeout,
-
-	/// The transport refused a request because the peer granted no stream credit.
-	#[error("no stream credit")]
-	NoStreamCredit,
 }
 
 impl Error {
@@ -606,6 +594,41 @@ impl Error {
 			crate::transport::CloseKind::Closed => SessionError::Cancel.into(),
 			_ => Self::Transport(err.to_string()),
 		}
+	}
+
+	/// Whether asking again may succeed: the route failed to deliver rather than judging what
+	/// it carried, which would repeat on every attempt. Mirrors `routeFailed` in
+	/// `js/net/src/resume.ts`.
+	pub(crate) fn retryable(&self) -> bool {
+		self.unroutable() || self.transient()
+	}
+
+	/// Whether a source lost its route to the content: only another route continues it.
+	pub(crate) fn unroutable(&self) -> bool {
+		matches!(self, Self::Unroutable | Self::Stream(StreamError::Unroutable))
+	}
+
+	/// Whether the same source may deliver a fresh copy. An unroutable source needs a new
+	/// route instead: asking it again can replace the withdrawal's cause with a refusal.
+	pub(crate) fn transient(&self) -> bool {
+		matches!(
+			self,
+			Self::Transport(_)
+				| Self::IdleTimeout
+				| Self::Session(_)
+				| Self::GoingAway
+				| Self::GoawayTimeout
+				| Self::Dropped
+				| Self::Closed
+				| Self::Cancel
+				| Self::Stream(
+					StreamError::Session(_)
+						| StreamError::Internal
+						| StreamError::Cancel
+						| StreamError::GoingAway
+						| StreamError::ControlTimeout
+				)
+		)
 	}
 }
 
@@ -655,14 +678,14 @@ impl From<&Error> for SessionError {
 			| Error::UnexpectedMessage
 			| Error::UnexpectedStream
 			| Error::Duplicate
+			| Error::Skipped
 			| Error::Decode(_)
 			| Error::Encode(_)
 			| Error::WrongSize
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
 			| Error::NavigationSegment
-			| Error::EmptySegment
-			| Error::InvalidEscape => Self::ProtocolViolation,
+			| Error::Path(_) => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
@@ -670,13 +693,12 @@ impl From<&Error> for SessionError {
 			// says an unrecognized code is an unspecified error. Send that instead.
 			Error::Remote(_) => Self::Internal,
 			// Our own transport failed: there is no code to say so.
-			Error::Transport(_) | Error::IdleTimeout | Error::NoStreamCredit => Self::Internal,
+			Error::Transport(_) | Error::IdleTimeout => Self::Internal,
 			// Stream-scoped conditions have no session code.
 			Error::Old
 			| Error::Evicted
 			| Error::Lagged
 			| Error::NotFound
-			| Error::NotFetchable
 			| Error::InvalidRange
 			| Error::InvalidJoiningRequestId
 			| Error::Unroutable
@@ -711,7 +733,6 @@ impl From<&Error> for StreamError {
 			Error::Evicted => Self::Evicted,
 			Error::Lagged => Self::TooFarBehind,
 			Error::NotFound => Self::NotFound,
-			Error::NotFetchable => Self::NotFetchable,
 			Error::Unroutable => Self::Unroutable,
 			Error::WrongSize => Self::WrongSize,
 			Error::FrameTooLarge => Self::FrameTooLarge,
@@ -727,8 +748,7 @@ impl From<&Error> for StreamError {
 			| Error::BoundsExceeded(_)
 			| Error::InvalidPath(_)
 			| Error::NavigationSegment
-			| Error::EmptySegment
-			| Error::InvalidEscape
+			| Error::Path(_)
 			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so
@@ -737,11 +757,12 @@ impl From<&Error> for StreamError {
 			// Session-scoped: the peer learns the detail from the session close.
 			// A stream refused on its own is not a session failure, so it does not claim
 			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
-			Error::UnexpectedStream | Error::NoStreamCredit => Self::Internal,
+			Error::UnexpectedStream => Self::Internal,
 			Error::Version
 			| Error::UnknownAlpn(_)
 			| Error::TooManyRequests
 			| Error::Duplicate
+			| Error::Skipped
 			| Error::GoawayTimeout
 			| Error::ProtocolViolation
 			| Error::UnexpectedMessage => Self::Session(SessionError::from(err)),
@@ -854,7 +875,6 @@ mod tests {
 			(StreamError::WrongSize, 0x37),
 			(StreamError::FrameTooLarge, 0x38),
 			(StreamError::TimestampMismatch, 0x39),
-			(StreamError::NotFetchable, 0x3a),
 			(StreamError::Unauthorized, 0x3b),
 			(StreamError::App(7), 0x40 + 7),
 		] {
@@ -891,12 +911,9 @@ mod tests {
 		let relayed = StreamError::from(&Error::from(StreamError::from_code(0x3)));
 		assert_eq!(relayed.to_code(), 0x3);
 
-		// A datagram reached by a FETCH keeps its own code rather than reading as a plain miss.
-		assert_eq!(StreamError::from(&Error::NotFetchable), StreamError::NotFetchable);
-
 		// Registered stream codes survive the hop unchanged.
 		for code in [
-			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b,
+			0x0, 0x1, 0x2, 0x4, 0x5, 0x12, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3b,
 		] {
 			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
 			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");

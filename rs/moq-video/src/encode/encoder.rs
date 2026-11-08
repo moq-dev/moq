@@ -48,56 +48,6 @@ pub enum Kind {
 	Named(String),
 }
 
-/// How the encoded stream is divided into groups.
-///
-/// Every mode opens a group at a point a subscriber can start decoding, and
-/// [`Encoder::cut`] opens one on demand in any of them. `#[non_exhaustive]`: a
-/// later mode adds a variant here rather than replacing the field, so match
-/// with a fallback arm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Gop {
-	/// A keyframe (an IDR with its parameter sets in band) every `interval`
-	/// frames, each opening a group. A subscriber joining mid-stream waits at
-	/// most that many frames for a picture it can decode.
-	Keyframe {
-		/// Frames per group. Must be at least 1; [`Encoder::new`] refuses 0.
-		interval: u32,
-	},
-}
-
-impl Gop {
-	/// Keyframes every `interval` of wall time at `framerate`, rounded down to
-	/// whole frames and never below one.
-	pub fn keyframe_every(interval: std::time::Duration, framerate: FrameRate) -> Self {
-		Self::Keyframe {
-			interval: framerate.frames(interval).max(1),
-		}
-	}
-
-	/// The nominal time between groups at `framerate`.
-	pub fn duration(self, framerate: FrameRate) -> std::time::Duration {
-		match self {
-			Self::Keyframe { interval } => std::time::Duration::from_nanos(
-				(u128::from(interval) * 1_000_000_000 * u128::from(framerate.denominator())
-					/ u128::from(framerate.numerator()))
-				.try_into()
-				.unwrap_or(u64::MAX),
-			),
-		}
-	}
-
-	/// Refuse a configuration no backend can honor, before one is opened.
-	pub(crate) fn validate(&self) -> Result<(), Error> {
-		match *self {
-			Self::Keyframe { interval: 0 } => Err(Error::InvalidGop(
-				"a keyframe interval of 0 frames opens no group".to_owned(),
-			)),
-			Self::Keyframe { .. } => Ok(()),
-		}
-	}
-}
-
 /// How an encoder trades latency for compression at the configured bitrate.
 ///
 /// Bitrate is set separately, via [`Config::bitrate`]. Presets differ in the
@@ -129,19 +79,27 @@ pub enum Preset {
 /// requested [`Preset`] names the one whose controls it did apply, and one that
 /// could not confirm the controls a preset needs names none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Applied {
+#[non_exhaustive]
+pub struct Applied {
 	/// The preset whose controls took effect, or `None` when the backend could
 	/// not confirm them (a refused or advisory low-latency setting).
-	pub(crate) preset: Option<Preset>,
+	pub preset: Option<Preset>,
 	/// The backend controls that took effect, for display, e.g.
 	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
-	pub(crate) controls: String,
+	pub controls: String,
 }
 
 impl Applied {
 	// A confirmed preset disables frame reordering even when the bitstream omits its bound.
 	fn reorder(&self, parsed: Option<u8>) -> Option<u8> {
 		self.preset.map(|_| 0).or(parsed)
+	}
+
+	// A confirmed preset neither reorders nor queues frames, so a frame trails the others by no more
+	// than its own encode, which the player's frame term already covers: the catalog `delay` is a
+	// known zero rather than one to measure. An unconfirmed one leaves it to measurement.
+	fn delay(&self) -> Option<std::time::Duration> {
+		self.preset.map(|_| std::time::Duration::ZERO)
 	}
 
 	/// A report that `preset` took effect through `controls`.
@@ -192,9 +150,15 @@ pub struct Config {
 	/// Target bitrate. `None` derives a sane default
 	/// from resolution and framerate (~0.07 bits per pixel per second).
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
-	/// How the stream is divided into groups. Defaults to a keyframe every two
-	/// seconds at `framerate`.
-	pub gop: Gop,
+	/// The time between join points: a keyframe (an IDR with its parameter sets
+	/// in band) opens a group this often, so a subscriber joining mid-stream waits
+	/// at most this long for a picture it can decode. [`Encoder::cut`] opens one
+	/// sooner. Rounded to whole frames at `framerate`, never below one; see
+	/// [`effective_join`](Self::effective_join). Measured by the frames'
+	/// timestamps on a backend that can cut, so a source running slower than
+	/// `framerate` still opens a group this often, overshooting by less than one of
+	/// its frames. [`Encoder::new`] refuses zero. Defaults to two seconds.
+	pub join: std::time::Duration,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
 	/// Which encoder implementation to use. Defaults to [`Kind::Auto`].
@@ -213,6 +177,22 @@ pub struct Config {
 	/// frame labelled differently with [`Error::ColorMismatch`] rather than
 	/// mislabel it.
 	pub color: Option<Color>,
+	/// Scale frames that arrive at another size to the encoded size, rather than
+	/// refusing them. `None` (the default) refuses them.
+	///
+	/// The scale runs wherever the encoder does, which for a
+	/// [`Sink`](super::Sink) is its own thread: a caller fanning one decoded
+	/// picture out to several encoders (a transcode ladder) hands each the
+	/// native frame and keeps the per-encoder pixel work off its own threads.
+	/// On Apple platforms a `Sink` encodes inline, so the scale runs on the
+	/// caller there. External Vulkan inputs the backend scales on the GPU are
+	/// left to it.
+	///
+	/// A scaled frame keeps its source's space, and an unlabelled one is labelled
+	/// with what [`Color::infer`] guesses for its original size. Set
+	/// [`color`](Self::color) to match, or a frame scaled across 576 lines is
+	/// refused with [`Error::ColorMismatch`].
+	pub resize: Option<crate::resize::Config>,
 	/// External Vulkan input device, required before opening a GPU-only encoder.
 	/// `None` retains selection for CPU and native decoder/capture surfaces.
 	#[cfg(target_os = "linux")]
@@ -221,18 +201,19 @@ pub struct Config {
 
 impl Config {
 	/// A config encoding `width` x `height` at `framerate`, with the default
-	/// codec, GOP, and bitrate.
+	/// codec, join, and bitrate.
 	pub fn new(width: u32, height: u32, framerate: FrameRate) -> Self {
 		Self {
 			width,
 			height,
 			framerate,
 			bitrate: None,
-			gop: Gop::keyframe_every(std::time::Duration::from_secs(2), framerate),
+			join: std::time::Duration::from_secs(2),
 			codec: Codec::default(),
 			kind: Kind::Auto,
 			preset: Preset::default(),
 			color: None,
+			resize: None,
 			#[cfg(target_os = "linux")]
 			input: None,
 		}
@@ -241,6 +222,23 @@ impl Config {
 	/// The encoded resolution.
 	pub fn size(&self) -> Size {
 		Size::new(self.width, self.height)
+	}
+
+	/// The time between join points the encoder holds to: [`join`](Self::join)
+	/// rounded to whole frames at `framerate`, the value a catalog declares.
+	pub fn effective_join(&self) -> std::time::Duration {
+		// Rounded up, since a catalog declares it as the longest group.
+		let nanos = (u128::from(self.keyframe_interval()) * 1_000_000_000 * u128::from(self.framerate.denominator()))
+			.div_ceil(u128::from(self.framerate.numerator()));
+		std::time::Duration::from_nanos(nanos.try_into().unwrap_or(u64::MAX))
+	}
+
+	/// Frames between keyframes at `framerate`: [`join`](Self::join) rounded to
+	/// the nearest frame, and never below one, since a positive join shorter than
+	/// a frame still opens a group per frame. Each backend keys on this count, and
+	/// the encoder keys sooner when the timestamps reach it first.
+	pub(crate) fn keyframe_interval(&self) -> u32 {
+		self.framerate.frames(self.join).max(1)
 	}
 
 	/// The catalog rendition an encoder for this config produces.
@@ -264,21 +262,15 @@ impl Config {
 	/// Fails when this machine cannot encode the config at all, which makes it a fail-fast check:
 	/// better here than on the first frame of a track that is already advertised.
 	pub async fn probe(&self) -> Result<hang::catalog::VideoConfig, Error> {
-		Ok(self.probe_sink().await?.0)
-	}
-
-	/// [`probe`](Self::probe), handing back the throwaway encoder so the caller can ask it more
-	/// before dropping it.
-	pub(crate) async fn probe_sink(&self) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
 		// Mid-gray, since the picture only has to make the encoder emit its parameter sets.
 		let size = self.size();
 		let i420 = crate::I420::new(size, vec![0x80u8; crate::I420::len(size)?])?;
 		let frame = Frame::new(crate::Surface::I420(i420), moq_net::Timestamp::from_micros(0)?);
-		self.probe_frame(frame).await
+		Ok(self.probe_frame(frame).await?.0)
 	}
 
-	/// [`probe_sink`](Self::probe_sink), encoding `frame` rather than a CPU picture, so the probe
-	/// also proves the encoder reads that kind of surface.
+	/// [`probe`](Self::probe), encoding `frame` rather than a CPU picture and handing back the
+	/// throwaway encoder, so the probe also proves the encoder reads that kind of surface.
 	pub(crate) async fn probe_frame(&self, frame: Frame) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
 		// A `Sink` rather than an `Encoder`: this runs on whatever executor thread the caller is on,
 		// and the Windows backend's COM apartment has to be opened and closed on one thread.
@@ -309,6 +301,7 @@ impl Config {
 		rendition.bitrate.get_or_insert(self.resolved_bitrate().as_bps());
 		rendition.framerate.get_or_insert(self.framerate.as_f64());
 		rendition.reorder = sink.applied().reorder(rendition.reorder);
+		rendition.delay = sink.applied().delay();
 		Ok((rendition, sink))
 	}
 
@@ -357,6 +350,10 @@ pub struct Encoder {
 	/// rather than applied immediately because the caller decides a group
 	/// boundary before it has the frame that opens it.
 	pending_cut: bool,
+	/// Where [`Config::join`] cuts a source slower than its frame rate.
+	join: Join,
+	/// How to scale a frame at another size, if at all; see [`Config::resize`].
+	resize: Option<crate::resize::Config>,
 	#[cfg(target_os = "linux")]
 	input: Option<crate::frame::vulkan::Device>,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
@@ -370,7 +367,9 @@ impl Encoder {
 		let size = config.size();
 		size.validate("encoder")?;
 		size.validate_encodable("encoder", config.framerate)?;
-		config.gop.validate()?;
+		if config.join.is_zero() {
+			return Err(Error::ZeroJoin);
+		}
 
 		let backend = backend::open(config)?;
 		let applied = backend.applied();
@@ -382,6 +381,8 @@ impl Encoder {
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
 			pending_cut: false,
+			join: Join::new(config),
+			resize: config.resize,
 			#[cfg(target_os = "linux")]
 			input: config.input,
 			_thread_bound: PhantomData,
@@ -395,7 +396,7 @@ impl Encoder {
 
 	/// The latency and compression controls the backend applied for
 	/// [`Config::preset`], fixed for the session's lifetime.
-	pub(crate) fn applied(&self) -> Applied {
+	pub fn applied(&self) -> Applied {
 		self.backend.applied()
 	}
 
@@ -443,7 +444,7 @@ impl Encoder {
 	}
 
 	/// Cut a new group at the next frame, on top of the boundaries
-	/// [`Config::gop`] places on its own. Today that means encoding it as a
+	/// [`Config::join`] places on its own. Today that means encoding it as a
 	/// keyframe (an IDR), so a subscriber can start decoding there.
 	///
 	/// Rarely needed: the encoder opens groups automatically, so reach for this
@@ -461,9 +462,9 @@ impl Encoder {
 	///
 	/// Returns [`Error::CutUnsupported`] when this backend cannot force a group
 	/// boundary (a V4L2 driver without the force-keyframe control), in which case
-	/// nothing is queued: groups keep falling where [`Config::gop`] puts them, and
-	/// the caller decides whether that layout is acceptable rather than finding
-	/// out from the stream.
+	/// nothing is queued: groups keep falling every [`Config::join`]'s worth of
+	/// frames at [`Config::framerate`], and the caller decides whether that layout
+	/// is acceptable rather than finding out from the stream.
 	pub fn cut(&mut self) -> Result<(), Error> {
 		self.check_cut()?;
 		self.pending_cut = true;
@@ -490,7 +491,8 @@ impl Encoder {
 	/// (NVDEC -> NVENC never leaves the GPU, a `CVPixelBuffer` goes straight to
 	/// VideoToolbox); anything else falls back to a CPU I420 upload. The frame must
 	/// already be at the encoder's resolution, except external Vulkan inputs
-	/// which the backend scales on the GPU. Scale other surfaces with
+	/// which the backend scales on the GPU. [`Config::resize`] scales the rest
+	/// here; without it, scale them with
 	/// [`Frame::resize`](crate::Frame::resize), which
 	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) lets a
 	/// hardware decoder make a no-op.
@@ -512,6 +514,14 @@ impl Encoder {
 		};
 		#[cfg(not(target_os = "linux"))]
 		let external = false;
+		let resized;
+		let frame = match self.resize {
+			Some(config) if !external && frame.size() != self.size => {
+				resized = frame.resize(self.size, &config)?;
+				&resized
+			}
+			_ => frame,
+		};
 		let size = frame.size();
 		if !external && size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -532,11 +542,15 @@ impl Encoder {
 				encoder: self.color,
 			});
 		}
-		let encoded = self.backend.encode(frame, self.pending_cut)?;
+		let timestamp = std::time::Duration::from(frame.timestamp);
+		let cut = self.pending_cut || (self.backend.can_cut() && self.join.due(timestamp));
+		let encoded = self.backend.encode(frame, cut)?;
 		// Cleared only once the frame is through: a failed encode produced no
 		// picture, so the request still belongs to whatever comes next rather than
 		// being swallowed. The size check above returns early for the same reason.
 		self.pending_cut = false;
+		self.join.encoded(timestamp, cut);
+		self.join.observe(&encoded);
 		Ok(encoded)
 	}
 
@@ -555,7 +569,9 @@ impl Encoder {
 	/// encode and the next frame's submission, so flush at boundaries rather than
 	/// per frame.
 	pub fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-		self.backend.flush()
+		let encoded = self.backend.flush()?;
+		self.join.observe(&encoded);
+		Ok(encoded)
 	}
 
 	/// Flush the encoder, returning any buffered frames. Each keeps the timestamp
@@ -566,6 +582,57 @@ impl Encoder {
 	/// last call rather than one leaving a drained encoder in your hands.
 	pub fn finish(mut self) -> Result<Vec<Encoded>, Error> {
 		self.backend.finish()
+	}
+}
+
+/// The keyframes [`Config::join`] adds for a source slower than [`Config::framerate`].
+///
+/// Each backend keys every [`Config::keyframe_interval`] frames, which a slower
+/// source (a camera dropping to 20 fps in low light) stretches past the join the
+/// catalog declared. This keys the first frame whose distance from the last
+/// keyframe, counted in frames at the configured rate and rounded to the nearest,
+/// reaches that interval: a source at the configured rate keys on the same frame
+/// as the backend whatever its jitter, and a slower one overshoots the join by
+/// less than one of its frames. A faster source reaches the backend's count first.
+struct Join {
+	framerate: FrameRate,
+	interval: u32,
+	/// The last keyframe's timestamp, `None` before the first frame, which every
+	/// backend keys.
+	last: Option<std::time::Duration>,
+}
+
+impl Join {
+	fn new(config: &Config) -> Self {
+		Self {
+			framerate: config.framerate,
+			interval: config.keyframe_interval(),
+			last: None,
+		}
+	}
+
+	/// Whether the frame at `timestamp` is due a keyframe.
+	fn due(&self, timestamp: std::time::Duration) -> bool {
+		self.last
+			.and_then(|last| timestamp.checked_sub(last))
+			.is_some_and(|elapsed| self.framerate.frames(elapsed) >= self.interval)
+	}
+
+	/// The frame at `timestamp` went in, keyed when `cut`.
+	fn encoded(&mut self, timestamp: std::time::Duration, cut: bool) {
+		// A timestamp behind the last keyframe starts a new timeline, measured from
+		// here rather than held until it catches up with the old one.
+		if cut || self.last.is_none_or(|last| timestamp < last) {
+			self.last = Some(timestamp);
+		}
+	}
+
+	/// Count the keyframes among `encoded`, including those the backend placed on
+	/// its own count, so the next is measured from the latest.
+	fn observe(&mut self, encoded: &[Encoded]) {
+		for keyframe in encoded.iter().filter(|encoded| encoded.keyframe) {
+			self.last = self.last.max(Some(keyframe.timestamp.into()));
+		}
 	}
 }
 
@@ -593,6 +660,18 @@ mod tests {
 		let unconfirmed = Applied::default();
 		assert_eq!(unconfirmed.reorder(None), None);
 		assert_eq!(unconfirmed.reorder(Some(3)), Some(3));
+	}
+
+	#[test]
+	fn delay_is_a_known_zero_only_for_confirmed_controls() {
+		for preset in [Preset::LowLatency, Preset::Balanced, Preset::Quality] {
+			let applied = Applied {
+				preset: Some(preset),
+				..Applied::default()
+			};
+			assert_eq!(applied.delay(), Some(std::time::Duration::ZERO));
+		}
+		assert_eq!(Applied::default().delay(), None);
 	}
 
 	/// A mid-gray RGBA buffer: encodable without a camera.
@@ -691,6 +770,20 @@ mod tests {
 			return;
 		};
 		assert!(matches!(encoder.encode(&gray_frame(640, 480, 0)), Err(Error::Codec(_))));
+	}
+
+	/// An encoder told to resize scales a frame at another size itself, so a
+	/// [`Sink`](super::super::Sink) does that work on its own thread.
+	#[test]
+	fn encode_resizes_when_configured() {
+		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
+		config.resize = Some(crate::resize::Config::default());
+		let Ok(mut encoder) = Encoder::new(&config) else {
+			return;
+		};
+		let mut frames = encoder.encode(&gray_frame(640, 480, 0)).unwrap();
+		frames.extend(encoder.finish().unwrap());
+		assert!(!frames.is_empty());
 	}
 
 	/// A transposed frame is why the encoder compares the shape rather than the
@@ -944,7 +1037,7 @@ mod tests {
 	/// which GPU-less CI runners lack. Run with `--ignored`.
 	#[cfg(target_os = "windows")]
 	#[test]
-	#[ignore = "needs a Media Foundation hardware encoder; see quest/m3/video-hardware.md"]
+	#[ignore = "needs a Media Foundation hardware encoder; see quest/m5/video-hardware.md"]
 	fn mediafoundation_cpu_rgba() {
 		let config = Config {
 			kind: Kind::Named("mediafoundation".into()),
@@ -987,7 +1080,7 @@ mod tests {
 	/// a GPU. Run with `--ignored`.
 	#[cfg(all(target_os = "windows", feature = "capture"))]
 	#[tokio::test]
-	#[ignore = "needs a Windows camera and GPU; see quest/m3/video-hardware.md"]
+	#[ignore = "needs a Windows camera and GPU; see quest/m5/video-hardware.md"]
 	async fn mediafoundation_camera_texture() {
 		let mut camera = crate::capture::open(&crate::capture::Config::default())
 			.await
@@ -1138,6 +1231,8 @@ mod tests {
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
 			pending_cut: false,
+			join: Join::new(config),
+			resize: config.resize,
 			#[cfg(target_os = "linux")]
 			input: None,
 			_thread_bound: PhantomData,
@@ -1194,7 +1289,7 @@ mod tests {
 		};
 		let mut encoder = encoder_with(Box::new(backend), &config);
 
-		// Nothing asked for: `Config::gop` places the boundaries on its own.
+		// Nothing asked for: `Config::join` places the boundaries on its own.
 		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
 
 		// Asked twice before a frame exists: one cut, on the next frame.
@@ -1262,41 +1357,243 @@ mod tests {
 		assert_eq!(*log.lock().unwrap(), vec![false]);
 	}
 
-	/// An interval of zero opens no group, so it is refused at open rather than
+	/// A 320x240 gray frame at `micros`, for a source whose rate varies.
+	fn gray_at(micros: u64) -> Frame {
+		let surface = Surface::rgba(&gray_rgba(320, 240), Size::new(320, 240)).unwrap();
+		Frame::new(surface, moq_net::Timestamp::from_micros(micros).unwrap())
+	}
+
+	/// A source slower than the configured rate (a camera dropping frames in low
+	/// light) still opens a group every join, by its timestamps: no group holds a
+	/// frame a join past its keyframe, so it overshoots by less than one of its
+	/// frames, and none closes more than half a configured frame early. A backend
+	/// that cannot cut is never asked to.
+	#[test]
+	fn a_slow_source_keys_by_time() {
+		let config = Config {
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		// 30 fps, then 20, then 12.5, then 24, the rates a camera drifts through as
+		// the light changes.
+		let mut times = Vec::new();
+		let mut micros = 0u64;
+		for (interval, count) in [(33_333, 45), (50_000, 50), (80_000, 30), (41_667, 60)] {
+			for _ in 0..count {
+				times.push(micros);
+				micros += interval;
+			}
+		}
+
+		for cuts in [true, false] {
+			let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+			let backend = Recorder { log: log.clone(), cuts };
+			let mut encoder = encoder_with(Box::new(backend), &config);
+			for &micros in &times {
+				encoder.encode(&gray_at(micros)).unwrap();
+			}
+			let log = log.lock().unwrap();
+			if !cuts {
+				assert!(log.iter().all(|cut| !cut), "a backend that cannot cut was asked to");
+				continue;
+			}
+
+			let mut key = times[0];
+			for (&micros, &cut) in times.iter().zip(log.iter()).skip(1) {
+				if cut {
+					assert!(
+						micros - key + 16_667 >= 1_000_000,
+						"the group at {key}us closed at {micros}us"
+					);
+					key = micros;
+				} else {
+					assert!(
+						micros - key < 1_000_000,
+						"the group at {key}us holds a frame at {micros}us"
+					);
+				}
+			}
+		}
+	}
+
+	/// A source at the configured rate keys on the same frames as the backend's
+	/// own count, however its timestamps jitter, so measuring by time adds none.
+	#[test]
+	fn a_jittery_source_at_the_configured_rate_keys_on_the_count() {
+		let config = Config {
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let backend = Recorder {
+			log: log.clone(),
+			cuts: true,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
+
+		// Up to a quarter frame either way, so neither end of a group can pull it
+		// past half a frame.
+		let jitter = [0, 8_000, -8_000, 5_000, -5_000];
+		for i in 0..120u64 {
+			let micros = (i * 33_333)
+				.checked_add_signed(jitter[i as usize % jitter.len()])
+				.unwrap();
+			encoder.encode(&gray_at(micros)).unwrap();
+		}
+
+		let log = log.lock().unwrap();
+		let cuts: Vec<usize> = (0..log.len()).filter(|&i| log[i]).collect();
+		assert_eq!(cuts, [30, 60, 90]);
+	}
+
+	/// Keys on its own every `interval` frames, restarting the count at a cut the
+	/// way a real codec's GOP does, and records the cut flag each frame came with.
+	struct Counting {
+		log: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+		interval: u32,
+		count: u32,
+	}
+
+	impl Backend for Counting {
+		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+			self.log.lock().unwrap().push(cut);
+			let keyframe = cut || self.count.is_multiple_of(self.interval);
+			self.count = if keyframe { 1 } else { self.count + 1 };
+			Ok(vec![Encoded::new(bytes::Bytes::new(), frame.timestamp, keyframe)])
+		}
+
+		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn can_cut(&self) -> bool {
+			true
+		}
+
+		fn name(&self) -> &'static str {
+			"counting"
+		}
+	}
+
+	/// A source faster than the configured rate reaches the backend's count before
+	/// the join, and each keyframe the backend places restarts the clock, so the
+	/// encoder forces none between them.
+	#[test]
+	fn a_fast_source_keys_on_the_backend_count() {
+		let config = Config {
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let backend = Counting {
+			log: log.clone(),
+			interval: config.keyframe_interval(),
+			count: 0,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
+
+		// Three seconds at 60 fps: the backend keys every half second.
+		for i in 0..180 {
+			encoder.encode(&gray_at(i * 16_667)).unwrap();
+		}
+		assert!(log.lock().unwrap().iter().all(|cut| !cut));
+	}
+
+	/// A timestamp behind the last keyframe starts a new timeline: the next
+	/// keyframe comes a join after the jump, not once the source catches up with
+	/// where it was.
+	#[test]
+	fn a_jump_back_restarts_the_join() {
+		let config = Config {
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let backend = Recorder {
+			log: log.clone(),
+			cuts: true,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
+
+		for i in 0..20 {
+			encoder.encode(&gray_at(10_000_000 + i * 33_333)).unwrap();
+		}
+		for i in 0..40 {
+			encoder.encode(&gray_at(i * 33_333)).unwrap();
+		}
+
+		let log = log.lock().unwrap();
+		let cuts: Vec<usize> = (0..log.len()).filter(|&i| log[i]).collect();
+		assert_eq!(cuts, [50], "a join after the jump at frame 20");
+	}
+
+	/// openh264 keys where the join asks and restarts its own count there, so a
+	/// 20 fps source on a 30 fps config keys every 20 frames, with no stray IDR
+	/// on the 30-frame count in between.
+	#[test]
+	#[cfg(feature = "openh264")]
+	fn openh264_keys_a_slow_source_by_time() {
+		let config = Config {
+			kind: Kind::Software,
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+
+		let mut keys = Vec::new();
+		for i in 0..70 {
+			for encoded in encoder.encode(&gray_at(i * 50_000)).unwrap() {
+				if encoded.keyframe {
+					keys.push(encoded.timestamp.as_micros() / 50_000);
+				}
+			}
+		}
+		assert_eq!(keys, [0, 20, 40, 60]);
+	}
+
+	/// A join of zero opens no group, so it is refused at open rather than
 	/// handed to a backend, each of which would do something different with it
 	/// (openh264 keys every frame, V4L2 rejects the control, VideoToolbox reads
 	/// it as unlimited).
 	#[test]
-	fn a_zero_keyframe_interval_is_refused() {
+	fn a_zero_join_is_refused() {
 		let config = Config {
-			gop: Gop::Keyframe { interval: 0 },
+			join: std::time::Duration::ZERO,
 			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
 		let Err(err) = Encoder::new(&config) else {
 			panic!("an empty group cannot open");
 		};
-		assert!(matches!(err, Error::InvalidGop(_)), "unexpected error: {err:?}");
+		assert!(matches!(err, Error::ZeroJoin), "unexpected error: {err:?}");
 	}
 
-	/// The wall-time constructor never produces the interval `Encoder::new`
-	/// refuses: a window shorter than a frame rounds up to one frame, not down
-	/// to none.
+	/// The catalog declares the join after rounding to whole frames, since that
+	/// is the spacing the stream actually has: a fractional frame rate stretches
+	/// the default two seconds, and a positive join shorter than a frame rounds
+	/// up to one frame rather than down to none. Nanoseconds round up too, so
+	/// the declaration never undercuts the stream.
 	#[test]
-	fn a_sub_frame_keyframe_window_rounds_up_to_one_frame() {
-		let framerate = crate::FrameRate::new(30, 1).unwrap();
-		assert_eq!(
-			Gop::keyframe_every(std::time::Duration::from_millis(1), framerate),
-			Gop::Keyframe { interval: 1 }
-		);
-		assert_eq!(
-			Gop::keyframe_every(std::time::Duration::from_secs(2), framerate),
-			Gop::Keyframe { interval: 60 }
-		);
-		assert!(
-			Gop::keyframe_every(std::time::Duration::ZERO, framerate)
-				.validate()
-				.is_ok()
-		);
+	fn the_effective_join_is_whole_frames() {
+		let join = |ms, framerate| {
+			let config = Config {
+				join: std::time::Duration::from_millis(ms),
+				..Config::new(320, 240, framerate)
+			};
+			(config.keyframe_interval(), config.effective_join())
+		};
+		let ntsc = crate::FrameRate::new(30_000, 1001).unwrap();
+		let thirty = crate::FrameRate::new(30, 1).unwrap();
+		assert_eq!(join(2000, ntsc), (60, std::time::Duration::from_millis(2002)));
+		assert_eq!(join(2000, thirty), (60, std::time::Duration::from_secs(2)));
+		assert_eq!(join(1, thirty), (1, std::time::Duration::from_nanos(33_333_334)));
 	}
 
 	/// `cut()` has to reach the codec on a *warm* encoder, which is the case that
@@ -1310,10 +1607,10 @@ mod tests {
 			kind: Kind::Software,
 			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		};
-		// A GOP far longer than the run, so any IDR here was asked for rather than
+		// A join far longer than the run, so any IDR here was asked for rather than
 		// inserted on schedule.
 		let mut encoder = Encoder::new(&Config {
-			gop: Gop::Keyframe { interval: 1000 },
+			join: std::time::Duration::from_secs(60),
 			..config
 		})
 		.unwrap();
@@ -1579,21 +1876,23 @@ mod tests {
 		};
 		let rate = crate::FrameRate::new(30, 1).unwrap();
 		let red = [255u8, 0, 0];
+		// Only the height picks the guess, so the frames are narrow to keep the codec and the
+		// scaler cheap.
 		for (source, rung, color) in [
 			// The source's own guess, scaled across 576 lines.
-			(Size::new(1280, 720), Size::new(640, 480), Color::BT709),
+			(Size::new(160, 720), Size::new(80, 480), Color::BT709),
 			// Spaces neither size would guess.
-			(Size::new(1280, 720), Size::new(1920, 1080), Color::BT601),
+			(Size::new(160, 720), Size::new(240, 1080), Color::BT601),
 			(
-				Size::new(640, 480),
-				Size::new(1280, 720),
+				Size::new(80, 480),
+				Size::new(160, 720),
 				Color::BT709.with_range(Range::Full),
 			),
 			// HDR survives the round trip with its primaries and curve.
-			(Size::new(1280, 720), Size::new(640, 480), hdr(Transfer::Pq)),
+			(Size::new(160, 720), Size::new(80, 480), hdr(Transfer::Pq)),
 			(
-				Size::new(640, 480),
-				Size::new(1280, 720),
+				Size::new(80, 480),
+				Size::new(160, 720),
 				hdr(Transfer::Hlg).with_range(Range::Full),
 			),
 		] {

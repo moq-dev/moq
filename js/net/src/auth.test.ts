@@ -1,6 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
-import type { Getter } from "@moq/signals";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
@@ -10,7 +9,7 @@ import * as IetfMessage from "./ietf/message.ts";
 import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
 import * as LiteMessage from "./lite/message.ts";
-import { createMockTransportPair, type MockTransport } from "./mock.ts";
+import { createMockTransportPair, type MockTransport, manual, settlesWithin, waitFor } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
@@ -36,12 +35,6 @@ function patterns(...prefixes: string[]): Path.Patterns {
 
 function grant(publish: string[], subscribe: string[]): Grant {
 	return { publish: patterns(...publish), subscribe: patterns(...subscribe) };
-}
-
-async function waitFor<T>(getter: Getter<T>, ready: (value: T) => boolean): Promise<T> {
-	let value = getter.peek();
-	while (!ready(value)) value = await getter.changed();
-	return value;
 }
 
 /** Whether a request on `path` logged the end of its authorization wait. */
@@ -311,8 +304,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		})();
 
 		await waitFor(client.auth.grant, (g) => g !== undefined);
-		origin.createBroadcast(Path.from("baz/ok")).announce();
-		origin.createBroadcast(Path.from("foo/bar")).announce();
+		origin.route(Path.from("baz/ok"), { hidden: true }).announce();
+		origin.route(Path.from("foo/bar"), { hidden: true }).announce();
 
 		const info = await transport.closed;
 		expect(info.closeCode).toBe(SessionCode.Unauthorized);
@@ -332,15 +325,14 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
-			const withdrawn = origin.createBroadcast(Path.from("foo/bar"));
-			withdrawn.announce();
+			const withdrawn = origin.route(Path.from("foo/bar"));
 			await yieldNow();
-			withdrawn.unannounce();
+			withdrawn.withdraw();
 			await yieldNow();
 			const issued = unanswered.accept(grant(["other"], []));
 			await adding;
 			// Still enforcing: the next uncovered broadcast is the one named.
-			origin.createBroadcast(Path.from("still-bad")).announce();
+			origin.route(Path.from("still-bad"), { hidden: true }).announce();
 			const info = await transport.closed;
 			expect(info.closeCode).toBe(SessionCode.Unauthorized);
 			expect(info.reason).toBe("unauthorized: still-bad");
@@ -354,6 +346,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 	});
 
 	test("a revoked grant withdraws its broadcasts without closing the session", async () => {
+		using clock = manual();
 		const origin = new OriginProducer();
 		const { client, server, transport } = await connect({ publish: origin, protocol });
 		const requests = server.auth.requests();
@@ -367,9 +360,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		})();
 
 		await waitFor(client.auth.grant, (g) => g !== undefined);
-		origin.createBroadcast(Path.from("a/x")).announce();
+		origin.route(Path.from("a/x"), { hidden: true }).announce();
 
-		const announced = server.announced();
+		const announced = server.routes();
 		const first = await nextRoute(announced);
 		expect(first?.prefix).toBe(Path.from("a/x"));
 		expect(first?.kind).toBe("start");
@@ -387,12 +380,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		const third = await nextRoute(announced);
 		expect(third?.kind).toBe("start");
 
-		let closed = false;
-		void transport.closed.then(() => {
-			closed = true;
-		});
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(closed).toBe(false);
+		expect(await settlesWithin(transport.closed, clock, Milli(10))).toBe(false);
 
 		announced.close();
 		client.abort();
@@ -459,9 +447,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		const installed = clock.install();
 		const logged = spyOn(console, "debug");
 		const origin = new OriginProducer();
-		const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room/x"));
+		const broadcast = broadcastRoute.broadcast;
 		const published = broadcast.createTrack("video");
 		published.appendGroup().writeFrame({ payload: new Uint8Array([1]) });
 		const { client, server } = await connect({ serverPublish: origin, protocol });
@@ -527,7 +514,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
-			const track = new OriginProducer().createBroadcast(Path.from("room/x")).broadcast.createTrack("video");
+			const track = new OriginProducer()
+				.route(Path.from("room/x"), { hidden: true })
+				.broadcast.createTrack("video");
 			const reader = track.subscribe();
 			const ready = wireOf(client).auth.ready(Path.from("room/x"), "subscribe", {
 				until: () => abandoned(track.demand()),
@@ -552,9 +541,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 	test("a subscribe abandoned while its token waits never reaches the wire", async () => {
 		const logged = spyOn(console, "debug");
 		const origin = new OriginProducer();
-		const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room/x"));
+		const broadcast = broadcastRoute.broadcast;
 		broadcast.createTrack("video");
 		const { client, server, transport } = await connect({ serverPublish: origin, protocol });
 		const requests = server.auth.requests();
@@ -591,9 +579,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		"a subscribe that regains a reader while its token waits keeps waiting (%d)",
 		async (gap) => {
 			const origin = new OriginProducer();
-			const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
-			const broadcast = broadcastPublication.broadcast;
-			broadcastPublication.announce();
+			const broadcastRoute = origin.route(Path.from("room/x"));
+			const broadcast = broadcastRoute.broadcast;
 			const published = broadcast.createTrack("video");
 			published.appendGroup().writeFrame({ payload: new Uint8Array([7]) });
 			const { client, server } = await connect({ serverPublish: origin, protocol });
@@ -628,9 +615,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 
 	test("a session's close is not a revocation of its subscriptions", async () => {
 		const origin = new OriginProducer();
-		const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room/x"));
+		const broadcast = broadcastRoute.broadcast;
 		broadcast
 			.createTrack("video")
 			.appendGroup()
@@ -649,7 +635,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		expect(track.closed.peek()).toBeUndefined();
 
 		client.abort();
-		expect(await track.closed).toBeNull();
+		const closed = await track.closed;
+		expect(closed).toBeInstanceOf(SessionError);
+		expect((closed as SessionError).code).toBe(SessionCode.Cancel);
 		server.abort();
 	});
 
@@ -1015,12 +1003,53 @@ test("lite-07 ignores a draining session's late refusal while its successor retr
 });
 
 // moq-lite carries patterns, so every grant arrives exactly as issued.
+test("lite-07 a token granted on a draining session stays held until its successor answers", async () => {
+	const protocol = Lite.ALPN_07_WIP;
+	const handle = new Handle();
+	const pair = createMockTransportPair(protocol);
+	const [client, server] = await Promise.all([
+		connectSession({ url, transport: pair.client, publish: new OriginProducer().consume(), auth: handle }),
+		acceptSession({ transport: pair.server, url }),
+	]);
+	const requests = server.auth.requests();
+	const setup = await requests.next();
+	if (!setup) throw new Error("missing setup token");
+	const issued = [setup.accept(grant([], []))];
+	const token = handle.present("token");
+	const request = await requests.next();
+	if (!request) throw new Error("missing token");
+	issued.push(request.accept(grant(["a"], [])));
+	await token.answered;
+	expect(token.held).toBe(true);
+
+	const stream = await Stream.open(pair.server, { version: Lite.Version.DRAFT_07 });
+	await stream.writer.u53(Lite.StreamId.Goaway);
+	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+	await settles(() => !wireOf(client).auth.active);
+
+	const next = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+	const successorRequests = next.server.auth.requests();
+	try {
+		const successorSetup = await successorRequests.next();
+		if (!successorSetup) throw new Error("missing successor setup token");
+		issued.push(successorSetup.accept(grant([], [])));
+		expect(await successorRequests.next()).toBeDefined();
+		// The live session has not answered, but the draining one still grants it.
+		expect(token.grant.peek()).toBeUndefined();
+		expect(token.held).toBe(true);
+	} finally {
+		client.abort();
+		server.abort();
+		next.client.abort();
+		next.server.abort();
+	}
+});
+
 test("a fetch abandoned while its token waits never reaches the wire", async () => {
 	const logged = spyOn(console, "debug");
 	const origin = new OriginProducer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room/x"));
+	const broadcast = broadcastRoute.broadcast;
 	broadcast
 		.createTrack("video")
 		.appendGroup()
@@ -1039,7 +1068,7 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 		const fetched = wireOf(client)
 			.consume(Path.from("room/x"))
 			.track("video")
-			.fetchGroup(0, { signal: abort.signal });
+			.fetchGroup(0n, { signal: abort.signal });
 		await yieldNow();
 		abort.abort(new Error("left"));
 		await expect(fetched).rejects.toThrow();
@@ -1062,9 +1091,8 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 // The peer refuses a listing its token has not yet authorized, so the request waits for it.
 test("a listing waits for its token before reaching the wire", async () => {
 	const origin = new OriginProducer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room/x"));
+	const broadcast = broadcastRoute.broadcast;
 	broadcast.createTrack("video");
 	const { client, server, transport } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
 	const requests = server.auth.requests();
@@ -1100,9 +1128,8 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 	"a fetch that regains a caller while its token waits keeps waiting (%d)",
 	async (gap) => {
 		const origin = new OriginProducer();
-		const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
-		const broadcast = broadcastPublication.broadcast;
-		broadcastPublication.announce();
+		const broadcastRoute = origin.route(Path.from("room/x"));
+		const broadcast = broadcastRoute.broadcast;
 		broadcast
 			.createTrack("video")
 			.appendGroup()
@@ -1119,12 +1146,12 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 			if (!unanswered) throw new Error("missing token");
 			const track = wireOf(client).consume(Path.from("room/x")).track("video");
 			const abort = new AbortController();
-			const first = track.fetchGroup(0, { signal: abort.signal });
+			const first = track.fetchGroup(0n, { signal: abort.signal });
 			await yieldNow();
 			// The last caller leaves and another coalesces before the wait observes it.
 			abort.abort(new Error("left"));
 			for (let i = 0; i < gap; i++) await Promise.resolve();
-			const second = track.fetchGroup(0);
+			const second = track.fetchGroup(0n);
 			await expect(first).rejects.toThrow();
 			const issued = unanswered.accept(grant([], ["room"]));
 			await adding;
@@ -1272,15 +1299,13 @@ test.each([
 // moq-transport has no stream code for it, so only moq-lite resets with UNAUTHORIZED.
 test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 	const clientOrigin = new OriginProducer();
-	const upPublication = clientOrigin.createBroadcast(Path.from("up/y"));
-	const up = upPublication.broadcast;
-	upPublication.announce();
+	const upRoute = clientOrigin.route(Path.from("up/y"));
+	const up = upRoute.broadcast;
 	const upTrack = up.createTrack("video");
 
 	const serverOrigin = new OriginProducer();
-	const downPublication = serverOrigin.createBroadcast(Path.from("room/x"));
-	const down = downPublication.broadcast;
-	downPublication.announce();
+	const downRoute = serverOrigin.route(Path.from("room/x"));
+	const down = downRoute.broadcast;
 	const downTrack = down.createTrack("video");
 
 	const { client, server } = await connect({
@@ -1357,6 +1382,50 @@ test("withdrawn queued tokens are pruned before the next application decision", 
 		(await live).close();
 		await request.closed;
 	} finally {
+		client.abort();
+		server.abort();
+	}
+});
+
+test("grants issued while a reply is blocked replace the one still queued", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
+	const grants = Array.from({ length: 100 }, (_, i) => grant([`${i}`], []));
+	const original = LiteAuthWire.prototype.grant;
+	// Which of `grants` reached the wire, in order.
+	const sent: number[] = [];
+	let release!: () => void;
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const spy = spyOn(LiteAuthWire.prototype, "grant").mockImplementation(async function (
+		this: LiteAuthWire,
+		stream,
+		grant,
+	) {
+		const index = grants.findIndex((issued) => issued.publish === grant.publish);
+		if (index >= 0) sent.push(index);
+		if (index === 0) await blocked;
+		return original.call(this, stream, grant);
+	});
+	try {
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("setup token missing");
+		setup.accept(grant(["a"], []));
+		const live = client.auth.add("live");
+		live.catch(() => void 0);
+		const request = await requests.next();
+		if (!request) throw new Error("live token missing");
+		const issued = request.accept(grants[0]);
+		await settles(() => sent.length === 1);
+		for (const update of grants.slice(1)) issued.update(update);
+		release();
+		await live;
+		await settles(() => sent.length === 2);
+		for (let i = 0; i < 10; i++) await yieldNow();
+		expect(sent).toEqual([0, 99]);
+	} finally {
+		spy.mockRestore();
 		client.abort();
 		server.abort();
 	}

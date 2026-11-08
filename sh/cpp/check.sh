@@ -11,6 +11,13 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
 fi
 
+# Both configure and build need the cache session for CMake's compiler launchers.
+# Keep Visual Studio builds on plain CMake, as on the Windows platform job.
+cmake_command=(cmake)
+if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]] && command -v mbx >/dev/null 2>&1; then
+    cmake_command=(mbx exec cmake)
+fi
+
 ffi_dir=""
 archive=""
 if [[ $# -gt 0 ]]; then
@@ -30,6 +37,12 @@ if [[ $# -gt 0 ]]; then
 fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../cpp"
+
+# A source build checks formatting first; the release jobs that pass an input
+# check a build of sources already gated.
+if [[ -z "$archive" && -z "$ffi_dir" ]]; then
+    bash ../sh/clang-format.sh --check cpp/moq
+fi
 
 # Single-config generators build the package Debug, for cargo's dev profile. The consumers
 # clear the build type, since debug info only slows the bindings' compile and link. Visual
@@ -58,8 +71,8 @@ if [[ -n "$archive" ]]; then
     fi
 else
     prefix="$PWD/$build/prefix"
-    cmake -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$ffi_dir"
-    cmake --build "$build/package" --config Release
+    "${cmake_command[@]}" -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$ffi_dir"
+    "${cmake_command[@]}" --build "$build/package" --config Release
     rm -rf "$prefix"
     cmake --install "$build/package" --config Release --prefix "$prefix"
 fi
@@ -68,8 +81,8 @@ run() {
     if [[ -x "$1/$2" ]]; then "$1/$2"; else "$1/Release/$2.exe"; fi
 }
 for std in 17 23; do
-    cmake -S moq/test -B "$build/test-$std" -DCMAKE_BUILD_TYPE= -DCMAKE_CXX_STANDARD="$std" -DCMAKE_PREFIX_PATH="$prefix"
-    cmake --build "$build/test-$std" --config Release --parallel
+    "${cmake_command[@]}" -S moq/test -B "$build/test-$std" -DCMAKE_BUILD_TYPE= -DCMAKE_CXX_STANDARD="$std" -DCMAKE_PREFIX_PATH="$prefix"
+    "${cmake_command[@]}" --build "$build/test-$std" --config Release --parallel
     run "$build/test-$std" probe
 done
 # The C++23 probe over the C++17 bindings.
@@ -90,10 +103,10 @@ bash ../doc/lib/samples.sh cpp ../doc/lib/cpp/index.md >"$build/doc-samples.cpp"
 "${CXX:-c++}" -std=c++20 -fsyntax-only -Wall -Werror -I"$prefix/include" moq/bench/main.cpp
 
 if command -v pkg-config >/dev/null 2>&1; then
-    export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+    pc="$prefix/lib/pkgconfig/moq-cpp.pc"
     # Assigned first: set -e ignores a failing substitution inside a command's arguments.
-    sources=$(pkg-config --variable=sources moq-cpp)
-    flags=$(pkg-config --cflags --libs moq-cpp)
+    sources=$(pkg-config --variable=sources "$pc")
+    flags=$(pkg-config --cflags --libs "$pc")
     # Those sources already compiled at C++17 with these flags in test-17, so the probe links
     # that library instead of compiling them again.
     if [[ ! -f "$sources" ]]; then

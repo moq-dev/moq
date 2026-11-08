@@ -20,8 +20,8 @@ test("room restores the announce prefix and reconciles local identity changes", 
 				let update: Net.Announce.Event | undefined = {
 					prefix: Net.Path.from("room-a/bob/camera.hang"),
 					captures: [Net.Path.Pattern.literal(Net.Path.from("bob/camera.hang"))],
-					kind: "start",
-					route: { hops: [], cost: 0n },
+					kind: "present",
+					route: { hops: [], cost: 0n, anonymous: false },
 				};
 				const stream = {
 					next: async () => {

@@ -2,8 +2,7 @@ import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
-import { Signal } from "@moq/signals";
-import type { Broadcast } from "../../../../../js/watch/src/broadcast";
+import { Broadcast } from "../../../../../js/watch/src/broadcast";
 import { Sync } from "../../../../../js/watch/src/sync";
 import { Decoder } from "../../../../../js/watch/src/video/decoder";
 import { Source } from "../../../../../js/watch/src/video/source";
@@ -59,13 +58,16 @@ window.runRecovery = async (packets) => {
 			super.decode(chunk);
 		}
 	};
-	const producer = new Moq.Broadcast.Producer();
-	const track = producer.createTrack("video", { timescale: Moq.Time.Timescale.MICRO });
+	const origin = new Moq.Origin.Producer();
+	const name = Moq.Path.from("open-gop");
+	const route = origin.route(name);
+	// Every group is written before the decoder reads from the first, so none may go stale.
+	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
-		if (group?.sequence !== packet.group) {
+		if (group?.sequence !== BigInt(packet.group)) {
 			group?.finish();
-			group = track.createGroup(packet.group);
+			group = track.createGroup(BigInt(packet.group));
 		}
 		const timestamp = Micro(packet.timestamp);
 		const payload = Uint8Array.from(atob(packet.data), (c) => c.charCodeAt(0));
@@ -77,20 +79,20 @@ window.runRecovery = async (packets) => {
 	group?.finish();
 	track.finish();
 	track.close();
-	const media = producer.consume();
 	const config = Catalog.VideoConfigSchema.parse({
 		codec: "avc1.64001f",
 		container: { kind: "legacy" },
 		codedWidth: 160,
 		codedHeight: 96,
 	});
-	const catalog = new Signal<Catalog.Root>({ video: { renditions: { video: config } } });
-	const broadcast = new Signal<Broadcast | undefined>({
-		out: { catalog, active: new Signal(media) },
-		relativeBroadcast: () => media,
-	} as unknown as Broadcast);
+	const broadcast = new Broadcast({
+		origin,
+		name,
+		catalogFormat: "manual",
+		catalog: { video: { renditions: { video: config } } },
+	});
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay: Milli(0), buffer: Milli(10_000) });
+	const sync = new Sync({ delay: Milli(0), lookahead: Milli(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {
 		await inputDone;
@@ -102,8 +104,8 @@ window.runRecovery = async (packets) => {
 		decoder.close();
 		source.close();
 		sync.close();
-		media.close();
-		producer.close();
+		broadcast.close();
+		origin.close();
 		window.VideoDecoder = Native;
 		Container.Consumer.prototype.next = next;
 	}

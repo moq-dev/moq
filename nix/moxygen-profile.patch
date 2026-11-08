@@ -1,6 +1,26 @@
 --- a/moxygen/moqtest/MoQTestClient.cpp
 +++ b/moxygen/moqtest/MoQTestClient.cpp
-@@ -554,6 +554,10 @@
+@@ -18,7 +18,6 @@
+ const int kDefaultRequestId = 0;
+ const std::string kDefaultTrackName = "test";
+ const GroupOrder kDefaultGroupOrder = GroupOrder::OldestFirst;
+-const LocationFilter kDefaultLocationFilter = LocationFilter::relativeStart(0);
+ 
+ MoQTestClient::MoQTestClient(
+     PrivateTag,
+@@ -179,7 +178,10 @@
+ 
+   sub.fullTrackName = ftn;
+   sub.groupOrder = kDefaultGroupOrder;
+-  sub.filter = kDefaultLocationFilter;
++  // Verify the complete configured fixture, not whichever groups start after
++  // the relay resolves its live edge. Upstream may already be sending group 0
++  // when a cold relay answers a Next Group subscription.
++  sub.filter = LocationFilter::absoluteStart(resolveFetchWindow(params).first);
+ 
+   // Add delivery timeout parameter if configured
+   if (params.deliveryTimeout > 0) {
+@@ -539,11 +541,26 @@
    XLOG(DBG1) << "MoQTest DEBUGGING: calling onObjectStatus";
  
    ObjectHeader header = objHeader;
@@ -11,10 +31,28 @@
    // Validate the received data
    if (header.status != ObjectStatus::END_OF_GROUP) {
      XLOG(ERR)
-@@ -594,6 +598,35 @@
+         << "MoQTest verification result: FAILURE! reason: Unknown object status received: "
+         << header.status;
++    return;
++  }
++  // The terminal stream past the last group skips the header's end-of-group
++  // check, so a group marker there must still fail. No such group exists.
++  if (header.group > window_.last.group) {
++    recordSemanticsFailure(
++        folly::to<std::string>(
++            "End of Group Marker Past Last Group: group=",
++            header.group,
++            "  Last=",
++            window_.last.group));
+     return;
    }
- }
  
+@@ -577,6 +594,35 @@
+     XLOG(DBG1)
+         << "MoQTest DEBUGGING: onObjectStatus: No more data to be expected";
+   }
++}
++
 +void MoQTestClient::validateEndOfTrack(
 +    const ReceiveState& state,
 +    const ObjectHeader& header) {
@@ -42,12 +80,10 @@
 +    return;
 +  }
 +  endOfTrackReceived_ = true;
-+}
-+
- void MoQTestClient::onEndOfStream() {
-   XLOG(DBG1) << "MoQTest DEBUGGING: calling onEndOfStream";
  }
-@@ -793,6 +826,16 @@
+ 
+ void MoQTestClient::onEndOfStream() {
+@@ -778,6 +824,16 @@
    publishDoneReceived_ = true;
  }
  
@@ -64,7 +100,7 @@
  void MoQTestClient::validateSubgroupHeader(
      const ReceiveState& state,
      uint64_t groupID,
-@@ -811,8 +854,11 @@
+@@ -796,8 +852,11 @@
      return;
    }
  
@@ -77,7 +113,7 @@
      recordSemanticsFailure(
          folly::to<std::string>(
              "End of Group Signal Mismatch for group=",
-@@ -839,7 +885,7 @@
+@@ -824,7 +883,7 @@
    // The publisher may elide the priority from the wire, but the value the
    // subscriber ends up with must still be the one the publisher chose.
    auto expectedPriority = publisherPriorityForGroup(groupID);
@@ -86,7 +122,7 @@
      recordSemanticsFailure(
          folly::to<std::string>(
              "Subgroup Priority Mismatch for group=",
-@@ -876,7 +922,7 @@
+@@ -861,7 +920,7 @@
    }
  
    auto expectedPriority = publisherPriorityForGroup(header.group);
@@ -106,7 +142,7 @@
    void onError(ReceiveState& state, ResetStreamErrorCode);
    void onPublishDone();
 @@ -318,6 +319,8 @@
-   // Last group the joining FETCH half covers; unset when there is no join.
+   // Last group the fill covers; unset when there is no fill.
    std::optional<uint64_t> fetchHalfLastGroup_;
    bool publishDoneReceived_{false};
 +  // A track ends at most once.

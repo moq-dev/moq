@@ -16,15 +16,14 @@ from the dispatcher's static JS pattern, which would otherwise never run the rea
 
 An input outside every current workspace selects all packages, including shared
 inputs such as `js/common/`, `js/justfile`, `test/tsconfig.json`, `drafts/`, Rust's
-shared JSON vectors, the root manifest and lockfile, and Biome then checks `js/`,
-`test/`, `doc/` and `demo/`, including the `demo/pub` Worker outside the workspace.
-Narrow selections lint every selected package directory plus `js/common/`. Biome's
-full HTML support counts Vue template reads as uses; its HTML formatter stays opt-in.
+shared JSON vectors, and the root manifest and lockfile.
+Biome is not part of this selection: the dispatcher's `biome` module runs
+`just biome` over the whole repository on every diff. Biome's full HTML support
+counts Vue template reads as uses; its HTML formatter stays opt-in.
 Unrelated paths are filtered by the dispatcher first.
 `just js check`, `just js test` and `just js build` explicitly select all packages.
 
-Checks generate WASM only when a selected package or one of its transitive
-dependencies is `@moq/wasm`; `just js build` leaves it to `just js wasm`. Harness type-checking uses the shared test
+Harness type-checking uses the shared test
 configuration, excluding unselected workspace packages. Harnesses outside every
 workspace remain checked because they have no dependency metadata; the all-package
 fallback keeps the whole harness check. Shared dependency validation, environment scanning and
@@ -35,9 +34,18 @@ The root devShell supplies Chromium and exports its Playwright version. Checks
 require every npm `playwright` dependency outside `test/smoke` to pin that exact
 version. A root `flake.nix` or `flake.lock` change selects JS checks too: when
 nixpkgs moves Playwright, update the reported manifests and regenerate `bun.lock`
-with `bun install` in the new shell. Smoke has its own flake and freshness check.
+with `uv run --no-project python sh/js/install.py update` in the new shell. Smoke has its own flake and freshness check.
 
 Run `python3 sh/js/workspace.test.py` for graph and execution regressions. The same
 suite runs in `just gh test` on every check. To inspect work without executing it, pass
 a file containing relevant paths, one per line, to
 `python3 sh/js/workspace.py plan LISTFILE`, or pass `--all`.
+
+All root workspace installers use `uv run --no-project python sh/js/install.py frozen` for checks
+and tests, or `update` when lockfile changes are allowed. Both reuse an unchanged
+installation under one checkout lock, including libav output. Separate Worker,
+smoke-client, and disposable baseline workspaces keep their own installs.
+
+The concurrency guarantee applies to unchanged dependency inputs. Stop active
+consumers before changing dependencies or postinstall inputs. Unix installers share an OS lock. Native Windows runs one recipe at a time,
+matching its existing development support; uv supplies Python on both setup paths.

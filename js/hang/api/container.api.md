@@ -1,13 +1,13 @@
 # `@moq/hang/container`
 
 ```ts
-import { Audio } from "@moq/hang/catalog";
+import { AudioConfig } from "@moq/hang/catalog";
 import { Format as Format_1 } from "@moq/hang/container";
 import { Micro } from "@moq/clock";
 import { Milli } from "@moq/clock";
 import { Net } from "@moq/hang";
 import { Signals } from "@moq/hang";
-import { Video } from "@moq/hang/catalog";
+import { VideoConfig } from "@moq/hang/catalog";
 
 export interface BufferedRange {
 	end: Milli;
@@ -25,13 +25,11 @@ export class Consumer {
 }
 
 export interface ConsumerProps {
+	delay?: Signals.GetterInit<Net.Track.Delay>;
 	format: Format;
-	maxBuffer?: number;
-	maxDelay?: Signals.GetterInit<Milli>;
 	predecessor?: Consumer;
+	warmup?: Milli;
 }
-
-export const DEFAULT_MAX_BUFFER: number;
 
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
@@ -50,7 +48,7 @@ export namespace Legacy {
 	export { BufferedRange };
 	export { BufferedRanges };
 	export class Format implements Format_1 {
-		constructor(config: Audio.AudioConfig | Video.VideoConfig | "audio" | "video" | "data");
+		constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data");
 		decode(frame: Uint8Array): Frame[];
 		end(frame: Frame): Micro | undefined;
 		finishGroup(group: Net.Group.Producer, end?: Micro): void;
@@ -72,9 +70,11 @@ export namespace Legacy {
 
 export * as Loc from "@moq/loc";
 
+export const MAX_AGE: Milli;
+
 export type Read = {
 	frame: ReceivedFrame;
-	group: number;
+	group: bigint;
 	kind: "frame";
 } | {
 	duration: Micro;
@@ -82,7 +82,7 @@ export type Read = {
 	timestamp: Micro;
 } | {
 	end: Micro;
-	group: number;
+	group: bigint;
 	kind: "end";
 };
 
@@ -91,11 +91,11 @@ export interface ReceivedFrame extends Frame {
 }
 
 export type TrackInfoOptions = {
-	maxAge?: Milli;
+	maxAge?: Milli | null;
 	priority: number;
 };
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
-export function trackInfo(options: TrackInfoOptions): Partial<Net.Track.Info>;
+export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
 ```

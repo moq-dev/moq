@@ -22,23 +22,24 @@ children for the causes nothing owned.
 
 This README's own work, after the children:
 
-- Nightly's multi-step jobs (Features first) keep going past a failed step
-  and fail at the end, so one break never hides the steps after it.
-- Confirm a scheduled run passes. Failures already owned elsewhere stay
-  there: the audio near-zero p95 row belongs to
+- Confirm a scheduled run on `main` passes; never dispatch Nightly. Failures
+  already owned elsewhere stay there: the audio near-zero p95 row belongs to
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
-  macOS `receive_credit` timeout to
-  [test flakes](/quest/m0/test-flakes-2/README.md), and the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md).
+  macOS `receive_credit` timeout has no owner since its quest was deleted in
+  [moq-dev/moq#6732](https://github.com/moq-dev/moq/pull/6732), so plan one under
+  [test flakes](/quest/m0/test-flakes-2/README.md) if it recurs, and the paired bench
+  threshold is calibrated in [Paired comparison](/bench/README.md#paired-comparison). The moq-net benchmark
+  fixtures were repaired in [moq-dev/moq#7940](https://github.com/moq-dev/moq/pull/7940).
+  The receive-windows benchmark's overcommitted cells, skipped since
+  [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838), moved to
+  [m1](/quest/m1/receive-windows-evicted.md) on 2026-11-04 (maintainer).
+
+Decided 2026-11-05 (maintainer, /quest-plan): catch the next moq-net bench
+break in Nightly's measured coverage only. Do not add a test-mode bench run
+to the PR gate; the full run costs about 17 minutes per PR.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
-- [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
-- [OBS TSan passes without a wall-clock bound](/quest/m0/nightly/obs-tsan.md) - `destroySource` asserts ordering instead of `elapsed < 500ms`
-- [Paired bench regressions bisected](/quest/m0/nightly/bench-regressions.md) - retirement/selection's +21-24% and two 10% rows fixed or shown to be noise
-- [Firefox's player closes every VideoFrame](/quest/m0/nightly/firefox-videoframe.md) - the Media job's Firefox player stops leaking an unclosed VideoFrame
-- [Gate stops hanging](/quest/m0/nightly/gate-hang.md) - `just gate` finishes instead of hanging to the timeout, and a hang names its module
-- [moq-quic rustdoc](/quest/m0/nightly/quic-rustdoc.md) - `--all-features` rustdoc for moq-quic builds and a lane checks it
+- [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs

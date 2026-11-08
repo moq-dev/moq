@@ -73,12 +73,13 @@ The simplest way to watch a stream:
 | `backend`        | auto, webgpu, 2d           | `auto`        | Graphics API for the canvas. `auto` picks WebGPU where it can render video, else Canvas2D. |
 | `follow`         | boolean                    | true          | Follow the broadcast's announcements: wait for one before subscribing, and move to each restart. Ignored when the relay does not support broadcast discovery. |
 | `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |
-| `buffer`         | duration                   | `0ms`         | Future-dated media held before playback skips ahead. |
+| `lookahead`      | duration                   | `0ms`         | How far future-dated media may run ahead of the live edge. Not a jitter buffer: live streams tune `delay`. |
 | `captions`       | string                     | off           | Text rendition to render. |
 | `catalog-format` | hang, msf, manual          | auto-detected | The catalog format; detected from the name suffix unless set. |
+| `echo`           | path segment               | -             | The viewer's feedback name: once the catalog solicits feedback, publish `<echo path>/<name>.echo` reporting what each rendition received and played. |
 
 Property and built-in UI changes reflect into attributes. Invalid URLs, numbers, durations,
-version lists, and rendering/catalog modes are refused: their property setters throw, and malformed markup
+version lists, echo names, and rendering/catalog modes are refused: their property setters throw, and malformed markup
 reports a browser `error` event and suspends media until corrected or removed. Defaults apply
 when attributes are absent.
 

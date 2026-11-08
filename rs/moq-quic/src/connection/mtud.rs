@@ -16,27 +16,13 @@ pub(crate) struct MtuDiscovery {
 }
 
 impl MtuDiscovery {
-	pub(crate) fn new(
-		initial_plpmtu: u16,
-		min_mtu: u16,
-		peer_max_udp_payload_size: Option<u16>,
-		config: mtu::Config,
-	) -> Self {
+	pub(crate) fn new(initial_plpmtu: u16, min_mtu: u16, config: mtu::Config) -> Self {
 		debug_assert!(
 			initial_plpmtu >= min_mtu,
 			"initial_max_udp_payload_size must be at least {min_mtu}"
 		);
 
-		let mut mtud = Self::with_state(initial_plpmtu, min_mtu, Some(EnabledMtuDiscovery::new(config)));
-
-		// We might be migrating an existing connection to a new path, in which case the transport
-		// parameters have already been transmitted, and we already know the value of
-		// `peer_max_udp_payload_size`
-		if let Some(peer_max_udp_payload_size) = peer_max_udp_payload_size {
-			mtud.on_peer_max_udp_payload_size_received(peer_max_udp_payload_size);
-		}
-
-		mtud
+		Self::with_state(initial_plpmtu, min_mtu, Some(EnabledMtuDiscovery::new(config)))
 	}
 
 	/// MTU discovery will be disabled and the current MTU will be fixed to the provided value
@@ -523,7 +509,7 @@ mod tests {
 
 	fn default_mtud() -> MtuDiscovery {
 		let config = mtu::Config::default();
-		MtuDiscovery::new(1_200, 1_200, None, config)
+		MtuDiscovery::new(1_200, 1_200, config)
 	}
 
 	fn completed(mtud: &MtuDiscovery) -> bool {
@@ -563,7 +549,7 @@ mod tests {
 		assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
 
 		mtud.on_non_probe_lost(4, 800);
-		assert!(!mtud.black_hole_detected(Instant::now()));
+		assert!(!mtud.black_hole_detected(Instant::ZERO));
 		assert_eq!(mtud.black_hole_detector.largest_non_probe_lost(), None);
 		assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
 	}
@@ -576,7 +562,7 @@ mod tests {
 		assert_eq!(mtud.black_hole_detector.largest_non_probe_lost(), Some(3));
 		assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
 
-		assert!(!mtud.black_hole_detected(Instant::now()));
+		assert!(!mtud.black_hole_detected(Instant::ZERO));
 		assert_eq!(mtud.black_hole_detector.largest_non_probe_lost(), None);
 		assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 1);
 	}
@@ -584,21 +570,21 @@ mod tests {
 	#[test]
 	fn black_hole_detector_ignores_empty_burst() {
 		let mut mtud = default_mtud();
-		assert!(!mtud.black_hole_detected(Instant::now()));
+		assert!(!mtud.black_hole_detected(Instant::ZERO));
 		assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
 	}
 
 	#[test]
 	fn mtu_discovery_disabled_does_nothing() {
 		let mut mtud = MtuDiscovery::disabled(1_200, 1_200);
-		let probe_size = mtud.poll_transmit(Instant::now(), 0);
+		let probe_size = mtud.poll_transmit(Instant::ZERO, 0);
 		assert_eq!(probe_size, None);
 	}
 
 	#[test]
 	fn mtu_discovery_disabled_lost_four_packet_bursts_triggers_black_hole_detection() {
 		let mut mtud = MtuDiscovery::disabled(1_400, 1_250);
-		let now = Instant::now();
+		let now = Instant::ZERO;
 
 		for i in 0..4 {
 			// The packets are never contiguous, so each one has its own burst
@@ -613,7 +599,7 @@ mod tests {
 	#[test]
 	fn mtu_discovery_lost_two_packet_bursts_does_not_trigger_black_hole_detection() {
 		let mut mtud = default_mtud();
-		let now = Instant::now();
+		let now = Instant::ZERO;
 
 		for i in 0..2 {
 			mtud.on_non_probe_lost(i, 1300);
@@ -624,7 +610,7 @@ mod tests {
 	#[test]
 	fn mtu_discovery_lost_four_packet_bursts_triggers_black_hole_detection_and_resets_timer() {
 		let mut mtud = default_mtud();
-		let now = Instant::now();
+		let now = Instant::ZERO;
 
 		for i in 0..4 {
 			// The packets are never contiguous, so each one has its own burst
@@ -646,8 +632,8 @@ mod tests {
 			upper_bound: 9_000,
 			..mtu::Config::default()
 		};
-		let mut mtud = MtuDiscovery::new(1_200, 1_200, None, config);
-		let now = Instant::now();
+		let mut mtud = MtuDiscovery::new(1_200, 1_200, config);
+		let now = Instant::ZERO;
 		drive_to_completion(&mut mtud, now, 1_500);
 
 		// Polling right after completion does not cause new packets to be sent
@@ -674,7 +660,7 @@ mod tests {
 		let mut mtud = default_mtud();
 
 		let mut probe_sizes = (0..4).map(|i| {
-			let probe_size = mtud.poll_transmit(Instant::now(), i);
+			let probe_size = mtud.poll_transmit(Instant::ZERO, i);
 			assert!(probe_size.is_some(), "no probe returned for packet {i}");
 
 			mtud.on_probe_lost();
@@ -698,7 +684,7 @@ mod tests {
 		let mut mtud = default_mtud();
 
 		mtud.on_peer_max_udp_payload_size_received(1300);
-		let probed_sizes = drive_to_completion(&mut mtud, Instant::now(), 1500);
+		let probed_sizes = drive_to_completion(&mut mtud, Instant::ZERO, 1500);
 
 		assert_eq!(mtud.state.as_ref().unwrap().peer_max_udp_payload_size, 1300);
 		assert_eq!(mtud.current_mtu, 1300);
@@ -709,12 +695,13 @@ mod tests {
 
 	#[test]
 	fn mtu_discovery_with_previous_peer_max_udp_payload_size_clamps_upper_bound() {
-		let mut mtud = MtuDiscovery::new(1500, 1_200, Some(1400), mtu::Config::default());
+		let mut mtud = MtuDiscovery::new(1500, 1_200, mtu::Config::default());
+		mtud.on_peer_max_udp_payload_size_received(1400);
 
 		assert_eq!(mtud.current_mtu, 1400);
 		assert_eq!(mtud.state.as_ref().unwrap().peer_max_udp_payload_size, 1400);
 
-		let probed_sizes = drive_to_completion(&mut mtud, Instant::now(), 1500);
+		let probed_sizes = drive_to_completion(&mut mtud, Instant::ZERO, 1500);
 
 		assert_eq!(mtud.current_mtu, 1400);
 		assert!(probed_sizes.is_empty());
@@ -726,7 +713,7 @@ mod tests {
 	#[should_panic(expected = "Transport parameters received after MTU probing started")]
 	fn mtu_discovery_with_peer_max_udp_payload_size_during_search_panics() {
 		let mut mtud = default_mtud();
-		assert!(mtud.poll_transmit(Instant::now(), 0).is_some());
+		assert!(mtud.poll_transmit(Instant::ZERO, 0).is_some());
 		assert!(matches!(mtud.state.as_ref().unwrap().phase, Phase::Searching(_)));
 		mtud.on_peer_max_udp_payload_size_received(1300);
 	}
@@ -735,7 +722,7 @@ mod tests {
 	fn mtu_discovery_with_1500_limit() {
 		let mut mtud = default_mtud();
 
-		let probed_sizes = drive_to_completion(&mut mtud, Instant::now(), 1500);
+		let probed_sizes = drive_to_completion(&mut mtud, Instant::ZERO, 1500);
 
 		let expected_probed_sizes = &[1326, 1389, 1420, 1452];
 		assert_eq!(probed_sizes, expected_probed_sizes);
@@ -749,9 +736,9 @@ mod tests {
 			upper_bound: 10_000,
 			..mtu::Config::default()
 		};
-		let mut mtud = MtuDiscovery::new(1_200, 1_200, None, config);
+		let mut mtud = MtuDiscovery::new(1_200, 1_200, config);
 
-		let probed_sizes = drive_to_completion(&mut mtud, Instant::now(), 1500);
+		let probed_sizes = drive_to_completion(&mut mtud, Instant::ZERO, 1500);
 
 		let expected_probed_sizes = &[
 			5600, 5600, 5600, 3399, 3399, 3399, 2299, 2299, 2299, 1749, 1749, 1749, 1474, 1611, 1611, 1611, 1542, 1542,
@@ -768,9 +755,9 @@ mod tests {
 			upper_bound: MAX_UDP_PAYLOAD,
 			..mtu::Config::default()
 		};
-		let mut mtud = MtuDiscovery::new(1200, 1200, None, config);
+		let mut mtud = MtuDiscovery::new(1200, 1200, config);
 
-		drive_to_completion(&mut mtud, Instant::now(), u16::MAX);
+		drive_to_completion(&mut mtud, Instant::ZERO, u16::MAX);
 
 		assert_eq!(mtud.current_mtu, 65527);
 		assert!(completed(&mtud));
@@ -782,9 +769,9 @@ mod tests {
 			upper_bound: MAX_UDP_PAYLOAD,
 			..mtu::Config::default()
 		};
-		let mut mtud = MtuDiscovery::new(1200, 1200, None, config);
+		let mut mtud = MtuDiscovery::new(1200, 1200, config);
 
-		let now = Instant::now();
+		let now = Instant::ZERO;
 		let mut iterations = 0;
 		for i in 1..100 {
 			iterations += 1;
@@ -792,7 +779,7 @@ mod tests {
 			let probe_pn = i * 2 - 1;
 			let other_pn = i * 2;
 
-			let result = mtud.poll_transmit(Instant::now(), probe_pn);
+			let result = mtud.poll_transmit(Instant::ZERO, probe_pn);
 
 			if completed(&mtud) {
 				break;

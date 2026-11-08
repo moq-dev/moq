@@ -1,97 +1,160 @@
 //! The local cluster view behind the internal `/nodes` endpoint.
 //!
-//! Lists the peers this relay dialed and currently holds a session with, keyed
-//! by the URL it dialed. Accepted peer sessions are not listed: a peer declares
+//! Lists every peer this relay is configured to dial, whether or not a session
+//! is up, with its live sessions and when one last connected. A peer's history
+//! is keyed by its dial identity, so it survives failed attempts and a dial
+//! restarted for a new cost or credential, and is retired only when the peer
+//! leaves the dial set. Accepted peer sessions are not listed: a peer declares
 //! no URL, so there is nothing to name it by.
 
 use std::{
-	collections::{BTreeMap, HashMap},
+	collections::BTreeMap,
 	sync::{Arc, Mutex, PoisonError},
 };
 
 use serde::Serialize;
 
-/// Established outbound cluster connections, by `conn` id.
+use crate::cluster::PeerKey;
+
+/// Outbound cluster peers by dial identity.
 #[derive(Clone, Default)]
 pub(crate) struct Nodes {
-	connections: Arc<Mutex<HashMap<u64, String>>>,
+	state: Arc<Mutex<State>>,
+}
+
+#[derive(Default)]
+struct State {
+	/// Keyed by the dial set's peer identity.
+	peers: BTreeMap<PeerKey, Peer>,
+	/// Distinguishes the dials of one peer, so a replaced dial clears only its own session.
+	next_dial: u64,
+}
+
+#[derive(Default)]
+struct Peer {
+	/// Live sessions by `conn` id, each with the dial that owns it.
+	connections: BTreeMap<u64, (u64, moq_tokio::Transport)>,
+	/// The latest successful handshake of any dial of this peer.
+	last_connected: Option<kio::clock::Instant>,
 }
 
 /// The JSON document returned by the internal `/nodes` endpoint.
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct Snapshot {
-	/// Dialed cluster nodes with a live session.
+	/// Configured outbound peers, connected or not.
 	pub nodes: Vec<Node>,
 }
 
-/// One dialed cluster node.
+/// One configured outbound peer.
 #[derive(Debug, Serialize)]
 pub(crate) struct Node {
-	/// Canonical URL this relay dialed, without its query.
+	/// The peer's canonical identity, with query, userinfo, and repeated slashes
+	/// removed: its dial URL, or for a LAN peer that advertised no node URL, its
+	/// per-run mDNS instance in URL form.
 	pub node: String,
-	/// Established connections to this node.
+	/// Live sessions to this peer; empty while it connects or retries.
 	pub connections: Vec<Connection>,
+	/// Seconds since a session to this peer last connected, including sessions
+	/// already closed. Null until the first successful handshake.
+	pub last_connected_seconds_ago: Option<f64>,
 }
 
-/// An established outbound cluster connection.
+/// A live outbound cluster session.
+#[serde_with::serde_as]
 #[derive(Debug, Serialize)]
 pub(crate) struct Connection {
 	/// The session's `conn` id, matching the `conn{id}` span its log lines carry.
 	/// Process-local, and only meaningful while the session lasts.
 	pub id: u64,
+	/// The transport the session runs over.
+	#[serde_as(as = "serde_with::DisplayFromStr")]
+	pub transport: moq_tokio::Transport,
 }
 
-/// Removes a live connection from the view when its session ends.
-pub(crate) struct ConnectionGuard {
+/// One dial task's handle on its peer's entry. Dropping it clears the session it
+/// holds, but keeps the peer's history: [`Nodes::retain`] retires that.
+pub(crate) struct Dial {
 	nodes: Nodes,
+	peer: PeerKey,
 	id: u64,
 }
 
 impl Nodes {
-	/// Record a dial this relay initiated, keyed by the URL it dialed.
-	///
-	/// `id` is the session's `conn` id from
-	/// [`Cluster::next_connection_id`](crate::cluster::Cluster::next_connection_id).
-	pub(crate) fn connect_outbound(&self, id: u64, node: impl Into<String>) -> ConnectionGuard {
-		self.connections
-			.lock()
-			.unwrap_or_else(PoisonError::into_inner)
-			.insert(id, node.into());
-		ConnectionGuard {
+	fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+		self.state.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Register a dial of `peer`, the dial set's identity for it, keeping any
+	/// history an earlier dial of the same peer left.
+	pub(crate) fn dial(&self, peer: &PeerKey) -> Dial {
+		let mut state = self.lock();
+		state.peers.entry(peer.clone()).or_default();
+		let id = state.next_dial;
+		state.next_dial += 1;
+		Dial {
 			nodes: self.clone(),
+			peer: peer.clone(),
 			id,
 		}
 	}
 
-	pub(crate) fn snapshot(&self) -> Snapshot {
-		let mut nodes = BTreeMap::<String, Vec<Connection>>::new();
-		let connections = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
-		for (&id, node) in connections.iter() {
-			nodes
-				.entry(crate::cluster::canonicalize_peer_key(node))
-				.or_default()
-				.push(Connection { id });
-		}
+	/// Retire the history of every peer `keep` rejects, once it leaves the dial set.
+	pub(crate) fn retain(&self, mut keep: impl FnMut(&PeerKey) -> bool) {
+		self.lock().peers.retain(|peer, _| keep(peer));
+	}
 
-		Snapshot {
-			nodes: nodes
-				.into_iter()
-				.map(|(node, mut connections)| {
-					connections.sort_by_key(|connection| connection.id);
-					Node { node, connections }
-				})
-				.collect(),
+	pub(crate) fn snapshot(&self) -> Snapshot {
+		let state = self.lock();
+		let nodes = state
+			.peers
+			.iter()
+			.map(|(peer, entry)| Node {
+				node: peer.to_string(),
+				// Sorted already: the map is keyed by `conn` id.
+				connections: entry
+					.connections
+					.iter()
+					.map(|(&id, &(_, transport))| Connection { id, transport })
+					.collect(),
+				last_connected_seconds_ago: entry.last_connected.map(|at| at.elapsed().as_secs_f64()),
+			})
+			.collect();
+		Snapshot { nodes }
+	}
+}
+
+impl Dial {
+	/// Apply one lifecycle observation of session `id`, which this dial owns.
+	pub(crate) fn observe(&self, id: u64, observation: &moq_tokio::connection::Observation) {
+		let mut state = self.nodes.lock();
+		// A retired peer's dial is being cancelled; it records nothing more.
+		let Some(peer) = state.peers.get_mut(&self.peer) else {
+			return;
+		};
+		if let Some(at) = observation.last_connected {
+			peer.last_connected = Some(peer.last_connected.map_or(at, |prev| prev.max(at)));
+		}
+		match observation.transport {
+			Some(transport) => {
+				peer.connections.insert(id, (self.id, transport));
+			}
+			None => {
+				peer.connections.remove(&id);
+			}
+		}
+	}
+
+	/// Clear this dial's session once it ends, keeping the peer's history.
+	pub(crate) fn disconnected(&self) {
+		if let Some(peer) = self.nodes.lock().peers.get_mut(&self.peer) {
+			peer.connections.retain(|_, (dial, _)| *dial != self.id);
 		}
 	}
 }
 
-impl Drop for ConnectionGuard {
+impl Drop for Dial {
 	fn drop(&mut self) {
-		self.nodes
-			.connections
-			.lock()
-			.unwrap_or_else(PoisonError::into_inner)
-			.remove(&self.id);
+		self.disconnected();
 	}
 }
 
@@ -99,39 +162,92 @@ impl Drop for ConnectionGuard {
 mod tests {
 	use super::*;
 
+	fn key(peer: &str) -> PeerKey {
+		PeerKey::canonicalize(peer)
+	}
+
+	fn observation(transport: Option<moq_tokio::Transport>) -> moq_tokio::connection::Observation {
+		moq_tokio::connection::Observation {
+			revision: 1,
+			phase: match transport {
+				Some(_) => moq_tokio::connection::Phase::Connected,
+				None => moq_tokio::connection::Phase::Disconnected,
+			},
+			connects: 1,
+			failure: None,
+			version: None,
+			last_connected: Some(kio::clock::now()),
+			transport,
+		}
+	}
+
 	#[test]
-	fn snapshot_groups_live_connections_by_node() {
+	fn configured_peers_list_before_they_connect_without_credentials() {
 		let nodes = Nodes::default();
-		let _second = nodes.connect_outbound(1, "https://relay-b.example/");
-		let _first = nodes.connect_outbound(0, "https://relay-b.example");
-		let _other = nodes.connect_outbound(2, "https://relay-a.example/");
+		let _dial = nodes.dial(&key("https://user:secret@peer.example//relay/"));
 
 		assert_eq!(
 			serde_json::to_value(nodes.snapshot()).unwrap(),
 			serde_json::json!({
-				"nodes": [
-					{ "node": "https://relay-a.example/", "connections": [{ "id": 2 }] },
-					{ "node": "https://relay-b.example/", "connections": [{ "id": 0 }, { "id": 1 }] }
-				]
+				"nodes": [{ "node": "https://peer.example/relay", "connections": [], "last_connected_seconds_ago": null }]
 			}),
 		);
 	}
 
 	#[test]
-	fn snapshot_stops_reporting_closed_outbound_connections() {
+	fn history_survives_disconnects_and_a_replaced_dial() {
 		let nodes = Nodes::default();
-		let connection = nodes.connect_outbound(0, "https://relay-b.example/");
-		assert_eq!(nodes.snapshot().nodes.len(), 1);
+		let dial = nodes.dial(&key("https://peer.example/"));
+		dial.observe(2, &observation(Some(moq_tokio::Transport::WebSocket)));
+		assert_eq!(
+			serde_json::to_value(&nodes.snapshot().nodes[0].connections).unwrap(),
+			serde_json::json!([{ "id": 2, "transport": "websocket" }]),
+		);
 
-		drop(connection);
-		assert!(nodes.snapshot().nodes.is_empty());
+		// A connect and disconnect may both happen before the observer polls.
+		dial.observe(2, &observation(None));
+		dial.disconnected();
+		let snapshot = nodes.snapshot();
+		assert!(snapshot.nodes[0].connections.is_empty());
+		assert!(snapshot.nodes[0].last_connected_seconds_ago.is_some());
+
+		// A new cost or credential replaces the dial: the new one starts before
+		// the old one is dropped or after, and the history stays either way.
+		let replacement = nodes.dial(&key("https://peer.example/"));
+		replacement.observe(4, &observation(Some(moq_tokio::Transport::Quic)));
+		drop(dial);
+		let snapshot = nodes.snapshot();
+		assert_eq!(snapshot.nodes.len(), 1);
+		assert_eq!(
+			snapshot.nodes[0].connections.len(),
+			1,
+			"dropping one dial keeps the other's session"
+		);
+		assert_eq!(snapshot.nodes[0].connections[0].id, 4);
+
+		drop(replacement);
+		let snapshot = nodes.snapshot();
+		assert!(snapshot.nodes[0].connections.is_empty());
+		assert!(snapshot.nodes[0].last_connected_seconds_ago.is_some());
 	}
 
 	#[test]
-	fn outbound_node_omits_credentials_from_url() {
+	fn retired_peers_drop_their_history() {
 		let nodes = Nodes::default();
-		let _connection = nodes.connect_outbound(0, "https://relay-b.example/?jwt=secret");
+		let kept = nodes.dial(&key("https://kept.example/"));
+		let retired = nodes.dial(&key("https://retired.example/"));
+		retired.observe(1, &observation(Some(moq_tokio::Transport::Quic)));
 
-		assert_eq!(nodes.snapshot().nodes[0].node, "https://relay-b.example/");
+		drop(retired);
+		nodes.retain(|peer| peer == &key("https://kept.example/"));
+		let snapshot = nodes.snapshot();
+		assert_eq!(snapshot.nodes.len(), 1);
+		assert_eq!(snapshot.nodes[0].node, "https://kept.example/");
+
+		// A dial cancelled after its peer retired records nothing.
+		kept.observe(2, &observation(Some(moq_tokio::Transport::Quic)));
+		nodes.retain(|_| false);
+		kept.observe(3, &observation(Some(moq_tokio::Transport::Quic)));
+		assert!(nodes.snapshot().nodes.is_empty());
 	}
 }

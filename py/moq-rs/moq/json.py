@@ -8,13 +8,17 @@ as well as by name. Values are any JSON-serializable Python object.
 
 Compression is the track's: publish it with ``TrackInfo(compress=True)``, which JSON benefits from,
 and a consumer reads it with no option of its own.
+
+Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
+broadcast clock, the epoch every track in the broadcast shares: read it with
+:meth:`moq.media.CatalogProducer.now`. The track needs a timescale (``TrackInfo(timescale=1000)``);
+one without is refused.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
 
 from moq_ffi import (
@@ -32,7 +36,7 @@ from moq_ffi import (
 )
 
 from . import publish, subscribe
-from ._records import _opt_from_us, _opt_us
+from ._records import Timestamp, _opt_from_ts
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand
 
@@ -44,10 +48,10 @@ __all__ = [
     "Timed",
     "WindowConsumer",
     "WindowEvent",
-    "WindowPop",
+    "WindowEventPop",
+    "WindowEventPush",
+    "WindowEventSkip",
     "WindowProducer",
-    "WindowPush",
-    "WindowSkip",
 ]
 
 
@@ -55,19 +59,17 @@ __all__ = [
 class Timed:
     """A parsed JSON value and the timestamp of the frame that carried it.
 
-    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track. It is
-    rounded down to a whole microsecond, so a tick on a track like 90 kHz may not
-    survive a read and republish exactly.
+    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track.
     """
 
     value: Any
-    timestamp: timedelta | None
+    timestamp: Timestamp | None
 
     @staticmethod
     def _from_ffi(value: MoqJsonValue | None) -> Timed | None:
         if value is None:
             return None
-        return Timed(value=json.loads(value.value), timestamp=_opt_from_us(value.timestamp_us))
+        return Timed(value=json.loads(value.value), timestamp=_opt_from_ts(value.timestamp))
 
 
 class SnapshotProducer:
@@ -94,9 +96,12 @@ class SnapshotProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def update(self, value: Any, *, timestamp: timedelta | None = None) -> None:
-        """Publish a new value. A no-op if unchanged from the previous update."""
-        self._inner.update(json.dumps(value), _opt_us(timestamp, "timestamp"))
+    def update(self, value: Any, timestamp: Timestamp) -> None:
+        """Publish a new value at ``timestamp`` on the broadcast clock.
+
+        A no-op if unchanged from the previous update.
+        """
+        self._inner.update(json.dumps(value), timestamp._ffi())
 
     def finish(self) -> None:
         """Finish the track, closing any open group."""
@@ -117,9 +122,9 @@ class StreamProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def append(self, value: Any, *, timestamp: timedelta | None = None) -> None:
-        """Append one record to the log."""
-        self._inner.append(json.dumps(value), _opt_us(timestamp, "timestamp"))
+    def append(self, value: Any, timestamp: Timestamp) -> None:
+        """Append one record to the log at ``timestamp`` on the broadcast clock."""
+        self._inner.append(json.dumps(value), timestamp._ffi())
 
     def finish(self) -> None:
         """Finish the track, closing the group."""
@@ -129,13 +134,15 @@ class StreamProducer:
 class SnapshotConsumer(_Stream[Timed]):
     """Async iterator over a JSON snapshot track, yielding each state in order (lossy).
 
-    Each item is a :class:`Timed`. Groups older than the subscription's ``max_delay`` are skipped,
-    so a playhead reader sets that budget to its distance behind live; :meth:`latest` skips to the
-    newest state instead. Usable as an async context manager that cancels on exit.
+    Each item is a :class:`Timed`. Every group a newer one supersedes is skipped; :meth:`latest`
+    skips to the newest state instead. The consumer subscribes to the track ``name`` on
+    ``broadcast`` itself, at a zero ``delay.max`` and ``priority`` (higher first); a read waits for
+    that subscription and raises if it fails. Usable as an async context manager that cancels on
+    exit.
     """
 
-    def __init__(self, track: subscribe.TrackConsumer) -> None:
-        self._inner = MoqJsonSnapshotConsumer(track._inner)
+    def __init__(self, broadcast: subscribe.BroadcastConsumer, name: str, *, priority: int = 0) -> None:
+        self._inner = MoqJsonSnapshotConsumer(broadcast._inner, name, priority)
 
     async def _next(self) -> Timed | None:
         return Timed._from_ffi(await self._inner.next())
@@ -194,13 +201,13 @@ class WindowProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def push(self, value: Any, *, timestamp: timedelta | None = None) -> None:
-        """Append one record to the back of the window."""
-        self._inner.push(json.dumps(value), _opt_us(timestamp, "timestamp"))
+    def push(self, value: Any, timestamp: Timestamp) -> None:
+        """Append one record to the back of the window at ``timestamp`` on the broadcast clock."""
+        self._inner.push(json.dumps(value), timestamp._ffi())
 
-    def pop(self, count: int, *, timestamp: timedelta | None = None) -> None:
-        """Drop ``count`` records from the front of the window, clamped to what it holds."""
-        self._inner.pop(count, _opt_us(timestamp, "timestamp"))
+    def pop(self, count: int, timestamp: Timestamp) -> None:
+        """Drop ``count`` records from the front of the window at ``timestamp``, clamped to what it holds."""
+        self._inner.pop(count, timestamp._ffi())
 
     def cut(self) -> None:
         """Close the open group, so the next edit opens one restating the retained window.
@@ -216,7 +223,7 @@ class WindowProducer:
 
 
 @dataclass(frozen=True)
-class WindowPush:
+class WindowEventPush:
     """A record joined the window at absolute ``index``."""
 
     index: int
@@ -224,14 +231,14 @@ class WindowPush:
 
 
 @dataclass(frozen=True)
-class WindowPop:
+class WindowEventPop:
     """The records at these absolute indices left the window."""
 
     range: range
 
 
 @dataclass(frozen=True)
-class WindowSkip:
+class WindowEventSkip:
     """The records at these absolute indices will never be delivered.
 
     They were pushed and dropped while this reader was behind, or fell outside the producer's
@@ -241,7 +248,7 @@ class WindowSkip:
     range: range
 
 
-WindowEvent = WindowPush | WindowPop | WindowSkip
+WindowEvent = WindowEventPush | WindowEventPop | WindowEventSkip
 """One change to a window, as a :class:`WindowConsumer` sees it."""
 
 
@@ -251,24 +258,24 @@ def _window_event(timed: MoqJsonWindowTimed | None) -> Timed | None:
     event = timed.event
     value: WindowEvent
     if isinstance(event, MoqJsonWindowEvent.PUSH):
-        value = WindowPush(index=event.index, value=json.loads(event.value))
+        value = WindowEventPush(index=event.index, value=json.loads(event.value))
     elif isinstance(event, MoqJsonWindowEvent.POP):
-        value = WindowPop(range(event.start, event.end))
+        value = WindowEventPop(range(event.start, event.end))
     elif isinstance(event, MoqJsonWindowEvent.SKIP):
-        value = WindowSkip(range(event.start, event.end))
+        value = WindowEventSkip(range(event.start, event.end))
     else:
         raise TypeError(f"unknown window event: {event!r}")
-    return Timed(value=value, timestamp=_opt_from_us(timed.timestamp_us))
+    return Timed(value=value, timestamp=_opt_from_ts(timed.timestamp))
 
 
 class WindowConsumer(_Stream[Timed]):
     """Async iterator over a JSON window track, yielding each change in order.
 
-    Each item is a :class:`Timed` whose ``value`` is a :class:`WindowPush`, :class:`WindowPop`, or
-    :class:`WindowSkip`. Group rolls never surface: a restated record this reader already has
-    yields nothing. A record first learned of from a restatement (after a join, or while behind)
-    carries that frame's timestamp, not its original push time. Usable as an async context manager
-    that cancels on exit.
+    Each item is a :class:`Timed` whose ``value`` is a :class:`WindowEventPush`,
+    :class:`WindowEventPop`, or :class:`WindowEventSkip`. Group rolls never surface: a restated
+    record this reader already has yields nothing. A record first learned of from a restatement
+    (after a join, or while behind) carries that frame's timestamp, not its original push time.
+    Usable as an async context manager that cancels on exit.
     """
 
     def __init__(self, track: subscribe.TrackConsumer) -> None:

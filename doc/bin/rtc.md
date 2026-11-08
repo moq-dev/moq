@@ -34,7 +34,7 @@ opens the endpoint to browsers on other origins, and `--udp-bind` plus
 put a TLS-terminating proxy in front for WHIP clients that require HTTPS. A fresh WHEP peer joins at the current group, so it
 starts at a keyframe without waiting for the next one. `DELETE` on the
 resource URL tears a session down per the RFC. Each WHIP session publishes
-under a fresh [epoch](/concept/moq-lite#publisher-epochs), so a publisher that
+under a fresh [instance](/concept/moq-lite#publisher-instances), so a publisher that
 reconnects while its stale session lingers replaces it at once.
 
 An export stays on the publisher it started with. A replacement publisher never
@@ -43,5 +43,5 @@ Once the original publisher leaves, the session ends with an error, and the
 player or `export rtc --connect` must reconnect to reach the replacement.
 `--connect` runs until its session ends.
 
-Built on [str0m](https://crates.io/crates/str0m); the library is
-[`moq-rtc`](https://docs.rs/moq-rtc).
+Built on a vendored, trimmed copy of [str0m](https://github.com/algesten/str0m), with DTLS and SRTP on [rind](https://github.com/moq-dev/rind); the library is
+[`moq-webrtc`](https://github.com/moq-dev/moq/tree/main/rs/moq-webrtc).

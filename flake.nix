@@ -1,16 +1,16 @@
 {
   description = "MoQ - Media over QUIC";
 
-  # Pre-built binaries live in our binary cache at nix.moq.dev. Of the
-  # packages, only tagged releases are pushed (moq-relay-v*, moq-cli-v*, etc.),
-  # so pin the flake ref to a recent tag to get a hit. The default branch HEAD
-  # builds from source, though its dev shell is cached:
-  #   nix run github:moq-dev/moq/moq-relay-v0.12.4#moq-relay --accept-flake-config
+  # nix.moq.dev caches the default branch's dev shell, along with moq-relay
+  # and moq on x86 Linux, with a 30-day expiry:
+  #   nix run github:moq-dev/moq#moq-relay --accept-flake-config
+  # Release Nix retains tagged packages permanently once a release cut
+  # carries that workflow from main; earlier tags still build from source.
   #
   # --accept-flake-config opts into the nixConfig below for one command. To
   # trust the cache permanently instead, add these settings to nix.conf.
   #
-  # The dev shell paths expire 30 days after upload, possibly before a path
+  # The CI paths expire 30 days after upload, possibly before a path
   # that depends on them; `fallback` builds whatever is missing instead of
   # failing the substitution.
   nixConfig = {
@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/01d051cf5dca8cd29c664bf8bcbcab63cdc76445";
+      url = "github:moq-dev/quest/6a18b8a815c2d15d37d7433a619f961ec5a07165";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -71,16 +71,6 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        wasm-bindgen-version =
-          (pkgs.lib.findSingle (package: package.name == "wasm-bindgen")
-            (throw "Cargo.lock has no wasm-bindgen package")
-            (throw "Cargo.lock has multiple wasm-bindgen versions")
-            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
-          ).version;
-        wasm-bindgen-cli =
-          pkgs.${"wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasm-bindgen-version}"}
-            or (throw "nixpkgs does not package wasm-bindgen-cli ${wasm-bindgen-version} locked in Cargo.lock");
-
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
         # unnoticed. The floor is 1.98, not the 1.95 relay MSRV: earlier rustc
@@ -100,10 +90,7 @@
             # match rustc's LLVM. cargo-llvm-cov finds them in the sysroot.
             "llvm-tools"
           ];
-          targets = [
-            "wasm32-unknown-unknown"
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+          targets = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             "aarch64-apple-darwin"
           ];
         };
@@ -171,9 +158,10 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
-            # Per-crate feature matrices (`just rs features`), where workspace
-            # unification would otherwise hide a broken single-crate build.
-            cargo-hack
+            # The workspace-hack that gives every build one feature set per dependency.
+            cargo-hakari
+            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
+            cargo-mutants
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
@@ -184,10 +172,6 @@
                 rustc = rust-toolchain;
               };
             })
-            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
-            # Cargo.lock selects the matching schema version, independently of
-            # nixpkgs' default wasm-bindgen-cli.
-            wasm-bindgen-cli
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
@@ -204,6 +188,8 @@
             pkgs.alsa-plugins
             # A private clocked null device for native playback tests.
             (pkgs.lib.getBin pkgs.pulseaudio)
+            # A shared session bus for the concurrent private audio server test.
+            pkgs.dbus
             # moq-video's `pipewire` screen-capture feature: the pipewire crate
             # links libpipewire-0.3 via pkg-config and generates bindings at build
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
@@ -237,9 +223,6 @@
           bun
           # Only for NPM publishing
           nodejs_24
-          # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
-          # so the release doesn't race on a runtime binary download.
-          deno
           # One browser build for local and CI Playwright checks.
           playwright-driver.browsers
         ];
@@ -307,13 +290,24 @@
         # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
-        lintDeps = with pkgs; [
-          shellcheck
-          shfmt
-          actionlint
-          taplo
-          nixfmt
-        ];
+        lintDeps =
+          with pkgs;
+          [
+            shellcheck
+            shfmt
+            actionlint
+            zizmor
+            taplo
+            nixfmt
+            # Formats and lints every Python file; the same version uv.lock pins.
+            ruff
+          ]
+          # Apple's formatter, so `just swift check` checks formatting off macOS
+          # too. nixpkgs marks the Swift compiler it builds with broken on
+          # aarch64-linux, where the check skips instead.
+          ++ lib.optionals (!(stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isAarch64)) [
+            swift-format
+          ];
 
         # Kotlin wrapper (kt/) toolchain so `just kt check` actually compiles
         # the wrapper and runs :moq:jvmTest instead of silently skipping.
@@ -323,6 +317,8 @@
         ktDeps = with pkgs; [
           jdk17
           gradle_8
+          # `just kt check` fails on Kotlin it would reformat; `just kt fix` applies it.
+          ktfmt
         ];
 
         # uniffi-bindgen-go renders rs/moq-ffi into the generated half of
@@ -330,11 +326,12 @@
         # check` skips itself, which reads as a pass in CI.
         #
         # The tag pairs the generator's own version with the uniffi release it
-        # targets (v0.10.0-kixelated.1+v0.32.0 -> uniffi 0.32), and it only
+        # targets (v0.10.0-kixelated.2+v0.32.0 -> uniffi 0.32), and it only
         # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
-        # generator version and must be bumped together: the repo and revision
-        # in release-ffi.yml, and the `cargo install` line in
+        # generator version and must be bumped together: the commit the tag
+        # peels to in .github/actions/uniffi-bindgen, which CI jobs outside
+        # the dev shell build, and the `cargo install` line in
         # rs/moq-ffi/build.sh, go/ffi/README.md, sh/go/check.sh, and
         # sh/go/stage.sh.
         #
@@ -342,21 +339,22 @@
         # uniffi 0.32 generator: the metadata encoding changed in 0.32 even
         # though the contract version did not, so v0.7.1+v0.31.0 fails to read a
         # 0.32-built cdylib at all. The fork carries the port, tracked upstream
-        # as NordSecurity/uniffi-bindgen-go#96, and renders an enum error's
-        # exported Display as its Error(). Move back to NordSecurity once they
-        # tag a 0.32 release carrying both.
+        # as NordSecurity/uniffi-bindgen-go#96, renders an enum error's
+        # exported Display as its Error(), and destroys an async result whose
+        # context was cancelled as it completed. Move back to NordSecurity once
+        # they tag a 0.32 release carrying all three.
         uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-go";
-          version = "0.10.0-kixelated.1+v0.32.0";
+          version = "0.10.0-kixelated.2+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-go";
             rev = "v${version}";
-            hash = "sha256-0DCIgHt4R5ndtLkeXw/KF500HidB13L2HeuS4eLvLHU=";
+            hash = "sha256-1dXQI30UYjIqiSY/yq4OTNxRKuERm1mrLDrff32fty4=";
           };
 
-          cargoHash = "sha256-wD+5Ghd4WFFQWAY2PXedXVPG+oPGozG9HbOhXB0fWco=";
+          cargoHash = "sha256-Q9746NcD4FkhHVtrvl+2PbqMe7kiiw4Uxt3z/Qbqy7A=";
 
           # The tag is a virtual workspace whose other members are uniffi test
           # fixtures. Building from the root would compile all of them, and CI
@@ -374,6 +372,8 @@
         goDeps = [
           pkgs.go
           uniffi-bindgen-go
+          # `just go audit`, nightly.
+          pkgs.govulncheck
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
@@ -382,13 +382,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.6+v0.32.0";
+          version = "0.3.1-kixelated.7+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
+            hash = "sha256-uSApyCocEhADWu8Koj5vXIt0fMYQVjnBVKctDWQHqLM=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test
@@ -416,10 +416,10 @@
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
-        # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
-        # and .github/workflows/release-shared-ffi.yml.
+        # bumped together: the commit the tag peels to in
+        # .github/actions/uniffi-bindgen, which CI jobs outside the dev shell
+        # (Windows among them) build, and the `cargo install` lines in
+        # rs/moq-ffi/build.sh and cpp/moq/README.md.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
@@ -519,6 +519,7 @@
             # too. Same 0.8.2 that obs-deps carries.
             simde
             qt6.qtbase
+            # clang-format, for the plugin and the c/ and cpp/moq packages.
             clang-tools
             gersemi
           ]
@@ -604,6 +605,12 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
+          # Nightly's `just rs send-depth` proves native Send futures on it.
+          # Pinned so a toolchain release alone never fails that job;
+          # bump it on purpose, like the stable toolchain above. Kept out of
+          # the dev shell, which every CI job downloads.
+          rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;
+
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
           # of the default shell because it pulls in ~3 GB (CEF, mostly) that
@@ -668,34 +675,64 @@
             if [ -x "$shim" ]; then
               export PATH="$(dirname "$shim"):$PATH"
             fi
+
+            # Skills also invoke quest directly, so keep it ahead of host installs.
+            export PATH="${quest-cli}/bin:$PATH"
+
+            # Each nested shell (direnv, then `nix develop`, then another
+            # inside a gate) prepends this shell's ~160 store paths again,
+            # about 10 KB. mbx copies PATH into two variables at ~3.6 times
+            # its size, and Linux rejects any one variable over 128 KiB, so
+            # four nested shells failed every Cargo launch with E2BIG. Keep
+            # each directory's first entry only: lookups resolve as before.
+            PATH=$(printf '%s' "$PATH" | awk -v RS=: '!seen[$0]++ { printf "%s%s", sep, $0; sep = ":" }')
           '';
 
-          env = {
-            # What sh/dispatch.sh checks before a scoped `just check` or `just
-            # fix`. IN_NIX_SHELL would also pass inside another project's shell.
-            IN_MOQ_DEV_SHELL = "1";
+          # moq binaries reject any MOQ_* variable they don't read, so the
+          # shell must export none.
+          env =
+            let
+              vars = {
+                # What sh/dispatch.sh checks before a scoped `just check` or `just
+                # fix`. IN_NIX_SHELL would also pass inside another project's shell.
+                IN_MOQ_DEV_SHELL = "1";
 
-            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
-            PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
-            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+                # Local launchers need the exact build without evaluating the flake again.
+                # QUEST_* belongs to quest itself.
+                DEV_SHELL_QUEST = "${quest-cli}/bin/quest";
 
-            # Where `just obs compile` and `just obs test` look for libobs. Set
-            # on every platform so the plugin type-checks against the pinned OBS
-            # release everywhere, rather than whatever the host happens to have.
-            OBS_INCLUDE_DIR = "${obs-headers}/include/obs";
+                PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+                PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
+                PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
 
-            # What `just obs check` compares the two in-repo OBS pins against.
-            # Exported rather than read back out of nix, so the guard costs a
-            # variable lookup instead of a nested evaluation of this flake.
-            OBS_LINKED_VERSION = obs-linked-version;
+                # Where `just obs compile` and `just obs test` look for libobs. Set
+                # on every platform so the plugin type-checks against the pinned OBS
+                # release everywhere, rather than whatever the host happens to have.
+                OBS_INCLUDE_DIR = "${obs-headers}/include/obs";
 
-            # Link libvpx statically for moq-video's `vpx` feature, the shape the
-            # quest ships: no system codec library at runtime.
-            VPX_STATIC = "1";
-          }
-          // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
-            ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
-          };
+                # What `just obs check` compares the two in-repo OBS pins against.
+                # Exported rather than read back out of nix, so the guard costs a
+                # variable lookup instead of a nested evaluation of this flake.
+                OBS_LINKED_VERSION = obs-linked-version;
+
+                # Link libvpx statically for moq-video's `vpx` feature, the shape the
+                # quest ships: no system codec library at runtime.
+                VPX_STATIC = "1";
+              }
+              // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
+                ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
+                # Firefox loads these at runtime; harness.ts exposes them only to its process.
+                PLAYWRIGHT_FIREFOX_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+                  pkgs.ffmpeg
+                  pkgs.libpulseaudio
+                ];
+              };
+              moq = builtins.filter (pkgs.lib.hasPrefix "MOQ_") (builtins.attrNames vars);
+            in
+            assert pkgs.lib.assertMsg (
+              moq == [ ]
+            ) "dev shell must not export MOQ_* (moq binaries reject them): ${toString moq}";
+            vars;
         };
 
         formatter = pkgs.nixfmt-tree;

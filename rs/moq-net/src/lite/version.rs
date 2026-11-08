@@ -20,9 +20,9 @@ pub enum Version {
 	/// Lite-07. Adds the hidden opt-in to ANNOUNCE_REQUEST: without it, a route with
 	/// a `.`-prefixed segment below the requested prefix is left out. SUBSCRIBE_DROP
 	/// accounts for every group the subscription will not deliver.
-	/// ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a
-	/// live announcement on the same stream. Adds the Auth Stream. SUBSCRIBE carries a
-	/// list of ranges. The wire format is
+	/// ANNOUNCE_START may copy a path head from a live
+	/// announcement on the same stream, and name a Route ID in place of the hop chain.
+	/// Adds the Auth Stream. SUBSCRIBE carries a list of ranges. The wire format is
 	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
 	/// only when explicitly requested; the default version sets leave it out.
 	Lite07,
@@ -79,12 +79,21 @@ impl Version {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
-	/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
-	/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload`
-	/// and is routed over the existing subscription. Added in lite-05; older versions never
-	/// send or accept datagram bodies.
+	/// Whether the session may carry unreliable QUIC datagrams (lite-05 §6.4): single-frame
+	/// groups on lite-05/06, a datagram track's datagrams on lite-07, which adds a leading
+	/// type and padding. Older than lite-05 never sends or accepts datagrams.
 	pub fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
+	}
+
+	/// Whether a subscriber subscribes to a datagram track through its own Datagrams Stream
+	/// (0x9), whose datagrams carry the datagram track's own sequence. Added in lite-07;
+	/// earlier versions carry single-frame groups as datagrams on a SUBSCRIBE subscription.
+	pub(crate) fn has_datagram_tracks(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
 	}
 
 	/// Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin
@@ -108,7 +117,7 @@ impl Version {
 		)
 	}
 
-	/// Whether either endpoint may open a Padding Stream (0x2). Added in lite-07.
+	/// Whether datagrams have a type and either endpoint may send padding streams or datagrams.
 	pub(crate) fn has_padding(self) -> bool {
 		!matches!(
 			self,
@@ -183,8 +192,17 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
+	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
+	pub(crate) fn has_min_delay(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
-	/// earlier fetch is bounded by the publisher's retention alone.
+	/// earlier fetch is bounded by the publisher's max age alone.
 	pub(crate) fn has_fetch_max_delay(self) -> bool {
 		!matches!(
 			self,
@@ -226,12 +244,19 @@ impl Version {
 		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
 	}
 
-	/// Whether subscription completion waits for the subscriber's FIN.
+	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
+	/// its tail accounting settles. SUBSCRIBE_FINISH says which groups are owed, so that is
+	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
+		self.has_track_stream()
+	}
+
+	/// Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH and past a covered
+	/// bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's history.
+	/// The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
+	/// Added in lite-07; before it the publisher FINs once the track ends.
+	pub(crate) fn keeps_subscribe_open(self) -> bool {
+		self.has_ranges()
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
@@ -243,8 +268,8 @@ impl Version {
 		)
 	}
 
-	/// Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail
-	/// from a live announcement on the same stream. Added in lite-07.
+	/// Whether ANNOUNCE_START may copy a path head from a live
+	/// announcement on the same stream. Added in lite-07.
 	pub fn has_announce_compression(self) -> bool {
 		!matches!(
 			self,
@@ -253,18 +278,9 @@ impl Version {
 	}
 
 	/// Whether TRACK_INFO carries the compression flag, and a compressed Track's FRAME
-	/// and datagram its inflated size. Added in lite-07; an earlier peer receives the
+	/// its inflated size. Added in lite-07; an earlier peer receives the
 	/// frames inflated.
 	pub(crate) fn has_compression(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether the stream error table has NOT_FETCHABLE, for a FETCH that reached a
-	/// datagram. Added in lite-07; earlier versions say NOT_FOUND instead.
-	pub(crate) fn has_not_fetchable(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -282,11 +298,30 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements and track requests carry the publisher epoch, the
-	/// identity that says two routes serve the same bytes. Added in lite-07.
-	/// Older versions carry nothing, so a received route has no epoch and is
-	/// never resumed through another route.
-	pub fn has_epoch(self) -> bool {
+	/// Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
+	/// SUBSCRIBE_DROP, for groups that existed, which names the `Update` in effect when it was
+	/// given up; SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07;
+	/// earlier versions name every hole in SUBSCRIBE_DROP.
+	pub(crate) fn has_skip(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end
+	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
+	pub(crate) fn has_end_error(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether announcements carry their instance and epoch, and track requests the
+	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an instance for each announcement.
+	pub fn has_instance(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -303,10 +338,30 @@ impl Version {
 		)
 	}
 
+	/// Whether SETUP may carry a route key proof. Added in lite-07.
+	pub(crate) fn has_route_key(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether the announce stream has ANNOUNCE_RESTART: another publisher instance
 	/// replacing an advertisement in place. Added in lite-07. Older versions send an
 	/// ANNOUNCE_END then an ANNOUNCE_START.
 	pub fn has_announce_restart(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether the announce stream carries the route layer: ROUTE_START, ROUTE_UPDATE,
+	/// ROUTE_HOLD, ROUTE_END, and ANNOUNCE_FLOOR toward the subscriber, and ROUTE_REQUEST
+	/// and the ROUTE_END echo back. A claim names its Route ID in place of a hop chain,
+	/// ANNOUNCE_OK and SETUP carry no Hop ID, and requests name the origin's Node ID.
+	/// Added in lite-07.
+	pub(crate) fn has_routes(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -325,7 +380,7 @@ impl Version {
 
 	/// Whether received frame timestamps are the publisher's media time. Lite05/06 stamp an
 	/// untimed track's payloads with their send time, which a receiver cannot tell from it,
-	/// so it drops every timestamp received on them and the track arrives untimed.
+	/// so it passes them through as the track's time without checking them for a rewind.
 	pub(crate) fn has_media_time(self) -> bool {
 		!matches!(
 			self,
@@ -353,7 +408,7 @@ impl Version {
 	}
 
 	/// The timescale the wire carries for a track with `timescale`, or `None` when its
-	/// frames and datagrams carry no timestamp.
+	/// frames or datagrams carry no timestamp.
 	///
 	/// Lite05 and Lite06 always carry one, so an untimed track declares milliseconds there
 	/// and its payloads carry their send times instead.

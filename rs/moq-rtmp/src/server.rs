@@ -260,12 +260,13 @@ pub struct Server {
 	/// While set, `accept` stops asking the listener until this instant. In-flight handshakes keep
 	/// being polled meanwhile: a connection that already got through must not wait out a backoff
 	/// earned by a different one.
-	accept_retry: Option<moq_clock::Instant>,
+	accept_retry: Option<kio::clock::Instant>,
 }
 
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
+		moq_crypto::cpu::check()?;
 		let listener = TcpListener::bind(addr).await?;
 
 		Ok(Self {
@@ -374,11 +375,11 @@ impl Server {
 							let request = Abortable::new(async move {
 								// The TLS handshake (if any) and the RTMP handshake share one
 								// budget, so a client that stalls either is dropped.
-								let outcome = moq_clock::timeout(REQUEST_TIMEOUT, async move {
+								let outcome = kio::clock::timeout(REQUEST_TIMEOUT, async move {
 									#[cfg(feature = "tls")]
 									let conn = match tls {
 										Some(acceptor) if starts_tls(&stream).await? => Conn::Tls(Box::new(
-											moq_clock::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+											kio::clock::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
 												.await
 												.map_err(|_| anyhow::anyhow!("RTMPS handshake timed out"))?
 												.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?,
@@ -418,9 +419,9 @@ impl Server {
 						// rather than slept on here, so the loop keeps serving in-flight handshakes
 						// through the pause.
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
-						let wait = self.accept_delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+						let wait = self.accept_delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
-						self.accept_retry = Some(moq_clock::Instant::now() + wait);
+						self.accept_retry = Some(kio::clock::Instant::now() + wait);
 					}
 				},
 			}
@@ -437,7 +438,7 @@ const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 #[cfg(feature = "tls")]
 async fn starts_tls(stream: &TcpStream) -> io::Result<bool> {
 	let mut first = [0u8; 1];
-	if moq_clock::timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
+	if kio::clock::timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
 		.await
 		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS detection timed out"))??
 		== 0
@@ -451,9 +452,9 @@ async fn starts_tls(stream: &TcpStream) -> io::Result<bool> {
 ///
 /// The `select!` arm that uses this is guarded on `at` being set; the pending branch keeps the arm
 /// well-formed rather than leaving the macro with a `None` to unwrap.
-async fn sleep_until(at: Option<moq_clock::Instant>) {
+async fn sleep_until(at: Option<kio::clock::Instant>) {
 	match at {
-		Some(at) => moq_clock::sleep_until(at).await,
+		Some(at) => kio::clock::sleep_until(at).await,
 		None => std::future::pending().await,
 	}
 }
@@ -493,8 +494,9 @@ pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 ///
 /// Returns `Ok(None)` if the client disconnects before issuing `publish` or
 /// `play`. The handshake must finish in five seconds; wrap the call in
-/// [`moq_clock::timeout`] to also bound the wait for a publish or play request.
+/// [`kio::clock::timeout`] to also bound the wait for a publish or play request.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
+	moq_crypto::cpu::check()?;
 	Ok(accept_until_request(stream, peer).await?)
 }
 
@@ -572,8 +574,8 @@ pub struct Publish<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// Retention declared on the media tracks this publish mints, or `None` for hang's
-	/// own default. Override with [`with_max_age`](Self::with_max_age).
+	/// Max age declared on the media tracks this publish mints, or `None` for no publisher
+	/// limit. Override with [`with_max_age`](Self::with_max_age).
 	max_age: Option<Duration>,
 	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
 	/// Override with [`with_bandwidth`](Self::with_bandwidth).
@@ -608,14 +610,14 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Set how long relays keep a non-latest group of this publish's media tracks
-	/// fetchable. `None` keeps hang's own default.
+	/// Set how long a superseded group of this publish's media tracks stays fresh, or
+	/// `None` for no publisher limit. Defaults to
+	/// [`MAX_AGE`](hang::container::MAX_AGE).
 	///
-	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// A freshness bound, not a delivery one: it never makes a subscriber play further
 	/// behind live, it caps how far back a FETCH can still reach. The default suits a
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history
-	/// and the memory matters.
+	/// advertise segments that are still fetchable. Lower it when nothing reads history.
 	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
 		self.max_age = max_age.into();
 		self
@@ -682,7 +684,7 @@ impl<S: Stream> Publish<S> {
 			.map_err(|e| anyhow::anyhow!("rtmp accept publish: {e:?}"))?;
 		self.work.extend(results);
 
-		tracing::info!(peer = %self.peer, %path, epoch = %publisher.epoch, "rtmp publish accepted");
+		tracing::info!(peer = %self.peer, %path, instance = %publisher.route.instance(), "rtmp publish accepted");
 
 		let result = pump(
 			&mut self.stream,
@@ -765,8 +767,8 @@ pub struct Play<S = Conn> {
 	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one; see [`with_max_delay`](Self::with_max_delay).
-	max_delay: Duration,
+	/// one; see [`with_delay`](Self::with_delay).
+	delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -798,8 +800,8 @@ impl<S: Stream> Play<S> {
 
 	/// Set the FLV release delay and stalled-group budget.
 	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
+	pub fn with_delay(mut self, delay: Duration) -> Self {
+		self.delay = delay;
 		self
 	}
 
@@ -826,7 +828,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			resolved = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, following.available()) => {
+			resolved = kio::clock::timeout(PLAY_RESOLVE_TIMEOUT, following.available()) => {
 				match resolved {
 					Ok(resolved) => resolved,
 					Err(_) => {
@@ -836,7 +838,7 @@ impl<S: Stream> Play<S> {
 				}
 			}
 		};
-		let Ok(broadcast) = broadcast else {
+		let Ok(Some(broadcast)) = broadcast else {
 			tracing::debug!(peer = %self.peer, %path, "play broadcast unavailable");
 			return self.reject("stream not found").await;
 		};
@@ -853,7 +855,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			catalog = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut check)) => {
+			catalog = kio::clock::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut check)) => {
 				match catalog {
 					Ok(Ok(Some(catalog))) => catalog,
 					Ok(Ok(None)) => {
@@ -888,7 +890,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.max_delay)
+			.with_delay(self.delay)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -901,7 +903,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			chunk = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, export.next()) => {
+			chunk = kio::clock::timeout(PLAY_RESOLVE_TIMEOUT, export.next()) => {
 				match chunk {
 					Ok(Ok(Some(chunk))) => chunk,
 					Ok(Ok(None)) => {
@@ -1125,7 +1127,7 @@ fn fourcc_label(fourcc: &[u8; 4]) -> String {
 /// Run one connection's handshake and connect exchange, returning a [`Request`]
 /// once the client issues `publish` or `play` (or `None` if it disconnects first).
 async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> anyhow::Result<Option<Request<S>>> {
-	let remaining = moq_clock::timeout(HANDSHAKE_TIMEOUT, run_handshake(&mut stream, peer))
+	let remaining = kio::clock::timeout(HANDSHAKE_TIMEOUT, run_handshake(&mut stream, peer))
 		.await
 		.map_err(|_| anyhow::anyhow!("RTMP handshake timed out"))??;
 
@@ -1197,7 +1199,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_age: None,
+							max_age: Some(hang::container::MAX_AGE),
 							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 							linger: moq_mux::Linger::DEFAULT,
 						})));
@@ -1220,7 +1222,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_delay: crate::DEFAULT_MAX_DELAY,
+							delay: crate::DEFAULT_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1261,24 +1263,24 @@ async fn pump<S: Stream>(
 	peer: SocketAddr,
 ) -> anyhow::Result<End> {
 	let mut buffer = [0u8; READ_BUFFER];
-	let mut media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+	let mut media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 	loop {
 		let mut finished = false;
 		while let Some(result) = work.pop_front() {
 			match result {
 				ServerSessionResult::OutboundResponse(packet) => {
-					moq_clock::timeout_at(media_deadline, stream.write_all(&packet.bytes))
+					kio::clock::timeout_at(media_deadline, stream.write_all(&packet.bytes))
 						.await
 						.map_err(|_| anyhow::anyhow!("peer blocked RTMP control output before the media deadline"))??;
 				}
 				ServerSessionResult::RaisedEvent(event) => match event {
 					// A timestamp restart ends this publisher; isolated malformed tags are skipped.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
-						media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						publisher.push(flv::TAG_AUDIO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
-						media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						publisher.push(flv::TAG_VIDEO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,
@@ -1300,7 +1302,7 @@ async fn pump<S: Stream>(
 
 		let n = tokio::select! {
 			res = stream.read(&mut buffer) => res?,
-			_ = moq_clock::sleep_until(media_deadline) => {
+			_ = kio::clock::sleep_until(media_deadline) => {
 				anyhow::bail!("peer {peer} sent no RTMP media for {:?}", PUBLISH_IDLE_TIMEOUT);
 			}
 		};
@@ -1501,7 +1503,7 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 }
 
 /// An active publish: the moq-mux FLV importer, which owns the origin-created
-/// [`BroadcastProducer`](moq_net::origin::Publication) it publishes into.
+/// [`Route`](moq_net::origin::Route) it publishes into.
 /// [`Self::close`] or dropping it closes the broadcast and unannounces the path;
 /// [`Self::finish`] hands back the finished broadcast to linger on.
 struct Publisher {
@@ -1509,22 +1511,19 @@ struct Publisher {
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer,
 	metadata: crate::metadata::Dropped,
-	// Controls publication so an end can retract before the importer's fill clone drops.
-	broadcast: moq_net::origin::Publication,
-	// This connection's publisher instance, so an encoder reconnecting under the
-	// same key replaces this broadcast at once instead of resuming into it.
-	epoch: moq_net::Epoch,
+	// Announces the path under this connection's fresh instance, so an encoder reconnecting
+	// under the same key replaces this broadcast at once instead of resuming into it.
+	// Closing its broadcast retracts it before the importer's fill clone drops.
+	route: moq_net::origin::Route,
 }
 
 impl Publisher {
-	/// Open a broadcast at `path` under a fresh epoch and prime the importer with
+	/// Open a broadcast at `path` under a fresh instance and prime the importer with
 	/// the FLV file header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
-		let epoch = moq_net::Epoch::mint();
-		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
-		let handle = broadcast.clone();
-		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
+		let route = origin.route(path, moq_net::origin::RouteOptions::default())?;
+		let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
+		let mut importer = FlvImport::new(route.broadcast().clone(), catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
@@ -1533,8 +1532,7 @@ impl Publisher {
 			importer,
 			catalog,
 			metadata: crate::metadata::Dropped::new(path),
-			broadcast: handle,
-			epoch,
+			route,
 		})
 	}
 
@@ -1548,7 +1546,7 @@ impl Publisher {
 	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		Ok(moq_mux::Linger::new([self.broadcast.broadcast().clone()], self, linger))
+		Ok(moq_mux::Linger::new([self.route.broadcast().clone()], self, linger))
 	}
 
 	/// Flush any buffered media, finish the catalog, close out the broadcast's open groups, and end
@@ -1556,7 +1554,7 @@ impl Publisher {
 	fn close(mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		self.broadcast.close();
+		self.route.broadcast().close();
 		Ok(())
 	}
 
@@ -1568,23 +1566,18 @@ impl Publisher {
 	fn abort(self, err: moq_net::Error) {
 		self.catalog.abort(err.clone());
 		self.importer.abort(err);
-		self.broadcast.close();
+		self.route.broadcast().close();
 	}
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
 	#[tokio::test(start_paused = true)]
 	async fn a_silent_peer_cannot_hold_a_handshake() {
 		let (_client, server) = tokio::io::duplex(4096);
-		let start = moq_clock::Instant::now();
+		let start = kio::clock::Instant::now();
 		let result = accept_stream(server, "127.0.0.1:1935".parse().unwrap()).await;
 		assert!(result.is_err());
 		assert_eq!(start.elapsed(), HANDSHAKE_TIMEOUT);
@@ -1598,7 +1591,7 @@ mod tests {
 		let mut work = VecDeque::from([ServerSessionResult::OutboundResponse(packet)]);
 		let origin = moq_tokio::origin::spawn();
 		let mut publisher = Publisher::new(&origin, "idle", Default::default()).unwrap();
-		let start = moq_clock::Instant::now();
+		let start = kio::clock::Instant::now();
 		assert!(
 			pump(
 				&mut stream,
@@ -1876,7 +1869,7 @@ mod tests {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
 			let (client, server) = tokio::io::duplex(64 * 1024);
-			let start = tokio::time::Instant::now();
+			let start = kio::clock::now();
 			let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 			// A hangup ends the instance at once, before a follower would hand it out, so this
 			// requests it on its announcement instead.
@@ -1902,7 +1895,13 @@ mod tests {
 		let (mut client, server) = tokio::io::duplex(64 * 1024);
 		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::ZERO));
 		let catalog = async {
-			let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+			let broadcast = consumer
+				.follow("live/cam0", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
 			let track = broadcast.track(hang::Catalog::DEFAULT_NAME).unwrap();
 			track.subscribe(None).await.unwrap()
 		};
@@ -1930,7 +1929,7 @@ mod tests {
 		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 		publish_one_keyframe(client, Leave::Unpublish).await;
 
-		tokio::time::sleep(Duration::from_secs(5)).await;
+		kio::clock::sleep(Duration::from_secs(5)).await;
 		let finished = consumer.request("live/cam0", None).await.unwrap();
 		let mut video = finished.track("0.flv-v").unwrap().subscribe(None).await.unwrap();
 		assert!(
@@ -1942,11 +1941,11 @@ mod tests {
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let _reconnect = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 		let _encoder = tokio::spawn(publish_one_keyframe(client, Leave::Hangup));
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(!accept.is_finished(), "the newer publisher leaves the linger running");
 		assert!(!finished.is_closed());
 
-		let start = tokio::time::Instant::now();
+		let start = kio::clock::now();
 		accept.await.unwrap();
 		assert_eq!(start.elapsed(), Duration::from_secs(4));
 		assert!(finished.is_closed());
@@ -2194,10 +2193,10 @@ mod tests {
 		}
 	}
 
-	/// The retention a publish declares has to reach the media tracks the FLV importer
+	/// The max age a publish declares has to reach the media tracks the FLV importer
 	/// mints, not stop at the catalog producer it was set on.
 	#[tokio::test]
-	async fn publisher_declares_the_configured_retention() {
+	async fn publisher_declares_the_configured_max_age() {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
@@ -2212,7 +2211,13 @@ mod tests {
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -2239,8 +2244,9 @@ mod tests {
 
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin
+			.route("live/cam0", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
@@ -2266,7 +2272,7 @@ mod tests {
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let media = tokio::time::timeout(Duration::from_secs(5), play_client_collect(stream, 2, 0, &[]))
+		let media = kio::clock::timeout(Duration::from_secs(5), play_client_collect(stream, 2, 0, &[]))
 			.await
 			.expect("play client timed out");
 
@@ -2286,29 +2292,33 @@ mod tests {
 		server_task.abort();
 	}
 
-	/// Publish an AVC broadcast at `live/cam0` under `epoch`, starting with a keyframe carrying
-	/// `idr`, and return its importer for more tags.
+	/// Publish an AVC broadcast at `live/cam0` under `instance`, starting with a keyframe carrying
+	/// `idr`, and return its route and its importer for more tags.
 	fn publish_avc(
 		origin: &origin::Producer,
-		epoch: moq_net::Epoch,
+		instance: moq_net::Instance,
 		idr: &[u8],
-	) -> (FlvImport, moq_mux::catalog::Producer) {
+	) -> (moq_net::origin::Route, FlvImport, moq_mux::catalog::Producer) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, idr.len() as u8];
 		vframe.extend_from_slice(idr);
 
-		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast.announce(origin::Route::default().with_epoch(epoch)).unwrap();
+		let route = origin
+			.route(
+				"live/cam0",
+				moq_net::origin::RouteOptions::default().with_instance(instance, 0),
+			)
+			.unwrap();
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+			moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
-		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
+		let mut importer = FlvImport::new(route.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
-		(importer, catalog)
+		(route, importer, catalog)
 	}
 
 	/// A play stays on the instance it resolved: a publisher taking over the path never reaches
@@ -2319,7 +2329,8 @@ mod tests {
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
-		let (mut old, old_catalog) = publish_avc(&origin, moq_net::Epoch::mint(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
+		let (old_route, mut old, old_catalog) =
+			publish_avc(&origin, moq_net::Instance::random(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
@@ -2333,7 +2344,7 @@ mod tests {
 		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
 		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
 		let mut next = async || {
-			tokio::time::timeout(Duration::from_secs(5), media.recv())
+			kio::clock::timeout(Duration::from_secs(5), media.recv())
 				.await
 				.expect("no media")
 				.expect("the play ended")
@@ -2342,13 +2353,14 @@ mod tests {
 		assert_eq!(next().await.1[..2], [0x17, 0x00]);
 		assert_eq!(next().await.1[..2], [0x17, 0x01]);
 
-		let epoch = moq_net::Epoch::mint();
-		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&epoch)).unwrap();
-		let (_new, _new_catalog) = publish_avc(&origin, epoch, &[0x65, 0x99, 0x99, 0x99, 0x99]);
-		tokio::time::timeout(Duration::from_secs(5), instances.next())
+		let instance = moq_net::Instance::random();
+		let mut instances = consumer.follow("live/cam0", instance.clone()).unwrap();
+		let (_new_route, _new, _new_catalog) = publish_avc(&origin, instance, &[0x65, 0x99, 0x99, 0x99, 0x99]);
+		kio::clock::timeout(Duration::from_secs(5), instances.available())
 			.await
 			.expect("the new publisher takes over")
-			.unwrap();
+			.unwrap()
+			.expect("the new publisher serves");
 
 		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
 		delta.extend_from_slice(OLD_DELTA);
@@ -2359,7 +2371,8 @@ mod tests {
 
 		old.abort(moq_net::Error::Transport("connection lost".into()));
 		drop(old_catalog);
-		let played = tokio::time::timeout(Duration::from_secs(5), played)
+		drop(old_route);
+		let played = kio::clock::timeout(Duration::from_secs(5), played)
 			.await
 			.expect("the play outlived its route")
 			.unwrap();
@@ -2372,8 +2385,9 @@ mod tests {
 		const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin
+			.route("live/cam0", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
@@ -2402,7 +2416,7 @@ mod tests {
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let status = tokio::time::timeout(Duration::from_secs(5), play_client_first_status(stream, 0, &[]))
+		let status = kio::clock::timeout(Duration::from_secs(5), play_client_first_status(stream, 0, &[]))
 			.await
 			.expect("play client timed out");
 
@@ -2453,7 +2467,7 @@ mod tests {
 		fn best(catalog: &moq_mux::catalog::hang::Catalog, capabilities: &ClientCapabilities) -> Option<String> {
 			let select = play_selection(catalog, capabilities).unwrap();
 			let mut catalog = catalog.clone();
-			select.retain(&mut catalog, &Default::default());
+			select.retain(&mut catalog);
 			catalog.video.ranked().next().map(|(name, _)| name.clone())
 		}
 
@@ -2513,7 +2527,7 @@ mod tests {
 		let legacy = ClientCapabilities::default();
 		let select = play_selection(&catalog, &legacy).expect("aac is playable");
 		let mut kept = catalog.clone();
-		select.retain(&mut kept, &Default::default());
+		select.retain(&mut kept);
 		assert_eq!(
 			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
 			["b"]
@@ -2547,7 +2561,7 @@ mod tests {
 		};
 		let select = play_selection(&ac3, &ClientCapabilities::new(0, FourCcSupport::default(), support)).unwrap();
 		let mut kept = ac3.clone();
-		select.retain(&mut kept, &Default::default());
+		select.retain(&mut kept);
 		assert_eq!(
 			kept.audio.renditions.keys().map(String::as_str).collect::<Vec<_>>(),
 			["a"]
@@ -2653,8 +2667,9 @@ mod tests {
 		let frames = multitrack_body(CODED_FRAMES, &[(0, nalu(0x88)), (1, nalu(0x99))]);
 
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("live/cam0").unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = origin
+			.route("live/cam0", moq_net::origin::RouteOptions::default())
+			.unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
@@ -2681,7 +2696,7 @@ mod tests {
 		// The player advertises multitrack; collect the four video messages (two
 		// sequence headers + two keyframes across the two tracks).
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let media = tokio::time::timeout(
+		let media = kio::clock::timeout(
 			Duration::from_secs(5),
 			play_client_collect(stream, 4, CAPS_EX_MULTITRACK, &[b"avc1"]),
 		)
@@ -2764,7 +2779,7 @@ mod tests {
 			run_client(stream, ClientMode::Publish).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = kio::clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -2780,11 +2795,12 @@ mod tests {
 	}
 
 	/// An encoder reconnecting under the same key while its stale connection is still
-	/// open restarts the broadcast at once: each connection is its own epoch, so a
+	/// open restarts the broadcast at once: each connection is its own instance, so a
 	/// fresh request reaches the reconnect, while the stale viewer stays on the old one
 	/// until it leaves.
 	#[tokio::test]
 	async fn a_reconnect_replaces_the_stale_publish() {
+		kio::clock::host_time();
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
 		let origin = moq_tokio::origin::spawn();
@@ -2802,7 +2818,13 @@ mod tests {
 		let stale_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
-		let stale = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let stale = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let mut catalog = stale
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -2810,17 +2832,17 @@ mod tests {
 			.await
 			.unwrap();
 
-		let mut announced = consumer.announced();
+		let mut announced = consumer.routes();
 		let fresh_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
-		tokio::time::timeout(Duration::from_secs(5), async {
-			while !matches!(announced.next().await, Some(moq_net::announce::Event::Restart(_))) {}
+		kio::clock::timeout(Duration::from_secs(5), async {
+			while !matches!(announced.next().await, Some(moq_net::origin::RouteEvent::Restart(_))) {}
 		})
 		.await
 		.expect("the reconnect restarts the broadcast");
 
-		let stale_viewer = tokio::time::timeout(Duration::from_millis(200), async {
+		let stale_viewer = kio::clock::timeout(Duration::from_millis(200), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
@@ -2922,7 +2944,7 @@ mod tests {
 					_ => {}
 				}
 			}
-			let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer))
+			let n = kio::clock::timeout(Duration::from_secs(5), stream.read(&mut buffer))
 				.await
 				.expect("timed out awaiting connect _result")
 				.unwrap();
@@ -2966,7 +2988,7 @@ mod tests {
 			run_client(stream, ClientMode::Play).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = kio::clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -3030,7 +3052,7 @@ mod tests {
 			}
 		}
 
-		let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+		let provider = Arc::new(rind_rustls::default_provider().unwrap());
 
 		let mut tls = moq_tokio::tls::Listen::default();
 		tls.generate = vec!["localhost".to_string()];
@@ -3060,7 +3082,7 @@ mod tests {
 			run_client(stream, ClientMode::Publish).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = kio::clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -3094,7 +3116,7 @@ mod tests {
 			let stream = TcpStream::connect(addr).await.unwrap();
 			run_client(stream, ClientMode::Play).await;
 		});
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = kio::clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("plaintext accept timed out")
 			.expect("server yielded a plaintext request");
@@ -3133,7 +3155,7 @@ mod tests {
 		// The refusal comes well inside REQUEST_TIMEOUT, so a client that stayed open
 		// (a bug) fails the outer timeout rather than passing quietly.
 		let refused = tokio::select! {
-			refused = tokio::time::timeout(Duration::from_secs(5), plain) => refused,
+			refused = kio::clock::timeout(Duration::from_secs(5), plain) => refused,
 			request = server.accept() => panic!("plaintext client yielded a request: {}", request.is_some()),
 		};
 		assert!(refused.expect("plaintext client was not refused").unwrap());

@@ -6,13 +6,14 @@ use crate::protocol::validate_protocol;
 use crate::transport::WsTransport;
 use moq_net::transport::Address;
 use moq_quic::Side;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use crate::{Config, Error, Session, Version, alpn};
+use crate::{Config, Driver, Error, Session, Version, alpn};
 
 /// The `tokio-tungstenite` version this crate is built against.
 ///
 /// [`Client::with_connector`] and [`Upgraded`] take `tokio-tungstenite` types
-/// directly, so use this re-export rather than a separately pinned dependency —
+/// directly, so use this re-export rather than a separately pinned dependency -
 /// a different minor version is a distinct crate to the compiler and fails to
 /// typecheck against these APIs.
 pub use tokio_tungstenite;
@@ -51,7 +52,7 @@ fn capped(
 ///
 /// WebSocket has no built-in idle timeout: when the peer's host crashes
 /// or its network drops without sending a TCP FIN, the local socket
-/// stays "open" until OS-level TCP keep_alive eventually probes — typically
+/// stays "open" until OS-level TCP keep_alive eventually probes - typically
 /// hours. Set this to send periodic Pings and close the session if no
 /// frame arrives within `timeout`.
 #[derive(Debug, Clone, Copy)]
@@ -102,9 +103,7 @@ impl<T> Upgraded<T>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
 		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
-		+ Unpin
-		+ Send
-		+ 'static,
+		+ Unpin,
 {
 	/// Wrap `ws`, whose handshake negotiated the `Sec-WebSocket-Protocol` value `alpn`.
 	pub fn new(ws: T, alpn: &str) -> Self {
@@ -126,10 +125,8 @@ where
 	/// Use `config` for every session setting except the wire-format version
 	/// and application protocol, which the handshake negotiates.
 	///
-	/// The WebSocket handshake already settled the protocol, so the session starts
-	/// without awaiting the peer's transport parameters, failing later with
-	/// [`Error::HandshakeTimeout`] if they never arrive. Cap the socket's message and
-	/// frame sizes at [`max_message_size`] of `config`, since each record is one message.
+	/// Cap the socket's message and frame sizes at [`max_message_size`] of `config`,
+	/// since each record is one message.
 	pub fn with_session_config(mut self, config: Config) -> Self {
 		self.session = config;
 		self
@@ -147,28 +144,28 @@ where
 		self
 	}
 
-	/// Wrap as a client-side session.
+	/// Wrap as a client-side session once it is established, returned with the
+	/// [`Driver`] to spawn.
 	///
-	/// The protocol is already known from the negotiated subprotocol (ALPN), so
-	/// this returns synchronously without awaiting in-band parameters. Fails when
-	/// the subprotocol names no QMux version.
-	pub fn connect(self) -> Result<Session, Error> {
-		self.start(Side::Client)
+	/// As with [`Session::connect`], established means the peer's transport parameters
+	/// arrived, so its stream and datagram limits are known. Fails when the subprotocol
+	/// names no QMux version, or with [`Error::HandshakeTimeout`] if the parameters never
+	/// arrive.
+	pub async fn connect(self) -> Result<(Session, Driver<WsTransport<T>>), Error> {
+		self.start(Side::Client).await
 	}
 
-	/// Wrap as a server-side session.
-	///
-	/// As with [`connect`](Self::connect), the protocol is known from the
-	/// negotiated subprotocol, so this returns synchronously.
-	pub fn accept(self) -> Result<Session, Error> {
-		self.start(Side::Server)
+	/// Wrap as a server-side session once it is established, as with
+	/// [`connect`](Self::connect).
+	pub async fn accept(self) -> Result<(Session, Driver<WsTransport<T>>), Error> {
+		self.start(Side::Server).await
 	}
 
-	fn start(self, side: Side) -> Result<Session, Error> {
+	async fn start(self, side: Side) -> Result<(Session, Driver<WsTransport<T>>), Error> {
 		let (version, protocol) = alpn::parse(Some(&self.alpn))?;
 		let config = self.session.clone().with_negotiated(version, protocol);
 		let transport = self.into_transport()?;
-		Session::new(transport, side, config)
+		Session::start(transport, side, config).await
 	}
 
 	fn into_transport(self) -> Result<WsTransport<T>, Error> {
@@ -268,8 +265,18 @@ impl Client {
 		self
 	}
 
-	/// Connect to a WebSocket server, negotiating an advertised `(alpn, version)`.
-	pub async fn connect(&self, url: &str) -> Result<Session, Error> {
+	/// Connect to a WebSocket server, negotiating an advertised `(alpn, version)`, and
+	/// return the session once it is established.
+	pub async fn connect(
+		&self,
+		url: &str,
+	) -> Result<
+		(
+			Session,
+			Driver<WsTransport<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>>,
+		),
+		Error,
+	> {
 		use tungstenite::{client::IntoClientRequest, http};
 
 		for (a, _) in &self.protocols {
@@ -291,7 +298,36 @@ impl Client {
 		// `true` disables Nagle: records are already batched, see `Server::accept`.
 		#[cfg(feature = "wss")]
 		let (ws_stream, response) = {
-			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, self.connector.clone())
+			let connector = match (
+				&self.connector,
+				request
+					.uri()
+					.scheme_str()
+					.is_some_and(|scheme| scheme.eq_ignore_ascii_case("wss")),
+			) {
+				(Some(connector), _) => Some(connector.clone()),
+				(None, true) => {
+					let provider = moq_crypto::provider::provider()?;
+					let native = rustls_native_certs::load_native_certs();
+					if native.certs.is_empty() {
+						return Err(std::io::Error::new(
+							std::io::ErrorKind::NotFound,
+							format!("no native root CA certificates found: {:?}", native.errors),
+						)
+						.into());
+					}
+					let mut roots = rustls::RootCertStore::empty();
+					roots.add_parsable_certificates(native.certs);
+					let config = rustls::ClientConfig::builder_with_provider(provider)
+						.with_safe_default_protocol_versions()
+						.map_err(std::io::Error::other)?
+						.with_root_certificates(roots)
+						.with_no_client_auth();
+					Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config)))
+				}
+				(None, false) => None,
+			};
+			tokio_tungstenite::connect_async_tls_with_config(request, Some(ws_config), true, connector)
 				.await
 				.map_err(Error::from)?
 		};
@@ -320,8 +356,7 @@ impl Client {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
 		};
-		// Protocol came from the negotiated subprotocol, so no in-band wait.
-		Session::new(transport, Side::Client, config)
+		Session::start(transport, Side::Client, config).await
 	}
 }
 
@@ -395,14 +430,15 @@ impl Server {
 		self
 	}
 
-	/// Accept a WebSocket connection, negotiating an offered `(alpn, version)`.
+	/// Accept a WebSocket connection, negotiating an offered `(alpn, version)`, and
+	/// return the session once it is established.
 	///
 	/// Disable Nagle on a TCP `socket` first (`set_nodelay(true)`): records are
 	/// already batched, so Nagle would only hold a batch's tail for the peer's ACK.
-	pub async fn accept<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+	pub async fn accept<T: AsyncRead + AsyncWrite + Unpin>(
 		&self,
 		socket: T,
-	) -> Result<Session, Error> {
+	) -> Result<(Session, Driver<WsTransport<WebSocketStream<T>>>), Error> {
 		use std::sync::{Arc, Mutex};
 		use tungstenite::{handshake::server, http};
 
@@ -489,15 +525,13 @@ impl Server {
 			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
 		};
-		// Protocol came from the negotiated subprotocol, so no in-band wait.
-		Session::new(transport, Side::Server, config)
+		Session::start(transport, Side::Server, config).await
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::transport::poll::Session as _;
 	use tokio::io::AsyncWriteExt;
 
 	/// A frame declaring more than one record is refused at its header rather than
@@ -514,16 +548,21 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let session = accept.await.unwrap().unwrap();
-
-		// A masked binary frame declaring 1 MiB, with none of its payload sent.
+		// A masked binary frame declaring 1 MiB, with none of its payload sent, before the
+		// client's transport parameters: the accept fails on it rather than awaiting them.
 		let mut frame = vec![0x82, 0x80 | 127];
 		frame.extend_from_slice(&(1u64 << 20).to_be_bytes());
 		frame.extend_from_slice(&[0; 4]);
 		client.write_all(&frame).await.unwrap();
 
-		moq_clock::timeout(Duration::from_secs(1), session.closed())
+		let accepted = kio::clock::timeout(Duration::from_secs(1), accept)
 			.await
-			.expect("the socket waited to buffer a frame larger than a record");
+			.expect("the socket waited to buffer a frame larger than a record")
+			.unwrap();
+		assert!(
+			matches!(&accepted, Err(err) if !matches!(err, Error::HandshakeTimeout)),
+			"{:?}",
+			accepted.map(|_| ())
+		);
 	}
 }

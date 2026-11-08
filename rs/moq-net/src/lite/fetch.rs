@@ -13,12 +13,15 @@ use super::{Message, Version};
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
 	pub broadcast: Path,
-	/// The publisher instance the subscriber expects; see [`crate::origin::Route::epoch`].
+	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
-	pub epoch: Option<crate::Epoch>,
+	pub instance: Option<crate::Instance>,
+	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// publisher selects. Lite07+ only.
+	pub node: u64,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
-	/// Reader freshness budget. Lite07+ only; omission uses publisher retention alone.
+	/// Reader freshness budget. Lite07+ only; omission uses the publisher's max age alone.
 	pub max_delay: Option<std::time::Duration>,
 	pub group: u64,
 	/// Index of the first frame to return; 0 is the start of the group. Lite06+ only.
@@ -33,7 +36,8 @@ impl Fetch<'_> {
 	pub fn into_owned(self) -> Fetch<'static> {
 		Fetch {
 			broadcast: self.broadcast,
-			epoch: self.epoch,
+			instance: self.instance,
+			node: self.node,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
@@ -55,7 +59,8 @@ impl<'a> Message<'a> for Fetch<'a> {
 		}
 
 		let broadcast = Path::decode(r, version)?;
-		let epoch = super::epoch::decode_epoch(r, version)?;
+		let instance = super::instance::decode_pin(r, version)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 		let max_delay = match version.has_fetch_max_delay() {
@@ -75,7 +80,8 @@ impl<'a> Message<'a> for Fetch<'a> {
 
 		Ok(Self {
 			broadcast,
-			epoch,
+			instance,
+			node,
 			track,
 			priority,
 			max_delay,
@@ -94,7 +100,8 @@ impl<'a> Message<'a> for Fetch<'a> {
 		}
 
 		self.broadcast.encode(w, version)?;
-		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
+		super::instance::encode_pin(w, version, self.instance.as_ref())?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 		match version.has_fetch_max_delay() {
@@ -127,7 +134,8 @@ mod test {
 
 	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
-			epoch: None,
+			instance: None,
+			node: 0,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 			priority: 3,
@@ -169,6 +177,16 @@ mod test {
 		crate::coding::decode_from(&mut slice, version, Fetch::decode_msg)
 			.unwrap()
 			.into_owned()
+	}
+
+	/// Only lite-07 names the origin node; older versions decode as letting the
+	/// publisher select.
+	#[test]
+	fn fetch_node_roundtrips_only_on_lite07() {
+		let mut msg = fetch_sample();
+		msg.node = 0x7a3f;
+		assert_eq!(fetch_roundtrip(Version::Lite07, &msg).node, 0x7a3f);
+		assert_eq!(fetch_roundtrip(Version::Lite06, &msg).node, 0);
 	}
 
 	#[test]

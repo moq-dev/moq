@@ -2,17 +2,134 @@
 
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
 import subprocess
 import tempfile
-import tomllib
+import textwrap
 import unittest
+from pathlib import Path
 
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class FeaturesTest(unittest.TestCase):
+    def run_features(self, failures=(), nested=False, leaks=(), recipe="features"):
+        runner = shutil.which("just")
+        (ROOT / ".tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
+            scratch = Path(directory)
+            calls = scratch / "calls"
+            for command in ("just", "cargo"):
+                stub = scratch / command
+                stub.write_text(
+                    textwrap.dedent("""\
+                    #!/usr/bin/env python3
+                    import json, os, subprocess, sys
+                    from pathlib import Path
+                    args = sys.argv[1:]
+                    call = [os.path.basename(sys.argv[0]), *[
+                        'mir=<output>' if arg.startswith('mir=') else arg for arg in args
+                    ]]
+                    with open(os.environ['FEATURE_CALLS'], 'a') as output:
+                        output.write(json.dumps(call) + '\\n')
+                    if call in json.loads(os.environ['FEATURE_FAILURES']):
+                        sys.exit(1)
+                    if call[0] == 'just':
+                        if os.environ['FEATURE_NESTED'] == '1' and args[1] in (
+                            'net-features', 'quic-features', 'crypto-key', 'tokio-features', 'media-features',
+                            'coroutines',
+                        ):
+                            sys.exit(subprocess.call([os.environ['FEATURE_REAL_JUST'], *args]))
+                        sys.exit(0)
+                    if args[0] == 'tree':
+                        for crate in json.loads(os.environ['FEATURE_LEAKS']):
+                            print(crate + ' v1.0.0')
+                        features = args[args.index('--features') + 1].split(',') if '--features' in args else []
+                        for feature, crates in {
+                            'openh264': ['openh264', 'openh264-sys2'], 'nvidia': ['moq-nvenc'],
+                            'render': ['wgpu'], 'vpx': ['libvpx-native-sys'], 'capture': ['cpal'],
+                        }.items():
+                            if feature in features:
+                                for crate in crates:
+                                    print(crate + ' v1.0.0')
+                    elif args[0] == 'rustc':
+                        for arg in args:
+                            if arg.startswith('mir='):
+                                Path(arg[4:]).write_text('')
+                    """)
+                )
+                stub.chmod(0o755)
+            result = subprocess.run(
+                [runner, "rs", recipe],
+                cwd=ROOT,
+                env=dict(
+                    os.environ,
+                    PATH=f"{scratch}:{os.environ['PATH']}",
+                    FEATURE_CALLS=str(calls),
+                    FEATURE_FAILURES=json.dumps(failures),
+                    FEATURE_REAL_JUST=runner,
+                    FEATURE_NESTED=str(int(nested)),
+                    FEATURE_LEAKS=json.dumps(leaks),
+                    LOCAL_SUPERVISED="1",
+                    GITHUB_ACTIONS="false",
+                    BASH_ENV="/dev/null",
+                ),
+                capture_output=True,
+                text=True,
+            )
+            return result, [json.loads(line) for line in calls.read_text().splitlines()]
+
+    def test_independent_checks_run_after_multiple_failures(self):
+        passed, expected = self.run_features()
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        # Early, middle, and final failures must all survive subsequent successes.
+        for failures in ([expected[0], expected[len(expected) // 2]], [expected[-1]]):
+            with self.subTest(failures=failures):
+                failed, calls = self.run_features(failures)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertEqual(calls, expected)
+                summary = [line for line in failed.stderr.splitlines() if line.startswith("checks: failed: ")]
+                self.assertEqual(len(summary), len(failures))
+                for failure in failures:
+                    self.assertTrue(any(" ".join(failure) in line for line in summary))
+
+    def test_platform_tests_run_after_a_failure(self):
+        for recipe in ("macos-test", "windows-test"):
+            with self.subTest(recipe=recipe):
+                passed, expected = self.run_features(recipe=recipe)
+                self.assertEqual(passed.returncode, 0, passed.stderr)
+                failed, calls = self.run_features([expected[0]], recipe=recipe)
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertEqual(calls, expected)
+                self.assertIn("checks: failed: " + " ".join(expected[0]), failed.stderr)
+
+    def test_nested_feature_checks_continue_after_compile_failures(self):
+        passed, expected = self.run_features(nested=True)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        failures = []
+        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-tokio", "moq-video"):
+            failures.append(
+                next(call for call in expected if call[0] == "cargo" and call[1] != "tree" and package in call)
+            )
+        failed, calls = self.run_features(failures, nested=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(calls, expected)
+        summary = "\n".join(line for line in failed.stderr.splitlines() if line.startswith("checks: failed: "))
+        for package in ("kio", "moq-net", "moq-quic", "moq-crypto", "moq-tokio", "moq-video"):
+            self.assertIn(package, summary)
+        self.assertIn("checks: just rs coroutines", failed.stdout)
+
+    def test_dependency_contract_failures_do_not_hide_checks(self):
+        passed, expected = self.run_features(nested=True)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        failed, calls = self.run_features(nested=True, leaks=("cpal",))
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(calls, expected)
+        self.assertIn("moq-video minimal unexpectedly contains cpal", failed.stderr)
 
 
 class NightlyTest(unittest.TestCase):
@@ -23,48 +140,83 @@ class NightlyTest(unittest.TestCase):
             for command in ("just", "cargo"):
                 stub = scratch / command
                 stub.write_text(
-                    '#!/usr/bin/env bash\n'
+                    "#!/usr/bin/env bash\n"
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
                     'printf "%s\n" "${BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
+                    # Nextest's bench profile writes a JUnit report, unless the test withholds it.
+                    'if [[ ${NEXTEST_PROFILE:-} == bench && "$*" != "$NIGHTLY_NO_JUNIT" ]]; then\n'
+                    '    mkdir -p "$CARGO_TARGET_DIR/nextest/bench"\n'
+                    '    printf "<testsuites/>" > "$CARGO_TARGET_DIR/nextest/bench/junit.xml"\n'
+                    "fi\n"
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )
                 stub.chmod(0o755)
             # Answers `gh run list` by applying its --jq filter to NIGHTLY_RUNS.
             gh = scratch / "gh"
-            gh.write_text('#!/usr/bin/env bash\nwhile [[ $1 != --jq ]]; do shift; done\n'
-                          'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n')
+            gh.write_text(
+                "#!/usr/bin/env bash\nwhile [[ $1 != --jq ]]; do shift; done\n"
+                'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n'
+            )
             gh.chmod(0o755)
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                       BENCH_RESULTS=str(scratch / "results"), NIGHTLY_CALLS=str(calls), NIGHTLY_FAIL=fail, BASH_ENV="/dev/null")
-            env.pop("BENCH_BASE", None)
+            env = dict(
+                os.environ,
+                PATH=f"{scratch}:{os.environ['PATH']}",
+                BENCH_RESULTS=str(scratch / "results"),
+                NIGHTLY_CALLS=str(calls),
+                NIGHTLY_FAIL=fail,
+                BASH_ENV="/dev/null",
+                CARGO_TARGET_DIR=str(scratch / "target"),
+            )
+            for name in ("BENCH_BASE", "NEXTEST_PROFILE", "NIGHTLY_NO_JUNIT"):
+                env.pop(name, None)
             env.update(environment)
-            result = subprocess.run(["bash", ROOT / "sh/gh/nightly.sh", group], cwd=cwd,
-                                    env=env, capture_output=True, text=True)
+            result = subprocess.run(
+                ["bash", ROOT / "sh/gh/nightly.sh", group], cwd=cwd, env=env, capture_output=True, text=True
+            )
+            raw = scratch / "results" / "raw"
+            self.raw = sorted(path.name for path in raw.iterdir()) if raw.exists() else []
             self.bases = set(Path(f"{calls}.base").read_text().splitlines()) if calls.exists() else set()
             return result, calls.read_text().splitlines() if calls.exists() else []
 
     def test_paired_base_is_the_previous_scheduled_nightly(self):
         # Nightly checks out shallowly, so the test builds the history it resolves against.
         with tempfile.TemporaryDirectory() as repo:
-            git = ["git", "-C", repo, "-c", "user.name=nightly", "-c", "user.email=nightly@example.com",
-                   "-c", "commit.gpgsign=false"]
+            git = [
+                "git",
+                "-C",
+                repo,
+                "-c",
+                "user.name=nightly",
+                "-c",
+                "user.email=nightly@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ]
             subprocess.run([*git, "init", "-q"], check=True)
             for message in ("parent", "head"):
                 subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", message], check=True)
-            head, parent = (subprocess.run([*git, "rev-parse", revision], capture_output=True, text=True,
-                                           check=True).stdout.strip() for revision in ("HEAD", "HEAD~1"))
+            head, parent = (
+                subprocess.run([*git, "rev-parse", revision], capture_output=True, text=True, check=True).stdout.strip()
+                for revision in ("HEAD", "HEAD~1")
+            )
             # This run is the newest scheduled one; the previous run's commit is the base.
             runs = json.dumps([{"databaseId": 2, "headSha": parent}, {"databaseId": 1, "headSha": head}])
-            result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2",
-                                       NIGHTLY_RUNS=runs)
+            result, _ = self.run_group(
+                "rust-uring", cwd=repo, BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2", NIGHTLY_RUNS=runs
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.bases, {head})
             # A named revision reaches the runner as its commit.
             result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="HEAD~1")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.bases, {parent})
-            result, calls = self.run_group("rust-uring", cwd=repo, BENCH_BASE="previous-nightly",
-                                           GITHUB_RUN_ID="1", NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]))
+            result, calls = self.run_group(
+                "rust-uring",
+                cwd=repo,
+                BENCH_BASE="previous-nightly",
+                GITHUB_RUN_ID="1",
+                NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]),
+            )
             self.assertEqual(result.returncode, 1)
             self.assertIn("no previous scheduled Nightly", result.stderr)
             self.assertEqual(calls, [])
@@ -88,7 +240,7 @@ class NightlyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(calls[-1], "just dart bench")
         self.assertIn("failed: just py bench", result.stderr)
-        for runner in ("rust-ffi", "rust-net", "go", "python", "kotlin", "cpp", "dart"):
+        for runner in ("rust-ffi", "rust-net", "rust-background", "go", "python", "kotlin", "cpp", "dart"):
             self.assertIn(f"/{runner}.json", result.stderr)
 
     def test_bench_targets_share_one_invocation(self):
@@ -97,8 +249,12 @@ class NightlyTest(unittest.TestCase):
         release = [call for call in calls if call.startswith("just gh criterion")]
         self.assertEqual(len(release), 4)  # moq-net, its CPU clock, kio, then GStreamer.
         # The CPU clock reuses moq-net's build instead of rebuilding it without fuzz.
-        self.assertTrue(any("-p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu" in call
-                            for call in release))
+        self.assertTrue(
+            any(
+                "-p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu" in call
+                for call in release
+            )
+        )
         self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
         result, calls = self.run_group("rust-shared")
@@ -128,6 +284,7 @@ class NightlyTest(unittest.TestCase):
                 if args[:3] != ["just", "gh", "criterion"]:
                     continue
                 packages = [args[i + 1] for i, arg in enumerate(args) if arg == "-p"]
+                packages += [Path(args[i + 1]).parent.name for i, arg in enumerate(args) if arg == "--manifest-path"]
                 targets = [args[i + 1] for i, arg in enumerate(args) if arg == "--bench"]
                 names = set()
                 for package in packages:
@@ -138,9 +295,11 @@ class NightlyTest(unittest.TestCase):
                             covered.add((package, bench["name"]))
                 # Cargo rejects the whole invocation when any named target is missing.
                 self.assertEqual(set(targets) - names - {"*"}, set(), call)
-        declared = {(manifest.parent.name, bench["name"])
-                    for manifest in (ROOT / "rs").glob("*/Cargo.toml")
-                    for bench in tomllib.loads(manifest.read_text()).get("bench", [])}
+        declared = {
+            (manifest.parent.name, bench["name"])
+            for manifest in (ROOT / "rs").glob("*/Cargo.toml")
+            for bench in tomllib.loads(manifest.read_text()).get("bench", [])
+        }
         self.assertEqual(declared - covered, set(), "Cargo bench targets missing from Nightly")
 
     def test_every_js_bench_runs_nightly(self):
@@ -160,9 +319,22 @@ class NightlyTest(unittest.TestCase):
                 continue
             for path in recipes[args[2]]:
                 entries.add(ROOT / "js" / path.replace("{{ name }}", args[-1]))
+        # The browser smoke lane runs the in-memory fixtures in Chromium.
+        self.assertIn("recipe: bench-browser --smoke", workflow)
+        smoke = re.search(
+            r"^for benchmark in (.+); do\n\s+bun micro\.ts ", (ROOT / "bench/browser/run.sh").read_text(), re.M
+        )
+        self.assertIsNotNone(smoke)
+        # Each smoke name runs the entry micro.ts's table names for it.
+        micro = (ROOT / "bench/browser/micro.ts").read_text()
+        fixtures = dict(re.findall(r'^\t"?([\w-]+)"?: \{ entry: "([^"]+)"', micro, re.M))
+        for name in smoke[1].split():
+            self.assertIn(name, fixtures, f"browser smoke bench {name}")
+            entries.add(ROOT / fixtures[name])
         # Bundled helpers only run through the entry that names them.
-        helpers = {path for entry in entries for path in entry.parent.glob("*.ts")
-                   if f"/{path.name}" in entry.read_text()}
+        helpers = {
+            path for entry in entries for path in entry.parent.glob("*.ts") if f"/{path.name}" in entry.read_text()
+        }
         declared = {path for path in (ROOT / "js").glob("*/bench/*.ts") if not path.name.endswith(".test.ts")}
         missing = {str(path.relative_to(ROOT)) for path in declared - entries - helpers}
         self.assertEqual(missing, set(), "JS benches missing from Nightly")
@@ -179,17 +351,43 @@ class NightlyTest(unittest.TestCase):
     def test_benchmark_tests_stay_out_of_cargo_bench(self):
         result, calls = self.run_group("rust-test")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(any(call.startswith(("cargo bench", "just gh")) for call in calls))
-        # Release builds run before the test-profile ones.
-        profiles = ["--release" in call or " bench-" in call for call in calls]
-        self.assertEqual(profiles, sorted(profiles, reverse=True))
+        *runs, publish = calls
+        self.assertFalse(any(call.startswith(("cargo bench", "just gh")) for call in runs))
+        # Every benchmark measures a release build, and each run keeps its JUnit report.
+        self.assertTrue(all("--release" in call or " bench-" in call for call in runs), runs)
+        self.assertIn("just rs bench-feed-fetch", runs)
+        self.assertEqual(set(self.raw), {f"nextest-{index}.xml" for index in range(1, len(runs) + 1)})
+        self.assertTrue(publish.startswith("just gh benchmark-report rust-test "), publish)
+
+    def test_benchmark_test_without_its_report_fails(self):
+        result, calls = self.run_group("rust-test", NIGHTLY_NO_JUNIT="rs bench-latency")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no JUnit report from: just rs bench-latency", result.stderr)
         self.assertIn("just rs bench-feed-fetch", calls)
-        self.assertTrue(calls[-1].startswith("just rs test -p moq-cli"))
+        self.assertFalse(any(call.startswith("just gh") for call in calls))
+
+    def test_every_nightly_benchmark_test_exists(self):
+        # A filter naming a removed test matches nothing, and nextest still passes.
+        recipes = (ROOT / "rs/justfile").read_text()
+        _, calls = self.run_group("rust-test")
+        named = set()
+        for call in calls:
+            if match := re.fullmatch(r"just rs (bench-[\w-]+)", call):
+                call = re.search(rf"^{match[1]}\b.*:\n    (.+)$", recipes, re.M)[1]
+            named |= set(re.findall(r"test\((\w+)\)", call))
+        self.assertTrue(named)
+        sources = "".join(path.read_text() for path in (ROOT / "rs").glob("*/**/*.rs") if "/target/" not in str(path))
+        # A filter can name one test or a module containing several benchmark cases.
+        missing = {name for name in named if not re.search(rf"\b(?:fn|mod) {name}\b", sources)}
+        self.assertEqual(missing, set(), "Nightly benchmark tests that no longer exist")
 
     def test_failed_release_build_does_not_hide_later_work(self):
         _, calls = self.run_group("rust-bench")
-        build = next(call.removeprefix("just ") for call in calls
-                     if call.startswith("just gh criterion") and "-p moq-net" in call)
+        build = next(
+            call.removeprefix("just ")
+            for call in calls
+            if call.startswith("just gh criterion") and "-p moq-net" in call
+        )
         result, calls = self.run_group("rust-bench", build)
         self.assertEqual(result.returncode, 1)
         # A failed group publishes no report, but every later target still runs.
@@ -221,17 +419,18 @@ class FuzzTest(unittest.TestCase):
             binary = root / "bin"
             binary.mkdir()
             rustup = binary / "rustup"
-            rustup.write_text('#!/bin/sh\nif [ "$*" = "run nightly rustc --print sysroot" ]; then printf "%s\\n" "$FUZZ_SYSROOT"; fi\n')
+            rustup.write_text(
+                "#!/bin/sh\n"
+                'if [ "$*" = "run nightly rustc --print sysroot" ]; then printf "%s\\n" "$FUZZ_SYSROOT"; fi\n'
+            )
             rustup.chmod(0o755)
             cargo = binary / "cargo"
             cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$FUZZ_CALLS"\n')
             cargo.chmod(0o755)
             (binary / "cargo-fuzz").symlink_to(cargo)
             calls = root / "calls"
-            env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
-                       FUZZ_SYSROOT=str(root), FUZZ_CALLS=str(calls))
-            result = subprocess.run(["bash", str(script), *args], cwd=root, env=env,
-                                    capture_output=True, text=True)
+            env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}", FUZZ_SYSROOT=str(root), FUZZ_CALLS=str(calls))
+            result = subprocess.run(["bash", str(script), *args], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual((corpus / "discovery").read_bytes(), b"from the previous run")
             self.assertEqual((seeds / "generated").read_bytes(), b"generated seed")
             return result, calls.read_text().splitlines() if calls.exists() else []
@@ -239,10 +438,14 @@ class FuzzTest(unittest.TestCase):
     def test_run_keeps_discoveries_writable_and_seeds_separate(self):
         result, calls = self.run_fuzz("lite", "--", "-runs=2")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls, [
-            "run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds",
-            "fuzz run --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite rs/moq-net/fuzz/seeds/lite -- -runs=2",
-        ])
+        self.assertEqual(
+            calls,
+            [
+                "run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds",
+                "fuzz run --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite rs/moq-net/fuzz/seeds/lite "
+                "-- -runs=2",
+            ],
+        )
 
     def test_minimization_only_rewrites_the_evolved_corpus(self):
         result, calls = self.run_fuzz("--minimize", "lite")

@@ -10,15 +10,16 @@ import (
 )
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
-// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]) and take it
-// from the [Publication], then publish tracks onto it.
+// [OriginProducer.Route] (or [Client.Route]) and take it from the [Route], then
+// publish tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
 
 // NewBroadcastProducer creates a standalone broadcast, not attached to any
-// origin: use it to serve a dynamic request ([BroadcastRequest.Accept]) or for
-// local pub/sub. To publish at a path, use [OriginProducer.CreateBroadcast].
+// origin: pass its [BroadcastProducer.Consume] result to [BroadcastRequest.Serve]
+// for a dynamic request, or use it for local pub/sub. To publish at a path, use
+// [OriginProducer.Route].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
@@ -61,9 +62,9 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 }
 
 // Close ends the broadcast for good: it retracts and serves no new tracks.
-// Tracks still open on it end with Unroutable, which readers take as the
-// publisher leaving, and their later calls fail with ErrClosed; finish a track
-// first to end it cleanly. Closing again is a no-op.
+// Tracks still open on it end with Unroutable (Internal to a moq-transport
+// reader), and their later calls fail with ErrClosed; finish a track first to
+// end it cleanly. Closing again is a no-op.
 func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
@@ -133,9 +134,9 @@ func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
 	return &TrackProducer{inner: inner}, nil
 }
 
-// Abort rejects the request with an application error code.
-func (r *TrackRequest) Abort(errorCode uint16) error {
-	return r.inner.Abort(errorCode)
+// Reject rejects the request with an application error code.
+func (r *TrackRequest) Reject(errorCode uint16) error {
+	return r.inner.Reject(errorCode)
 }
 
 // TrackDemand watches the group a published track's subscribers want next.
@@ -204,23 +205,21 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 	return &GroupProducer{inner: inner}, nil
 }
 
-// WriteFrame writes frame as a single-frame group.
-func (t *TrackProducer) WriteFrame(frame Frame) error {
-	f, err := frame.ffi()
-	if err != nil {
-		return err
-	}
-	return t.inner.WriteFrame(f)
+// SkipGroups declares that groups start up to the exclusive end will never be
+// produced, so readers move past them. Creating a group there then fails.
+func (t *TrackProducer) SkipGroups(start, end uint64) error {
+	return t.inner.SkipGroups(start, end)
 }
 
-// AppendDatagram sends frame as a best-effort datagram and returns the sequence number
-// assigned to it. Payloads are capped at 1200 bytes. There is no stream fallback.
-func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
-	f, err := frame.ffi()
-	if err != nil {
-		return 0, err
-	}
-	return t.inner.AppendDatagram(f)
+// WriteFrame writes frame as a single-frame group.
+func (t *TrackProducer) WriteFrame(frame Frame) error {
+	return t.inner.WriteFrame(frame)
+}
+
+// Largest reports the newest group written, at its newest frame, or nil
+// before any.
+func (t *TrackProducer) Largest() (*Position, error) {
+	return t.inner.Largest()
 }
 
 // Abort closes the track with an application error code.
@@ -272,13 +271,20 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// WriteFrame appends frame to the group.
+// Ready blocks until a frame of size bytes fits a window ahead of the fastest
+// reader. Call it before each WriteFrame so that reader paces the writer, as TCP
+// backpressure does, instead of the group shedding frames it has not taken, which
+// fails it with Evicted; slower readers are not waited on. It also waits until a reader holds
+// the group, and returns once the group is closed so the next write reports why.
+// It fails with Closed after Abort.
+func (g *GroupProducer) Ready(ctx context.Context, size uint64) error {
+	return g.inner.Ready(ctx, size)
+}
+
+// WriteFrame appends frame to the group. It never blocks: without Ready, a writer
+// that outpaces its readers sheds the front of the group instead.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
-	f, err := frame.ffi()
-	if err != nil {
-		return err
-	}
-	return g.inner.WriteFrame(f)
+	return g.inner.WriteFrame(frame)
 }
 
 // Finish marks the group complete. The handle remains so Abort can still run.
@@ -317,28 +323,25 @@ func (d *TrackRequests) Cancel() {
 
 // Fill is a run of groups readers miss, for a TrackRequests to serve.
 //
-// Accept each group you have and DropGroups the rest; Next names what is still
-// owed, in the fill's order. Releasing the fill names whatever is left as dropped
+// Accept each group you have and DropGroups the rest, one group at a time as
+// WantedChanged returns them; Wanted names what is still owed, in the fill's
+// order. Releasing the fill names whatever is left as dropped
 // while a reader still wants it; once nobody does, it is withdrawn, so stop
-// serving it when Unused returns. Stop serving a single group when Unwanted
-// returns for it, and move on to Next.
+// serving it once Wanted is nil. Stop serving a single group when Unwanted
+// returns for it, and move on to Wanted. Serve the fills you take
+// concurrently: each waits on its own readers.
 type Fill struct {
 	inner *ffi.MoqFill
 }
 
-// StartGroup is the first group to fill.
-func (f *Fill) StartGroup() uint64 {
-	return f.inner.StartGroup()
+// Start is the first group to fill, and the frame within it to start from.
+func (f *Fill) Start() Position {
+	return f.inner.Start()
 }
 
-// StartFrame is the frame within the first group to start from.
-func (f *Fill) StartFrame() uint64 {
-	return f.inner.StartFrame()
-}
-
-// EndGroup is the exclusive end group.
-func (f *Fill) EndGroup() uint64 {
-	return f.inner.EndGroup()
+// End is the exclusive end group.
+func (f *Fill) End() uint64 {
+	return f.inner.End()
 }
 
 // Priority is the most urgent delivery priority among the readers waiting on it.
@@ -357,13 +360,23 @@ func (f *Fill) Order() Order {
 	return f.inner.Order()
 }
 
-// Next is the next group still owed in the fill's order, or nil once every group is answered.
-func (f *Fill) Next() *uint64 {
-	return f.inner.Next()
+// Wanted is the next group still owed in the fill's order, or nil once every
+// group is answered or no reader waits on the fill. It does not wait for the
+// readers; WantedChanged does.
+func (f *Fill) Wanted() *uint64 {
+	return f.inner.Wanted()
+}
+
+// WantedChanged blocks until Wanted changed and every group this fill accepted
+// reached a reader, which picks it up when it next reads, and returns it. Nil,
+// once the fill is done, never waits; the first call returns at once unless an
+// accepted group has yet to reach a reader.
+func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
+	return f.inner.WantedChanged(ctx)
 }
 
 // Accept inserts group sequence and returns a producer for it. The first group
-// starts at StartFrame, so its frames keep their indices.
+// starts at Start's frame, so its frames keep their indices.
 func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
 	inner, err := f.inner.Accept(sequence)
 	if err != nil {
@@ -375,16 +388,6 @@ func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
 // DropGroups names groups start up to the exclusive end as never to be delivered.
 func (f *Fill) DropGroups(start, end uint64) {
 	f.inner.DropGroups(start, end)
-}
-
-// IsUsed reports whether a reader still waits on this fill.
-func (f *Fill) IsUsed() bool {
-	return f.inner.IsUsed()
-}
-
-// Unused blocks until no reader waits on this fill.
-func (f *Fill) Unused(ctx context.Context) error {
-	return f.inner.Unused(ctx)
 }
 
 // IsWanted reports whether a reader still waits for group sequence from this fill:

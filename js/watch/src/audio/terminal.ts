@@ -8,9 +8,9 @@ interface SampleSpan {
 
 /** The parts of a container read the terminal tracks. */
 type Update =
-	| { readonly kind: "frame"; readonly group: number; readonly frame: { readonly timestamp: Micro } }
+	| { readonly kind: "frame"; readonly group: bigint; readonly frame: { readonly timestamp: Micro } }
 	| { readonly kind: "gap" }
-	| { readonly kind: "end"; readonly group: number; readonly end: Micro };
+	| { readonly kind: "end"; readonly group: bigint; readonly end: Micro };
 
 /** The portion of decoded audio that belongs to the source timeline. */
 export interface DecodedSpan {
@@ -28,13 +28,18 @@ export class Terminal {
 	#started = false;
 	#end?: Micro;
 	// The group that carried `#end`. It bounds only the terminal packets that follow it there.
-	#endGroup?: number;
+	#endGroup?: bigint;
 	#epoch?: Micro;
 	#preSkip = 0;
 	#preSkipRemaining?: number;
 	#warmup = 0 as Micro;
 	#prime = true;
 	#before?: Micro;
+
+	/** How far decoded output lands before its frame timestamp: the Opus pre-skip, or zero. */
+	get delay(): Micro {
+		return Math.round((this.#preSkip * 1_000_000) / 48_000) as Micro;
+	}
 
 	/** The exclusive source endpoint most recently received. */
 	get end(): Micro | undefined {
@@ -79,7 +84,7 @@ export class Terminal {
 		return reset;
 	}
 
-	// Start a fresh timeline after its declared end.
+	// Start a fresh codec epoch after its declared end, on the same timeline.
 	#restart(): void {
 		this.#started = false;
 		this.#end = undefined;

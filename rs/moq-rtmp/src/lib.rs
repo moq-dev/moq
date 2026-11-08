@@ -8,7 +8,7 @@
 //!   its audio/video messages as FLV tags, demux them with [`moq_mux`], and
 //!   publish the result into a [`moq_net::origin::Producer`] as ordinary MoQ
 //!   broadcasts. This is the contribution-ingest analogue of `moq-srt`,
-//!   `moq-cli import ... hls`, and `moq-rtc`'s WHIP.
+//!   `moq-cli import ... hls`, and `moq-webrtc`'s WHIP.
 //! - **Play (egress)**: a client (VLC, ffplay, mpv) pulls
 //!   `rtmp://host/<app>/<key>`; we subscribe to that broadcast from a
 //!   [`moq_net::origin::Consumer`], mux it back to FLV with [`moq_mux`], and stream
@@ -63,13 +63,18 @@ use std::time::Duration;
 mod dial;
 mod error;
 mod flv;
+// Not part of the public API: compiled only for the crate's own tests and for the `fuzz/`
+// harness.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub mod fuzz;
 mod metadata;
 // Vendored forks of rml_rtmp and rml_amf0; see the module docs.
 mod rml;
 mod server;
 
 /// Default FLV release delay and stalled-group budget.
-const DEFAULT_MAX_DELAY: Duration = Duration::from_millis(500);
+const DEFAULT_DELAY: Duration = Duration::from_millis(500);
 
 pub use dial::Client;
 pub use error::{Error, Result};

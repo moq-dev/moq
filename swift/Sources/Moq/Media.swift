@@ -29,6 +29,9 @@ public enum Media {
     public typealias Audio = MoqFFI.MoqAudio
     /// A width and height in pixels.
     public typealias Dimensions = MoqFFI.MoqDimensions
+    /// Where an audio or video decoder starts on a track that already holds
+    /// groups: `.latest` for a live player.
+    public typealias DecodeStart = MoqFFI.MoqDecodeStart
     /// How a track's frames are packaged (Legacy, CMAF, or LOC), as advertised in
     /// the catalog.
     public typealias Container = MoqFFI.MoqContainer
@@ -46,10 +49,48 @@ public enum Media {
             }
         }
     }
+    /// A single-track producer of either kind, such as a video rendition's `lower`.
+    public enum Producer: Sendable {
+        /// Imports complete encoded frames.
+        case track(TrackProducer)
+        /// Imports a byte stream.
+        case stream(TrackStreamProducer)
+        var ffi: MoqMediaProducer {
+            switch self {
+            case .track(let producer): return .track(producer: producer.ffi)
+            case .stream(let producer): return .stream(producer: producer.ffi)
+            }
+        }
+    }
     /// An audio codec, its initialization bytes, and label.
     public typealias AudioInit = MoqAudioInit
-    /// A video codec, its initialization bytes, label, and hints.
-    public typealias VideoInit = MoqVideoInit
+    /// A video codec, its initialization bytes, label, hints, and lower rendition.
+    public struct VideoInit: Sendable {
+        /// The video codec.
+        public var format: VideoFormat
+        /// Codec init bytes (an avcC, an hvcC, ...). May be empty for a format that resolves in band.
+        public var data: Data
+        /// Human-readable rendition name for a track picker.
+        public var label: String?
+        /// Catalog fields the stream cannot reveal itself.
+        public var hint: VideoHint?
+        /// The next lower rendition of the same source, of either producer kind: this track then
+        /// sits one priority below it, so a bandwidth allocator funds that one first.
+        public var lower: Producer?
+        /// Describe a video publish.
+        public init(
+            format: VideoFormat, data: Data, label: String? = nil, hint: VideoHint? = nil, lower: Producer? = nil
+        ) {
+            self.format = format
+            self.data = data
+            self.label = label
+            self.hint = hint
+            self.lower = lower
+        }
+        var ffi: MoqVideoInit {
+            MoqVideoInit(format: format, data: data, label: label, hint: hint, lower: lower?.ffi)
+        }
+    }
     /// Shares one source's timestamp offset without keeping its broadcast open.
     public final class Timebase: Sendable {
         let ffi: MoqMediaTimebase
@@ -85,10 +126,12 @@ public enum Media {
         /// Construct a weak catalog handle for this broadcast.
         public init(broadcast: BroadcastProducer) throws { ffi = try MoqMediaCatalogProducer(broadcast: broadcast.ffi) }
 
-        /// Read the broadcast clock in microseconds, fixing it for subsequent media producers.
-        public func now() throws -> UInt64 { try ffi.now() }
+        /// Read the broadcast clock, fixing it for subsequent media producers.
+        public func now() throws -> Timestamp { try ffi.now() }
         /// Replace the video properties shared by every rendition.
-        public func setVideoProperties(_ properties: VideoProperties) throws { try ffi.setVideoProperties(properties: properties) }
+        public func setVideoProperties(_ properties: VideoProperties) throws {
+            try ffi.setVideoProperties(properties: properties)
+        }
         /// Set an application catalog section from its serialized JSON value.
         public func setSection(name: String, json: String) throws { try ffi.setSection(name: name, json: json) }
         /// Remove an application catalog section if present.
@@ -188,7 +231,7 @@ public enum Media {
         ///
         /// Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
         /// timestamps are container media time, not the transport's. Which groups arrive, and how
-        /// long a stalled one stays readable, is the subscription's `maxDelay`. Takes over
+        /// long a stalled one stays readable, is the subscription's `delay.max`. Takes over
         /// `group`, whose handle is closed afterward; throws if it has already read a frame.
         public convenience init(group: Moq.GroupConsumer, container: Container) throws {
             self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))
@@ -222,12 +265,17 @@ public enum Media {
         let ffi: MoqMediaTrackProducer
 
         /// Import complete audio frames on a named or requested track.
-        public static func audio(broadcast: BroadcastProducer, initData: AudioInit, target: Target = .named(name: nil)) throws -> TrackProducer {
+        public static func audio(broadcast: BroadcastProducer, initData: AudioInit, target: Target = .named(name: nil))
+            throws -> TrackProducer
+        {
             TrackProducer(try MoqMediaTrackProducer.audio(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         /// Import complete video frames on a named or requested track.
-        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil)) throws -> TrackProducer {
-            TrackProducer(try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
+        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil))
+            throws -> TrackProducer
+        {
+            TrackProducer(
+                try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData.ffi))
         }
         init(_ ffi: MoqMediaTrackProducer) {
             self.ffi = ffi
@@ -238,17 +286,25 @@ public enum Media {
             TrackDemand(try ffi.demand())
         }
 
-        /// Write a frame with the given presentation timestamp (microseconds).
+        /// Write a frame with the given presentation timestamp.
         ///
         /// The importer derives keyframe status from the bitstream, so only the payload and its
         /// timestamp cross the boundary.
-        public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
-            try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
+        public func writeFrame(_ payload: Data, timestamp: Timestamp) throws {
+            try ffi.writeFrame(frame: Frame(payload: payload, timestamp: timestamp))
         }
 
         /// Mark a timeline break, preserving the advertised jitter and delay.
         public func discontinuity() throws {
             try ffi.discontinuity()
+        }
+
+        /// Advertise whether this video rendition is being produced, as its catalog `enabled`.
+        ///
+        /// Disable it when its sender stops for lack of bandwidth and mark a ``discontinuity()``;
+        /// enable it again just before the keyframe that resumes it. An audio track refuses.
+        public func setEnabled(_ enabled: Bool) throws {
+            try ffi.setEnabled(enabled: enabled)
         }
 
         /// Draw a group boundary here.
@@ -319,8 +375,11 @@ public enum Media {
         let ffi: MoqMediaTrackStreamProducer
 
         /// Import a video byte stream, inferring frame boundaries.
-        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil)) throws -> TrackStreamProducer {
-            TrackStreamProducer(try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
+        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil))
+            throws -> TrackStreamProducer
+        {
+            TrackStreamProducer(
+                try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData.ffi))
         }
         init(_ ffi: MoqMediaTrackStreamProducer) {
             self.ffi = ffi
@@ -335,6 +394,16 @@ public enum Media {
         /// access units and buffers any partial trailing frame for the next call.
         public func write(_ payload: Data) throws {
             try ffi.write(payload: payload)
+        }
+
+        /// Stop or resume publishing this rendition, advertised as its catalog `enabled`.
+        ///
+        /// Disable it when its sender stops for lack of bandwidth: this marks a discontinuity
+        /// and drops everything written until it is enabled again, so the stream may keep
+        /// flowing. Enabled again, it resumes, and advertises itself enabled, at the next
+        /// keyframe in the stream.
+        public func setEnabled(_ enabled: Bool) throws {
+            try ffi.setEnabled(enabled: enabled)
         }
 
         /// Finalize the track, publishing the last access unit still waiting for a

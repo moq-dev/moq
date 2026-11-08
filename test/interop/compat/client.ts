@@ -18,6 +18,12 @@ import { connect } from "./transport";
 type FrameMicros = Parameters<typeof Container.Legacy.encodeFrame>[1];
 type TimestampMicros = Parameters<typeof Moq.Time.Timestamp.fromMicros>[0];
 
+// Group completion was renamed after @moq/net 0.4.7. Select the installed API
+// once before connecting, so the same client can publish with either package.
+const groupMethods = Moq.Group.Producer.prototype as { finish?: () => void; close?: () => void };
+const finishGroup = groupMethods.finish ?? groupMethods.close;
+if (!finishGroup) throw new Error("group producer has no clean completion method");
+
 /** A catalog section's first rendition, with its name. */
 function first<T>(section: { renditions: Record<string, T> } | undefined): [string, T] | undefined {
 	return Object.entries(section?.renditions ?? {})[0];
@@ -86,19 +92,27 @@ async function video(bc: Moq.Broadcast.Consumer, [name, config]: [string, Catalo
 // How far behind the newest audio a group may fall and still be read, in milliseconds.
 const AUDIO_BUDGET = 5000;
 
-/** The subscription field holding the latency budget, which the checkout renamed from `maxAge`. */
-function budgetField(): "maxAge" | "maxDelay" {
-	// The checkout refuses the old name, which a throwaway local track shows without a session.
+/**
+ * The subscription fields holding the latency budget, which releases spelled `maxAge`, then
+ * `maxDelay`, and the checkout spells `delay: { max }`.
+ */
+function budget(millis: number): Record<string, unknown> {
+	// Each version refuses the older names, which a throwaway local track shows without a session.
+	const spellings = [{ maxAge: millis }, { maxDelay: millis }, { delay: { max: millis } }];
 	const broadcast = new Moq.Broadcast.Producer();
 	try {
-		broadcast
-			.createTrack("probe")
-			.subscribe({ maxAge: 0 } as Moq.Track.Subscription)
-			.close();
-		return "maxAge";
-	} catch (err) {
-		if (!(err instanceof TypeError)) throw err;
-		return "maxDelay";
+		for (const spelling of spellings.slice(0, -1)) {
+			try {
+				broadcast
+					.createTrack(`probe-${Object.keys(spelling)[0]}`)
+					.subscribe(spelling as Moq.Track.Subscription)
+					.close();
+				return spelling;
+			} catch (err) {
+				if (!(err instanceof TypeError)) throw err;
+			}
+		}
+		return spellings[spellings.length - 1];
 	} finally {
 		broadcast.close();
 	}
@@ -168,7 +182,7 @@ async function audio(
 	// In sequence order, as a stateful decoder needs. An fMP4 fragment lands the tail of one audio
 	// group and the head of the next in one burst, and the default budget of zero drops that tail
 	// once the next group arrives, so allow a backlog; a group that never arrives still leaves a gap.
-	const subscription = { priority: Catalog.PRIORITY.audio, [budgetField()]: AUDIO_BUDGET };
+	const subscription = { priority: Catalog.PRIORITY.audio, ...budget(AUDIO_BUDGET) };
 	const track = bc
 		.track(name)
 		.subscribe(subscription as Moq.Track.Subscription)
@@ -293,8 +307,14 @@ if (command === "sign") {
 } else if (command === "publish") {
 	install();
 	const origin = new Moq.Origin.Producer();
-	const publication = origin.createBroadcast(Moq.Path.from(args[1]));
-	// Released packages return the fill producer directly; current ones return its publication.
+	const path = Moq.Path.from(args[1]);
+	// Released packages create with `createBroadcast`, which returns the fill producer directly or,
+	// later, its publication; current ones create a route that owns its broadcast.
+	type Released = { createBroadcast(path: Moq.Path.Valid): { announce(): void } };
+	const publication =
+		"route" in origin
+			? origin.route(path, { hidden: true })
+			: (origin as unknown as Released).createBroadcast(path);
 	const broadcast = ("broadcast" in publication ? publication.broadcast : publication) as Moq.Broadcast.Producer;
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MICRO });
 	publication.announce();
@@ -319,7 +339,7 @@ if (command === "sign") {
 		payload: new TextEncoder().encode("compat-fetch"),
 		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
 	});
-	group.finish();
+	finishGroup.call(group);
 	await connection.closed;
 } else if (command === "subscribe") {
 	// The flags of the interop subscriber this stands in for.

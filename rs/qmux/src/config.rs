@@ -79,6 +79,11 @@ pub struct Config {
 	/// an application is actively sending. Only the record-framed drafts (QMux01+) carry
 	/// `QX_PING`. Default: 1s.
 	pub rtt_interval: Option<Duration>,
+
+	/// Keep `limits.receive_window` for the session's life, for a carrier that sizes its own
+	/// buffers by it, such as a WebRTC data channel: [`Session::set_limits`](crate::Session::set_limits)
+	/// then refuses to change it. Default: false.
+	pub fixed_receive_window: bool,
 }
 
 impl Default for Config {
@@ -93,6 +98,7 @@ impl Default for Config {
 			max_datagram_frame_size: Some(DEFAULT_MAX_RECORD_SIZE),
 			handshake_timeout: Some(Duration::from_secs(10)),
 			rtt_interval: Some(Duration::from_secs(1)),
+			fixed_receive_window: false,
 		}
 	}
 }
@@ -145,7 +151,7 @@ impl Config {
 			return Err(crate::Error::InvalidConfig("zero rtt_interval"));
 		}
 
-		self.limits.validate()?;
+		check_limits(&self.limits)?;
 
 		let mut config = mux::Config::default();
 		config.version = self.version;
@@ -166,6 +172,21 @@ impl Config {
 		};
 		Ok(config)
 	}
+}
+
+/// Refuse limits a peer would refuse, and a receive window that cannot fit the largest unit a
+/// moq-net session assembles: incomplete messages hold leased credit, so a smaller one could
+/// stall the session.
+pub(crate) fn check_limits(limits: &Limits) -> Result<(), crate::Error> {
+	limits.validate()?;
+	if let Some(window) = limits.receive_window
+		&& window.get() < moq_net::transport::MIN_RECEIVE_WINDOW
+	{
+		return Err(crate::Error::ReceiveWindowTooSmall(
+			moq_net::transport::MIN_RECEIVE_WINDOW,
+		));
+	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -209,6 +230,21 @@ mod tests {
 			..Config::default()
 		};
 		assert!(matches!(rtt.to_mux(), Err(crate::Error::InvalidConfig(_))));
+	}
+
+	/// Incomplete messages hold leased credit, so a window that cannot fit the largest unit is
+	/// refused rather than left to stall.
+	#[test]
+	fn a_receive_window_below_the_largest_unit_is_refused() {
+		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
+		let mut config = Config::default();
+		config.limits.receive_window = std::num::NonZeroU64::new(min - 1);
+		assert!(matches!(
+			config.to_mux(),
+			Err(crate::Error::ReceiveWindowTooSmall(got)) if got == min
+		));
+		config.limits.receive_window = std::num::NonZeroU64::new(min);
+		assert!(config.to_mux().is_ok());
 	}
 
 	#[test]

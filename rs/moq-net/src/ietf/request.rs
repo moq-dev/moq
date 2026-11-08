@@ -86,6 +86,23 @@ pub struct RequestError<'a> {
 	pub retry_interval: u64,
 }
 
+impl<'a> RequestError<'a> {
+	/// The REQUEST_ERROR refusing a `kind` request with `err`.
+	pub(crate) fn refuse(
+		err: &crate::Error,
+		kind: super::error::request::Kind,
+		reason: impl Into<Cow<'a, str>>,
+		version: Version,
+	) -> Self {
+		let error_code = super::error::request::to_code(err, kind, version);
+		Self {
+			error_code,
+			reason_phrase: reason.into(),
+			retry_interval: super::error::request::retry_interval(err, error_code),
+		}
+	}
+}
+
 impl<'a> Message<'a> for RequestError<'a> {
 	const ID: u64 = 0x05;
 
@@ -128,7 +145,7 @@ mod tests {
 	/// carries LARGEST_OBJECT; neither is rejected.
 	#[test]
 	fn test_request_ok_ignores_largest_object() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for bytes in [&[0x01, 0x08, 0x05][..], &[0x01, 0x09, 0x05, 0x03]] {
 				let mut buf = Decoder::new(bytes, version.into());
 				RequestOk::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
@@ -139,7 +156,7 @@ mod tests {
 
 	#[test]
 	fn test_request_ok_active_round_trips() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for count in [None, Some(0), Some(7)] {
 				let msg = RequestOk {
 					largest: None,

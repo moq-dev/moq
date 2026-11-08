@@ -29,7 +29,7 @@
 //!
 //! * `announces_started` / `announces_ended`: cumulative broadcast
 //!   announce/unannounce events on this `(tier, role)`. Driven by the tagged
-//!   announce stream on the egress side, and by `create_broadcast` route
+//!   announce stream on the egress side, and by `origin::Producer::route`
 //!   transitions on the ingress side.
 //! * `announced_bytes`: cumulative broadcast-name length summed over each
 //!   model-visible announce and unannounce of this broadcast (the name, not the
@@ -52,15 +52,12 @@
 //!   `frames` / `groups`.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
 //!   groups/frames are read (egress) or written (ingress) in the model.
-//! * `datagrams`: cumulative single-frame groups carried over unreliable QUIC
-//!   datagrams. A datagram is metered as the group it stands in for, so it also
-//!   bumps `groups`, `frames`, and `bytes`; this counter breaks out how many of
-//!   those took the datagram path.
+//! * `datagrams`: cumulative datagrams of datagram tracks. A datagram belongs to
+//!   no group, so it bumps `bytes` but not `groups` or `frames`.
 //! * `inflated`: cumulative bytes inflated from compressed groups for plain
 //!   readers (in-process consumers, and egress that cannot carry compression).
 //!   Every plain reader of a group shares one inflated copy, so each byte counts
-//!   once, on the side of the reader whose read inflated it. A received compressed
-//!   datagram inflates on arrival, counted on the receiving side. Kept separate from
+//!   once, on the side of the reader whose read inflated it. Kept separate from
 //!   `bytes`, which counts payload as stored or sent.
 //! * `requests` ([`Presence`]): cumulative request/response admissions under the
 //!   label and tier at admission. [`Handle::request`] meters their traffic
@@ -137,14 +134,14 @@ use std::{
 	fmt,
 	sync::{
 		Arc, Mutex, MutexGuard, PoisonError, Weak,
-		atomic::{AtomicU64, AtomicUsize, Ordering, fence},
+		atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence},
 	},
 };
 
 use kio::Lock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{Path, Pattern, Patterns, util::SendCell};
+use crate::{Path, Pattern, Patterns, time::Instant, util::SendCell};
 
 mod outcomes;
 pub use outcomes::{Failure, Failures, RefusalKind, Refusals};
@@ -183,7 +180,7 @@ pub(crate) struct Counters {
 	bytes: AtomicU64,
 	frames: AtomicU64,
 	groups: AtomicU64,
-	// Subset of `groups` carried over an unreliable QUIC datagram.
+	// Datagrams of datagram tracks, disjoint from `groups`.
 	datagrams: AtomicU64,
 	// Bytes inflated from compressed groups for plain readers, once per group.
 	inflated: AtomicU64,
@@ -198,7 +195,6 @@ struct ContentCounters {
 	bytes: AtomicU64,
 	frames: AtomicU64,
 	groups: AtomicU64,
-	datagrams: AtomicU64,
 }
 
 impl ContentCounters {
@@ -207,7 +203,6 @@ impl ContentCounters {
 			bytes: self.bytes.load(Ordering::Relaxed),
 			frames: self.frames.load(Ordering::Relaxed),
 			groups: self.groups.load(Ordering::Relaxed),
-			datagrams: self.datagrams.load(Ordering::Relaxed),
 		}
 	}
 
@@ -215,7 +210,6 @@ impl ContentCounters {
 		self.bytes.fetch_add(content.bytes, Ordering::Relaxed);
 		self.frames.fetch_add(content.frames, Ordering::Relaxed);
 		self.groups.fetch_add(content.groups, Ordering::Relaxed);
-		self.datagrams.fetch_add(content.datagrams, Ordering::Relaxed);
 	}
 }
 
@@ -276,8 +270,6 @@ pub struct Content {
 	pub frames: u64,
 	/// Cumulative groups.
 	pub groups: u64,
-	/// Cumulative single-frame groups carried as unreliable datagrams.
-	pub datagrams: u64,
 }
 
 impl Content {
@@ -286,7 +278,6 @@ impl Content {
 		self.bytes += other.bytes;
 		self.frames += other.frames;
 		self.groups += other.groups;
-		self.datagrams += other.datagrams;
 	}
 }
 
@@ -318,17 +309,17 @@ impl SessionCounters {
 		}
 	}
 
-	/// Read the gauge and whether all its payload meters have ended. Ended is loaded with `Acquire`
-	/// before started with `Relaxed`, the same pairing as [`Counters::snapshot`],
-	/// so the readout never shows `ended > started`.
-	fn snapshot(&self) -> (Presence, bool) {
+	/// Read the gauge, its connected sessions' [`Activity`] at `now`, and whether all its payload
+	/// meters have ended. Ended is loaded with `Acquire` before started with `Relaxed`, the same
+	/// pairing as [`Counters::snapshot`], so the readout never shows `ended > started`.
+	fn snapshot(&self, now: Instant) -> (Presence, Activity, bool) {
 		let sessions_failed = self.sessions_failed.snapshot();
 		let sessions_ended = self.sessions_ended.load(Ordering::Acquire);
 		let sessions_started = self.sessions_started.load(Ordering::Relaxed);
-		let (sent_bytes, received_bytes, empty) = {
+		let (sent_bytes, received_bytes, activity, empty) = {
 			let mut bytes = self.bytes();
-			let (sent, received) = bytes.read();
-			(sent, received, bytes.live.is_empty())
+			let (sent, received, activity) = bytes.read(now);
+			(sent, received, activity, bytes.live.is_empty())
 		};
 		let presence = Presence {
 			sessions_refused: self.sessions_refused.snapshot(),
@@ -343,7 +334,7 @@ impl SessionCounters {
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
 		};
-		(presence, empty)
+		(presence, activity, empty)
 	}
 
 	fn control(&self, totals: &mut [[u64; 2]; Message::ALL.len()]) {
@@ -376,6 +367,17 @@ struct Arrival {
 	traffic: Arc<SessionTraffic>,
 	sent: u64,
 	received: u64,
+	sample: Sample,
+}
+
+/// What readouts have seen of one session's payload, carried across a retag so a change of
+/// row neither forgets recent activity nor misses a move made before it.
+#[derive(Clone, Copy, Debug)]
+struct Sample {
+	/// The counters as of the last readout, to notice payload moving between readouts.
+	seen: (u64, u64),
+	/// The first readout that saw the counters move since the one before it.
+	moved: Option<Instant>,
 }
 
 impl SessionBytes {
@@ -385,21 +387,23 @@ impl SessionBytes {
 		Arc::as_ptr(traffic) as usize
 	}
 
-	/// Count `traffic` here from `(sent, received)` on.
-	fn join(&mut self, traffic: Arc<SessionTraffic>, (sent, received): (u64, u64)) {
+	/// Count `traffic` here from `(sent, received)` on, continuing `sample`.
+	fn join(&mut self, traffic: Arc<SessionTraffic>, (sent, received): (u64, u64), sample: Sample) {
 		self.live.insert(
 			Self::key(&traffic),
 			Arrival {
 				traffic,
 				sent,
 				received,
+				sample,
 			},
 		);
 	}
 
 	/// Stop counting `traffic` here, keeping what it recorded so far, and return the
-	/// counters at that cut: a concurrent write lands on one side of the single load.
-	fn leave(&mut self, traffic: &Arc<SessionTraffic>) -> (u64, u64) {
+	/// counters at that cut, where a concurrent write lands on one side of the single
+	/// load, with the session's sample for its next row.
+	fn leave(&mut self, traffic: &Arc<SessionTraffic>) -> ((u64, u64), Sample) {
 		let (sent, received) = traffic.load();
 		let arrival = self
 			.live
@@ -407,14 +411,18 @@ impl SessionBytes {
 			.expect("a session is live on its current row");
 		self.sent += sent - arrival.sent;
 		self.received += received - arrival.received;
-		(sent, received)
+		((sent, received), arrival.sample)
 	}
 
-	/// The row's `(sent, received)` totals. Folds in each session that no handle can
-	/// write through anymore, since its count is final.
-	fn read(&mut self) -> (u64, u64) {
+	/// The row's `(sent, received)` totals and its connected sessions' [`Activity`] at `now`.
+	/// Folds in each session that no handle can write through anymore, since its count is final.
+	///
+	/// Every readout samples each session, so how precisely a move is dated depends on
+	/// how often the registry is read, by anyone.
+	fn read(&mut self, now: Instant) -> (u64, u64, Activity) {
 		let Self { sent, received, live } = self;
 		let (mut live_sent, mut live_received) = (0, 0);
+		let mut activity = Activity::default();
 		live.retain(|_, arrival| {
 			// No Weak<SessionTraffic> exists, so a unique arrival cannot gain another writer.
 			let ended = Arc::strong_count(&arrival.traffic) == 1;
@@ -423,6 +431,17 @@ impl SessionBytes {
 				fence(Ordering::Acquire);
 			}
 			let (now_sent, now_received) = arrival.traffic.load();
+			let sample = &mut arrival.sample;
+			if (now_sent, now_received) != sample.seen {
+				sample.seen = (now_sent, now_received);
+				sample.moved = Some(now);
+			}
+			if arrival.traffic.connected.load(Ordering::Relaxed) {
+				match sample.moved {
+					Some(moved) if now.saturating_duration_since(moved) < Activity::WINDOW => activity.active += 1,
+					_ => activity.idle += 1,
+				}
+			}
 			let (delta_sent, delta_received) = (now_sent - arrival.sent, now_received - arrival.received);
 			if ended {
 				*sent += delta_sent;
@@ -433,7 +452,7 @@ impl SessionBytes {
 			}
 			!ended
 		});
-		(*sent + live_sent, *received + live_received)
+		(*sent + live_sent, *received + live_received, activity)
 	}
 }
 
@@ -478,17 +497,15 @@ pub struct Traffic {
 	pub frames: u64,
 	/// Cumulative groups delivered.
 	pub groups: u64,
-	/// Cumulative single-frame groups delivered over an unreliable QUIC datagram.
-	/// A subset of `groups`: each one also counts there and its payload in
-	/// `frames` / `bytes`.
+	/// Cumulative datagrams of datagram tracks delivered. Disjoint from `groups` and
+	/// `frames`; their payload counts in `bytes`.
 	pub datagrams: u64,
 	/// Cumulative bytes inflated from compressed groups for plain readers. Every plain
-	/// reader shares one inflated copy per group, so each byte counts once. A received
-	/// compressed datagram counts here as it inflates on arrival. `bytes` still counts
+	/// reader shares one inflated copy per group, so each byte counts once. `bytes` still counts
 	/// payload as stored or sent.
 	pub inflated: u64,
 	/// Content skipped because it fell behind a subscriber's
-	/// [`max_delay`](crate::track::Subscription::max_delay) budget. Disjoint from the top-level payload
+	/// [`Delay::max`](crate::track::Delay::max) budget. Disjoint from the top-level payload
 	/// counters: skipped content is never handed over. A steady rate here means
 	/// subscribers are consistently behind the live edge.
 	pub stale: Content,
@@ -806,6 +823,32 @@ impl Presence {
 	}
 }
 
+/// Connected sessions right now, split by whether media payload moved through them
+/// within the last 10 seconds, in either direction.
+///
+/// A gauge, not a counter. A session that only holds announces, or subscriptions
+/// with nothing flowing, is idle: it costs keepalives and control traffic, not
+/// media forwarding. Moves are dated at registry readouts, so a move is seen no
+/// earlier than the readout after it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Activity {
+	/// Connected sessions with no payload moved within the window.
+	pub idle: u64,
+	/// Connected sessions with payload moved within the window.
+	pub active: u64,
+}
+
+impl Activity {
+	/// How recently payload must have moved for a session to count as active.
+	const WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+	fn add(&mut self, other: Self) {
+		self.idle += other.idle;
+		self.active += other.active;
+	}
+}
+
 /// Traffic-class label that selects which counter set a session's bumps record
 /// in, so a single [`Registry`] can split customer-facing, cluster-peer, regional,
 /// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
@@ -958,6 +1001,8 @@ pub struct Snapshot {
 	traffic: HashMap<Tier, [Traffic; 2]>,
 	/// Session presence per tier; read via [`Self::sessions`].
 	sessions: HashMap<Tier, Presence>,
+	/// Connected-session activity per tier; read via [`Self::activity`].
+	activity: HashMap<Tier, Activity>,
 	control: HashMap<Tier, [[u64; 2]; Message::ALL.len()]>,
 }
 
@@ -995,6 +1040,14 @@ impl Snapshot {
 	/// label.
 	pub fn sessions(&self) -> Vec<(Tier, Presence)> {
 		let mut rows: Vec<_> = self.sessions.iter().map(|(tier, s)| (tier.clone(), *s)).collect();
+		rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+		rows
+	}
+
+	/// The `(tier, activity)` rows of connected sessions, one per tier with a session row,
+	/// sorted by tier label.
+	pub fn activity(&self) -> Vec<(Tier, Activity)> {
+		let mut rows: Vec<_> = self.activity.iter().map(|(tier, a)| (tier.clone(), *a)).collect();
 		rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 		rows
 	}
@@ -1248,6 +1301,10 @@ impl Registry {
 	/// node lifetime totals (what a `/metrics`-style scrape wants) and never prunes.
 	/// Retired entries remain in these totals after [`Self::report`] prunes them.
 	pub fn snapshot(&self) -> Snapshot {
+		self.snapshot_at(Instant::now())
+	}
+
+	fn snapshot_at(&self, now: Instant) -> Snapshot {
 		self.collect_wire();
 		let Some(shared) = self.shared.as_ref() else {
 			return Snapshot::default();
@@ -1269,11 +1326,18 @@ impl Registry {
 			let sessions = shared.sessions.lock();
 			for (tier, labels) in sessions.iter() {
 				let totals = snap.sessions.entry(tier.clone()).or_default();
+				let activity = snap.activity.entry(tier.clone()).or_default();
 				for counters in labels.values() {
-					totals.add(counters.snapshot().0);
+					let (presence, active, _) = counters.snapshot(now);
+					totals.add(presence);
+					activity.add(active);
 					counters.control(snap.control.entry(tier.clone()).or_default());
 				}
 			}
+		}
+		// A tier whose sessions were all pruned still reports, as zero connected.
+		for tier in snap.sessions.keys() {
+			snap.activity.entry(tier.clone()).or_default();
 		}
 		snap
 	}
@@ -1289,6 +1353,10 @@ impl Registry {
 	/// sees traffic again restarts from zero; see the module docs on counter
 	/// resets. Leaves the report empty for a disabled registry.
 	pub fn report(&self, report: &mut Report) {
+		self.report_at(report, Instant::now());
+	}
+
+	fn report_at(&self, report: &mut Report, now: Instant) {
 		self.collect_wire();
 		report.traffic.clear();
 		report.sessions.clear();
@@ -1329,7 +1397,7 @@ impl Registry {
 				// Nothing can join a row only the map holds (that needs the lock held here),
 				// but a meter outliving its session still writes until its last clone drops.
 				let unheld = Arc::strong_count(counters) == 1;
-				let (presence, empty) = counters.snapshot();
+				let (presence, _, empty) = counters.snapshot(now);
 				let closed = unheld && empty;
 				report.sessions.push(SessionEntry {
 					tier: tier.clone(),
@@ -1413,9 +1481,16 @@ impl Handle {
 				}
 			}
 		}
-		let traffic = Arc::new(SessionTraffic::default());
+		let traffic = Arc::new(SessionTraffic {
+			connected: AtomicBool::new(matches!(context, Context::Session)),
+			..Default::default()
+		});
 		if let Some(presence) = &presence {
-			presence.bytes().join(traffic.clone(), (0, 0));
+			let sample = Sample {
+				seen: (0, 0),
+				moved: None,
+			};
+			presence.bytes().join(traffic.clone(), (0, 0), sample);
 		}
 		Session {
 			inner: Some(SendCell::new(Arc::new(SessionInner {
@@ -1603,6 +1678,8 @@ struct Current {
 struct SessionTraffic {
 	sent: AtomicU64,
 	received: AtomicU64,
+	/// A connected session that has not ended: its [`Activity`] counts. Requests never set it.
+	connected: AtomicBool,
 }
 
 impl SessionTraffic {
@@ -1683,12 +1760,15 @@ impl Session {
 			});
 		let presence = inner.registry.session_counters(&tier, &label);
 		// Bytes before the cut stay on the old row; later ones, through any meter, go to the new.
-		let cut = match &current.presence {
+		let (cut, sample) = match &current.presence {
 			Some(old) => old.bytes().leave(&inner.traffic),
-			None => inner.traffic.load(),
+			None => {
+				let cut = inner.traffic.load();
+				(cut, Sample { seen: cut, moved: None })
+			}
 		};
 		if let Some(presence) = &presence {
-			presence.bytes().join(inner.traffic.clone(), cut);
+			presence.bytes().join(inner.traffic.clone(), cut, sample);
 		}
 		if inner.connected
 			&& let Some(presence) = &presence
@@ -1814,6 +1894,8 @@ impl SessionInner {
 
 impl Drop for SessionInner {
 	fn drop(&mut self) {
+		// Meters may outlive the session; the ended session is neither idle nor active.
+		self.traffic.connected.store(false, Ordering::Relaxed);
 		let current = self.current.get_mut().expect("stats session poisoned");
 		if self.connected
 			&& let Some(presence) = &current.presence
@@ -1872,14 +1954,10 @@ impl Meter {
 		}
 	}
 
-	/// Record one datagram of `n` payload bytes. A datagram stands in for the
-	/// single-frame group it replaces, so this bumps `groups`, `frames`, and
-	/// `bytes` alongside `datagrams`.
+	/// Record one datagram of `n` payload bytes, which belongs to no group.
 	pub(crate) fn datagram(&self, n: u64) {
 		if let Some(counters) = self.counters() {
 			counters.datagrams.fetch_add(1, Ordering::Relaxed);
-			counters.groups.fetch_add(1, Ordering::Relaxed);
-			counters.frames.fetch_add(1, Ordering::Relaxed);
 			counters.bytes.fetch_add(n, Ordering::Relaxed);
 		}
 		self.session_bytes(n);
@@ -1970,6 +2048,13 @@ impl Clone for Scope {
 }
 
 impl Scope {
+	/// Whether this scope was tagged, a cheap pre-check that never resolves: an untagged
+	/// scope's [`Meter`] counts nothing, but a tagged one's may count nothing either, when
+	/// the registry is disabled or excludes its path, so [`Meter::is_tracked`] decides.
+	pub(crate) fn is_tagged(&self) -> bool {
+		self.session.inner.is_some() && self.resolved.is_some()
+	}
+
 	/// The counters for the session's current tier. Skips the registry unless the
 	/// tier changed since the last call, so the per-group path stays cheap.
 	fn counters(&self) -> Option<Arc<TierCounters>> {
@@ -2281,7 +2366,7 @@ mod tests {
 		stats.shared().sessions.lock().get(tier).and_then(|labels| {
 			labels
 				.get(&crate::Path::try_from(label.to_string()).unwrap())
-				.map(|c| c.snapshot().0)
+				.map(|c| c.snapshot(Instant::ZERO).0)
 		})
 	}
 
@@ -2635,7 +2720,6 @@ mod tests {
 		assert_eq!(retired.sessions.len(), 1);
 	}
 
-	#[cfg(not(target_family = "wasm"))]
 	#[test]
 	fn snapshot_and_report_transfer_counters_once() {
 		let stats = test_stats();
@@ -2947,6 +3031,53 @@ mod tests {
 	}
 
 	#[test]
+	fn activity_follows_recent_payload() {
+		let stats = test_stats();
+		let tier = Tier::default();
+		let at = |secs| Instant::ZERO + std::time::Duration::from_secs(secs);
+		let activity = |secs| stats.snapshot_at(at(secs)).activity[&tier];
+		let both = |idle, active| Activity { idle, active };
+
+		let quiet = stats.tier(tier.clone()).session(crate::Path::from_static("acme"));
+		let busy = stats.tier(tier.clone()).session(crate::Path::from_static("acme"));
+		let _request = stats.tier(tier.clone()).request(crate::Path::from_static("acme"));
+		let meter = busy.egress(crate::Path::from_static("acme/live")).meter();
+		let _held = quiet.ingress(crate::Path::from_static("acme/other")).meter();
+		assert_eq!(
+			activity(0),
+			both(2, 0),
+			"connecting moves no payload; requests never count"
+		);
+
+		meter.bytes(1);
+		assert_eq!(activity(1), both(1, 1));
+		assert_eq!(
+			activity(10),
+			both(1, 1),
+			"still within the window of the readout that saw it"
+		);
+		assert_eq!(activity(11), both(2, 0), "the window ends");
+
+		meter.bytes(1);
+		busy.retag(tier.clone(), crate::Path::from_static("other"));
+		assert_eq!(activity(12), both(1, 1), "a move before a retag is still seen after it");
+		busy.retag(tier.clone(), crate::Path::from_static("acme"));
+		assert_eq!(activity(13), both(1, 1), "a retag keeps recent activity");
+
+		meter.datagram(1);
+		drop(busy);
+		assert_eq!(
+			activity(14),
+			both(1, 0),
+			"an ended session is neither, even with a live meter"
+		);
+
+		drop((quiet, _held, _request, meter));
+		stats.report_at(&mut Report::default(), at(15));
+		assert_eq!(activity(15), both(0, 0), "a pruned tier still reports zero");
+	}
+
+	#[test]
 	fn excluded_paths_skip_session_bytes() {
 		let stats = test_stats();
 		let tier = Tier::default();
@@ -3185,11 +3316,17 @@ mod tests {
 		// Same `ended`-before-`started` invariant as `Counters::snapshot`, pinned
 		// at the source level so a reordering refactor can't let
 		// `sessions_ended > sessions_started` leak into a readout.
+		// Anchor on the impl's column-0 header, which this test's escaped literal can't match,
+		// so a signature change fails the search instead of finding the test's own strings.
 		let src = include_str!("stats.rs");
-		let body_start = src
-			.find("fn snapshot(&self) -> (Presence, bool)")
-			.expect("SessionCounters::snapshot fn present");
-		let body = &src[body_start..];
+		let impl_start = src
+			.find("\nimpl SessionCounters {")
+			.expect("impl SessionCounters present");
+		let body = &src[impl_start..];
+		let body = &body[..body.find("\n}\n").expect("impl SessionCounters end")];
+		let body = &body[body
+			.find("\tfn snapshot(")
+			.expect("SessionCounters::snapshot fn present")..];
 		let body = &body[..body.find("\n\t}\n").expect("SessionCounters::snapshot fn end")];
 		let ended_pos = body.find("self.sessions_ended.load").expect("sessions_ended load");
 		let started_pos = body.find("self.sessions_started.load").expect("sessions_started load");

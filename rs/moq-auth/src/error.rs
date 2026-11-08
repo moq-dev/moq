@@ -66,14 +66,6 @@ pub enum KeyError {
 	/// The JWT header has no `kid` to select a key with.
 	#[error("missing kid in JWT header")]
 	MissingKid,
-
-	/// An EC key has no x coordinate.
-	#[error("missing x() point in EC key")]
-	MissingEcX,
-
-	/// An EC key has no y coordinate.
-	#[error("missing y() point in EC key")]
-	MissingEcY,
 }
 
 /// Top-level error type for moq-auth.
@@ -93,11 +85,11 @@ pub enum Error {
 	InvalidRoot(String),
 
 	/// The path does not overlap the token's root.
-	#[error("path `{0}` does not overlap the token root")]
+	#[error("path {0:?} does not overlap the token root")]
 	RootMismatch(String),
 
 	/// The token grants no access to this path.
-	#[error("token grants no access to path `{0}`")]
+	#[error("token grants no access to path {0:?}")]
 	NoAccess(String),
 
 	/// The key scope allows neither publish nor subscribe.
@@ -203,6 +195,18 @@ pub enum Error {
 	/// Fetching a remote JWKS failed.
 	#[error("{0}")]
 	Other(String),
+
+	/// A mesh coordinator refused the request.
+	#[error("mesh coordinator refused: {0}")]
+	Mesh(#[from] crate::mesh::ErrorReply),
+
+	/// The mesh coordinator's state file could not be read, parsed, or written.
+	#[error("mesh state: {0}")]
+	MeshState(String),
+
+	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
+	#[error(transparent)]
+	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),
 }
 
 // Dependency errors are flattened to their message so their crates stay out of this crate's
@@ -224,10 +228,13 @@ from_message! {
 	serde_json::Error => Json,
 	base64::DecodeError => Base64,
 	jsonwebtoken::errors::Error => Jwt,
-	p256::elliptic_curve::pkcs8::Error => Crypto,
-	p256::elliptic_curve::Error => Crypto,
-	aws_lc_rs::error::Unspecified => Crypto,
-	aws_lc_rs::error::KeyRejected => Crypto,
+}
+
+impl Error {
+	/// A crypto backend's error, converted by hand so its crate stays out of this crate's API.
+	pub(crate) fn crypto(err: impl std::error::Error) -> Self {
+		Self::Crypto(message(err))
+	}
 }
 
 #[cfg(feature = "client")]

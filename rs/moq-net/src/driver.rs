@@ -91,7 +91,7 @@ impl Protocol {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match self {
 			Self::Lite(driver) => driver.poll(waiter),
-			Self::Ietf(driver) => waiter.poll_future(std::pin::Pin::new(driver)),
+			Self::Ietf(driver) => driver.poll(waiter),
 		}
 	}
 
@@ -168,7 +168,6 @@ impl std::fmt::Debug for Driver {
 }
 
 // The relay and the bindings spawn drivers on multi-threaded runtimes.
-#[cfg(not(target_family = "wasm"))]
 const _: () = {
 	const fn assert_send<T: Send>() {}
 	assert_send::<Driver>();

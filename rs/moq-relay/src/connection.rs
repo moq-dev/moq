@@ -1,17 +1,17 @@
 use crate::{auth, cluster, incoming::Incoming, refusals::RefusalKind};
 
+use futures::FutureExt as _;
 use tracing::Instrument;
-#[cfg(all(target_os = "linux", feature = "_uring"))]
 use tracing::instrument::WithSubscriber;
 
 /// An admission refusal carrying the session code to close the request with.
 ///
 /// Used only on the pre-accept auth path so the caller can close once with
 /// the right code instead of sprinkling close/return at each failure site.
-pub(crate) struct Rejection {
-	pub(crate) code: moq_net::SessionError,
+struct Rejection {
+	code: moq_net::SessionError,
 	refusal: Option<RefusalKind>,
-	pub(crate) source: anyhow::Error,
+	source: anyhow::Error,
 }
 
 impl From<auth::Error> for Rejection {
@@ -30,8 +30,8 @@ impl From<auth::Error> for Rejection {
 /// [`run`](Self::run) to admit the request through its lease, wire up
 /// publish/subscribe origins, and serve the session until it closes.
 ///
-/// The request is a moq-tokio [`Request`](moq_tokio::server::Request), or an
-/// in-memory accepted session when the `test-support` feature is enabled.
+/// The request is a moq-tokio [`Request`](moq_tokio::server::Request), an io_uring
+/// worker's, or an in-memory accepted session when the `test-support` feature is enabled.
 pub struct Connection<R: Incoming = moq_tokio::server::Request> {
 	request: R,
 	lifecycle: Lifecycle,
@@ -39,7 +39,7 @@ pub struct Connection<R: Incoming = moq_tokio::server::Request> {
 
 /// Shared owner of admission, supervision and the connection's log span.
 #[derive(Clone)]
-pub(crate) struct Lifecycle {
+struct Lifecycle {
 	id: u64,
 	span: tracing::Span,
 	cluster: cluster::Cluster,
@@ -83,19 +83,43 @@ impl<R: Incoming> Connection<R> {
 	/// ends only this connection, as an error.
 	pub async fn run(self) {
 		let Self { request, lifecycle } = self;
-		lifecycle.run(Self::serve(request, &lifecycle)).await;
+		match request.shared().cloned() {
+			Some(shared) => lifecycle.start(&shared, Self::start(request, &lifecycle)).await,
+			None => {
+				lifecycle
+					.run(async { Self::start(request, &lifecycle).await?.await })
+					.await
+			}
+		}
 	}
 
-	async fn serve(request: R, lifecycle: &Lifecycle) -> anyhow::Result<()> {
+	/// Admit the request and answer its SETUP, returning the session's supervision.
+	async fn start(mut request: R, lifecycle: &Lifecycle) -> anyhow::Result<Supervision> {
+		// Only this relay's origin holds its Hop ID, so a session declaring it is this
+		// relay dialing itself under a spelling its self filter missed. Every route
+		// from it would be dropped as reflected, so refuse it rather than serve it.
+		if let Some(hop) = request.peer_hop().filter(|hop| hop.get() == lifecycle.cluster.id()) {
+			request.reject(moq_net::SessionError::Internal).await;
+			anyhow::bail!(
+				"refused a session declaring this relay's own Hop ID {hop}: a cluster peer URL reaches this relay itself"
+			);
+		}
+		let shared = request.shared().cloned();
+		let admit = {
+			let admission = request.admission(&lifecycle.auth);
+			let pacer = request.pacer();
+			let lifecycle = lifecycle.clone();
+			async move { lifecycle.admit(admission, pacer).await }
+		};
 		// Abandoned at the drain deadline, so the deadline bounds this task and its
 		// socket like it bounds a session, and at the handshake deadline, so a peer
 		// cannot hold the connection open behind a decision that never comes.
 		// Boxed: the admission future is large, and nesting it inline overflows debug stacks.
 		let admitted = request
-			.within(Box::pin(lifecycle.admit(request.admission(&lifecycle.auth))))
+			.within(Box::pin(lifecycle.on(shared.as_ref(), admit)))
 			.await
 			.inspect_err(|_| lifecycle.cluster.refusals.record(RefusalKind::Unavailable))
-			.map_err(|err| err.context("admission timed out"))?;
+			.map_err(|err| err.context("admission timed out"))??;
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
@@ -111,15 +135,6 @@ impl<R: Incoming> Connection<R> {
 			subscriber,
 			stats,
 		} = admitted;
-
-		// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
-		// Other transports keep their own limits.
-		#[cfg(feature = "quic")]
-		if let Some(limits) = lifecycle.cluster.quic_limits(&lease)
-			&& let Some(quic) = request.quic()
-		{
-			quic.set_limits(limits)?;
-		}
 
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
@@ -143,25 +158,39 @@ impl<R: Incoming> Connection<R> {
 				return Err(err.into());
 			}
 		};
+		// Before SETUP OK, so the first requests see them: a peer's wider limits, and the
+		// caps the window then opens under. Other transports keep their own limits.
+		let request = request.with_quic_limits(lifecycle.cluster.quic_limits(&lease))?;
 		let serving = lifecycle.shutdown.serve();
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
 		// Abandoning the reply refuses the session with the timeout code, which its stats count.
-		let (session, driver) = lifecycle
-			.shutdown
-			.until_deadline(request.ok())
-			.await
-			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
+		let expired = {
+			let shutdown = lifecycle.shutdown.clone();
+			lifecycle.on(shared.as_ref(), async move { shutdown.expired().await })
+		};
+		let (session, driver) = tokio::select! {
+			biased;
+			_ = expired => anyhow::bail!("the SETUP reply was still pending at the drain deadline"),
+			reply = request.ok() => reply?,
+		};
 
 		// Joined rather than awaited in turn, for a driver that runs only when polled. A
 		// spawned driver's panic still surfaces here, so it cannot look like cancellation.
-		let (result, driven) = futures::join!(
-			lifecycle.supervise(serving, session, lease, registration, transport),
-			R::drive(driver),
-		);
-		driven?;
-		result
+		let lifecycle = lifecycle.clone();
+		Ok(async move {
+			let (result, driven) = futures::join!(
+				lifecycle.supervise(serving, session, lease, registration, transport),
+				R::drive(driver),
+			);
+			driven?;
+			result
+		}
+		.boxed())
 	}
 }
+
+/// A started session's supervision, which runs until the session closes.
+type Supervision = futures::future::BoxFuture<'static, anyhow::Result<()>>;
 
 /// The span every line about one connection logs under, on whichever runtime emits it.
 fn span(id: u64, remote: Option<std::net::SocketAddr>) -> tracing::Span {
@@ -175,12 +204,7 @@ fn span(id: u64, remote: Option<std::net::SocketAddr>) -> tracing::Span {
 }
 
 impl Lifecycle {
-	pub(crate) fn new(
-		cluster: cluster::Cluster,
-		auth: auth::Auth,
-		id: u64,
-		remote: Option<std::net::SocketAddr>,
-	) -> Self {
+	fn new(cluster: cluster::Cluster, auth: auth::Auth, id: u64, remote: Option<std::net::SocketAddr>) -> Self {
 		Self {
 			id,
 			span: span(id, remote),
@@ -191,26 +215,25 @@ impl Lifecycle {
 		}
 	}
 
-	pub(crate) fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
+	fn with_shutdown(mut self, shutdown: crate::shutdown::Observer) -> Self {
 		self.shutdown = shutdown;
 		self
 	}
 
-	pub(crate) fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
+	fn with_sessions(mut self, sessions: crate::session::Registry) -> Self {
 		self.sessions = Some(sessions);
 		self
 	}
 
 	/// Run `task` in this connection's span, then log its close; a panic closes it as an error.
-	pub(crate) async fn run(&self, task: impl std::future::Future<Output = anyhow::Result<()>>) {
+	async fn run(&self, task: impl std::future::Future<Output = anyhow::Result<()>>) {
 		let result = self.isolate(task).await;
 		self.closed(result);
 	}
 
-	/// Run the ring worker's half, then supervise the started session on `runtime`, which logs
+	/// Run the connection task's half, then supervise the started session on `runtime`, which logs
 	/// the close there: a worker stopped at shutdown drops its tasks, and the line with them.
-	#[cfg(all(target_os = "linux", feature = "_uring"))]
-	pub(crate) async fn start<S>(
+	async fn start<S>(
 		&self,
 		runtime: &tokio::runtime::Handle,
 		start: impl std::future::Future<Output = anyhow::Result<S>>,
@@ -244,10 +267,21 @@ impl Lifecycle {
 		}
 	}
 
+	/// Run `task` on `runtime`, or in place without one; see [`shared`](Self::shared).
+	async fn on<T: Send + 'static>(
+		&self,
+		runtime: Option<&tokio::runtime::Handle>,
+		task: impl std::future::Future<Output = T> + Send + 'static,
+	) -> anyhow::Result<T> {
+		match runtime {
+			Some(runtime) => self.shared(runtime, task).await,
+			None => Ok(task.await),
+		}
+	}
+
 	/// Keep the connection span across a worker-to-shared-runtime handoff and return panics to its owner.
 	/// Dropping the returned future aborts the task, so it never outlives its connection.
-	#[cfg(all(target_os = "linux", feature = "_uring"))]
-	pub(crate) async fn shared<T: Send + 'static>(
+	async fn shared<T: Send + 'static>(
 		&self,
 		runtime: &tokio::runtime::Handle,
 		task: impl std::future::Future<Output = T> + Send + 'static,
@@ -272,9 +306,12 @@ impl Lifecycle {
 			.ok_or_else(|| anyhow::anyhow!("connection task panicked"))
 	}
 
-	pub(crate) async fn admit(
+	/// Admit `request`, holding its connection to a capped grant through `pacer`, or
+	/// refusing a capped grant without one.
+	async fn admit(
 		&self,
 		request: moq_auth::Request,
+		pacer: Option<auth::Pacer>,
 	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), Rejection> {
 		self.span.record("session", &request.id);
 		// Peer-controlled, so recorded escaped rather than displayed raw.
@@ -282,7 +319,7 @@ impl Lifecycle {
 			self.span
 				.record("implementation", tracing::field::debug(implementation));
 		}
-		let admitted = self.shutdown.admit(self.authorize(request)).await;
+		let admitted = self.shutdown.admit(self.authorize(request, pacer)).await;
 		// Cluster admission records its own refusals; LAN and drain refusals are recorded here.
 		if let Err(err) = &admitted
 			&& let Some(refusal) = err.refusal
@@ -295,6 +332,7 @@ impl Lifecycle {
 	async fn authorize(
 		&self,
 		request: moq_auth::Request,
+		pacer: Option<auth::Pacer>,
 	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), Rejection> {
 		if cluster::Cluster::is_lan_path(&request.path) {
 			let Some(presented) = cluster::Cluster::lan_credential(&request.path) else {
@@ -331,7 +369,7 @@ impl Lifecycle {
 		}
 		let admitted = self
 			.cluster
-			.admit_session(&self.auth, request.clone())
+			.admit_session(&self.auth, request.clone(), pacer)
 			.await
 			.map_err(|err| {
 				// Cluster admission owns this refusal; only local/drain refusals remain here.
@@ -343,7 +381,7 @@ impl Lifecycle {
 		Ok((admitted, registration))
 	}
 
-	pub(crate) async fn supervise(
+	async fn supervise(
 		&self,
 		serving: crate::shutdown::Serving,
 		session: moq_net::Session,
@@ -378,13 +416,11 @@ impl Lifecycle {
 pub async fn supervise(
 	session: moq_net::Session,
 	lease: auth::Lease,
-	serving: crate::shutdown::Serving,
+	mut serving: crate::shutdown::Serving,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
 	let mut lease = lease.authorizing(&session);
 	let mut shutdown = serving.shutdown.clone();
-	// Held until the `end` is reported, so a drain past its deadline still waits for it.
-	let _serving = serving;
 	let reported = lease.reported();
 	let result = loop {
 		let nudged = async {
@@ -412,13 +448,20 @@ pub async fn supervise(
 				// Empty URI: "reconnect to me" (the relay is restarting). The session's
 				// machine runs on its own, so the GOAWAY still reaches the wire while
 				// we wait here, and the drain deadline closes it if the peer stays.
-				shutdown.drain_session(&session).await;
+				serving.drain(&session).await;
 				lease.close(moq_auth::lease::Reason::Shutdown, session_bytes(&session));
 				break Ok(());
 			}
 			() = nudged => lease.revalidate(),
 		}
 	};
+	// Abort requests are executed by the driver, so observe the transport close first.
+	session.closed().await;
+	serving.closed();
+	if let Some(registration) = &registration {
+		registration.closed();
+	}
+	// Keep `serving` and the registration until the end report finishes.
 	reported.await;
 	result
 }
@@ -433,11 +476,11 @@ pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
 	}
 }
 
-#[cfg(all(test, target_os = "linux", feature = "_uring"))]
+#[cfg(test)]
 #[path = "../tests/integration/logs.rs"]
 mod logs;
 
-#[cfg(all(test, target_os = "linux", feature = "_uring"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 
@@ -455,7 +498,7 @@ mod tests {
 				tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO),
 			);
 		let _logging = tracing::subscriber::set_default(subscriber);
-		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 		let (auth, _admissions) = auth::Auth::embedded("test");
 		let lifecycle = Lifecycle::new(cluster, auth, 42, None);
 		lifecycle

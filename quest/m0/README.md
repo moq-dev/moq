@@ -2,8 +2,14 @@
 
 ## Goal
 
-The work in flight now: a passing Nightly, fixes for the `release` line, the
-quest merge driver, local reviews, CI cost and latency, and test flakes.
+The work in flight now: passing Nightly, Interop, and Video runs, backports
+and patch releases for the `release` line, CI cost and latency, test flakes,
+and a few small fixes for hostile input, WebSocket throughput, agent disk use,
+and CRLF checkouts. The quest merge driver
+([moq-dev/moq#6728](https://github.com/moq-dev/moq/pull/6728)), local reviews
+([moq-dev/moq#7175](https://github.com/moq-dev/moq/pull/7175)), and the
+declared HLS segment grid
+([moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652)) landed.
 
 ## Plan
 
@@ -21,11 +27,10 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 ## Required
 
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
-- [Release credential leaks](/quest/m0/security-audit/README.md) - tokens stay out of logs and outbound HTTP clients verify their peer, on `main` and `release`
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
-- [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
-- [Backport @moq/flate bounds](/quest/m0/backport-flate-budget.md) - `@moq/flate` on `release` stops inflating past its cap and stops pinning pako scratch
-- [Backport audio groupDuration](/quest/m0/backport-audio-group-duration.md) - `@moq/publish` 0.5.4 on `release` can pack several Opus frames per group, making Cloudflare's relay drop audio less often
-- [Resolve the remaining external Smoke interoperability failures](/quest/m0/smoke-released.md) - every external Docker interop cell in Smoke passes, fixed at its cause
-- [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in a batched merge gate as one `just ci` pass per batch, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
+- [kio's Instant has no panicking arithmetic, and peer values never wrap](/quest/m0/peer-arithmetic.md) - every deadline states what overflow means, so a peer's retry interval or a huge configured duration cannot panic a task
+- [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Dart `moq` 0.1.1 reaches pub.dev from `release`
+- [Release's audio encoder rolls groups before the cap](/quest/m0/release-audio-group-cap.md) - a long `groupDuration` with short frames never throws `GroupTooLarge` on `release`
+- [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in GitHub's merge queue, one tested entry at a time, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
+- [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one drops a queued PR
+- [Agent build output can't fill the desktop's disk](/quest/m0/agent-disk-budget.md) - finished agent checkouts reclaim their mbx targets automatically, so parallel agent builds stop filling the root disk

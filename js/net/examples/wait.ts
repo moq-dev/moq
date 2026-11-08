@@ -23,7 +23,7 @@ async function main() {
 		}
 
 		console.log("broadcast is live");
-		const track = active.track("chat").subscribe({ priority: 0 });
+		const track = active.track("chat").subscribe();
 		effect.cleanup(() => track.close());
 
 		effect.spawn(async () => {

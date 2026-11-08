@@ -2,12 +2,12 @@
 
 ## Goal
 
-A `<moq-watch>` with a nonzero `buffer` subscribes to its audio and video
+A `<moq-watch>` with a nonzero `lookahead` subscribes to its audio and video
 tracks with `order: "ascending"`, so the oldest group in its window is sent
 first and a voice reply's opening never arrives after its live edge. The audio
 decoder's head hold from [moq-dev/moq#6549](https://github.com/moq-dev/moq/pull/6549)
 shrinks to one rule: hold the head until it spans the floor, then release it
-sorted. Live playback (`buffer` of zero) stays newest-first.
+sorted. Live playback (`lookahead` of zero) stays newest-first.
 
 Not here: the protocol's `Group Order` (landed in
 [moq-dev/moq#5385](https://github.com/moq-dev/moq/pull/5385)), the buffered
@@ -27,7 +27,7 @@ Decided 2026-10-23 by the maintainer:
   from #6549 can go. Voice AI motivates it but is not the only user.
 - ✅ All buffered media goes ascending, audio and video. Not chosen: audio
   only; an explicit opt-in independent of buffering.
-- ✅ The opt-in is buffered mode itself: a nonzero `buffer` makes every media
+- ✅ The opt-in is buffered mode itself: a nonzero `lookahead` makes every media
   subscription ascending. A buffered player always wants its window from the
   start, and a live one never does, so a second knob adds nothing.
 - ✅ Keep a head hold, sized by the floor (the minimum latency): hold frames
@@ -38,7 +38,7 @@ Decided 2026-10-23 by the maintainer:
   max-delay release rules go. Not chosen: delete the hold outright; keep
   #6549's rules unchanged.
 - ✅ The hold stays audio-only. Video's startup hold is the poster quest's.
-- ✅ Placed in m1, requiring [Finalize moq-lite-07](/quest/m1/lite07-finalize.md):
+- ✅ Placed in m1, requiring [Finalize moq-lite-07](/quest/m2/lite07-finalize.md):
   lite-06 and earlier serve an ascending request newest-first, so this is a
   no-op on default sessions until lite-07 negotiates by default. `release`
   has no `order` field, so it ships in the next minor, not a 0.6.x patch.
@@ -55,31 +55,30 @@ Implementation:
   to end. Say in the watch docs that a mixed audience gets newest-first
   upstream.
 - The draft says an ascending subscriber SHOULD raise `Subscriber Max Age`.
-  Buffered mode already subscribes with `delay + buffer`; confirm that covers
+  Buffered mode already subscribes with `delay + lookahead`; confirm that covers
   it.
 - Replace `Order`'s release rules in `js/watch/src/audio/order.ts` with the
   floor span, keeping `admit()` and the epoch reset ordering from #6549. Keep
   the decoder tests for a reversed head (now released at the floor) and the
   fresh-encoder case.
-- Interplay with [Container reads drop backfill](/quest/m1/read-backfill.md):
-  once the JS consumer drops groups below its cursor, an ascending head
-  arrives above it, so nothing valid is dropped. Whichever lands second
-  re-runs the other's tests.
-- Update `doc/concept/use-case/ai.md` and the `buffer` docs in
+- Since [moq-dev/moq#8071](https://github.com/moq-dev/moq/pull/8071), the JS ordered read starts at the
+  publisher's reported start, waits on each group in sequence, and drops one
+  below its cursor, so `Order` only ever sees an ascending head. That PR left
+  `Order` alone for this quest; rerun its decoder tests against the new read.
+- Update `doc/concept/use-case/ai.md` and the `lookahead` docs in
   `js/watch/src/element.ts` and `js/watch/src/sync.ts` in the same PR.
 - Verify against a voice agent on a lite-07 relay, such as a Pipecat pipeline
   publishing each TTS reply as a fresh track with one Opus frame per group:
   every reply decodes from its first frame, plain and barge-in, with no
   overflow.
 
-Runtime buffer changes switch the audio ring and reader mode. This quest
+Runtime lookahead changes switch the audio ring and reader mode. This quest
 keeps waiting on lite-07 for the head-hold simplification.
 
 ## Required
 
-- [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - an ascending request is served newest-first until lite-07 negotiates by default
+- [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - an ascending request is served newest-first until lite-07 negotiates by default
 
 ## Related
 
-- [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS consumer stops delivering groups below its cursor
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor
+- [Subscribe ranges](/quest/m2/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor

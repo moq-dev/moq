@@ -1,0 +1,5 @@
+error: #[kio::wrapper] needs each argument bound to a plain name
+ --> tests/ui/wrapper_pattern.rs:8:45
+  |
+8 |     fn poll_pair(&self, _waiter: &kio::Waiter, (a, b): (u8, u8)) -> Poll<u8> {
+  |                                                ^^^^^^

@@ -5,8 +5,9 @@
 //! timeout; moq-tokio's `defaults_apply_when_unset` pins the 10s default.
 #![cfg(feature = "quic")]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use kio::clock::Instant;
 use moq_relay::cluster::{self, Peer};
 
 /// The dial's idle timeout. QUIC uses the smaller of both ends', so the peer's
@@ -51,8 +52,9 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 	let (bound, port) = tokio::sync::oneshot::channel();
 	runtime.spawn(async move {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin.create_broadcast("peer").expect("create broadcast");
-		broadcast.announce(Default::default()).expect("announce");
+		let broadcast = origin
+			.route("peer", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
 
 		let mut config = moq_tokio::listen::Config::default();
 		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -65,7 +67,7 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 			.expect("peer listen");
 		let _ = bound.send(listener.local_addr().expect("peer addr").port());
 
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			let origin = origin.clone();
 			tokio::spawn(async move {
 				if let Ok(session) = request.with_publisher(&origin).ok().await {
@@ -76,7 +78,7 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 		drop(broadcast);
 	});
 
-	let port = tokio::time::timeout(DETECT, port)
+	let port = kio::clock::timeout(DETECT, port)
 		.await
 		.expect("peer startup timed out")
 		.expect("peer failed to start");
@@ -89,7 +91,7 @@ fn silent_peer_detected_within_idle_timeout() {
 }
 
 async fn silent_peer_detected() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let (port, peer) = spawn_peer().await;
 
@@ -103,20 +105,17 @@ async fn silent_peer_detected() {
 
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("https://127.0.0.1:{port}/"))];
-	// Keep-alives under the idle timeout, so only the silenced peer idles out.
+	// The keep-alive derives from the idle timeout, so only the silenced peer idles out.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Some((IDLE).into());
-	quic.keep_alive = Some((IDLE / 4).into());
-	let cluster = cluster::Cluster::new(cluster::Options::new(config))
-		.expect("cluster init")
-		.with_connect(connect, quic);
-	let mut announced = cluster.origin.consume().announced();
+	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(connect, quic);
+	let mut announced = cluster.origin.consume().routes();
 	let run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 
-	tokio::time::timeout(DETECT, async {
+	kio::clock::timeout(DETECT, async {
 		loop {
 			let event = announced.next().await.expect("origin closed");
-			if let moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) = event
+			if let moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update) = event
 				&& update.prefix.as_str() == "peer"
 			{
 				break;
@@ -131,10 +130,10 @@ async fn silent_peer_detected() {
 		.expect("peer shutdown panicked");
 	let silenced = Instant::now();
 
-	tokio::time::timeout(DETECT, async {
+	kio::clock::timeout(DETECT, async {
 		loop {
 			let event = announced.next().await.expect("origin closed");
-			if let moq_net::announce::Event::End(update) = event
+			if let moq_net::origin::RouteEvent::End(update) = event
 				&& update.prefix.as_str() == "peer"
 			{
 				break;

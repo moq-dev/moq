@@ -242,10 +242,10 @@ export class FrameTooLarge extends Stream {
 }
 
 /**
- * A write grew the group past its cache budget, so the group is aborted.
+ * A peer could not retain a group and aborted it.
  *
- * Raised locally by a frame write, and decoded from a moq-lite peer's `GROUP_TOO_LARGE`
- * reset. Mirrors the Rust `Error::GroupTooLarge`.
+ * Decoded from a moq-lite peer's `GROUP_TOO_LARGE` reset. Local groups shed their front
+ * instead of aborting when their retained tail exceeds its budget.
  *
  * @public
  */
@@ -406,14 +406,21 @@ function localStreamCode(err: unknown): StreamCode {
 }
 
 /**
- * The transport refused a request stream or failed to grant stream credit before its deadline.
+ * A group was created at a sequence its track declared skipped.
  *
- * This local failure is terminal and has no wire code. The request is not retried.
+ * A skip says the sequence will never be produced, so it is final. See the track producer's
+ * `skipGroups`. Mirrors the Rust `Error::Skipped`.
+ *
+ * @public
  */
-export class NoStreamCredit extends Error {
-	constructor(options?: ErrorOptions) {
-		super("no stream credit", options);
-		this.name = "NoStreamCredit";
+export class Skipped extends Error {
+	/** The sequence that was refused. */
+	readonly sequence: bigint;
+
+	constructor(sequence: bigint) {
+		super(`sequence ${sequence} was skipped`);
+		this.name = "Skipped";
+		this.sequence = sequence;
 	}
 }
 

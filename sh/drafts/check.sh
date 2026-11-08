@@ -12,7 +12,7 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-bun install --frozen-lockfile
+uv run --no-project python sh/js/install.py frozen
 cd drafts
 
 if grep -n "$(printf '\t')" draft-*.md; then
@@ -30,7 +30,7 @@ for f in draft-*.md; do
     rm -f "${f%.md}.prepped.xml"
 done
 
-for f in moq-e2ee-*.ts; do
-    bun tsc --ignoreConfig --noEmit --skipLibCheck --target esnext --module esnext --moduleResolution bundler --types bun "$f"
+for f in moq-e2ee-*.ts moq-sign-*.ts; do
+    bun tsc --ignoreConfig --noEmit --skipLibCheck --target esnext --module esnext --moduleResolution bundler --allowImportingTsExtensions --types bun "$f"
     bun "$f"
 done

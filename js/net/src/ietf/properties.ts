@@ -1,5 +1,6 @@
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
+import { toNumber } from "../util/bigint.ts";
 import type { IetfVersion } from "./version.ts";
 
 // TIMESCALE (0x08), from the MOQ Properties registry shared with draft-ietf-moq-loc-04.
@@ -101,7 +102,7 @@ export async function decode(r: Reader, _version: IetfVersion): Promise<Properti
 			} else if (abs === TIMESCALE && value > 0n) {
 				// A zero timescale is invalid; treat it as no declaration rather than
 				// failing the whole message over one property we could have ignored.
-				properties.timescale = Timescale(Number(value));
+				properties.timescale = Timescale(toNumber(value));
 			} else if (abs === DEFAULT_PUBLISHER_PRIORITY) {
 				if (value > 255n) throw new Error(`invalid publisher priority: ${value}`);
 				properties.priority = Number(value);

@@ -9,10 +9,9 @@
 # session is gone, so a cancelled reader's broadcast parks forever instead of
 # closing. Leaking only one is not a leak: the other still closes the front.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
-index 94175c3ec6..8f07d4f860 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -1512,7 +1512,8 @@ struct PrefixRun {
+@@ -2042,7 +2042,8 @@
  	/// it comes from the connect config or the peer's SETUP, neither of which
  	/// changes for the life of the session.
  	link_cost: u64,
@@ -22,31 +21,43 @@ index 94175c3ec6..8f07d4f860 100644
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -1600,7 +1601,7 @@ impl AnnouncePrefix {
+@@ -2145,7 +2146,10 @@
  		let mut run: PrefixRun = PrefixRun {
  			responder_origin,
  			link_cost,
--			announced: Announced::new(self.subscriber.announces.clone()),
-+			announced: std::mem::ManuallyDrop::new(Announced::new(self.subscriber.announces.clone())),
+-			announced: Announced::new(self.subscriber.announces.clone(), self.subscriber.minted.clone()),
++			announced: std::mem::ManuallyDrop::new(Announced::new(
++				self.subscriber.announces.clone(),
++				self.subscriber.minted.clone(),
++			)),
  			decoder: lite::AnnounceDecoder::default(),
  			auth_epoch: 0,
  			initial,
-@@ -1728,7 +1729,8 @@ struct SourceServe {
- 	subscriber: Subscriber,
+@@ -2301,7 +2305,8 @@
  	path: Path,
- 	epoch: Option<crate::Epoch>,
+ 	instance: Option<crate::Instance>,
+ 	node: u64,
 -	source: crate::model::broadcast::SourceGuard,
 +	// MUTATION: never dropped, so a session that ends keeps every source it minted alive.
 +	source: std::mem::ManuallyDrop<crate::model::broadcast::SourceGuard>,
  	dynamic: crate::broadcast::Requests,
  	route: kio::Consumer<()>,
  	// A dedicated close-watch handle, since each pending operation needs its own.
-@@ -1871,7 +1873,7 @@ impl SourceServe {
- 			subscriber,
+@@ -2451,7 +2456,7 @@
  			path: minted.path,
- 			epoch: minted.epoch,
+ 			instance: minted.instance,
+ 			node: minted.node,
 -			source: minted.source,
 +			source: std::mem::ManuallyDrop::new(minted.source),
+ 			datagram_requests: minted.dynamic.datagrams(),
  			dynamic: minted.dynamic,
  			route: minted.route,
- 			closed,
+@@ -2560,7 +2565,7 @@
+ 					let serve = TrackServe {
+ 						validity: self.dynamic.validity().clone(),
+ 						route: Some(self.route.clone()),
+-						source: Some((*self.source).clone()),
++						source: Some((**self.source).clone()),
+ 						subscriber: self.subscriber.clone(),
+ 						path: self.path.clone(),
+ 						instance: self.instance.clone(),

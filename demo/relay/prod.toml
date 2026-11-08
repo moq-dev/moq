@@ -6,6 +6,20 @@
 # This is the default port for WebTransport
 bind = "[::]:443"
 
+# Every version, plus the opt-in moq-lite-07-wip that sockets (such as MoQ Boy's) need.
+version = [
+    "moq-lite-07-wip",
+    "moq-lite-06",
+    "moq-lite-05",
+    "moq-lite-04",
+    "moq-lite-03",
+    "moq-lite-02",
+    "moq-lite-01",
+    "moq-transport-22",
+    "moq-transport-20",
+    "moq-transport-18",
+]
+
 [listen.tls]
 # You'll need to provide a real certificate and key in production.
 # You can get this via a service like Let's Encrypt.
@@ -25,21 +39,23 @@ listen = "[::]:443"
 cert = "cert.pem"
 key = "key.pem"
 
-# Or let the relay fetch and renew a Let's Encrypt certificate for both
-# endpoints: remove both cert/key pairs and uncomment this. Let's Encrypt
-# validates over web.https, which must be reachable on TCP port 443.
-# [acme]
-# domains = ["relay.example.com"]
-# cache = "/var/lib/moq-relay/acme"
-
 # See docs/auth.md for more information.
 [auth]
 # The auth server asked once per session event. The policy lives there:
 #
 #   moq auth serve --listen 127.0.0.1:4440 --key root.jwk \
 #     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
-#     --public-publish 'anon/**' --public-publish 'demo/viewer/**' \
+#     --public-publish 'anon/**' \
+#     --public-publish 'demo/boy/.client/*' \
+#     --public-publish 'demo/carla/.client/*' \
 #     --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer
+#
+# Anonymous MoQ Boy viewers and CARLA drivers get one shared grant each, covering only
+# client socket endpoints: a game's or truck's server endpoint, `.server/<name>`, stays
+# its publisher's, which signs in with a token. `demo/**` lets viewers dial those
+# servers, and also read another viewer's client endpoint, which yields nothing without
+# a session's secret id. Each viewer's id is 128 random bits, so no viewer can guess
+# another's.
 #
 # For multiple keys with rotation, give it `--key-dir /path/to/keys/` instead:
 # keys are named {kid}.jwk and resolved by the kid in the JWT header.

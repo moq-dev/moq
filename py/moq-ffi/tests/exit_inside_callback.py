@@ -54,17 +54,18 @@ gen._uniffi_continuation_callback = _preempted_continuation
 
 async def main() -> None:
     origin = moq_ffi.MoqOriginProducer(moq_ffi.MoqOriginConfig())
-    publication = origin.create_broadcast("exit")
-    publication.announce(moq_ffi.MoqAnnounceRoute())
-    broadcast = publication.broadcast()
+    route = origin.route("exit", moq_ffi.MoqRouteOptions())
+    broadcast = route.broadcast()
     track = broadcast.publish_track("data", moq_ffi.MoqTrackInfo(timescale=1_000_000))
 
     consumer = await origin.consume().request("exit")
     subscriber = await consumer.subscribe_track("data", None)
 
-    # Written once the read is parked, so the runtime thread delivers the wake.
-    asyncio.get_running_loop().call_later(0.05, track.write_frame, moq_ffi.MoqFrame(payload=b"hello", timestamp_us=0))
-    frame = await subscriber.read_frame()
+    # Written once the read is parked: its first step polls it.
+    read = asyncio.ensure_future(subscriber.read_frame())
+    await asyncio.sleep(0)
+    track.write_frame(moq_ffi.MoqFrame(payload=b"hello", timestamp=moq_ffi.MoqTimestamp(value=0, scale=1_000_000)))
+    frame = await read
     assert frame is not None
     # Flushed now: a write left for exit would hand the GIL over early.
     print("received", frame.payload.decode(), flush=True)

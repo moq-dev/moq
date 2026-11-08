@@ -29,6 +29,7 @@ mod data;
 mod entry;
 mod estimate;
 mod format;
+pub(crate) mod interval;
 mod producer;
 mod select;
 mod stream;
@@ -37,12 +38,15 @@ pub(crate) mod tracks;
 
 pub(crate) use claim::Claim;
 pub use consumer::Consumer;
+pub(crate) use consumer::Subscribing;
 pub use data::IntoRendition;
 pub(crate) use data::Listing;
 pub use entry::Entry;
 pub(crate) use estimate::Reading;
 pub use estimate::{Estimate, Estimator};
 pub use format::*;
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) use producer::to_msf;
 pub use producer::{Config, Guard, Producer};
 pub use select::Select;
 pub use stream::Stream;

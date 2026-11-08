@@ -39,7 +39,7 @@ pub enum Program {
 ///
 /// A step of the source's clock onto another timeline ([`ts::Restart`]), such as a
 /// changeover between two encoders whose clocks were never locked, finishes the broadcast
-/// and republishes the rest of the input on the same path under a new epoch, on the same
+/// and republishes the rest of the input on the same path under a new instance, on the same
 /// connection. [`Program::All`] still ends the ingest there.
 pub struct Publisher {
 	importer: Importer,
@@ -67,7 +67,7 @@ struct One {
 	program: Option<u16>,
 }
 
-/// One program's broadcast, under one epoch.
+/// One program's broadcast, under one instance.
 struct Instance {
 	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 	// verbatim, so the importer uses the `mpegts` catalog extension rather than the
@@ -75,12 +75,12 @@ struct Instance {
 	import: ts::Import<ts::Ext>,
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer<ts::Ext>,
-	// Controls publication while the importer fills it, including finish or close at EOF.
-	broadcast: moq_net::origin::Publication,
+	// Keeps the path announced while the importer fills it, through the linger after a clean end.
+	route: moq_net::origin::Route,
 }
 
 impl Instance {
-	/// Publish `path` under a new epoch, importing `program` of the input, or its only one.
+	/// Publish `path` under a new instance, importing `program` of the input, or its only one.
 	///
 	/// Each instance is its own publisher, so an encoder reconnecting under the same stream id,
 	/// or a source whose clock stepped, replaces the stale broadcast instead of resuming into it.
@@ -89,21 +89,17 @@ impl Instance {
 		path: &str,
 		config: moq_mux::catalog::Config,
 		program: Option<u16>,
-	) -> Result<(Self, moq_net::Epoch)> {
-		let epoch = moq_net::Epoch::mint();
-		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
+	) -> Result<(Self, moq_net::Instance)> {
+		let route = origin.route(path, moq_net::origin::RouteOptions::default())?;
+		let id = route.instance();
 		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
-		let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
+		let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
+		let mut import = ts::Import::new(route.broadcast().clone(), catalog.reserve());
 		if let Some(program) = program {
 			import = import.with_program(program);
 		}
-		let instance = Self {
-			import,
-			catalog,
-			broadcast,
-		};
-		Ok((instance, epoch))
+		let instance = Self { import, catalog, route };
+		Ok((instance, id))
 	}
 
 	/// Flush the buffered media and finish every track, the catalog included.
@@ -118,7 +114,7 @@ impl Publisher {
 	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
 	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
 	///
-	/// `config` is the catalog the importer publishes into: retention
+	/// `config` is the catalog the importer publishes into: max age
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
 	/// (`with_bandwidth`).
 	pub fn new(
@@ -128,7 +124,7 @@ impl Publisher {
 		program: Option<Program>,
 	) -> Result<Self> {
 		let importer = match program {
-			// `ts::Programs` mints an epoch per program.
+			// `ts::Programs` mints an instance per program.
 			Some(Program::All) => {
 				tracing::info!(%path, ?program, "publishing ingest broadcasts");
 				Importer::All(Box::new(ts::Programs::new(
@@ -142,8 +138,8 @@ impl Publisher {
 					Some(Program::One(program)) => Some(program),
 					_ => None,
 				};
-				let (instance, epoch) = Instance::publish(origin, path, config.clone(), program)?;
-				tracing::info!(%path, ?program, %epoch, "publishing ingest broadcast");
+				let (instance, id) = Instance::publish(origin, path, config.clone(), program)?;
+				tracing::info!(%path, ?program, instance = %id, "publishing ingest broadcast");
 				Importer::One(Box::new(One {
 					instance,
 					origin: origin.clone(),
@@ -182,12 +178,12 @@ impl Publisher {
 				while let Err(err) = instance.import.decode(&data) {
 					let restart = err.downcast::<ts::Restart>().map_err(moq_mux::Error::from)?;
 					// The instance before the step finishes; the rest of the input republishes
-					// the path under a new epoch.
+					// the path under a new instance.
 					instance.finish()?;
 					self.span.in_scope(|| self.log.finish(&instance.import.stats()));
-					let (next, epoch) = Instance::publish(origin, path, config.clone(), *program)?;
-					tracing::warn!(%path, step = %restart.step, %epoch, "the source's clock stepped; republishing");
-					// The finished broadcast ends with its publication.
+					let (next, id) = Instance::publish(origin, path, config.clone(), *program)?;
+					tracing::warn!(%path, step = %restart.step, instance = %id, "the source's clock stepped; republishing");
+					// The finished broadcast ends with its route.
 					*instance = next;
 					self.log = ts::stats::Log::default();
 					data = restart.remainder;
@@ -216,7 +212,7 @@ impl Publisher {
 		let finished = match &mut self.importer {
 			Importer::One(one) => {
 				one.instance.finish()?;
-				vec![one.instance.broadcast.broadcast().clone()]
+				vec![one.instance.route.broadcast().clone()]
 			}
 			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
 		};
@@ -232,9 +228,9 @@ impl Publisher {
 	pub fn abort(self, err: moq_net::Error) {
 		match self.importer {
 			Importer::One(one) => {
-				let Instance { import, broadcast, .. } = one.instance;
+				let Instance { import, route, .. } = one.instance;
 				import.abort(err);
-				broadcast.close();
+				route.broadcast().close();
 			}
 			Importer::All(programs) => programs.abort(err),
 		}
@@ -292,13 +288,15 @@ impl Subscriber {
 		// Join the broadcast once announced. The export resolves any referenced sibling
 		// broadcast (the catalog `broadcast` field) through the same origin.
 		let broadcast = match following.available().await {
-			Ok(broadcast) => broadcast,
+			Ok(Some(broadcast)) => broadcast,
+			// The first change is always an instance.
+			Ok(None) => return Ok(None),
 			Err(moq_net::Error::Closed) => return Ok(None),
 			Err(err) => return Err(err.into()),
 		};
 		let source = moq_mux::Source::new(origin.clone(), broadcast);
 		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
-		let export = ts::Export::new(source, catalog).with_delay(options.latency.max(MIN_DELAY));
+		let export = ts::Export::new(source, catalog, options.latency.max(MIN_DELAY));
 		let follower = ts::Follower::new(export)?
 			.with_follow(options.follow)
 			.with_stitch(options.stitch);
@@ -325,15 +323,10 @@ impl Subscriber {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
+	use kio::clock::timeout;
 	use moq_mux::catalog::hang::Container;
 	use moq_mux::catalog::{CatalogFormat, Stream};
-	use tokio::time::timeout;
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
@@ -493,10 +486,10 @@ mod tests {
 	}
 
 	/// A source switched between two encoders whose clocks started hours apart, without a
-	/// `discontinuity_indicator`, either way: the ingest republishes under a new epoch on the
+	/// `discontinuity_indicator`, either way: the ingest republishes under a new instance on the
 	/// same connection, and an egress that stitches replacements carries on into it.
 	#[tokio::test(start_paused = true)]
-	async fn a_clock_step_republishes_under_a_new_epoch() {
+	async fn a_clock_step_republishes_under_a_new_instance() {
 		// The issue's step: two encoders started about 4 h 40 m apart.
 		const SWITCH: i64 = 16_844 * 90_000 + 45_000;
 		for step in [-SWITCH, SWITCH] {
@@ -636,7 +629,7 @@ mod tests {
 	/// announced.
 	async fn program(origin: &moq_net::origin::Producer, path: &str) -> (u16, Vec<u16>) {
 		let consumer = origin.consume();
-		let broadcast = consumer.follow(path, None).unwrap().available().await.unwrap();
+		let broadcast = consumer.follow(path, None).unwrap().available().await.unwrap().unwrap();
 		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
 			.await
 			.unwrap();
@@ -664,7 +657,7 @@ mod tests {
 	}
 
 	/// A caller reconnecting under the same stream id while its stale connection is
-	/// still open restarts the broadcast at once: each connection is its own epoch, so
+	/// still open restarts the broadcast at once: each connection is its own instance, so
 	/// a fresh request reaches the reconnect, while the stale viewer stays on the old
 	/// one until it leaves.
 	#[tokio::test(start_paused = true)]
@@ -681,7 +674,7 @@ mod tests {
 			.unwrap();
 
 		let _fresh = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
-		let stale_viewer = tokio::time::timeout(Duration::from_secs(1), async {
+		let stale_viewer = kio::clock::timeout(Duration::from_secs(1), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
@@ -732,10 +725,16 @@ mod tests {
 		publisher.feed(Bytes::from_static(BBB5S)).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
-		let start = tokio::time::Instant::now();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let start = kio::clock::now();
 		let wait = tokio::spawn(publisher.finish(linger).unwrap().wait());
-		tokio::time::sleep(linger / 2).await;
+		kio::clock::sleep(linger / 2).await;
 		let mut catalog = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			catalog.recv_group().await.unwrap().is_some(),
@@ -747,10 +746,10 @@ mod tests {
 		assert!(broadcast.is_closed());
 	}
 
-	/// The retention the caller configured has to reach the media tracks the TS importer
+	/// The max age the caller configured has to reach the media tracks the TS importer
 	/// mints off the PMT, not stop at the catalog producer it was set on.
 	#[tokio::test]
-	async fn publisher_declares_the_configured_retention() {
+	async fn publisher_declares_the_configured_max_age() {
 		let origin = produce_origin();
 		let mut publisher = Publisher::new(
 			&origin,
@@ -765,7 +764,13 @@ mod tests {
 		publisher.feed(Bytes::from(ts)).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("live/cam0", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 		let info = broadcast.track("0.avc3").unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	}
@@ -773,35 +778,60 @@ mod tests {
 	/// A video PID that goes silent behind a running mux is logged against its ingest path,
 	/// and neither the same feed intact nor the audio that kept delivering is.
 	#[tokio::test(start_paused = true)]
-	#[tracing_test::traced_test]
 	async fn publisher_reports_a_silent_pid() {
 		const VIDEO: u16 = 0x100;
+		// `moq-mux` logs the report, and `traced_test` keeps only this crate's lines. The
+		// current-thread runtime runs the ingest on this thread, where this subscriber is.
+		#[derive(Clone, Default)]
+		struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+		impl std::io::Write for Logs {
+			fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+				self.0.lock().unwrap().write(buf)
+			}
+			fn flush(&mut self) -> std::io::Result<()> {
+				Ok(())
+			}
+		}
+		let logs = Logs::default();
+		let writer = logs.clone();
+		let subscriber = tracing_subscriber::fmt()
+			.with_max_level(tracing::Level::INFO)
+			.with_ansi(false)
+			.with_writer(move || writer.clone())
+			.finish();
+		let _guard = tracing::subscriber::set_default(subscriber);
+		// With one dispatcher registered, tracing caches each callsite's interest from the
+		// first thread to hit it, so a parallel test without a subscriber could disable the
+		// ingest span for good. A second one leaves every thread to ask its own subscriber.
+		let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
 		let origin = produce_origin();
 		ingest(&origin, "intact", &[BBB5S]).await;
 		let stimulus = suppress(BBB5S, VIDEO, Duration::from_millis(1500), Duration::from_millis(3500));
 		ingest(&origin, "silent", &[&stimulus]).await;
 
-		logs_assert(|lines: &[&str]| {
-			let stopped: Vec<_> = lines
+		let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+		let stopped: Vec<_> = logs
+			.lines()
+			.filter(|line| line.contains("stopped delivering access units"))
+			.collect();
+		let reported = |path: &str, pid: u16| {
+			stopped
 				.iter()
-				.filter(|line| line.contains("stopped delivering access units"))
-				.collect();
-			let reported = |path: &str, pid: u16| {
-				stopped
-					.iter()
-					.any(|line| line.contains(&format!("path={path}")) && line.contains(&format!("pid={pid} ")))
-			};
-			if !reported("silent", VIDEO) {
-				return Err(format!("the silent video PID was not reported: {stopped:?}"));
-			}
-			if reported("intact", VIDEO) {
-				return Err(format!("the intact feed's video was reported: {stopped:?}"));
-			}
-			if reported("silent", 0x101) || reported("intact", 0x101) {
-				return Err(format!("the audio kept delivering: {stopped:?}"));
-			}
-			Ok(())
-		});
+				.any(|line| line.contains(&format!("path={path}")) && line.contains(&format!("pid={pid} ")))
+		};
+		assert!(
+			reported("silent", VIDEO),
+			"the silent video PID was not reported: {stopped:?}"
+		);
+		assert!(
+			!reported("intact", VIDEO),
+			"the intact feed's video was reported: {stopped:?}"
+		);
+		assert!(
+			!reported("silent", 0x101) && !reported("intact", 0x101),
+			"the audio kept delivering: {stopped:?}"
+		);
 	}
 
 	/// SRT is a contribution protocol, so SCTE-35 cues survive ingest and egress.
@@ -811,7 +841,13 @@ mod tests {
 		let mut publisher = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
 
 		let consumer = origin.consume();
-		let broadcast = consumer.follow("ingest", None).unwrap().available().await.unwrap();
+		let broadcast = consumer
+			.follow("ingest", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
 
 		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
 

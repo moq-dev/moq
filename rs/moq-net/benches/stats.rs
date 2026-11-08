@@ -6,7 +6,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, fuzz, origin, stats, transport};
+use moq_net::{fuzz, origin, stats, transport};
 
 /// `(broadcasts, tiers)` shapes; every broadcast records under every tier.
 const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10)];
@@ -16,22 +16,26 @@ const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10
 struct Registry {
 	registry: stats::Registry,
 	_driver: origin::Driver,
-	_publishers: Vec<origin::Publication>,
-	_cursors: Vec<announce::Consumer>,
+	_publishers: Vec<origin::Route>,
+	_cursors: Vec<origin::Routes>,
 }
 
 fn registry(broadcasts: usize, tiers: usize) -> Registry {
 	let registry = stats::Registry::new(stats::Config::new());
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	let publishers = (0..broadcasts)
-		.map(|i| producer.publish(format!("room/{i}"), origin::Route::default()).unwrap())
+		.map(|i| {
+			producer
+				.route(format!("room/{i}"), moq_net::origin::RouteOptions::default())
+				.unwrap()
+		})
 		.collect();
 	let cursors = (0..tiers)
 		.map(|t| {
 			let session = registry
 				.tier(stats::Tier::new(moq_net::Path::new(&format!("tier{t}")).unwrap()))
 				.session(moq_net::Path::from_static("root"));
-			let mut cursor = producer.consume().with_stats(session).announced();
+			let mut cursor = producer.consume().with_stats(session).routes();
 			// Each announce the cursor replays records under its tier.
 			while cursor.next().now_or_never().flatten().is_some() {}
 			cursor

@@ -10,24 +10,23 @@
 //! Like [`crate::connection::Connection`], it performs no I/O. Feed it each record (each frame on
 //! draft-00) the transport delimits with [`Connection::handle_record`], write out what
 //! [`Connection::poll_transmit`] returns, run [`Connection::handle_timeout`] at
-//! [`Connection::poll_timeout`], and drain [`Connection::poll`] for events.
+//! [`Connection::poll_timeout`], and wait on its `poll_*` forms as on QUIC.
 
-use std::{collections::VecDeque, num::NonZeroU64};
+use std::{collections::VecDeque, num::NonZeroU64, task::Poll};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
 use tracing::{debug, trace};
 
 use super::{
-	Error as ConnectionError, State as ConnectionState, ThinRetransmits,
+	Error as ConnectionError, ThinRetransmits,
 	datagrams::DatagramState,
 	spaces::Retransmits,
 	stats::FrameStats,
-	streams::{Leased, RecvStream, SendGroups, SendOptions, SendStream, StreamEvent, Streams, StreamsState},
+	streams::{Streams, StreamsState, recv, send},
 };
 use crate::{
-	ApplicationClose, Dir, Duration, Instant, Limits, MAX_STREAM_COUNT, SendDatagramError, Side, TransportError,
-	VarInt,
-	frame::{self, Close, Datagram},
+	ApplicationClose, Dir, Duration, Instant, Limits, MAX_STREAM_COUNT, Side, TransportError, VarInt,
+	frame::{self, Close, Datagram, OutgoingDatagram},
 	transport_parameters::TransportParameters,
 };
 
@@ -128,20 +127,17 @@ fn limit(limit: Option<NonZeroU64>, default: u64) -> VarInt {
 	VarInt::from_u64(limit.map_or(default, NonZeroU64::get)).unwrap_or(VarInt::MAX)
 }
 
-/// Events from [`Connection::poll`]
-#[derive(Debug)]
-pub enum Event {
-	/// The peer's transport parameters arrived, so streams can be opened
-	Connected,
-	/// Stream activity, as on QUIC
-	Stream(StreamEvent),
-	/// One or more datagrams arrived
-	DatagramReceived,
-	/// The connection ended
-	ConnectionLost {
-		/// Why: [`ConnectionError::Reset`] means the transport ended without a close frame
-		reason: ConnectionError,
+/// How a [`Connection`] ended, if it has, during the handshake or after it
+enum End {
+	/// Not ended
+	Open,
+	/// Ended with `error`; `frame` is the close still to write, if any
+	Closing {
+		error: ConnectionError,
+		frame: Option<Close>,
 	},
+	/// Ended with `error`, having written everything it will
+	Closed(ConnectionError),
 }
 
 /// A QMux connection over a reliable, ordered transport
@@ -151,11 +147,14 @@ pub struct Connection {
 	streams: StreamsState,
 	/// Control frames waiting to be written
 	pending: Retransmits,
-	conn_state: ConnectionState,
 	stats: FrameStats,
 
+	/// Our transport parameters went out: the first record carries them, whether the peer's
+	/// arrived first or the connection already ended
 	params_sent: bool,
+	/// The peer's transport parameters, once they arrive; they stay in force after the end
 	peer: Option<Params>,
+	end: End,
 	protocol: Option<String>,
 	timer: Timer,
 
@@ -167,13 +166,11 @@ pub struct Connection {
 
 	datagrams: DatagramState,
 
-	/// The close frame waiting to be written
-	close: Option<Close>,
-	close_sent: bool,
-	error: Option<ConnectionError>,
-	events: VecDeque<Event>,
 	/// Draft-00 frames already serialized, one per transport message
 	queued: VecDeque<Bytes>,
+	/// Where records are serialized. Each one handed out is split off, so the allocation is
+	/// reused once the transport drops the records it holds.
+	out: BytesMut,
 }
 
 impl Connection {
@@ -198,10 +195,10 @@ impl Connection {
 			config,
 			streams,
 			pending: Retransmits::default(),
-			conn_state: ConnectionState::Established,
 			stats: FrameStats::default(),
 			params_sent: false,
 			peer: None,
+			end: End::Open,
 			protocol: None,
 			timer,
 			next_ping: 0,
@@ -209,11 +206,8 @@ impl Connection {
 			ping_request: false,
 			ping_response: None,
 			datagrams: DatagramState::default(),
-			close: None,
-			close_sent: false,
-			error: None,
-			events: VecDeque::new(),
 			queued: VecDeque::new(),
+			out: BytesMut::new(),
 		}
 	}
 
@@ -229,23 +223,42 @@ impl Connection {
 
 	/// Whether the peer's transport parameters arrived and the connection is still up
 	pub fn is_established(&self) -> bool {
-		self.peer.is_some() && self.error.is_none()
+		self.peer.is_some() && !self.is_closed()
 	}
 
 	/// Whether the connection ended
 	pub fn is_closed(&self) -> bool {
-		self.error.is_some()
+		!matches!(self.end, End::Open)
 	}
 
 	/// Whether the connection ended and has nothing left to write, so the transport can be
 	/// shut down
 	pub fn is_drained(&self) -> bool {
-		self.error.is_some() && self.close.is_none() && self.queued.is_empty()
+		match self.end {
+			End::Closing { frame: None, .. } | End::Closed(_) => self.queued.is_empty(),
+			End::Open | End::Closing { frame: Some(_), .. } => false,
+		}
 	}
 
 	/// Why the connection ended, if it has
 	pub fn error(&self) -> Option<&ConnectionError> {
-		self.error.as_ref()
+		match &self.end {
+			End::Closing { error, .. } | End::Closed(error) => Some(error),
+			End::Open => None,
+		}
+	}
+
+	/// Wait for the peer's transport parameters
+	///
+	/// Ready once they arrived, even if the connection ended since, or with the reason the
+	/// connection ended first.
+	pub fn poll_connected(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), ConnectionError>> {
+		self.streams.waits.poll_connected(waiter)
+	}
+
+	/// Wait for the connection to end, returning why
+	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<ConnectionError> {
+		self.streams.waits.poll_closed(waiter)
 	}
 
 	/// The application protocol negotiated in-band, once the peer's parameters arrive
@@ -263,7 +276,7 @@ impl Connection {
 	/// A protocol violation ends the connection with a CONNECTION_CLOSE from the next
 	/// [`Self::poll_transmit`].
 	pub fn handle_record(&mut self, payload: Bytes, now: Instant) {
-		if self.error.is_some() {
+		if self.is_closed() {
 			return;
 		}
 		self.timer.on_recv(now);
@@ -275,17 +288,13 @@ impl Connection {
 	/// The transport refused an incoming record larger than `max_record_size`, or a draft-00
 	/// frame larger than `max_frame_size`, rather than read it into memory
 	pub fn handle_oversized(&mut self) {
-		if self.error.is_none() {
-			self.fail(self.oversized());
-		}
+		self.fail(self.oversized());
 	}
 
 	/// The transport found the peer violating its framing, such as overrunning a buffer it
 	/// bounds itself, so close with `err`
 	pub fn handle_violation(&mut self, err: TransportError) {
-		if self.error.is_none() {
-			self.fail(err);
-		}
+		self.fail(err);
 	}
 
 	/// The transport failed, or ended without a close frame
@@ -304,25 +313,43 @@ impl Connection {
 	/// The frame comes from the next [`Self::poll_transmit`]; flush it before shutting down
 	/// the transport.
 	pub fn close(&mut self, error_code: VarInt, reason: String) {
-		if self.error.is_some() {
+		if self.is_closed() {
 			return;
 		}
-		self.close = Some(Close::Application(ApplicationClose {
+		let frame = Close::Application(ApplicationClose {
 			error_code,
 			reason: reason.clone(),
-		}));
-		self.lost(ConnectionError::LocallyClosed {
-			code: error_code,
-			reason,
 		});
+		self.terminate(
+			ConnectionError::LocallyClosed {
+				code: error_code,
+				reason,
+			},
+			Some(frame),
+		);
 	}
 
-	/// The next record to write, without its Size field, or the next frame on draft-00
-	pub fn poll_transmit(&mut self, now: Instant) -> Option<Bytes> {
+	/// The next record to write, without its Size field, or the next frame on draft-00, or wait
+	/// for one
+	///
+	/// Pending registers `waiter` until the application queues something, as on QUIC. Poll
+	/// again after [`Self::handle_record`] and at [`Self::poll_timeout`].
+	pub fn poll_transmit(&mut self, waiter: &kio::Waiter, now: Instant) -> Poll<Bytes> {
+		match self.transmit(now) {
+			Some(record) => Poll::Ready(record),
+			None => {
+				self.streams.waits.register_transmit(waiter);
+				Poll::Pending
+			}
+		}
+	}
+
+	/// The next record to write, if any, as [`Self::poll_transmit`] without the wait
+	pub(crate) fn transmit(&mut self, now: Instant) -> Option<Bytes> {
 		if let Some(frame) = self.queued.pop_front() {
 			return Some(frame);
 		}
-		let buf = Bytes::from(self.fill(now)?);
+		let buf = self.fill(now)?;
 		if self.config.version.uses_records() {
 			return Some(buf);
 		}
@@ -332,15 +359,15 @@ impl Connection {
 
 	/// The instant [`Self::handle_timeout`] should run next
 	pub fn poll_timeout(&self) -> Option<Instant> {
-		match self.error {
-			Some(_) => None,
-			None => self.timer.next(),
+		match self.is_closed() {
+			true => None,
+			false => self.timer.next(),
 		}
 	}
 
 	/// Run the handshake, idle, keep-alive, and RTT timers
 	pub fn handle_timeout(&mut self, now: Instant) {
-		if self.error.is_some() {
+		if self.is_closed() {
 			return;
 		}
 		let due = self.timer.poll(now);
@@ -356,42 +383,82 @@ impl Connection {
 		}
 	}
 
-	/// The next event
-	pub fn poll(&mut self) -> Option<Event> {
-		if let Some(event) = self.events.pop_front() {
-			return Some(event);
-		}
-		self.streams.poll().map(Event::Stream)
-	}
-
 	/// Open and accept streams
 	pub fn streams(&mut self) -> Streams<'_> {
 		Streams {
+			closed: self.is_closed(),
 			state: &mut self.streams,
-			conn_state: &self.conn_state,
 		}
 	}
 
 	/// Schedule outgoing streams in send groups
-	pub fn send_groups(&mut self) -> SendGroups<'_> {
-		SendGroups {
+	pub fn send_groups(&mut self) -> send::Groups<'_> {
+		send::Groups {
 			state: &mut self.streams,
 		}
 	}
 
 	/// The send half of stream `id`
-	pub fn send_stream(&mut self, id: crate::StreamId) -> SendStream<'_> {
-		SendStream {
+	pub fn send_stream(&mut self, id: crate::StreamId) -> send::Stream<'_> {
+		send::Stream {
 			id,
+			closed: self.is_closed(),
 			state: &mut self.streams,
 			pending: &mut self.pending,
-			conn_state: &self.conn_state,
 		}
 	}
 
+	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
+	pub fn receive_window(&self) -> u64 {
+		self.streams.receive_window()
+	}
+
+	/// The most receive credit one stream may hold: the largest per-stream window ever in force,
+	/// since credit already granted outlives a shrink; see [`Limits::stream_receive_window`]
+	pub fn stream_receive_window(&self) -> u64 {
+		self.streams.peak_stream_receive_window()
+	}
+
+	/// Receive flow control as the receiver sees it, evictions included
+	pub fn credit_stats(&self) -> super::CreditStats {
+		self.streams.credit_stats()
+	}
+
+	/// Change the windows and stream counts `limits` sets, leaving the others as they are
+	///
+	/// Errors, changing nothing, on limits [`Limits::validate`] refuses. QMux never paces, so
+	/// the rates are ignored.
+	pub fn set_limits(&mut self, limits: Limits) -> Result<(), crate::LimitsError> {
+		limits.validate()?;
+		if let Some(window) = limits.receive_window
+			&& self
+				.streams
+				.set_receive_window(VarInt::from_u64(window.get()).expect("validated"))
+		{
+			self.pending.max_data = true;
+		}
+		if let Some(window) = limits.stream_receive_window {
+			self.streams.set_stream_receive_window(window.get());
+		}
+		if let Some(window) = limits.send_window {
+			self.streams.set_send_window(window.get());
+		}
+		if let Some(streams) = limits.max_streams {
+			let streams = VarInt::from_u64(streams.get()).expect("validated");
+			for dir in [Dir::Bi, Dir::Uni] {
+				self.streams.set_max_concurrent(dir, streams);
+			}
+			// A lower limit can make a credit update once deemed insignificant significant.
+			self.streams.queue_max_stream_id(&mut self.pending);
+		}
+		// MAX_DATA or MAX_STREAMS may be due.
+		self.streams.waits.wake_transmit();
+		Ok(())
+	}
+
 	/// The receive half of stream `id`
-	pub fn recv_stream(&mut self, id: crate::StreamId) -> RecvStream<'_> {
-		RecvStream {
+	pub fn recv_stream(&mut self, id: crate::StreamId) -> recv::Stream<'_> {
+		recv::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.pending,
@@ -401,11 +468,6 @@ impl Connection {
 	/// Send and receive datagrams
 	pub fn datagrams(&mut self) -> Datagrams<'_> {
 		Datagrams { conn: self }
-	}
-
-	/// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
-	pub fn leased(&self, id: crate::StreamId) -> Option<&Leased> {
-		self.streams.leased(id)
 	}
 
 	/// The frame space of a record: the peer's `max_record_size`, under the STREAM ceiling
@@ -442,48 +504,57 @@ impl Connection {
 	}
 
 	/// Serialize the next batch of frames, each counted as acknowledged on the spot
-	fn fill(&mut self, now: Instant) -> Option<Vec<u8>> {
-		if self.close_sent {
+	fn fill(&mut self, now: Instant) -> Option<Bytes> {
+		if matches!(self.end, End::Closed(_)) {
 			return None;
 		}
 		let budget = self.budget();
-		let mut buf = Vec::new();
+		let mut buf = std::mem::take(&mut self.out);
+		// Reuses the allocation in place once every record split from it was dropped.
+		buf.reserve(budget);
+		let filled = self.fill_into(&mut buf, budget, now);
+		let record = filled.then(|| buf.split().freeze());
+		self.out = buf;
+		record
+	}
 
+	/// Serialize the next batch of frames into the empty `buf`, returning whether it wrote any
+	fn fill_into(&mut self, buf: &mut BytesMut, budget: usize, now: Instant) -> bool {
 		// The transport parameters go first
 		if !self.params_sent {
 			let mut blob = Vec::new();
 			self.local_params().encode(&mut blob);
-			wire::encode_transport_parameters(&mut buf, &blob);
+			wire::encode_transport_parameters(buf, &blob);
 			self.params_sent = true;
 		}
 
-		if self.error.is_some() {
+		if let End::Closing { error, frame } = &mut self.end {
 			// Write the close frame, if any, and go quiet
-			if let Some(close) = self.close.take() {
+			if let Some(close) = frame.take() {
 				let room = budget - buf.len();
-				close.encode(&mut buf, room);
+				close.encode(buf, room);
 			}
-			self.close_sent = true;
+			self.end = End::Closed(error.clone());
 			if buf.is_empty() {
-				return None;
+				return false;
 			}
 			self.timer.on_send(now);
-			return Some(buf);
+			return true;
 		}
 
 		if let Some(seq) = self.ping_response.take() {
-			wire::encode_ping(&mut buf, true, seq);
+			wire::encode_ping(buf, true, seq);
 		}
 		if std::mem::take(&mut self.ping_request) {
 			let seq = VarInt::from_u64(self.next_ping).expect("QX_PING sequence overflow");
-			wire::encode_ping(&mut buf, false, seq);
+			wire::encode_ping(buf, false, seq);
 			self.timer.ping_sent(self.next_ping, now);
 			self.next_ping += 1;
 		}
 
 		let mut written = ThinRetransmits::default();
 		self.streams
-			.write_control_frames(&mut buf, &mut self.pending, &mut written, &mut self.stats, budget);
+			.write_control_frames(buf, &mut self.pending, &mut written, &mut self.stats, budget);
 		if let Some(written) = written.get() {
 			for &(id, reliable_size) in &written.reset_stream {
 				self.streams.reset_acked(id, reliable_size);
@@ -492,9 +563,7 @@ impl Connection {
 
 		// Stream data and datagrams last, so a STREAM frame without a Length field runs to the
 		// end of the record
-		let written = self
-			.streams
-			.write_frames(&mut buf, 0..budget, self.config.send_fairness);
+		let written = self.streams.write_frames(buf, 0..budget, self.config.send_fairness);
 		for meta in written.streams {
 			let id = meta.id;
 			// A reset held until the peer has the data below its Reliable Size goes out now
@@ -506,10 +575,10 @@ impl Connection {
 		self.streams.queue_max_stream_id(&mut self.pending);
 
 		if buf.is_empty() {
-			return None;
+			return false;
 		}
 		self.timer.on_send(now);
-		Some(buf)
+		true
 	}
 
 	/// Queue a draft-00 batch one frame per message, each STREAM frame with its Length field
@@ -551,6 +620,11 @@ impl Connection {
 		if size as u64 > limit {
 			return Err(self.oversized());
 		}
+		// What the record keeps allocated while a stream holds a slice of it, which bounds how
+		// much memory the peer's buffered data pins. A transport may slice records out of a
+		// shared read buffer of `MAX_FRAME_SIZE`, grown to fit the largest record allowed, so
+		// count at least that much.
+		let allocation = size.max(MAX_FRAME_SIZE).max(limit as usize);
 
 		let mut frames = 0;
 		loop {
@@ -569,8 +643,8 @@ impl Connection {
 					"draft-00 message carries more than one frame",
 				));
 			}
-			self.on_frame(frame, size, frame_len, now)?;
-			if self.error.is_some() {
+			self.on_frame(frame, allocation, frame_len, now)?;
+			if self.is_closed() {
 				// The peer closed; ignore the rest
 				return Ok(());
 			}
@@ -590,17 +664,21 @@ impl Connection {
 		}
 	}
 
-	/// End the connection over a violation, telling the peer with a CONNECTION_CLOSE
+	/// End the connection over a violation, telling the peer with a CONNECTION_CLOSE, unless it
+	/// already ended
 	fn fail(&mut self, err: TransportError) {
+		if self.is_closed() {
+			return;
+		}
 		debug!(%err, "qmux protocol error");
-		self.close = Some(Close::from(err.clone()));
-		self.lost(ConnectionError::TransportError(err));
+		let frame = Close::from(err.clone());
+		self.terminate(ConnectionError::TransportError(err), Some(frame));
 	}
 
 	fn on_frame(
 		&mut self,
 		frame: wire::Frame,
-		payload_len: usize,
+		allocation: usize,
 		frame_len: usize,
 		now: Instant,
 	) -> Result<(), TransportError> {
@@ -649,7 +727,7 @@ impl Connection {
 				if let Some(offset) = self.streams.rx_offset(stream.id) {
 					stream.offset = offset;
 				}
-				return self.on_stream(stream, payload_len);
+				return self.on_stream(stream, allocation);
 			}
 			wire::Frame::Quic(frame) => frame,
 		};
@@ -665,7 +743,7 @@ impl Connection {
 				{
 					return Err(TransportError::PROTOCOL_VIOLATION("stream data out of order"));
 				}
-				self.on_stream(stream, payload_len)?;
+				self.on_stream(stream, allocation)?;
 			}
 			frame::Frame::ResetStream(reset) => {
 				if reset.reliable_size.is_some() && self.config.version != Version::QMux02 {
@@ -673,7 +751,7 @@ impl Connection {
 					err.frame = Some(frame::FrameType::RESET_STREAM_AT);
 					return Err(err);
 				}
-				if self.streams.received_reset(reset)?.should_transmit() {
+				if self.streams.received_reset(reset)? {
 					self.pending.max_data = true;
 				}
 			}
@@ -724,7 +802,7 @@ impl Connection {
 					.datagrams
 					.received(datagram, &Some(self.config.datagram_receive_buffer_size))?
 				{
-					self.events.push_back(Event::DatagramReceived);
+					self.streams.waits.wake_datagram();
 				}
 			}
 			// ACK, PING, CRYPTO, NEW_TOKEN, connection ID and path management, ACK_FREQUENCY,
@@ -738,8 +816,8 @@ impl Connection {
 		Ok(())
 	}
 
-	fn on_stream(&mut self, stream: frame::Stream, payload_len: usize) -> Result<(), TransportError> {
-		if self.streams.received(stream, payload_len)?.should_transmit() {
+	fn on_stream(&mut self, stream: frame::Stream, allocation: usize) -> Result<(), TransportError> {
+		if self.streams.received(stream, allocation)? {
 			self.pending.max_data = true;
 		}
 		Ok(())
@@ -786,18 +864,23 @@ impl Connection {
 		};
 		self.timer.established(idle, self.config.rtt_interval, now);
 		self.peer = Some(peer);
-		self.events.push_back(Event::Connected);
+		self.streams.waits.connected();
 		Ok(())
 	}
 
-	/// End the connection with `reason`, unless it already ended: the first close wins
+	/// End the connection with `reason` without a close frame, unless it already ended
 	fn lost(&mut self, reason: ConnectionError) {
-		if self.error.is_some() {
+		self.terminate(reason, None);
+	}
+
+	/// End the connection with `error`, writing `frame` if any, unless it already ended: the
+	/// first close wins
+	fn terminate(&mut self, error: ConnectionError, frame: Option<Close>) {
+		if self.is_closed() {
 			return;
 		}
-		self.error = Some(reason.clone());
-		self.conn_state = ConnectionState::Draining;
-		self.events.push_back(Event::ConnectionLost { reason });
+		self.streams.waits.lose(error.clone());
+		self.end = End::Closing { error, frame };
 	}
 }
 
@@ -807,7 +890,7 @@ impl std::fmt::Debug for Connection {
 			.field("side", &self.side)
 			.field("version", &self.config.version)
 			.field("established", &self.peer.is_some())
-			.field("error", &self.error)
+			.field("error", &self.error())
 			.finish_non_exhaustive()
 	}
 }
@@ -826,16 +909,18 @@ impl Datagrams<'_> {
 	///
 	/// # Panics
 	/// - when `options.group` was opened on another connection
-	pub fn send(&mut self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
+	pub fn send(&mut self, data: impl Buf, options: send::Options<'_>) -> Result<(), send::Error> {
 		if self.conn.config.max_datagram_frame_size.is_none() {
-			return Err(SendDatagramError::Disabled);
+			return Err(send::Error::Unsupported);
 		}
-		let max = self.max_size().ok_or(SendDatagramError::UnsupportedByPeer)?;
+		let max = self.max_size().ok_or(send::Error::Unsupported)?;
 		let budget = self.conn.config.datagram_send_buffer_size;
-		let datagram = Datagram { data };
-		if datagram.data.len() > max || datagram.size(true) > budget {
-			return Err(SendDatagramError::TooLarge);
+		// Checked before taking the payload, which copies whatever is not already `Bytes`.
+		let len = data.remaining();
+		if len > max || OutgoingDatagram::frame_size(len) > budget {
+			return Err(send::Error::TooLarge);
 		}
+		let datagram = OutgoingDatagram::new(data);
 		if !self.conn.streams.queue_datagram(datagram, options, budget) {
 			trace!("dropping outgoing datagram");
 		}
@@ -854,5 +939,21 @@ impl Datagrams<'_> {
 	/// Receive the next datagram
 	pub fn recv(&mut self) -> Option<Bytes> {
 		self.conn.datagrams.recv()
+	}
+
+	/// [`Self::recv`], or wait for a datagram to arrive
+	///
+	/// Datagrams that arrived stay receivable after the connection ends, and only then does
+	/// this fail.
+	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, ConnectionError>> {
+		if let Some(datagram) = self.recv() {
+			return Poll::Ready(Ok(datagram));
+		}
+		let waits = &mut self.conn.streams.waits;
+		if let Some(err) = waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waits.register_datagram(waiter);
+		Poll::Pending
 	}
 }

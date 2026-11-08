@@ -10,15 +10,10 @@ import pytest
 
 
 async def routes(announced: moq.AnnounceConsumer):
-    """Yield each newly announced route, skipping updates and ends."""
+    """Yield each route that makes its path present, skipping absences."""
     async for event in announced:
-        if isinstance(event, moq.AnnounceEventStart):
+        if isinstance(event, moq.AnnounceEventPresent):
             yield event.announce
-
-
-async def next_route(announced: moq.AnnounceConsumer) -> moq.AnnounceEvent:
-    """The next announce event."""
-    return await asyncio.wait_for(anext(announced), timeout=5.0)
 
 
 def opus_head() -> bytes:
@@ -43,12 +38,12 @@ async def test_server_client_roundtrip():
     """Server publishes a broadcast; a client connects and receives a frame."""
     async with moq.Server("127.0.0.1:0", versions=["moq-lite-07-wip"], tls_generate=["localhost"]) as server:
         # Publish a broadcast on the server side.
-        publication = server.create_broadcast("hello")
-        broadcast = publication.broadcast
+        published = server.route("hello", hidden=True)
+        broadcast = published.broadcast
         media = moq.media.TrackProducer.audio(
             broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
         )
-        publication.announce()
+        published.announce()
 
         # Auto-accept incoming sessions in the background so the handshake
         # completes from the server side. Hold references so the sessions
@@ -82,12 +77,12 @@ async def test_server_client_roundtrip():
                     media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
                     payload = b"hello over the wire"
-                    media.write_frame(payload, timedelta(microseconds=1_000_000))
+                    media.write_frame(payload, moq.Timestamp(1_000_000, 1_000_000))
 
                     async for frame in media_consumer:
                         assert isinstance(frame, moq.media.MediaFrame)
                         assert frame.payload == payload
-                        assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
+                        assert frame.timestamp == moq.Timestamp(1_000_000, 1_000_000)
                         break
 
                     break
@@ -163,9 +158,8 @@ async def test_client_reconnects_and_resumes_announcements():
                 assert session.state().failure is None
 
                 # A broadcast published only after the reconnect still arrives.
-                publication = server.create_broadcast("after-reconnect")
-                broadcast = publication.broadcast
-                publication.announce()
+                published = server.route("after-reconnect")
+                broadcast = published.broadcast
                 async for announcement in routes(client.announced()):
                     assert announcement.prefix == "after-reconnect"
                     break
@@ -209,6 +203,36 @@ async def test_session_state_names_a_failing_first_dial():
                 state = await asyncio.wait_for(session.state_changed(state.revision), timeout=10)
                 assert isinstance(state.failure, moq.Error.Connect)
                 assert state.connects == 0
+            session.cancel(0)
+
+
+async def test_viewer_holds_without_an_estimate():
+    """A viewer on a session that has not connected reads no estimate."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as silent:
+        silent.bind(("127.0.0.1", 0))
+        host, port = silent.getsockname()
+        client = moq.Client(
+            f"https://{host}:{port}",
+            tls=moq.ClientTls(insecure=True),
+            bind="127.0.0.1:0",
+            websocket=moq.WebSocketConfig(enabled=False),
+        )
+        async with client:
+            session = client.session
+            assert session is not None
+            viewers = session.viewers()
+            viewer = viewers.watch(1_000_000)
+            viewer.update(2_000_000)
+            viewers.set_target(0)
+            viewers.set_target(None)
+            assert viewer.rate() is None
+            # Past what a PROBE target carries: refused.
+            with pytest.raises(moq.Error.OutOfRange):
+                viewers.watch(2**53)
+            with pytest.raises(moq.Error.OutOfRange):
+                viewers.set_target(2**53)
             session.cancel(0)
 
 
@@ -397,9 +421,8 @@ async def test_request_double_accept_returns_already_responded():
 async def test_serve_helper_accepts_clients():
     """Server.serve() accepts incoming sessions and holds them automatically."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
-        publication = server.create_broadcast("via-serve")
-        broadcast = publication.broadcast
-        publication.announce()
+        published = server.route("via-serve")
+        broadcast = published.broadcast
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -423,9 +446,8 @@ async def test_serve_helper_accepts_clients():
 async def test_broadcast_route_over_wire():
     """A route received over the wire exposes its hop chain and cost."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
-        publication = server.create_broadcast("with-route")
-        broadcast = publication.broadcast
-        publication.announce()
+        published = server.route("with-route")
+        broadcast = published.broadcast
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -448,50 +470,6 @@ async def test_broadcast_route_over_wire():
             except asyncio.CancelledError:
                 pass
             broadcast.close()
-
-
-async def test_route_update_observes_restart():
-    """A route metadata update arrives as an AnnounceEventUpdate.
-
-    The publisher re-prices its announced route; the subscriber observes the new
-    cost in place (no retraction), and unannouncing retracts it.
-    """
-    origin = moq.OriginProducer()
-    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
-        publication = origin.create_broadcast("routed")
-        publication.announce(moq.AnnounceRoute(cost=1))
-
-        serve_task = asyncio.create_task(server.serve())
-        try:
-            async with moq.Client(
-                f"https://{server.local_addr}",
-                tls=moq.ClientTls(insecure=True),
-                bind="127.0.0.1:0",
-            ) as client:
-                announced = client.announced()
-                first = await next_route(announced)
-                assert isinstance(first, moq.AnnounceEventStart)
-                assert first.announce.prefix == "routed"
-                first_cost = first.announce.route.cost
-
-                # The publisher raises its cost: an in-place update.
-                publication.announce(moq.AnnounceRoute(cost=5))
-                updated = await next_route(announced)
-                assert isinstance(updated, moq.AnnounceEventUpdate)
-                assert updated.announce.prefix == "routed"
-                assert updated.announce.route.cost == first_cost + 4
-
-                # Unannouncing retracts the route.
-                publication.unannounce()
-                ended = await next_route(announced)
-                assert isinstance(ended, moq.AnnounceEventEnd)
-                assert ended.announce.prefix == "routed"
-        finally:
-            serve_task.cancel()
-            try:
-                await serve_task
-            except asyncio.CancelledError:
-                pass
 
 
 async def test_client_context_keeps_the_body_error():
@@ -526,9 +504,8 @@ async def test_client_context_keeps_the_body_error():
                     # rather than lean on the last session reference dropping.
                     session = client.session
                     assert session is not None
-                    publication = client.create_broadcast("live")
-                    broadcast = publication.broadcast
-                    publication.announce()
+                    published = client.route("live")
+                    broadcast = published.broadcast
                     track = broadcast.publish_track("data")
                     await asyncio.wait_for(accepted.wait(), timeout=5.0)
                     consume = sessions[0].consume()

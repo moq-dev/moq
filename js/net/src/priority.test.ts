@@ -92,8 +92,8 @@ test("groups still draining are promoted after the subscription closes", () => {
 
 	const older = open();
 	const newer = open();
-	priority.add(older, 0, 0);
-	priority.add(newer, 1, 0);
+	priority.add(older, 0n, 0);
+	priority.add(newer, 1n, 0);
 	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
 
 	// The serving loop is done, but both groups are still on the wire.
@@ -113,7 +113,7 @@ test("groups still draining are promoted after the subscription closes", () => {
 test("the subscription's order picks which group goes first", async () => {
 	const { priority, subscriber, open, streams, broadcast } = ranking({ priority: 7, order: "ascending" });
 
-	const writers = [5, 1, 10].map((sequence) => {
+	const writers = [5n, 1n, 10n].map((sequence) => {
 		const writer = open();
 		priority.add(writer, sequence, 0);
 		return writer;
@@ -139,9 +139,9 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 	const rest = open();
 	const fill = open();
 	const other = open();
-	priority.add(rest, 5, 2 ** 45);
-	priority.add(fill, 5, 0);
-	priority.add(other, order === "ascending" ? 4 : 6, Number.MAX_SAFE_INTEGER);
+	priority.add(rest, 5n, 2 ** 45);
+	priority.add(fill, 5n, 0);
+	priority.add(other, order === "ascending" ? 4n : 6n, Number.MAX_SAFE_INTEGER);
 	const [restOrder, fillOrder, otherOrder] = streams.map((stream) => {
 		if (stream.sendOrder === undefined) throw new Error("send order missing");
 		return stream.sendOrder;
@@ -153,5 +153,43 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 	priority.close();
 	priority.remove(rest);
 	priority.remove(other);
+	broadcast.close();
+});
+
+// Every stream sits at the count of streams strictly ahead of it, the same count `rank` gives
+// a stream about to open there, so identical starts share a position and the next one skips
+// past both. Covers duplicates, fills within one group, and removals in both orders.
+test.each(["ascending", "descending"] as const)("re-ranking matches rank for every stream in %s order", (order) => {
+	const { priority, open, streams, broadcast } = ranking({ priority: 7, order });
+	const starts: [bigint, number][] = [
+		[5n, 0],
+		[3n, 0],
+		[5n, 0],
+		[5n, 4],
+		[9n, 0],
+		[3n, 2],
+		[1n, 0],
+		[9n, 0],
+	];
+	const writers = starts.map(([sequence, object]) => {
+		const writer = open();
+		priority.add(writer, sequence, object);
+		return writer;
+	});
+	const check = (live: number[]) => {
+		for (const i of live) expect(streams[i].sendOrder).toBe(priority.rank(starts[i][0], starts[i][1]));
+	};
+	const live = starts.map((_, i) => i);
+	check(live);
+	// Identical starts tie, and the next start counts both of them.
+	const lowest = order === "ascending" ? 6 : 4;
+	expect(streams[lowest].sendOrder).toBe(sendOrder({ priority: 7, position: 0 }));
+	for (const i of [2, 4, 0]) {
+		priority.remove(writers[i]);
+		live.splice(live.indexOf(i), 1);
+		check(live);
+	}
+	priority.close();
+	for (const i of live) priority.remove(writers[i]);
 	broadcast.close();
 });

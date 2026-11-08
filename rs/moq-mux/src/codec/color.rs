@@ -104,8 +104,11 @@ pub(crate) fn access_unit(
 ) -> Hdr {
 	let mut hdr = Hdr::default();
 	let mut scan = |nal: &[u8]| {
-		if nal.len() > header && sei(nal[0]) {
-			hdr.update(self::sei(&h264_parser::nal::ebsp_to_rbsp(&nal[header..])));
+		if nal.len() > header
+			&& sei(nal[0])
+			&& let Some(rbsp) = crate::codec::annexb::rbsp_bytes(nal, header)
+		{
+			hdr.update(self::sei(&rbsp));
 		}
 	};
 	match length_size {
@@ -137,15 +140,7 @@ const SEI_CONTENT_LIGHT: u32 = 144;
 /// (ITU-T H.264 D.1.29 and D.1.31, H.265 D.2.28 and D.2.35). A malformed message ends the scan.
 pub(crate) fn sei(rbsp: &[u8]) -> Hdr {
 	let mut hdr = Hdr::default();
-	let mut buf = rbsp;
-	// Each message needs at least a type and size byte; the last byte is the RBSP stop bit.
-	while buf.len() > 2 {
-		let Some(kind) = sei_value(&mut buf) else { break };
-		let Some(size) = sei_value(&mut buf) else { break };
-		let Some((payload, rest)) = buf.split_at_checked(size as usize) else {
-			break;
-		};
-		buf = rest;
+	for (kind, payload) in crate::codec::annexb::sei_messages(rbsp) {
 		match kind {
 			SEI_MASTERING_DISPLAY if payload.len() >= 24 => hdr.mastering = Some(sei_mastering(payload)),
 			SEI_CONTENT_LIGHT if payload.len() >= 4 => {
@@ -162,6 +157,12 @@ pub(crate) fn sei(rbsp: &[u8]) -> Hdr {
 
 const AV1_METADATA_HDR_CLL: u64 = 1;
 const AV1_METADATA_HDR_MDCV: u64 = 2;
+
+/// The type of the HDR metadata an AV1 metadata OBU's payload carries, if [`av1_metadata`] reads it.
+pub(crate) fn av1_hdr_type(payload: &[u8]) -> Option<u64> {
+	let mut buf = payload;
+	leb128(&mut buf).filter(|kind| matches!(*kind, AV1_METADATA_HDR_CLL | AV1_METADATA_HDR_MDCV))
+}
 
 /// The HDR metadata in an AV1 metadata OBU's payload (AV1 5.8.1, 6.7.3 and 6.7.4): content light
 /// levels, or a mastering display whose chromaticities are 0.16 fixed point and whose luminances
@@ -212,19 +213,6 @@ fn leb128(buf: &mut &[u8]) -> Option<u64> {
 		}
 	}
 	None
-}
-
-/// An SEI `payloadType` or `payloadSize`: a run of 0xFF bytes, each adding 255, then the remainder.
-fn sei_value(buf: &mut &[u8]) -> Option<u32> {
-	let mut value = 0u32;
-	loop {
-		let (&byte, rest) = buf.split_first()?;
-		*buf = rest;
-		value = value.checked_add(byte.into())?;
-		if byte != 0xFF {
-			return Some(value);
-		}
-	}
 }
 
 /// A `mastering_display_colour_volume` payload. Chromaticities count 0.00002 and luminance
@@ -311,7 +299,7 @@ pub(crate) mod test {
 		use crate::codec::h264::fixtures::{SEI_CONTENT_LIGHT, SEI_MASTERING};
 		let mut hdr = Hdr::default();
 		for nal in [SEI_MASTERING, SEI_CONTENT_LIGHT] {
-			hdr.update(sei(&h264_parser::nal::ebsp_to_rbsp(&nal[1..])));
+			hdr.update(sei(&crate::codec::annexb::rbsp_bytes(nal, 1).unwrap()));
 		}
 		assert_eq!(hdr, hdr10());
 	}

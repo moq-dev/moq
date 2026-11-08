@@ -42,10 +42,8 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::announce::Event::Start(route)
-			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
-			moq_net::announce::Event::End(route) => Some((route, false)),
+			moq_net::announce::Event::Present(route) => Some((route, true)),
+			moq_net::announce::Event::Absent(route) => Some((route, false)),
 		}
 	}
 
@@ -56,14 +54,15 @@ mod tests {
 		let origin = spawn();
 		let mut announced = origin.consume().announced();
 
-		let broadcast = origin.create_broadcast("cam").expect("create broadcast");
-		broadcast.announce(Default::default()).expect("create broadcast");
+		let broadcast = origin
+			.route("cam", moq_net::origin::RouteOptions::default())
+			.expect("create broadcast");
 
 		let (update, active) = next_update(&mut announced).await.expect("announce");
 		assert_eq!(update.prefix.as_str(), "cam");
 		assert!(active);
 
-		broadcast.close();
+		broadcast.broadcast().close();
 		let (_, active) = next_update(&mut announced).await.expect("retraction");
 		assert!(!active);
 	}

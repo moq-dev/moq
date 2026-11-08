@@ -12,13 +12,13 @@ use crate::error::MoqError;
 #[derive(uniffi::Object)]
 pub struct MoqTrackDemand {
 	inner: moq_net::track::Demand,
-	// The watcher `wanted_changed` advances, kept apart so concurrent waits queue in turn.
-	changes: Arc<tokio::sync::Mutex<moq_net::track::Demand>>,
+	// Each poll advances one shared cursor; a parked call never holds it locked.
+	changes: crate::ffi::Polled<moq_net::track::Demand>,
 }
 
 impl MoqTrackDemand {
 	pub(crate) fn new(inner: moq_net::track::Demand) -> Arc<Self> {
-		let changes = Arc::new(tokio::sync::Mutex::new(inner.clone()));
+		let changes = crate::ffi::Polled::new(inner.clone());
 		Arc::new(Self { inner, changes })
 	}
 
@@ -43,8 +43,9 @@ impl MoqTrackDemand {
 
 	/// Wait for `wanted` to change and return the new value. The first call returns at once.
 	pub async fn wanted_changed(&self) -> Result<Option<u64>, MoqError> {
-		let changes = self.changes.clone();
-		crate::ffi::detached(async move { gone(changes.lock().await.wanted_changed().await) }).await
+		self.changes
+			.wait(|changes, waiter| changes.poll_wanted_changed(waiter).map(gone))
+			.await
 	}
 }
 

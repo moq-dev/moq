@@ -16,7 +16,7 @@ use crate::refresh::Refresh;
 /// An [`Encoder`] that owns its track: it writes each encoded frame and rolls a group whenever the
 /// encoder emits a header. When something else already owns the track, use the [`Encoder`] directly.
 ///
-/// A group runs until a joiner wants a fresh one, which [`refresh`](Self::refresh) answers, or until
+/// A group runs until a joiner wants a fresh one, which [`poll_refresh`](Self::poll_refresh) answers, or until
 /// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
 /// when creating it, or joins never ask.
 ///
@@ -48,7 +48,7 @@ impl<T> Producer<T> {
 				},
 				encoder: Encoder::new(config),
 				at: None,
-				finished: false,
+				state: crate::state::State::Open,
 			})),
 			_marker: PhantomData,
 		}
@@ -97,11 +97,7 @@ impl<T> Producer<T> {
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
 	/// beside the edits. Errors once the track is finished or closed.
-	pub async fn refresh(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_refresh(waiter)).await
-	}
-
-	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
 		self.inner.lock().unwrap().poll_refresh(waiter)
 	}
@@ -110,7 +106,8 @@ impl<T> Producer<T> {
 	///
 	/// Borrows rather than consumes, matching snapshot and stream, so the handle stays
 	/// usable afterwards (reads, a second finish). Writes after this fail with
-	/// [`moq_net::Error::Closed`].
+	/// [`moq_net::Error::Closed`]. A finish that fails aborts the track instead, and every later
+	/// call returns its cause.
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
@@ -118,9 +115,9 @@ impl<T> Producer<T> {
 	/// Abort the track with the given error, which consumers see in place of a clean end.
 	///
 	/// Consumes the handle, since nothing can be published afterwards. Clones sharing the track see
-	/// it closed: their next edit fails with [`moq_net::Error::Closed`].
+	/// it closed: their next edit fails with `err`.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
-		self.inner.lock().unwrap().abort(err);
+		self.inner.lock().unwrap().abort(err.into());
 		Ok(())
 	}
 }
@@ -151,12 +148,14 @@ struct Inner<T> {
 	/// older timestamp than its group's first frame, and a new group may not start before that one.
 	at: Option<moq_net::Timestamp>,
 
-	finished: bool,
+	/// Whether this producer still publishes, or how it ended the track.
+	state: crate::state::State,
 }
 
 impl<T> Inner<T> {
 	fn pop(&mut self, count: Timed<u64>) -> Result<()> {
 		self.ensure_open()?;
+		let at = self.track.rescale(count.at)?;
 		let Inner { track, encoder, .. } = self;
 
 		let Some(frame) = encoder.pop(count.value)? else {
@@ -165,9 +164,9 @@ impl<T> Inner<T> {
 
 		// A failed write drops the frame uncommitted. The pop is discarded, and the next edit opens a
 		// new group, since a consumer may hold the group the frame was meant for.
-		track.write(count.at, &frame)?;
+		track.write(at, &frame)?;
 		frame.commit();
-		self.at = self.at.max(count.at);
+		self.at = self.at.max(at);
 
 		Ok(())
 	}
@@ -196,25 +195,53 @@ impl<T> Inner<T> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if self.finished {
-			return Ok(());
+		match &self.state {
+			crate::state::State::Open => {}
+			crate::state::State::Finished => return Ok(()),
+			crate::state::State::Aborted(err) => return Err(err.clone()),
 		}
-		self.finished = true;
-		self.track.finish()
+		// The open group goes with the track, so the encoder must not keep appending ops to it.
+		self.encoder.reset();
+		if let Err(err) = self.track.finish() {
+			// Half-finished, the track could still take groups, so it ends with the cause instead.
+			self.abort(err.clone());
+			return Err(err);
+		}
+		self.state = crate::state::State::Finished;
+		Ok(())
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
-		self.finished = true;
+	/// Abort the track with `err`, which every later call reports. The first cause wins.
+	fn abort(&mut self, err: crate::Error) {
+		// The track carries a moq-net error; anything else has no wire code, so consumers get a
+		// generic failure while the exact cause stays here.
+		let reason = match &err {
+			crate::Error::Net(err) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		};
+		self.encoder.reset();
 		// The group first: aborting the track leaves an already-pulled group consumer independent.
 		if let Some(group) = self.track.group.take() {
-			let _ = group.abort(err.clone());
+			let _ = group.abort(reason.clone());
 		}
 		// Idempotent: a track that is already closed keeps its first reason.
-		let _ = self.track.inner.clone().abort(err);
+		let _ = self.track.inner.clone().abort(reason);
+		self.state.abort(err);
 	}
 
+	/// Refuse further edits once the track can't take another group.
 	fn ensure_open(&self) -> Result<()> {
-		if self.finished {
+		self.state.check()?;
+		// The same test `append_group` applies: a boundary declared ahead of the live edge still
+		// admits the groups below it. The largest counts every group, even an empty one, so the
+		// next group is the one after it.
+		let track = &self.track.inner;
+		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
+		if track.is_closed()
+			|| track
+				.finished()
+				.is_some_and(|end| moq_net::track::Position::group(next) >= end)
+		{
 			return Err(moq_net::Error::Closed.into());
 		}
 		Ok(())
@@ -224,12 +251,13 @@ impl<T> Inner<T> {
 impl<T: Serialize> Inner<T> {
 	fn push(&mut self, value: Timed<&T>) -> Result<()> {
 		self.ensure_open()?;
+		let at = self.track.rescale(value.at)?;
 		let Inner { track, encoder, .. } = self;
 
 		let frame = encoder.push(value.value)?;
-		track.write(value.at, &frame)?;
+		track.write(at, &frame)?;
 		frame.commit();
-		self.at = self.at.max(value.at);
+		self.at = self.at.max(at);
 
 		Ok(())
 	}
@@ -239,7 +267,8 @@ impl<T: Serialize> Inner<T> {
 struct Track {
 	inner: moq_net::track::Producer,
 
-	/// The group an op would be appended to, open after a header.
+	/// The group an op would be appended to, open after a header. Whatever clears it resets the
+	/// encoder too, or the encoder's next op would have no group to land in.
 	group: Option<moq_net::group::Producer>,
 
 	/// The sequence of the newest group written, which a refresh has to pass.
@@ -247,14 +276,19 @@ struct Track {
 }
 
 impl Track {
-	/// Write one encoded frame, rolling a group when it is a header.
-	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
-		// Check before touching a group: a header publishes a new group before its frame is
-		// written, so a mismatch found by `write_frame` would leave an empty newest group behind.
-		if timestamp.is_some() != self.inner.info().timescale.is_some() {
-			return Err(moq_net::Error::TimestampMismatch.into());
-		}
+	/// `timestamp` at the track's timescale, or [`moq_net::Error::TimestampMismatch`] when it is
+	/// missing on a timed track, present on an untimed one, or beyond what the scale can hold.
+	///
+	/// An edit checks this before encoding. Found by `write_frame` instead, the mismatch would
+	/// come after a header published its group, leaving an empty newest group behind, and the
+	/// dropped frame would reset the encoder, rolling a group for an edit that changed nothing.
+	fn rescale(&self, timestamp: Option<moq_net::Timestamp>) -> Result<Option<moq_net::Timestamp>> {
+		Ok(self.inner.info().rescale(timestamp)?)
+	}
 
+	/// Write one encoded frame at a timestamp already [rescaled](Self::rescale) to the track, rolling a
+	/// group when it is a header.
+	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
 		match encoded.keyframe {
 			true => self.write_header(timestamp, encoded.payload.clone()),
 			false => self.write_op(timestamp, encoded.payload.clone()),
@@ -295,7 +329,10 @@ impl Track {
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
-		self.inner.finish()?;
+		// Another handle may have declared the end already, which stands.
+		if self.inner.finished().is_none() {
+			self.inner.finish()?;
+		}
 		Ok(())
 	}
 }

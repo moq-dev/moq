@@ -27,7 +27,7 @@ function GameCardInner() {
 		game.canvas.set(canvasRef);
 	});
 
-	// Keyboard input — preventDefault when expanded or hovered.
+	// Keyboard input - preventDefault when expanded or hovered.
 	const isActive = () => game.expanded.peek() === game.sessionId || game.hovered.peek();
 
 	const onKeyDown = (e: KeyboardEvent) => {
@@ -79,8 +79,7 @@ function GameCardInner() {
 
 	// Label: session name + player count.
 	const label = () => {
-		const status = ctx.status();
-		const n = status ? Object.keys(status.latency).length : 0;
+		const n = ctx.status()?.players ?? 0;
 		return n > 0 ? `${game.sessionId} (${n})` : game.sessionId;
 	};
 

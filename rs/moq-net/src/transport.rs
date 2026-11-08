@@ -1,10 +1,10 @@
 //! The poll transport interface owned by `moq-net`.
 //!
 //! Implement these traits for a transport, or wrap a backend at the application
-//! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
+//! boundary. `moq-tokio` and `moq-uring` provide their own adapters, and
 //! [`memory`] links two peers in one process.
 //! The async helpers only drive the required poll methods. Sessions take a
-//! [`poll::Boxable`] transport, which adds native thread bounds; wrap a thread-local
+//! [`poll::Boxable`] transport, which adds thread bounds; wrap a thread-local
 //! transport in a type that checks the thread on use (`moq-uring` has one).
 
 use std::time::Duration;
@@ -12,34 +12,8 @@ use std::time::Duration;
 #[cfg(feature = "async")]
 pub(crate) mod boxed;
 pub mod memory;
-
-/// A trait that is Send on native targets and empty on WASM.
-#[cfg(not(target_family = "wasm"))]
-pub trait MaybeSend: Send {}
-
-/// A trait that is Sync on native targets and empty on WASM.
-#[cfg(not(target_family = "wasm"))]
-pub trait MaybeSync: Sync {}
-
-#[cfg(not(target_family = "wasm"))]
-impl<T: Send> MaybeSend for T {}
-
-#[cfg(not(target_family = "wasm"))]
-impl<T: Sync> MaybeSync for T {}
-
-/// A trait that is Send on native targets and empty on WASM.
-#[cfg(target_family = "wasm")]
-pub trait MaybeSend {}
-
-/// A trait that is Sync on native targets and empty on WASM.
-#[cfg(target_family = "wasm")]
-pub trait MaybeSync {}
-
-#[cfg(target_family = "wasm")]
-impl<T> MaybeSend for T {}
-
-#[cfg(target_family = "wasm")]
-impl<T> MaybeSync for T {}
+#[cfg(feature = "async")]
+pub(crate) mod open;
 
 /// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,18 +140,109 @@ pub trait Metrics {
 struct Untracked;
 impl Metrics for Untracked {}
 
-/// The smallest connection receive window a transport that leases may offer.
+/// The receive credit a transport grants its peer, which bounds what a stream the session
+/// stops reading still holds.
+///
+/// A session's ingest stops reading a group's stream while the group's fastest reader is far
+/// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
+/// `stream` bytes counted against the shared `connection` window, so the session pauses only
+/// as many streams as fit in half of it; the rest keep reading. See
+/// [`poll::Session::receive_window`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReceiveWindow {
+	/// The connection-wide receive window, in bytes, or [`u64::MAX`] when streams share none.
+	pub connection: u64,
+	/// The most receive credit one stream may hold, in bytes.
+	pub stream: u64,
+}
+
+impl ReceiveWindow {
+	/// A connection-wide window of `connection` bytes, of which one stream holds at most `stream`.
+	pub fn new(connection: u64, stream: u64) -> Self {
+		Self { connection, stream }
+	}
+}
+
+/// Which streams a session opens: one-way, or both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+	/// Unidirectional streams.
+	Uni,
+	/// Bidirectional streams.
+	Bi,
+}
+
+/// The streams a peer still lets this side open in one direction, as the transport last heard.
+///
+/// A peer grants a bounded number of streams, and an open beyond them waits for it to grant
+/// more. A session reads this to tell an open waiting for that credit from one waiting on
+/// anything else. See [`poll::Session::stream_credit`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StreamCredit {
+	/// The streams this side may still open before the peer grants more.
+	pub available: u64,
+	/// Whether an open was refused for lack of credit since the peer last granted more, so
+	/// this side waits for the peer, as QUIC's STREAMS_BLOCKED says.
+	pub blocked: bool,
+}
+
+impl StreamCredit {
+	/// `available` streams left, `blocked` once an open was refused for lack of them.
+	pub fn new(available: u64, blocked: bool) -> Self {
+		Self { available, blocked }
+	}
+}
+
+/// Limits to change on a live session with [`poll::Session::set_limits`]. Each `None` leaves
+/// its limit as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Limits {
+	/// The connection-wide receive window, in bytes.
+	pub receive_window: Option<std::num::NonZeroU64>,
+}
+
+/// Why a transport did not apply [`Limits`].
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum LimitsError {
+	/// The transport cannot change these limits on a live session.
+	#[error("the transport cannot change these limits")]
+	Unsupported,
+	/// The transport refused the values, with its reason.
+	#[error("limits refused: {0}")]
+	Refused(String),
+}
+
+/// The smallest connection receive window a transport that leases may offer: one 1 MiB
+/// storage segment.
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
-/// window can never complete, so the window has to fit the largest one with its framing:
-/// a legacy announcement set, past any frame segment. A frame returns its credit a
-/// segment at a time, so its size never matters here.
+/// window can never complete, so the window has to fit the largest one with its framing.
+/// A frame returns its credit a segment at a time, so its size never matters here, and a
+/// legacy announcement set is capped to fit the same segment.
 pub const MIN_RECEIVE_WINDOW: u64 = {
 	// A type and a size prefix, each a varint of at most 8 bytes.
 	const PREFIXES: u64 = 16;
 	let message = <crate::lite::AnnounceInit as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
 	let segment = crate::frame::SEGMENT as u64;
 	if message > segment { message } else { segment }
+};
+
+/// The connection receive window a server offers before it admits the session.
+///
+/// It fits the SETUP and one in-band AUTH, each with its framing, which is all a client
+/// sends before the reply. Credit cannot be withdrawn, so a session that started with
+/// its full window could bank it and spend it after a lower window or a bitrate cap
+/// arrives; the server opens the full window only once it admits the session.
+pub const SETUP_RECEIVE_WINDOW: u64 = {
+	// A type and a size prefix, each a varint of at most 8 bytes.
+	const PREFIXES: u64 = 16;
+	let setup = crate::setup::MAX_SETUP_SIZE as u64 + PREFIXES;
+	let auth = <crate::lite::Auth as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
+	setup + auth
 };
 
 /// The typed transport condition when no application code was received.
@@ -199,7 +264,7 @@ pub enum CloseKind {
 /// A transport failure with optional session and stream application codes.
 ///
 /// Session codes and stream codes belong to separate registries.
-pub trait Error: std::error::Error + MaybeSend + MaybeSync + 'static {
+pub trait Error: std::error::Error + Send + Sync + 'static {
 	/// The typed transport condition, independent of application close codes.
 	fn close_kind(&self) -> CloseKind {
 		CloseKind::Transport
@@ -223,12 +288,12 @@ pub mod poll {
 
 	use std::collections::VecDeque;
 
-	use super::{Error, MaybeSend, MaybeSync, Metrics, Untracked};
+	use super::{Error, Metrics, Untracked};
 	use bytes::{Buf, Bytes, BytesMut};
 
 	/// A transport session, shared by reference between the tasks that use it.
 	///
-	/// Every operation takes `&self` and keeps no per-caller progress between polls: the
+	/// Every session operation takes `&self` and keeps no per-caller progress between polls: the
 	/// caller owns the [`kio::Waiter`] it parks, so an abandoned wait leaves nothing behind.
 	/// Share a session with [`Arc`](std::sync::Arc) rather than cloning it. Poll operations
 	/// never borrow caller buffers between calls, and shared resources must not be held
@@ -264,18 +329,6 @@ pub mod poll {
 			waiter: &kio::Waiter,
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
-
-		/// Open a request stream without waiting for stream credit.
-		///
-		/// `None` refuses the request before opening a stream. `Pending` means the stream
-		/// already has credit but its transport header is waiting for send capacity.
-		/// Native QUIC and qmux implement this admission check. Iroh retains its waiting
-		/// open behavior, and browser-backed sessions retain their browser's behavior.
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
-		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>>;
 
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
@@ -352,6 +405,48 @@ pub mod poll {
 		/// The session sets the target; see [`super::Probe`]. Without a sender nothing probes,
 		/// so the congestion estimate stops rising while the connection is app-limited.
 		fn probe(&self) -> Option<super::Probe> {
+			None
+		}
+
+		/// Return the receive windows now in force, or `None` when the transport cannot say.
+		///
+		/// Read whenever the session considers pausing a stream, so a window changed on a live
+		/// connection is followed. Without one, the session cannot bound the credit a paused
+		/// stream holds, so it never pauses one: ingest reads every stream as it arrives and
+		/// sheds what its readers fall behind on.
+		fn receive_window(&self) -> Option<super::ReceiveWindow> {
+			None
+		}
+
+		/// Apply `limits` to the live session, such as to open the receive window a server held
+		/// back until it admitted the peer.
+		///
+		/// Errors with [`LimitsError::Unsupported`](super::LimitsError::Unsupported) when the
+		/// transport cannot change them, which is the default: such a transport holds nothing
+		/// back to open.
+		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
+			let _ = limits;
+			Err(super::LimitsError::Unsupported)
+		}
+
+		/// Return the peer's stream credit in `dir`, or `None` when the transport cannot say,
+		/// as a browser's WebTransport cannot.
+		///
+		/// Read whenever an open waits, so the session knows whether the peer's credit is what
+		/// it waits for.
+		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+			let _ = dir;
+			None
+		}
+
+		/// Export 32 bytes of keying material from this session's handshake under `label` and
+		/// `context` (RFC 8446 section 7.5), or `None` when the transport has no exporter.
+		///
+		/// Both ends of one session export the same bytes, and no other session does.
+		/// WebTransport derives them per session as its draft specifies, since other sessions
+		/// may share the connection.
+		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+			let _ = (label, context);
 			None
 		}
 
@@ -508,14 +603,6 @@ pub mod poll {
 			(**self).poll_open_bi(waiter, options)
 		}
 
-		fn poll_open_request(
-			&self,
-			waiter: &kio::Waiter,
-			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
-		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>> {
-			(**self).poll_open_request(waiter, options)
-		}
-
 		fn send_group(&self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group> {
 			(**self).send_group(priority)
 		}
@@ -563,29 +650,37 @@ pub mod poll {
 		fn probe(&self) -> Option<super::Probe> {
 			(**self).probe()
 		}
+
+		fn receive_window(&self) -> Option<super::ReceiveWindow> {
+			(**self).receive_window()
+		}
+
+		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
+			(**self).set_limits(limits)
+		}
+
+		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
+			(**self).stream_credit(dir)
+		}
+
+		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
+			(**self).export_keying_material(label, context)
+		}
 	}
 
 	/// A transport that the async client and server can box:
-	/// the session, its streams, send groups, and errors are thread-safe on native.
+	/// the session, its streams, send groups, and errors are thread-safe.
 	/// Implemented automatically.
 	///
 	/// Boxing is what compiles the session code once per binary rather than once per
 	/// transport.
 	pub trait Boxable:
-		Session<
-			SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend + MaybeSync,
-		> + MaybeSend
-		+ MaybeSync
+		Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
 	{
 	}
 
 	impl<S> Boxable for S where
-		S: Session<
-				SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend + MaybeSync,
-			> + MaybeSend
-			+ MaybeSync
+		S: Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
 	{
 	}
 
@@ -680,8 +775,7 @@ pub mod poll {
 		/// Set the priority within the stream's send group, or session-wide when ungrouped.
 		///
 		/// Streams with higher values will be sent first, but are not guaranteed to
-		/// arrive first. This matches the W3C WebTransport `sendOrder` convention (and
-		/// quinn's scheduler).
+		/// arrive first. This matches the W3C WebTransport `sendOrder` convention.
 		///
 		/// Backends with a narrower priority saturate or approximate it, so treat the
 		/// ordering as best-effort.
@@ -696,8 +790,8 @@ pub mod poll {
 		/// [`poll_closed`](Self::poll_closed) should resolve when the FIN is acknowledged
 		/// by the peer.
 		///
-		/// NOTE: Quinn implicitly calls this on Drop, but it's a common footgun.
-		/// Implementations SHOULD [`reset`](Self::reset) on Drop instead.
+		/// Dropping an unfinished stream must [`reset`](Self::reset) it, so the peer cannot
+		/// mistake truncated data for a complete stream.
 		fn finish(&mut self) -> Result<(), Self::Error>;
 
 		/// Immediately closes the stream and discards any remaining data.
@@ -706,7 +800,7 @@ pub mod poll {
 		/// The peer may not receive the reset code if the stream is already closed.
 		///
 		/// Takes `&mut self` rather than `self` even though it is terminal, so a caller
-		/// can still [`poll_closed`](Self::poll_closed) afterwards to await the peer ,
+		/// can still [`poll_closed`](Self::poll_closed) afterwards to await the peer,
 		/// and so it matches [`finish`](Self::finish), which must not consume the stream
 		/// for exactly that reason.
 		fn reset(&mut self, code: u32);
@@ -721,6 +815,15 @@ pub mod poll {
 		/// Some implementations do not support FIN acknowledgement, in which case this
 		/// resolves once the FIN is sent.
 		fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>>;
+
+		/// Whether the peer has acknowledged every byte written so far, or `None` when the
+		/// transport cannot tell, as a browser's WebTransport cannot.
+		///
+		/// A transport answers for all of its streams or for none. A stream that was reset, or
+		/// that the peer stopped, is never acknowledged.
+		fn acknowledged(&self) -> Option<bool> {
+			None
+		}
 
 		/// Write some of the buffer, returning how many bytes were accepted.
 		fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self> {
@@ -850,6 +953,19 @@ pub mod poll {
 		/// Call this method manually if you want to specify a code yourself.
 		fn stop(&mut self, code: u32);
 
+		/// Poll until the stream fails without reading it: the peer resets it, the receiver
+		/// evicts it to free a stuck window, or the connection closes. Pending for good once the
+		/// peer finished it.
+		///
+		/// A session that stops reading a stream, to pace it (see [`Session::receive_window`])
+		/// or until a control message says how to read it, watches this instead, so a reset
+		/// still ends the group it carries and an eviction stops the stream. It takes no bytes and grants no credit. The default never completes,
+		/// which suits a transport reporting no receive window, since none of its streams pause.
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			let _ = waiter;
+			Poll::Pending
+		}
+
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
 		/// stream. Its credit returns as it is read.
 		///
@@ -927,6 +1043,12 @@ pub mod poll {
 		/// An implementation MUST also do this on Drop: [`Buffered`] forwards an explicit stop
 		/// but leaves the drop to the wrapped stream.
 		fn stop(&mut self, code: u32);
+
+		/// Poll until the stream fails without reading it. See [`RecvStream::poll_reset`].
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			let _ = waiter;
+			Poll::Pending
+		}
 	}
 
 	/// Leases over a transport that cannot keep bytes unconsumed, buffering what it reads.
@@ -996,6 +1118,14 @@ pub mod poll {
 			self.chunks.clear();
 			self.len = 0;
 			self.inner.stop(code);
+		}
+
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<S::Error> {
+			// Every byte arrived, so nothing is left to reset.
+			match self.fin {
+				true => Poll::Pending,
+				false => self.inner.poll_reset(waiter),
+			}
 		}
 	}
 

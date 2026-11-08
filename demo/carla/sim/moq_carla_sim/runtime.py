@@ -1,8 +1,8 @@
 """The per-truck control loop.
 
-One `TruckSession` per truck: it owns the safety gate, the MoQ broadcast, and
-the truck's bridge stream, whose compressed video the bridge publishes into
-that broadcast.
+One `TruckSession` per truck: it owns the safety gate, the MoQ broadcast, the
+socket endpoint its drivers dial, and the truck's bridge stream, whose
+compressed video the bridge publishes into that broadcast.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import moq
 
 from .drive import Accepted, Command, Drive, TimestampEntry
-from .publish import Pose, Status, StatusPublisher, Telemetry, status_payload, watch_drivers
+from .publish import Drivers, Pose, Status, StatusPublisher, Telemetry, status_payload
 from .world import drive_hold, status_hold
 
 if TYPE_CHECKING:
@@ -93,33 +93,34 @@ class TruckSession:
     def __init__(
         self,
         truck: Truck,
-        publication: moq.Publication,
+        route: moq.Route,
         video: BridgeStream,
         location: str | None,
         map_name: str | None,
         clock: Clock,
-        route: moq.AnnounceRoute,
     ) -> None:
         self._truck = truck
+        # Held for the session's lifetime: dropping the route retracts the broadcast.
+        self._route = route
         self._video = video
         self._clock = clock
         self._location = location
         self._map_name = map_name
         self._drive = Drive()
-        self._status = StatusPublisher(publication.broadcast)
+        self._status = StatusPublisher(route.broadcast)
         # Bounded: drivers are untrusted publishers, so an unbounded queue is a
         # memory-growth path under one that floods; a full queue instead blocks
         # that driver's own task.
         self._commands: asyncio.Queue[Command] = asyncio.Queue(maxsize=COMMAND_QUEUE_DEPTH)
-        self._media_pipeline: dict[str, list[dict[str, Any]]] = {}
+        self._drivers = Drivers(truck.name, self._commands)
         self._deadline: float | None = None
         self._stuck = StuckDetector()
-        # A broadcast starts unadvertised; the player discovers trucks by
-        # announcement, so advertise once the status and video tracks exist.
-        # The stream's are there already: opening it advertised them. The
-        # route carries the run's epoch, so viewers see a restarted worker as
-        # a restart rather than a stalled broadcast.
-        publication.announce(route)
+        # The route starts hidden; the player discovers trucks by announcement,
+        # so advertise once the status and video tracks exist. The stream's are
+        # there already: opening it advertised them. The route mints a fresh
+        # instance, so viewers see a restarted worker as a restart rather than
+        # a stalled broadcast.
+        route.announce()
 
     def stop_video(self) -> None:
         """End the video tracks cleanly and stop the bridge encoding them."""
@@ -129,19 +130,21 @@ class TruckSession:
     def commands(self) -> asyncio.Queue[Command]:
         return self._commands
 
-    async def run(self, client: moq.Client, drivers: str) -> None:
+    @property
+    def drivers(self) -> Drivers:
+        return self._drivers
+
+    async def run(self, origin: moq.OriginProducer) -> None:
         """Consume driver commands and actuate until cancelled.
 
-        Driver discovery runs in a task group rather than a bare task, so a
+        The driver endpoint runs in a task group rather than a bare task, so a
         failure there fails the session. A detached task's exception is never
         retrieved: the truck would keep publishing video and status while
         silently accepting no driver ever again, which reads as healthy.
         """
         self._publish()
         async with asyncio.TaskGroup() as group:
-            watcher = group.create_task(
-                watch_drivers(client, drivers, self._commands), name=f"drivers:{self._truck.name}"
-            )
+            watcher = group.create_task(self._drivers.run(origin), name=f"drivers:{self._truck.name}")
             # Video demand is what renders the world for this truck, and the
             # bridge follows the same demand to pick its camera.
             demand = group.create_task(
@@ -170,50 +173,35 @@ class TruckSession:
                 # drive contract. Only the lease holder may move the truck.
                 if not self._drive.holds(command) or self._drive.estopped:
                     continue
-                self._truck.respawn()
-                self._drive = Drive()
-                self._deadline = None
-                self._media_pipeline.clear()
-                self._stuck.reset()
-                self._hold_clock()
+                self._respawn()
                 self._publish()
                 continue
-            if command.kind == "drive" and self._drive.driver is None and self._truck.autonomous:
-                # The browser seeds its first command from the latest status, but
-                # the gate still holds its no-driver resting state. Synchronize the
-                # gear from fresher local feedback so the shift interlock does not
-                # turn a moving takeover into a neutral coast.
-                self._drive.synchronize(self._truck.telemetry().measured)
             accepted = self._drive.apply(command)
-            changed = accepted
             self._hold_clock()
-
-            if command.kind in ("drive", "estop", "reset_estop"):
-                if accepted and self._drive.holds(command):
-                    # Only the lease holder's accepted traffic refreshes the
-                    # watchdog and its pipeline timing. A bystander's e-stop
-                    # still latches, but must not extend the holder's lease, and
-                    # an e-stopped holder's refused drive frames must not keep
-                    # the lease alive forever.
-                    self._media_pipeline[command.driver_id] = latency_breakdown(command.timestamps)
-                    self._deadline = asyncio.get_running_loop().time() + COMMAND_TIMEOUT
-            elif command.kind == "driver_left" and accepted:
-                # Only the holder's run has a pipeline entry, so another run of
-                # the same driver id leaving must not drop it.
-                self._media_pipeline.pop(command.driver_id, None)
-                self._deadline = None
-            elif command.kind == "watchdog_expired" and accepted:
-                self._deadline = None
-                self._media_pipeline.clear()
-                log.warning("%s: control watchdog expired, returning to autonomy", self._truck.name)
-
-            if not changed:
+            if not accepted:
                 continue
+
+            # Only the lease holder's accepted traffic refreshes the watchdog
+            # and is acknowledged. A bystander's e-stop still latches, but must
+            # not extend the holder's lease, and an e-stopped holder's refused
+            # drive frames must not keep the lease alive forever.
+            acknowledged = command.kind in ("drive", "estop", "reset_estop") and self._drive.holds(command)
+            if acknowledged:
+                self._deadline = asyncio.get_running_loop().time() + COMMAND_TIMEOUT
+            elif command.kind == "driver_left":
+                self._deadline = None
+            elif command.kind == "watchdog_expired":
+                self._deadline = None
+                log.warning("%s: control watchdog expired, returning to autonomy", self._truck.name)
 
             # Actuate before publishing, so the world and the status echo can
             # never disagree about what was accepted.
             self._actuate()
             self._publish()
+            if acknowledged:
+                self._drivers.reply(
+                    command, {"sequence": command.sequence, "media_pipeline": latency_breakdown(command.timestamps)}
+                )
 
     async def _report_video(self) -> None:
         """Log the published frame rate per rendition.
@@ -251,9 +239,11 @@ class TruckSession:
 
         The stuck watchdog rides on the same tick. It only ever fires for a
         truck nobody holds: a stationary truck under a driver is the driver's
-        business, and an e-stopped one is latched on purpose. So does the
-        handback: a released truck steers itself onto a lane before Traffic
-        Manager takes it, and nothing else runs often enough to drive it.
+        business. A driverless truck whose e-stop is still latched is not, since
+        nobody may come back to reset it: it respawns like an autonomous one,
+        and the respawn clears the latch. So does the handback: a released
+        truck steers itself onto a lane before Traffic Manager takes it, and
+        nothing else runs often enough to drive it.
         """
         while True:
             await asyncio.sleep(TELEMETRY_INTERVAL)
@@ -262,8 +252,9 @@ class TruckSession:
                 self._truck.release()
             if (
                 self._drive.driver is not None
-                or self._drive.estopped
-                or not self._truck.autonomous
+                # Mid-handback: the truck is still coasting onto a lane, and
+                # engages autonomy within a tick once it slows to walking pace.
+                or not (self._drive.estopped or self._truck.autonomous)
                 or not self._clock.running
             ):
                 # A parked world is not a stuck truck: nothing is meant to be
@@ -271,10 +262,27 @@ class TruckSession:
                 # for as long as nobody watches.
                 self._stuck.reset()
             elif self._stuck.update(telemetry.pose, asyncio.get_running_loop().time()):
-                log.warning("%s: no movement in %.0f s while autonomous, respawning", self._truck.name, STUCK_TIMEOUT)
-                self._truck.respawn()
-                self._stuck.reset()
+                log.warning(
+                    "%s: no movement in %.0f s with nobody driving%s, respawning",
+                    self._truck.name,
+                    STUCK_TIMEOUT,
+                    f", clearing the e-stop latched by {self._drive.estop_by}" if self._drive.estopped else "",
+                )
+                self._respawn()
+                telemetry = self._truck.telemetry()
             self._publish(telemetry)
+
+    def _respawn(self) -> None:
+        """Return the truck to a spawn point under a fresh gate.
+
+        The fresh gate drops the lease and clears any e-stop latch and its
+        attribution, so the truck comes back autonomous rather than braked.
+        """
+        self._truck.respawn()
+        self._drive = Drive()
+        self._deadline = None
+        self._stuck.reset()
+        self._hold_clock()
 
     async def _next_command(self) -> Command:
         """The next driver command, or a synthesized watchdog expiry."""
@@ -333,8 +341,6 @@ class TruckSession:
                     estop_by=self._drive.estop_by,
                     autonomous=self._truck.autonomous,
                     driver=self._drive.driver,
-                    sequence=self._drive.sequence,
-                    media_pipeline=self._media_pipeline,
                     location=self._location,
                     map_name=self._map_name,
                     telemetry=self._truck.telemetry() if telemetry is None else telemetry,

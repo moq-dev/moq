@@ -1,12 +1,120 @@
 # Migrating moq-mux
 
-How to update your code for each breaking change, newest first.
+How to adopt new APIs and update for breaking changes, newest first.
 
 ## Unreleased
 
+### Selection never holds a disabled rendition ([#7942](https://github.com/moq-dev/moq/pull/7942))
+
+`select::Broadcast::retain` takes only the catalog, and `select::Selected` is gone: a rendition the catalog marks `enabled: false` is never selected, even one selected before, so `catalog::Select` drops it on the snapshot that disables it. Drop the second argument and any `Selected` you tracked.
+
+```rust
+// Before
+selection.retain(&mut catalog, &Selected::of(&previous));
+// After
+selection.retain(&mut catalog);
+```
+
+### Shared H.265 SPS parsing
+
+Use `codec::h265::Sps::parse` to read an SPS NAL unit through the same bounded
+walk as moq-mux before scuffle-h265 parses it. The `Sps` result exposes the
+checked picture size and any VUI `VideoSignal` without exposing scuffle-h265's
+types. moq-video clears the colour label when an SPS is refused. No wire change.
+
+### The async API is opt-in
+
+Enable the `async` Cargo feature to keep awaiting moq-mux:
+`moq-mux = { version = "...", features = ["async"] }`. This also applies with `default-features = false`.
+The feature is off by default, and every `poll_*` method stays available without it.
+It covers the `next`, `read`, `latest`, `refresh`, `ready`, `wait`, and `broadcast` methods beside each poll:
+the catalog consumers and `catalog::Stream::next`, the container `Consumer` and `GroupConsumer`,
+every exporter (`next`, and fMP4's `next_chunk`), `ts::Follower`, `ts::Release`, `follow::Instances`,
+`json::Consumer`, `json::Snapshot`, `rate::Follower`, `timeline::Resume`, `Binding`, and `Linger`.
+It also covers the async functions with no poll of their own: `catalog::Consumer::new`,
+`Source::{catalog, resolve, subscribe_track}`, `ts::Release::new`, and the JSON catalog entry's `subscribe`.
+`fmp4::Muxer::read` is async too; without the feature, drive `fmp4::Muxer::poll_read`, passing the same
+empty `Vec` to every poll of one group.
+
+`timeline::Resume::ready` borrows the resume instead of consuming it, and the hang catalog consumer's
+`next` no longer requires `Catalog<E>: Unpin`.
+moq-mux no longer enables `moq-json/async`: enable it yourself to await moq-json's readers directly.
+
+### `follow::Instances` folds into `Following` ([#7678](https://github.com/moq-dev/moq/pull/7678))
+
+`follow::Instances::new` is removed: call `origin.follow(path, instance)` and read `Following::available()`, which returns `Some(broadcast)` where `Event::Start` did and `None` where `Event::End` did.
+`Source::follow` still returns `follow::Instances`, for its one-shot hand-out of the catalog's own broadcast; its `next()` and `poll_next()` now return `Option<broadcast::Consumer>`, and `follow::Event` is gone.
+
+### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
+
+`container::Consumer::with_warmup` is gone. Build a `container::Playout::new(delay, warmup)` from the `Delay` and the catalog rendition's `warmup`, subscribe with `playout.subscription(subscription)`, which widens the max delay by the warmup, and build the consumer with `playout.consumer(track, format)`, which skips at the max delay alone. The order no longer matters, and a track subscribed without the widening is widened when the consumer is built.
+
+```rust
+// Before
+let subscription = Subscription::default().with_delay(delay.with_max(delay.max.map(|max| max + warmup)));
+let track = broadcast.track(name)?.subscribe(subscription).await?;
+let consumer = Consumer::new(track, format).with_warmup(warmup).with_delay(delay);
+// After
+let playout = Playout::new(delay, warmup);
+let track = broadcast.track(name)?.subscribe(playout.subscription(Subscription::default())).await?;
+let consumer = playout.consumer(track, format);
+```
+
+A rendition without a warmup keeps `Consumer::new(track, format).with_delay(delay)`.
+
+### `catalog::Config::with_max_age(None)` is unlimited ([#7729](https://github.com/moq-dev/moq/pull/7729))
+
+`Config::with_max_age` no longer treats `None` as "keep hang's default": an unset `Config` mints media tracks with `hang::container::MAX_AGE` (30 s), as before, `None` sets no publisher limit, and a value is that value.
+Callers that passed an optional override straight through call `with_max_age` only when it is set.
+
+```rust
+// Before
+Config::default().with_max_age(override_or_none);
+// After
+let mut config = Config::default();
+if let Some(max_age) = override_or_none {
+	config = config.with_max_age(max_age);
+}
+```
+
+The catalog and HLS record tracks take moq-net's new zero default instead of no limit; their newest group restates them.
+
+### Snapshot consumers subscribe themselves at a zero delay ([#7736](https://github.com/moq-dev/moq/pull/7736))
+
+`catalog::hang::Consumer::new` and its `From` impl take the catalog track, a `moq_net::track::Consumer`, instead of a `track::Subscriber`; the consumer subscribes itself, as `hang::catalog::Consumer::new` does. Pass `broadcast.track(hang::Catalog::DEFAULT_NAME)?` rather than subscribing first.
+`json::Consumer::from_track` takes a `moq_net::track::Consumer` and is now `async`: a snapshot track's reader subscribes itself, and a stream track's subscription resolves before it returns.
+A refused catalog or snapshot subscription now surfaces from the first read.
+
+### Shared playout timing
+
+Native players can use `timeline::Producer` and its read-only `Consumer` instead
+of building their own audio/video clock. Feed the speaker's buffered position
+and caller-selected jitter target to the producer; the consumer selects the
+newest due video frame without waiting. `moq play` now uses the same API. No
+existing public API or wire format changes.
+
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json::Snapshot::update` and `json::Stream::append` take `(&value, timestamp)`, a required `moq_net::Timestamp` on the broadcast clock, instead of `impl Into<Timed<&T>>`. Every track in a broadcast shares that clock's epoch, so nothing stamps a write for you.
+Replace `update(&value)` and `update(Timed::from(&value).at(at))` with `update(&value, at)`, taking `at` from `catalog.clock().now()` or `catalog.clock().capture(instant)?`.
+`catalog::Producer::json_snapshot` and `json_stream` refuse a track without a timescale with `Error::Moq(moq_net::Error::TimestampMismatch)`: create it with `moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)`.
+
+### fMP4 decode errors are terminal
+
+After `container::fmp4::Import::decode` fails, later decodes, cuts, seeks and discontinuities return that error without reading input or changing tracks, including through `import::Container`.
+Replace the importer to resume instead of feeding it another box or segment. `finish()` still ends the tracks with the accepted media and does not reset the error.
+HLS replaces a refused importer immediately; transient fetch failures still keep their retry budget.
+
+### A `Delay` sets where a consumer starts ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
+
+`container::Consumer::set_max_delay(Duration)` is `set_delay(Delay)`, and `with_delay(Delay)` is its builder.
+`moq_net::track::Delay { min, max }` defaults to zero for both: `max` (`None` for no limit) is the max delay that `set_max_delay` took. `set_delay` puts the whole delay on the subscription, and `Consumer::new` inherits it from there.
+`min` is the playout delay, and a consumer reads an unstated (`None`) one as zero. An unfloored consumer starts at the group covering the live edge less `min` plus any `Playout` warmup, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
+Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay::default().with_max(d))`, and set `min` to your playout delay. A rendition with a catalog warmup builds its consumer with `container::Playout` instead.
+
 ### Compression moves to the track
 
-`catalog.json.z` is gone: `catalog::Producer` publishes one `catalog.json` with `compress: true` (the MSF `catalog` stays uncompressed), and HLS record tracks are compressed too.
+`catalog.json.z` is gone: `catalog::Producer` publishes one `catalog.json` with `compress: true` (the MSF `catalog` stays uncompressed).
 `CatalogFormat::HangZ` and `catalog::hang::Consumer::compressed` are removed; read `CatalogFormat::Hang` with `Consumer::new`, which reads a compressed track like a plain one.
 `json::Config::compression` and `with_compression` are removed: create the track with `moq_net::track::Info::default().with_compress(true)` instead. `Error::UnsupportedCompression` and `Error::Flate` are gone with them.
 The `binary` module and `catalog::Producer::binary_snapshot` and `binary_stream` are deleted, along with the moq-flate dependency: publish opaque bytes on a plain track, or JSON through `json_snapshot` and `json_stream`.
@@ -42,16 +150,14 @@ Match `Target::Enabled(rate)` where you took the rate before. A policy without `
 A TS PMT listing a PID twice routes it by the later entry instead of failing the import.
 Delete matches on `DuplicateTrackName`.
 
-### HLS records replace timelines
+### The join interval replaces timelines and HLS records
 
-The `timeline` module is replaced by `hls`, and records are still published by default.
-`catalog::Config::with_timeline(config)` is `with_hls(config)`, and `with_hls(None)` publishes none.
-`catalog::Reserved::with_timeline_hint` is `with_hls_hint`, and `catalog::Producer::timeline()` is gone.
-Each video and audio rendition advertises its own `hls` field and `<track>.hls` record track, cut at group boundaries; untimed and data tracks get none.
-Read records with `hls::Consumer::subscribe(&broadcast, &hls)`, whose `Event::Push` carries an `hls::Entry`, or publish your own with `hls::Producer`.
-`Config::duration_min` is `hls::Config::duration`, `with_duration_min` is `with_duration`, and `DEFAULT_DURATION_MIN` is `DEFAULT_DURATION`.
-It is now the spacing of a pts grid rather than a floor: a group starts a segment when its pts falls in a later multiple of it than the previous group's, so a segment may be shorter.
-Each rendition cuts and numbers its own segments, so they line up across renditions wherever keyframes share timestamps.
+The `timeline` and `hls` modules are gone: nothing publishes `<track>.hls` record tracks or a rendition `hls` field, and an HLS export reads the media tracks themselves.
+`catalog::Config::with_timeline` and `with_hls` are removed, along with `Config::duration_min`, `DEFAULT_DURATION_MIN`, `catalog::Producer::timeline()`, `Producer::retire`, and `Error::HlsSequence` and `Error::HlsGroup`.
+`catalog::Reserved::with_timeline_hint` (later `with_hls_hint`) is `with_interval`: the track's longest group, its GOP.
+Every video and audio track joins the broadcast's `media.join.interval`, declared once with the largest of their intervals, the hint or, without one, the longest group measured over the track's first second or group, whichever is longer.
+A catalog seeded or modified with its own `media.join` keeps it.
+The broadcast clock is advertised as `media.clock` rather than a root `clock`.
 `container::fmp4::Muxer::fragment` takes a third argument, where the content ends, which times the last sample when neither its codec nor a duration marker does; pass `None` to keep the old behavior.
 
 ### JSON snapshot encoder options move to `json::Options`
@@ -107,11 +213,11 @@ Call `.with_passthrough(true)` to keep publishing CMAF.
 Read the frame yourself and hand it over: `while let Some(frame) = group.read_frame().await? { for media in container.decode(frame)? { .. } }`.
 An implementation drops its `group.poll_read_frame` call and its `None` end-of-group case, and decodes the frame it is given.
 
-### `Source` resolution takes the reference's epoch (#5699)
+### `Source` resolution takes the reference's instance (#5699)
 
-`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.
-Pass `config.epoch.as_ref()` (or `Reference::epoch`), or `None` to accept the first instance resolved as before.
-A broadcast proven to serve another epoch fails with the new `Error::EpochMismatch`; over a route without an epoch the check is best effort.
+`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional instance after `rel`.
+Pass `config.instance.as_ref()` (or `Reference::instance`), or `None` to accept the first instance resolved as before.
+A broadcast proven to serve another instance fails with the new `Error::InstanceMismatch`; against an instance a session minted the check is best effort.
 
 ### `ts::stats::Export`'s release counters move into `release` (#5849)
 
@@ -180,7 +286,7 @@ Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are
 Every later request for a path, siblings included, stays on the broadcast first held there and fails once it ends, so build a new `Source` to follow a new instance.
 
 ```rust
-let broadcast = origin.request_broadcast(path, None).await?;
+let broadcast = origin.request(path, None).await?;
 let source = Source::new(origin, broadcast);
 ```
 

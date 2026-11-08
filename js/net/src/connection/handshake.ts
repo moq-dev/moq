@@ -4,7 +4,7 @@ import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
-import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
+import { acceptBudget, Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
 import * as Extensions from "./extensions.ts";
 
 /** Default bound on a connection attempt, including its SETUP exchange. @internal */
@@ -19,9 +19,9 @@ export const DEFAULT_TIMEOUT = Milli(30_000);
  * Returns the control stream, the uni streams that arrived before it (see
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
- * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth and MoQ Epoch
- * are negotiated, plus the implementation it advertised. We declare our Hop ID on every
- * session, and Solicit, Auth, and Epoch unless `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth
+ * is negotiated, plus the implementation it advertised. We declare our Hop ID on every
+ * session, and Solicit and Auth unless `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
@@ -39,7 +39,6 @@ export async function exchangeSetup(
 	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
 	auth: boolean;
-	epoch: boolean;
 	peerImplementation: string | undefined;
 }> {
 	const params = new Ietf.SetupOptions();
@@ -82,7 +81,6 @@ export async function exchangeSetup(
 		cluster: { self, peer: received.cluster },
 		// Negotiated only when both sides offer it.
 		auth: received.auth && extensions.auth,
-		epoch: received.epoch && extensions.epoch,
 		peerImplementation: received.implementation,
 	};
 }
@@ -114,7 +112,6 @@ async function receiveSetup(
 	activeCount: boolean;
 	cluster: Hop | undefined;
 	auth: boolean;
-	epoch: boolean;
 	implementation: string | undefined;
 }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
@@ -125,6 +122,10 @@ async function receiveSetup(
 	let reader: Reader;
 	try {
 		for (;;) {
+			// Each stream racing ahead of SETUP is held, so a peer opening them at once must
+			// not hold the host for its whole stream credit.
+			const pause = acceptBudget.poll();
+			if (pause !== undefined) await pause;
 			const next = await uniReader.read();
 			if (next.done) throw new Error("no incoming uni stream for SETUP");
 
@@ -171,7 +172,6 @@ async function receiveSetup(
 		activeCount: Ietf.activeCountFromSetup(setup.parameters),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters),
 		auth: Ietf.Auth.fromSetup(setup.parameters) === true,
-		epoch: Ietf.Epoch.fromSetup(setup.parameters),
 		implementation: Ietf.implementationFromSetup(setup.parameters),
 	};
 }

@@ -10,7 +10,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, StreamError, Timestamp, Version};
+use moq_net::{Error, StreamError, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const VERSIONS: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
@@ -22,7 +22,8 @@ fn timed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -31,7 +32,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// to the relay, with `bcast` resolved at the relay and the far end.
 struct Relayed {
 	_publisher: moq_net::origin::Producer,
-	broadcast: moq_net::origin::Publication,
+	broadcast: moq_net::origin::Route,
 	upstream: MockPair,
 	_downstream: MockPair,
 	relayed: moq_net::broadcast::Consumer,
@@ -40,10 +41,11 @@ struct Relayed {
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
+		.unwrap()
 }
 
 async fn relayed(version: &str) -> Relayed {
@@ -51,8 +53,10 @@ async fn relayed(version: &str) -> Relayed {
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
 	let far = produce_origin(3);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(publisher.consume());
@@ -101,20 +105,20 @@ fn assert_ended(result: Result<(), Error>, expected: StreamError, version: &str)
 /// #5347: a TRACK request is in flight to an upstream publisher session that dies before
 /// answering. The relay's request, and the far end's through it, find the path has no
 /// route; neither is an internal error.
-#[moq_clock::test]
+#[kio::test]
 async fn request_in_flight_to_a_dead_upstream_is_unroutable() {
 	for version in VERSIONS {
 		let setup = relayed(version).await;
-		let _track = setup.broadcast.create_track("catalog", timed()).unwrap();
+		let _track = setup.broadcast.broadcast().create_track("catalog", timed()).unwrap();
 		// The relay's requests never reach the publisher.
 		setup.upstream.client_transport.hold_bidis();
-		let relayed = moq_clock::sim::spawn(read_to_end(setup.relayed.clone(), "catalog"));
-		let remote = moq_clock::sim::spawn(read_to_end(setup.remote.clone(), "catalog"));
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		let relayed = kio::clock::sim::spawn(read_to_end(setup.relayed.clone(), "catalog"));
+		let remote = kio::clock::sim::spawn(read_to_end(setup.remote.clone(), "catalog"));
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(!relayed.is_finished(), "{version}: answered through a held stream");
 		setup.upstream.server.abort(Error::Timeout);
 		for reader in [relayed, remote] {
-			let result = moq_clock::timeout(TIMEOUT, reader)
+			let result = kio::clock::timeout(TIMEOUT, reader)
 				.await
 				.expect("request hung")
 				.unwrap();
@@ -125,22 +129,22 @@ async fn request_in_flight_to_a_dead_upstream_is_unroutable() {
 
 /// A subscription already delivering when the upstream session dies, with nothing to
 /// replace it: the far end learns the path is gone, not that its own session closed.
-#[moq_clock::test]
+#[kio::test]
 async fn track_in_flight_through_a_dead_upstream_is_unroutable() {
 	for version in VERSIONS {
 		let setup = relayed(version).await;
-		let track = setup.broadcast.create_track("video", timed()).unwrap();
+		let track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
 		group.finish().unwrap();
-		moq_clock::timeout(TIMEOUT, sub.recv_group())
+		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
 			.unwrap();
 		setup.upstream.server.abort(Error::Timeout);
-		let result = moq_clock::timeout(TIMEOUT, async {
+		let result = kio::clock::timeout(TIMEOUT, async {
 			while sub.recv_group().await?.is_some() {}
 			Ok(())
 		})
@@ -153,24 +157,24 @@ async fn track_in_flight_through_a_dead_upstream_is_unroutable() {
 /// #4349: the broadcast is withdrawn under an active subscription, then its track fails
 /// with a specific error. The withdrawal does not disturb the subscription, which ends
 /// with that error.
-#[moq_clock::test]
+#[kio::test]
 async fn withdrawn_broadcast_keeps_the_source_error() {
 	for version in VERSIONS {
 		let setup = relayed(version).await;
-		let track = setup.broadcast.create_track("video", timed()).unwrap();
+		let track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
 		let mut sub = setup.remote.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"head".as_ref()).unwrap();
 		group.finish().unwrap();
-		moq_clock::timeout(TIMEOUT, sub.recv_group())
+		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
 			.unwrap();
-		setup.broadcast.unannounce();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		setup.broadcast.withdraw();
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		track.abort(Error::App(7)).unwrap();
-		let result = moq_clock::timeout(TIMEOUT, async {
+		let result = kio::clock::timeout(TIMEOUT, async {
 			while sub.recv_group().await?.is_some() {}
 			Ok(())
 		})
@@ -181,15 +185,15 @@ async fn withdrawn_broadcast_keeps_the_source_error() {
 }
 
 /// A subscribe on a broadcast whose route was withdrawn is refused as unroutable.
-#[moq_clock::test]
+#[kio::test]
 async fn subscribe_after_withdrawal_is_unroutable() {
 	for version in VERSIONS {
 		let setup = relayed(version).await;
-		let _track = setup.broadcast.create_track("video", timed()).unwrap();
-		setup.broadcast.unannounce();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		let _track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
+		setup.broadcast.withdraw();
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		for broadcast in [setup.relayed.clone(), setup.remote.clone()] {
-			let result = moq_clock::timeout(TIMEOUT, read_to_end(broadcast, "video"))
+			let result = kio::clock::timeout(TIMEOUT, read_to_end(broadcast, "video"))
 				.await
 				.expect("subscribe hung");
 			assert_ended(result, StreamError::Unroutable, version);

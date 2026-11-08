@@ -12,11 +12,11 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version, origin};
+use moq_net::{Version, origin};
 use support::harness::{MockConnectOptions, connect_mock, peer};
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -30,10 +30,10 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 		_pairs.push(peer(version, &pair[0], &pair[1]).await);
 	}
 
-	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	broadcast.announce(Default::default()).unwrap();
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	let broadcast = nodes[0].route("room", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
+	kio::clock::sleep(Duration::from_secs(1)).await;
 
 	let consumer = nodes[relays as usize].consume().request("room", None).await.unwrap();
 	let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
@@ -44,20 +44,20 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 
 	// The publisher never answers; the reader gives up.
 	drop(waiting);
-	moq_clock::timeout(Duration::from_secs(5), crate::support::unwanted(request.demand()))
+	kio::clock::timeout(Duration::from_secs(5), crate::support::unwanted(request.demand()))
 		.await
 		.unwrap_or_else(|_| panic!("{version:?} over {relays} relays: the publisher's request is still wanted"))
 		.expect("the pending request is still open");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn abandoned_request_reaches_the_publisher_lite05() {
 	for relays in [1, 2] {
 		abandoned_request_reaches_the_publisher("moq-lite-05", relays).await;
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn abandoned_request_reaches_the_publisher_lite06() {
 	for relays in [1, 2] {
 		abandoned_request_reaches_the_publisher("moq-lite-06", relays).await;
@@ -70,13 +70,13 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let reader = produce_origin(2);
-	let broadcast = publisher.create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.requests();
-	let mut route = origin::Route::default();
+	let mut options = origin::RouteOptions::hidden();
 	if explicit {
-		route.epoch = Some("019a1234-5678-7000-8000-000000000001".parse().unwrap());
+		options = options.with_instance("019a1234-5678-7000-8000-000000000001".parse().unwrap(), 0);
 	}
-	broadcast.announce(route).unwrap();
+	let broadcast = publisher.route("room", options).unwrap();
+	let mut dynamic = broadcast.broadcast().requests();
+	broadcast.announce().unwrap();
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(reader.clone());
@@ -87,6 +87,7 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 		.unwrap()
 		.available()
 		.await
+		.unwrap()
 		.unwrap();
 	let mut query = remote.track("video").unwrap().info();
 	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut query).await {
@@ -104,8 +105,8 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 		None
 	};
 	let finished = pair.client_transport.finished_streams();
-	broadcast.close();
-	moq_clock::timeout(Duration::from_secs(5), crate::support::unwanted(demand))
+	broadcast.broadcast().close();
+	kio::clock::timeout(Duration::from_secs(5), crate::support::unwanted(demand))
 		.await
 		.unwrap_or_else(|_| panic!("{version}, answered={answered}, explicit={explicit}: TRACK outlived its broadcast"))
 		.expect("the publisher still owns its track");
@@ -121,7 +122,7 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	drop(query);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_pending_track_info_ends_with_its_broadcast() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		for explicit in [false, true] {
@@ -130,7 +131,7 @@ async fn a_pending_track_info_ends_with_its_broadcast() {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn an_answered_track_info_ends_with_its_broadcast() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		for explicit in [false, true] {

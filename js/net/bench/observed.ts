@@ -29,7 +29,7 @@ for (const mode of ["eager", "observed"] as const)
 				);
 			});
 			await settle();
-			const held = values.filter((value) => value.used.peek()).length;
+			const held = values.filter((value) => value.wanted.peek()).length;
 			const samples: number[] = [];
 			for (let round = 0; round < 6; round++) {
 				const before = updates;

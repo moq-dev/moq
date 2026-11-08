@@ -2,22 +2,23 @@
 
 ```ts
 import { $strip } from "zod/v4/core";
-import { ZodMiniArray } from "@zod/mini";
-import { ZodMiniBoolean } from "@zod/mini";
-import { ZodMiniEnum } from "@zod/mini";
-import { ZodMiniNumber } from "@zod/mini";
-import { ZodMiniObject } from "@zod/mini";
-import { ZodMiniOptional } from "@zod/mini";
-import { ZodMiniRecord } from "@zod/mini";
-import { ZodMiniString } from "@zod/mini";
-import { ZodMiniUnion } from "@zod/mini";
-import { ZodMiniUnknown } from "@zod/mini";
-import { infer } from "@zod/mini";
+import { ZodMiniArray } from "zod/mini";
+import { ZodMiniBoolean } from "zod/mini";
+import { ZodMiniCustom } from "zod/mini";
+import { ZodMiniEnum } from "zod/mini";
+import { ZodMiniNumber } from "zod/mini";
+import { ZodMiniObject } from "zod/mini";
+import { ZodMiniOptional } from "zod/mini";
+import { ZodMiniPipe } from "zod/mini";
+import { ZodMiniString } from "zod/mini";
+import { ZodMiniTransform } from "zod/mini";
+import { ZodMiniUnion } from "zod/mini";
+import { infer } from "zod/mini";
 
 export type Catalog = infer<typeof CatalogSchema>;
 
 export const CatalogSchema: ZodMiniObject<{
-	ext: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniUnknown>>;
+	ext: ZodMiniOptional<ZodMiniPipe<ZodMiniCustom<Record<string, unknown>, Record<string, unknown>>, ZodMiniTransform<Record<string, unknown>, Record<string, unknown>>>>;
 	tracks: ZodMiniArray<ZodMiniObject<{
 		altGroup: ZodMiniOptional<ZodMiniNumber<number>>;
 		bitrate: ZodMiniOptional<ZodMiniNumber<number>>;

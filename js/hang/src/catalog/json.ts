@@ -1,7 +1,8 @@
 import * as z from "zod/mini";
 import { u53Schema } from "./integers";
 import { ModeSchema } from "./mode";
-import { EpochSchema, RelativeBroadcastSchema } from "./path";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path";
+import { renditions } from "./section";
 
 /**
  * Schema for a single JSON track: application data published as a live JSON document or log.
@@ -17,11 +18,11 @@ export const JsonConfigSchema = z.looseObject({
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
-	// The publisher instance the reference names, when known. Absent accepts whichever instance
-	// resolves first. An epoch-aware route proving another instance fails the entry; an epochless
-	// route cannot prove one, so there it is best effort. Without `broadcast`, it names the
-	// catalog's own instance.
-	epoch: z.optional(EpochSchema),
+	// The instance of the stream the reference names, when known. Absent accepts whichever stream
+	// resolves first. A route of another instance fails the entry; a route over a wire that
+	// carries no instance has one its session minted, which proves nothing, so there it is best
+	// effort. Without `broadcast`, it names the catalog's own stream.
+	instance: z.optional(InstanceSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
@@ -63,7 +64,7 @@ export const JsonConfigSchema = z.looseObject({
  * key is the track name to subscribe to.
  */
 export const JsonSchema = z.object({
-	tracks: z.record(z.string(), JsonConfigSchema),
+	tracks: renditions(JsonConfigSchema),
 });
 
 /** The catalog JSON section: data tracks keyed by track name. */

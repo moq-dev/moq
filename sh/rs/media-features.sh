@@ -13,12 +13,14 @@ elif [[ $# != 0 ]]; then
     exit 2
 fi
 
+# shellcheck source=sh/checks.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
+
 targets=(--tests)
 if ((all)); then targets=(--all-targets); fi
 
 check() {
-    echo "media features: cargo check $*"
-    cargo check --locked "${targets[@]}" "$@"
+    run cargo check --locked "${targets[@]}" "$@"
 }
 
 # Resolved for Linux, the platform every asserted dependency targets: moq-nvenc
@@ -32,7 +34,7 @@ require_crate() {
     local graph=$1 crate=$2 label=$3
     if ! grep -Eq "^${crate} v" <<<"$graph"; then
         echo "media features: $label must contain $crate" >&2
-        exit 1
+        failed+=("$label must contain $crate")
     fi
 }
 
@@ -40,20 +42,19 @@ forbid_crate() {
     local graph=$1 crate=$2 label=$3
     if grep -Eq "^${crate} v" <<<"$graph"; then
         echo "media features: $label unexpectedly contains $crate" >&2
-        exit 1
+        failed+=("$label unexpectedly contains $crate")
     fi
 }
 
-# Minimal shapes and the off-default VPX backend always compile and test. The
-# other positive paths already compile in default, capture, and play checks;
-# isolate them when their feature owner changes, and exhaustively in Nightly.
-# Dependency absence contracts stay on every affected PR, including transitive edits.
+# Minimal shapes and the off-default VPX backend always compile and test, and
+# the dependency absence contracts always run. --all, which `just rs features`
+# passes, also compiles each positive path in isolation.
 check -p moq-video --no-default-features
 minimal=$(tree -p moq-video --no-default-features)
 for crate in openh264 openh264-sys2 wgpu cpal; do
     forbid_crate "$minimal" "$crate" "moq-video minimal"
 done
-cargo nextest run --locked -p moq-video --no-default-features
+run cargo nextest run --locked -p moq-video --no-default-features
 
 if ((all)); then check -p moq-video --no-default-features --features openh264; fi
 software=$(tree -p moq-video --no-default-features --features openh264)
@@ -77,7 +78,7 @@ require_crate "$vpx" libvpx-native-sys "moq-video VP8/VP9"
 for crate in openh264 openh264-sys2 wgpu; do
     forbid_crate "$vpx" "$crate" "moq-video VP8/VP9"
 done
-cargo nextest run --locked -p moq-video --no-default-features --features vpx -E 'test(/::vpx::/)'
+run cargo nextest run --locked -p moq-video --no-default-features --features vpx -E 'test(/::vpx::/)'
 
 if ((all)); then check -p moq-video --no-default-features --features render; fi
 render=$(tree -p moq-video --no-default-features --features render)
@@ -112,4 +113,5 @@ if ((all)); then check -p moq-audio --no-default-features --features capture,pip
 audio_capture=$(tree -p moq-audio --no-default-features --features capture,pipewire)
 require_crate "$audio_capture" cpal "moq-audio PipeWire capture"
 
+finish
 echo "media features: dependency contracts ok"

@@ -1,8 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
+import { type Manual, Milli, Nano } from "@moq/clock";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, manual } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
@@ -45,11 +46,14 @@ function subscribe(fields: number[][], name: number, requestId = 0): Uint8Array 
 	return frame(0x03, [requestId, fields.length, ...fields.flat(), ...field(name), 0]);
 }
 
-/** Resolves to the session's close code, or undefined if it stays open a moment. */
-async function closeCode(quic: WebTransport): Promise<number | undefined> {
-	const open = Symbol("open");
-	const result = await Promise.race([quic.closed, Bun.sleep(50).then(() => open)]);
-	return result === open ? undefined : (result as WebTransportCloseInfo).closeCode;
+/** Resolves to the session's close code once `clock` passes a moment, or undefined if it stays open. */
+async function closeCode(quic: WebTransport, clock: Manual): Promise<number | undefined> {
+	let code: number | undefined;
+	void quic.closed.then((info) => {
+		code = info.closeCode;
+	});
+	await clock.advance(Nano.fromMilli(Milli(50)));
+	return code;
 }
 
 /** A server publishing `room/video`, and a fresh client request stream. */
@@ -57,9 +61,8 @@ async function serving(version: IetfVersion, alpn: string) {
 	const pair = createMockTransportPair(alpn);
 	const control = await Stream.open(pair.server, { version });
 	const origin = new OriginProducer();
-	const broadcastPublication = origin.createBroadcast(Path.from("room"));
-	const broadcast = broadcastPublication.broadcast;
-	broadcastPublication.announce();
+	const broadcastRoute = origin.route(Path.from("room"));
+	const broadcast = broadcastRoute.broadcast;
 	broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const connection = new Connection({
 		url: new URL("https://example.com"),
@@ -131,11 +134,12 @@ for (const [version, alpn] of DRAFTS) {
 		],
 	] as const) {
 		test(`a request with ${name} closes ${alpn}`, async () => {
+			using clock = manual();
 			const logged = spyOn(console, "error").mockImplementation(() => undefined);
 			const { pair, stream, close } = await serving(version, alpn);
 			try {
 				await stream.writer.write(bytes);
-				expect(await closeCode(pair.client)).toBe(code);
+				expect(await closeCode(pair.client, clock)).toBe(code);
 			} finally {
 				logged.mockRestore();
 				close();
@@ -144,12 +148,13 @@ for (const [version, alpn] of DRAFTS) {
 	}
 
 	test(`a request truncated at FIN closes ${alpn}`, async () => {
+		using clock = manual();
 		const logged = spyOn(console, "error").mockImplementation(() => undefined);
 		const { pair, stream, close } = await serving(version, alpn);
 		try {
 			await stream.writer.write(subscribe([field(4)], 5).slice(0, 6));
 			stream.writer.close();
-			expect(await closeCode(pair.client)).toBe(SessionCode.ProtocolViolation);
+			expect(await closeCode(pair.client, clock)).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			logged.mockRestore();
 			close();
@@ -162,6 +167,7 @@ for (const [version, alpn] of DRAFTS) {
 		["a second GOAWAY", 2, SessionCode.ProtocolViolation],
 	] as const) {
 		test(`${name} on a namespace subscription ${code === undefined ? "keeps" : "closes"} ${alpn}`, async () => {
+			using clock = manual();
 			const logged = spyOn(console, "error").mockImplementation(() => undefined);
 			const { pair, stream, close } = await serving(version, alpn);
 			try {
@@ -169,7 +175,7 @@ for (const [version, alpn] of DRAFTS) {
 				await new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }).encode(stream.writer, version);
 				expect(await stream.reader.u53()).toBe(RequestOk.id);
 				await stream.writer.write(goaways(count, version));
-				expect(await closeCode(pair.client)).toBe(code);
+				expect(await closeCode(pair.client, clock)).toBe(code);
 			} finally {
 				logged.mockRestore();
 				close();
@@ -177,6 +183,7 @@ for (const [version, alpn] of DRAFTS) {
 		});
 
 		test(`${name} on a subscription ${code === undefined ? "keeps" : "closes"} ${alpn}`, async () => {
+			using clock = manual();
 			const logged = spyOn(console, "error").mockImplementation(() => undefined);
 			const { pair, stream, close } = await serving(version, alpn);
 			try {
@@ -193,7 +200,7 @@ for (const [version, alpn] of DRAFTS) {
 				);
 				expect(await stream.reader.u53()).toBe(SubscribeOk.id);
 				await stream.writer.write(goaways(count, version));
-				expect(await closeCode(pair.client)).toBe(code);
+				expect(await closeCode(pair.client, clock)).toBe(code);
 			} finally {
 				logged.mockRestore();
 				close();
@@ -202,6 +209,7 @@ for (const [version, alpn] of DRAFTS) {
 	}
 
 	test(`an unknown message on a subscription closes ${alpn}`, async () => {
+		using clock = manual();
 		const logged = spyOn(console, "error").mockImplementation(() => undefined);
 		const { pair, stream, close } = await serving(version, alpn);
 		try {
@@ -210,7 +218,7 @@ for (const [version, alpn] of DRAFTS) {
 			);
 			expect(await stream.reader.u53()).toBe(SubscribeOk.id);
 			await stream.writer.write(frame(0x7e, []));
-			expect(await closeCode(pair.client)).toBe(SessionCode.ProtocolViolation);
+			expect(await closeCode(pair.client, clock)).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			logged.mockRestore();
 			close();
@@ -219,13 +227,14 @@ for (const [version, alpn] of DRAFTS) {
 
 	// A relay cancels an object stream it no longer serves, such as an old route's after a replacement.
 	test(`a peer reset object stream keeps ${alpn} and logs no error`, async () => {
+		using clock = manual();
 		const logged = spyOn(console, "error");
 		const { pair, close } = await serving(version, alpn);
 		try {
 			const uni = new Writer(await pair.client.createUnidirectionalStream(), version);
 			await uni.write(new Uint8Array([0x10]));
 			uni.reset(new StreamError(StreamCode.Cancel, { message: "cancel" }));
-			expect(await closeCode(pair.client)).toBeUndefined();
+			expect(await closeCode(pair.client, clock)).toBeUndefined();
 			expect(logged).not.toHaveBeenCalled();
 		} finally {
 			logged.mockRestore();
@@ -253,11 +262,12 @@ for (const [version, alpn] of DRAFTS) {
 		],
 	] as const) {
 		test(`${name} on the setup stream ${code === undefined ? "keeps" : "closes"} ${alpn}`, async () => {
+			using clock = manual();
 			const logged = spyOn(console, "error").mockImplementation(() => undefined);
 			const { pair, peer, connection } = await client(version, alpn);
 			try {
 				await write(peer.writer);
-				expect(await closeCode(pair.server)).toBe(code);
+				expect(await closeCode(pair.server, clock)).toBe(code);
 			} finally {
 				logged.mockRestore();
 				connection.abort();
@@ -303,11 +313,12 @@ for (const [requestId, code] of [
 ] as const) {
 	const name = requestId === undefined ? "without a Request ID" : `Request ID ${requestId}`;
 	test(`a draft-18 GOAWAY ${name} ${code === undefined ? "keeps" : "closes"} a client`, async () => {
+		using clock = manual();
 		const logged = spyOn(console, "error").mockImplementation(() => undefined);
 		const { pair, peer, connection } = await client(Version.DRAFT_18, ALPN.DRAFT_18);
 		try {
 			await peer.writer.write(goaways(1, Version.DRAFT_18, requestId));
-			expect(await closeCode(pair.server)).toBe(code);
+			expect(await closeCode(pair.server, clock)).toBe(code);
 		} finally {
 			logged.mockRestore();
 			connection.abort();
@@ -318,6 +329,7 @@ for (const [requestId, code] of [
 // Draft-18's GOAWAY Request ID belongs on the control stream only.
 for (const [version, alpn] of DRAFTS) {
 	test(`a client's request stream GOAWAY naming a new session closes ${alpn}`, async () => {
+		using clock = manual();
 		const logged = spyOn(console, "error").mockImplementation(() => undefined);
 		const { pair, stream, close } = await serving(version, alpn);
 		try {
@@ -326,7 +338,7 @@ for (const [version, alpn] of DRAFTS) {
 			expect(await stream.reader.u53()).toBe(RequestOk.id);
 			// New Session URI "a", then a zero timeout.
 			await stream.writer.write(frame(GoAway.id, [1, 0x61, 0]));
-			expect(await closeCode(pair.client)).toBe(SessionCode.ProtocolViolation);
+			expect(await closeCode(pair.client, clock)).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			logged.mockRestore();
 			close();
@@ -335,6 +347,7 @@ for (const [version, alpn] of DRAFTS) {
 }
 
 test("a draft-18 request stream GOAWAY with a Request ID closes", async () => {
+	using clock = manual();
 	const logged = spyOn(console, "error").mockImplementation(() => undefined);
 	const { pair, stream, close } = await serving(Version.DRAFT_18, ALPN.DRAFT_18);
 	try {
@@ -345,7 +358,7 @@ test("a draft-18 request stream GOAWAY with a Request ID closes", async () => {
 		);
 		expect(await stream.reader.u53()).toBe(RequestOk.id);
 		await stream.writer.write(goaways(1, Version.DRAFT_18, 0));
-		expect(await closeCode(pair.client)).toBe(SessionCode.ProtocolViolation);
+		expect(await closeCode(pair.client, clock)).toBe(SessionCode.ProtocolViolation);
 	} finally {
 		logged.mockRestore();
 		close();

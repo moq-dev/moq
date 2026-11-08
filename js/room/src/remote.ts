@@ -51,10 +51,10 @@ export class Member {
 
 		this.player = new Watch.Player({
 			origin: connection.origin,
-			probe: connection.probe,
 			name: path,
 			video: { canvas: this.canvas },
 			audio: { muted: this.muted, volume: this.volume },
+			viewer: { viewers: connection.viewers },
 		});
 		this.#signals.cleanup(() => this.player.close());
 		this.broadcast = this.player.broadcast;

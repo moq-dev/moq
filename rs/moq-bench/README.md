@@ -1,6 +1,11 @@
 # moq-bench
 
-A load generator for benchmarking a remote MoQ relay.
+A load generator for benchmarking a remote MoQ relay, plus `moq-bench host`, a
+sampler that records what that load costs on the relay's host.
+
+```bash
+cargo install moq-bench
+```
 
 `moq-bench` opens many QUIC connections to a server and drives synthetic media
 through them. Every knob is a `[min, max]` range that is rolled once per
@@ -219,9 +224,9 @@ window is not the combination of these numbers. `latency_interval_max_ms` is
 the highest bucket that gained a sample, so below 60 seconds it is the exact
 millisecond maximum, and 60000 means at least 60 seconds.
 
-## Host-side sampling: moq-bench-host
+## Host-side sampling: moq-bench host
 
-`moq-bench` measures the load it generates; `moq-bench-host` measures what that
+`moq-bench` measures the load it generates; `moq-bench host` measures what that
 load costs. It runs on the host of the process under test, production included:
 it only reads `/proc` (Linux-only), needs no privileges beyond visibility of the
 target process, and never touches the process itself (no ptrace, no perf, no
@@ -229,10 +234,10 @@ signals).
 
 ```bash
 # On the relay host: sample the relay once per second, forever, to stdout.
-moq-bench-host --name moq-relay
+moq-bench host --name moq-relay
 
 # Bounded run to a file, with the per-thread breakdown.
-moq-bench-host --name moq-relay --interval 1s --duration 5m \
+moq-bench host --name moq-relay --interval 1s --duration 5m \
   --threads --output host.jsonl
 ```
 
@@ -243,6 +248,23 @@ plus the host's total busy CPU seconds (`host_cpu_busy`) and core count so the
 process's share of the machine is computable. `--threads` adds a per-thread
 breakdown including the core each thread last ran on, which is how to verify
 pinning once the relay grows a thread-per-core mode.
+
+The `udp_*` fields come from the kernel's own socket accounting (a `sock_diag`
+dump, what `ss -uam` reads) for the process's UDP sockets: how many it holds
+(`udp_sockets`), the smallest receive and send buffer the kernel granted
+(`udp_rcvbuf_min`, `udp_sndbuf_min`, in kernel units, which on Linux are twice
+the honored `SO_RCVBUF` request), the bytes queued for receive right now
+(`udp_rx_queue_bytes`), and `udp_drops`, the datagrams dropped at those sockets
+because a receive queue was full. `udp_drops` is cumulative across every socket
+the sampler saw, closed ones included. One drop is one queued skb, so a
+coalesced GRO train counts once however many datagrams it carried. A drop here
+is local: the process was too slow to read. Loss on the path never reaches the
+socket and needs the transport's own counters. `udp_rcvbuf_errors`,
+`udp_sndbuf_errors` and `udp_in_errors` are the namespace's `/proc/net/snmp`
+counters, IPv4 and IPv6 summed, and count every socket in the namespace. The
+dump sees the sampler's network namespace, so run it in the target's. The
+fields are absent when the host refuses the dump, or for another user's process,
+whose `/proc/<pid>/fd` the sampler may not list; the other fields still sample.
 
 ## Measuring CPU cost
 
@@ -275,4 +297,5 @@ to the results.
 
 `just rs bench-latency` measures latency recording with 1, 4 and 16 concurrent
 writers and 0, 10 and 100 snapshots per run. It checks final sample conservation
-and prints throughput for each case. The nightly workflow runs the same matrix.
+and prints the cost per sample for each case. The nightly workflow runs the same
+matrix and records it on the benchmark table.

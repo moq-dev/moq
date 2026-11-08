@@ -1,4 +1,4 @@
-import Session from "@moq/qmux";
+import Session, { type SendStreamOptions } from "@moq/qmux";
 import { Channel } from "./channel.ts";
 
 /** The peer connection and the MoQ ALPN agreed through signaling. */
@@ -70,12 +70,19 @@ export class Transport implements WebTransport {
 		}
 		if (channel.protocol !== protocol) throw new TypeError("data-channel protocol does not match the agreed ALPN");
 		this.protocol = protocol;
-		this.#socket = new Channel(peer, channel, protocol);
+		this.#socket = new Channel({ peer, channel, protocol, accepted: server });
 		this.closed = this.#closed.promise;
 		// SCTP's negotiated limit is known only after the data channel opens.
 		this.#session = this.#socket.opened.then(() => {
 			if (this.#closing) throw new Error("transport closed before opening");
-			const config = { maxRecordSize: BigInt(this.#socket.maxRecordSize), maxDatagramFrameSize: null };
+			// MoQ holds a stream open per subscription and per live group, far past qmux's default
+			// of 100 each way. Matches the stream limit of Rust's sessions.
+			const config = {
+				maxStreamsBidi: 10_000n,
+				maxStreamsUni: 10_000n,
+				maxRecordSize: BigInt(this.#socket.maxRecordSize),
+				maxDatagramFrameSize: null,
+			};
 			const session = server
 				? Session.accept(this.#socket, { config, protocol: `qmux-01.${protocol}` })
 				: new Session(this.#socket, { config });
@@ -85,6 +92,9 @@ export class Transport implements WebTransport {
 		});
 		this.ready = this.#session.then((session) => session.ready);
 		void this.ready.catch((error) => {
+			// A session that started settles `closed` and closes the channel itself, gracefully
+			// when closed before its handshake finished. Only a channel that never opened has none.
+			if (this.#active) return;
 			this.#closed.reject(error);
 			this.#socket.close();
 		});
@@ -132,12 +142,12 @@ export class Transport implements WebTransport {
 	}
 
 	/** Open a bidirectional qmux stream. */
-	async createBidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WebTransportBidirectionalStream> {
+	async createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream> {
 		return (await this.#session).createBidirectionalStream(options);
 	}
 
 	/** Open a unidirectional qmux stream. */
-	async createUnidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WritableStream<Uint8Array>> {
+	async createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>> {
 		return (await this.#session).createUnidirectionalStream(options);
 	}
 
@@ -145,6 +155,7 @@ export class Transport implements WebTransport {
 	close(info: WebTransportCloseInfo = {}) {
 		if (this.#closing) return;
 		if (this.#active) {
+			this.#socket.release();
 			this.#active.close(info);
 			this.#closing = true;
 		} else {

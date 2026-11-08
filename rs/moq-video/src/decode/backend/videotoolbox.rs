@@ -6,7 +6,9 @@
 //! VPS/SPS/PPS for H.265), so we:
 //! - pull the parameter sets out of the stream and build a
 //!   `CMVideoFormatDescription`, (re)creating the decompression session whenever
-//!   they change;
+//!   they change. A track whose description carries them builds the session at
+//!   open, so a stream VideoToolbox has no decoder for is refused before
+//!   subscribing rather than at its first keyframe;
 //! - repackage the slice NALs as AVCC/HVCC (4-byte length-prefixed) in a
 //!   `CMSampleBuffer`, the form VideoToolbox decodes;
 //! - request NV12 output and hand the `CVPixelBuffer` back as-is, so a decoded
@@ -37,9 +39,10 @@ use objc2_core_video::{
 };
 use objc2_video_toolbox::{
 	VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
+	kVTCouldNotFindVideoDecoderErr, kVTVideoDecoderUnsupportedDataFormatErr,
 };
 
-use super::{Backend, Codec, Config};
+use super::{Backend, Codec, Config, Stream};
 use crate::frame::{Surface, apple::PixelBuffer};
 use crate::{Error, Frame};
 
@@ -59,6 +62,48 @@ enum NalKind {
 	Slice,
 }
 
+/// One access unit taken apart: the parameter sets it carries and its slices
+/// in the 4-byte length-prefixed form VideoToolbox decodes.
+#[derive(Default)]
+struct Split {
+	vps: Option<Bytes>,
+	sps: Option<Bytes>,
+	pps: Option<Bytes>,
+	avcc: Vec<u8>,
+}
+
+impl Split {
+	/// `NalIterator` yields the parameter-set NALs as zero-copy `Bytes`
+	/// (sub-slices of `access_unit`), so they need no copy.
+	fn new(codec: Codec, access_unit: Bytes) -> Result<Self, Error> {
+		let mut split = Self {
+			avcc: Vec::with_capacity(access_unit.len()),
+			..Self::default()
+		};
+		let mut handle = |nal: Bytes| match nal_kind(&nal, codec) {
+			NalKind::Vps => split.vps = Some(nal),
+			NalKind::Sps => split.sps = Some(nal),
+			NalKind::Pps => split.pps = Some(nal),
+			NalKind::Slice => {
+				split.avcc.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+				split.avcc.extend_from_slice(&nal);
+			}
+		};
+
+		// `NalIterator` yields every NAL except the last (it has no trailing start
+		// code); `flush` returns that final one.
+		let mut buf = access_unit;
+		let mut nals = NalIterator::new(&mut buf);
+		for nal in nals.by_ref() {
+			handle(nal.map_err(moq_mux::Error::from)?);
+		}
+		if let Some(nal) = nals.flush().map_err(moq_mux::Error::from)? {
+			handle(nal);
+		}
+		Ok(split)
+	}
+}
+
 /// Where the C output callback drops decoded frames, drained after each
 /// `decode_frame`. Boxed so its address is a stable refcon for the session.
 #[derive(Default)]
@@ -67,22 +112,39 @@ struct Sink {
 	error: Option<String>,
 }
 
+/// A live decompression session and what it was built from.
+struct Session {
+	session: CFRetained<VTDecompressionSession>,
+	/// The format description the session and its samples use.
+	format: CFRetained<CMFormatDescription>,
+	/// The exact ordered parameter sets it was built from, so a mid-stream
+	/// change triggers a rebuild.
+	built_from: Vec<Bytes>,
+}
+
+impl Session {
+	/// Finish the pictures the session delayed into the sink, then invalidate
+	/// it, returning the status of the wait.
+	///
+	/// The wait is for every callback, so none can outlive the sink.
+	fn finish(self) -> i32 {
+		let status = unsafe { self.session.wait_for_asynchronous_frames() };
+		unsafe { self.session.invalidate() };
+		status
+	}
+}
+
 pub(crate) struct VideoToolbox {
 	/// Which codec's parameter sets and format description to build (H.264 needs
 	/// SPS+PPS; H.265 also needs VPS).
 	codec: Codec,
 	/// Built lazily once the parameter sets first arrive, rebuilt if they change.
-	session: Option<CFRetained<VTDecompressionSession>>,
-	/// Format description the current session + samples use (kept in lockstep
-	/// with `session`).
-	format: Option<CFRetained<CMFormatDescription>>,
+	session: Option<Session>,
 	/// Latest parameter sets seen, persisted across access units (a delta frame
-	/// carries none). `built_from` records the exact ordered set the live session
-	/// was built from, so a mid-stream parameter-set change triggers a rebuild.
+	/// carries none).
 	vps: Option<Bytes>,
 	sps: Option<Bytes>,
 	pps: Option<Bytes>,
-	built_from: Option<Vec<Bytes>>,
 	/// Synthetic presentation time assigned to the next input sample.
 	sample_index: i64,
 	/// Original container timestamps keyed by the synthetic presentation times
@@ -92,30 +154,39 @@ pub(crate) struct VideoToolbox {
 }
 
 impl VideoToolbox {
-	/// Open a decoder for `codec` (H.264 or H.265). The session is built lazily
-	/// once the first keyframe's parameter sets arrive.
+	/// Open a decoder for `stream` (H.264 or H.265). The session is built from
+	/// the description's parameter sets when the track has them, otherwise once
+	/// the first keyframe's arrive.
 	/// `config` is accepted for signature parity; VideoToolbox decodes at the
 	/// stream's native size (callers scale the frames themselves).
-	pub(crate) fn open(codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self::new(stream)?))
+	}
+
+	fn new(stream: &Stream) -> Result<Self, Error> {
+		let codec = stream.codec;
 		if !matches!(codec, Codec::H264 | Codec::H265) {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"VideoToolbox {} decode is not wired",
 				codec.label()
 			)));
 		}
-		tracing::info!(decoder = NAME, codec = ?codec, "opened video decoder");
-		Ok(Box::new(Self {
+		let mut backend = Self {
 			codec,
 			session: None,
-			format: None,
 			vps: None,
 			sps: None,
 			pps: None,
-			built_from: None,
 			sample_index: 0,
 			pending: VecDeque::new(),
 			sink: Box::new(Sink::default()),
-		}))
+		};
+		if let Some(parameter_sets) = &stream.parameter_sets {
+			let split = Split::new(codec, parameter_sets.clone())?;
+			backend.ensure_session(split.vps, split.sps, split.pps)?;
+		}
+		tracing::info!(decoder = NAME, codec = ?codec, "opened video decoder");
+		Ok(backend)
 	}
 
 	/// The ordered parameter sets the format description needs, or `None` if any
@@ -132,8 +203,11 @@ impl VideoToolbox {
 	}
 
 	/// (Re)build the decompression session when the parameter sets first appear
-	/// or change. Returns `false` if we still don't have a complete set.
-	fn ensure_session(&mut self, vps: Option<Bytes>, sps: Option<Bytes>, pps: Option<Bytes>) -> Result<bool, Error> {
+	/// or change, leaving none while the set is still incomplete.
+	///
+	/// A session being replaced is finished first, so the pictures it delayed
+	/// land in the sink ahead of the new session's rather than being lost with it.
+	fn ensure_session(&mut self, vps: Option<Bytes>, sps: Option<Bytes>, pps: Option<Bytes>) -> Result<(), Error> {
 		if let Some(vps) = vps {
 			self.vps = Some(vps);
 		}
@@ -144,12 +218,24 @@ impl VideoToolbox {
 			self.pps = Some(pps);
 		}
 		let Some(params) = self.param_sets() else {
-			return Ok(false);
+			return Ok(());
 		};
 
 		// Reuse the existing session if it was built from these exact sets.
-		if self.session.is_some() && self.built_from.as_ref() == Some(&params) {
-			return Ok(true);
+		if self
+			.session
+			.as_ref()
+			.is_some_and(|session| session.built_from == params)
+		{
+			return Ok(());
+		}
+		if let Some(old) = self.session.take() {
+			let status = old.finish();
+			if status != 0 {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"VTDecompressionSessionWaitForAsynchronousFrames failed: {status}"
+				)));
+			}
 		}
 
 		let format = create_format_description(self.codec, &params)?;
@@ -175,12 +261,24 @@ impl VideoToolbox {
 		let session = NonNull::new(session_ptr)
 			.filter(|_| status == 0)
 			.map(|p| unsafe { CFRetained::from_raw(p) })
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("VTDecompressionSessionCreate failed: {status}")))?;
+			.ok_or_else(|| {
+				// VideoToolbox has no decoder, hardware or software, for this format.
+				if status == kVTCouldNotFindVideoDecoderErr || status == kVTVideoDecoderUnsupportedDataFormatErr {
+					Error::UnsupportedCodec(format!(
+						"VideoToolbox has no decoder for this {} stream ({status})",
+						self.codec.label()
+					))
+				} else {
+					Error::Codec(anyhow::anyhow!("VTDecompressionSessionCreate failed: {status}"))
+				}
+			})?;
 
-		self.session = Some(session);
-		self.format = Some(format);
-		self.built_from = Some(params);
-		Ok(true)
+		self.session = Some(Session {
+			session,
+			format,
+			built_from: params,
+		});
+		Ok(())
 	}
 
 	/// Pair one callback time back to the timestamp of its submitted access unit.
@@ -209,66 +307,46 @@ impl VideoToolbox {
 impl Backend for VideoToolbox {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
-		// the slices into length-prefixed (4-byte) form. `NalIterator` yields the
-		// parameter-set NALs as zero-copy `Bytes` (sub-slices of `access_unit`), so
-		// they need no copy.
-		let codec = self.codec;
-		let mut vps = None;
-		let mut sps = None;
-		let mut pps = None;
-		let mut avcc: Vec<u8> = Vec::with_capacity(access_unit.len());
-		let mut handle = |nal: Bytes| match nal_kind(&nal, codec) {
-			NalKind::Vps => vps = Some(nal),
-			NalKind::Sps => sps = Some(nal),
-			NalKind::Pps => pps = Some(nal),
-			NalKind::Slice => {
-				avcc.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-				avcc.extend_from_slice(&nal);
-			}
-		};
+		// the slices into length-prefixed (4-byte) form.
+		let Split { vps, sps, pps, avcc } = Split::new(self.codec, access_unit)?;
 
-		// `NalIterator` yields every NAL except the last (it has no trailing start
-		// code); `flush` returns that final one.
-		let mut buf = access_unit;
-		let mut nals = NalIterator::new(&mut buf);
-		for nal in nals.by_ref() {
-			handle(nal.map_err(moq_mux::Error::from)?);
-		}
-		if let Some(nal) = nals.flush().map_err(moq_mux::Error::from)? {
-			handle(nal);
-		}
-
-		if !self.ensure_session(vps, sps, pps)? {
-			// No parameter sets yet (e.g. a delta frame before the first keyframe).
-			return Ok(Vec::new());
-		}
-		if avcc.is_empty() {
-			// Parameter-set-only access unit: nothing to decode.
-			return Ok(Vec::new());
-		}
-
-		let sample_time = self.sample_index;
-		let format = self.format.as_ref().expect("format ensured above");
-		let sample = make_sample_buffer(&avcc, format, sample_time)?;
-		let session = self.session.as_ref().expect("session ensured above");
-
+		// Cleared ahead of the rebuild, which finishes the old session's pictures
+		// into the sink.
 		self.sink.frames.clear();
 		self.sink.error = None;
+		self.ensure_session(vps, sps, pps)?;
+		// No parameter sets yet (e.g. a delta frame before the first keyframe).
+		let Some(live) = &self.session else {
+			return Ok(Vec::new());
+		};
 
-		let status = unsafe { session.decode_frame(&sample, VTDecodeFrameFlags(0), ptr::null_mut(), ptr::null_mut()) };
-		if status != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"VTDecompressionSessionDecodeFrame failed: {status}"
-			)));
-		}
+		// A parameter-set-only access unit has nothing to decode.
+		let decoded = if avcc.is_empty() {
+			None
+		} else {
+			let sample_time = self.sample_index;
+			let sample = make_sample_buffer(&avcc, &live.format, sample_time)?;
+			let status = unsafe {
+				live.session
+					.decode_frame(&sample, VTDecodeFrameFlags(0), ptr::null_mut(), ptr::null_mut())
+			};
+			if status != 0 {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"VTDecompressionSessionDecodeFrame failed: {status}"
+				)));
+			}
+			Some(sample_time)
+		};
 
 		if let Some(error) = self.sink.error.take() {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"VideoToolbox decode callback failed: {error}"
 			)));
 		}
-		remember_timestamp(&mut self.pending, sample_time, timestamp);
-		self.sample_index += 1;
+		if let Some(sample_time) = decoded {
+			remember_timestamp(&mut self.pending, sample_time, timestamp);
+			self.sample_index += 1;
+		}
 		self.take_frames()
 	}
 
@@ -276,17 +354,7 @@ impl Backend for VideoToolbox {
 		self.sink.frames.clear();
 		self.sink.error = None;
 
-		let status = if let Some(session) = self.session.take() {
-			// This finishes delayed pictures and waits for every callback before the
-			// session is invalidated, so no callback can outlive `sink`.
-			let status = unsafe { session.wait_for_asynchronous_frames() };
-			unsafe { session.invalidate() };
-			status
-		} else {
-			0
-		};
-		self.format = None;
-		self.built_from = None;
+		let status = self.session.take().map_or(0, Session::finish);
 
 		let result = if status != 0 {
 			Err(Error::Codec(anyhow::anyhow!(
@@ -532,6 +600,35 @@ fn nal_kind(nal: &[u8], codec: Codec) -> NalKind {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A track whose description carries its parameter sets gets its session at
+	/// open, which is where VideoToolbox answers whether it has a decoder for the
+	/// stream, and its first keyframe reuses that session.
+	#[test]
+	fn a_description_builds_the_session_at_open() {
+		// x264's High profile SPS and PPS for a 64x64 picture.
+		const SPS: &[u8] = &[
+			0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03,
+			0x00, 0x08, 0x3c, 0x48, 0x96, 0x58,
+		];
+		const PPS: &[u8] = &[0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0];
+		let parameter_sets = moq_mux::codec::annexb::build_prefix(&[Bytes::from_static(SPS), Bytes::from_static(PPS)]);
+		let stream = Stream {
+			parameter_sets: Some(parameter_sets.clone()),
+			..Codec::H264.into()
+		};
+
+		let mut backend = VideoToolbox::new(&stream).unwrap();
+		let opened: *const VTDecompressionSession = &*backend.session.as_ref().expect("no session at open").session;
+
+		let split = Split::new(Codec::H264, parameter_sets).unwrap();
+		backend.ensure_session(split.vps, split.sps, split.pps).unwrap();
+		let session: *const VTDecompressionSession = &*backend.session.as_ref().expect("no session").session;
+		assert!(
+			ptr::eq(opened, session),
+			"the keyframe's parameter sets rebuilt the session"
+		);
+	}
 
 	#[test]
 	fn pending_timestamps_are_bounded() {

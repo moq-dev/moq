@@ -13,6 +13,10 @@
 /.claude/cache/
 /.claude/tmp/
 /.claude/worktrees/
+# quest's own checkouts (`quest worktree create`, /quest-spawn, and its Claude
+# Code worktree hooks) live under the main checkout's .worktrees/, for the same
+# reason.
+/.worktrees/
 
 # Per-checkout scratch output, such as benchmark logs and agent notes.
 /.tmp/
@@ -68,9 +72,6 @@ __pycache__/
 # maturin develop drops uniffi bindings + cdylib here during editable
 # installs of the py/moq-ffi package.
 /py/moq-ffi/moq_ffi/_uniffi/
-
-# Generated JSR manifest (derived from package.json by js/common/package.ts)
-jsr.json
 
 # msys/cygwin crash dumps, from running the shell scripts on Windows.
 *.stackdump

@@ -8,11 +8,12 @@
 //! sender would transmit them.
 
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
 use moq_net::track::{Info, Order, Subscription};
-use moq_net::{Hop, Timescale, Timestamp, Version};
+use moq_net::{Timescale, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,7 +25,8 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 const BACKLOG: [u64; 4] = [0, 1, 2, 3];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -44,17 +46,18 @@ async fn connect(
 
 /// Subscribe to the test track through `origin` in `order`, then read every backlog group
 /// in the order it arrives.
-fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_clock::sim::JoinHandle<Vec<u64>> {
-	moq_clock::sim::spawn(async move {
+fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock::sim::JoinHandle<Vec<u64>> {
+	kio::clock::sim::spawn(async move {
 		let consumer = origin.consume();
 		let remote = consumer
 			.follow("bcast", None)
 			.unwrap()
 			.available()
 			.await
-			.expect("broadcast resolves");
+			.expect("broadcast resolves")
+			.unwrap();
 		let subscription = Subscription::default()
-			.with_max_delay(FOREVER)
+			.with_delay(Delay::default().with_max(FOREVER))
 			.with_range(0..)
 			.with_order(order);
 		let mut sub = remote
@@ -66,7 +69,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_clock::
 
 		let mut arrivals = Vec::new();
 		while arrivals.len() < BACKLOG.len() {
-			let group = moq_clock::timeout(TIMEOUT, sub.recv_group())
+			let group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.expect("group timeout")
 				.expect("recv_group")
@@ -112,14 +115,17 @@ fn carries_order(version: &str) -> bool {
 async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let broadcast = publisher
+		.route("bcast", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
 	let track = broadcast
+		.broadcast()
 		.create_track(
 			"ordered",
 			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 		)
 		.unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let upstream = match relay {
 		true => Some(connect(version, publisher.consume(), 2).await),
@@ -135,15 +141,15 @@ async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 	support::harness::subscribed(&track).await;
 	// Simulated time advances only once every task is idle, so this settles the
 	// subscription on every hop before the groups exist.
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 
 	pair.server_transport.hold_unis();
 	let backlog = write_backlog(&track);
 	// Every group stream is open and ranked before any reaches the subscriber.
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	pair.server_transport.release_unis_by_priority();
 
-	let got = moq_clock::timeout(TIMEOUT * 3, reader)
+	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -151,7 +157,7 @@ async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 	got
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_backlog_is_served_in_the_subscription_order() {
 	let mut failures = Vec::new();
 	for version in [
@@ -181,19 +187,22 @@ async fn a_backlog_is_served_in_the_subscription_order() {
 /// One relay request serves an ascending and a descending subscriber: upstream asks for
 /// descending so the live subscriber stays fresh, and each downstream session still sends
 /// its own subscriber's backlog in that subscriber's order.
-#[moq_clock::test]
+#[kio::test]
 async fn merged_subscribers_keep_their_own_order() {
 	for version in ["moq-lite-07-wip", "moq-transport-18"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let broadcast = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
 		let track = broadcast
+			.broadcast()
 			.create_track(
 				"ordered",
 				Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
 			)
 			.unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let (upstream, relay) = connect(version, publisher.consume(), 2).await;
 		let (descending_pair, descending_origin) = connect(version, relay.consume(), 3).await;
@@ -203,7 +212,7 @@ async fn merged_subscribers_keep_their_own_order() {
 
 		let ascending = read_arrivals(ascending_origin.clone(), Order::Ascending);
 		support::harness::subscribed(&track).await;
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		assert_eq!(
 			upstream_order(),
 			Some(Order::Ascending),
@@ -211,7 +220,7 @@ async fn merged_subscribers_keep_their_own_order() {
 		);
 
 		let descending = read_arrivals(descending_origin.clone(), Order::Descending);
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		// lite-07 moves the upstream request with a SUBSCRIBE_UPDATE. This moq-transport
 		// subscriber never updates a request, priority included, so its first order stands.
 		let merged = match version.is_lite() {
@@ -223,12 +232,12 @@ async fn merged_subscribers_keep_their_own_order() {
 		descending_pair.server_transport.hold_unis();
 		ascending_pair.server_transport.hold_unis();
 		let backlog = write_backlog(&track);
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		descending_pair.server_transport.release_unis_by_priority();
 		ascending_pair.server_transport.release_unis_by_priority();
 
 		for (reader, order) in [(descending, Order::Descending), (ascending, Order::Ascending)] {
-			let got = moq_clock::timeout(TIMEOUT * 3, reader)
+			let got = kio::clock::timeout(TIMEOUT * 3, reader)
 				.await
 				.expect("reader hung")
 				.expect("reader panicked");

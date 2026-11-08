@@ -10,20 +10,20 @@ use std::{
 	collections::{HashMap, HashSet, VecDeque},
 	net::{Ipv6Addr, SocketAddr},
 	num::NonZeroU64,
-	sync::Arc,
+	task::Poll,
 };
 
 use arbitrary::{Arbitrary, Unstructured};
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use super::plaintext::{Clear, Plaintext, TAG_LEN};
 use crate::{
-	Dir, Duration, Event, Instant, LeaseError, Limits, ReadError, Side, StreamId, client,
+	Dir, Duration, Instant, Limits, Side, StreamId,
 	connection::Connection,
 	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received},
 	frame::{self, Frame},
 	packet::{FixedLengthConnectionIdParser, PartialDecode},
-	server, transport,
+	recv, transport,
 };
 
 /// The connection ID length both endpoints issue, which a captured packet needs to parse.
@@ -219,7 +219,7 @@ struct Peer {
 impl Peer {
 	fn new(side: Side, port: u16) -> Self {
 		let server = side.is_server().then(|| {
-			let mut config = server::Config::new(Arc::new(Plaintext));
+			let mut config = Plaintext::server();
 			config.transport = transport();
 			config
 		});
@@ -257,8 +257,9 @@ impl Peer {
 	/// so a frame they accept is never missed. Over-counting only skips a check.
 	///
 	/// `from` is the first byte that may differ from what the sender sent. Packets ending
-	/// before it are untouched, and a change inside a packet's tag alters nothing: the tag
-	/// is never checked and bounds no packet.
+	/// before it are untouched, and so are the frames of the packet whose tag holds it: the
+	/// tag is never checked and bounds no packet. Every later byte may differ, so every later
+	/// coalesced packet is decoded.
 	fn taint(&mut self, datagram: &[u8], from: usize) {
 		let parser = FixedLengthConnectionIdParser::new(CID_LEN);
 		let mut rest = Some(BytesMut::from(datagram));
@@ -274,7 +275,7 @@ impl Peer {
 				continue;
 			}
 			if start <= from && from + TAG_LEN >= end {
-				return;
+				continue;
 			}
 
 			let Ok(packet) = partial.finish(Some(&Clear)) else {
@@ -323,7 +324,7 @@ impl Pair {
 			capture: None,
 		};
 
-		let mut config = client::Config::new(Arc::new(Plaintext));
+		let mut config = Plaintext::client();
 		config.transport = transport();
 		let (ch, conn) = pair
 			.client
@@ -427,6 +428,7 @@ impl Pair {
 					local_ip: None,
 					ecn: None,
 					data,
+					arrival: None,
 				},
 				&mut buf,
 			);
@@ -483,7 +485,7 @@ impl Pair {
 					conn.handle_event(event);
 				}
 			}
-			while let Some(transmit) = conn.poll_transmit(now, MAX_DATAGRAMS, &mut buf) {
+			while let Some(transmit) = conn.transmit(now, MAX_DATAGRAMS, &mut buf) {
 				progress = true;
 				send(
 					&mut other.inbound,
@@ -498,20 +500,15 @@ impl Pair {
 			}
 		}
 
-		while let Some(event) = conn.poll() {
-			match event {
-				Event::Connected => peer.connected = true,
-				Event::DatagramReceived => {
-					while let Some(datagram) = conn.datagrams().recv() {
-						if peer.forged_datagrams.contains(&datagram) {
-							continue;
-						}
-						let seq = check_datagram(&datagram, &other.datagrams_sent);
-						assert!(peer.datagrams_received.insert(seq), "datagram {seq} delivered twice");
-					}
-				}
-				_ => {}
+		// Nothing waits between polls, so each wait is only asked for its answer as it stands.
+		let waiter = kio::Waiter::noop();
+		peer.connected |= conn.poll_connected(&waiter) == Poll::Ready(Ok(()));
+		while let Poll::Ready(Ok(datagram)) = conn.datagrams().poll_recv(&waiter) {
+			if peer.forged_datagrams.contains(&datagram) {
+				continue;
 			}
+			let seq = check_datagram(&datagram, &other.datagrams_sent);
+			assert!(peer.datagrams_received.insert(seq), "datagram {seq} delivered twice");
 		}
 	}
 
@@ -578,14 +575,16 @@ impl Pair {
 			} => {
 				if let Some((id, conn)) = send_stream(self.peer(who), stream) {
 					let mut stream = conn.send_stream(id);
-					let offset = u64::from(offset) % (stream.offset() + 1);
+					let end = stream.offset();
+					let offset = end.rewind(u64::from(offset) % (u64::from(end) + 1));
 					let _ = stream.reset_at(offset, code.into());
 				}
 			}
 			Op::Acked { who, stream, offset } => {
 				if let Some((id, conn)) = send_stream(self.peer(who), stream) {
 					let mut stream = conn.send_stream(id);
-					let offset = u64::from(offset) % (stream.offset() + 1);
+					let end = stream.offset();
+					let offset = end.rewind(u64::from(offset) % (u64::from(end) + 1));
 					let _ = stream.acked(offset);
 				}
 			}
@@ -671,7 +670,7 @@ impl Pair {
 					.datagrams()
 					.send(
 						data,
-						crate::SendOptions {
+						crate::send::Options {
 							group: None,
 							priority: priority.into(),
 						},
@@ -752,7 +751,7 @@ impl Pair {
 		let data: Vec<u8> = (sent.len..sent.len + len)
 			.map(|offset| stream_byte(side, id, offset))
 			.collect();
-		if let Ok(written) = conn.send_stream(id).write(&data) {
+		if let Ok(written) = conn.send_stream(id).write(&mut &data[..]) {
 			sent.len += written as u64;
 		}
 	}
@@ -847,11 +846,12 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 				}
 				break;
 			}
-			Err(ReadError::Blocked | ReadError::Reset(_)) => break,
+			Err(recv::Error::Blocked | recv::Error::Reset(_)) => break,
+			Err(err) => unreachable!("{err}"),
 		}
 	}
 
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 /// Odd streams are read through leases, since a plain read would skip what a lease holds.
@@ -868,9 +868,9 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
 	let Some((_, conn)) = &mut peer.conn else {
 		return;
 	};
-	match conn.recv_stream(id).lease(want) {
-		Ok(_) => {}
-		Err(LeaseError::Evicted) => {
+	let mut lease = match conn.recv_stream(id).lease(want) {
+		Ok(lease) => lease,
+		Err(recv::Error::Evicted) => {
 			conn.recv_stream(id)
 				.stop(0u32.into())
 				.expect("an evicted stream stops once");
@@ -878,23 +878,22 @@ fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, 
 		}
 		// Waiting, reset, or stopped: nothing to check yet.
 		Err(_) => return,
-	}
-	let Some(lease) = conn.leased(id) else {
-		return;
 	};
 	let offset = peer.read.entry(id).or_default();
-	let n = max.min(lease.len());
+	let n = max.min(lease.remaining());
 	if !forged {
 		let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
-		assert!(*offset + lease.len() as u64 <= written, "leased past what was written");
+		assert!(
+			*offset + lease.remaining() as u64 <= written,
+			"leased past what was written"
+		);
 		for (at, &byte) in (*offset..).zip(lease.chunks().flatten().take(n)) {
 			assert_eq!(byte, stream_byte(writer, id, at), "corrupt stream data");
 		}
 	}
 	*offset += n as u64;
-	let mut recv = conn.recv_stream(id);
-	recv.advance(n);
-	let _ = recv.release();
+	lease.advance(n);
+	conn.recv_stream(id).release(lease);
 }
 
 /// The byte a writer puts at `offset` of a stream, unique enough to catch misplaced data.

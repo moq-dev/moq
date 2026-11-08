@@ -11,7 +11,8 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Client, Hop, Server, Session, Version, origin, stats};
+use moq_net::{Client, Server, Session, Version, origin, stats};
+use std::num::NonZeroU64;
 use support::{
 	harness::{now, spawn},
 	mock::create_mock_session_pair,
@@ -20,7 +21,7 @@ use support::{
 /// Long enough, in virtual time, for an announce or subscribe to cross the mock link.
 const SETTLE: Duration = Duration::from_secs(1);
 
-fn produce(hop: Hop) -> origin::Producer {
+fn produce(hop: NonZeroU64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(hop));
 	spawn(driver);
 	producer
@@ -93,16 +94,16 @@ fn traffic(registry: &stats::Registry, role: stats::Role) -> stats::Traffic {
 }
 
 /// The hop the dialer attributed `path` to, once that announce has arrived.
-async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
-	let mut announced = dialer.consume().announced();
-	let event = moq_clock::timeout(SETTLE, async {
+async fn learned_hop(dialer: &origin::Producer, path: &str) -> u64 {
+	let mut announced = dialer.consume().routes();
+	let event = kio::clock::timeout(SETTLE, async {
 		loop {
 			let event = announced.next().await.expect("announce cursor closed");
 			let announce = match event {
-				moq_net::announce::Event::Start(announce)
-				| moq_net::announce::Event::Update(announce)
-				| moq_net::announce::Event::Restart(announce) => announce,
-				moq_net::announce::Event::End(_) => continue,
+				moq_net::origin::RouteEvent::Start(announce)
+				| moq_net::origin::RouteEvent::Update(announce)
+				| moq_net::origin::RouteEvent::Restart(announce) => announce,
+				moq_net::origin::RouteEvent::End(_) => continue,
 			};
 			if announce.prefix.as_str() == path {
 				return announce;
@@ -118,18 +119,18 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
 	}
 }
 
-fn hop(id: u64) -> Hop {
-	Hop::new(id).unwrap()
+fn hop(id: u64) -> NonZeroU64 {
+	NonZeroU64::new(id).unwrap()
 }
 
 /// Edges that declare their own hop over the MoQ Cluster extension.
-#[moq_clock::test]
+#[kio::test]
 async fn dialed_named_session_does_not_echo_or_route_subscribe_back() {
 	split_horizon("moq-transport-18", [hop(2), hop(3)]).await;
 }
 
 /// moq-lite-01 carries no hop, so neither side declares one.
-#[moq_clock::test]
+#[kio::test]
 async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	split_horizon("moq-lite-01", [hop(2), hop(3)]).await;
 }
@@ -138,7 +139,7 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 /// announced a namespace is not told about it, and the other edge is. A
 /// subscribe from that other edge is fetched from the announcer and is not
 /// sent back to the subscriber.
-async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2]) {
+async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [NonZeroU64; 2]) {
 	let version: Version = version.parse().unwrap();
 	let dialer = produce(hop(1));
 	let publisher = produce(publisher_hop);
@@ -146,25 +147,26 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 	let to_publisher = dial(version, &dialer, &publisher).await;
 	let to_subscriber = dial(version, &dialer, &subscriber).await;
 
-	let broadcast = publisher.create_broadcast("room").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
-	broadcast.announce(origin::Route::default()).unwrap();
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast.broadcast().create_track("video", None).unwrap();
+	broadcast.announce().unwrap();
 
 	let publisher_hop = learned_hop(&dialer, "room").await;
 	assert_ne!(
-		publisher_hop,
-		Hop::UNKNOWN,
+		publisher_hop, 0,
 		"an anonymous dial still needs a hop, or its routes echo"
 	);
 
 	// The other edge learns the namespace, attributed to a different hop, so the
 	// two dials are not one endpoint.
-	let mut subscriber_announced = subscriber.consume().announced();
-	let subscriber_saw = moq_clock::timeout(SETTLE, subscriber_announced.next())
+	let mut subscriber_announced = subscriber.consume().routes();
+	let subscriber_saw = kio::clock::timeout(SETTLE, subscriber_announced.next())
 		.await
 		.expect("the other edge never learned the namespace")
 		.expect("announce cursor closed");
-	let moq_net::announce::Event::Start(subscriber_saw) = subscriber_saw else {
+	let moq_net::origin::RouteEvent::Start(subscriber_saw) = subscriber_saw else {
 		panic!("the other edge's first event was not the namespace: {subscriber_saw:?}");
 	};
 	assert_eq!(subscriber_saw.prefix.as_str(), "room");
@@ -173,9 +175,9 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 		origin::Source::Local => panic!("the forwarded route looks local"),
 	};
 	assert_ne!(subscriber_hop, publisher_hop, "each dial gets its own hop");
-	assert_ne!(subscriber_hop, Hop::UNKNOWN);
+	assert_ne!(subscriber_hop, 0);
 
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 
 	let echoed = traffic(&to_publisher.registry, stats::Role::Subscriber);
 	assert_eq!(
@@ -203,12 +205,12 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 		.subscribe(subscription)
 		.await
 		.expect("subscriber subscribes");
-	moq_clock::timeout(SETTLE, crate::support::wanted(track.demand()))
+	kio::clock::timeout(SETTLE, crate::support::wanted(track.demand()))
 		.await
 		.expect("the subscribe never reached the announcer")
 		.unwrap();
 
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 
 	let from_announcer = traffic(&to_publisher.registry, stats::Role::Publisher);
 	assert_eq!(

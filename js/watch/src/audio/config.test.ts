@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { Micro, Milli, yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Effect, Signal } from "@moq/signals";
 import { decoderConfig, frameDuration, packetDuration, playbackIdentity } from "./config";
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flush = () => yieldNow();
 
 function config(fields: Record<string, unknown> = {}): Catalog.AudioConfig {
 	return Catalog.AudioConfigSchema.parse({

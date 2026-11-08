@@ -1,0 +1,37 @@
+# PULLFROG ACTION - DO NOT EDIT EXCEPT WHERE INDICATED
+name: Pullfrog
+run-name: ${{ inputs.name || github.workflow }}
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        type: string
+        description: Agent prompt
+      name:
+        type: string
+        description: Run name
+
+permissions:
+  contents: read
+
+jobs:
+  pullfrog:
+    runs-on: ubuntu-latest
+    # Only main may deploy to this environment, so a dispatch on a pushed
+    # branch can't mint the OIDC token Pullfrog trades for model access.
+    environment: pullfrog
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Run agent
+        uses: pullfrog/pullfrog@895164fc90f5c493e72693c919c6cf269af158eb # v0.1.110
+        with:
+          prompt: ${{ inputs.prompt }}
+        # No provider keys from this repository: model access is configured
+        # in the Pullfrog console (https://docs.pullfrog.com/model-access).

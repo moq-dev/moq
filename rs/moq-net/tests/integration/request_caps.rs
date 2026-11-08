@@ -9,7 +9,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Hop, Version, session::Limits};
+use moq_net::{Version, session::Limits};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,7 +18,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VERSIONS: [&str; 2] = ["moq-transport-18", "moq-lite-06"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) =
+		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
 	producer
 }
@@ -27,7 +28,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Setup {
 	client: moq_net::origin::Producer,
 	_server: moq_net::origin::Producer,
-	_broadcast: moq_net::origin::Publication,
+	_broadcast: moq_net::origin::Route,
 	tracks: Vec<moq_net::track::Producer>,
 	_pair: MockPair,
 }
@@ -37,11 +38,11 @@ async fn setup(version: &str, limits: Limits, tracks: usize) -> Setup {
 	let server = produce_origin(1);
 	let client = produce_origin(2);
 
-	let broadcast = server.create_broadcast("bcast").unwrap();
+	let broadcast = server.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 	let tracks = (0..tracks)
-		.map(|i| broadcast.create_track(format!("t{i}"), None).unwrap())
+		.map(|i| broadcast.broadcast().create_track(format!("t{i}"), None).unwrap())
 		.collect();
-	broadcast.announce(Default::default()).unwrap();
+	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(server.consume());
@@ -66,23 +67,24 @@ fn limits(announces: usize) -> Limits {
 
 /// Many more requests than the stream credit admits at once, opened and closed in turn, all
 /// succeed: each one that closes is granted back.
-#[moq_clock::test]
+#[kio::test]
 async fn closed_requests_are_granted_back() {
 	const ROUNDS: usize = 64;
 
 	for version in VERSIONS {
 		let setup = setup(version, limits(0), ROUNDS).await;
-		let broadcast = moq_clock::timeout(
+		let broadcast = kio::clock::timeout(
 			TIMEOUT,
 			setup.client.consume().follow("bcast", None).unwrap().available(),
 		)
 		.await
 		.expect("announce timeout")
+		.unwrap()
 		.unwrap();
 
 		for round in 0..ROUNDS {
 			let track = broadcast.track(&format!("t{round}")).unwrap();
-			let subscriber = moq_clock::timeout(TIMEOUT, track.subscribe(None))
+			let subscriber = kio::clock::timeout(TIMEOUT, track.subscribe(None))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} stalled"))
 				.unwrap_or_else(|err| panic!("{version}: round {round} refused: {err}"));
@@ -91,7 +93,7 @@ async fn closed_requests_are_granted_back() {
 
 			// Wait for the server to see it end, so the next round is a fresh request.
 			let published = &setup.tracks[round];
-			moq_clock::timeout(TIMEOUT, crate::support::unwanted(published.demand()))
+			kio::clock::timeout(TIMEOUT, crate::support::unwanted(published.demand()))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} never ended"))
 				.unwrap();
@@ -102,7 +104,7 @@ async fn closed_requests_are_granted_back() {
 /// With no subscription cap, a client asking for more subscriptions than the server admits
 /// still holds no more than the stream credit at once. The rest wait rather than close the
 /// session.
-#[moq_clock::test]
+#[kio::test]
 async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 	// 8 bidi streams toward the server.
 	const BOUND: usize = 8;
@@ -112,11 +114,11 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 		let version: Version = version.parse().unwrap();
 		let server = produce_origin(1);
 		let client = produce_origin(2);
-		let broadcast = server.create_broadcast("bcast").unwrap();
+		let broadcast = server.route("bcast", moq_net::origin::RouteOptions::hidden()).unwrap();
 		let tracks: Vec<_> = (0..TRACKS)
-			.map(|i| broadcast.create_track(format!("t{i}"), None).unwrap())
+			.map(|i| broadcast.broadcast().create_track(format!("t{i}"), None).unwrap())
 			.collect();
-		broadcast.announce(Default::default()).unwrap();
+		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		options.transport.max_concurrent_bi_streams = Some(BOUND);
@@ -125,26 +127,27 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 		options.server_limits = Some(limits(0));
 		let pair = connect_mock(options).await;
 
-		let remote = moq_clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
+		let remote = kio::clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
 			.await
 			.expect("announce timeout")
+			.unwrap()
 			.unwrap();
 		let subscribing: Vec<_> = (0..TRACKS)
 			.map(|i| {
 				let track = remote.track(&format!("t{i}")).unwrap();
-				moq_clock::sim::spawn(async move {
+				kio::clock::sim::spawn(async move {
 					let _subscriber = track.subscribe(None).await;
 					std::future::pending::<()>().await
 				})
 			})
 			.collect();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		let held = tracks.iter().filter(|track| track.demand().wanted().is_some()).count();
 		assert!(held > 0, "{version}: nothing was subscribed");
 		assert!(held <= BOUND, "{version}: the server holds {held} subscriptions");
 		assert!(
-			moq_clock::timeout(Duration::from_millis(100), pair.client.closed())
+			kio::clock::timeout(Duration::from_millis(100), pair.client.closed())
 				.await
 				.is_err(),
 			"{version}: the session closed"
@@ -156,16 +159,16 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 }
 
 /// A broadcast announced past the cap closes the session with TOO_MANY_REQUESTS.
-#[moq_clock::test]
+#[kio::test]
 async fn an_announce_past_the_cap_closes_the_session() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
 		let client = produce_origin(1);
 		let server = produce_origin(2);
-		let a = client.create_broadcast("a").unwrap();
-		let b = client.create_broadcast("b").unwrap();
-		a.announce(Default::default()).unwrap();
-		b.announce(Default::default()).unwrap();
+		let a = client.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let b = client.route("b", moq_net::origin::RouteOptions::hidden()).unwrap();
+		a.announce().unwrap();
+		b.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
 		options.client_publish = Some(client.consume());
@@ -173,7 +176,7 @@ async fn an_announce_past_the_cap_closes_the_session() {
 		options.server_limits = Some(limits(1));
 		let pair = connect_mock(options).await;
 
-		let err = moq_clock::timeout(TIMEOUT, pair.client.closed())
+		let err = kio::clock::timeout(TIMEOUT, pair.client.closed())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
 		assert!(
@@ -181,4 +184,32 @@ async fn an_announce_past_the_cap_closes_the_session() {
 			"{version}: closed with {err}"
 		);
 	}
+}
+
+/// On moq-lite-07 the peer's route takes a slot as well as each claim under it, so
+/// whatever a peer makes the route layer hold stays under the cap: here its route and
+/// first claim fill it, and the second claim closes the session.
+#[kio::test]
+async fn a_lite07_claim_past_the_cap_closes_the_session() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let client = produce_origin(1);
+	let server = produce_origin(2);
+	let a = client.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
+	let b = client.route("b", moq_net::origin::RouteOptions::hidden()).unwrap();
+	a.announce().unwrap();
+	b.announce().unwrap();
+
+	let mut options = MockConnectOptions::new(version);
+	options.client_publish = Some(client.consume());
+	options.server_subscribe = Some(server.clone());
+	options.server_limits = Some(limits(2));
+	let pair = connect_mock(options).await;
+
+	let err = kio::clock::timeout(TIMEOUT, pair.client.closed())
+		.await
+		.expect("the session stayed open");
+	assert!(
+		matches!(err, moq_net::Error::Session(moq_net::SessionError::TooManyRequests)),
+		"closed with {err}"
+	);
 }

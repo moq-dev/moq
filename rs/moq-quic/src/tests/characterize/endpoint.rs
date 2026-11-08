@@ -70,6 +70,7 @@ fn answer(endpoint: &mut Endpoint, now: Instant, packet: &[u8]) -> Answer {
 			local_ip: None,
 			ecn: None,
 			data: packet.into(),
+			arrival: None,
 		},
 		&mut buf,
 	) {
@@ -106,7 +107,7 @@ impl Answer {
 fn unknown_cid_gets_stateless_reset() {
 	let _guard = subscribe();
 	let mut server = endpoint(true);
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	let cid = valid_cid();
 	let packet = short(&cid, 100);
 
@@ -125,7 +126,7 @@ fn unknown_cid_gets_stateless_reset() {
 #[test]
 fn small_unknown_packet_gets_no_reset() {
 	let _guard = subscribe();
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	let cid = valid_cid();
 	assert_eq!(answer(&mut endpoint(true), now, &short(&cid, 21)), Answer::Nothing);
 	let Answer::Response(reset) = answer(&mut endpoint(true), now, &short(&cid, 22)) else {
@@ -138,7 +139,7 @@ fn small_unknown_packet_gets_no_reset() {
 #[test]
 fn invalid_cid_is_dropped() {
 	let _guard = subscribe();
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	assert_eq!(
 		answer(&mut endpoint(true), now, &short(&[0xab; 8], 100)),
 		Answer::Nothing
@@ -153,14 +154,14 @@ fn zero_length_cid_short_packet_is_dropped() {
 		..crate::endpoint::Config::default()
 	};
 	let mut server = Endpoint::new(config.with_server(server_config()), true).unwrap();
-	assert_eq!(answer(&mut server, Instant::now(), &short(&[], 100)), Answer::Nothing);
+	assert_eq!(answer(&mut server, Instant::ZERO, &short(&[], 100)), Answer::Nothing);
 }
 
 /// Only Initials can start a connection, so another long header for an unknown CID is dropped
 #[test]
 fn long_header_for_unknown_connection_is_dropped() {
 	let _guard = subscribe();
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	let packet = long(2, Version::V1.wire(), &valid_cid(), 1200);
 	assert_eq!(answer(&mut endpoint(true), now, &packet), Answer::Nothing);
 }
@@ -171,7 +172,7 @@ fn long_header_for_unknown_connection_is_dropped() {
 fn short_initial_is_dropped() {
 	let _guard = subscribe();
 	let packet = long(0, Version::V1.wire(), &[0x11; 8], 1199);
-	assert_eq!(answer(&mut endpoint(true), Instant::now(), &packet), Answer::Nothing);
+	assert_eq!(answer(&mut endpoint(true), Instant::ZERO, &packet), Answer::Nothing);
 
 	let mut pair = pair_with(|_| {});
 	pair.begin_connect(client_with(|_| {}));
@@ -187,7 +188,7 @@ fn short_initial_is_dropped() {
 fn initial_with_short_cid_is_refused() {
 	let _guard = subscribe();
 	let packet = long(0, Version::V1.wire(), &[0x11; 7], 1200);
-	let answer = answer(&mut endpoint(true), Instant::now(), &packet);
+	let answer = answer(&mut endpoint(true), Instant::ZERO, &packet);
 	let Answer::Response(close) = answer else {
 		panic!("expected an Initial close, got {answer:?}");
 	};
@@ -201,7 +202,7 @@ fn initial_with_short_cid_is_refused() {
 fn undecryptable_initial() {
 	let _guard = subscribe();
 	let mut server = endpoint(true);
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	let mut packet = long(0, Version::V1.wire(), &[0x11; 8], 1200);
 	assert_eq!(answer(&mut server, now, &packet), Answer::Nothing);
 
@@ -218,6 +219,7 @@ fn undecryptable_initial() {
 					local_ip: None,
 					ecn: None,
 					data: packet[..].into(),
+					arrival: None,
 				},
 				&mut buf,
 			) {
@@ -236,7 +238,7 @@ fn undecryptable_initial() {
 #[test]
 fn undecodable_datagram_is_dropped() {
 	let _guard = subscribe();
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	// A long header cut off inside its version
 	assert_eq!(answer(&mut endpoint(true), now, &[0xc0, 0, 0]), Answer::Nothing);
 	// An Initial whose two-byte length field, after its 20 bytes of header, runs past the
@@ -250,7 +252,7 @@ fn undecodable_datagram_is_dropped() {
 #[test]
 fn wrong_version_initial() {
 	let _guard = subscribe();
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	let packet = long(0, 0x0a1a_2a3a, &[0x11; 8], 1200);
 	assert!(matches!(answer(&mut endpoint(true), now, &packet), Answer::Response(_)));
 	assert_eq!(answer(&mut endpoint(false), now, &packet), Answer::Nothing);
@@ -263,7 +265,7 @@ fn wrong_version_initial() {
 #[test]
 fn client_endpoint_sends_stateless_reset() {
 	let _guard = subscribe();
-	let now = Instant::now();
+	let now = Instant::ZERO;
 	let cid = valid_cid();
 	let mut client = endpoint(false);
 	assert!(answer(&mut client, now, &short(&cid, 100)).is_reset_for(&client, cid));

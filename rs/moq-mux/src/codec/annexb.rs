@@ -6,6 +6,63 @@ use std::collections::BTreeMap;
 
 use bytes::{Buf, Bytes, BytesMut};
 
+/// A bit reader over an H.264 or H.265 parameter set or SEI NAL unit's RBSP: the bytes after its
+/// `header`-byte NAL header, with emulation prevention removed as they are read.
+///
+/// These NAL units end in `rbsp_trailing_bits`, so a trailing zero byte is Annex B's
+/// `trailing_zero_8bits` left behind by the splitter, and is dropped rather than refused as an
+/// emulated start code.
+pub(crate) fn rbsp(nal: &[u8], header: usize) -> h264_reader::rbsp::BitReader<h264_reader::rbsp::ByteReader<&[u8]>> {
+	h264_reader::rbsp::BitReader::new(rbsp_bytes_reader(nal, header))
+}
+
+/// The RBSP bytes of an H.264 or H.265 parameter set or SEI NAL unit, as [`rbsp`] reads them.
+/// `None` when the payload holds a byte sequence emulation prevention forbids.
+pub(crate) fn rbsp_bytes(nal: &[u8], header: usize) -> Option<Vec<u8>> {
+	use std::io::Read;
+
+	let mut out = Vec::with_capacity(nal.len());
+	rbsp_bytes_reader(nal, header).read_to_end(&mut out).ok()?;
+	Some(out)
+}
+
+/// The `(payloadType, payload)` of each message in an H.264 or H.265 SEI RBSP, which share the
+/// `sei_message` syntax. A malformed message ends the iteration. Unlike h264-reader's
+/// `SeiReader`, a payload of any size is skipped without a copy.
+pub(crate) fn sei_messages(rbsp: &[u8]) -> impl Iterator<Item = (u32, &[u8])> {
+	let mut buf = rbsp;
+	std::iter::from_fn(move || {
+		// Each message needs at least a type and size byte; the last byte is the RBSP stop bit.
+		if buf.len() <= 2 {
+			return None;
+		}
+		let kind = sei_value(&mut buf)?;
+		let size = sei_value(&mut buf)?;
+		let (payload, rest) = buf.split_at_checked(size as usize)?;
+		buf = rest;
+		Some((kind, payload))
+	})
+}
+
+/// An SEI `payloadType` or `payloadSize`: a run of 0xFF bytes, each adding 255, then the remainder.
+fn sei_value(buf: &mut &[u8]) -> Option<u32> {
+	let mut value = 0u32;
+	loop {
+		let (&byte, rest) = buf.split_first()?;
+		*buf = rest;
+		value = value.checked_add(byte.into())?;
+		if byte != 0xFF {
+			return Some(value);
+		}
+	}
+}
+
+fn rbsp_bytes_reader(nal: &[u8], header: usize) -> h264_reader::rbsp::ByteReader<&[u8]> {
+	let payload = nal.get(header..).unwrap_or_default();
+	let end = payload.iter().rposition(|&b| b != 0).map_or(0, |last| last + 1);
+	h264_reader::rbsp::ByteReader::without_skip(&payload[..end])
+}
+
 /// The four-byte Annex B start code preceding a NAL unit.
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
@@ -151,12 +208,22 @@ pub fn build_prefix<'a, I: IntoIterator<Item = &'a Bytes>>(nals: I) -> Bytes {
 	out.freeze()
 }
 
-/// Parameter sets of one type keyed by the id they define, in id order.
+/// Parameter sets of one type keyed by the layer (H.265 `nuh_layer_id`, always 0 for H.264) and
+/// id they define, base layer first and then in id order.
 ///
-/// A later set with an id replaces the earlier one, as it does in a decoder, so a source may
-/// define several (e.g. two PPS that slices reference by id) and a repeated or redefined id
-/// costs one entry rather than a growing list.
-pub(crate) type ParameterSets = BTreeMap<u32, Bytes>;
+/// A later set with a layer and id replaces the earlier one, as it does in a decoder, so a source
+/// may define several (e.g. two PPS that slices reference by id) and a repeated or redefined id
+/// costs one entry rather than a growing list. Each layer numbers its own sets, so an enhancement
+/// layer's never replaces the base layer's.
+pub(crate) type ParameterSets = BTreeMap<(u8, u32), Bytes>;
+
+/// Adopt the parameter sets of one type that an access unit or init defined: each layer it
+/// defined any for replaces that layer's retained sets, dropping ids the new configuration no
+/// longer uses, while every other layer keeps its own. An empty `sets` changes nothing.
+pub(crate) fn adopt_parameter_sets(retained: &mut ParameterSets, sets: ParameterSets) {
+	retained.retain(|(layer, _), _| !sets.keys().any(|(defined, _)| defined == layer));
+	retained.extend(sets);
+}
 
 /// The NAL syntax an [`InBand`] transform reads.
 #[derive(Debug, Clone, Copy)]
@@ -186,28 +253,56 @@ impl InBandCodec {
 		}
 	}
 
-	/// Insert parameter set `nal` (header included) under the id it defines, replacing any
-	/// earlier set with that id.
+	/// Insert parameter set `nal` (header included) under the layer and id it defines, replacing
+	/// any earlier set with both.
 	pub(crate) fn insert_parameter_set(self, sets: &mut ParameterSets, nal: &Bytes) -> Result<()> {
-		use h264_parser::{bitreader::BitReader, eg::read_ue};
+		use h264_reader::rbsp::BitRead;
 
 		let nal_type = self.nal_type(nal);
-		let header = match self {
-			Self::H264 => 1,
-			Self::H265 => 2,
+		let (header, layer) = match self {
+			Self::H264 => (1, 0),
+			Self::H265 => (
+				2,
+				crate::codec::h265::layer_id(nal).ok_or(Error::ParameterSetId(nal_type))?,
+			),
 		};
-		let rbsp = h264_parser::nal::ebsp_to_rbsp(nal.get(header..).unwrap_or_default());
-		let r = &mut BitReader::new(&rbsp);
+		let r = &mut rbsp(nal, header);
 		let id = match (self, nal_type) {
 			// seq_parameter_set_id follows profile_idc, the constraint flags, and level_idc.
-			(Self::H264, 7) => r.skip_bits(24).and_then(|()| read_ue(r)),
+			(Self::H264, 7) => r
+				.skip(24, "profile_idc..level_idc")
+				.and_then(|()| r.read_ue("seq_parameter_set_id")),
 			// pic_parameter_set_id opens a PPS in both codecs.
-			(Self::H264, 8) | (Self::H265, 34) => read_ue(r),
-			(Self::H265, 32) => r.read_bits(4), // vps_video_parameter_set_id
-			(Self::H265, 33) => crate::codec::h265::sps_id(r),
+			(Self::H264, 8) | (Self::H265, 34) => r.read_ue("pic_parameter_set_id"),
+			(Self::H265, 32) => r.read::<4, u32>("vps_video_parameter_set_id"),
+			(Self::H265, 33) => crate::codec::h265::sps_id(r, layer),
 			_ => return Err(Error::ParameterSetId(nal_type)),
 		};
-		sets.insert(id.map_err(|_| Error::ParameterSetId(nal_type))?, nal.clone());
+		sets.insert((layer, id.map_err(|_| Error::ParameterSetId(nal_type))?), nal.clone());
+		Ok(())
+	}
+
+	/// Replace each `retained` parameter-set type, in VPS, SPS, PPS order, with the sets a complete
+	/// Annex-B init defines. A type the init omits keeps its retained sets.
+	///
+	/// Each init replaces the last one's sets rather than accumulating onto them, as a keyframe's
+	/// inline sets do in [`reconcile_keyframe_params`].
+	pub(crate) fn adopt_init(self, data: &[u8], retained: &mut [&mut ParameterSets]) -> Result<()> {
+		let types = self.parameter_sets();
+		debug_assert_eq!(types.len(), retained.len());
+		let mut sets = vec![ParameterSets::new(); types.len()];
+		for nal in complete_nals(data)? {
+			if nal.is_empty() {
+				continue;
+			}
+			let nal_type = self.nal_type(&nal);
+			if let Some(index) = types.iter().position(|&(ty, _)| ty == nal_type) {
+				self.insert_parameter_set(&mut sets[index], &nal)?;
+			}
+		}
+		for (retained, set) in retained.iter_mut().zip(sets) {
+			adopt_parameter_sets(retained, set);
+		}
 		Ok(())
 	}
 
@@ -239,9 +334,9 @@ impl InBandCodec {
 ///
 /// A keyframe is the only place a receiver can join, so it always carries every
 /// parameter-set type, in dependency order (VPS, SPS, PPS) right after any access
-/// unit delimiter. A type the access unit omitted is the last one seen. A type it
-/// carried replaces every cached set of that type, so a source that spreads several
-/// PPS ids across access units keeps only the last.
+/// unit delimiter. A type or layer the access unit omitted is the last one seen. A type
+/// it carried replaces every cached set of that type in each layer it carried, so a
+/// source that spreads several PPS ids across access units keeps only the last.
 pub(crate) struct InBand {
 	codec: InBandCodec,
 	/// The active sets of each type, in [`InBandCodec::parameter_sets`] order.
@@ -281,9 +376,7 @@ impl InBand {
 			}
 		}
 		for (active, set) in self.active.iter_mut().zip(sets) {
-			if !set.is_empty() {
-				*active = set;
-			}
+			adopt_parameter_sets(active, set);
 		}
 		if !nals.iter().any(|nal| codec.is_vcl(nal)) {
 			return Ok(None);
@@ -327,25 +420,68 @@ fn length_prefix(out: &mut BytesMut, nal: &[u8]) -> Result<()> {
 }
 
 /// Reconcile the retained parameter sets with what a keyframe access unit carried
-/// inline, called when the keyframe slice is reached:
+/// inline, called when the keyframe slice is reached or, to see every inline set, when
+/// the access unit closes. `retained` and `seen` hold
+/// each parameter-set type in dependency order (VPS, SPS, PPS).
 ///
-/// - If the AU presented its own set (`seen` non-empty), adopt it as the retained
-///   set, dropping any the new GOP no longer uses (a mid-stream reinit).
-/// - If the AU carried none, re-inject the retained set into `chunks` as Annex-B
-///   so a receiver tuning in at this keyframe still gets them.
+/// - Each type and layer the AU presented sets for adopts them as its retained
+///   sets, dropping any the new GOP no longer uses (a mid-stream reinit).
+/// - When any retained type or layer is missing from the AU, its parameter sets are
+///   rewritten as every retained set in dependency order, at the first inline one or
+///   before the first slice, so a receiver tuning in at this keyframe still gets them all
+///   and each after those it references.
 ///
 /// `seen` is this AU's inline NALs (already appended to `chunks`); `retained` is
 /// the cross-GOP set re-injected on bare keyframes.
-pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut ParameterSets, seen: &mut ParameterSets) {
-	if seen.is_empty() {
-		for nal in retained.values() {
-			chunks.extend_from_slice(&START_CODE);
-			chunks.extend_from_slice(nal);
-		}
+pub(crate) fn reconcile_keyframe_params(
+	codec: InBandCodec,
+	chunks: &mut BytesMut,
+	retained: &mut [&mut ParameterSets],
+	seen: &mut [&mut ParameterSets],
+) -> Result<()> {
+	let mut missing = false;
+	for (retained, seen) in retained.iter_mut().zip(seen.iter_mut()) {
+		missing |= retained
+			.keys()
+			.any(|(layer, _)| !seen.keys().any(|(defined, _)| defined == layer));
+		adopt_parameter_sets(retained, std::mem::take(*seen));
 		seen.clone_from(retained);
-	} else if seen != retained {
-		retained.clone_from(seen);
 	}
+	if !missing {
+		return Ok(());
+	}
+
+	let block = build_prefix(retained.iter().flat_map(|sets| sets.values()));
+	let types = codec.parameter_sets();
+	let au = std::mem::take(chunks);
+	let mut injected = false;
+	for nal in complete_nals(&au)? {
+		if nal.is_empty() {
+			continue;
+		}
+		let set = types.iter().any(|&(ty, _)| ty == codec.nal_type(&nal));
+		if (set || codec.is_vcl(&nal)) && !std::mem::replace(&mut injected, true) {
+			chunks.extend_from_slice(&block);
+		}
+		if set {
+			continue;
+		}
+		chunks.extend_from_slice(&START_CODE);
+		chunks.extend_from_slice(&nal);
+	}
+	if !injected {
+		chunks.extend_from_slice(&block);
+	}
+	Ok(())
+}
+
+/// Every NAL in a complete Annex-B buffer, including the final one that no start code terminates.
+pub(crate) fn complete_nals(data: &[u8]) -> Result<Vec<Bytes>> {
+	let mut buf = Bytes::copy_from_slice(data);
+	let mut iter = NalIterator::new(&mut buf);
+	let mut nals = iter.by_ref().collect::<Result<Vec<_>>>()?;
+	nals.extend(iter.flush()?);
+	Ok(nals)
 }
 
 /// Iterates complete Annex B NAL units, leaving an unterminated final unit for `flush`.
@@ -1024,6 +1160,25 @@ mod tests {
 		assert_eq!(sei_first.as_ref(), length_prefixed(&[vps, sps2, pps, sei, idr]));
 	}
 
+	/// An access unit redefining only an enhancement layer's sets keeps the base layer's.
+	#[test]
+	fn in_band_h265_keeps_the_base_layer_beside_an_enhancement_update() {
+		use crate::codec::h265::fixtures::{MV_PPS_LAYER1, MV_SPS_LAYER1, PPS, SPS, VPS};
+		let idr = &[0x26, 0x01, 0xaa][..];
+
+		let mut tx = InBand::new(InBandCodec::H265);
+		let first = tx.transform(annexb(&[VPS, SPS, PPS, idr]), true).unwrap().unwrap();
+		assert_eq!(first.as_ref(), length_prefixed(&[VPS, SPS, PPS, idr]));
+		let update = tx
+			.transform(annexb(&[MV_SPS_LAYER1, MV_PPS_LAYER1, idr]), true)
+			.unwrap()
+			.unwrap();
+		assert_eq!(
+			update.as_ref(),
+			length_prefixed(&[VPS, SPS, MV_SPS_LAYER1, PPS, MV_PPS_LAYER1, idr])
+		);
+	}
+
 	/// A parameter set keys by the id it defines, so a stream redefining ids holds one entry
 	/// per id, the last, however many sets it sends. A set too short for its id is refused.
 	#[test]
@@ -1039,15 +1194,15 @@ mod tests {
 			}
 		}
 		assert_eq!(sets.len(), 2);
-		assert_eq!(sets[&0].as_ref(), [0x68, 0xce, 0x3c, 0xff]);
-		assert_eq!(sets[&1].as_ref(), [0x68, 0x4e, 0x3c, 0xff]);
+		assert_eq!(sets[&(0, 0)].as_ref(), [0x68, 0xce, 0x3c, 0xff]);
+		assert_eq!(sets[&(0, 1)].as_ref(), [0x68, 0x4e, 0x3c, 0xff]);
 
 		for nal in [VPS, SPS, SPS_PYRAMID, PPS] {
 			let mut sets = ParameterSets::new();
 			InBandCodec::H265
 				.insert_parameter_set(&mut sets, &Bytes::from_static(nal))
 				.unwrap();
-			assert_eq!(sets.keys().collect::<Vec<_>>(), [&0]);
+			assert_eq!(sets.keys().collect::<Vec<_>>(), [&(0, 0)]);
 		}
 
 		let truncated = Bytes::from_static(&[0x67, 0x42, 0xc0]);

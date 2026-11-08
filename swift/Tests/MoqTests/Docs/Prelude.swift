@@ -6,6 +6,6 @@ import Moq
 
 var opusInit: Data { fatalError() }
 var packet: Data { fatalError() }
-var pts: UInt64 { fatalError() }
+var pts: Timestamp { fatalError() }
 var rgba: Data { fatalError() }
 var session: Session { fatalError() }

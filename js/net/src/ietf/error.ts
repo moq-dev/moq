@@ -112,7 +112,7 @@ function invalidJoiningRequestId(kind: RequestKind, version: IetfVersion): numbe
 export function toRequestCode(condition: RequestCondition, kind: RequestKind, version: IetfVersion): number {
 	switch (condition) {
 		case "invalid_filter":
-			return version >= Version.DRAFT_22 ? INVALID_FILTER : INTERNAL_ERROR;
+			return version >= Version.DRAFT_20 ? INVALID_FILTER : INTERNAL_ERROR;
 		case "internal":
 			return INTERNAL_ERROR;
 		case "unauthorized":
@@ -161,7 +161,7 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 			return "not_supported";
 	}
 
-	if (code === INVALID_FILTER && version >= Version.DRAFT_22) return "invalid_filter";
+	if (code === INVALID_FILTER && version >= Version.DRAFT_20) return "invalid_filter";
 	if (code === DOES_NOT_EXIST) return "does_not_exist";
 	if (code === invalidRange(kind)) return "invalid_range";
 	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";
@@ -180,4 +180,24 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 export function requestReason(code: number, reasonPhrase: string, kind: RequestKind, version: IetfVersion): string {
 	const condition = fromRequestCode(code, kind, version) ?? "unregistered";
 	return `${condition} (code=${code}) ${reasonPhrase}`;
+}
+
+/**
+ * A peer's REQUEST_ERROR refusing a SUBSCRIBE: what it reads as, and the Retry Interval it asked
+ * for, which a relay forwards to its own readers unchanged.
+ *
+ * @internal
+ */
+export class SubscribeRefused extends Error {
+	/** The condition the code reads as, `internal` for one the draft does not register. */
+	readonly condition: RequestCondition;
+	/** The Retry Interval, in milliseconds. */
+	readonly retryInterval: bigint;
+
+	constructor(code: number, reasonPhrase: string, retryInterval: bigint, version: IetfVersion) {
+		super(`SUBSCRIBE error: ${requestReason(code, reasonPhrase, "subscribe", version)}`);
+		this.name = "SubscribeRefused";
+		this.condition = fromRequestCode(code, "subscribe", version) ?? "internal";
+		this.retryInterval = retryInterval;
+	}
 }

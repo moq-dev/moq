@@ -7,9 +7,9 @@ public enum Video {
 
     /// The raw frame layout, resolution, and framerate the caller writes.
     public typealias EncoderInput = VideoEncoderInput
-    /// The codec, bitrate, group mode, and backend preference.
+    /// The codec, bitrate, join interval, and backend preference.
     public typealias EncoderOutput = VideoEncoderOutput
-    /// What a `Consumer` delivers: an optional resize, a max delay, and the decoder's surface (macOS only).
+    /// What a `Consumer` delivers: an optional resize, a delay, and the decoder's surface (macOS only).
     public typealias DecoderOutput = VideoDecoderOutput
     /// One raw picture with its presentation timestamp.
     public typealias Frame = VideoFrame
@@ -18,8 +18,6 @@ public enum Video {
     public typealias Read = MoqVideoRead
     /// One encoded access unit from an `Encoder`.
     public typealias Packet = MoqVideoPacket
-    /// How pictures are split into independently decodable groups.
-    public typealias Gop = MoqVideoGop
     /// A video codec identifier (H.264 or H.265).
     public typealias Codec = VideoCodec
     /// A CPU pixel layout (I420 or RGBA).
@@ -68,7 +66,7 @@ public enum Video {
 
         /// Start a new group at the next written frame.
         ///
-        /// Optional: the encoder starts groups on its own per `output.gop`, so a
+        /// Optional: the encoder starts groups on its own per `output.join`, so a
         /// subscriber can always join without this. Reach for it only to place the
         /// boundaries yourself, aligning groups with something the encoder can't
         /// see such as a scene change. Throws if the selected encoder cannot force
@@ -118,12 +116,13 @@ public enum Video {
             rendition: Media.Video,
             output: DecoderOutput = DecoderOutput()
         ) async throws -> Consumer {
-            Consumer(try await MoqVideoConsumer.subscribe(
-                broadcast: broadcast.ffi,
-                id: id,
-                catalogVideo: rendition,
-                output: output
-            ))
+            Consumer(
+                try await MoqVideoConsumer.subscribe(
+                    broadcast: broadcast.ffi,
+                    id: id,
+                    catalogVideo: rendition,
+                    output: output
+                ))
         }
 
         /// The next frame, gap, or end, or `nil` once the track ends or is closed.

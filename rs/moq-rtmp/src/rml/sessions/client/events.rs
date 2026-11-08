@@ -10,13 +10,19 @@ pub enum ClientSessionEvent {
 	ConnectionRequestAccepted,
 
 	/// The server has rejected the connection request
-	ConnectionRequestRejected { description: String },
+	ConnectionRequestRejected { code: String, description: String },
 
 	/// The server has accepted our request to play video back from a stream key
 	PlaybackRequestAccepted,
 
 	/// The server has accepted our request to publish video
 	PublishRequestAccepted,
+
+	/// The server has rejected our request to play video back from a stream key
+	PlaybackRequestRejected { code: String, description: String },
+
+	/// The server has rejected our request to publish video
+	PublishRequestRejected { code: String, description: String },
 
 	/// The server has sent over new metadata for the stream
 	StreamMetadataReceived { metadata: StreamMetadata },

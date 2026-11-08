@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// Set `enabled = true` to attach a [`moq_stats::Producer`] to every session
 /// the relay accepts (and every cluster dial). The producer publishes a single
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
-/// unset) on the cluster origin, under a fresh epoch each run. The broadcast
+/// unset) on the cluster origin, under a fresh instance each run. The broadcast
 /// carries a `totals.json` track of per-tier totals, one `<group>/group.json`
 /// track per [`Self::depth`] group with its per-path traffic and per-label
 /// sessions, and presence and prefix tracks on request, each a compressed JSON
@@ -59,7 +59,9 @@ pub struct Config {
 	///
 	/// May be multi-segment (e.g. `sjc/1`, `sjc/2`) when a region has multiple
 	/// hosts; the segments nest under a shared region key on the advertised
-	/// path. Single-relay deployments can leave this unset.
+	/// path. Required when stats are enabled on a clustered relay, and on a
+	/// relay that only accepts peer dials, since its dialers see every peer's
+	/// broadcast; otherwise it may be unset.
 	#[usage(long = "stats-node", env = "MOQ_STATS_NODE", setting = "stats.node")]
 	pub node: Option<String>,
 
@@ -111,14 +113,54 @@ impl Config {
 		self.linger.map(Into::into)
 	}
 
-	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
+	/// Refuse stats on a clustered relay without a node name: every node would
+	/// publish the same `<prefix>/node` broadcast and the origin keeps only one.
+	/// Run by both `Config::resolve` and [`Cluster::new`](crate::cluster::Cluster::new),
+	/// which embedders call directly.
+	pub(crate) fn check(&self, cluster: &crate::cluster::Config) -> anyhow::Result<()> {
+		if !self.enabled {
+			return Ok(());
+		}
+		// A malformed node was set, so it gets its own error rather than the missing-flag one.
+		let node = self
+			.node
+			.as_deref()
+			.map(Path::new)
+			.transpose()
+			.context("invalid stats.node")?;
+		#[cfg(feature = "cluster-lan")]
+		let lan = cluster.lan.enabled;
+		#[cfg(not(feature = "cluster-lan"))]
+		let lan = false;
+		let clustered = !cluster.connect.is_empty() || cluster.api.url.is_some() || cluster.node.is_some() || lan;
+		// An empty name is the root path, which publishes the shared unnamed broadcast.
+		anyhow::ensure!(
+			!clustered || node.is_some_and(|node| !node.is_empty()),
+			"--stats-enabled on a clustered relay requires --stats-node, so each node publishes its own stats"
+		);
+		Ok(())
+	}
+
+	/// The prefix stats publish under, reserved for the relay's own publisher, or
+	/// `None` when publishing is disabled.
+	pub(crate) fn reserved(&self) -> anyhow::Result<Option<Path>> {
+		if !self.enabled {
+			return Ok(None);
+		}
+		Ok(Some(Path::new(&self.prefix).context("invalid stats.prefix")?))
+	}
+
+	/// Build a [`moq_stats::Producer`] and its [`moq_stats::Publisher`] from this
+	/// config, publishing on `origin`.
 	///
-	/// Returns a no-op producer when [`Self::enabled`] is false, so the relay can
-	/// attach the result unconditionally. Hand it to
-	/// [`Cluster::with_stats`](crate::cluster::Cluster::with_stats), which takes over both
-	/// the registry and keeping the publish task alive (the task stops when the
-	/// last clone of the producer drops). Fails on a zero interval.
-	pub fn build(&self, origin: origin::Producer) -> anyhow::Result<moq_stats::Producer> {
+	/// Returns a no-op producer when [`Self::enabled`] is false, so
+	/// [`Cluster::new`](crate::cluster::Cluster::new) can build one unconditionally,
+	/// keep the producer, and run the publisher on its driver. Fails on a zero
+	/// interval.
+	pub(crate) fn build(
+		&self,
+		origin: origin::Producer,
+	) -> anyhow::Result<(moq_stats::Producer, moq_stats::Publisher)> {
 		if !self.enabled {
 			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
 		}

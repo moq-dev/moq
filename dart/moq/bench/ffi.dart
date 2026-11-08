@@ -41,8 +41,11 @@ Future<void> throughput(
   final origin = OriginProducer(
     config: OriginConfig(cacheCapacityBytes: 64 << 20),
   );
-  final publication = origin.createBroadcast(path: 'bench');
-  final broadcast = publication.broadcast();
+  final route = origin.route(
+    path: 'bench',
+    options: RouteOptions(hidden: true),
+  );
+  final broadcast = route.broadcast();
   final tracks = List.generate(
     c.publishers,
     (p) =>
@@ -61,7 +64,7 @@ Future<void> throughput(
         final frame = await group.readFrame();
         require(
           frame != null &&
-              frame.timestampUs == n * c.frames + f &&
+              frame.timestamp?.value == n * c.frames + f &&
               frame.payload.length == payload.length &&
               memcmp(frame.payload.address, payload.address, payload.length) ==
                   0,
@@ -79,7 +82,10 @@ Future<void> throughput(
       try {
         for (var f = 0; f < c.frames; f++) {
           group.writeFrame(
-            frame: Frame(payload: payload, timestampUs: n * c.frames + f),
+            frame: Frame(
+              payload: payload,
+              timestamp: Timestamp(value: n * c.frames + f, scale: 1000000),
+            ),
           );
         }
         group.finish();
@@ -121,7 +127,7 @@ Future<void> throughput(
       track.dispose();
     }
     broadcast.dispose();
-    publication.dispose();
+    route.dispose();
     origin.dispose();
   }
 }

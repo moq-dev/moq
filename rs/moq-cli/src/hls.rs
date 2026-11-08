@@ -27,8 +27,8 @@ pub struct ImportArgs {
 
 	/// Publish each fMP4 fragment whole as CMAF instead of splitting it into one frame per
 	/// sample. Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
-	#[usage(long = "cmaf")]
-	pub passthrough: bool,
+	#[usage(long)]
+	pub cmaf: bool,
 }
 
 /// HLS export (serve over HTTP, record to a directory) args.
@@ -50,8 +50,8 @@ pub struct ExportArgs {
 	pub tls: Tls,
 
 	/// Minimum media listed in each rendition's playlist window, at most 256 segments.
-	/// Keep it within the relay's group-cache retention, since segments are fetched from
-	/// there on request.
+	/// Keep it within the media's max age and the relay's group-cache retention, since
+	/// segments are fetched from there on request.
 	#[usage(long, default = "16s")]
 	pub window: moq_tokio::cli::Duration,
 
@@ -161,8 +161,8 @@ impl Tls {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
-/// announced under `epoch`. Once the playlist ends, serve the finished broadcast for the linger.
-pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoch) -> anyhow::Result<()> {
+/// announced under `instance`. Once the playlist ends, serve the finished broadcast for the linger.
+pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::Instance) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
@@ -170,27 +170,33 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 		linger,
 		bandwidth,
 	} = target;
-	let producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
+	// Held through the linger, so the finished broadcast stays announced while it serves the tail.
+	let route = origin
+		.route(
+			&name,
+			moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
+		)
+		.context("failed to create broadcast")?;
 
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
 		.with_bandwidth(bandwidth);
-	let catalog = moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), config)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), config)?;
 	// Announced once the catalog first goes out, which waits for every rendition's init: a
 	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
 	// publisher that cannot serve its declared tracks yet.
 	let mut listed = catalog.consume()?;
 
 	let mut config = moq_hls::import::Config::new(playlist_url(&args.playlist)?);
-	config.passthrough = args.passthrough;
-	let mut importer = moq_hls::import::Import::new(producer.broadcast().clone(), catalog, config)?;
+	config.cmaf = args.cmaf;
+	let mut importer = moq_hls::import::Import::new(route.broadcast().clone(), catalog, config)?;
 
 	tracing::info!(%name, "importing HLS");
 
 	let ran = match importer.init().await {
 		Ok(()) => {
 			notify_ready();
-			run_announced(&mut importer, &mut listed, &producer, epoch).await
+			run_announced(&mut importer, &mut listed, &route).await
 		}
 		Err(err) => Err(err.into()),
 	};
@@ -204,7 +210,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 	// arrives after the end still gets the tail. An interrupt drops it at once.
 	importer.finish()?;
 	tracing::info!(?linger, "playlist ended; serving the finished broadcast");
-	moq_mux::Linger::new([producer.broadcast().clone()], importer, linger)
+	moq_mux::Linger::new([route.broadcast().clone()], importer, linger)
 		.wait()
 		.await;
 	Ok(())
@@ -216,8 +222,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 async fn run_announced(
 	importer: &mut moq_hls::import::Import,
 	listed: &mut moq_mux::catalog::hang::Consumer,
-	publication: &moq_net::origin::Publication,
-	epoch: moq_net::Epoch,
+	route: &moq_net::origin::Route,
 ) -> anyhow::Result<()> {
 	let run = importer.run();
 	tokio::pin!(run);
@@ -233,9 +238,7 @@ async fn run_announced(
 		}
 	};
 	anyhow::ensure!(catalog.is_some(), "the playlist ended before it declared a track");
-	publication
-		.announce(moq_net::origin::Route::default().with_epoch(epoch))
-		.context("failed to announce broadcast")?;
+	route.announce().context("failed to announce broadcast")?;
 	if !ended {
 		run.await?;
 	}
@@ -270,13 +273,17 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 	let mut config = moq_hls::export::Config::default();
 	config.window = args.window.into();
 
+	// Serving and recording share one server, which follows the publisher instances: a recording
+	// ends at what its instance listed once another takes the broadcast over.
+	let server = moq_hls::Server::new(scoped.clone(), config)?;
+
 	let tls = args.tls.into_config()?;
 	let listen = match (args.listen, &args.output) {
 		(None, Some(_)) => None,
 		(listen, _) => Some(listen.unwrap_or(LISTEN)),
 	};
 	let serving = match listen {
-		Some(listen) => Some(serve(scoped.clone(), config.clone(), listen, tls, &args.cors)?),
+		Some(listen) => Some(serve(server.clone(), listen, tls, &args.cors)?),
 		None => {
 			anyhow::ensure!(
 				tls.cert.is_empty() && tls.key.is_empty() && tls.generate.is_empty() && tls.root.is_empty(),
@@ -298,13 +305,15 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		};
 		// Wait for a covering route rather than asking on the spot: a recording started beside
 		// its publisher, or over a session that discovers only watched paths, sees no route yet.
-		let broadcast = scoped
+		scoped
 			.follow(name.as_str(), None)?
 			.available()
 			.await
 			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
-		let source = moq_mux::Source::new(scoped.clone(), broadcast);
-		let broadcaster = moq_hls::export::Broadcaster::new(source, config);
+		let broadcaster = server
+			.broadcaster(&name)
+			.await
+			.with_context(|| format!("broadcast `{name}` went offline before recording"))?;
 		tracing::info!(%name, "recording HLS");
 		recording.run(&broadcaster).await
 	};
@@ -316,13 +325,11 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 
 /// Bind the HLS listener, returning the server to run.
 fn serve(
-	origin: moq_net::origin::Consumer,
-	config: moq_hls::export::Config,
+	server: moq_hls::Server,
 	listen: SocketAddr,
 	tls: moq_tokio::tls::Listen,
 	cors: &crate::web::Cors,
 ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
-	let server = moq_hls::Server::new(origin, config);
 	let app = server.router().layer(cors.layer([Method::GET])?);
 	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
 		None
@@ -385,7 +392,7 @@ mod test {
 		tempfile::TempDir,
 		moq_hls::import::Import,
 		moq_mux::catalog::hang::Consumer,
-		moq_net::origin::Publication,
+		moq_net::origin::Route,
 	)> {
 		let dir = tempfile::tempdir()?;
 		write_playlist(dir.path(), segments, false);
@@ -393,7 +400,7 @@ mod test {
 
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let producer = origin.create_broadcast("hls")?;
+		let producer = origin.route("hls", moq_net::origin::RouteOptions::hidden())?;
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), moq_mux::catalog::Config::default())?;
 		let listed = catalog.consume()?;
@@ -415,10 +422,8 @@ mod test {
 	async fn an_ended_playlist_announces_its_catalog() {
 		for _ in 0..32 {
 			let (_dir, mut importer, mut listed, producer) = joined_then_ended(1).await.unwrap();
-			run_announced(&mut importer, &mut listed, &producer, moq_net::Epoch::mint())
-				.await
-				.unwrap();
-			assert!(producer.route().is_some(), "the finished playlist was not announced");
+			run_announced(&mut importer, &mut listed, &producer).await.unwrap();
+			assert!(producer.is_announced(), "the finished playlist was not announced");
 		}
 	}
 
@@ -436,8 +441,8 @@ mod test {
 	#[tokio::test]
 	async fn an_empty_playlist_fails_unannounced() {
 		let (_dir, mut importer, mut listed, producer) = joined_then_ended(0).await.unwrap();
-		let result = run_announced(&mut importer, &mut listed, &producer, moq_net::Epoch::mint()).await;
-		assert!(producer.route().is_none(), "an empty playlist was announced");
+		let result = run_announced(&mut importer, &mut listed, &producer).await;
+		assert!(!producer.is_announced(), "an empty playlist was announced");
 		let err = result.expect_err("an empty playlist imports nothing");
 		assert!(format!("{err:#}").contains("before it declared a track"), "{err:#}");
 	}
@@ -464,7 +469,7 @@ mod test {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let exporting = export(origin.consume(), args, "live".to_string());
-		let result = moq_clock::timeout(std::time::Duration::from_secs(1), exporting).await;
+		let result = kio::clock::timeout(std::time::Duration::from_secs(1), exporting).await;
 		assert!(result.is_err(), "the recording gave up: {result:?}");
 	}
 
@@ -483,6 +488,7 @@ mod test {
 	/// with the cause, so subscribers see the failure rather than a dropped producer.
 	#[tokio::test]
 	async fn a_failed_import_aborts_its_tracks() {
+		kio::clock::host_time();
 		use moq_mux::container::{Frame, fmp4::Muxer};
 
 		let dir = tempfile::tempdir().unwrap();
@@ -519,9 +525,9 @@ mod test {
 		};
 		let args = ImportArgs {
 			playlist: playlist.to_str().unwrap().to_string(),
-			passthrough: false,
+			cmaf: false,
 		};
-		let importing = tokio::spawn(import(target, args, moq_net::Epoch::mint()));
+		let importing = tokio::spawn(import(target, args, moq_net::Instance::random()));
 
 		announced.next().await.expect("announced");
 		let broadcast = consumer.request("hls", None).await.unwrap();

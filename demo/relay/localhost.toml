@@ -15,6 +15,20 @@ bind = "[::]:4443"
 # This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
 tls.generate = ["localhost"]
 
+# Every version, plus the opt-in moq-lite-07-wip that sockets (such as MoQ Boy's) need.
+version = [
+    "moq-lite-07-wip",
+    "moq-lite-06",
+    "moq-lite-05",
+    "moq-lite-04",
+    "moq-lite-03",
+    "moq-lite-02",
+    "moq-lite-01",
+    "moq-transport-22",
+    "moq-transport-20",
+    "moq-transport-18",
+]
+
 [web.http]
 # Listen for HTTP and WebSocket connections on the given TCP address.
 # This is unfortunately required to serve certificate.sha256 for local development.
@@ -39,6 +53,3 @@ enabled = true
 # It can be multi-segment (e.g. `sjc/1`, `sjc/2`) to nest multiple hosts under
 # a shared region key. Single-node setups can leave it unset.
 node = "local/host"
-
-# Iroh is available in source builds with `--features iroh`.
-# See doc/bin/relay/config.md to enable its listener.

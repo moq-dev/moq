@@ -28,10 +28,10 @@
 //! The publisher rolls a group when a joiner wants a fresh one, exactly as
 //! [`snapshot`](crate::snapshot) does: on a track created with a
 //! [`refresh`](moq_net::track::Info::refresh) ratio, a subscriber joining once the open group's ops
-//! outweigh that ratio times its header asks for one, and [`Producer::refresh`] restates the window
-//! in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a roll:
-//! a header restating records a reader already has yields nothing, so however often the publisher
-//! rolls, the reader sees one continuous stream of [`Event`]s.
+//! outweigh that ratio times its header asks for one, and [`Producer::poll_refresh`] restates the
+//! window in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a
+//! roll: a header restating records a reader already has yields nothing, so however often the
+//! publisher rolls, the reader sees one continuous stream of [`Event`]s.
 //! [`ProducerConfig::checkpoint_records`] bounds the suffix repeated on each roll for a long-lived
 //! window.
 //!
@@ -111,6 +111,43 @@ mod test {
 		let at = moq_net::Timestamp::from_millis(100).unwrap();
 		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
 		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
+		producer.finish().unwrap();
+		let pushed: Vec<_> = drain(&mut consumer(track))
+			.into_iter()
+			.filter_map(|event| match event {
+				Event::Push { value, .. } => Some(value),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(pushed, vec![rec(1), rec(2)]);
+	}
+
+	/// A timestamp the track's millisecond scale can't hold is refused before encoding: a header
+	/// publishes no group, and an op leaves the open group to carry on rather than rolling it.
+	#[test]
+	fn a_timed_track_refuses_an_unconvertible_timestamp() {
+		let (mut producer, mut track) = producer_on(ProducerConfig::default(), timed());
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		let huge = moq_net::Timestamp::from_scale((1 << 61) - 1, 1).unwrap();
+		let largest = |track: &mut moq_net::track::Subscriber| {
+			track.largest().now_or_never().flatten().map(|position| position.group)
+		};
+		let refused = |result: crate::Result<()>| {
+			assert!(matches!(
+				result,
+				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+			));
+		};
+
+		refused(producer.push(moq_net::Timed::from(&rec(1)).at(huge)));
+		assert_eq!(largest(&mut track), None, "a refused header published a group");
+
+		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
+		refused(producer.push(moq_net::Timed::from(&rec(2)).at(huge)));
+		refused(producer.pop(moq_net::Timed::from(1u64).at(huge)));
+		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
+		assert_eq!(largest(&mut track), Some(0), "a refused op rolled the group");
+
 		producer.finish().unwrap();
 		let pushed: Vec<_> = drain(&mut consumer(track))
 			.into_iter()
@@ -250,15 +287,29 @@ mod test {
 		Consumer::new(track, ConsumerConfig::default())
 	}
 
-	/// A track whose timestamp conversion rejects every frame after its group is published.
+	/// A timed track whose first group already starts at ten seconds, so a group that a frame at
+	/// [`rewound`] opens is published by `append_group` and then refused by `write_frame` for
+	/// starting before it. That stands in for any post-`append_group` write failure (the reported
+	/// one is a frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut info = timed();
-		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
-
-		moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", Some(info))
-			.unwrap()
+			.create_track("test", timed())
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(
+				moq_net::Timestamp::from_millis(10_000).unwrap(),
+				bytes::Bytes::from_static(b"{}"),
+			)
+			.unwrap();
+		group.finish().unwrap();
+		track
+	}
+
+	/// Before [`rejecting_track`]'s first group starts, so a group opened at it is refused.
+	fn rewound() -> moq_net::Timestamp {
+		moq_net::Timestamp::from_millis(1_000).unwrap()
 	}
 
 	/// Drain every event currently available without blocking.
@@ -790,9 +841,8 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
-		// Too late for the timescale, so the header group is published before the write fails.
-		let late = moq_net::Timestamp::from_millis(10_000).unwrap();
-		assert!(producer.push(moq_net::Timed::from(&rec(1)).at(late)).is_err());
+		// Rewound past the first group, so the header group is published before the write fails.
+		assert!(producer.push(moq_net::Timed::from(&rec(1)).at(rewound())).is_err());
 		assert_eq!(producer.range(), 0..0);
 		assert!(producer.window().is_empty());
 
@@ -820,6 +870,70 @@ mod test {
 		assert!(matches!(
 			producer.push(&rec(2)),
 			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+	}
+
+	/// A finish that fails is final: the track aborts, and a retry reports the failure rather than
+	/// claiming the track finished.
+	#[test]
+	fn a_failed_finish_is_final() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		// Another handle ends the track, so finishing it fails.
+		track.abort(moq_net::Error::Cancel).unwrap();
+
+		let err = producer.finish().unwrap_err().to_string();
+		assert_eq!(producer.finish().unwrap_err().to_string(), err);
+		assert_eq!(producer.push(&rec(2)).unwrap_err().to_string(), err);
+	}
+
+	/// A track another handle already ended still has its open group closed by this producer's
+	/// finish, which then refuses edits even though the end leaves room below it.
+	#[test]
+	fn finish_closes_the_group_on_a_track_already_ended() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut subscriber = track.subscribe(None).ordered();
+		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		track.finish().unwrap();
+		producer.finish().unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("expected the window group");
+		};
+		while let Poll::Ready(Ok(Some(_))) = group.poll_read_frame(&waiter) {}
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
+			"the group ends rather than waiting for a producer that finished"
+		);
+		assert!(matches!(
+			producer.push(&rec(2)),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+	}
+
+	/// Clones of an aborted producer report the abort's cause, not just a closed track.
+	#[test]
+	fn edits_after_an_abort_report_its_cause() {
+		let (mut producer, _track) = producer(ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		producer.clone().abort(moq_net::Error::Cancel).unwrap();
+
+		assert!(matches!(
+			producer.push(&rec(2)),
+			Err(crate::Error::Net(moq_net::Error::Cancel))
+		));
+		assert!(matches!(
+			producer.finish(),
+			Err(crate::Error::Net(moq_net::Error::Cancel))
 		));
 	}
 
@@ -915,11 +1029,13 @@ mod test {
 
 	#[test]
 	fn cut_finishes_the_group_and_the_next_edit_restates() {
+		// The superseded first group is inspected too, so it must stay fresh.
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", moq_net::track::Info::default())
+			.create_track("test", moq_net::track::Info::default().with_max_age(None))
 			.unwrap();
-		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
+		let replay = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let mut groups = track.subscribe(replay);
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 

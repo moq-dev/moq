@@ -23,9 +23,9 @@ use bytes::{Bytes, BytesMut};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
-	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, SendStream, Side, StreamId, Streams, VarInt,
+	ConnectionId, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, Side, StreamId, VarInt,
 	coding::BufMutExt,
-	connection::{Retransmits, State, StreamsState},
+	connection::{Retransmits, Streams, StreamsState},
 	frame::{self, Frame},
 	packet::{FixedLengthConnectionIdParser, PartialDecode},
 	transport_parameters::{PreferredAddress, TransportParameters},
@@ -52,7 +52,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 
 /// A cid length byte, a grease byte, and a datagram: the unprotected packet header.
 ///
-/// A decoded packet and the coalesced remainder together account for every input byte.
+/// The decoded packet is the bytes just before the coalesced remainder, and any bytes before
+/// it start with a 0-RTT packet, which the decode skips.
 pub fn packet(data: &[u8]) -> bool {
 	let [cid_len, grease, packet @ ..] = data else {
 		return false;
@@ -68,8 +69,14 @@ pub fn packet(data: &[u8]) -> bool {
 		return false;
 	};
 
-	let rest = rest.map_or(0, |rest| rest.len());
-	assert_eq!(len, decoded.len() + rest, "the decode lost bytes");
+	let end = len - rest.map_or(0, |rest| rest.len());
+	let skipped = end.checked_sub(decoded.len()).expect("the decode invented bytes");
+	assert_eq!(decoded.data(), &packet[skipped..end], "the decode moved bytes");
+	// A long header (0x80) with the 0-RTT type (0x10 of the type bits 0x30)
+	assert!(
+		skipped == 0 || packet[0] & 0xb0 == 0x90,
+		"the decode skipped a packet that is not 0-RTT"
+	);
 	true
 }
 
@@ -161,7 +168,6 @@ pub fn streams(data: &[u8]) -> bool {
 
 	let side = if limits.server { Side::Server } else { Side::Client };
 	let dir = if limits.uni { Dir::Uni } else { Dir::Bi };
-	let conn_state = State::Established;
 	let mut pending = Retransmits::default();
 	let mut state = StreamsState::new(
 		side,
@@ -178,14 +184,14 @@ pub fn streams(data: &[u8]) -> bool {
 		};
 		match op {
 			StreamOp::Open => {
-				Streams::new(&mut state, &conn_state).open(dir, Default::default());
+				Streams::new(&mut state, false).open(dir, Default::default());
 			}
 			StreamOp::Accept { uni } => {
 				let dir = if uni { Dir::Uni } else { Dir::Bi };
-				Streams::new(&mut state, &conn_state).accept(dir);
+				Streams::new(&mut state, false).accept(dir);
 			}
 			StreamOp::Finish { id } => {
-				let _ = SendStream::new(StreamId(id), &mut state, &mut pending, &conn_state).finish();
+				let _ = crate::send::Stream::new(StreamId(id), &mut state, &mut pending, false).finish();
 			}
 			StreamOp::ReceivedStopSending { id, error_code } => {
 				let _ = state.received_stop_sending(StreamId(id), varint(error_code));
@@ -204,7 +210,7 @@ pub fn streams(data: &[u8]) -> bool {
 				});
 			}
 			StreamOp::Reset { id } => {
-				let _ = SendStream::new(StreamId(id), &mut state, &mut pending, &conn_state).reset(0u32.into());
+				let _ = crate::send::Stream::new(StreamId(id), &mut state, &mut pending, false).reset(0u32.into());
 			}
 		}
 	}

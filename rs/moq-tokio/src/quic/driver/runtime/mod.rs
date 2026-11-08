@@ -122,6 +122,7 @@ impl Slot {
 	}
 
 	/// Send through `socket` from now on, returning the one it replaces
+	#[cfg(test)]
 	pub(crate) fn replace(&self, socket: Box<dyn AsyncUdpSocket>) -> Option<Box<dyn AsyncUdpSocket>> {
 		let previous = self.socket.write().unwrap().replace(socket);
 		// A sender blocked on the old socket would otherwise wait on it forever.
@@ -133,6 +134,12 @@ impl Slot {
 	pub(crate) fn release(&self) {
 		self.socket.write().unwrap().take();
 		self.blocked.wake_all();
+	}
+
+	/// Whether [`Self::release`] closed the socket
+	#[cfg(feature = "quic")]
+	pub(crate) fn is_released(&self) -> bool {
+		self.socket.read().unwrap().is_none()
 	}
 
 	/// See [`AsyncUdpSocket::max_transmit_segments`]

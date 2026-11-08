@@ -1,5 +1,6 @@
 mod config;
 mod connection;
+mod host;
 mod range;
 mod stats;
 
@@ -13,11 +14,19 @@ pub use stats::Stats;
 use connection::{Role, Rolled};
 use rand::RngExt;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-	moq_tokio::crypto::install_default().expect("failed to install default crypto provider");
+fn main() -> anyhow::Result<()> {
+	let mut config = Config::load()?;
+	match config.command.take() {
+		// The sampler blocks on the host clock, so it runs outside any runtime.
+		Some(config::Command::Host(args)) => host::run(args),
+		None => tokio::runtime::Runtime::new()?.block_on(generate(config)),
+	}
+}
 
-	let config = Config::load()?;
+/// Drive the configured load until the duration elapses or the process is interrupted.
+async fn generate(config: Config) -> anyhow::Result<()> {
+	moq_tokio::crypto::install_default()?;
+
 	anyhow::ensure!(
 		config.client.url.is_some(),
 		"--connect is required (or set it in the TOML file)"
@@ -83,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
 			stats: stats.clone(),
 		};
 		tasks.spawn(async move {
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 			connection::run(ctx).await;
 		});
 	}
@@ -91,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 	let duration = config.duration.map(Into::into);
 	let stop = async move {
 		match duration {
-			Some(d) => moq_clock::sleep(d).await,
+			Some(d) => kio::clock::sleep(d).await,
 			None => std::future::pending::<()>().await,
 		}
 	};

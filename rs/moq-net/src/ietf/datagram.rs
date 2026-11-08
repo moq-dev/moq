@@ -1,6 +1,6 @@
 //! OBJECT_DATAGRAM: one Object carried in a QUIC datagram (draft-22 section 11.2.1).
 //!
-//! Public [`crate::Datagram`] writers emit Object ID 0; private relay metadata preserves
+//! Public [`crate::datagram::Datagram`] writers emit Object ID 0; private relay metadata preserves
 //! other IDs, properties, and status. The Type is a set of flags.
 
 use bytes::Bytes;
@@ -70,29 +70,6 @@ impl ObjectDatagram {
 			kind |= flag::STATUS;
 		}
 		kind
-	}
-}
-
-impl crate::model::datagram::Wire {
-	/// Whether a datagram of this shape is defined, as ingress checks one. Egress resolves
-	/// the Object ID and priority each draft needs.
-	pub(crate) fn defined(&self) -> bool {
-		let shape = ObjectDatagram {
-			track_alias: 0,
-			group_id: 0,
-			object_id: self.object_id,
-			publisher_priority: self.priority,
-			end_of_group: self.end_of_group,
-			properties: self.properties.block.is_some().then(Vec::new),
-			body: match self.status {
-				Some(status) => DatagramBody::Status(status),
-				None => DatagramBody::Payload(Bytes::new()),
-			},
-		};
-		ObjectDatagram::valid(shape.kind())
-			&& self.status.is_none_or(|status| {
-				super::object::status_defined(status) && (self.properties.block.is_none() || status == 0)
-			})
 	}
 }
 
@@ -201,7 +178,7 @@ mod tests {
 		Ok(datagram)
 	}
 
-	const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	fn single(priority: Option<u8>) -> ObjectDatagram {
 		ObjectDatagram {

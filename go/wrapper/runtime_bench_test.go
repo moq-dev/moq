@@ -150,11 +150,15 @@ func benchThroughput(b *testing.B, c benchCase) {
 	origin := moq.NewOriginProducerWithConfig(moq.OriginConfig{CacheCapacityBytes: &cacheBytes})
 	// The origin owns the cache policy; keep it until the case ends.
 	b.Cleanup(func() { runtime.KeepAlive(origin) })
-	publication, err := origin.CreateBroadcast("bench")
+	route, err := origin.Route("bench", moq.RouteOptions{Hidden: true})
 	if err != nil {
 		b.Fatal(err)
 	}
-	broadcast := publication.Broadcast()
+	b.Cleanup(func() { runtime.KeepAlive(route) })
+	broadcast, err := route.Broadcast()
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.Cleanup(func() { _ = broadcast.Close() })
 	tracks := make([]*moq.TrackProducer, c.publishers)
 	consumers := make([]*moq.TrackConsumer, 0, c.publishers*c.subscribers)
@@ -199,7 +203,7 @@ func benchThroughput(b *testing.B, c benchCase) {
 						done <- err
 						return
 					}
-					want := time.Duration(n*frames+f) * time.Microsecond
+					want := moq.Timestamp{Value: uint64(n*frames + f), Scale: 1_000_000}
 					if frame == nil || !bytes.Equal(frame.Payload, payload) || frame.Timestamp == nil || *frame.Timestamp != want {
 						done <- fmt.Errorf("missing, reordered, or corrupt frame %d of round %d", f, n)
 						return
@@ -214,7 +218,7 @@ func benchThroughput(b *testing.B, c benchCase) {
 				return err
 			}
 			for f := range frames {
-				timestamp := time.Duration(n*frames+f) * time.Microsecond
+				timestamp := moq.Timestamp{Value: uint64(n*frames + f), Scale: 1_000_000}
 				if err := group.WriteFrame(moq.Frame{Payload: payload, Timestamp: &timestamp}); err != nil {
 					return err
 				}

@@ -50,9 +50,14 @@ export class Duplicate extends Error {
 	}
 }
 
-// How long a token refused for a reason that may pass waits before its session presents it
-// again, doubling on each refusal up to RETRY_MAX.
-const RETRY_INITIAL = Milli(1000);
+/**
+ * How long a token refused for a reason that may pass waits before its session presents it
+ * again, doubling on each refusal up to RETRY_MAX. A moq-transport refusal that may pass asks
+ * its peer to wait as long.
+ *
+ * @internal
+ */
+export const RETRY_INITIAL = Milli(1000);
 const RETRY_MAX = Milli(30_000);
 
 // Whether a refusal is the acceptor failing to decide rather than its verdict on the token,
@@ -105,7 +110,7 @@ export interface AuthWire {
 	unsupported(stream: Stream, reason: string): Promise<void>;
 }
 
-/** The paths any of `grants` allows. Reduced once, so it costs about the grants' total size. */
+/** The paths any of `grants` allows. Reduced once over all of them, not pairwise. */
 function union(grants: Iterable<Grant>): Grant {
 	const publish: Path.Pattern[] = [];
 	const subscribe: Path.Pattern[] = [];
@@ -151,8 +156,20 @@ class Presented {
 	}
 }
 
+/**
+ * A token {@link Handle.present} returned before its answer.
+ *
+ * @internal
+ */
+export interface Pending extends Credential {
+	/** Resolves once a peer accepts the token, or rejects as {@link Handle.add} does. */
+	readonly answered: Promise<void>;
+	/** Whether any session holds a grant for it now, a draining one included. */
+	readonly held: boolean;
+}
+
 /** A token the application added to a {@link Handle}, presented on every session of it. */
-class Token implements Credential {
+class Token implements Pending {
 	readonly grant = new Signal<Grant | undefined>(undefined);
 	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
@@ -161,14 +178,14 @@ class Token implements Credential {
 	isAnswered = false;
 	ended = false;
 
-	#withdraw: (token: Token) => void;
+	#state: HandleState;
 	#close!: (err: Error | null) => void;
 	#answer!: () => void;
 	#refuse!: (err: Error) => void;
 
-	constructor(bytes: Uint8Array, withdraw: (token: Token) => void) {
+	constructor(bytes: Uint8Array, state: HandleState) {
 		this.bytes = bytes;
-		this.#withdraw = withdraw;
+		this.#state = state;
 		this.closed = new Promise((resolve) => {
 			this.#close = resolve;
 		});
@@ -197,8 +214,12 @@ class Token implements Credential {
 		this.#close(err);
 	}
 
+	get held(): boolean {
+		return this.#state.sessions.some((session) => session.grantOf(this) !== undefined);
+	}
+
 	close() {
-		this.#withdraw(this);
+		this.#state.withdraw(this);
 	}
 }
 
@@ -259,7 +280,7 @@ class HandleState {
 		if (this.own && !this.sessions.some((session) => session.active)) {
 			throw new StreamError(StreamCode.GoingAway);
 		}
-		const token = new Token(bytes, (token) => this.withdraw(token));
+		const token = new Token(bytes, this);
 		this.tokens.add(token);
 		for (const session of [...this.sessions]) session.offer(token);
 		return token;
@@ -354,11 +375,21 @@ export class Handle {
 	 * request whose route names it carries it.
 	 */
 	async add(token: string | Uint8Array): Promise<Credential> {
-		// A copy, so the caller reusing its buffer never changes what a request carries.
-		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
-		const added = stateOf(this).add(bytes);
+		const added = this.present(token);
 		await added.answered;
 		return added;
+	}
+
+	/**
+	 * Present another token like {@link add}, returning it at once with its answer, so it can be
+	 * withdrawn before the peer answers.
+	 *
+	 * @internal
+	 */
+	present(token: string | Uint8Array): Pending {
+		// A copy, so the caller reusing its buffer never changes what a request carries.
+		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
+		return stateOf(this).add(bytes);
 	}
 
 	/**
@@ -440,6 +471,8 @@ class IssuedGrant implements Issued {
 	#stream: Stream;
 	#wire: AuthWire;
 	#writes = Promise.resolve();
+	/** The latest grant, until its write starts: a newer one replaces it rather than queueing. */
+	#queued: Grant | undefined;
 	#done = false;
 
 	constructor(stream: Stream, wire: AuthWire) {
@@ -465,20 +498,31 @@ class IssuedGrant implements Issued {
 			// reply that fails to encode.
 			if (!(err instanceof Unsupported)) console.warn("auth reply not sent", err);
 			this.#done = true;
+			this.#queued = undefined;
 			return this.#wire.unsupported(this.#stream, error(err).message).catch(() => void 0);
 		});
 	}
 
 	update(grant: Grant): void {
 		if (this.#done) return;
-		const expires = grant.expires === undefined ? undefined : grant.expires - wall();
-		this.#write(() =>
-			this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires }),
-		);
+		// A grant still waiting to be written is replaced, so a peer withholding stream credit
+		// holds at most one.
+		const queued = this.#queued !== undefined;
+		this.#queued = grant;
+		if (queued) return;
+		this.#write(async () => {
+			const grant = this.#queued;
+			this.#queued = undefined;
+			if (grant === undefined) return;
+			const expires = grant.expires === undefined ? undefined : grant.expires - wall();
+			await this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires });
+		});
 	}
 
 	revoke(code: SessionCode, reason: string): void {
 		if (this.#done) return;
+		// The peer never saw a grant still queued, so the refusal replaces it.
+		this.#queued = undefined;
 		this.#write(() => this.#wire.refuse(this.#stream, code, reason));
 		this.close();
 	}

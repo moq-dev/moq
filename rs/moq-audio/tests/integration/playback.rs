@@ -11,10 +11,10 @@
 //! Through the dev shell, not bare `cargo`: reaching the default device needs
 //! the ALSA plugin path the shell sets (see `alsaPlugins` in `flake.nix`).
 //! Nothing here asserts on what you hear, so muting the system volume is fine:
-//! the mix is metered before it reaches the device.
+//! the mix is metered before it reaches the device. The tests run on real time
+//! because the device pulls on its own clock, which no mocked clock can drive.
 
 #![cfg(feature = "playback")]
-#![expect(clippy::disallowed_types, reason = "tests read the host clock directly")]
 
 use std::time::Duration;
 
@@ -55,7 +55,7 @@ async fn open() -> playback::Engine {
 
 	// The first pull fills the device's buffer at once, so only a clock that
 	// keeps moving after it shows the device is playing.
-	let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+	let deadline = kio::clock::Instant::now() + Duration::from_secs(10);
 	let mut first = None;
 	loop {
 		let clock = observer.read().expect("an observation").clock;
@@ -63,10 +63,10 @@ async fn open() -> playback::Engine {
 			return engine;
 		}
 		assert!(
-			tokio::time::Instant::now() < deadline,
+			kio::clock::Instant::now() < deadline,
 			"the device never started pulling"
 		);
-		tokio::time::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 	}
 }
 
@@ -118,7 +118,7 @@ async fn plays_a_tone_through_the_default_device() {
 
 	for _ in 0..10 {
 		let _ = sink.write(&tone).expect("write");
-		tokio::time::sleep(Duration::from_millis(100)).await;
+		kio::clock::sleep(Duration::from_millis(100)).await;
 
 		peaked |= sink.peak() > 0.4;
 		// The device is consuming if the queue stays near the target latency
@@ -143,7 +143,7 @@ async fn the_device_buffers_periods_not_seconds() {
 
 	let mut latency = None;
 	for _ in 0..20 {
-		tokio::time::sleep(Duration::from_millis(50)).await;
+		kio::clock::sleep(Duration::from_millis(50)).await;
 		latency = observer.read().expect("an observation").latency;
 		if latency.is_some() {
 			break;
@@ -175,7 +175,7 @@ async fn mixes_two_sinks_and_honors_volume() {
 	for _ in 0..10 {
 		let _ = loud.write(&tone).expect("write");
 		let _ = quiet.write(&tone).expect("write");
-		tokio::time::sleep(Duration::from_millis(100)).await;
+		kio::clock::sleep(Duration::from_millis(100)).await;
 		loud_peak = loud_peak.max(loud.peak());
 		quiet_peak = quiet_peak.max(quiet.peak());
 	}
@@ -215,7 +215,7 @@ async fn switches_devices_without_dropping_sinks() {
 
 		switched += 1;
 		let _ = sink.write(&tone).expect("write");
-		tokio::time::sleep(Duration::from_millis(200)).await;
+		kio::clock::sleep(Duration::from_millis(200)).await;
 		assert!(
 			sink.buffered() < Duration::from_secs(1),
 			"{} did not drain after the switch",
@@ -242,7 +242,7 @@ async fn sink_outlives_its_engine() {
 	let mut peaked = false;
 	for _ in 0..5 {
 		let _ = sink.write(&tone).expect("write");
-		tokio::time::sleep(Duration::from_millis(100)).await;
+		kio::clock::sleep(Duration::from_millis(100)).await;
 		peaked |= sink.peak() > 0.4;
 	}
 

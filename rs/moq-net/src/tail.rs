@@ -12,6 +12,8 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
+use rangemap::RangeSet;
+
 pub(crate) use crate::ledger::{GRACE, grace};
 use crate::{
 	ledger::Ledger,
@@ -25,9 +27,13 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
-	// The publisher ended the subscription, so the track is over even if the session
-	// dies before the tail settles.
+	// The publisher's FIN ended the track, its only end before lite-05, so a session that
+	// dies before the tail settles declares that end before aborting.
 	ended: bool,
+	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under
+	// that update names one only if it was sent before the publisher served the group, so the
+	// group won over it, even once the cache evicted it.
+	finished: RangeSet<u64>,
 }
 
 impl Default for Tail {
@@ -44,15 +50,16 @@ impl Tail {
 			streams: 0,
 			active: 0,
 			ended: false,
+			finished: RangeSet::new(),
 		}
 	}
 
-	/// Record that the publisher ended the subscription.
+	/// Record that the publisher's FIN ended the track.
 	pub fn end(&mut self) {
 		self.ended = true;
 	}
 
-	/// Whether the publisher ended the subscription.
+	/// Whether the publisher's FIN ended the track.
 	pub fn is_ended(&self) -> bool {
 		self.ended
 	}
@@ -71,6 +78,12 @@ impl Tail {
 		self.expire(now);
 	}
 
+	/// Owe `groups` again from `now`: a stale drop that accounted for them was reversed by a
+	/// widening, so the publisher serves or drops them anew.
+	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
+		self.ledger.unaccount(groups, now);
+	}
+
 	/// Restart the age of every gap reaching into `groups`, which the demand newly asks for.
 	pub fn demand(&mut self, groups: Range<u64>, now: Instant) {
 		self.ledger.demand(groups, now);
@@ -86,10 +99,31 @@ impl Tail {
 		self.ledger.covers(groups)
 	}
 
+	/// See [`Ledger::accounted`].
+	pub fn accounted(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		self.ledger.accounted(groups)
+	}
+
 	/// See [`Ledger::folds_at`].
 	#[cfg(test)]
 	pub fn folds_at(&self, group: u64) -> Option<Instant> {
 		self.ledger.folds_at(group, self.ledger.grace())
+	}
+
+	/// The runs of `groups` whose stream finished since the last update was sent.
+	pub fn finished(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		self.finished.overlapping(groups).cloned()
+	}
+
+	/// Forget which streams finished, for an update being sent: a stale drop under an earlier
+	/// one is no verdict, so none needs them.
+	pub fn updated(&mut self) {
+		self.finished = RangeSet::new();
+	}
+
+	/// Whether a data stream whose header arrived is still being read.
+	pub fn is_reading(&self) -> bool {
+		self.active > 0
 	}
 
 	/// Data streams received, whether they finished or were reset.
@@ -101,6 +135,7 @@ impl Tail {
 /// A data stream whose header arrived, holding its subscription's end open until dropped.
 pub(crate) struct Reading {
 	tail: Option<kio::Producer<Tail>>,
+	group: Option<u64>,
 	active: bool,
 }
 
@@ -110,6 +145,7 @@ impl Reading {
 		let Ok(mut state) = tail.write() else {
 			return Self {
 				tail: None,
+				group,
 				active: false,
 			};
 		};
@@ -120,7 +156,17 @@ impl Reading {
 		}
 		Self {
 			tail: Some(tail.clone()),
+			group,
 			active: true,
+		}
+	}
+
+	/// Record that the stream's group arrived whole, once it finished.
+	pub fn finish(&self) {
+		if let (Some(tail), Some(group)) = (&self.tail, self.group)
+			&& let Ok(mut state) = tail.write()
+		{
+			state.finished.insert(group..group.saturating_add(1));
 		}
 	}
 
@@ -195,7 +241,7 @@ mod tests {
 
 	/// The grace gives up on streams that never arrived, never on one still being read:
 	/// its group, or the END_OF_TRACK it carries, still belongs to the track.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn the_grace_waits_for_a_stream_being_read() {
 		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
@@ -203,7 +249,7 @@ mod tests {
 		let mut settle = Settle::new(&runtime, tail.consume());
 		let mut settled = std::pin::pin!(kio::wait(|waiter| settle.poll(waiter, |_| false)));
 
-		moq_clock::sleep(GRACE * 2).await;
+		kio::clock::sleep(GRACE * 2).await;
 		assert!(
 			futures::poll!(settled.as_mut()).is_pending(),
 			"a stream is still being read"
@@ -214,13 +260,13 @@ mod tests {
 	}
 
 	/// A stream that outlives the grace still reaches `complete` once it finishes.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn completion_is_judged_after_the_grace() {
 		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let reading = Reading::open(&tail, Some(0), runtime.now());
 		let mut settle = Settle::new(&runtime, tail.consume());
-		moq_clock::sleep(GRACE * 2).await;
+		kio::clock::sleep(GRACE * 2).await;
 
 		drop(reading);
 		let mut complete = false;
@@ -235,7 +281,7 @@ mod tests {
 	}
 
 	/// A stream parked on another one does not hold the end open.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_parked_stream_does_not_hold_the_end() {
 		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());

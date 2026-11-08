@@ -6,6 +6,8 @@
 	"include": [
 		"analyze.ts",
 		"driver.ts",
+		"ptt.ts",
+		"ptt-analyze.ts",
 		"native.ts",
 		"grade.ts",
 		"record.ts",

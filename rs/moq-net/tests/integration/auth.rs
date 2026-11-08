@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use moq_net::{
-	Client, Error, Hop, Pattern, Patterns, Server, Session, SessionError, StreamError, Version,
+	Client, Error, Pattern, Patterns, Server, Session, SessionError, StreamError, Version,
 	auth::{self, Grant},
 	origin,
 };
@@ -39,13 +39,13 @@ const MOQT_22: &str = "moq-transport-22";
 macro_rules! cases {
 	($($case:ident),* $(,)?) => {
 		mod lite_07 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod moqt_18 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 		mod moqt_22 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_22).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::MOQT_22).await })*
 		}
 	};
 }
@@ -81,23 +81,23 @@ cases!(
 );
 
 /// moq-transport's AUTH_ERROR carries no code that may pass, so only lite retries.
-#[moq_clock::test]
+#[kio::test]
 async fn lite_07_presents_a_transiently_refused_token_again() {
 	a_transient_refusal_is_presented_again(LITE_07).await
 }
 
 /// moq-transport's u16 message size is the one a test can overflow quickly.
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_18_a_grant_too_large_for_one_message_is_unsupported() {
 	a_grant_too_large_for_one_message_is_unsupported(MOQT_18).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_a_grant_too_large_for_one_message_is_unsupported() {
 	a_grant_too_large_for_one_message_is_unsupported(MOQT_22).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_06_has_no_grant() {
 	older_versions_have_no_grant(LITE_06).await
 }
@@ -105,7 +105,7 @@ async fn lite_06_has_no_grant() {
 /// The control for the lite versions without AUTH: on the same barrier, lite-07 has
 /// opened an Auth Stream on each side, which is what makes its absence on them mean
 /// something.
-#[moq_clock::test]
+#[kio::test]
 async fn lite_07_opens_an_auth_stream_per_side() {
 	within(async {
 		let (pair, _broadcast) = connect_announced(LITE_07).await;
@@ -121,30 +121,30 @@ async fn lite_07_opens_an_auth_stream_per_side() {
 	.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_route_auth_renews_its_announce() {
 	a_route_auth_renews_its_announce(MOQT_22).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_route_auth_survives_a_reconnect() {
 	a_route_auth_survives_a_reconnect(MOQT_22).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 	within(async {
 		let (mut pair, client_origin, _server_origin) = connect_route_auth(MOQT_22).await;
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
-		let (first, answer) = pair.client.auth().add("first").await.expect("kept for requests");
-		assert_eq!(answer, auth::Answer::Requests);
-		let broadcast = client_origin.create_broadcast("room/x").unwrap();
-		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let broadcast = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
 		// Ending the grant cancels the announcement. The idle request reads that and the
@@ -153,9 +153,9 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 		drop(first);
 		let (token, _again) = tokens.next().await.expect("offered again after the cancel");
 		assert_eq!(token, b"first");
-		moq_clock::sleep(Duration::from_secs(1)).await;
-		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		broadcast.set_auth(Some(second)).unwrap();
 		let (token, _second) = tokens.next().await.expect("announced again");
 		assert_eq!(token, b"second");
 		assert_eq!(pair.client_transport.close_reason(), None);
@@ -164,7 +164,7 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 	.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 	within(async {
 		let (mut pair, client_origin, _server_origin) = connect_route_auth(MOQT_22).await;
@@ -173,16 +173,17 @@ async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 		let mut tokens = serve(pair.requests.take().unwrap(), |token| {
 			(token == b"first").then(Grant::all)
 		});
-		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.create_broadcast("room/x").unwrap();
-		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let broadcast = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
-		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		broadcast.set_auth(Some(second)).unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		drop(first);
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
@@ -192,14 +193,15 @@ async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 /// An acceptor that accepts a renewal and drops the grant it replaces in one step keeps the
 /// announcement: the old grant ending is not the request ending once its replacement is in.
 /// The replacement then holds it, so an update that stops covering it ends it.
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 	within(async {
 		let (mut pair, client_origin, server_origin) = connect_route_auth(MOQT_22).await;
 		let mut requests = pair.requests.take().unwrap();
-		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.create_broadcast("room/x").unwrap();
-		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let broadcast = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let first = requests
 			.next()
 			.await
@@ -207,14 +209,14 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 			.accept(Grant::all());
 		wait_announced(&server_origin.consume(), "room/x", true).await;
 
-		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
+		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		broadcast.set_auth(Some(second)).unwrap();
 		let renewal = requests.next().await.expect("the renewal's token");
 		assert_eq!(renewal.token().as_ref(), b"second");
 		let second = renewal.accept(Grant::all());
 		drop(first);
 
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			futures::FutureExt::now_or_never(second.closed()).is_none(),
 			"the request ended with the grant its renewal replaced"
@@ -230,7 +232,7 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 
 /// A route auth the peer revokes on its AUTH stream is no longer carried, so its request is
 /// made again without it, even while another token keeps the session's grant unchanged.
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
 	within(async {
 		let client_origin = produce_origin(2);
@@ -250,11 +252,12 @@ async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
 		let (token, _setup) = tokens.next().await.expect("the setup token");
 		assert!(token.is_empty());
 
-		let (first, _) = pair.client.auth().add("first").await.expect("granted");
+		let first = pair.client.auth().add("first").await.expect("granted");
 		let (token, presented) = tokens.next().await.expect("the AUTH stream's token");
 		assert_eq!(token, b"first");
-		let broadcast = client_origin.create_broadcast("room/x").unwrap();
-		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let _route = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let (token, carried) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
@@ -312,9 +315,10 @@ async fn a_route_auth_survives_a_reconnect(version: &'static str) {
 		let server_origin = produce_origin(1);
 		let mut first = connect_route_auth_on(version, &client_origin, &server_origin, Some(handle.clone())).await;
 		let mut tokens = serve(first.requests.take().unwrap(), |_| Some(Grant::all()));
-		let (token, _) = handle.add("first").await.expect("kept for requests");
-		let broadcast = client_origin.create_broadcast("room/x").unwrap();
-		broadcast.announce(origin::Route::default().with_auth(token)).unwrap();
+		let token = handle.add("first").await.expect("kept for requests");
+		let _route = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(token))
+			.unwrap();
 		let (token, _first) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
 
@@ -338,15 +342,16 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 		let (mut pair, client_origin, server_origin) = connect_route_auth(version).await;
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
 
-		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.create_broadcast("room/x").unwrap();
-		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let route = client_origin
+			.route("room/x", origin::RouteOptions::default().with_auth(first))
+			.unwrap();
 		let (token, _first) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
 
-		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
-		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
+		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		route.set_auth(Some(second)).unwrap();
 		let (token, _second) = tokens.next().await.expect("the renewal's token");
 		assert_eq!(token, b"second");
 		wait_announced(&server_origin.consume(), "room/x", true).await;
@@ -358,7 +363,7 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
 	producer
 }
@@ -396,15 +401,15 @@ async fn granted(session: &Session) -> Grant {
 
 /// Wait until `path` is announced (`true`) or retracted (`false`) in `origin`.
 async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
-	let mut announced = origin.announced();
+	let mut announced = origin.routes();
 	let mut live = std::collections::HashSet::new();
-	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::announce::Event| match event {
-		moq_net::announce::Event::Start(update)
-		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update) => {
+	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::origin::RouteEvent| match event {
+		moq_net::origin::RouteEvent::Start(update)
+		| moq_net::origin::RouteEvent::Update(update)
+		| moq_net::origin::RouteEvent::Restart(update) => {
 			live.insert(update.prefix.to_string());
 		}
-		moq_net::announce::Event::End(update) => {
+		moq_net::origin::RouteEvent::End(update) => {
 			live.remove(update.prefix.as_str());
 		}
 	};
@@ -448,7 +453,7 @@ struct Pair {
 	/// The SETUP token the server's handshake read.
 	setup_token: Option<moq_net::setup::Token>,
 	/// Aborting it drops the server's driver without letting it finish.
-	server_driver: moq_clock::sim::JoinHandle<Error>,
+	server_driver: kio::clock::sim::JoinHandle<Error>,
 }
 
 async fn connect(opts: Options) -> Pair {
@@ -504,7 +509,7 @@ async fn connect(opts: Options) -> Pair {
 		// Taken before the session starts, the way a relay verifying tokens would.
 		let requests = opts.server_requests.then(|| handshake.requests());
 		let (session, mut driver) = handshake.ok().await.expect("server accept");
-		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+		let driver = kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}));
 		(session, requests, setup_token, driver)
@@ -529,7 +534,7 @@ fn serve(
 	answer: impl Fn(&[u8]) -> Option<Grant> + 'static,
 ) -> futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, auth::Issued)> {
 	let (tx, rx) = futures::channel::mpsc::unbounded();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		let mut unanswered = Vec::new();
 		while let Some(request) = requests.next().await {
 			let token = request.token().to_vec();
@@ -544,8 +549,8 @@ fn serve(
 	rx
 }
 
-fn within<F: std::future::Future>(f: F) -> impl std::future::Future<Output = Result<F::Output, moq_clock::Elapsed>> {
-	moq_clock::timeout(TEST_TIMEOUT, f)
+fn within<F: std::future::Future>(f: F) -> impl std::future::Future<Output = Result<F::Output, kio::clock::Elapsed>> {
+	kio::clock::timeout(TEST_TIMEOUT, f)
 }
 
 /// Each side's default grant is what the other side's origin handles allow:
@@ -607,13 +612,17 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 		.await;
 
 		// In scope: served, and nothing aborts.
-		let ok = publisher.create_broadcast("baz/ok").unwrap();
-		ok.announce(Default::default()).unwrap();
+		let ok = publisher
+			.route("baz/ok", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		ok.announce().unwrap();
 		wait_announced(&relay.consume(), "baz/ok", true).await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		let bad = publisher.create_broadcast("foo/bar").unwrap();
-		bad.announce(Default::default()).unwrap();
+		let bad = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		bad.announce().unwrap();
 		let err = pair.server.closed().await;
 		assert!(
 			matches!(err, Error::Session(SessionError::Unauthorized)),
@@ -631,8 +640,10 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 async fn a_broadcast_published_before_the_grant_is_checked(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
-		let early = publisher.create_broadcast("foo/bar").unwrap();
-		early.announce(Default::default()).unwrap();
+		let early = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		early.announce().unwrap();
 
 		let pair = connect(Options {
 			version: Some(version),
@@ -671,11 +682,13 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
 		let auth = pair.client.auth();
-		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
+		let pending = kio::clock::sim::spawn(async move { auth.add("new").await });
 		let unanswered = requests.next().await.unwrap();
-		let broadcast = publisher.create_broadcast("foo/bar").unwrap();
-		broadcast.announce(Default::default()).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		let broadcast = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		broadcast.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		use futures::FutureExt;
 		assert!(
 			pair.server.closed().now_or_never().is_none(),
@@ -684,8 +697,10 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 		let _issued = unanswered.accept(grant(&["foo"], &[]));
 		let _token = pending.await.unwrap().unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["baz", "foo"], &[]));
-		let bad = publisher.create_broadcast("still-bad").unwrap();
-		bad.announce(Default::default()).unwrap();
+		let bad = publisher
+			.route("still-bad", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		bad.announce().unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
@@ -713,19 +728,23 @@ async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'s
 		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
 		let auth = pair.client.auth();
-		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
+		let pending = kio::clock::sim::spawn(async move { auth.add("new").await });
 		let unanswered = requests.next().await.unwrap();
-		let withdrawn = publisher.create_broadcast("foo/bar").unwrap();
-		withdrawn.announce(Default::default()).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
-		withdrawn.unannounce();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		let withdrawn = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		withdrawn.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		withdrawn.withdraw();
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let _issued = unanswered.accept(grant(&["other"], &[]));
 		let _token = pending.await.unwrap().unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["baz", "other"], &[]));
 		// Still enforcing: the next uncovered broadcast is the one named.
-		let bad = publisher.create_broadcast("still-bad").unwrap();
-		bad.announce(Default::default()).unwrap();
+		let bad = publisher
+			.route("still-bad", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		bad.announce().unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
@@ -758,15 +777,15 @@ async fn tokens_union_and_withdrawing_one_shrinks_it(version: &'static str) {
 		});
 		let (_, _setup) = issued.next().await.unwrap();
 
-		let (t1, _) = pair.client.auth().add("t1").await.expect("t1 granted");
+		let t1 = pair.client.auth().add("t1").await.expect("t1 granted");
 		let (_, t1_issued) = issued.next().await.unwrap();
 		assert_eq!(t1.grant().peek(), Some(grant(&["b"], &[])));
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
 
-		let a = publisher.create_broadcast("a/x").unwrap();
-		a.announce(Default::default()).unwrap();
-		let b = publisher.create_broadcast("b/y").unwrap();
-		b.announce(Default::default()).unwrap();
+		let a = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		a.announce().unwrap();
+		let b = publisher.route("b/y", moq_net::origin::RouteOptions::hidden()).unwrap();
+		b.announce().unwrap();
 		let served = relay.consume();
 		wait_announced(&served, "a/x", true).await;
 		wait_announced(&served, "b/y", true).await;
@@ -800,7 +819,7 @@ async fn an_update_replaces_one_tokens_grant(version: &'static str) {
 			_ => None,
 		});
 		let (_, _setup) = issued.next().await.unwrap();
-		let (t1, _) = pair.client.auth().add("t1").await.unwrap();
+		let t1 = pair.client.auth().add("t1").await.unwrap();
 		let (_, t1_issued) = issued.next().await.unwrap();
 
 		t1_issued.update(grant(&["c"], &["c"]));
@@ -831,8 +850,8 @@ async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 		});
 		let (_, setup) = issued.next().await.unwrap();
 
-		let a = publisher.create_broadcast("a/x").unwrap();
-		a.announce(Default::default()).unwrap();
+		let a = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		a.announce().unwrap();
 		let served = relay.consume();
 		wait_announced(&served, "a/x", true).await;
 
@@ -843,7 +862,7 @@ async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 		crate::support::announced(&publisher.consume(), "a/x").await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		let (_again, _) = pair.client.auth().add("again").await.expect("re-authorized");
+		let _again = pair.client.auth().add("again").await.expect("re-authorized");
 		wait_announced(&served, "a/x", true).await;
 	})
 	.await
@@ -861,7 +880,7 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		moq_clock::sim::spawn(async move {
+		kio::clock::sim::spawn(async move {
 			while let Some(request) = requests.next().await {
 				match request.token().is_empty() {
 					true => {
@@ -896,7 +915,7 @@ async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		moq_clock::sim::spawn(async move {
+		kio::clock::sim::spawn(async move {
 			while let Some(request) = requests.next().await {
 				request.reject(SessionError::Unauthorized, "bad credential");
 			}
@@ -936,7 +955,7 @@ async fn the_setup_token_is_the_connection_credential(version: &'static str) {
 
 /// A lite version without the Token parameter carries none, so the caller's URL query
 /// has to.
-#[moq_clock::test]
+#[kio::test]
 async fn lite_06_sends_no_setup_token() {
 	within(async {
 		let pair = connect(Options {
@@ -966,9 +985,9 @@ async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 		let first = requests.next().await.expect("setup token");
 		drop(first.accept(Grant::default()));
 		let auth = pair.client.auth();
-		let pending = moq_clock::sim::spawn(async move { auth.add("queued").await.map(drop) });
+		let pending = kio::clock::sim::spawn(async move { auth.add("queued").await.map(drop) });
 		// Give the second token time to reach the queue before dropping it.
-		moq_clock::sleep(Duration::from_millis(50)).await;
+		kio::clock::sleep(Duration::from_millis(50)).await;
 		drop(requests);
 
 		let err = pending.await.unwrap().expect_err("refused");
@@ -1053,7 +1072,7 @@ async fn older_versions_have_no_grant(version: &'static str) {
 		match version.starts_with("moq-lite") {
 			true => assert!(matches!(pair.client.auth().add("token").await, Err(Error::Unsupported))),
 			false => {
-				let (auth, _) = pair.client.auth().add("token").await.expect("kept for requests");
+				let auth = pair.client.auth().add("token").await.expect("kept for requests");
 				assert_eq!(auth.grant().peek(), None);
 				assert_eq!(pair.client.auth().grant().peek(), None);
 			}
@@ -1079,9 +1098,9 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 	for scope in ["ch1", "ch1/**"] {
 		within(async {
 			let relay = produce_origin(1);
-			let broadcast = relay.create_broadcast("ch1").unwrap();
-			let track = broadcast.create_track("video", timed()).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = relay.route("ch1", moq_net::origin::RouteOptions::hidden()).unwrap();
+			let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+			broadcast.announce().unwrap();
 
 			let received = produce_origin(2);
 			let scope = pattern_set(&[scope]);
@@ -1103,8 +1122,10 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 				.unwrap()
 				.available()
 				.await
+				.unwrap()
 				.unwrap();
-			let prefs = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+			let prefs = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 			sub.recv_group().await.unwrap().expect("a group");
 
@@ -1119,10 +1140,12 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 /// Connect on `version` and wait for a client announcement to reach the server. Each
 /// driver presents its setup token before it handles any other stream, so by then a
 /// version with AUTH has opened its Auth Stream on both sides.
-async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Publication) {
+async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Route) {
 	let client_origin = produce_origin(2);
-	let broadcast = client_origin.create_broadcast("room/x").unwrap();
-	broadcast.announce(Default::default()).unwrap();
+	let broadcast = client_origin
+		.route("room/x", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	broadcast.announce().unwrap();
 	let server_origin = produce_origin(1);
 	let pair = connect(Options {
 		version: Some(version),
@@ -1138,9 +1161,11 @@ async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Pub
 async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast("room/x").unwrap();
-		let published = broadcast.create_track("video", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = publisher
+			.route("room/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let published = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 		let received = produce_origin(2);
 		let mut pair = connect(Options {
 			version: Some(version),
@@ -1164,6 +1189,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut group = published.append_group().unwrap();
 		group
@@ -1201,18 +1227,25 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		// The server publishes room/x to the client; the client publishes up/y to the server.
 		let server_origin = produce_origin(1);
-		let down = server_origin.create_broadcast("room/x").unwrap();
-		let down_track = down.create_track("video", timed()).unwrap();
-		down.announce(Default::default()).unwrap();
+		let down = server_origin
+			.route("room/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let down_track = down.broadcast().create_track("video", timed()).unwrap();
+		down.announce().unwrap();
 
 		let client_origin = produce_origin(2);
-		let up = client_origin.create_broadcast("up/y").unwrap();
-		let up_track = up.create_track("video", timed()).unwrap();
-		up.announce(Default::default()).unwrap();
+		let up = client_origin
+			.route("up/y", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let up_track = up.broadcast().create_track("video", timed()).unwrap();
+		up.announce().unwrap();
 
 		let received = produce_origin(3);
 		let mut pair = connect(Options {
@@ -1241,6 +1274,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut down_sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 		down_sub.recv_group().await.unwrap().unwrap();
@@ -1251,6 +1285,7 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut up_sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 		up_sub.recv_group().await.unwrap().unwrap();
@@ -1287,6 +1322,79 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 			let count = resets.iter().filter(|&&code| code == unauthorized).count();
 			assert_eq!(count, 2, "both subscriptions reset with UNAUTHORIZED: {resets:x?}");
 		}
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Losing a grant cancels a datagram track the peer publishes to us, and leaves the session up.
+#[kio::test]
+async fn lite_07_a_revoked_grant_cancels_its_datagram_subscriptions() {
+	within(async {
+		let server_origin = produce_origin(1);
+		let down = server_origin
+			.route("room/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mut audio = down
+			.broadcast()
+			.create_datagrams(
+				"audio",
+				moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		down.announce().unwrap();
+
+		let received = produce_origin(3);
+		let mut pair = connect(Options {
+			version: Some(LITE_07),
+			client_publish: Some(produce_origin(2)),
+			client_subscribe: Some(received.clone()),
+			server_publish: Some(server_origin.clone()),
+			server_subscribe: Some(server_origin.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| {
+			token.is_empty().then(|| grant(&["up"], &["room"]))
+		});
+		let (_, setup) = issued.next().await.unwrap();
+
+		let remote = received
+			.consume()
+			.follow("room/x", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let mut reader = remote.datagrams("audio").unwrap();
+		reader.info().await.unwrap();
+		// Sent until one arrives: a datagram is best-effort.
+		let first = loop {
+			audio
+				.append(moq_net::Timestamp::from_millis(0).unwrap(), b"x".as_ref())
+				.unwrap();
+			if let Some(Ok(datagram)) = futures::FutureExt::now_or_never(reader.recv()) {
+				break datagram;
+			}
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		};
+		assert!(first.is_some());
+
+		setup.revoke(SessionError::Unauthorized, "expired");
+		let err = loop {
+			match reader.recv().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("datagram subscription finished instead of ending"),
+				Err(err) => break err,
+			}
+		};
+		assert!(
+			matches!(err, Error::Unauthorized | Error::Stream(StreamError::Unauthorized)),
+			"{err:?}"
+		);
+		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
 	.expect("timed out");
@@ -1347,7 +1455,7 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 			Some(grant(if token.is_empty() { &["a"] } else { &["b"] }, &[]))
 		});
 		let (_, _setup) = issued.next().await.unwrap();
-		let (token, _) = pair.client.auth().add("update").await.unwrap();
+		let token = pair.client.auth().add("update").await.unwrap();
 		let (_, updated) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
 		let huge: Patterns = (0..20)
@@ -1405,7 +1513,7 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 
 		let mut held = Vec::new();
 		for token in ["exact", "wildcard", "mixed", "root"] {
-			let (added, _) = pair.client.auth().add(token).await.expect(token);
+			let added = pair.client.auth().add(token).await.expect(token);
 			assert_eq!(added.grant().peek(), table(token.as_bytes()), "{token}");
 			held.push(added);
 		}
@@ -1433,15 +1541,17 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 
 		let mut held = Vec::new();
 		for path in ["room/alice/cam", "b.hang", "deep/x/b.hang"] {
-			let broadcast = publisher.create_broadcast(path).unwrap();
-			broadcast.announce(Default::default()).unwrap();
+			let broadcast = publisher.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
+			broadcast.announce().unwrap();
 			wait_announced(&relay.consume(), path, true).await;
 			held.push(broadcast);
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		let bad = publisher.create_broadcast("room/alice/mic").unwrap();
-		bad.announce(Default::default()).unwrap();
+		let bad = publisher
+			.route("room/alice/mic", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		bad.announce().unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
@@ -1461,8 +1571,10 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
-		let early = publisher.create_broadcast("foo/bar").unwrap();
-		early.announce(Default::default()).unwrap();
+		let early = publisher
+			.route("foo/bar", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		early.announce().unwrap();
 
 		// The relay accepts anything; only the grant it tells the client is narrow.
 		let relay = produce_origin(1);
@@ -1478,7 +1590,7 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 		// Hold the answer, so the peer's discovery request is in long before the grant.
 		let mut requests = pair.requests.take().unwrap();
 		let setup = requests.next().await.expect("setup token");
-		let leaked = moq_clock::timeout(
+		let leaked = kio::clock::timeout(
 			Duration::from_millis(100),
 			wait_announced(&relay.consume(), "foo/bar", true),
 		)
@@ -1501,8 +1613,10 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 	within(async {
 		let local = produce_origin(2);
 		let relay = produce_origin(1);
-		let remote = relay.create_broadcast("remote/x").unwrap();
-		remote.announce(Default::default()).unwrap();
+		let remote = relay
+			.route("remote/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		remote.announce().unwrap();
 
 		let pair = connect(Options {
 			version: Some(version),
@@ -1518,8 +1632,8 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 		wait_announced(&local.consume(), "remote/x", true).await;
 
 		// The first broadcast refused is the one we published, not the one we received.
-		let bad = local.create_broadcast("bad/x").unwrap();
-		bad.announce(Default::default()).unwrap();
+		let bad = local.route("bad/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		bad.announce().unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
@@ -1536,16 +1650,16 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 macro_rules! limit_cases {
 	($($case:ident),* $(,)?) => {
 		mod limit_lite_05 {
-			$(#[moq_clock::test] async fn $case() { super::$case("moq-lite-05").await })*
+			$(#[kio::test] async fn $case() { super::$case("moq-lite-05").await })*
 		}
 		mod limit_lite_06 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_06).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::LITE_06).await })*
 		}
 		mod limit_lite_07 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod limit_moqt_18 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 	};
 }
@@ -1557,17 +1671,17 @@ limit_cases!(
 	a_widening_brings_back_what_the_peer_published,
 );
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_05_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight("moq-lite-05").await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_06_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_06).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_07).await
 }
@@ -1600,15 +1714,22 @@ async fn ended(sub: &mut moq_net::track::Subscriber) -> Error {
 async fn a_narrowing_deafens_one_path(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		let relay = produce_origin(1);
-		let audio = relay.create_broadcast("room/alice/audio").unwrap();
-		let audio_track = audio.create_track("opus", timed()).unwrap();
-		audio.announce(Default::default()).unwrap();
-		let video = relay.create_broadcast("room/alice/video").unwrap();
-		let video_track = video.create_track("h264", timed()).unwrap();
-		video.announce(Default::default()).unwrap();
+		let audio = relay
+			.route("room/alice/audio", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let audio_track = audio.broadcast().create_track("opus", timed()).unwrap();
+		audio.announce().unwrap();
+		let video = relay
+			.route("room/alice/video", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let video_track = video.broadcast().create_track("h264", timed()).unwrap();
+		video.announce().unwrap();
 
 		let received = produce_origin(3);
 		let pair = connect(Options {
@@ -1630,6 +1751,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut audio_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		audio_sub.recv_group().await.unwrap().unwrap();
@@ -1639,6 +1761,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut video_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		video_sub.recv_group().await.unwrap().unwrap();
@@ -1685,15 +1808,22 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		let client_origin = produce_origin(2);
-		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
-		let mic_track = mic.create_track("opus", timed()).unwrap();
-		mic.announce(Default::default()).unwrap();
-		let cam = client_origin.create_broadcast("room/bob/cam").unwrap();
-		let cam_track = cam.create_track("h264", timed()).unwrap();
-		cam.announce(Default::default()).unwrap();
+		let mic = client_origin
+			.route("room/bob/mic", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mic_track = mic.broadcast().create_track("opus", timed()).unwrap();
+		mic.announce().unwrap();
+		let cam = client_origin
+			.route("room/bob/cam", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let cam_track = cam.broadcast().create_track("h264", timed()).unwrap();
+		cam.announce().unwrap();
 
 		let relay = produce_origin(1);
 		let pair = connect(Options {
@@ -1715,6 +1845,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut mic_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		mic_sub.recv_group().await.unwrap().unwrap();
@@ -1724,6 +1855,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut cam_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		cam_sub.recv_group().await.unwrap().unwrap();
@@ -1753,9 +1885,9 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 
 		let relay = produce_origin(1);
-		let broadcast = relay.create_broadcast("room/x").unwrap();
-		let track = broadcast.create_track("video", timed()).unwrap();
-		broadcast.announce(Default::default()).unwrap();
+		let broadcast = relay.route("room/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
 		// The group stays open, so the fetch is still in flight when the grant narrows.
 		let mut group = track.append_group().unwrap();
 		group.write_frame(ts(0), b"first".as_ref()).unwrap();
@@ -1775,6 +1907,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut fetched = remote.track("video").unwrap().fetch_group(0, None).await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().expect("first frame");
@@ -1819,12 +1952,17 @@ async fn recv_through(sub: &mut moq_net::track::Subscriber, sequence: u64) {
 async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		let relay = produce_origin(1);
-		let audio = relay.create_broadcast("room/alice/audio").unwrap();
-		let audio_track = audio.create_track("opus", timed()).unwrap();
-		audio.announce(Default::default()).unwrap();
+		let audio = relay
+			.route("room/alice/audio", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let audio_track = audio.broadcast().create_track("opus", timed()).unwrap();
+		audio.announce().unwrap();
 
 		let received = produce_origin(3);
 		let pair = connect(Options {
@@ -1843,6 +1981,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		sub.recv_group().await.unwrap().unwrap();
@@ -1861,6 +2000,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		let mut group = audio_track.append_group().unwrap();
@@ -1888,12 +2028,17 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let prefs = || {
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
+		};
 
 		let client_origin = produce_origin(2);
-		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
-		let mic_track = mic.create_track("opus", timed()).unwrap();
-		mic.announce(Default::default()).unwrap();
+		let mic = client_origin
+			.route("room/bob/mic", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let mic_track = mic.broadcast().create_track("opus", timed()).unwrap();
+		mic.announce().unwrap();
 
 		let relay = produce_origin(1);
 		let pair = connect(Options {
@@ -1916,6 +2061,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 			.unwrap()
 			.available()
 			.await
+			.unwrap()
 			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		let mut group = mic_track.append_group().unwrap();
@@ -1935,7 +2081,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 async fn a_shared_handle_presents_its_token_on_every_session(version: &'static str) {
 	within(async {
 		let handle = auth::Handle::new();
-		let added = moq_clock::sim::spawn({
+		let added = kio::clock::sim::spawn({
 			let handle = handle.clone();
 			async move { handle.add("token").await }
 		});
@@ -1952,8 +2098,7 @@ async fn a_shared_handle_presents_its_token_on_every_session(version: &'static s
 			b"" => Some(Grant::default()),
 			_ => Some(grant(&["first"], &[])),
 		});
-		let (token, answer) = added.await.expect("joined").expect("granted on the first session");
-		assert_eq!(answer, auth::Answer::Granted);
+		let token = added.await.expect("joined").expect("granted on the first session");
 		let _first = presented(&mut tokens).await;
 		wait_for(token.grant(), |g| g == &Some(grant(&["first"], &[]))).await;
 
@@ -2010,7 +2155,7 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		};
 		let mut first = connect(options()).await;
 		let mut first_requests = first.requests.take().unwrap();
-		let added = moq_clock::sim::spawn({
+		let added = kio::clock::sim::spawn({
 			let handle = handle.clone();
 			async move { handle.add("token").await }
 		});
@@ -2045,19 +2190,19 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		let _second_issued = presented(&mut second_tokens).await;
 		let _token = added.await.expect("joined").expect("granted on the second session");
 
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			unanswered.closed().now_or_never().is_none(),
 			"the draining session withdrew its unanswered token"
 		);
 		let first_grant = unanswered.accept(Grant::all());
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			first_grant.closed().now_or_never().is_none(),
 			"the draining session dropped its late grant"
 		);
 
-		let (later, _) = handle.add("later").await.expect("granted on the second session");
+		let later = handle.add("later").await.expect("granted on the second session");
 		let (token, _later) = second_tokens.next().await.expect("the active session presents it");
 		assert_eq!(token, b"later");
 		assert!(
@@ -2093,7 +2238,7 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 		let mut adding = Box::pin(handle.add("late"));
 		assert!(adding.as_mut().now_or_never().is_none());
 		first.client.drain().send(moq_net::goaway::Goaway::new()).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			first_tokens.next().now_or_never().is_none(),
 			"the draining session presented a new token"
@@ -2107,8 +2252,7 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 		];
 		tokens.sort();
 		assert_eq!(tokens, [b"".to_vec(), b"late".to_vec()]);
-		let (_late, answer) = adding.await.expect("granted on the successor");
-		assert_eq!(answer, auth::Answer::Granted);
+		let _late = adding.await.expect("granted on the successor");
 	})
 	.await
 	.expect("timed out");
@@ -2127,7 +2271,7 @@ async fn a_transient_refusal_is_presented_again(version: &'static str) {
 		.await;
 		let mut requests = pair.requests.take().unwrap();
 		let (tx, mut issued) = futures::channel::mpsc::unbounded();
-		moq_clock::sim::spawn(async move {
+		kio::clock::sim::spawn(async move {
 			let mut refused = false;
 			while let Some(request) = requests.next().await {
 				if request.token().is_empty() || refused {
@@ -2138,8 +2282,7 @@ async fn a_transient_refusal_is_presented_again(version: &'static str) {
 				}
 			}
 		});
-		let (token, answer) = pair.client.auth().add("token").await.expect("granted on the retry");
-		assert_eq!(answer, auth::Answer::Granted);
+		let token = pair.client.auth().add("token").await.expect("granted on the retry");
 		assert_eq!(token.grant().peek(), Some(Grant::default()));
 		let _setup = issued.next().await;
 		let _token = issued.next().await;

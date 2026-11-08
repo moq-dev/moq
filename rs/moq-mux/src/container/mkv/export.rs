@@ -26,7 +26,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// re-encodes everything as EBML + Segment + Tracks + Cluster/SimpleBlock tags ready
 /// for any Matroska-aware consumer (ffplay, libwebm, browser MSE for WebM).
 ///
-/// Use [`next`](Self::next) to pull byte chunks. The first chunk is the file
+/// Use [`poll_next`](Self::poll_next) to pull byte chunks. The first chunk is the file
 /// header (EBML + unknown-size Segment + Info + Tracks); subsequent chunks are
 /// complete Cluster elements. By default a Cluster contains one GOP (rolled
 /// over on each video keyframe, or on i16 timestamp overflow);
@@ -83,9 +83,9 @@ struct MkvTrack {
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
 	// When the source was subscribed: nothing it delivers reached the export before then.
-	subscribed: moq_clock::Instant,
+	subscribed: kio::clock::Instant,
 	// The latest arrival read from the source, which settles the frames held for their DTS.
-	latest: moq_clock::Instant,
+	latest: kio::clock::Instant,
 	finished: bool,
 	track_number: u64,
 	kind: TrackKind,
@@ -107,8 +107,8 @@ impl MkvTrack {
 			reorder: None,
 			source,
 			pending: None,
-			subscribed: moq_clock::now(),
-			latest: moq_clock::Instant::ZERO,
+			subscribed: kio::clock::now(),
+			latest: kio::clock::Instant::ZERO,
 			finished: false,
 			track_number,
 			kind,
@@ -131,7 +131,7 @@ impl MkvTrack {
 		self.reorder = None;
 		self.source = source.continuing(&self.source);
 		self.finished = false;
-		self.subscribed = moq_clock::now();
+		self.subscribed = kio::clock::now();
 		self.moved = true;
 		Ok(())
 	}
@@ -185,8 +185,8 @@ impl MkvTrack {
 		match &mut self.declared {
 			Some(clock) => clock.push(arrival, pts)?,
 			None => {
-				let arrived = arrival.arrived;
-				self.clock.push(arrival, pts, arrived)
+				let (arrived, bytes) = (arrival.arrived, arrival.bytes);
+				self.clock.push(arrival, pts, arrived, bytes)
 			}
 		}
 		self.release(name, jitter, false)
@@ -208,9 +208,9 @@ impl MkvTrack {
 				VideoCodec::H264(_) => {
 					crate::codec::h264::sps_reorder(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
 				}
-				VideoCodec::H265(_) => {
-					crate::codec::h265::sps_reorder(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
-				}
+				VideoCodec::H265(_) => crate::codec::h265::sps_reorder(
+					crate::codec::h265::base_sps(&crate::codec::h265::Hvcc::parse(description).ok()?.sps).ok()??,
+				),
 				_ => None,
 			});
 			let (floor, lookahead) = declared.map_or((0, 0), |reorder| reorder.timing(config.framerate));
@@ -227,7 +227,9 @@ impl MkvTrack {
 		loop {
 			let settle = match flush {
 				true => Settle::All,
-				false => self.clock.settle(lookahead, self.latest, jitter.delay()),
+				false => self
+					.clock
+					.settle(lookahead, self.latest, jitter.delay(), crate::jitter::MAX_BYTES),
 			};
 			let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, settle) else {
 				break;
@@ -372,17 +374,13 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Get the next byte chunk.
-	pub async fn next(&mut self) -> Result<Option<Bytes>> {
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next MKV byte chunk, or `None` once the export ends.
+	/// Get the next MKV byte chunk, or `None` once the export ends.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		// 1. Drain catalog updates.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
-				Poll::Ready(Some(snapshot)) => self.update_catalog(snapshot.media())?,
+				Poll::Ready(Some(snapshot)) => self.update_catalog(snapshot.without_ext())?,
 				Poll::Ready(None) => {
 					self.catalog = None;
 					break;
@@ -431,7 +429,7 @@ impl<S: Stream> Export<S> {
 		}
 
 		// 6. End-of-stream: flush any open cluster when every subscribed track
-		// has finished. We don't require catalog EOS here — a long-lived
+		// has finished. We don't require catalog EOS here - a long-lived
 		// producer may keep the catalog open even after every active track has
 		// ended, and we'd rather flush the cluster than hold the last frames.
 		if !self.tracks.is_empty() && self.tracks.values().all(|t| t.finished) {
@@ -451,7 +449,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	#[cfg(test)]
-	pub(super) fn next_deadline(&self) -> Option<moq_clock::Instant> {
+	pub(super) fn next_deadline(&self) -> Option<kio::clock::Instant> {
 		self.jitter.next_deadline()
 	}
 
@@ -477,11 +475,12 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Read each track until it has a frame due, preserving ingress timing before buffering.
+	/// Read each track within its jitter window, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> Result<()> {
 		for (name, track) in &mut self.tracks {
 			loop {
-				if self.header_emitted && self.jitter.full(name) {
+				if self.header_emitted && self.jitter.full(name, waiter) {
+					let _ = track.source.poll_received(waiter);
 					break;
 				}
 				if !self.header_emitted && track.pending.is_some() {
@@ -532,12 +531,12 @@ impl<S: Stream> Export<S> {
 					}
 					crate::jitter::Arrival {
 						arrived,
-						read: moq_clock::now(),
+						read: kio::clock::now(),
 						decode: frame.timestamp.into(),
 						restart: track.source.markers(),
-						skip: track.source.skips(),
 						sync: track.kind == TrackKind::Audio || frame.keyframe,
 						leading: false,
+						bytes: frame.payload.len() + name.len(),
 						item: frame,
 					}
 				};
@@ -784,7 +783,7 @@ impl<S: Stream> Export<S> {
 			Some(cluster) => {
 				let overflow = !cluster.fits(frame_ticks);
 				// Roll on a video keyframe only once the cluster already has video
-				// frames in it — otherwise audio that arrived before the first
+				// frames in it - otherwise audio that arrived before the first
 				// keyframe would split into its own (un-renderable) cluster.
 				let gop_boundary = is_video && keyframe && cluster.has_video;
 				let too_long = self

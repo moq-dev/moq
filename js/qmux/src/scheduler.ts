@@ -3,13 +3,13 @@
  * A single writer loop owns the socket. Frames are written in priority order:
  * control frames (flow control, resets, pings, close) always preempt stream
  * data, and among stream data the highest `sendOrder` wins (W3C WebTransport
- * convention — larger value is sent first), with round-robin among equal
+ * convention - larger value is sent first), with round-robin among equal
  * priorities. Prioritization only bites under backpressure; when the sink has
  * room every frame is written as soon as it's queued.
  *
- * The backpressure source is abstracted behind {@link SendSink} so we can use
- * `WebSocketStream`'s real (event-driven) backpressure where available and fall
- * back to polling `WebSocket.bufferedAmount` everywhere else.
+ * The backpressure source is abstracted behind {@link SendSink}: the ponyfill
+ * reports its `bufferedAmount` backlog itself, while {@link BacklogSink} counts
+ * the backlog of any other writable, such as the native `WebSocketStream`.
  */
 
 /** A write sink over the underlying socket, exposing backpressure. */
@@ -18,7 +18,7 @@ export interface SendSink {
 	 *  high-water mark. Rejects if the socket is closed/errored. */
 	ready(): Promise<void>;
 	/** Write bytes to the socket, resolving once the write is accepted. Rejects
-	 *  if the write fails — the scheduler must observe this rather than resolve
+	 *  if the write fails - the scheduler must observe this rather than resolve
 	 *  the frame's promise as if it succeeded. */
 	write(bytes: Uint8Array): Promise<void>;
 	/** Synchronous backpressure probe: true when the sink can take a write now
@@ -26,17 +26,26 @@ export interface SendSink {
 	 *  instant the transport starts queuing, rather than letting them pile up
 	 *  behind a stream/control backlog and arrive stale. */
 	wantsMore(): boolean;
+	/** Resolve once every accepted write has reached the socket. Rejects if a
+	 *  write failed. */
+	flush(): Promise<void>;
+	/** Settles when the socket's writable closes; rejects once it fails, even
+	 *  after a write it already accepted. */
+	readonly closed: Promise<void>;
 }
 
-/** Backpressure-aware sink over a `WebSocketStream` writable. The writable's
- *  `writer.ready` is the backpressure signal — native `WebSocketStream` ties it
- *  to the real send buffer, while the `WebSocketStream` ponyfill drives
- *  it from `bufferedAmount` against a (resizable) high-water mark. */
+/** Sink over a writable whose `desiredSize` already tracks a byte backlog, as
+ *  the `WebSocketStream` ponyfill's does from `bufferedAmount` against its
+ *  (resizable) high-water mark. Each write resolves once the socket holds it. */
 export class WritableStreamSink implements SendSink {
 	#writer: WritableStreamDefaultWriter<Uint8Array>;
 
 	constructor(writable: WritableStream<Uint8Array>) {
 		this.#writer = writable.getWriter();
+	}
+
+	get closed(): Promise<void> {
+		return this.#writer.closed;
 	}
 
 	ready(): Promise<void> {
@@ -51,10 +60,84 @@ export class WritableStreamSink implements SendSink {
 	wantsMore(): boolean {
 		// desiredSize > 0 means below the high-water mark (room to write); 0 or
 		// negative means backpressured; null means the stream errored/closed.
-		// Native WebSocketStream ties this to the real send buffer; the ponyfill
-		// derives it from bufferedAmount, so both report true backpressure.
 		const desired = this.#writer.desiredSize;
 		return desired !== null && desired > 0;
+	}
+
+	flush(): Promise<void> {
+		// A resolved write is already in the socket, which flushes it before closing.
+		return Promise.resolve();
+	}
+}
+
+/** Sink over a writable whose own backpressure counts writes rather than bytes,
+ *  such as the native `WebSocketStream`: its `desiredSize` reaches 0 while any
+ *  one write is in flight, however idle the socket. This hands each write over
+ *  at once and counts the bytes whose write has yet to complete as the send
+ *  backlog, held under a resizable high-water mark. */
+export class BacklogSink implements SendSink {
+	#writer: WritableStreamDefaultWriter<Uint8Array>;
+	#highWaterMark: number;
+	#pending = 0;
+	#error?: Error;
+	// Settles whenever the backlog shrinks or a write fails, then is replaced.
+	#changed = Promise.withResolvers<void>();
+
+	constructor(writable: WritableStream<Uint8Array>, highWaterMark: number) {
+		this.#writer = writable.getWriter();
+		this.#highWaterMark = highWaterMark;
+	}
+
+	get closed(): Promise<void> {
+		return this.#writer.closed;
+	}
+
+	/** Resize the high-water mark (bytes), waking a write parked behind the old one. */
+	setHighWaterMark(bytes: number): void {
+		this.#highWaterMark = bytes;
+		this.#notify();
+	}
+
+	async ready(): Promise<void> {
+		for (;;) {
+			if (this.#error) throw this.#error;
+			if (this.#pending <= this.#highWaterMark) return;
+			await this.#changed.promise;
+		}
+	}
+
+	write(bytes: Uint8Array): Promise<void> {
+		if (this.#error) return Promise.reject(this.#error);
+		const size = bytes.byteLength;
+		this.#pending += size;
+		this.#writer.write(bytes).then(
+			() => {
+				this.#pending -= size;
+				this.#notify();
+			},
+			(err) => {
+				this.#error ??= err instanceof Error ? err : new Error(String(err));
+				this.#notify();
+			},
+		);
+		return this.ready();
+	}
+
+	wantsMore(): boolean {
+		return !this.#error && this.#pending <= this.#highWaterMark;
+	}
+
+	async flush(): Promise<void> {
+		for (;;) {
+			if (this.#error) throw this.#error;
+			if (this.#pending === 0) return;
+			await this.#changed.promise;
+		}
+	}
+
+	#notify(): void {
+		this.#changed.resolve();
+		this.#changed = Promise.withResolvers<void>();
 	}
 }
 
@@ -74,6 +157,9 @@ export interface SchedulerOptions {
 	onActivity?: () => void;
 	/** Called once if the sink fails, after which nothing more is sent. */
 	onFail?: (err: Error) => void;
+	/** Encodes the next pending update (MAX_DATA, MAX_STREAMS, MAX_STREAM_DATA), or
+	 *  returns undefined once none is owed. Polled after {@link SendScheduler.notify}. */
+	pending?: () => Uint8Array | undefined;
 }
 
 /** Default `sendOrder` for streams that don't set one. */
@@ -89,13 +175,19 @@ export class SendScheduler {
 	#onActivity: () => void;
 	#onFail: (err: Error) => void;
 	#closed?: Error;
+	#failed = false;
 
 	// Control frames preempt all stream data, FIFO among themselves. Lossless and
-	// uncapped, so whatever the peer can trigger here must be bounded by design:
-	// at most one RESET_STREAM or STOP_SENDING per stream, and flow-control and
-	// stream-count updates only as the peer spends credit it has already received
-	// (which a peer not reading our writes never gets more of).
+	// uncapped, so whatever the peer can trigger here must be bounded by design: a
+	// stream's state allows it at most one RESET_STREAM and one STOP_SENDING, and the
+	// peer opens streams only as fast as it reads the MAX_STREAMS we send.
 	#control: Uint8Array[] = [];
+
+	// Window updates are not queued at all: the session flags them and this polls
+	// `#pending` for the newest values when it next writes, so one is owed at most per
+	// window however often credit returns.
+	#pending: () => Uint8Array | undefined;
+	#notified = false;
 
 	// Control frames where only the newest matters (QX_PING requests and
 	// responses), keyed by kind. A newer frame replaces one still unsent, so a peer
@@ -103,7 +195,7 @@ export class SendScheduler {
 	#latest = new Map<string, Uint8Array>();
 
 	// Datagrams: serviced after control, ahead of stream data. Bounded and lossy
-	// (unlike #control) since unreliable datagrams are meant to be droppable —
+	// (unlike #control) since unreliable datagrams are meant to be droppable -
 	// shed on transport backpressure or a full lane.
 	#datagrams: Uint8Array[] = [];
 
@@ -124,14 +216,28 @@ export class SendScheduler {
 		this.#sink = sink;
 		this.#onActivity = options?.onActivity ?? (() => {});
 		this.#onFail = options?.onFail ?? (() => {});
-		// Start the writer loop. It never rejects — failures are captured by #fail.
+		this.#pending = options?.pending ?? (() => undefined);
+		// Start the writer loop. It never rejects - failures are captured by #fail.
 		void this.#run(options?.first);
+		// A write the sink already accepted can fail while the loop is parked.
+		sink.closed.catch((err) => {
+			if (this.#closed) return;
+			this.#fail(err instanceof Error ? err : new Error(String(err)));
+			this.#signal();
+		});
 	}
 
 	/** Queue a pre-encoded control frame. Preempts all stream data. */
 	enqueueControl(bytes: Uint8Array): void {
 		if (this.#closed) throw this.#closed;
 		this.#control.push(bytes);
+		this.#signal();
+	}
+
+	/** Flag that a window update is pending; the loop polls for it after the control lane. */
+	notify(): void {
+		if (this.#closed) return;
+		this.#notified = true;
 		this.#signal();
 	}
 
@@ -143,10 +249,10 @@ export class SendScheduler {
 		this.#signal();
 	}
 
-	/** Queue a datagram frame — best-effort, serviced after control but ahead of
+	/** Queue a datagram frame - best-effort, serviced after control but ahead of
 	 *  stream data. Dropped (rather than queued) when:
 	 *   - the scheduler is closed;
-	 *   - the transport is backpressured — the socket is already queuing stream/
+	 *   - the transport is backpressured - the socket is already queuing stream/
 	 *     control data, so a datagram behind it would arrive stale; or
 	 *   - the datagram lane is full, bounding a synchronous burst that outruns the
 	 *     writer loop even while the transport has room.
@@ -154,7 +260,7 @@ export class SendScheduler {
 	 *  applying backpressure to the caller. */
 	enqueueDatagram(bytes: Uint8Array): void {
 		if (this.#closed) return;
-		if (!this.#sink.wantsMore()) return; // transport is queuing — drop, don't delay
+		if (!this.#sink.wantsMore()) return; // transport is queuing - drop, don't delay
 		if (this.#datagrams.length >= DATAGRAM_QUEUE_LIMIT) return; // burst cap
 		this.#datagrams.push(bytes);
 		this.#signal();
@@ -168,7 +274,7 @@ export class SendScheduler {
 		this.#sendOrders.set(streamId, order);
 	}
 
-	/** Queue a stream-data frame. Resolves once the bytes hit the socket;
+	/** Queue a stream-data frame. Resolves once the sink accepts the bytes;
 	 *  rejects if the session closes or the stream is dropped first. */
 	enqueueStream(streamId: bigint, bytes: Uint8Array): Promise<void> {
 		if (this.#closed) return Promise.reject(this.#closed);
@@ -201,8 +307,9 @@ export class SendScheduler {
 
 	/** Close the scheduler: drop everything still queued and reject pending
 	 *  stream frames, then send `final` (the session's close frame) next.
-	 *  Resolves once the loop has nothing left to write: `final` was handed to
-	 *  the sink, or the sink failed. A write already in flight finishes first. */
+	 *  Resolves once the loop has nothing left to write: every accepted write,
+	 *  `final` included, reached the socket, or the sink failed. A write already
+	 *  in flight finishes first. */
 	close(err: Error, final?: Uint8Array): Promise<void> {
 		if (this.#closed) return this.#done.promise;
 		this.#closed = err;
@@ -211,6 +318,7 @@ export class SendScheduler {
 		this.#sendOrders.clear();
 		// Nothing queued means anything once closed, so the close frame goes next.
 		this.#control.length = 0;
+		this.#notified = false;
 		this.#latest.clear();
 		this.#datagrams.length = 0;
 		if (final) this.#control.push(final);
@@ -255,18 +363,19 @@ export class SendScheduler {
 			while (true) {
 				if (
 					this.#control.length === 0 &&
+					!this.#notified &&
 					this.#latest.size === 0 &&
 					this.#datagrams.length === 0 &&
 					this.#ready.size === 0
 				) {
-					if (this.#closed) return;
+					if (this.#closed) break;
 					await new Promise<void>((resolve) => {
 						this.#wake = resolve;
 					});
 					continue;
 				}
 
-				// Block until the socket can take a write, THEN pick — so a frame
+				// Block until the socket can take a write, THEN pick - so a frame
 				// that arrives during backpressure is considered before we commit.
 				await this.#sink.ready();
 
@@ -274,6 +383,17 @@ export class SendScheduler {
 					const bytes = this.#control.shift() as Uint8Array;
 					await this.#sink.write(bytes);
 					this.#onActivity();
+					continue;
+				}
+
+				if (this.#notified) {
+					const bytes = this.#pending();
+					if (bytes) {
+						await this.#sink.write(bytes);
+						this.#onActivity();
+					} else {
+						this.#notified = false;
+					}
 					continue;
 				}
 
@@ -293,7 +413,7 @@ export class SendScheduler {
 					continue;
 				}
 
-				if (this.#closed) return; // closed with only stream frames left (already rejected)
+				if (this.#closed) break; // closed with only stream frames left (already rejected)
 				if (this.#ready.size === 0) continue;
 
 				const id = this.#pickStream();
@@ -310,6 +430,8 @@ export class SendScheduler {
 				this.#onActivity();
 				waiter.resolve();
 			}
+			// Closed: the close frame counts as sent only once the socket holds it.
+			await this.#sink.flush();
 		} catch (err) {
 			this.#fail(err instanceof Error ? err : new Error(String(err)));
 		} finally {
@@ -318,10 +440,13 @@ export class SendScheduler {
 	}
 
 	#fail(err: Error): void {
+		if (this.#failed) return;
+		this.#failed = true;
 		this.#closed ??= err;
 		for (const waiter of this.#ready.values()) waiter.reject(err);
 		this.#ready.clear();
 		this.#control.length = 0;
+		this.#notified = false;
 		this.#latest.clear();
 		this.#datagrams.length = 0;
 		this.#onFail(err);

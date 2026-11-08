@@ -11,7 +11,7 @@
 /// The PCR clock, in Hz.
 const PCR_HZ: u64 = 27_000_000;
 /// Bits per transport packet.
-const PACKET_BITS: u64 = 188 * 8;
+pub(super) const PACKET_BITS: u64 = 188 * 8;
 /// The 33-bit base times 300 plus the 9-bit extension: the PCR wraps here.
 pub(super) const PCR_WRAP: u64 = (1 << 33) * 300;
 /// How much PCR time one window spans before it is judged.
@@ -32,8 +32,8 @@ pub(super) const MAX_INTERVAL: u64 = PCR_HZ;
 /// samples while its whole-window average holds far tighter; a VBR source is off by
 /// multiples.
 const AGREEMENT: u64 = 20;
-/// How far a stable window must move before the published rate follows it, in
-/// thousandths, so measurement noise never touches the catalog.
+/// How far a stable window must fall before the published rate follows it, in
+/// thousandths, so packet loss does not keep lowering the catalog.
 const DRIFT: u64 = 10;
 
 /// Packets over the PCR ticks they were paced across.
@@ -64,7 +64,7 @@ fn rate(packets: u64, ticks: u64) -> u64 {
 }
 
 /// Tracks the multiplex rate and the value currently recorded for it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Meter {
 	/// The last PCR seen, in 27 MHz ticks.
 	last: Option<u64>,
@@ -81,9 +81,23 @@ pub(super) struct Meter {
 }
 
 impl Meter {
+	/// A meter whose catalog already records `published`, measured on this multiplex before,
+	/// which the next windows confirm, replace, or clear.
+	pub fn measured(published: Option<u64>) -> Self {
+		Self {
+			published,
+			..Default::default()
+		}
+	}
+
 	/// The rate recorded in the catalog.
 	pub fn published(&self) -> Option<u64> {
 		self.published
+	}
+
+	/// Whether a PCR has started measurement on this import's clock.
+	pub fn started(&self) -> bool {
+		self.last.is_some()
 	}
 
 	/// Whether a PCR measurement window has completed on the current clock.
@@ -134,6 +148,7 @@ impl Meter {
 		let window = std::mem::take(&mut self.window);
 		let mut whole = Interval::default();
 		window.iter().for_each(|s| whole.add(*s));
+		let packet = (PACKET_BITS * PCR_HZ).div_ceil(whole.ticks);
 		let rate = whole.rate();
 		let stable = window.iter().all(|s| s.agrees(rate));
 		match self.published {
@@ -142,9 +157,14 @@ impl Meter {
 				true
 			}
 			None => false,
-			// A stable window at a new rate replaces the old one once it has drifted.
+			// Loss only lowers a measurement. Recover after one good window, while
+			// tolerating one packet of rounding and retaining downward hysteresis.
 			Some(published) if stable => {
-				let drifted = rate.abs_diff(published) * 1000 > published * DRIFT;
+				let drifted = if rate > published {
+					rate - published > packet
+				} else {
+					(published - rate) * 1000 > published * DRIFT
+				};
 				if drifted {
 					self.published = Some(rate);
 				}
@@ -202,6 +222,50 @@ mod test {
 	}
 
 	#[test]
+	fn a_short_window_recovers_after_one_good_window() {
+		let exact = (25_000, SAMPLE);
+		let expected = rate(exact.0 * 4, WINDOW);
+		let mut meter = Meter::default();
+		let short = [(24_937, SAMPLE), exact, exact, exact];
+		assert_eq!(feed(&mut meter, short), vec![Some(rate(99_937, WINDOW))]);
+		assert_eq!(feed(&mut meter, [exact; 4]), vec![Some(expected)]);
+		assert!(feed(&mut meter, [exact; 8]).is_empty());
+		assert!(feed(&mut meter, short).is_empty(), "small downward drift holds");
+
+		let mut reused = Meter::measured(Some(rate(99_937, WINDOW)));
+		assert_eq!(feed(&mut reused, [exact; 4]), vec![Some(expected)]);
+	}
+
+	#[test]
+	fn upward_rounding_of_one_packet_holds() {
+		// Real windows overshoot two seconds; one packet need not be an integer rate.
+		let ticks = SAMPLE + 75_000;
+		let published = rate(100_000, ticks * 4);
+		let mut meter = Meter::measured(Some(published));
+		assert!(
+			feed(
+				&mut meter,
+				[(25_000, ticks), (25_000, ticks), (25_000, ticks), (25_001, ticks)]
+			)
+			.is_empty()
+		);
+		assert_eq!(
+			feed(&mut meter, [(25_001, ticks); 4]),
+			vec![Some(rate(100_004, ticks * 4))]
+		);
+	}
+
+	#[test]
+	fn upward_noise_republishes_only_at_a_new_high() {
+		let (low, high) = ((25_000, SAMPLE), (25_002, SAMPLE));
+		let mut meter = Meter::measured(Some(rate(100_000, WINDOW)));
+		assert_eq!(feed(&mut meter, [high; 4]), vec![Some(rate(100_008, WINDOW))]);
+		// Each upward step raises the bar, so jitter below the high mark never republishes.
+		let jitter = [[low; 4], [high; 4], [low, high, low, high]].concat().repeat(4);
+		assert!(feed(&mut meter, jitter).is_empty());
+	}
+
+	#[test]
 	fn vbr_never_publishes() {
 		let mut meter = Meter::default();
 		// A file-paced source: the clock is a grid but the packets come in bursts.
@@ -223,8 +287,8 @@ mod test {
 		assert!(feed(&mut meter, glitch).is_empty());
 		assert_eq!(meter.published(), Some(2_499_999));
 
-		// Half a percent is noise; the catalog does not follow it.
-		let noise = std::iter::repeat_n((44, 711_000), PER_WINDOW);
+		// A downward half-percent fluctuation does not change the catalog.
+		let noise = std::iter::repeat_n((44, 718_400), PER_WINDOW);
 		assert!(feed(&mut meter, noise).is_empty());
 
 		// A stable window at a clearly different rate replaces the published one.

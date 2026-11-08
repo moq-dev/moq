@@ -37,6 +37,11 @@ TRUCKS_FILE = Path(__file__).resolve().parent.parent / "trucks.json"
 # A local development relay, which needs no token.
 DEFAULT_URL = "http://localhost:4443"
 
+# Drivers dial each truck's socket endpoint, which only these versions carry:
+# an endpoint is a hidden broadcast, and moq-lite before 07 hides it from every
+# peer. The web player offers the same list.
+VERSIONS = ("moq-lite-07-wip", "moq-transport-22")
+
 
 def default_trucks() -> list[str]:
     trucks = json.loads(TRUCKS_FILE.read_text())
@@ -108,11 +113,6 @@ async def connect_bridge(path: str) -> Bridge:
 
 def broadcast_path(truck: str, camera: str) -> str:
     return f"carla/{truck}/{camera}.hang"
-
-
-def driver_prefix(truck: str) -> str:
-    """Where a truck's drivers publish, each at `{prefix}/{driverId}`."""
-    return f"viewer/carla/{truck}"
 
 
 # The one task allowed to end the run without failing it.
@@ -238,29 +238,27 @@ async def run(args: argparse.Namespace) -> None:
         # shares the connection.
         events = asyncio.create_task(bridge.run(), name="bridge")
         try:
-            async with moq.connect(args.url) as client:
+            async with moq.connect(args.url, versions=VERSIONS) as client:
                 try:
-                    # One epoch for the run: a restarted worker announces every
-                    # truck under a new one, which viewers see as a restart.
-                    route = moq.AnnounceRoute(epoch=moq.mint_epoch())
                     for truck in world.trucks:
-                        publication = client.create_broadcast(broadcast_path(truck.name, args.camera))
+                        route = client.route(broadcast_path(truck.name, args.camera), hidden=True)
                         video = await bridge.open(
-                            bridge_stream(truck.name, args.camera), renditions(camera), publication.broadcast
+                            bridge_stream(truck.name, args.camera), renditions(camera), route.broadcast
                         )
-                        session = TruckSession(truck, publication, video, args.location, map_name, world.clock, route)
+                        session = TruckSession(truck, route, video, args.location, map_name, world.clock)
                         sessions.append(session)
                         log.info(
-                            "publishing %s, consuming %s/*",
+                            "publishing %s, accepting drivers at %s",
                             broadcast_path(truck.name, args.camera),
-                            driver_prefix(truck.name),
+                            session.drivers.path,
                         )
 
+                    relay = client.session
+                    if relay is None:
+                        raise RuntimeError("relay session is not connected")
+                    origin = relay.publish()
                     tasks = [
-                        asyncio.create_task(
-                            session.run(client, driver_prefix(truck.name)),
-                            name=f"truck:{truck.name}",
-                        )
+                        asyncio.create_task(session.run(origin), name=f"truck:{truck.name}")
                         for session, truck in zip(sessions, world.trucks)
                     ]
 

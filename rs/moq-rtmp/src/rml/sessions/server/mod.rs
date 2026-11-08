@@ -20,7 +20,7 @@ use crate::rml::messages::{PeerBandwidthLimitType, RtmpMessage, UserControlEvent
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::collections::{HashMap, HashSet};
 
 const FOURCC_CAN_DECODE: u32 = 0x01;
@@ -52,7 +52,6 @@ pub struct ServerSession {
 	start_time: Instant,
 	serializer: ChunkSerializer,
 	deserializer: ChunkDeserializer,
-	connected_app_name: Option<String>,
 	request: Option<OutstandingRequest>,
 	current_state: SessionState,
 	fms_version: String,
@@ -75,7 +74,6 @@ impl ServerSession {
 			start_time: Instant::now(),
 			serializer: ChunkSerializer::new(),
 			deserializer: ChunkDeserializer::new(),
-			connected_app_name: None,
 			request: None,
 			current_state: SessionState::Started,
 			fms_version: config.fms_version,
@@ -487,7 +485,7 @@ impl ServerSession {
 		transaction_id: f64,
 		command_object: Value<'_>,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		if self.current_state != SessionState::Started || self.request.is_some() {
+		if !matches!(self.current_state, SessionState::Started) || self.request.is_some() {
 			return Err(ServerSessionError::RepeatedConnect);
 		}
 
@@ -649,13 +647,8 @@ impl ServerSession {
 		&mut self,
 		mut arguments: Values<'_>,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		if self.current_state != SessionState::Connected {
+		let Some(app_name) = self.app_name() else {
 			return Ok(Vec::new());
-		}
-
-		let app_name = match self.connected_app_name {
-			Some(ref name) => name.clone(),
-			None => return Ok(Vec::new()),
 		};
 
 		// First argument should be the stream id to close
@@ -708,7 +701,7 @@ impl ServerSession {
 			_ => Vec::new(),
 		};
 
-		// A connection carries one publisher epoch or one playback, never a replacement.
+		// A connection carries one publisher instance or one playback, never a replacement.
 		stream.current_state = StreamState::Completed;
 		self.current_state = SessionState::Completed;
 		self.request = None;
@@ -720,7 +713,7 @@ impl ServerSession {
 		&mut self,
 		transaction_id: f64,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		if self.current_state != SessionState::Connected || self.active_stream.is_some() {
+		if self.app_name().is_none() || self.active_stream.is_some() {
 			let packet = self.create_error_packet(
 				"NetConnection.Call.Failed",
 				"one stream is allowed after connect",
@@ -763,7 +756,7 @@ impl ServerSession {
 			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
 		}
 
-		if self.current_state != SessionState::Connected {
+		let Some(app_name) = self.app_name() else {
 			let packet = self.create_error_packet(
 				"NetStream.Publish.Start",
 				"Can't publish before connecting",
@@ -771,7 +764,7 @@ impl ServerSession {
 				stream_id,
 			)?;
 			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
-		}
+		};
 
 		if !matches!(
 			self.active_stream.as_ref().filter(|_| stream_id == 1),
@@ -787,19 +780,6 @@ impl ServerSession {
 			)?;
 			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
 		}
-
-		let app_name = match self.connected_app_name {
-			Some(ref name) => name.clone(),
-			None => {
-				let packet = self.create_error_packet(
-					"NetStream.Publish.Start",
-					"Can't publish before connecting",
-					transaction_id,
-					stream_id,
-				)?;
-				return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
-			}
-		};
 
 		let stream_key = match arguments.next().unwrap() {
 			Value::Utf8String(stream_key) => stream_key.to_owned(),
@@ -880,7 +860,7 @@ impl ServerSession {
 			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
 		}
 
-		if self.current_state != SessionState::Connected {
+		let Some(app_name) = self.app_name() else {
 			let packet = self.create_error_packet(
 				"NetStream.Play.Start",
 				"Can't play before connecting",
@@ -888,7 +868,7 @@ impl ServerSession {
 				stream_id,
 			)?;
 			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
-		}
+		};
 
 		if !matches!(
 			self.active_stream.as_ref().filter(|_| stream_id == 1),
@@ -904,19 +884,6 @@ impl ServerSession {
 			)?;
 			return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
 		}
-
-		let app_name = match self.connected_app_name {
-			Some(ref name) => name.clone(),
-			None => {
-				let packet = self.create_error_packet(
-					"NetStream.Play.Start",
-					"Can't play before connecting",
-					transaction_id,
-					stream_id,
-				)?;
-				return Ok(vec![ServerSessionResult::OutboundResponse(packet)]);
-			}
-		};
 
 		let stream_key = match arguments.next().unwrap() {
 			Value::Utf8String(stream_key) => stream_key.to_owned(),
@@ -1024,7 +991,7 @@ impl ServerSession {
 			return None;
 		}
 
-		let app_name = self.connected_app_name.clone()?;
+		let app_name = self.app_name()?;
 		let StreamState::Publishing { ref stream_key, .. } =
 			self.active_stream.as_ref().filter(|_| stream_id == 1)?.current_state
 		else {
@@ -1049,14 +1016,9 @@ impl ServerSession {
 		stream_id: u32,
 		timestamp: RtmpTimestamp,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		if self.current_state != SessionState::Connected {
+		let Some(app_name) = self.app_name() else {
 			// Audio data sent before connected, just ignore it.
 			return Ok(Vec::new());
-		}
-
-		let app_name = match self.connected_app_name {
-			Some(ref x) => x.clone(),
-			None => return Ok(Vec::new()), // No app name so we aren't in a valid connection state.
 		};
 
 		let publish_stream_key = match self.active_stream.as_ref().filter(|_| stream_id == 1) {
@@ -1133,14 +1095,9 @@ impl ServerSession {
 		stream_id: u32,
 		timestamp: RtmpTimestamp,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		if self.current_state != SessionState::Connected {
+		let Some(app_name) = self.app_name() else {
 			// Video data sent before connected, just ignore it.
 			return Ok(Vec::new());
-		}
-
-		let app_name = match self.connected_app_name {
-			Some(ref x) => x.clone(),
-			None => return Ok(Vec::new()), // No app name so we aren't in a valid connection state.
 		};
 
 		let publish_stream_key = match self.active_stream.as_ref().filter(|_| stream_id == 1) {
@@ -1172,13 +1129,22 @@ impl ServerSession {
 		Ok(Vec::new())
 	}
 
+	/// The app name a connect accepted, while connected.
+	fn app_name(&self) -> Option<String> {
+		match &self.current_state {
+			SessionState::Connected { app_name } => Some(app_name.clone()),
+			SessionState::Started | SessionState::Completed => None,
+		}
+	}
+
 	fn accept_connection_request(
 		&mut self,
 		app_name: String,
 		transaction_id: f64,
 	) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-		self.connected_app_name = Some(app_name.clone());
-		self.current_state = SessionState::Connected;
+		self.current_state = SessionState::Connected {
+			app_name: app_name.clone(),
+		};
 
 		let mut command_object_properties = HashMap::new();
 		command_object_properties.insert("fmsVer".to_string(), Amf0Value::Utf8String(self.fms_version.clone()));
@@ -1419,14 +1385,14 @@ fn create_status_object(level: &str, code: &str, description: &str) -> HashMap<S
 mod clock_tests {
 	use super::*;
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn session_epoch_uses_the_timer_clock() {
 		let session = ServerSession::new(ServerSessionConfig::new()).unwrap().0;
-		moq_clock::sleep(std::time::Duration::from_millis(12_345)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(12_345)).await;
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
-		moq_clock::sim::step_wall(moq_clock::Wall::UNIX_EPOCH);
+		kio::clock::sim::step_wall(kio::clock::Wall::UNIX_EPOCH);
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
-		moq_clock::sleep(std::time::Duration::from_millis(1 << 32)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1 << 32)).await;
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
 	}
 }

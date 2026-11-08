@@ -3,8 +3,9 @@
  * Missing counters mean zero; parsing preserves omission.
  * @module
  */
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { u53Schema } from "./catalog/integers";
+import { renditions } from "./catalog/section";
 import { measurementSchema } from "./snapshot";
 /** Transport gauges and cumulative loss counters known to the observer. */
 export const TransportSchema = z.object({
@@ -36,12 +37,16 @@ export const RenditionSchema = z.object({
 });
 /** One locally published rendition's counters and optional target bitrate. */
 export type Rendition = z.infer<typeof RenditionSchema>;
+/** What a publisher writes for one rendition: {@link Rendition} with plain numbers. */
+export type RenditionInput = z.input<typeof RenditionSchema>;
 /** One cumulative publisher report, keyed by the catalog's rendition IDs. */
 export const SnapshotSchema = z.looseObject({
 	// Connection measurements; unavailable fields remain absent.
 	transport: z.optional(TransportSchema),
 	// Empty entries retain a rendition ID whose counters are all zero.
-	renditions: z.optional(z.record(z.string(), RenditionSchema)),
+	renditions: z.optional(renditions(RenditionSchema)),
 });
 /** One publisher report, with application or container sections flattened beside it. */
 export type Snapshot = z.infer<typeof SnapshotSchema>;
+/** What a publisher writes for one report: {@link Snapshot} with plain numbers. */
+export type SnapshotInput = z.input<typeof SnapshotSchema>;

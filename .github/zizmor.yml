@@ -1,0 +1,15 @@
+# Workflow security lint, run by `just gh check`. A finding is fixed, or
+# suppressed with its reason: inline as `# zizmor: ignore[rule]` beside the
+# code it justifies, or here when the reason covers a whole rule or file.
+rules:
+  # `./.github/...` is how every local action is referenced, and actionlint
+  # does not accept the `$/` self-repository syntax zizmor suggests instead.
+  self-repository:
+    disable: true
+  # These call only this repository's workflows at the same commit, so a callee
+  # is exactly as trusted as its caller with the same secrets.
+  secrets-inherit:
+    ignore:
+      - nightly.yml
+      - release-gate.yml
+      - release-shared-ffi.yml

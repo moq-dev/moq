@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Withdrawal } from "./withdrawal.ts";
 
 // A failure in one loop must not strand the others mid-write: that is the same
@@ -24,7 +25,7 @@ test("a rejected withdrawal still lets its siblings finish", async () => {
 	);
 
 	// A macrotask turn, not a sleep: it only has to outrun a microtask rejection.
-	const turn = new Promise((resolve) => setTimeout(resolve, 0));
+	const turn = yieldNow();
 	const closing = withdrawal.close();
 	const outcome = closing.then(
 		() => "resolved" as const,

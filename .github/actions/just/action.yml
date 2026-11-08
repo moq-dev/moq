@@ -11,7 +11,7 @@ runs:
       shell: bash
       run: just --version
 
-    - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+    - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
       if: runner.environment != 'self-hosted'
       with:
         tool: just@1.58.0

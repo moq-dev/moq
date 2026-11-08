@@ -671,7 +671,6 @@ mod tests {
 	/// socket would be unrelated to the connection ID.
 	#[test]
 	#[cfg(target_os = "linux")]
-	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	fn a_connection_id_reaches_its_own_member() {
 		const COUNT: u16 = 4;
 
@@ -688,6 +687,20 @@ mod tests {
 
 		/// Which member received something, given every send targets exactly one.
 		fn receiver(group: &[UdpSocket]) -> Option<usize> {
+			use std::os::fd::AsRawFd;
+
+			// Block until a member is readable: the filter runs on the send, but the
+			// datagram lands in the member's queue asynchronously.
+			let mut fds: Vec<_> = group
+				.iter()
+				.map(|socket| libc::pollfd {
+					fd: socket.as_raw_fd(),
+					events: libc::POLLIN,
+					revents: 0,
+				})
+				.collect();
+			let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 5_000) };
+			assert!(n >= 0, "poll failed: {}", std::io::Error::last_os_error());
 			let mut buf = [0u8; 64];
 			group.iter().position(|socket| socket.recv_from(&mut buf).is_ok())
 		}
@@ -713,10 +726,6 @@ mod tests {
 				// can be steering this.
 				let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
 				sender.send_to(packet, addr).unwrap();
-
-				// The send is local and the filter is synchronous, but the receive
-				// still has to be given a moment to land.
-				std::thread::sleep(std::time::Duration::from_millis(50));
 				assert_eq!(
 					receiver(&sockets),
 					Some(index),

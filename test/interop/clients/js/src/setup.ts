@@ -1,14 +1,25 @@
 // Role logic for the browser client: read ?role= and wire up a publisher, the real
 // <moq-watch-ui> player, or a refused session. The Playwright drivers (driver.ts for the interop
-// matrix, media.ts for the media-output and lifecycle checks, close.ts for the close code) poll the
-// state each role mirrors onto the DOM.
+// matrix, media.ts for the media-output and lifecycle checks, close.ts for the close code,
+// route-key.ts for the route key proof) poll the
+// state each role reports over the console or mirrors onto the DOM.
 import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
 import { refused, refusedWebSocket } from "./close";
-import { type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
+import {
+	AUDIO_CODECS,
+	type AudioCodec,
+	CAPTURE_EVENT,
+	type CaptureState,
+	FAULTS,
+	type Fault,
+	publish,
+	SAMPLE_MS,
+} from "./contract";
 import { finish } from "./finish";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
+import { routeKey } from "./route-key";
 
 const params = new URLSearchParams(location.search);
 const role = params.get("role");
@@ -60,7 +71,7 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	document.body.appendChild(el);
 	// So the driver can wait for the session to close before closing the browser.
 	watchResources();
-	// Playwright reads the shared DOM, so mirror the public source state onto the element.
+	// Report the public source state the way players report samples. See CAPTURE_EVENT.
 	const sample = () => {
 		type CaptureSource = { out: { source: { peek(): unknown }; error?: { peek(): Error | undefined } } };
 		const video = el.sources.video.peek() as CaptureSource | undefined;
@@ -71,7 +82,7 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 			videoActive: video?.out.source.peek() !== undefined,
 			audioActive: audio?.out.source.peek() !== undefined,
 		};
-		el.dataset.interopCapture = JSON.stringify(state);
+		console.debug(CAPTURE_EVENT + JSON.stringify(state));
 	};
 	sample();
 	self.setInterval(sample, SAMPLE_MS);
@@ -83,13 +94,17 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	document.body.appendChild(host);
 
 	const fault = parseFault(params.get("fault"));
-	let fixture: Fixture | undefined = new Fixture(host, {
+	const audioCodec = params.get("audio-codec") ?? "opus";
+	if (!AUDIO_CODECS.some((codec) => codec === audioCodec)) throw new Error(`unknown audio codec: ${audioCodec}`);
+	const props = {
 		url,
 		name: broadcast,
 		fault,
 		versions: versions?.split(","),
 		generation: Number(params.get("generation") ?? 0),
-	});
+		audioCodec: audioCodec as AudioCodec,
+	};
+	let fixture: Fixture | undefined = new Fixture(host, props);
 
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
@@ -100,18 +115,17 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 		},
 		start: () => {
 			fixture?.close();
-			fixture = new Fixture(host, {
-				url,
-				name: broadcast,
-				fault,
-				versions: versions?.split(","),
-				generation: Number(params.get("generation") ?? 0),
-			});
+			fixture = new Fixture(host, props);
 		},
 		disableVideo: () => fixture?.setVideo(false),
 		enableVideo: () => fixture?.setVideo(true),
 		changeVideoCodec: () => fixture?.changeVideoCodec(),
 		resizeVideo: () => fixture?.resizeVideo(),
+		changeAudioCodec: () => fixture?.changeAudioCodec(),
+		changeAudioRate: () => fixture?.changeAudioRate(),
+		changeAudioChannels: () => fixture?.changeAudioChannels(),
+		addAudioRendition: () => fixture?.addAudioRendition(),
+		removeAudioRendition: () => fixture?.removeAudioRendition(),
 	});
 } else if (role === "subscribe") {
 	await customElements.whenDefined("moq-watch");
@@ -192,6 +206,9 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	document.body.dataset.interopClose = JSON.stringify(
 		await (params.get("transport") === "websocket" ? refusedWebSocket(url) : refused(url)),
 	);
+} else if (role === "route-key") {
+	// Mirror why the session ended for route-key.ts, which fails on it: the session has to stay open.
+	document.body.dataset.interopRouteKey = await routeKey(url, params.get("implementation") ?? "").catch(String);
 } else {
-	throw new Error("missing ?role=publish|fixture|subscribe|close");
+	throw new Error("missing ?role=publish|fixture|subscribe|close|route-key");
 }

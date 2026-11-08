@@ -11,6 +11,21 @@ use crate::{Duration, Instant, TIMER_GRANULARITY, congestion, packet::SpaceId, t
 #[cfg(feature = "qlog")]
 use qlog::events::{ExData, quic::RecoveryMetricsUpdated};
 
+/// An unanswered PATH_CHALLENGE
+#[derive(Clone, Copy)]
+pub(super) struct Challenge {
+	pub(super) token: u64,
+	/// A packet of its own is still due for it; after that, it only rides along with the path's
+	/// other frames
+	pub(super) pending: bool,
+}
+
+impl Challenge {
+	pub(super) fn new(token: u64) -> Self {
+		Self { token, pending: true }
+	}
+}
+
 /// Description of a particular network path
 pub(super) struct PathData {
 	pub(super) remote: SocketAddr,
@@ -19,9 +34,8 @@ pub(super) struct PathData {
 	pub(super) sending_ecn: bool,
 	/// Congestion controller state
 	pub(super) congestion: Box<dyn congestion::Controller>,
-	/// Pacing state
-	pub(super) challenge: Option<u64>,
-	pub(super) challenge_pending: bool,
+	/// The PATH_CHALLENGE validating this path, until it is answered or abandoned
+	pub(super) challenge: Option<Challenge>,
 	/// Whether we're certain the peer can both send and receive on this address
 	///
 	/// Initially equal to `use_stateless_retry` for servers, and becomes false again on every
@@ -52,13 +66,14 @@ pub(super) struct PathData {
 	generation: u64,
 }
 
-/// Builds the configured congestion controller for a path starting now.
-fn build_congestion(now: Instant, config: &transport::Config) -> Box<dyn congestion::Controller> {
+/// Builds the configured congestion controller for a path starting now at `mtu`, randomized
+/// from `seed`.
+fn build_congestion(now: Instant, mtu: u16, seed: u64, config: &transport::Config) -> Box<dyn congestion::Controller> {
 	config.congestion.clone().build(congestion::Init {
 		now,
-		mtu: config.get_initial_mtu(),
+		mtu,
 		rtt: config.initial_rtt,
-		max_pacing_rate: config.max_outgoing_bytes_per_second,
+		seed,
 	})
 }
 
@@ -69,29 +84,29 @@ impl PathData {
 		peer_max_udp_payload_size: Option<u16>,
 		generation: u64,
 		now: Instant,
+		seed: u64,
 		config: &transport::Config,
 	) -> Self {
+		let mut mtud = config.mtu.as_ref().filter(|_| allow_mtud).map_or_else(
+			|| MtuDiscovery::disabled(config.get_initial_mtu(), config.min_mtu),
+			|mtud_config| MtuDiscovery::new(config.get_initial_mtu(), config.min_mtu, mtud_config.clone()),
+		);
+		// A migration's new path already knows the peer's limit, which binds with or without
+		// discovery.
+		if let Some(peer_max_udp_payload_size) = peer_max_udp_payload_size {
+			mtud.on_peer_max_udp_payload_size_received(peer_max_udp_payload_size);
+		}
 		Self {
 			remote,
 			rtt: RttEstimator::new(config.initial_rtt),
 			sending_ecn: true,
-			congestion: build_congestion(now, config),
+			// Sized for the MTU discovery starts at, which a known peer limit may have lowered
+			congestion: build_congestion(now, mtud.current_mtu(), seed, config),
 			challenge: None,
-			challenge_pending: false,
 			validated: false,
 			total_sent: 0,
 			total_recvd: 0,
-			mtud: config.mtu.as_ref().filter(|_| allow_mtud).map_or_else(
-				|| MtuDiscovery::disabled(config.get_initial_mtu(), config.min_mtu),
-				|mtud_config| {
-					MtuDiscovery::new(
-						config.get_initial_mtu(),
-						config.min_mtu,
-						peer_max_udp_payload_size,
-						mtud_config.clone(),
-					)
-				},
-			),
+			mtud,
 			first_packet_after_rtt_sample: None,
 			in_flight: InFlight::new(),
 			first_packet: None,
@@ -108,7 +123,6 @@ impl PathData {
 			sending_ecn: true,
 			congestion: prev.congestion.clone_box(),
 			challenge: None,
-			challenge_pending: false,
 			validated: false,
 			total_sent: 0,
 			total_recvd: 0,
@@ -126,10 +140,10 @@ impl PathData {
 	///
 	/// This is useful when it is known the underlying path has changed.
 	#[cfg(test)]
-	pub(super) fn reset(&mut self, now: Instant, config: &transport::Config) {
+	pub(super) fn reset(&mut self, now: Instant, seed: u64, config: &transport::Config) {
 		self.rtt = RttEstimator::new(config.initial_rtt);
-		self.congestion = build_congestion(now, config);
 		self.mtud.reset(config.get_initial_mtu(), config.min_mtu);
+		self.congestion = build_congestion(now, self.mtud.current_mtu(), seed, config);
 	}
 
 	/// Indicates whether we're a server that hasn't validated the peer's address and hasn't

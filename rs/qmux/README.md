@@ -10,6 +10,10 @@ Use `Session::connect` or `Session::accept` with a transport. The `tcp`, `tls`,
 `transport::Stream` wraps another Tokio byte stream. Sessions implement
 `moq_net::transport::poll` for MoQ's protocol layer.
 
+Every constructor returns the session with its `Driver`: one future that owns the
+socket, reads and writes it, and runs the session's timers. Spawn it on any
+executor, such as `tokio::spawn`; qmux spawns nothing and needs no Tokio runtime.
+
 The default features are `tls` and `wss`. Opt into `tcp`, `uds`, or `ws` for the
 corresponding unencrypted transport, or disable defaults when supplying your own.
 Unix sockets require a Unix host.

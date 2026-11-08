@@ -6,10 +6,8 @@ use std::{
 	sync::Arc,
 };
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use crate::crypto::rustls::QuicServerConfig;
 use crate::{
 	Duration,
@@ -29,9 +27,7 @@ pub struct Config {
 	pub transport: transport::Config,
 
 	/// TLS configuration used for incoming connections
-	///
-	/// Must be set to use TLS 1.3 only.
-	pub crypto: Arc<dyn crypto::ServerConfig>,
+	pub(crate) crypto: Arc<dyn crypto::ServerConfig>,
 
 	/// Configuration for sending and handling validation tokens
 	pub validation_token: validation_token::Config,
@@ -92,20 +88,24 @@ pub struct Config {
 	pub(crate) token_key: Arc<dyn HandshakeTokenKey>,
 }
 
-#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl Config {
-	/// Serve `crypto` with the default settings and a random handshake token key
-	pub fn new(crypto: Arc<dyn crypto::ServerConfig>) -> Self {
-		#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-		use aws_lc_rs::hkdf;
+	/// Run the handshake with `tls`, with the default settings and a random handshake token key
+	///
+	/// The config must enable TLS 1.3, or every incoming connection fails its handshake.
+	/// Early data stays off: if `tls` accepts it, the connection uses a copy that does not.
+	pub fn new(tls: Arc<rustls::ServerConfig>) -> Self {
+		Self::from_crypto(Arc::new(QuicServerConfig::new(tls)))
+	}
+
+	/// Serve any crypto, such as the fuzz target's plaintext
+	pub(crate) fn from_crypto(crypto: Arc<dyn crypto::ServerConfig>) -> Self {
 		use rand::Rng;
-		#[cfg(feature = "ring")]
-		use ring::hkdf;
+		use rind::hkdf;
 
 		let rng = &mut crate::entropy::rng();
 		let mut master_key = [0u8; 64];
 		rng.fill_bytes(&mut master_key);
-		let token_key = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(&master_key);
+		let token_key = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(&master_key);
 
 		Self {
 			transport: transport::Config::default(),
@@ -123,11 +123,14 @@ impl Config {
 	}
 
 	/// Present `cert_chain`, signed for by `key`, with the default settings
+	///
+	/// A CPU that rind cannot run on arrives in [`rustls::Error::Other`]: downcast it to
+	/// [`UnsupportedCpu`](moq_crypto::cpu::UnsupportedCpu).
 	pub fn with_single_cert(
 		cert_chain: Vec<CertificateDer<'static>>,
 		key: PrivateKeyDer<'static>,
 	) -> Result<Self, rustls::Error> {
-		Ok(Self::new(Arc::new(QuicServerConfig::new(cert_chain, key)?)))
+		Ok(Self::new(Arc::new(QuicServerConfig::inner(cert_chain, key)?)))
 	}
 }
 
