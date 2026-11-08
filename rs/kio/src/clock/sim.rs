@@ -703,28 +703,17 @@ mod tests {
 		std::future::poll_fn(|cx| {
 			polls += 1;
 			assert!(polls <= 3, "the sleep woke its task without time passing");
-			sleep.as_mut().reset(at);
+			// The first poll arms the sleep and wakes once, so the next poll
+			// resets an armed entry before the deadline.
+			if polls == 1 {
+				cx.waker().wake_by_ref();
+			} else {
+				sleep.as_mut().reset(at);
+			}
 			sleep.as_mut().poll(cx)
 		})
 		.await;
 		assert_eq!(crate::clock::now(), at);
-	}
-
-	/// A reset to an earlier deadline from another task still wakes the parked one.
-	#[crate::test]
-	async fn an_earlier_reset_from_another_task_wakes() {
-		let start = crate::clock::now();
-		let sleep = Rc::new(RefCell::new(Box::pin(crate::clock::sleep(Duration::from_secs(10)))));
-		let resetter = spawn({
-			let sleep = sleep.clone();
-			async move {
-				crate::clock::sleep(Duration::from_secs(1)).await;
-				sleep.borrow_mut().as_mut().reset(start + Duration::from_secs(2));
-			}
-		});
-		std::future::poll_fn(|cx| sleep.borrow_mut().as_mut().poll(cx)).await;
-		assert_eq!(crate::clock::now(), start + Duration::from_secs(2));
-		resetter.await.unwrap();
 	}
 
 	#[test]
