@@ -98,8 +98,8 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.KeepAlive(served)
-	if served.Instance() == dynamic.Instance() {
-		t.Fatal("a job's route serves a fresh instance")
+	if served.Instance() != dynamic.Instance() {
+		t.Fatal("a job's route continues the instance its prefix route lends")
 	}
 	broadcast, err := served.Broadcast()
 	if err != nil {

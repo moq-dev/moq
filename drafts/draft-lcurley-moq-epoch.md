@@ -27,7 +27,7 @@ informative:
 --- abstract
 
 This document defines an extension for MoQ Transport {{moqt}} that names the publisher instance behind a namespace.
-Peers that negotiate it carry an EPOCH, a UUIDv7 the publisher mints when it starts, on namespace advertisements and on the requests that resolve through them.
+Peers that negotiate it carry an EPOCH, a UUIDv7 the publisher mints for each instance, on namespace advertisements and on the requests that resolve through them.
 A relay can then move a subscription between redundant paths of one instance, and refuse to serve a request from a replacement instance that reused the same names.
 
 --- note_Note_to_Readers
@@ -42,7 +42,7 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 
 An endpoint **advertises** a namespace by sending PUBLISH_NAMESPACE, or NAMESPACE in response to a SUBSCRIBE_NAMESPACE.
 
-An **instance** is one run of a publisher of a namespace: the content it produces between starting and stopping.
+An **instance** is one continuous sequence space of a namespace: its group sequences never restart and never name two different groups.
 A namespace and an EPOCH name one instance.
 
 
@@ -51,7 +51,8 @@ A namespace and an EPOCH name one instance.
 A publisher that restarts and counts its groups from zero again reuses names for different content, and a relay holding both runs cannot tell them apart.
 A relay with several paths to one namespace also cannot tell whether they serve the same bytes, so it cannot move a subscription between them without risking a gap or a mix of two runs.
 
-This extension carries the instance identity that {{moql}} carries in its Epoch field, without changing any name.
+This extension names the instance as {{moql}}'s Instance does, without changing any name.
+{{moql}}'s Epoch, which orders the incarnations of one Instance, has no counterpart: a publisher here never keeps an instance across a restart.
 The namespace a subscriber asks for is the same with or without it.
 
 
@@ -97,11 +98,11 @@ Epochs compare as their 16 bytes, which for a UUIDv7 orders them by creation tim
 
 # Identity {#identity}
 
-A publisher mints a new Epoch each time it starts an instance, and MUST NOT serve different content under one namespace and Epoch.
-Publishers serving identical content, such as replicas of one encoder, MAY share an Epoch.
+A publisher mints a new EPOCH each time it starts an instance, such as a restart that counts its groups from zero again, and MUST NOT serve different content under one namespace and EPOCH.
+Publishers serving identical content, such as replicas of one encoder, MAY share an EPOCH.
 
 Two advertisements of a namespace with the same EPOCH serve the same instance: a receiver MAY move a subscription between them, continuing from the first object the subscriber lacks.
-A receiver MUST NOT move a subscription between advertisements with different EPOCHs, or between advertisements without one: it stays on its path and ends with it.
+A receiver MUST NOT move a subscription between advertisements of different instances, or between advertisements without EPOCH: it stays on its path and ends with it.
 An advertisement without EPOCH names no instance, so nothing says another advertisement serves the same bytes.
 
 

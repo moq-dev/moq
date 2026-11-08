@@ -192,3 +192,30 @@ test("an open ranked above an impatient one makes room for it at once", async ()
 		installed.close();
 	}
 });
+
+test("an RTT of 0 reads as no sample, so an open still waits 100 ms", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { client, server } = qmuxPair(1n);
+	// A transport may report a zero smoothed RTT before its first sample.
+	Object.assign(client, { getStats: async () => ({ smoothedRtt: 0 }) });
+	try {
+		const low = await openGroup(client, 1);
+		await low.write(new Uint8Array(16));
+
+		const high = openGroup(client, 5);
+		await clock.advance(Nano.fromMilli(Milli(99)));
+		expect(orders(client)).toEqual([1]);
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		await expect(low.closed).rejects.toThrow("lagged");
+
+		const incoming = server.incomingUnidirectionalStreams.getReader();
+		const { value } = await incoming.read();
+		await value?.cancel();
+		expect((await high).sendOrder).toBe(5);
+	} finally {
+		client.close();
+		server.close();
+		installed.close();
+	}
+});

@@ -111,13 +111,13 @@ hidden names work exactly as before.
 - **One stream, one instance.** Every broadcast mints a random instance and
   keeps it across reconnects. Replicas of the same content announce that same
   instance. A prefix claim is its own stream: its worker answers each requested
-  path by announcing that exact path under the output's own instance.
-  Restarting one output is then a new instance every hop sees, so a viewer
-  returning within a relay's cache window never gets the old output's groups.
-  On moq-lite 07 that announcement is a takeover of the claim: what a viewer
-  already resolved through the claim keeps playing from the output rather than
-  being reset to the new route. A different worker, or a replacement output,
-  never inherits those viewers.
+  path by announcing that exact path under the claim's instance, so on
+  moq-lite 07 a viewer resolved through the claim keeps playing (a claim that
+  names a stable instance gives each output a fresh one instead). When that
+  output ends, the claim takes a fresh instance, so a restarted output is a
+  new stream every hop sees, and a viewer returning within a relay's cache
+  window never gets the old output's groups. A different worker has its own
+  instance, so it never inherits those viewers.
 - **Most specific, then highest epoch, then rank.** The most specific prefix
   wins. Within one instance only its highest epoch is eligible, ahead of cost.
   Among instances the order is link preference, cost, a broadcast published
@@ -138,19 +138,17 @@ hidden names work exactly as before.
   sequence. A relay drops its copy of the old stream, so a new subscriber never
   sees its cached groups.
 
-The instance, the epoch, and the restart and takeover messages travel on
-moq-lite 07, which is opt-in. `ANNOUNCE_START`, `ANNOUNCE_RESTART` and
-`ANNOUNCE_TAKEOVER` carry the instance and epoch, and `TRACK`, `TRACKS`,
-`SUBSCRIBE` and `FETCH` name the instance they pin. A restart onto another
-instance, or a higher epoch of the same one, is advertised before the old one
-is withdrawn, so the path is never absent. Older versions carry a takeover as
-an ordinary announcement, so the first subscription through a claim is reset
-once the output's route arrives. Older moq-lite versions and moq-transport
-carry no instance, so the receiving session mints one for each announcement,
-marked with a leading `~`: a reconnect or a re-announcement through such a hop
-is another stream. A peer that ignores the end and start may keep cached
-objects of the old run under the same names, so an end and a start is not a
-cache flush.
+The instance, the epoch, and the restart message travel on moq-lite 07, which
+is opt-in. `ANNOUNCE_START` and `ANNOUNCE_RESTART` carry the instance and
+epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
+pin. A restart onto another instance, or a higher epoch of the same one, is
+advertised before the old one is withdrawn, so the path is never absent. Older
+moq-lite versions and moq-transport carry no instance, so the receiving session
+mints one for each announcement, marked with a leading `~`: a reconnect or a
+re-announcement through such a hop is another stream, and the first
+subscription through a claim is reset once the output's route arrives. A peer
+that ignores the end and start may keep cached objects of the old run under
+the same names, so an end and a start is not a cache flush.
 
 Independent importers use distinct instances, even when fed one stream. Only
 replicas of one publisher's bytes share its instance, such as one publisher
