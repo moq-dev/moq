@@ -515,9 +515,7 @@ impl Tracks {
 impl Drop for Tracks {
 	fn drop(&mut self) {
 		let mut state = self.broadcast.state.lock();
-		state
-			.listing
-			.release(self.key, self.owner, &self.queue);
+		state.listing.release(self.key, self.owner, &self.queue);
 	}
 }
 

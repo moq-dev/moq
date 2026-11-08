@@ -12193,7 +12193,10 @@ mod serve_tests {
 		update.encode(&mut encoder, version).unwrap();
 		request.push(&bytes);
 		for _ in 0..200 {
-			assert!(futures::poll!(serving.as_mut()).is_pending(), "the fill holds the request");
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"the fill holds the request"
+			);
 		}
 
 		*credit.write().ok().expect("credit is live") = true;
