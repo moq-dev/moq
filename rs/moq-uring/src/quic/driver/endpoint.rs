@@ -280,6 +280,8 @@ impl Inner {
 		let mut buf = Vec::new();
 
 		let mut fed = Fed::default();
+		// Every datagram in this receive opens under one DIT toggle rather than one per rind call.
+		let _dit = moq_crypto::cpu::Dit::hold();
 
 		// moq-quic takes each datagram as an owned `BytesMut`: copy the whole
 		// completion out of the receive pool once and split it per datagram.

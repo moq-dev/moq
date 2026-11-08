@@ -164,37 +164,6 @@ impl ReceiveWindow {
 	}
 }
 
-/// Which streams a session opens: one-way, or both ways.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Dir {
-	/// Unidirectional streams.
-	Uni,
-	/// Bidirectional streams.
-	Bi,
-}
-
-/// The streams a peer still lets this side open in one direction, as the transport last heard.
-///
-/// A peer grants a bounded number of streams, and an open beyond them waits for it to grant
-/// more. A session reads this to tell an open waiting for that credit from one waiting on
-/// anything else. See [`poll::Session::stream_credit`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct StreamCredit {
-	/// The streams this side may still open before the peer grants more.
-	pub available: u64,
-	/// Whether an open was refused for lack of credit since the peer last granted more, so
-	/// this side waits for the peer, as QUIC's STREAMS_BLOCKED says.
-	pub blocked: bool,
-}
-
-impl StreamCredit {
-	/// `available` streams left, `blocked` once an open was refused for lack of them.
-	pub fn new(available: u64, blocked: bool) -> Self {
-		Self { available, blocked }
-	}
-}
-
 /// Limits to change on a live session with [`poll::Session::set_limits`]. Each `None` leaves
 /// its limit as it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -429,16 +398,6 @@ pub mod poll {
 			Err(super::LimitsError::Unsupported)
 		}
 
-		/// Return the peer's stream credit in `dir`, or `None` when the transport cannot say,
-		/// as a browser's WebTransport cannot.
-		///
-		/// Read whenever an open waits, so the session knows whether the peer's credit is what
-		/// it waits for.
-		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
-			let _ = dir;
-			None
-		}
-
 		/// Export 32 bytes of keying material from this session's handshake under `label` and
 		/// `context` (RFC 8446 section 7.5), or `None` when the transport has no exporter.
 		///
@@ -657,10 +616,6 @@ pub mod poll {
 
 		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 			(**self).set_limits(limits)
-		}
-
-		fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {
-			(**self).stream_credit(dir)
 		}
 
 		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
