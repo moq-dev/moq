@@ -3162,10 +3162,9 @@ async fn a_track_request_reports_its_answer() {
 	let failed = failed.map(|_| ());
 	assert!(matches!(failed, Err(MoqError::Codec { .. })), "{failed:?}");
 	let later = second.reject(0);
-	assert!(
-		matches!(rejected, Err(MoqError::AlreadyResponded)) && matches!(later, Err(MoqError::Codec { .. })),
-		"{rejected:?} {later:?}"
-	);
+	assert!(matches!(rejected, Err(MoqError::AlreadyResponded)), "{rejected:?}");
+	// The saved failure is the import's own error, reason included.
+	assert_eq!(format!("{later:?}"), format!("{failed:?}"));
 }
 
 #[tokio::test]

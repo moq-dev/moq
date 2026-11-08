@@ -9,8 +9,8 @@ a field that means nothing in the current phase can't be read:
   record (`revision`, `phase`, `connects`, `failure`, `version`), so
   `failure` and `version` are readable in phases where they mean nothing.
   It becomes a phase enum whose variants carry their own data, mirroring
-  whatever shape Rust's connection state takes, and every hand-written
-  wrapper follows.
+  Rust's `moq_tokio::connection::Observation`, which takes the same shape,
+  and every hand-written wrapper follows.
 - moq-c's `moq_connection_state` follows the same shape and renames its
   `protocol` to `version`.
 
@@ -25,10 +25,12 @@ how to migrate.
 Rust's `moq_tokio::connection::Observation` (`rs/moq-tokio/src/connection.rs`)
 is flat too: `failure`, `version`, `transport`, and `last_connected` sit
 beside `phase`, while the private `Lifecycle` enum it is built from already
-carries them per phase. Open, for whoever starts this, with the maintainer:
-reshape `Observation` the same way so the bindings mirror it (recommended,
-since the bindings can then convert one enum to another), or reshape only
-the binding records and keep Rust's snapshot flat.
+carries them per phase.
+
+- ✅ Decided 2026-11-08 (maintainer): reshape `Observation` together with
+  `MoqConnectionState`, one phase per value in both, so each binding converts
+  one enum to another (rejected: reshape only the binding records and keep
+  Rust's snapshot flat).
 
 ## Related
 

@@ -623,15 +623,17 @@ impl VideoEncoder {
 		// zero or more access units rather than one per call.
 		let encoded = block_on(encoder.encode(frame))?;
 		let before = self.producer.demand();
-		self.producer.publish(&encoded)?;
+		let published = self.producer.publish(&encoded);
 		// A frame whose decoder identity changed, such as a resume at a ceiling past the declared
 		// level, moved the rendition to a newly named track, whose demand the claim has to watch.
+		// The claim moves even when publishing on the new track failed, so it never stays on the
+		// ended one.
 		if self.producer.demand().name() != before.name()
 			&& let Some(follow) = &self.follow
 		{
 			self.follow_grant(shared, follow.allocator.clone());
 		}
-		Ok(())
+		Ok(published?)
 	}
 
 	fn publish_cut(&mut self) -> Result<(), Error> {

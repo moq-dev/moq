@@ -631,24 +631,27 @@ impl MoqVideoProducer {
 	/// bandwidth, the frame is dropped without encoding.
 	pub fn write(&self, frame: MoqVideoFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
-		let moved = self.with(|producer| {
+		let (written, moved) = self.with(|producer| {
 			let before = producer.producer.demand();
-			producer.write(frame)?;
+			let written = producer.write(frame);
 			// A frame whose decoder identity changed, such as a resume at a ceiling past the
 			// declared level, moved the rendition to a newly named track, and the claim moves
-			// with it under the same lock.
+			// with it under the same lock. It moves even when publishing on the new track
+			// failed, so the claim never stays on the ended one.
 			let after = producer.producer.demand();
 			if after.name() == before.name() {
-				return Ok(None);
+				return Ok((written, None));
 			}
 			let ceiling = *producer.ceiling.read();
-			Ok(producer.follow.as_mut().map(|follow| {
+			let moved = producer.follow.as_mut().map(|follow| {
 				let moved = Following::start(follow.allocator.clone(), follow.lower.clone(), &after, ceiling, self);
 				std::mem::replace(follow, moved).follower
-			}))
+			});
+			Ok((written, moved))
 		})?;
 		// Outside the lock, which the old follower takes on its way out.
-		moved.map_or(Ok(()), Follow::stop)
+		let stopped = moved.map_or(Ok(()), Follow::stop);
+		written.and(stopped)
 	}
 
 	/// Cut a new group at the next written frame.
