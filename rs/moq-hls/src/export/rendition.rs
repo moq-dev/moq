@@ -1616,12 +1616,51 @@ impl Fetch {
 
 	/// The row's CMAF fragment, or `None` when it is a stop or its media is gone.
 	pub(crate) fn poll(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		let result = ready!(self.poll_state(rendition, waiter));
+		let result = ready!(self.poll_fragment(rendition, waiter));
 		self.state = Fetching::Done;
 		Poll::Ready(result)
 	}
 
-	fn poll_state(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+	/// The payload bytes of the row's frames, without building its fragment, or `None` when it is
+	/// a stop or its media is gone. Keeps no frames once ready.
+	pub(crate) fn poll_size(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
+		let result = ready!(self.poll_frames(rendition, waiter))
+			.map(|frames| frames.map(|frames| frames.iter().map(|frame| frame.payload.len()).sum()));
+		self.state = Fetching::Done;
+		Poll::Ready(result)
+	}
+
+	fn poll_fragment(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		if ready!(self.poll_frames(rendition, waiter))?.is_none() {
+			return Poll::Ready(Ok(None));
+		}
+		let row = &self.row;
+		let Fetching::Groups {
+			epoch, muxer, frames, ..
+		} = &mut self.state
+		else {
+			unreachable!("read every group above");
+		};
+		// The last presented sample has no successor to time it, so the fragment ends where the
+		// next group starts, unless its codec or a duration marker times it.
+		let end = row
+			.content
+			.and_then(|content| moq_net::Timestamp::from_micros(content.as_micros() as u64).ok());
+		let fragment = muxer.fragment(row.segment as u32, frames, end)?;
+		// Inline codec metadata was already decoded from these completed groups.
+		// Reuse it instead of fetching a newer, possibly unfinished group.
+		if let Some(bytes) = muxer.init()? {
+			rendition.cache_init(*epoch, bytes);
+		}
+		Poll::Ready(Ok(Some(fragment)))
+	}
+
+	/// Read every group of the row; `None` when it is a stop, its media is gone, or it has no frames.
+	fn poll_frames(
+		&mut self,
+		rendition: &Rendition,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<&[moq_mux::container::Frame]>>> {
 		let row = &self.row;
 		loop {
 			match &mut self.state {
@@ -1698,27 +1737,10 @@ impl Fetch {
 				Fetching::Done => panic!("polled a finished segment fetch"),
 			}
 		}
-		let Fetching::Groups {
-			epoch, muxer, frames, ..
-		} = &mut self.state
-		else {
+		let Fetching::Groups { frames, .. } = &self.state else {
 			unreachable!("read every group above");
 		};
-		if frames.is_empty() {
-			return Poll::Ready(Ok(None));
-		}
-		// The last presented sample has no successor to time it, so the fragment ends where the
-		// next group starts, unless its codec or a duration marker times it.
-		let end = row
-			.content
-			.and_then(|content| moq_net::Timestamp::from_micros(content.as_micros() as u64).ok());
-		let fragment = muxer.fragment(row.segment as u32, frames, end)?;
-		// Inline codec metadata was already decoded from these completed groups.
-		// Reuse it instead of fetching a newer, possibly unfinished group.
-		if let Some(bytes) = muxer.init()? {
-			rendition.cache_init(*epoch, bytes);
-		}
-		Poll::Ready(Ok(Some(fragment)))
+		Poll::Ready(Ok((!frames.is_empty()).then_some(frames.as_slice())))
 	}
 }
 

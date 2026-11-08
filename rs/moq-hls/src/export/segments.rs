@@ -512,7 +512,7 @@ pub struct Consumer {
 	/// The reset epoch and next append position; errors leave it unchanged.
 	position: (u64, u64),
 	feed: Option<Feed>,
-	/// The next row's media being fetched, kept across polls.
+	/// The next row's media being fetched or sized, kept across polls.
 	fetch: Option<Fetch>,
 }
 
@@ -538,6 +538,31 @@ impl Consumer {
 	pub async fn init(&self) -> Result<Option<Bytes>> {
 		let mut load = LoadInit::default();
 		kio::wait(|waiter| self.rendition.poll_latest_init(waiter, &mut load)).await
+	}
+
+	/// The payload bytes of the next segment's media, so a caller can reserve memory before
+	/// [`next`](Self::next) builds it; the fragment adds only container overhead.
+	///
+	/// Reads the segment's groups but keeps none of them, so nothing is held while the caller
+	/// waits, and `next` reads them again. `Some(0)` for a gap, `None` once the rendition ends
+	/// cleanly. Fails as `next` would, and never advances the cursor.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_next_size(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
+		loop {
+			let Some(fetch) = &mut self.fetch else {
+				let Some(row) = ready!(self.poll_row(waiter))? else {
+					return Poll::Ready(Ok(None));
+				};
+				if row.stop {
+					return Poll::Ready(Ok(Some(0)));
+				}
+				self.fetch = Some(Fetch::new(row));
+				continue;
+			};
+			let size = ready!(fetch.poll_size(&self.rendition, waiter));
+			let segment = self.fetch.take().expect("fetching above").row().segment;
+			return Poll::Ready(size?.ok_or(crate::Error::SegmentUnavailable { segment }).map(Some));
+		}
 	}
 
 	/// The next segment, with its media; `None` only once the rendition ends cleanly, so a
