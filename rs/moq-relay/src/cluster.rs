@@ -276,10 +276,15 @@ impl DialTarget {
 	/// defaults to `cost`; anything else is rejected, never ignored.
 	fn from_peer(peer: &Peer) -> anyhow::Result<Self> {
 		let mut url = peer_url(&peer.url)?;
-		// Never sent, so it must not make two spellings of one peer conflict.
-		url.set_fragment(None);
+		// Spellings that share a key dial alike, so they never conflict.
+		key::normalize(&mut url);
 		let has_cost = url.query_pairs().any(|(key, _)| key == "cost");
 		let has_jwt = url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty());
+		// An empty `?jwt=` counts as absent, as `moq auth serve` reads it, so drop it
+		// before a token is appended rather than send two.
+		if !has_jwt && url.query_pairs().any(|(key, _)| key == "jwt") {
+			strip_jwt(&mut url);
+		}
 		if peer.cost.is_some() || peer.egress.is_some() {
 			anyhow::ensure!(
 				!has_cost,
@@ -2285,8 +2290,12 @@ impl Cluster {
 	/// An `ephemeral` client is one session's alone: it binds an ephemeral port on
 	/// the template's bind address, and its reconnect loop always gives up, so a
 	/// redial moves to a fresh socket rather than retrying one the path may be
-	/// dropping. A zero backoff timeout, which would retry the one socket forever,
-	/// takes moq-tokio's default instead; the redial loop already retries forever.
+	/// dropping.
+	///
+	/// Every peer client's reconnect loop gives up eventually: a zero backoff
+	/// timeout, which would retry forever, takes moq-tokio's default instead. The
+	/// redial loop already retries forever, and only it re-reads `cluster.token`,
+	/// so an unending inner loop could keep presenting a rotated-out token.
 	///
 	/// A LAN `target` keeps only request-path versions. A `target` fingerprint is
 	/// pinned on a clean TLS config, so the relay's CA roots cannot combine with it.
@@ -2300,9 +2309,9 @@ impl Cluster {
 			let mut bind = connect.resolve().bind;
 			bind.set_port(0);
 			connect.bind = Some(bind);
-			if connect.backoff.timeout().is_zero() {
-				connect.backoff.timeout = None;
-			}
+		}
+		if connect.backoff.timeout().is_zero() {
+			connect.backoff.timeout = None;
 		}
 		if target.is_some_and(|target| target.lan) {
 			connect.version = connect
@@ -4084,6 +4093,47 @@ mod tests {
 		])
 		.expect("one peer");
 		assert_eq!(desired.len(), 1);
+	}
+
+	/// Spellings that share a key also dial alike, so a list naming both is one
+	/// peer rather than a conflict.
+	#[test]
+	fn peer_list_merges_every_spelling_of_one_key() {
+		let desired = parse_peer_list(vec![
+			Peer::new("https://peer.example/relay"),
+			Peer::new("https://user:pw@peer.example//relay/"),
+			Peer::new("https://PEER.example/relay/#frag"),
+		])
+		.expect("one peer");
+		let [target] = desired.values().collect::<Vec<_>>()[..] else {
+			panic!("one peer: {desired:?}");
+		};
+		assert_eq!(target.url.as_str(), "https://peer.example/relay");
+
+		let desired = parse_peer_list(vec![
+			Peer::new("moqt://PEER.example:4443/"),
+			Peer::new("moqt://peer.example:4443"),
+		])
+		.expect("one peer");
+		assert_eq!(desired.len(), 1);
+	}
+
+	/// An empty `?jwt=` is absent, so a token never rides alongside it.
+	#[test]
+	fn an_empty_jwt_is_dropped_before_a_token() {
+		let target = DialTarget::from_peer(&Peer {
+			token: Some("tok".to_string()),
+			..Peer::new("https://peer.example/?jwt=")
+		})
+		.unwrap();
+		assert_eq!(target.url.as_str(), "https://peer.example/?jwt=tok");
+		assert_eq!(
+			DialTarget::parse("https://peer.example/?jwt=&x=1")
+				.unwrap()
+				.url
+				.as_str(),
+			"https://peer.example/?x=1"
+		);
 	}
 
 	/// A static list naming only this relay runs standalone, rather than as a mesh
