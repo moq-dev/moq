@@ -2505,6 +2505,13 @@ impl Producer {
 		self.exact(full, options, None)
 	}
 
+	/// Whether this handle could publish the absolute `full` path: its scope reaches
+	/// it, and no mount or excluded subtree covers it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn publishable(&self, full: &Path) -> bool {
+		self.scope.permits(full) && self.scope.publishes(full)
+	}
+
 	/// An exact route at the absolute `full` path, answering `request` on its first
 	/// announce when it is a job's.
 	fn exact(&self, full: Path, options: RouteOptions, request: Option<Request>) -> Result<Route, Error> {
