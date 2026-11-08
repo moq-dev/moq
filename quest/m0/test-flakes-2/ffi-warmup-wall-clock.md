@@ -15,6 +15,8 @@ It panicked at `rs/moq-ffi/src/media.rs:1635` with `video=false; left: [4400000,
 [4400000, 4700000, 5000000]`: the audio pass started at group 3 and ended at group 5, but skipped
 group 4. It is quarantined with `#[ignore]` and a `sh/gh/test-inventory.allow` entry until this quest
 fixes it.
+Its subscription assertions moved to `raw_media_catalog_warmup_widens_the_subscription`,
+which stays in the gate.
 
 The test writes groups 5, 4, 3 newest first, finishes the track, then reads. The read polls on the
 FFI runtime, whose clock is real time, so every wall-clock rule in the read path runs on a loaded
