@@ -80,6 +80,7 @@ which collapses that state and waits on [Drop set](/quest/m1/drop-set.md).
 - [Track and group end-of-life](/quest/m1/explicit-state/track-end.md) - moq-net's track and group outcomes are one enum each, in Rust and JS
 - [moq-net phase data](/quest/m1/explicit-state/net-phases.md) - moq-net's session and subscription state machines keep each phase's data in its variant
 - [moq-mux and moq-gst lifecycles](/quest/m1/explicit-state/mux-gst.md) - export sources, TS and fMP4 export tracks, and gst pads are explicit state
+- [A failed catalog finish is final](/quest/m1/explicit-state/catalog-finish.md) - the catalog producer never reports closed with a catalog track left open
 
 ## Related
 
