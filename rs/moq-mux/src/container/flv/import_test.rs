@@ -1009,3 +1009,17 @@ fn unsupported_codecs_fail_at_the_public_importer_boundary() {
 		}
 	}
 }
+
+/// Input after finish is refused, as every importer refuses it, rather than publishing new tracks.
+#[test]
+fn input_after_finish_is_refused() {
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	importer.finish().unwrap();
+	importer.finish().unwrap();
+
+	let err = importer.decode(&synth_flv()).unwrap_err();
+	assert!(matches!(err, crate::Error::Finished), "{err:?}");
+	assert!(catalog.snapshot().video.renditions.is_empty(), "no track was declared");
+}

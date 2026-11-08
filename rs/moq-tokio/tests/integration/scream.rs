@@ -1,4 +1,4 @@
-//! SCReAMv2 ([`congestion::Scream`]) over real sockets through the cellular moq-shaper presets.
+//! SCReAMv2 ([`congestion::scream::Scream`]) over real sockets through the cellular moq-shaper presets.
 //!
 //! A media sender encodes 30 frames a second at the controller's estimate, a keyframe every two
 //! seconds, each group on its own stream, up through the shaper's uplink. Each frame carries when

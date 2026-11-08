@@ -409,13 +409,6 @@ pub struct Serve {
 	#[serde(default)]
 	mtls: MtlsRules,
 
-	#[usage(long = "mtls-peer", hide = true, default_missing = "true", num_args = 0..=1, require_equals = true)]
-	#[serde(skip)]
-	mtls_peer: Option<bool>,
-	#[usage(long = "mtls-upstream", hide = true, default_missing = "true", num_args = 0..=1, require_equals = true)]
-	#[serde(skip)]
-	mtls_upstream: Option<bool>,
-
 	/// The tier label stamped on every grant, handed to the relay's stats: `/`-joined
 	/// segments of ASCII letters, digits, `.`, `_`, and `-`.
 	#[usage(long, setting = "tier")]
@@ -660,9 +653,6 @@ impl Serve {
 	/// A mesh setting without a mesh URL is refused here rather than by the parser, so
 	/// the URL can come from the file and the rest from the command line.
 	fn merged(&self, cli: &usage_rs::config::CliLayer, env: &usage_rs::config::EnvLayer) -> anyhow::Result<Self> {
-		if self.mtls_peer.is_some() || self.mtls_upstream.is_some() {
-			anyhow::bail!("--mtls-peer and --mtls-upstream are removed; use --mtls-link peer or --mtls-link upstream");
-		}
 		let value = self
 			.file
 			.as_ref()
@@ -713,9 +703,6 @@ impl Serve {
 			anyhow::bail!(
 				"--limit-token and --limit-remote need --revalidate, which ages out the slots of dead relays"
 			);
-		}
-		if self.mtls_peer.is_some() || self.mtls_upstream.is_some() {
-			anyhow::bail!("--mtls-peer and --mtls-upstream are removed; use --mtls-link peer or --mtls-link upstream");
 		}
 		let mtls = &self.mtls;
 		if mtls.link.is_some() && mtls.publish.is_empty() && mtls.subscribe.is_empty() && mtls.certificates.is_empty() {
@@ -1392,9 +1379,6 @@ mod tests {
 			(&["--limit-remote", "3", "--expires", "1h"], "need --revalidate"),
 			// A peer marking with nothing granted to certificates marks nobody.
 			(&["--mtls-link", "peer"], "--mtls-link needs"),
-			(&["--mtls-subscribe", "**", "--mtls-upstream"], "use --mtls-link"),
-			(&["--mtls-peer=false"], "use --mtls-link"),
-			(&["--mtls-upstream=false"], "use --mtls-link"),
 		] {
 			let argv: Vec<&str> = ["moq", "auth", "serve"].iter().chain(args).copied().collect();
 			let err = serve(&argv).policy().unwrap_err().to_string();
