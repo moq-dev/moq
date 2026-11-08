@@ -1,5 +1,7 @@
 //! The binding features moq-c gained to match moq-ffi for the cut.
 
+use std::sync::Arc;
+
 use super::*;
 
 /// Open the socket endpoint `name` under `room` on `origin`.
@@ -338,21 +340,16 @@ fn track_largest_and_group_ready() {
 	assert!(present);
 	assert_eq!((group, frame), (3, 1));
 
-	// Nobody reads the group, so the wait resolves once the group is finished.
+	// Nobody reads the group, so the wait resolves once the group is finished. A parked wait
+	// must still wake, though moq-net does not wake `poll_ready` on a finish.
+	let mut parked = ReadyWait::park(first);
 	let ready = Callback::new();
 	assert_eq!(
 		unsafe { moq_publish_group_ready(first, 1, Some(channel_callback), ready.ptr) },
 		0
 	);
-	// Let the wait park first: finishing must still end it, though moq-net does not wake
-	// `poll_ready` on a finish. Best effort: a runtime slow to poll only skips the parked case,
-	// since a wait first polled after the finish resolves at once.
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "the test thread has no runtime; it gives the C API's runtime time to park the wait"
-	)]
-	std::thread::sleep(Duration::from_millis(50));
 	assert_eq!(moq_publish_group_finish(first), 0);
+	assert!(parked.woken() && parked.poll(), "finishing wakes the parked wait");
 	assert_eq!(ready.recv(), 0);
 	assert!(
 		unsafe { moq_publish_group_ready(first, 1, Some(ignore_callback), std::ptr::null_mut()) } < 0,
@@ -364,19 +361,46 @@ fn track_largest_and_group_ready() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Whether a ready wait on raw `group` would park now, polled synchronously.
-fn group_pending(group: u32) -> bool {
-	let (group, _ended) = State::lock().publish.group(Id::try_from(group).unwrap()).unwrap();
-	let group = group.lock();
-	let frame = moq_net::frame::Info {
-		size: 1,
-		timestamp: None,
-	};
-	group
-		.as_ref()
-		.expect("the group handle is live")
-		.poll_ready(&kio::Waiter::noop(), &frame)
-		.is_pending()
+/// A [moq_publish_group_ready] wait, polled by hand so a test knows it parked.
+struct ReadyWait {
+	wait: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+	woken: Arc<Woken>,
+}
+
+#[derive(Default)]
+struct Woken(std::sync::atomic::AtomicBool);
+
+impl std::task::Wake for Woken {
+	fn wake(self: Arc<Self>) {
+		self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+	}
+}
+
+impl ReadyWait {
+	/// Start waiting on raw `group`, asserting the wait parked.
+	fn park(group: u32) -> Self {
+		let mut wait = Self {
+			wait: Box::pin(crate::api::group_ready(Id::try_from(group).unwrap(), 1).unwrap()),
+			woken: Arc::default(),
+		};
+		assert!(!wait.poll(), "the wait parks");
+		wait
+	}
+
+	/// Whether something woke the parked wait since it last polled.
+	fn woken(&self) -> bool {
+		self.woken.0.load(std::sync::atomic::Ordering::SeqCst)
+	}
+
+	/// Poll once, returning whether the wait resolved.
+	fn poll(&mut self) -> bool {
+		self.woken.0.store(false, std::sync::atomic::Ordering::SeqCst);
+		let waker = std::task::Waker::from(self.woken.clone());
+		self.wait
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(&waker))
+			.is_ready()
+	}
 }
 
 /// Closing a broadcast ends its open tracks' groups and so their ready waits, but a track
@@ -394,38 +418,23 @@ fn group_ready_across_a_broadcast_close() {
 		id(moq_publish_track_group(open)),
 		id(moq_publish_track_group_at(declared, 0)),
 	);
-	let (open_ready, declared_ready) = (Callback::new(), Callback::new());
-	for (group, ready) in [(open_group, &open_ready), (declared_group, &declared_ready)] {
-		assert_eq!(
-			unsafe { moq_publish_group_ready(group, 1, Some(channel_callback), ready.ptr) },
-			0
-		);
-	}
-	// Unread, so both waits have something to wait for.
-	assert!(group_pending(open_group) && group_pending(declared_group));
-	// Best effort, as above: a wait first polled after the close still resolves the same way.
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "the test thread has no runtime; it gives the C API's runtime time to park the waits"
-	)]
-	std::thread::sleep(Duration::from_millis(50));
+	// Unread, so both waits park.
+	let (mut open_wait, mut declared_wait) = (ReadyWait::park(open_group), ReadyWait::park(declared_group));
 
 	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(open_ready.recv(), 0, "the close ends the group");
+	assert!(open_wait.woken() && open_wait.poll(), "the close ends the group");
 	let payload = b"late";
 	assert!(
 		unsafe { moq_publish_group_frame(open_group, payload.as_ptr(), payload.len(), &micros(0)) } < 0,
 		"the next write reports why"
 	);
-	// Nothing will resolve the declared group's wait yet: it is still open and unread.
-	assert!(group_pending(declared_group), "a declared-end track's group stays open");
-	assert!(declared_ready.rx.try_recv().is_err());
+	assert!(!declared_wait.poll(), "a declared-end track's group stays open");
 	assert_eq!(
 		unsafe { moq_publish_group_frame(declared_group, payload.as_ptr(), payload.len(), &micros(0)) },
 		0
 	);
 	assert_eq!(moq_publish_group_finish(declared_group), 0);
-	assert_eq!(declared_ready.recv(), 0);
+	assert!(declared_wait.woken() && declared_wait.poll());
 
 	assert!(
 		moq_publish_group_abort(open_group, 0) < 0,

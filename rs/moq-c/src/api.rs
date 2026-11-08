@@ -3894,26 +3894,35 @@ pub unsafe extern "C" fn moq_publish_group_ready(
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		let callback = unsafe { ffi::OnStatus::new(user_data, on_ready)? };
-		let (group, mut ended) = State::lock().publish.group(group)?;
-		let frame = moq_net::frame::Info { size, timestamp: None };
+		let wait = group_ready(group, size)?;
 		tokio::spawn(async move {
 			let res = ffi::run(async {
-				let ready = kio::wait(|waiter| match group.lock().as_ref() {
-					Some(group) => group.poll_ready(waiter, &frame),
-					// Finished or aborted: the next write reports why.
-					None => std::task::Poll::Ready(()),
-				});
-				// The handle ending also resolves it: a finish does not wake `poll_ready`.
-				tokio::select! {
-					() = ready => {}
-					_ = ended.changed() => {}
-				}
+				wait.await;
 				Ok(())
 			})
 			.await;
 			callback.call(res);
 		});
 		Ok(())
+	})
+}
+
+/// The wait behind [moq_publish_group_ready]: resolves once raw `group` can take a frame of
+/// `size` bytes, or its handle ends.
+pub(crate) fn group_ready(group: crate::Id, size: u64) -> Result<impl Future<Output = ()> + Send + 'static, Error> {
+	let (group, mut ended) = State::lock().publish.group(group)?;
+	let frame = moq_net::frame::Info { size, timestamp: None };
+	Ok(async move {
+		let ready = kio::wait(|waiter| match group.lock().as_ref() {
+			Some(group) => group.poll_ready(waiter, &frame),
+			// Finished or aborted: the next write reports why.
+			None => std::task::Poll::Ready(()),
+		});
+		// The handle ending also resolves it: a finish does not wake `poll_ready`.
+		tokio::select! {
+			() = ready => {}
+			_ = ended.changed() => {}
+		}
 	})
 }
 
