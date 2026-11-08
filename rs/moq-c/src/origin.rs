@@ -150,7 +150,7 @@ impl State {
 struct RouteEntry {
 	inner: moq_net::origin::Route,
 	driver: crate::ffi::Background,
-	/// Minted at creation and kept for the route's lifetime, borrowed by [Origin::route_instance].
+	/// The instance last read, borrowed by [Origin::route_instance].
 	instance: String,
 	/// An exact route's broadcast fill handle, or a prefix route's request delivery task.
 	kind: RouteKind,
@@ -409,8 +409,9 @@ impl Origin {
 		driver: crate::ffi::Background,
 		broadcast: Id,
 	) -> Result<Id, Error> {
+		// Read only on request: reading a hidden job's instance binds it.
 		self.routes.insert(RouteEntry {
-			instance: route.instance().to_string(),
+			instance: String::new(),
 			inner: route,
 			driver,
 			kind: RouteKind::Exact { broadcast },
@@ -519,8 +520,10 @@ impl Origin {
 		}
 	}
 
-	pub fn route_instance(&self, route: Id, dst: &mut moq_string) -> Result<(), Error> {
-		let entry = self.route_entry(route)?;
+	pub fn route_instance(&mut self, route: Id, dst: &mut moq_string) -> Result<(), Error> {
+		let entry = self.routes.get_mut(route).ok_or(Error::NotFound)?;
+		entry.driver.check()?;
+		entry.instance = entry.inner.instance().to_string();
 		*dst = moq_string {
 			data: entry.instance.as_ptr().cast::<c_char>(),
 			len: entry.instance.len(),

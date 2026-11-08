@@ -21,8 +21,6 @@ const ANNOUNCE_UPDATE: u64 = 2;
 // lite-07: the advertisement serves another instance, or a newer epoch of its own.
 const ANNOUNCE_RESTART: u64 = 3;
 const SYNCED: u64 = 4;
-// lite-07: a new advertisement continues what a live one served beneath its prefix.
-const ANNOUNCE_TAKEOVER: u64 = 5;
 // lite-07: the route layer. ROUTE_END also travels back as the echo.
 const ROUTE_START: u64 = 6;
 const ROUTE_UPDATE: u64 = 7;
@@ -47,10 +45,9 @@ pub fn update_supported(version: Version) -> bool {
 /// An announcement on the Announce Stream, advertising or retracting a broadcast.
 ///
 /// On lite-06+ these are independently-typed messages (`ANNOUNCE_START`,
-/// `ANNOUNCE_END`, `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART` and
-/// `ANNOUNCE_TAKEOVER`), each
+/// `ANNOUNCE_END`, `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each
 /// framed as `Type | Length | Body` like the subscribe stream's responses. Each
-/// `Active` (ANNOUNCE_START) or `Takeover` implicitly assigns the next announce id (a
+/// `Active` (ANNOUNCE_START) implicitly assigns the next announce id (a
 /// per-stream ordinal starting at 0); the others reference that id instead of
 /// repeating the path. Older versions send a single `ANNOUNCE_BROADCAST`
 /// message that retracts by path (`Ended`).
@@ -88,17 +85,6 @@ pub enum AnnounceBroadcast {
 	/// continues it. The id stays live.
 	Restart {
 		id: u64,
-		instance: Option<Instance>,
-		epoch: u64,
-		cost: Cost,
-	},
-	/// ANNOUNCE_TAKEOVER (lite-07+): an `Active` that continues what the live
-	/// announcement `predecessor` served beneath this one's path. It assigns the next
-	/// announce id; one at the predecessor's own path retires the predecessor.
-	Takeover {
-		predecessor: u64,
-		suffix: PathRef,
-		route: u64,
 		instance: Option<Instance>,
 		epoch: u64,
 		cost: Cost,
@@ -292,9 +278,6 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::Restart { .. } if version.has_announce_restart() => ANNOUNCE_RESTART,
 				// Older versions send an end and a start instead.
 				Self::Restart { .. } => return Err(EncodeError::Version),
-				Self::Takeover { .. } if version.has_announce_takeover() => ANNOUNCE_TAKEOVER,
-				// Older versions send a start instead.
-				Self::Takeover { .. } => return Err(EncodeError::Version),
 				Self::RouteStart { .. } if version.has_routes() => ROUTE_START,
 				Self::RouteUpdate { .. } if version.has_routes() => ROUTE_UPDATE,
 				Self::RouteHold { .. } if version.has_routes() => ROUTE_HOLD,
@@ -341,20 +324,6 @@ impl Encode<Version> for AnnounceBroadcast {
 					cost,
 				} => {
 					w.varint(*id)?;
-					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
-					cost.encode(w, version)?;
-				}
-				Self::Takeover {
-					predecessor,
-					suffix,
-					route,
-					instance,
-					epoch,
-					cost,
-				} => {
-					w.varint(*predecessor)?;
-					suffix.encode(w, version)?;
-					encode_route_id(w, version, *route)?;
 					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
 					cost.encode(w, version)?;
 				}
@@ -409,7 +378,6 @@ impl Encode<Version> for AnnounceBroadcast {
 			Self::EndedId { .. }
 			| Self::Update { .. }
 			| Self::Restart { .. }
-			| Self::Takeover { .. }
 			| Self::Skipped
 			| Self::Synced
 			| Self::RouteStart { .. }
@@ -463,20 +431,6 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
 						Self::Restart {
 							id,
-							instance,
-							epoch,
-							cost: Cost::decode(&mut body, version)?,
-						}
-					}
-					ANNOUNCE_TAKEOVER if version.has_announce_takeover() => {
-						let predecessor = body.varint()?;
-						let suffix = PathRef::decode(&mut body, version)?;
-						let route = decode_route_id(&mut body, version)?;
-						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
-						Self::Takeover {
-							predecessor,
-							suffix,
-							route,
 							instance,
 							epoch,
 							cost: Cost::decode(&mut body, version)?,
@@ -1096,26 +1050,12 @@ mod tests {
 				cost,
 			};
 			assert_eq!(broadcast_round_trip(&restart, Version::Lite07), restart);
-
-			let takeover = AnnounceBroadcast::Takeover {
-				predecessor: 2,
-				suffix: PathRef {
-					base: 1,
-					keep: 1,
-					rest: Path::from_static("p"),
-				},
-				route: 0,
-				instance: Some(Instance::random()),
-				epoch,
-				cost,
-			};
-			assert_eq!(broadcast_round_trip(&takeover, Version::Lite07), takeover);
 		}
 	}
 
 	/// The draft's field order, byte for byte: ANNOUNCE_START is the path base, keep, and
 	/// rest, the Route ID, the instance and epoch, and the cost; ANNOUNCE_UPDATE is the
-	/// Announce ID and the cost; ANNOUNCE_TAKEOVER leads with its predecessor.
+	/// Announce ID and the cost.
 	#[test]
 	fn lite07_announce_layout() {
 		let encode = |msg: AnnounceBroadcast| {
@@ -1156,17 +1096,6 @@ mod tests {
 				cost: Cost::new(6),
 			}),
 			[3, 5, 7, 1, b'a', 5, 6]
-		);
-		assert_eq!(
-			encode(AnnounceBroadcast::Takeover {
-				predecessor: 9,
-				suffix,
-				route: 3,
-				instance: Some("a".parse().unwrap()),
-				epoch: 5,
-				cost: Cost::new(6),
-			}),
-			[5, 10, 9, 1, 2, 1, b'c', 3, 1, b'a', 5, 6]
 		);
 	}
 
@@ -1214,26 +1143,6 @@ mod tests {
 			let res = msg.encode(&mut Encoder::new(&mut buf, version.into()), version);
 			assert!(matches!(res, Err(EncodeError::InvalidState)), "{version:?}");
 		}
-	}
-
-	// Only lite-07 carries ANNOUNCE_TAKEOVER: older versions send a start instead.
-	#[test]
-	fn announce_takeover_needs_lite07() {
-		let takeover = AnnounceBroadcast::Takeover {
-			predecessor: 0,
-			suffix: PathRef::literal(Path::from_static("p")),
-			route: 0,
-			instance: Some(Instance::random()),
-			epoch: 0,
-			cost: Cost::default(),
-		};
-		assert!(matches!(
-			takeover.encode(
-				&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()),
-				Version::Lite06
-			),
-			Err(EncodeError::Version)
-		));
 	}
 
 	// Only lite-07 carries ANNOUNCE_RESTART: older versions send an end and a start, and an
