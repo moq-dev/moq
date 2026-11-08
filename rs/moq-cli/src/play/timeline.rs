@@ -1,6 +1,67 @@
 //! Sample accounting for the player's speaker.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use kio::clock::Instant;
+
+/// The media time the speaker is sounding, which `--metrics` reports.
+///
+/// The speaker converges on the shared clock rather than owning it, so where it
+/// actually is stays its own: it runs dry in a stall and skips ahead to catch up.
+#[derive(Clone, Default)]
+pub(super) struct Playhead(Arc<Mutex<Written>>);
+
+#[derive(Default)]
+struct Written {
+	/// The last write: the media time it ends at, when that sounds, and the
+	/// playhead it may not fall back behind on the same timeline.
+	last: Option<(Duration, Instant, Option<Duration>)>,
+	/// The next write starts a new timeline.
+	restart: bool,
+}
+
+impl Playhead {
+	/// Record a write ending at media `end`, of which `buffered` is still queued at `now`.
+	pub(super) fn wrote(&self, end: Duration, buffered: Duration, now: Instant) {
+		let mut written = self.0.lock().unwrap();
+		// Silence padded ahead of the frame to refill the speaker is not media: the
+		// playhead holds where it was until the padding has played, rather than
+		// projecting back over media already heard. A new timeline starts afresh.
+		let floor = if std::mem::take(&mut written.restart) {
+			None
+		} else {
+			written.playhead(now)
+		};
+		written.last = now.checked_add(buffered).map(|sounds| (end, sounds, floor));
+	}
+
+	/// The speaker moved onto an unrelated timeline: a fresh sink or rendition.
+	pub(super) fn restart(&self) {
+		self.0.lock().unwrap().restart = true;
+	}
+
+	/// The speaker went quiet.
+	pub(super) fn clear(&self) {
+		*self.0.lock().unwrap() = Written::default();
+	}
+
+	/// The media time sounding at `now`, or `None` with no speaker.
+	pub(super) fn at(&self, now: Instant) -> Option<Duration> {
+		self.0.lock().unwrap().playhead(now)
+	}
+}
+
+impl Written {
+	/// Projected from the last write at the wall rate, held at its end (a speaker
+	/// with nothing left plays nothing further), and never behind where it stood
+	/// at that write (refill padding plays no media).
+	fn playhead(&self, now: Instant) -> Option<Duration> {
+		let (end, sounds, floor) = self.last?;
+		let projected = end.saturating_sub(sounds.saturating_duration_since(now));
+		Some(floor.map_or(projected, |floor| projected.max(floor)).min(end))
+	}
+}
 
 /// Where the audio track has reached, measured from its own origin so
 /// timestamp rounding can't accumulate into drift.
@@ -84,6 +145,51 @@ pub(super) struct Fit {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	const DELAY: Duration = Duration::from_millis(100);
+
+	/// The playhead runs at the wall rate from the last write and stops at its
+	/// end, which is what a speaker that ran dry is still sounding.
+	#[test]
+	fn the_playhead_projects_the_last_write_and_holds_at_its_end() {
+		let now = Instant::ZERO + Duration::from_secs(1);
+		let playhead = Playhead::default();
+		assert_eq!(playhead.at(now), None);
+
+		playhead.wrote(Duration::from_secs(10), Duration::from_millis(200), now);
+		assert_eq!(playhead.at(now), Some(Duration::from_millis(9_800)));
+		let later = now + Duration::from_millis(150);
+		assert_eq!(playhead.at(later), Some(Duration::from_millis(9_950)));
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(playhead.at(dry), Some(Duration::from_secs(10)));
+
+		playhead.clear();
+		assert_eq!(playhead.at(dry), None);
+	}
+
+	/// Silence padded ahead of a frame after the speaker ran dry plays no media,
+	/// so the playhead holds instead of replaying media already heard.
+	#[test]
+	fn the_playhead_holds_through_refill_padding() {
+		let now = Instant::ZERO + Duration::from_secs(1);
+		let playhead = Playhead::default();
+		playhead.wrote(Duration::from_secs(10), Duration::from_millis(200), now);
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(playhead.at(dry), Some(Duration::from_secs(10)));
+
+		// 100 ms of padding, then a 20 ms frame continuing from 10 s.
+		playhead.wrote(Duration::from_millis(10_020), Duration::from_millis(120), dry);
+		assert_eq!(playhead.at(dry), Some(Duration::from_secs(10)));
+		let padded = dry + Duration::from_millis(100);
+		assert_eq!(playhead.at(padded), Some(Duration::from_secs(10)));
+		let played = dry + Duration::from_millis(110);
+		assert_eq!(playhead.at(played), Some(Duration::from_millis(10_010)));
+
+		// A new timeline may start anywhere.
+		playhead.restart();
+		playhead.wrote(Duration::from_secs(2), DELAY, played);
+		assert_eq!(playhead.at(played), Some(Duration::from_millis(1_900)));
+	}
 
 	#[test]
 	fn audio_timeline_restarts_when_media_time_rewinds() {
