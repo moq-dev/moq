@@ -10403,6 +10403,7 @@ mod test {
 
 	/// Largest names a moq-transport object by its ID, which a sparse group's frame count
 	/// does not give.
+	#[cfg(feature = "async")]
 	#[test]
 	fn an_idle_copy_judges_a_sparse_group_by_object_id() {
 		let wire = group::Wire {
