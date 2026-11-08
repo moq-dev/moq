@@ -2,8 +2,9 @@
 // as stale, including those below where SUBSCRIBE_START resolved, and never one twice.
 
 import { expect, test } from "bun:test";
-import { Milli, now } from "@moq/clock";
+import { Milli } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -23,6 +24,25 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 		got.push(group.sequence);
 	}
 	return got.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * Resolves once the publisher's re-drop of groups 1 and 2 reaches `reader`: the update clears
+ * their stale verdict, and the drop under the update's number sets it again. Each change is
+ * heard as it lands, so the clear is seen even when the re-drop follows it at once.
+ */
+function redropped(reader: TrackSubscriber): Promise<void> {
+	return new Promise((resolve) => {
+		let cleared = false;
+		const dispose = hooks.givenUp(reader, 1n).changed.subscribe(() => {
+			const held = hooks.staleHeld(reader, 1n, 3n);
+			if (held.length === 0) cleared = true;
+			else if (cleared && held.length === 1 && held[0].start === 1n && held[0].end === 3n) {
+				dispose();
+				resolve();
+			}
+		});
+	});
 }
 
 test("a widened maxDelay re-offers what the publisher skipped below the start", async () => {
@@ -193,14 +213,15 @@ test("an update keeping the budget drops the stale groups again on lite-07", asy
 	}
 	expect(await received(reader, 2)).toEqual([3n, 4n]);
 
-	// Only the priority changes: groups 1 and 2 are still stale, so they are dropped again.
+	// Only the priority changes: groups 1 and 2 are still stale, so they are dropped again. The
+	// track ends only once that re-drop has reached the reader, so the end is a FIN, not a reset
+	// of the reply still writing; a missing re-drop fails here instead of waiting out the grace.
+	const reached = redropped(reader);
 	reader.update({ priority: 5 });
-	const before = now();
+	await reached;
 	producer.finish();
 	producer.close();
 	expect(await reader.recvGroup()).toBeUndefined();
-	// Well inside the 1.5s grace a missing re-drop would wait out, in nanoseconds.
-	expect(now() - before).toBeLessThan(500_000_000);
 
 	reader.close();
 	remote.close();
