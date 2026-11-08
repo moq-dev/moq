@@ -1530,7 +1530,11 @@ pub struct Consumer {
 }
 
 /// One copy's read of a frame, as [`agree`] compares it.
-type Read<'a> = (&'a kio::Consumer<GroupState>, &'a Info, Option<&'a super::object::Fields>);
+type Read<'a> = (
+	&'a kio::Consumer<GroupState>,
+	&'a Info,
+	Option<&'a super::object::Fields>,
+);
 
 /// Whether two copies' reads of one frame carry the same timestamp and object properties,
 /// where both copies hold them: timestamps that may be send times differ per copy, and only
@@ -1650,8 +1654,7 @@ impl Consumer {
 				|| !agree(
 					(&self.state, &self.info, self.fields.as_deref()),
 					(&frame.state, &frame.info, frame.fields.as_deref()),
-				)
-			{
+				) {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
 			recover.adopt(&replacement);
