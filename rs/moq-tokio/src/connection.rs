@@ -1038,6 +1038,10 @@ impl Connection {
 		// The dial in flight, and the address it was asked for. It owns its client, so a
 		// fresh port can replace the loop's between walks.
 		let mut dial: Option<(url::Url, std::pin::Pin<Box<Dial>>)> = None;
+		// The QUIC probe in flight while the live session runs on the WebSocket fallback, and
+		// the address whose race that fallback won, which its end makes QUIC's again.
+		#[cfg(all(feature = "websocket", feature = "quic"))]
+		let (mut probe, mut fallback): (Option<(url::Url, std::pin::Pin<Box<Probe>>)>, Option<url::Url>) = (None, None);
 		// Mirrors the live session's estimates while it serves.
 		let mut forward: Option<Forward> = None;
 		let mut timer: Option<kio::clock::Sleep> = None;
@@ -1063,6 +1067,11 @@ impl Connection {
 								shared.connected(&session, transport);
 								forward = Some(Forward::new(&session));
 								policy.connected(kio::clock::now(), session);
+								#[cfg(all(feature = "websocket", feature = "quic"))]
+								if client.on_fallback(&url, transport) {
+									policy.fallback(kio::clock::now());
+									fallback = Some(url);
+								}
 							}
 							Err(err) => {
 								#[cfg(feature = "quic")]
@@ -1078,6 +1087,25 @@ impl Connection {
 								#[cfg(not(feature = "quic"))]
 								let verdict = verdict(&err);
 								policy.failed(kio::clock::now(), err, verdict);
+							}
+						}
+					}
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					if let Some((_, attempt)) = probe.as_mut()
+						&& let Poll::Ready(res) = waiter.poll_future(attempt.as_mut())
+					{
+						let (url, _) = probe.take().expect("polled above");
+						// Reaching QUIC moves the policy off the fallback, making the handshake
+						// over it the dial in flight.
+						match res {
+							Ok(handshake) => {
+								if policy.probed(kio::clock::now(), Ok(())) {
+									tracing::info!(peer = %Endpoint(&url), "QUIC reachable again; leaving the WebSocket fallback");
+									dial = Some((url, handshake));
+								}
+							}
+							Err(err) => {
+								policy.probed(kio::clock::now(), Err(err));
 							}
 						}
 					}
@@ -1110,12 +1138,26 @@ impl Connection {
 				// The policy already counted the timeout; dropping the dial cancels it.
 				Action::Abandon => {
 					#[cfg(feature = "quic")]
-					{
+					if dial.is_some() {
 						dial_failed = true;
 					}
 					dial = None;
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					{
+						probe = None;
+					}
 				}
+				#[cfg(all(feature = "websocket", feature = "quic"))]
+				Action::Probe(attempt) => {
+					let url = attempt.target().url().clone();
+					let client = client.clone();
+					probe = Some((url, Box::pin(async move { client.probe(attempt).await })));
+				}
+				#[cfg(not(all(feature = "websocket", feature = "quic")))]
+				Action::Probe(_) => unreachable!("only a WebSocket fallback probes"),
 				Action::Migrating => {
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					left_fallback(&mut probe, &mut fallback);
 					forward = None;
 					// After the predecessor is published, so a close woken by this status
 					// finds it and honors its handover deadline.
@@ -1124,6 +1166,8 @@ impl Connection {
 				}
 				Action::Retired => shared.predecessor(None),
 				Action::Offline(failure) => {
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					left_fallback(&mut probe, &mut fallback);
 					forward = None;
 					shared.offline(failure.as_ref());
 				}
@@ -1150,6 +1194,8 @@ impl Connection {
 				// The terminal snapshot does the offline bookkeeping, so a watcher never sees a
 				// `Disconnected` the loop will not redial from.
 				Action::Done(res) => {
+					#[cfg(all(feature = "websocket", feature = "quic"))]
+					left_fallback(&mut probe, &mut fallback);
 					shared.predecessor(None);
 					return res;
 				}
@@ -1345,7 +1391,21 @@ impl Connection {
 }
 
 /// A dial in flight.
-type Dial = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send;
+pub(crate) type Dial = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send;
+
+/// A QUIC probe in flight, resolving to the MoQ handshake to finish over what it reached.
+#[cfg(all(feature = "websocket", feature = "quic"))]
+type Probe = dyn Future<Output = crate::Result<std::pin::Pin<Box<Dial>>>> + Send;
+
+/// The live session left the WebSocket fallback: stop probing, and give QUIC its head start
+/// on the next race, since the outage that lost the last one may be over.
+#[cfg(all(feature = "websocket", feature = "quic"))]
+fn left_fallback(probe: &mut Option<(url::Url, std::pin::Pin<Box<Probe>>)>, fallback: &mut Option<url::Url>) {
+	*probe = None;
+	if let Some(url) = fallback.take() {
+		crate::websocket::forget(&url);
+	}
+}
 
 /// Whether a dial to `url` runs over the QUIC endpoint, whose socket a fresh port replaces.
 #[cfg(feature = "quic")]
@@ -2649,6 +2709,207 @@ mod tests {
 			.await
 			.expect("never redialed after the close")
 			.unwrap();
+	}
+
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	fn fallback_version() -> moq_net::Version {
+		"moq-lite-07-wip".parse().unwrap()
+	}
+
+	/// A client offering only [`fallback_version`], dialing over in-memory qmux sessions to a
+	/// server publishing `origin`, and sending each server session it accepts with whether a
+	/// probe reached it.
+	///
+	/// A dial lands on WebSocket, as the race does while UDP is blocked, and records the win
+	/// the way the race would. A probe fails while `blocked` holds and otherwise reaches what
+	/// stands in for QUIC.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	fn fallback_client(
+		origin: moq_net::origin::Producer,
+		blocked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+		accepted: tokio::sync::mpsc::UnboundedSender<(bool, moq_net::Session)>,
+	) -> Client {
+		use std::sync::atomic::Ordering;
+
+		// A client qmux session whose server side accepts the MoQ handshake in the background.
+		let serve = {
+			let (origin, accepted) = (origin.clone(), accepted.clone());
+			move |probe: bool| {
+				let (origin, accepted) = (origin.clone(), accepted.clone());
+				async move {
+					let versions = moq_net::Versions::from(fallback_version());
+					let config = || {
+						let mut config = qmux::Config::new(qmux::Version::QMux01);
+						config.protocol =
+							qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
+						config
+					};
+					let (client, server) = tokio::io::duplex(64 * 1024);
+					let (client, server) = tokio::try_join!(
+						qmux::Session::connect(qmux::transport::Stream::new(client), config()),
+						qmux::Session::accept(qmux::transport::Stream::new(server), config())
+					)
+					.unwrap();
+					let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
+					tokio::spawn(async move {
+						let server_config = moq_net::Server::new().with_versions(versions).with_publisher(&origin);
+						if let Ok((session, driver)) = server_config.accept(moq_net::time::Instant::now(), server).await
+						{
+							tokio::spawn(moq_net::time::run(driver));
+							let _ = accepted.send((probe, session));
+						}
+					});
+					client
+				}
+			}
+		};
+
+		let config = crate::connect::Config {
+			version: vec![fallback_version()],
+			..Default::default()
+		};
+		let mut client = config.init(Default::default()).unwrap();
+		let dial = serve.clone();
+		client.dialer = Some(std::sync::Arc::new(
+			move |addr: crate::connect::Addr, moq: moq_net::Client| {
+				let transport = dial(false);
+				Box::pin(async move {
+					let session = connect_session(&moq, transport.await).await?;
+					crate::websocket::remember(addr.url());
+					Ok(crate::client::Dialed {
+						session,
+						transport: crate::Transport::WebSocket,
+					})
+				})
+			},
+		));
+		client.prober = Some(std::sync::Arc::new(move |_addr: crate::connect::Addr| {
+			let blocked = blocked.load(Ordering::SeqCst);
+			let transport = serve(true);
+			Box::pin(async move {
+				match blocked {
+					true => Err(Error::ConnectFailed),
+					false => Ok(transport.await),
+				}
+			})
+		}));
+		client
+	}
+
+	/// The MoQ handshake a test dial runs over `transport`.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	async fn connect_session(moq: &moq_net::Client, transport: qmux::Session) -> crate::Result<moq_net::Session> {
+		let (session, driver) = moq.connect(moq_net::time::Instant::now(), transport).await?;
+		tokio::spawn(moq_net::time::run(driver));
+		Ok(session)
+	}
+
+	/// A link that fell back to WebSocket while UDP was blocked moves back to QUIC once a
+	/// probe gets through, without dropping the subscription it carries, and gives the race
+	/// back QUIC's head start. Until then it stays on WebSocket, probing no faster than the
+	/// backoff allows.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	#[tokio::test(start_paused = true)]
+	async fn a_websocket_fallback_returns_to_quic_once_udp_works() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+		const WAIT: Duration = Duration::from_secs(5);
+		// Past the first three probes' longest waits (10 s, 20 s, 40 s), short of the fourth.
+		const OUTAGE: Duration = Duration::from_secs(71);
+		// The longest the fourth probe waits after the third.
+		const BOUND: Duration = Duration::from_secs(80);
+
+		let origin = crate::origin::spawn();
+		let broadcast = origin.route("cam", moq_net::origin::RouteOptions::default()).unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		let blocked = std::sync::Arc::new(AtomicBool::new(true));
+		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+
+		let subscriber = crate::origin::spawn();
+		let client = fallback_client(origin.clone(), blocked.clone(), accepted).with_subscriber(subscriber.clone());
+		let url = url("https://fallback-returns.test/");
+		let connection = kio::clock::timeout(WAIT, client.connect(url.clone()).established())
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+		assert!(crate::websocket::won(&url));
+		let (probe, fallback) = sessions.recv().await.unwrap();
+		assert!(!probe);
+
+		let cam = kio::clock::timeout(WAIT, subscriber.consume().follow("cam", None).unwrap().available())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
+		group.finish().unwrap();
+		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(g0.sequence, 0);
+
+		// Every probe fails while UDP is blocked, and the link keeps serving on WebSocket.
+		kio::clock::sleep(OUTAGE).await;
+		assert_eq!(connection.transport(), Some(crate::Transport::WebSocket));
+		assert_eq!(connection.connects(), 1);
+		assert!(sessions.try_recv().is_err(), "a failed probe connected");
+
+		blocked.store(false, Ordering::SeqCst);
+		let (probe, _preferred) = kio::clock::timeout(BOUND, sessions.recv())
+			.await
+			.expect("never probed QUIC within the backoff bound")
+			.unwrap();
+		assert!(probe, "redialed instead of probing");
+		kio::clock::sleep(Duration::from_millis(1)).await;
+		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
+		assert_eq!(connection.connects(), 2);
+		assert!(connection.connected(), "the move went through a disconnect");
+		assert!(!crate::websocket::won(&url), "the race still skips QUIC's head start");
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
+		group.finish().unwrap();
+		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(g1.sequence, 1, "the subscription dropped across the move");
+		assert_eq!(g1.read_frame().await.unwrap().unwrap().payload[..], b"g1"[..]);
+
+		// The fallback session drains, closing within the handover window.
+		kio::clock::timeout(Duration::from_secs(11), fallback.closed())
+			.await
+			.expect("the fallback session outlived its handover");
+	}
+
+	/// A WebSocket win is provisional: once the session it brought up ends, the redial
+	/// gives QUIC its head start again, since the outage that lost the race may be over.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	#[tokio::test(start_paused = true)]
+	async fn a_websocket_session_ending_restores_the_quic_head_start() {
+		const WAIT: Duration = Duration::from_secs(5);
+		let blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+		let client = fallback_client(crate::origin::spawn(), blocked, accepted);
+		let url = url("https://fallback-ends.test/");
+		let mut connection = kio::clock::timeout(WAIT, client.connect(url.clone()).established())
+			.await
+			.unwrap()
+			.unwrap();
+		let (_, server) = sessions.recv().await.unwrap();
+		assert!(crate::websocket::won(&url));
+
+		server.abort(moq_net::Error::Cancel);
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Disconnected);
+		assert!(!crate::websocket::won(&url), "the redial would skip QUIC's head start");
 	}
 
 	/// A configured token is held before its dial starts the session, so a broadcast

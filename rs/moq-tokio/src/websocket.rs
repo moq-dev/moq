@@ -3,9 +3,11 @@
 //! Used when QUIC is unreachable: UDP blocked by a firewall, a proxy in the way, a
 //! network that only passes TCP/443. The client races this against QUIC and gives QUIC
 //! a small head start ([`Config::delay`]), so WebSocket only wins when QUIC can't get
-//! through. A session that lands on WebSocket stays on it for its lifetime. Servers
-//! accept it on a separate TCP port via [`Listener`], or pass an HTTP server's
-//! upgraded socket to [`accept`] before admitting the returned request.
+//! through. A reconnecting [`Connection`](crate::Connection) that lands on WebSocket
+//! keeps probing QUIC on a slow backoff and moves back once a probe connects, handing
+//! over make-before-break like a GOAWAY migration. Servers accept it on a separate TCP
+//! port via [`Listener`], or pass an HTTP server's upgraded socket to [`accept`] before
+//! admitting the returned request.
 
 use qmux::ws::tokio_tungstenite;
 use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
@@ -191,8 +193,9 @@ where
 
 /// Servers (host, port) where WebSocket won the race, so later dials skip QUIC's head start.
 ///
-/// Both arms still race on those dials, and a QUIC win clears the entry through [`forget`],
-/// since UDP gets through after all.
+/// Both arms still race on those dials. The entry is provisional: a QUIC win or probe
+/// clears it through [`forget`], since UDP gets through after all, and so does the end of
+/// the WebSocket session that won, so a redial after an outage gives QUIC its head start.
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// The [`WEBSOCKET_WON`] key for a dial URL: the host and port the fallback dials.
