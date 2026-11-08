@@ -4,7 +4,7 @@ import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
 import { SessionCode } from "../error.ts";
 import { hooks } from "../internal.ts";
-import { createMockTransportPair, driveUntil, type MockTransport, manual } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, manual } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
@@ -62,9 +62,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 				datagrams.finish();
 				track?.finish();
 				// The end waits out the grace a late datagram gets.
-				const end = reader.recv();
-				await driveUntil(clock, end);
-				expect(await end).toBeUndefined();
+				expect(await clock.drive(reader.recv())).toBeUndefined();
 			} finally {
 				reader.close();
 				remote.close();
@@ -368,9 +366,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 				expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
 				if (finish) {
 					// The end waits out the grace a late datagram gets.
-					const end = reader.recv();
-					await driveUntil(clock, end);
-					expect(await end).toBeUndefined();
+					expect(await clock.drive(reader.recv())).toBeUndefined();
 				} else {
 					expect((await reader.recv())?.payload).toEqual(Uint8Array.of(2));
 				}
@@ -410,9 +406,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			datagrams.finish();
 			expect((await reader.recv())?.payload).toEqual(Uint8Array.of(1));
 			// The end waits out the grace a late datagram gets.
-			const end = reader.recv();
-			await driveUntil(clock, end);
-			expect(await end).toBeUndefined();
+			expect(await clock.drive(reader.recv())).toBeUndefined();
 			expect((await client.stats()).datagramsUnrouted).toBe(0);
 		} finally {
 			reader.close();
@@ -459,8 +453,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 				return count;
 			})();
 			// The end waits out the grace a late datagram gets.
-			await driveUntil(clock, counted);
-			expect(await counted).toBe(BURST);
+			expect(await clock.drive(counted)).toBe(BURST);
 			expect((await client.stats()).datagramsUnrouted).toBe(0);
 		} finally {
 			budget.mockRestore();
