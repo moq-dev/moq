@@ -843,3 +843,16 @@ async fn an_overriding_clock_paces_on_its_own_pcrs() {
 		"a clock no program names marks no program's decoding boundary"
 	);
 }
+
+/// Input after finish is refused, as every importer refuses it.
+#[test]
+fn input_after_finish_is_refused() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut passthrough = Passthrough::new(broadcast, catalog.reserve()).unwrap();
+	passthrough.finish().unwrap();
+	passthrough.finish().unwrap();
+
+	let err = passthrough.decode(KYRION_H264).unwrap_err();
+	assert!(matches!(err, crate::Error::Finished), "{err:?}");
+}

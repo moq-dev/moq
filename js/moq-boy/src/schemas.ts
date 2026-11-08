@@ -8,8 +8,15 @@ export const GameStatsSchema = z.object({
 	wall_secs: z.number(),
 });
 
-/** A single latency component measurement. */
-export const LatencyEntrySchema = z.object({
+/** One component of a viewer's latency, in milliseconds. */
+export interface LatencyEntry {
+	/** The component's name. */
+	label: string;
+	/** Its duration in milliseconds. */
+	ms: number;
+}
+
+const LatencyEntrySchema: z.ZodMiniType<LatencyEntry> = z.object({
 	label: z.string(),
 	ms: z.number().check(z.int(), z.nonnegative(), z.lte(4294967295)),
 });
@@ -29,7 +36,5 @@ export const ReplySchema = z.object({
 
 /** Server-reported encoding and emulation performance stats. */
 export type GameStats = z.infer<typeof GameStatsSchema>;
-/** One component of a viewer's latency, in milliseconds. */
-export type LatencyEntry = z.infer<typeof LatencyEntrySchema>;
 /** Per-frame status published by the emulator. */
 export type GameStatus = z.infer<typeof GameStatusSchema>;

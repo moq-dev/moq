@@ -593,13 +593,14 @@ impl Rendition {
 	}
 
 	/// The catalog's `media.join.interval`, which fixes the [segment length](Self::segment_length).
-	pub fn interval(&self) -> Duration {
+	pub(super) fn interval(&self) -> Duration {
 		self.interval
 	}
 
 	/// How long a segment is: the smallest whole multiple of the interval that is at least a
 	/// second, the grid every rendition numbers its segments on.
-	pub fn segment_length(&self) -> Duration {
+	#[cfg(test)]
+	pub(super) fn segment_length(&self) -> Duration {
 		self.segment
 	}
 

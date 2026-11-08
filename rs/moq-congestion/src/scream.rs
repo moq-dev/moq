@@ -226,7 +226,6 @@ impl Scream {
                 init.rtt,
                 (MIN_REF_WND as u64).max(2 * u64::from(init.mtu)),
                 init.mtu,
-                init.max_pacing_rate,
                 init.now,
             ),
             config,
@@ -592,7 +591,6 @@ mod tests {
                 now,
                 mtu: MTU,
                 rtt: Duration::from_millis(333),
-                max_pacing_rate: None,
                 seed: 0,
             },
         )
