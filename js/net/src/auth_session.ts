@@ -156,7 +156,6 @@ class Presented {
 	}
 }
 
-/** A token the application added to a {@link Handle}, presented on every session of it. */
 /**
  * A token {@link Handle.present} returned before its answer.
  *
@@ -169,6 +168,7 @@ export interface Pending extends Credential {
 	readonly held: boolean;
 }
 
+/** A token the application added to a {@link Handle}, presented on every session of it. */
 class Token implements Pending {
 	readonly grant = new Signal<Grant | undefined>(undefined);
 	readonly closed: Promise<Error | null>;
