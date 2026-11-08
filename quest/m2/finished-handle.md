@@ -44,5 +44,5 @@ packages. Wire: none.
 
 ## Related
 
-- [Track and group end-of-life](/quest/m1/explicit-state/track-end.md) - the outcome enums `Finished` would wrap
+- [Track and group end-of-life](https://github.com/moq-dev/moq/pull/8243) - the outcome enums `Finished` would wrap (`Outcome` in `track.rs` and `group.rs`)
 - [A failed finish is final](https://github.com/moq-dev/moq/pull/8210) - the explicit state this builds on
