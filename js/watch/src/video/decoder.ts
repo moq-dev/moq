@@ -466,7 +466,7 @@ export class Decoder {
 		this.#out.stalled.set(false);
 		// A picture held through the publisher's declared end is not waiting for anything.
 		const active = effect.get(this.#active);
-		if (active && effect.get(active.ended)) return;
+		if (active && effect.get(active.ended) !== undefined) return;
 
 		effect.timer(() => {
 			this.#out.stalled.set(true);
@@ -487,7 +487,7 @@ export class Decoder {
 				playback.set("starting");
 				return;
 			}
-			if (inner.get(active.ended)) {
+			if (inner.get(active.ended) !== undefined) {
 				playback.set("ended");
 				return;
 			}
@@ -612,10 +612,9 @@ class DecoderTrack {
 
 	// A hole or timeline restart makes the next decoded frame decide whether the codec resets.
 	#resetPending = false;
-	// A declared endpoint stays in force through holes until a later group starts a new timeline.
-	#endGroup?: bigint;
-	// Whether the publisher declared the media ends, until a later group starts a new timeline.
-	readonly ended = new Signal(false);
+	// The group the publisher declared the media ends with. It stays in force through holes until a
+	// later group starts a new timeline.
+	readonly ended = new Signal<bigint | undefined>(undefined);
 
 	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
 	// is only held until the first one opens.
@@ -968,13 +967,11 @@ class DecoderTrack {
 		if (read.kind === "gap") {
 			if (latest !== undefined) this.#resetPending = true;
 		} else if (read.kind === "end") {
-			if (latest === undefined || read.group >= latest) {
-				this.#endGroup = read.group;
-				this.ended.set(true);
-			}
-		} else if (this.#endGroup !== undefined && read.group > this.#endGroup) {
-			this.#endGroup = undefined;
-			this.ended.set(false);
+			if (latest === undefined || read.group >= latest) this.ended.set(read.group);
+		} else {
+			const ended = this.ended.peek();
+			if (ended === undefined || read.group <= ended) return;
+			this.ended.set(undefined);
 			this.#onBreak(read.group);
 		}
 	}
@@ -1191,8 +1188,8 @@ class Rendition {
 		return this.min.spread;
 	}
 
-	// Whether the publisher declared the clock-driving decoder's media ends.
-	get ended(): Getter<boolean> {
+	// The group the publisher declared the clock-driving decoder's media ends with.
+	get ended(): Getter<bigint | undefined> {
 		return this.min.ended;
 	}
 
