@@ -210,6 +210,11 @@ export interface Entry {
 	readonly charge: Charge;
 }
 
+// A group's place in an account's eviction order, emptied once the group leaves the cache.
+interface Slot<E> {
+	entry: E | undefined;
+}
+
 /** How an account reaches the track whose groups it evicts. */
 export interface Owner<E extends Entry> {
 	/** Whether `entry` is the live edge, which neither eviction nor expiry takes. */
@@ -237,11 +242,11 @@ export class Track<E extends Entry> {
 	#written = 0;
 	// The tick a frame write may next run an idle scan at.
 	#nextExpiry = 0;
-	// Every cached group, and the eviction order, oldest first, which keeps hints of groups no
-	// longer cached until a scan reaches them. The order starts at `#head`, since `Array.shift`
-	// moves every entry behind it in V8.
-	#live = new Set<E>();
-	#order: E[] = [];
+	// Every cached group with its slot in the eviction order, oldest first. A group leaving the
+	// cache empties its slot, so the order never pins its frames; a scan drops empty slots. The
+	// order starts at `#head`, since `Array.shift` moves every slot behind it in V8.
+	#live = new Map<E, Slot<E>>();
+	#order: Slot<E>[] = [];
 	#head = 0;
 	// Debt carried over from earlier payments.
 	#debt = 0;
@@ -271,8 +276,9 @@ export class Track<E extends Entry> {
 
 	/** Cache `entry` at the back of the eviction order, evictable now unless it is the live edge. */
 	insert(entry: E): void {
-		this.#live.add(entry);
-		this.#order.push(entry);
+		const slot = { entry };
+		this.#live.set(entry, slot);
+		this.#order.push(slot);
 		if (!this.#owner.protects(entry)) this.demote(entry);
 	}
 
@@ -285,7 +291,10 @@ export class Track<E extends Entry> {
 
 	/** Forget `entry`, which left the cache, releasing what it billed. */
 	remove(entry: E): void {
-		if (!this.#live.delete(entry)) return;
+		const slot = this.#live.get(entry);
+		if (slot === undefined) return;
+		this.#live.delete(entry);
+		slot.entry = undefined;
 		entry.charge.clear();
 		if (this.#live.size === 0) {
 			this.#order = [];
@@ -321,8 +330,8 @@ export class Track<E extends Entry> {
 	// at the front reads as not stale until a scan drops it.
 	#oldestIsStale(): boolean {
 		const average = this.pool.average();
-		const front = this.#order[this.#head];
-		if (average === undefined || front === undefined || !this.#live.has(front)) return false;
+		const front = this.#order[this.#head]?.entry;
+		if (average === undefined || front === undefined) return false;
 		return !this.#owner.protects(front) && front.charge.accessed <= average;
 	}
 
@@ -341,21 +350,22 @@ export class Track<E extends Entry> {
 			if (this.#debt === 0 || paid >= cap || scanned >= EVICT_SCAN) break;
 			// An eviction that emptied the account reset the order.
 			if (this.#head >= this.#order.length) break;
-			const entry = this.#order[this.#head++];
-			if (!this.#live.has(entry)) continue;
+			const slot = this.#order[this.#head++];
+			const entry = slot.entry;
+			if (entry === undefined) continue;
 			if (this.#owner.protects(entry)) {
-				this.#order.push(entry);
+				this.#order.push(slot);
 				continue;
 			}
 			scanned++;
 			if (entry.charge.accessed > average) {
-				this.#order.push(entry);
+				this.#order.push(slot);
 				fresh.push(entry);
 				continue;
 			}
 			const size = entry.charge.size;
 			if (size > this.#debt) {
-				// Its slot still holds it.
+				// Back to the front, where its slot still is.
 				this.#head--;
 				this.#compact();
 				return evicted;
@@ -394,8 +404,8 @@ export class Track<E extends Entry> {
 		if (!full) this.#cursor = start + width;
 		const expired: E[] = [];
 		for (let step = 0; step < width; step++) {
-			const entry = order[head + ((start + step) % len)];
-			if (!this.#live.has(entry) || this.#owner.protects(entry)) continue;
+			const entry = order[head + ((start + step) % len)].entry;
+			if (entry === undefined || this.#owner.protects(entry)) continue;
 			if (now - Math.floor(entry.charge.accessed / BOOSTS) > expiry) expired.push(entry);
 		}
 		for (const entry of expired) this.#owner.evict(entry, "expired");
@@ -403,13 +413,13 @@ export class Track<E extends Entry> {
 		return expired.length > 0;
 	}
 
-	// Skip the dead entries at the front of the order, and rebuild it once the slots before the
-	// front and the dead entries behind it clearly outnumber the live ones.
+	// Skip the empty slots at the front of the order, and rebuild it once the slots before the
+	// front and the empty ones behind it clearly outnumber the live ones.
 	#compact(): void {
 		const order = this.#order;
-		while (this.#head < order.length && !this.#live.has(order[this.#head])) this.#head++;
+		while (this.#head < order.length && order[this.#head].entry === undefined) this.#head++;
 		if (order.length > 2 * this.#live.size + EVICT_SLACK) {
-			this.#order = order.slice(this.#head).filter((entry) => this.#live.has(entry));
+			this.#order = order.slice(this.#head).filter((slot) => slot.entry !== undefined);
 			this.#head = 0;
 		}
 	}
@@ -431,7 +441,7 @@ export class Track<E extends Entry> {
 	sweep(): void {
 		if (this.evictExpired(true)) this.#owner.settle();
 		// A live edge alone never expires, so it needs no sweep to keep its track alive for.
-		for (const entry of this.#live) if (!this.#owner.protects(entry)) return;
+		for (const entry of this.#live.keys()) if (!this.#owner.protects(entry)) return;
 		this.pool.unregister(this as Track<Entry>);
 	}
 

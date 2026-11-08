@@ -274,3 +274,23 @@ test("the debt sheds the front of an open live edge", async () => {
 		await expect(behind?.readFrame()).rejects.toThrow();
 	});
 });
+
+// A group leaving the cache leaves nothing in the eviction order holding its frames, so a track
+// that stops publishing does not pin what already expired.
+test("expired groups are not retained by the eviction order", async () => {
+	await withClock(async (clock) => {
+		const pool = new cache.Pool({ expiry: Milli(1_000) });
+		const producer = pooled(pool);
+		const refs: WeakRef<object>[] = [];
+		for (let i = 0; i < 8; i++) {
+			const group = producer.appendGroup();
+			group.writeFrame({ payload: new Uint8Array(1) });
+			group.finish();
+			refs.push(new WeakRef(group));
+		}
+		await clock.advance(3_000);
+		expect(await cached(producer)).toEqual([7n]);
+		Bun.gc(true);
+		expect(refs.slice(0, 7).filter((ref) => ref.deref() !== undefined)).toEqual([]);
+	});
+});
