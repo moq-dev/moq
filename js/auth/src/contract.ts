@@ -9,7 +9,7 @@
 
 import { Pattern } from "@moq/pattern";
 import * as z from "zod/mini";
-import { decodeRoles, encodeRoles, WireRoleSchema } from "./wire.ts";
+import { decodeRoles, encodeRoles, UnixSecondsSchema, WireRoleSchema } from "./wire.ts";
 
 const PathSchema = z.string().check(
 	z.refine(
@@ -195,7 +195,7 @@ export const GrantSchema = z
 			/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
 			mounts: z.optional(z.record(z.string(), z.string())),
 			/** When the session closes, as whole unix seconds. */
-			expires: z.optional(z.int()),
+			expires: z.optional(UnixSecondsSchema),
 			/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
 			revalidate: z.optional(z.int().check(z.positive())),
 			/** The stats tier this session's traffic is bucketed under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`. */

@@ -2544,7 +2544,7 @@ mod tests {
 		options.peer.announces = 20;
 		let cluster = Cluster::spawn(options).unwrap();
 		for (peer, upstream, expected) in [(false, false, 2), (true, false, 20), (true, true, 20)] {
-			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
+			let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
 			grant.peer = peer;
 			grant.upstream = upstream;
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);

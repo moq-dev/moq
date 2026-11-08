@@ -433,7 +433,7 @@ evaluated or refused: nothing is ignored, and no two are combined.
 | a JWT and a certificate | never requested | refused |
 
 A JWT is verified against `--key FILE`, `--key-dir DIR`, or `--key-set FILE`
-(by `kid`, read per request so rotation needs no restart) and authorized at the
+(by `kid`, re-read when the file changes so rotation needs no restart) and authorized at the
 dialed path, as in [Path matching](#path-matching). A bad token is refused; it
 never falls through to the anonymous rules. A JWT presented with a certificate
 is refused too, because neither can safely win, so a peer presents

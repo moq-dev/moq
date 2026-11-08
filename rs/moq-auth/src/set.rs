@@ -38,6 +38,14 @@ impl<'de> Deserialize<'de> for KeySet {
 		}
 
 		let raw = RawKeySet::deserialize(deserializer)?;
+		// A token selects its key by `kid`, so two keys sharing one would make the
+		// verifying key depend on the order the set happens to list them in.
+		let mut kids = std::collections::HashSet::new();
+		for kid in raw.keys.iter().filter_map(|key| key.kid.as_ref()) {
+			if !kids.insert(kid.encode()) {
+				return Err(serde::de::Error::custom(format!("duplicate kid {kid}")));
+			}
+		}
 		Ok(KeySet {
 			keys: raw.keys.into_iter().map(Arc::new).collect(),
 		})

@@ -376,6 +376,11 @@ impl From<moq_auth::Error> for Error {
 		match err {
 			moq_auth::Error::Refused(refusal) => Self::Refused(refusal),
 			moq_auth::Error::UselessGrant => Self::Refused(Default::default()),
+			moq_auth::Error::GrantExpired => {
+				let mut refusal = moq_auth::Refusal::default();
+				refusal.reason = moq_auth::refusal::Reason::Expired;
+				Self::Refused(refusal)
+			}
 			other => Self::Unavailable(other.to_string()),
 		}
 	}
@@ -549,10 +554,11 @@ impl Lease {
 	/// Hold `consumer` for a session that dialed `path`, reducing its grant to
 	/// what the origin scopes by.
 	///
-	/// Fails if the grant's paths are too long; see [`Token::new`]. Fails too if the
-	/// grant caps a bitrate, which nothing here enforces.
+	/// Fails on a grant [`Grant::validate`] refuses, or whose paths are too long; see
+	/// [`Token::new`]. Fails too if the grant caps a bitrate, which nothing here enforces.
 	pub fn new(path: &str, consumer: lease::Consumer) -> Result<Self, Error> {
 		let grant = consumer.grant();
+		grant.validate()?;
 		Self::granted(path, &grant, consumer, None)
 	}
 
@@ -879,13 +885,12 @@ impl Decider {
 }
 
 /// Whether `request` carries a token: a SETUP token of any type, or a non-empty
-/// `jwt` query parameter, the convention `moq auth serve` reads.
+/// `jwt` query parameter, form-decoded as `moq auth serve` reads it, so an escaped
+/// key such as `%6Awt` counts too.
 fn presents_token(request: &Request) -> bool {
 	request.token.is_some()
 		|| request.query.as_deref().is_some_and(|query| {
-			query
-				.split('&')
-				.any(|pair| pair.strip_prefix("jwt=").is_some_and(|jwt| !jwt.is_empty()))
+			url::form_urlencoded::parse(query.as_bytes()).any(|(key, jwt)| key == "jwt" && !jwt.is_empty())
 		})
 }
 
@@ -1491,6 +1496,18 @@ mod tests {
 		}
 	}
 
+	/// An embedder's grant meets the contract an auth server's does.
+	#[test]
+	fn a_lease_refuses_a_grant_the_contract_refuses() {
+		let mut tier = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		tier.tier = Some("a b".into());
+		let mut upstream = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		upstream.upstream = true;
+		for grant in [tier, upstream] {
+			assert!(Lease::new("/room", lease::Consumer::fixed(grant)).is_err());
+		}
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn an_invalid_label_at_revalidation_ends_the_lease() {
 		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
@@ -1718,7 +1735,10 @@ mod tests {
 		});
 		let mut http = auth.request(moq_auth::Transport::Http, "/");
 		http.query = Some("jwt=eyJ".into());
-		for request in [query, setup, http] {
+		// `moq auth serve` form-decodes the key, so an escaped one is a token too.
+		let mut escaped = auth.request(moq_auth::Transport::WebSocket, "/");
+		escaped.query = Some("%6Awt=eyJ".into());
+		for request in [query, setup, http, escaped] {
 			let Err(err) = auth.admit(request).await else {
 				panic!("a token was admitted on the public grant");
 			};
@@ -1903,13 +1923,21 @@ mod tests {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
-		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(1));
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/room", consumer).unwrap();
 
+		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
 		let start = kio::clock::now();
-		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant)).unwrap();
+		producer.update(grant.clone());
 		assert_eq!(lease.ended().await, lease::Reason::Expired);
 		assert_eq!(kio::clock::now(), start, "no grace after expiry");
+
+		// Nor is a lease taken on one already past.
+		let Err(err) = Lease::new("/room", lease::Consumer::fixed(grant)) else {
+			panic!("an expired grant was leased");
+		};
+		assert_eq!(moq_net::SessionError::from(&err), moq_net::SessionError::Expired);
 	}
 
 	#[test]

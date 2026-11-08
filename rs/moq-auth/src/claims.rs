@@ -29,8 +29,10 @@ pub struct Scope {
 }
 
 impl Scope {
-	/// Returns an error when the scope permits nothing, making the key unusable.
+	/// Returns an error when the scope permits nothing, making the key unusable, or names
+	/// a root [`Key::sign`](crate::Key::sign) would refuse.
 	pub fn validate(&self) -> crate::Result<()> {
+		path::validate(&self.root)?;
 		if self.publish.is_empty() && self.subscribe.is_empty() {
 			return Err(crate::Error::UselessScope);
 		}
