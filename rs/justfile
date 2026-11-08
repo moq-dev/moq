@@ -155,6 +155,8 @@ macos-test:
     run just rs test -p kio -p hang -p moq-tokio -p moq-sock
     run just rs test -p moq-sock --features fast-apple-datapath
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
+    # Runner has no camera; these tests need none.
+    run just rs test -p moq-video --no-default-features --features capture -E 'test(/^capture::avfoundation::tests::/)'
     run just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
     # The runner's paravirtual Metal device proves the IOSurface import, ignored elsewhere.
     run just rs test -p moq-video --no-default-features --features render --lib --run-ignored only \
