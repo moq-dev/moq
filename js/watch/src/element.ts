@@ -227,8 +227,9 @@ export default class MoqWatch extends HTMLElement {
 	#connected = new Signal(false);
 	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether to connect and play: connected with every attribute valid.
-	#enabled = new Derived([this.#connected, this.#invalid], (connected, invalid) => connected && invalid.size === 0);
+	// Whether to connect and play: connected with every attribute valid. Written only by the effect
+	// deriving it; a Signal because the connection takes one.
+	#enabled = new Signal(false);
 	#reflecting = false;
 
 	/**
@@ -241,6 +242,11 @@ export default class MoqWatch extends HTMLElement {
 
 	constructor() {
 		super();
+
+		this.signals.run((effect) => {
+			const connected = effect.get(this.#connected);
+			this.#enabled.set(connected && effect.get(this.#invalid).size === 0);
+		});
 
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,

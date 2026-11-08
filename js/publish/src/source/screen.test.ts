@@ -131,7 +131,7 @@ test("a share the user stops releases both tracks and stays ended", async () => 
 		await settle();
 		const state = screen.out.state.peek();
 		expect(state.kind).toBe("live");
-		expect(screen.out.source.peek()?.video?.track).toBe(video as never);
+		expect(screen.out.state.peek()).toMatchObject({ kind: "live", media: { video: { track: video } } });
 
 		video.end();
 		await settle();

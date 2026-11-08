@@ -6,7 +6,7 @@
  * @module
  */
 import * as Moq from "@moq/net";
-import { Derived, Effect, readonlys, Signal } from "@moq/signals";
+import { Effect, readonlys, Signal } from "@moq/signals";
 import * as Announce from "./announce";
 import * as Audio from "./audio";
 import { Broadcast } from "./broadcast";
@@ -211,8 +211,9 @@ export default class MoqPublish extends HTMLElement {
 	#root = new Signal<Document | ShadowRoot | undefined>(undefined);
 	// The attributes holding a refused value, which suspend the element until corrected.
 	#invalid = new Signal<ReadonlySet<string>>(new Set());
-	// Whether to connect and capture: connected to a document with every attribute valid.
-	#enabled = new Derived([this.#root, this.#invalid], (root, invalid) => root !== undefined && invalid.size === 0);
+	// Whether to connect and capture: connected to a document with every attribute valid. Written only
+	// by the effect deriving it; a Signal because the connection takes one.
+	#enabled = new Signal(false);
 	#reflecting = false;
 
 	// Whether to advertise the broadcast, driven by the `announce` mode.
@@ -228,6 +229,11 @@ export default class MoqPublish extends HTMLElement {
 
 	constructor() {
 		super();
+
+		this.signals.run((effect) => {
+			const root = effect.get(this.#root);
+			this.#enabled.set(root !== undefined && effect.get(this.#invalid).size === 0);
+		});
 
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
