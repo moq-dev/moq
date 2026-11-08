@@ -954,8 +954,7 @@ root = ["ca.pem"]
 		resolve("[stats]\nenabled = true\n");
 
 		// Embedders build a cluster without resolving, so it refuses the same.
-		let mut cluster = cluster::Config::default();
-		cluster.node = Some("https://a.example".into());
+		let cluster: cluster::Config = toml::from_str("node = \"https://a.example\"\n").expect("parse");
 		let stats: crate::stats::Config = toml::from_str("enabled = true\n").expect("parse");
 		let err = cluster::Cluster::new(cluster::Options::new(cluster).with_stats(stats))
 			.err()
