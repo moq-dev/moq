@@ -145,10 +145,11 @@ SUBSCRIBE_FINISH arrived before its FIN aborted with the session's error. Its
 datagrams now finish whenever the stream track's settled end survives the abort,
 fixed by [moq-dev/moq#8157](https://github.com/moq-dev/moq/pull/8157).
 
-Added 2026-11-07 (maintainer, /quest-complete): moq-relay's
-`embed::worker_tokio_custom_route_and_quic`, which failed
-[moq-dev/moq#8138](https://github.com/moq-dev/moq/pull/8138)'s Check with "the
-owner's sockets outlived `run`". It is `#[ignore]`d until its child fixes it.
+moq-relay's `embed::worker_tokio_custom_route_and_quic` was never load-bound
+either. Its socket-ownership check matched the HTTP and QUIC ports without
+their protocol, so the test's own QUIC client, still draining, counted as the
+relay's whenever its UDP port shared the HTTP listener's TCP port number.
+Fixed by [moq-dev/moq#8236](https://github.com/moq-dev/moq/pull/8236).
 
 `sh/dispatch-query.test.py`'s terminate test was never load-bound. A TERM
 landing just after the dispatcher's `wait -n` returned left Bash marking the
@@ -193,5 +194,4 @@ Public API: none. Wire: none.
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
 - [moq-gst's stale-completion sink test survives load](/quest/m0/test-flakes-2/gst-stale-completion.md) - `a_stale_completion_cannot_end_the_next_publication` passes under stress, and its `#[ignore]` is removed
-- [The embedded relay's sockets are closed when run returns](/quest/m0/test-flakes-2/embed-sockets-outlived.md) - `embed::worker_tokio_custom_route_and_quic` stops failing with "the owner's sockets outlived `run`"
 - [The http:// fingerprint tests survive a slow fetch](/quest/m0/test-flakes-2/fingerprint-host-clock.md) - a fingerprint fetch slower than the 500 ms hedge no longer trips the host-clock guard
