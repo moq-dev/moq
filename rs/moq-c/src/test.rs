@@ -5509,10 +5509,16 @@ fn decoders_cancel_while_resolving_a_sibling() {
 	let video = id(unsafe { moq_decode_video(catalog_id, 0, &video_output, Some(channel_callback), video_cb.ptr) });
 
 	assert_eq!(moq_decode_audio_cancel(audio), 0);
-	let code = audio_cb.rx.recv_timeout(TIMEOUT).expect("audio cancel ends the resolve wait");
+	let code = audio_cb
+		.rx
+		.recv_timeout(TIMEOUT)
+		.expect("audio cancel ends the resolve wait");
 	assert_eq!(code, 0, "a cancelled audio decoder ends cleanly");
 	assert_eq!(moq_decode_video_cancel(video), 0);
-	let code = video_cb.rx.recv_timeout(TIMEOUT).expect("video cancel ends the resolve wait");
+	let code = video_cb
+		.rx
+		.recv_timeout(TIMEOUT)
+		.expect("video cancel ends the resolve wait");
 	assert_eq!(code, 0, "a cancelled video decoder ends cleanly");
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
