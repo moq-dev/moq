@@ -207,10 +207,6 @@ pub enum Error {
 	#[error("duplicate moov")]
 	DuplicateMoov,
 
-	/// A moov arrived after `finish()`, so the tracks it declares could never finish.
-	#[error("moov after finish")]
-	MoovAfterFinish,
-
 	/// The track fragment has no trun box.
 	#[error("missing trun")]
 	MissingTrun,
