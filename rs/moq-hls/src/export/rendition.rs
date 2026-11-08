@@ -1571,12 +1571,12 @@ impl Rendition {
 pub(crate) struct Fetch {
 	row: segments::Row,
 	state: Fetching,
-	/// Set when only sizing the row: each group's frames are counted and dropped as they are
-	/// read rather than kept for a fragment.
+	/// Set when only sizing the row: each frame is counted and dropped as it is read, never
+	/// decoded or kept for a fragment.
 	sizing: Option<Size>,
 }
 
-/// What a sizing [`Fetch`] counted so far.
+/// What a sizing [`Fetch`] counted so far, of the frames as its groups carry them.
 #[derive(Default)]
 struct Size {
 	frames: usize,
@@ -1645,9 +1645,8 @@ impl Fetch {
 		Poll::Ready(result)
 	}
 
-	/// The payload bytes of a [`sizing`](Self::sizing) fetch's frames, without building its
-	/// fragment, or `None` when it is a stop or its media is gone. Holds at most one group's
-	/// frames at a time.
+	/// The bytes a [`sizing`](Self::sizing) fetch's groups carry, without decoding them, or
+	/// `None` when it is a stop or its media is gone. Holds at most one frame at a time.
 	pub(crate) fn poll_size(&mut self, rendition: &Rendition, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
 		let result = ready!(self.poll_groups(rendition, waiter)).map(|read| {
 			let size = self.sizing.as_ref().expect("a sizing fetch");
@@ -1746,15 +1745,12 @@ impl Fetch {
 						},
 					};
 					let sequence = read.sequence;
-					let miss = match ready!(read.poll(waiter, muxer, broadcast))? {
-						Ok(mut read) => {
-							match &mut self.sizing {
-								Some(size) => {
-									size.frames += read.len();
-									size.bytes += read.iter().map(|frame| frame.payload.len()).sum::<usize>();
-								}
-								None => frames.append(&mut read),
-							}
+					let read = match &mut self.sizing {
+						Some(size) => ready!(read.poll_size(waiter, broadcast, size))?,
+						None => ready!(read.poll(waiter, muxer, broadcast))?.map(|mut read| frames.append(&mut read)),
+					};
+					let miss = match read {
+						Ok(()) => {
 							*group = None;
 							continue;
 						}
@@ -2674,6 +2670,37 @@ impl GroupRead {
 		Self {
 			sequence,
 			state: GroupReading::Fetching(track.fetch_group(sequence, None).into_inner()),
+		}
+	}
+
+	/// Count the group's frames and their bytes into `size` as they are read, keeping none; an
+	/// unservable group is an error as in [`poll`](Self::poll).
+	fn poll_size(
+		&mut self,
+		waiter: &kio::Waiter,
+		broadcast: &moq_net::broadcast::Consumer,
+		size: &mut Size,
+	) -> Poll<Result<std::result::Result<(), moq_net::Error>>> {
+		if let GroupReading::Fetching(fetching) = &mut self.state {
+			match ready!(kio::Task::poll(fetching, waiter)) {
+				Ok(group) => self.state = GroupReading::Reading(group, Vec::new()),
+				Err(err) if is_unservable(&err, broadcast) => return Poll::Ready(Ok(Err(err))),
+				Err(err) => return Poll::Ready(Err(err.into())),
+			}
+		}
+		let GroupReading::Reading(group, _) = &mut self.state else {
+			unreachable!("fetched above");
+		};
+		loop {
+			match ready!(group.poll_read_frame(waiter)) {
+				Ok(Some(frame)) => {
+					size.frames += 1;
+					size.bytes += frame.payload.len();
+				}
+				Ok(None) => return Poll::Ready(Ok(Ok(()))),
+				Err(err) if is_unservable(&err, broadcast) => return Poll::Ready(Ok(Err(err))),
+				Err(err) => return Poll::Ready(Err(err.into())),
+			}
 		}
 	}
 

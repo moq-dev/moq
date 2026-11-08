@@ -540,12 +540,13 @@ impl Consumer {
 		kio::wait(|waiter| self.rendition.poll_latest_init(waiter, &mut load)).await
 	}
 
-	/// The payload bytes of the next segment's media, so a caller can reserve memory before
-	/// [`next`](Self::next) builds it; the fragment adds only container overhead.
+	/// The bytes the next segment's groups carry, so a caller can reserve memory before
+	/// [`next`](Self::next) builds its media, which re-frames those bytes into about as many.
 	///
-	/// Reads the segment's groups one at a time and keeps none of them, so nothing is held while
-	/// the caller waits, and `next` reads them again. `Some(0)` for a gap, `None` once the rendition ends
-	/// cleanly. Fails as `next` would, and never advances the cursor.
+	/// Counts each frame as it is read, without decoding or keeping any, so nothing is held while
+	/// the caller waits, and `next` reads them again. `Some(0)` for a gap, `None` once the
+	/// rendition ends cleanly. Fails as `next` would on a missing segment, and never advances the
+	/// cursor.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_size(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<usize>>> {
 		if self.fetch.as_ref().is_some_and(|fetch| !fetch.sizes()) {
