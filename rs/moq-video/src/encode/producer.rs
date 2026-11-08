@@ -412,8 +412,7 @@ pub fn publish_capture<E: CatalogExt>(
 		observed: 0,
 	};
 	let driver = Driver {
-		track: Some(track),
-		producer: None,
+		owned: Owned::Track(track),
 		catalog,
 		options,
 		state,
@@ -487,13 +486,48 @@ impl Publication {
 /// abandons a camera open or permission prompt still in flight.
 #[cfg(feature = "capture")]
 pub struct Driver<E: CatalogExt = ()> {
-	/// The registered track, until the probe knows its rendition.
-	track: Option<moq_net::track::Producer>,
-	/// The track's importer once probed, held here so a dropped `run` future still cancels it.
-	producer: Option<Producer>,
+	owned: Owned,
 	catalog: moq_mux::catalog::Producer<E>,
 	options: Capture,
 	state: kio::Producer<Published>,
+}
+
+/// What a [`Driver`] owns of its track, one phase at a time, held in the driver so a
+/// dropped [`run`](Driver::run) future still cancels it.
+#[cfg(feature = "capture")]
+enum Owned {
+	/// Registered, until the probe knows its rendition.
+	Track(moq_net::track::Producer),
+	/// Probed, and wrapped in the importer that publishes it.
+	Producer(Box<Producer>),
+	/// Ended or cancelled, so nothing is left to end.
+	Done,
+}
+
+#[cfg(feature = "capture")]
+impl Owned {
+	/// End the track cleanly, best effort: it is usually already going away.
+	fn finish(self) {
+		let ended = match self {
+			Self::Track(track) => track.finish().map_err(Error::from),
+			Self::Producer(mut producer) => producer.finish(),
+			Self::Done => Ok(()),
+		};
+		if let Err(err) = ended {
+			tracing::debug!(error = %err, "video track finish after capture ended");
+		}
+	}
+
+	/// End the track with `err`. A track that already ended has nobody left to tell.
+	fn abort(self, err: moq_net::Error) {
+		match self {
+			Self::Track(track) => {
+				let _ = track.abort(err);
+			}
+			Self::Producer(producer) => producer.abort(err),
+			Self::Done => {}
+		}
+	}
 }
 
 #[cfg(feature = "capture")]
@@ -507,12 +541,7 @@ impl<E: CatalogExt> std::fmt::Debug for Driver<E> {
 impl<E: CatalogExt> Drop for Driver<E> {
 	fn drop(&mut self) {
 		// Dropped before `run` finished: say so rather than `Dropped`.
-		if let Some(track) = self.track.take() {
-			let _ = track.abort(moq_net::Error::Cancel);
-		}
-		if let Some(producer) = self.producer.take() {
-			producer.abort(moq_net::Error::Cancel);
-		}
+		std::mem::replace(&mut self.owned, Owned::Done).abort(moq_net::Error::Cancel);
 		// A no-op once `run` closed the state on its own terminal status.
 		publish_status(&self.state, Status::Cancelled);
 	}
@@ -534,29 +563,13 @@ impl<E: CatalogExt> Driver<E> {
 	/// stalled one.
 	async fn run_from<S: CaptureSource>(mut self, source: S) -> Result<(), Arc<Error>> {
 		let result = self.capture(source).await.map_err(Arc::new);
-		// This runs only when the capture ends on its own (the track is usually already
-		// going away by then); dropping the future leaves the track to `Drop` instead,
-		// since async `Drop` can't finalize it.
+		// This runs only when the capture ends on its own; dropping the future leaves the
+		// track to `Drop` instead, since async `Drop` can't finalize it.
+		let owned = std::mem::replace(&mut self.owned, Owned::Done);
 		match &result {
-			// Clean end (the track was dropped): best-effort finish.
-			Ok(()) => {
-				if let Some(mut producer) = self.producer.take()
-					&& let Err(err) = producer.finish()
-				{
-					tracing::debug!(error = %err, "video track finish after capture ended");
-				}
-			}
-			// Abort with the real cause so subscribers see it. A track that already ended has
-			// nobody left to tell.
-			Err(err) => {
-				let cause = moq_net::Error::Transport(err.to_string());
-				if let Some(track) = self.track.take() {
-					let _ = track.abort(cause.clone());
-				}
-				if let Some(producer) = self.producer.take() {
-					producer.abort(cause);
-				}
-			}
+			Ok(()) => owned.finish(),
+			// Abort with the real cause so subscribers see it.
+			Err(err) => owned.abort(moq_net::Error::Transport(err.to_string())),
 		}
 		publish_status(
 			&self.state,
@@ -600,19 +613,16 @@ impl<E: CatalogExt> Driver<E> {
 		}
 		.await?;
 
-		// The importer consumes the track, so keep a handle to abort it if setup fails,
-		// then drop it so it never outlives the importer's.
-		let track = self.track.take().expect("a driver runs once");
-		let fallback = track.clone();
-		let producer = match Producer::new(track, self.catalog.reserve().with_interval(join), rendition) {
-			Ok(producer) => producer,
-			Err(err) => {
-				let _ = fallback.abort(moq_net::Error::Transport(err.to_string()));
-				return Err(err);
-			}
+		// The importer takes a clone, so a setup failure leaves the registered track for `run`
+		// to abort, and success drops ours so it never outlives the importer's.
+		let Owned::Track(track) = &self.owned else {
+			unreachable!("a driver runs once")
 		};
-		drop(fallback);
-		let producer = self.producer.insert(producer);
+		let producer = Producer::new(track.clone(), self.catalog.reserve().with_interval(join), rendition)?;
+		self.owned = Owned::Producer(Box::new(producer));
+		let Owned::Producer(producer) = &mut self.owned else {
+			unreachable!("just set")
+		};
 		// Capturing from the start, the loop keeps the probe's camera rather than reopening it,
 		// which could mean a second permission prompt or picker. On demand it closes until a viewer.
 		let mut source = Opened {
