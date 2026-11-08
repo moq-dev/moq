@@ -2388,7 +2388,8 @@ impl Producer {
 		self.handle.poll_closed(waiter)
 	}
 
-	/// Watch reader demand without keeping the group alive.
+	/// Watch reader demand without keeping the group alive, such as for a paced flight to see
+	/// its riders leave. [`track::Fill::poll_unwanted`] resolves as soon as readers take the group.
 	pub fn demand(&self) -> Demand {
 		self.handle.demand()
 	}
@@ -3114,6 +3115,7 @@ fn settle(poll: Poll<std::result::Result<Result<()>, kio::Ref<'_, GroupState>>>)
 
 /// A cloneable, watch-only handle to a group's readers.
 ///
+/// A paced flight watches it to stop once its riders leave.
 /// A frame being read counts as a reader of its group, and a group a track subscription
 /// or fetch handed out keeps that track wanted until a reader reads its end
 /// ([`track::Demand`]).
