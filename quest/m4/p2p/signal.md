@@ -66,8 +66,8 @@ access and mDNS resolution work, or across the Internet through a publicly
 reachable host candidate, and a selected native peer may still connect over
 its advertised WebTransport URL; otherwise the peers stay on the relay.
 Changing a peer's list never closes an established pair; it applies to the
-peer's next negotiation, and a pair whose ICE failed renegotiates with the new
-list, without touching other pairs. Test roster churn and pending
+peer's next negotiation (a failed pair stays failed until a re-announce, as
+Lifecycle says). Test roster churn and pending
 negotiations separately.
 
 Native entries: when `info.webtransport` is present the dialer tries its
