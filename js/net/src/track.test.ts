@@ -4662,3 +4662,10 @@ test("reopening stale drops reports again what is stale at the max age bound", (
 	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
 	expect(drain()).toEqual([[1n, 3n, 1500]]);
 });
+
+test("group sequences stop at 2^64-1, as a u64 does", () => {
+	const producer = new TrackProducer("test").accept({});
+	expect(() => producer.createGroup(1n << 64n)).toThrow(RangeError);
+	producer.createGroup((1n << 64n) - 1n).finish();
+	expect(() => producer.appendGroup()).toThrow(RangeError);
+});

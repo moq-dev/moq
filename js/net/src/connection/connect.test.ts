@@ -279,9 +279,9 @@ test("connect logs the relay URL without its credentials", async () => {
 		restoreTransport();
 	}
 
-	// The diagnostics must still identify the relay, just without the query.
+	// The diagnostics must still identify the relay, just without the path or query.
 	expect(captured.lines.length).toBeGreaterThan(0);
-	expect(captured.lines.every((line) => line.includes("https://example.com/test"))).toBe(true);
+	expect(captured.lines.every((line) => line.includes("https://example.com:443"))).toBe(true);
 
 	for (const line of captured.lines) {
 		expect(line).not.toContain(SECRET);
@@ -559,18 +559,32 @@ test("SETUP refuses a version the client did not name", async () => {
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
-		const server = accept({ url, transport: pair.server, version: Lite.DRAFT_05 }).catch(() => undefined);
 		const connecting = connect(url, {
 			versions: ["moq-lite-07-wip", "moq-lite-06"],
 			websocket: { enabled: false },
 		});
+		// Handled now, since the refusal can land while the write below yields.
+		connecting.catch(() => {});
+		const stream = await Stream.accept(pair.server, Lite.DRAFT_02);
+		if (!stream) throw new Error("no SETUP stream");
+		await ClientSetup.decode(stream.reader);
+		await new ServerSetup(Lite.DRAFT_05).encode(stream.writer);
 		// The refusal waits out the grace a peer's close code gets.
 		await driveUntil(clock, connecting);
 		await expect(connecting).rejects.toThrow("unsupported server version: 0xff0dad05");
-		(await server)?.abort();
 	} finally {
 		restore();
 	}
+});
+
+test("a server pinned to a version the client did not offer refuses the SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const accepting = accept({ url, transport: pair.server, version: Lite.DRAFT_05 });
+	// Handled now, since the refusal can land while the write below yields.
+	accepting.catch(() => {});
+	const stream = await Stream.open(pair.client, { version: Lite.DRAFT_02 });
+	await new ClientSetup([Lite.DRAFT_07, Lite.DRAFT_06]).encode(stream.writer);
+	await expect(accepting).rejects.toThrow("no common version found");
 });
 
 test("a peer without an ALPN is refused when no named version negotiates in SETUP", async () => {
