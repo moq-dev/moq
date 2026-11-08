@@ -19,13 +19,28 @@ reason (`Hole` in `rs/moq-net/src/model/track/hole.rs`,
 only for readers it covers (`Drift::settles`, `settles` in
 `js/net/src/track.ts`) and forgetting stale runs when they send new terms
 (`supersede_stale`), and every lite-07 update re-offering what was reported
-stale (`reoffer_stale`). It kept today's storage: `TrackState::drops`,
-`DropCursor` with its `reported` and `reported_stale` sets, `Skipped`,
-`Delivered`, `TrackRun::served`, the lite subscriber's record of the group
-streams that finished since its last update (`Tail::finished`, JS
-`Tail#finished`), and the JS `drops` signal, `#pending`, `#reported`, and
-`#reportedStale`, none billed to anything. This quest is
+stale (`reoffer_stale`). The per-track runs are bounded now (below), but
+not the per-cursor storage: `DropCursor` with
+its `reported`, `reported_stale`, `reported_received`, and `reported_skip`
+sets, `Skipped`, `Delivered`, `TrackRun::served`, the lite subscriber's record
+of the group streams that finished since its last update (`Tail::finished`,
+JS `Tail#finished`), and the JS wire cursor's `#pending`, `#reported`,
+`#reportedStale`, and `#reportedSkip`, none billed to anything. This quest is
 what remains: bounding them.
+
+Done, the drop set's track half: `TrackState::drops` (Rust) and the shared
+`DropSet` in `js/net/src/drops.ts`, which a JS track's sinks now share instead
+of copying, bill each run (`RUN_OVERHEAD`) and each entry of their expiry index
+(`BORN_OVERHEAD`) to the track's pool account. Paying eviction debt sheds the
+lowest runs after the cold groups, and the expiry scan forgets a run given up
+longer than the pool's idle window ago (rounded up to a quarter of it), so a
+pool with no byte target still bounds the set. A shed or forgotten run is
+unknown again. A JS reader's own fill refusals stay its own (`refused`).
+`DropCursor::next`, the JS wire cursor, and `Misses::unknown` fold in only the
+runs changed since they last looked (`drops_changes`, `DropSet::since`), and
+check a folded run against the set before reporting it, so a drop costs each
+reader the runs it touches: `track_subscriber_churn_drops` in
+`rs/moq-net/benches/track.rs` stays flat over shared runs and span.
 
 Decided 2026-11-03 (maintainer, /quest-unblock): `js/net` bounds run memory
 by porting Rust's per-broadcast `cache::Pool` to JS. One shared byte account
@@ -278,13 +293,10 @@ starts.
   publisher's `served`. Delivery is recorded, not inferred from the cursor
   position, since an arrival-order or descending cursor delivers out of
   sequence order.
-- **Billed to the pool, never guessed.** Each track run and each cursor run
-  is billed through a `Charge` at a fixed per-run cost (in JS, through the
-  pool in `js/net/src/cache.ts`). Under pressure the pool
-  evicts the oldest track runs as it evicts groups, and a run older than the
-  cache's retention window is forgotten. An evicted track run's sequences are
-  unknown again: a reader judges them by `drifted` or fills them by range.
-  A relay's own eviction is never a run.
+- **Billed to the pool, never guessed.** Each cursor run is billed through a
+  `Charge` at a fixed per-run cost (in JS, through the pool in
+  `js/net/src/cache.ts`), as the track's runs already are. A relay's own
+  eviction is never a run.
 - **The floor rises only over a final prefix:** the runs from the floor up to
   the lowest run that is not final. A final run is a delivered one, one
   skipped at the track's max age bound, a skip, a budget-independent drop,
@@ -297,14 +309,12 @@ starts.
   `rs/moq-net/src/model/track/miss.rs` keeps per gap (from
   [moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171), decided
   2026-10-23).
-- **CPU per drop.** Every SUBSCRIBE_DROP bumps `drops_revision`, and each
-  reader's `DropCursor::next` rescans the overlapping runs, so N fragmented
-  runs and R readers cost O(R*N) per 6-byte drop; JS `insertDrop`
-  (`js/net/src/internal.ts`) copies the whole run array once for the track
-  and once per sink. Keep the per-cursor walk incremental in both languages.
-  Extend `track_subscriber_churn` in `rs/moq-net/benches/track.rs` with a
-  fragmented set up to pool capacity, swept over subscriber count, shared
-  runs, runs per cursor record, and run span.
+- **CPU per drop.** The per-cursor records are still `RangeSet`s and sorted
+  arrays that every report inserts into, so `track_subscriber_churn_drops`
+  slows once many readers each hold many reported runs (256 readers holding
+  65,536 each: about 1 to 4 ms per drop against 0.16 ms with one each). JS
+  `#askFills` still walks every run above the edge on each probe while a fill
+  handler serves the track; mirror Rust's `Misses::unknown` memo there.
 
 Still to cover, beyond the memory work:
 
@@ -342,9 +352,9 @@ Tests, on mock time through a relay, in Rust and mirrored in `js/net`:
 - Under pool pressure, delivered runs and budget-independent drops fold into
   the floor, while evicting a lite-07 stale report within reach, or a run
   above it, ends the cursor with `TooFarBehind`.
-- A flood of fragmented runs, including a JS drop-only flood with no cached
-  groups, stays within the pool, evicting the oldest shared runs first, and
-  a sequence whose run was evicted is judged locally or filled by range.
+- A sequence whose shared run was shed or forgotten is judged locally or
+  filled by range, through a relay (the flood bound itself is covered by
+  `a_drop_flood_stays_within_the_pool` and its JS mirror).
 - A single run spanning billions of sequences is settled by each cursor in
   one step, whether dropped, skipped by a wider reader, or evicted and judged
   again.

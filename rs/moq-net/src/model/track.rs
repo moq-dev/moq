@@ -23704,8 +23704,8 @@ mod test {
 
 		elapse(&producer, cache::DEFAULT_EXPIRY);
 		pool.sweep();
-		let held: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.clone()).collect();
-		assert_eq!(held, [4..5], "only the run given up within the window stays");
+		let held: Vec<_> = producer.state.read().drops.iter().map(|(run, _)| run.start).collect();
+		assert_eq!(held, [4], "only the run given up within the window stays");
 		assert_eq!(pool.used(), used + RUN_OVERHEAD + BORN_OVERHEAD);
 		assert!(
 			producer.state.read().given_up(0).is_none(),

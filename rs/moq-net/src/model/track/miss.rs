@@ -601,15 +601,6 @@ impl Misses {
 		}
 	}
 
-	/// Judge the holes in `target` the last probe has not, returning the runs to ask a
-	/// fill for. Gives up a run already stale under this reader's budget. `named` is the
-	/// lowest group the reader's ranges name, which may reach below the feed's start,
-	/// `bound` the exclusive end of a window whose ranges all end, and `taken` what the
-	/// reader handed out, which an eviction never makes a miss again.
-	#[expect(
-		clippy::too_many_arguments,
-		reason = "one probe's inputs, borrowed apart from its cursor"
-	)]
 	/// The last sequence of the highest received stale run above the newest group that `drift`
 	/// does not settle. While the terms hold and the run it found still stands, only the runs
 	/// changed since are looked at, so a drop costs each reader the runs it touches.
@@ -658,6 +649,15 @@ impl Misses {
 		self.unknown
 	}
 
+	/// Judge the holes in `target` the last probe has not, returning the runs to ask a
+	/// fill for. Gives up a run already stale under this reader's budget. `named` is the
+	/// lowest group the reader's ranges name, which may reach below the feed's start,
+	/// `bound` the exclusive end of a window whose ranges all end, and `taken` what the
+	/// reader handed out, which an eviction never makes a miss again.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "one probe's inputs, borrowed apart from its cursor"
+	)]
 	pub fn judge(
 		&mut self,
 		state: &TrackState,
