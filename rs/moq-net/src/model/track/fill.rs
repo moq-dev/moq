@@ -915,8 +915,7 @@ impl Fill {
 	/// [`Info`] if it hasn't been accepted yet (a fetch with no live subscription), and is
 	/// ignored otherwise. Errors with [`Error::InvalidRange`] outside the fill,
 	/// [`Error::Duplicate`] if the group was already answered or cached, [`Error::Skipped`] if
-	/// the track skipped it, [`Error::Reused`] if an earlier track of the name used it, or the
-	/// track's abort error.
+	/// the track skipped it, or the track's abort error.
 	pub fn accept(&self, sequence: u64, info: impl Into<Option<Info>>) -> Result<group::Producer> {
 		self.inner.accept(sequence, info.into())
 	}

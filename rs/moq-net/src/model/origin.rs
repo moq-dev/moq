@@ -671,11 +671,9 @@ impl RouteOptions {
 	/// Serve a stable `instance` at `epoch`, in place of a freshly minted one.
 	///
 	/// Only for a publisher that continues the instance's sequence space across restarts,
-	/// announcing a higher `epoch` each time, such as a counter persisted on disk. A restarted
-	/// publisher must start each track past every group sequence it published before, or
-	/// announce a new instance instead. Nothing detects a restart whose sequences go
-	/// backwards: readers stitch every route of one instance together, so its groups are
-	/// dropped as already delivered or spliced into groups a reader already holds.
+	/// announcing a higher `epoch` each time, such as a counter persisted on disk. Readers
+	/// stitch every route of one instance together, so a publisher that restarts its
+	/// group sequences under an old instance splices unrelated groups into their tracks.
 	/// The highest epoch wins over every older one of the instance, cheaper or not.
 	/// Naming an instance grants nothing: publishing still needs the path's grant.
 	///

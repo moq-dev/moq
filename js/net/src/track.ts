@@ -10,7 +10,6 @@ import { Delivered } from "./delivered.ts";
 import {
 	GroupTooLarge,
 	ProtocolViolation,
-	Reused,
 	Skipped,
 	StreamCode,
 	StreamError,
@@ -43,7 +42,6 @@ import {
 	skipHole,
 	staleHole,
 	type TrackRequestOptions,
-	type UsedSequences,
 } from "./internal.ts";
 import { CACHE_EXPIRY, grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
@@ -990,13 +988,6 @@ export class Producer {
 	// One past the highest group this producer received, like the Rust
 	// `max_sequence`, and where the next append lands.
 	#received = 0n;
-	// The sequences earlier tracks of this name used in the broadcast, which this one refuses
-	// below `#fresh`, since a name never reuses a group identity. Unset unless the broadcast's
-	// producer created this track.
-	#used?: UsedSequences;
-	#fresh = 0n;
-	// This producer's identity in `#used.writer`, so the record never keeps a removed producer alive.
-	#writer = Symbol();
 	#subscribing = new Signal(false);
 	// The aggregate across live subscribers only. A fetch's preferences judge just the group it
 	// asks for, so a publisher sizing what it serves (such as how much retained media to replay)
@@ -1139,11 +1130,6 @@ export class Producer {
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
-		hooks.useSequences = (producer, used) => {
-			producer.#used = used;
-			producer.#fresh = used.next;
-			used.writer = producer.#writer;
-		};
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
 		hooks.supersedeStale = (producer, judged) => {
@@ -1762,7 +1748,6 @@ export class Producer {
 		this.#advance(group.sequence, true);
 		this.#arrive(group.sequence);
 		this.#produce(group.sequence);
-		if (this.#used) this.#used.next = max(this.#used.next, group.sequence + 1n);
 		this.#state.latest = max(this.#state.latest ?? 0n, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Follow the group's frames as they land, past the head `#advance` already named.
@@ -1840,9 +1825,12 @@ export class Producer {
 	 * sequences are then final: creating one throws {@link Skipped}. Appending alone never leaves
 	 * such a gap; one left by out-of-order {@link createGroup} calls is what it names.
 	 *
-	 * A track that replaces an earlier one of its name in the broadcast has no writes of its own
-	 * yet, so its first append would reuse sequence 0 and throws {@link Reused}: it starts past
-	 * its predecessor's groups with {@link createGroup}.
+	 * The same broadcast, track, and group sequence always name the same content, and nothing
+	 * checks it: the broadcast remembers nothing of an earlier producer of the name, so a
+	 * replacement starts at 0. A recreated track, or a restarted publisher keeping its instance,
+	 * continues past its predecessor's groups with {@link createGroup}, or uses a new track name
+	 * or instance. Reusing a sequence only corrupts this broadcast for its readers. Datagram
+	 * sequences name no cached content and are exempt.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
 	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
@@ -1851,7 +1839,6 @@ export class Producer {
 	appendGroup(): GroupProducer {
 		const sequence = this.#nextSequence();
 		this.#refuseSkipped(sequence);
-		this.#refuseReused(sequence);
 		const group = new GroupProducer(sequence);
 		this.#bind(group);
 		this.#cap(group);
@@ -1932,21 +1919,13 @@ export class Producer {
 		if (run?.skip) throw new Skipped(sequence);
 	}
 
-	// Refuse a sequence an earlier track of the name used, and every write once a newer track
-	// of the name replaced this one, which could reuse any sequence this one writes.
-	#refuseReused(sequence: bigint): void {
-		if (!this.#used) return;
-		if (sequence < this.#fresh || this.#used.writer !== this.#writer) throw new Reused(sequence);
-	}
-
 	/**
 	 * Create a new group with the given sequence number.
 	 *
 	 * It says nothing about the sequences around it: groups may be created out of order, and an
 	 * aborted or evicted sequence created again. A gap it leaves is skipped only once the
 	 * producer says it will not fill it, with {@link skipGroups} or {@link appendGroup}. A
-	 * sequence already skipped throws {@link Skipped}, and one an earlier track of the name used
-	 * in the broadcast throws {@link Reused}.
+	 * sequence already skipped throws {@link Skipped}.
 	 *
 	 * Throws on a sequence that is still cached: a live duplicate would fan out to every
 	 * subscriber twice. An aborted incarnation is evicted so a fresh group can serve the
@@ -1959,12 +1938,10 @@ export class Producer {
 	}
 
 	#createGroup(sequence: bigint, start: number): GroupProducer {
-		checkSequence(sequence);
 		this.#writable(sequence);
 		// A skip says the sequence will never be produced, so it is final. A drop is not: a
 		// publisher may re-create a group it cut or aborted.
 		this.#refuseSkipped(sequence);
-		this.#refuseReused(sequence);
 		const existing = this.#cached.get(sequence);
 		if (existing) {
 			if (!(existing.group.closed.peek() instanceof Error)) {

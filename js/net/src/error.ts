@@ -397,7 +397,6 @@ function localStreamCode(err: unknown): StreamCode {
 	if (err instanceof TimeoutError) return StreamCode.DeliveryTimeout;
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
-	if (err instanceof Reused) return StreamCode.MalformedTrack;
 	// App codes share the 64+ range in both registries.
 	if (err instanceof Session) return err.code >= 64 ? StreamCode(err.code) : StreamCode.Unroutable;
 	// A session that failed underneath without a close code, as on a network or idle failure.
@@ -421,25 +420,6 @@ export class Skipped extends Error {
 	constructor(sequence: bigint) {
 		super(`sequence ${sequence} was skipped`);
 		this.name = "Skipped";
-		this.sequence = sequence;
-	}
-}
-
-/**
- * A group was created at a sequence an earlier track of its name used in the broadcast.
- *
- * A name never gives new content an identity it already used, so a replacement track starts
- * past its predecessor's groups with an explicit `createGroup`. Mirrors the Rust `Error::Reused`.
- *
- * @public
- */
-export class Reused extends Error {
-	/** The sequence that was refused. */
-	readonly sequence: bigint;
-
-	constructor(sequence: bigint) {
-		super(`sequence ${sequence} was already used`);
-		this.name = "Reused";
 		this.sequence = sequence;
 	}
 }

@@ -5,10 +5,10 @@
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import * as datagram from "./datagram.ts";
-import { NotFound, type Reused, StreamCode, StreamError, toStreamCode } from "./error.ts";
+import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type * as Instance from "./instance.ts";
-import { hooks, type UsedSequences } from "./internal.ts";
+import { hooks } from "./internal.ts";
 import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
@@ -40,10 +40,6 @@ class BroadcastState {
 	// The tracks the application inserted. A finished one stays and keeps serving its cache; only an
 	// abort or removeTrack drops it, the way only a dropped producer leaves a Rust broadcast.
 	tracks = new Map<string, track.Producer>();
-	// One past the highest sequence each name's tracks created, shared with every track the
-	// application created under it, so a replacement never reuses a group identity. Kept for the
-	// broadcast's life: only the local publisher names these tracks.
-	used = new Map<string, UsedSequences>();
 	// The on-demand producer for each name, shared by every subscription and info lookup until it closes.
 	requests = new Map<string, track.Producer>();
 	lookups = new WeakMap<track.Producer, Lookups>();
@@ -358,12 +354,6 @@ function takeQueued(state: BroadcastState, name: string): track.Request | undefi
 
 // Serve `producer` as the broadcast's track for its name, listed with `info`.
 function adopt(state: BroadcastState, producer: track.Producer, info: track.Info): void {
-	let used = state.used.get(producer.name);
-	if (!used) {
-		used = { next: 0n };
-		state.used.set(producer.name, used);
-	}
-	hooks.useSequences(producer, used);
 	const lookups = state.lookups.get(producer) ?? new Lookups();
 	state.lookups.set(producer, lookups);
 	state.tracks.set(producer.name, producer);
@@ -446,9 +436,8 @@ export class Producer {
 	 *
 	 * A request still queued for the name is answered with this track, so its subscribers read
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
-	 * A group at a sequence an earlier track of the name used in this broadcast throws
-	 * {@link Reused}, an append included, so a replacement writes its first group explicitly past
-	 * its predecessor's. Throws if an
+	 * An append on the track throws if it would reuse a sequence an earlier track of the name
+	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
 	 * open track or a live request already holds the name. `info` resolves as
 	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
 	 */

@@ -338,10 +338,6 @@ export namespace Error {
 	export class RefusedRedirect extends Error {
 		constructor(reason: string);
 	}
-	export class Reused extends Error {
-		constructor(sequence: bigint);
-		readonly sequence: bigint;
-	}
 	export class Session extends Error {
 		constructor(code: SessionCode, options?: {
 			cause?: unknown;

@@ -9,10 +9,10 @@
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{cache, datagram, stats, track};
 use std::{
-	collections::{HashMap, HashSet, VecDeque},
+	collections::{HashSet, VecDeque},
 	sync::{
 		Arc,
-		atomic::{AtomicU64, AtomicUsize, Ordering},
+		atomic::{AtomicUsize, Ordering},
 	},
 	task::{Poll, ready},
 };
@@ -106,11 +106,6 @@ struct BroadcastState {
 
 	// Shared across suffixes and producer clones; cache eviction must not reset IDs.
 	unique: u64,
-
-	// One past the highest sequence each name's tracks created, shared with every track the
-	// producer created under it, so a replacement never reuses a group identity. Kept for the
-	// broadcast's life: only the local publisher names these tracks.
-	used: HashMap<Arc<str>, Arc<AtomicU64>>,
 
 	// Pending requests keyed by track name, coalescing concurrent `track()` calls
 	// and waiting for a dynamic handler to accept or deny them. A request leaves
@@ -214,11 +209,6 @@ impl BroadcastState {
 	}
 
 	/// The track serving `name` now, published or requested, read without joining its demand.
-	/// Join `name`'s record of the sequences its tracks used, as its newest track.
-	fn used(&mut self, name: &Arc<str>) -> track::Used {
-		track::Used::join(self.used.entry(name.clone()).or_default().clone())
-	}
-
 	fn peek(state: &mut kio::Mut<'_, Self>, name: &str) -> Option<kio::ConsumerWeak<track::TrackState>> {
 		if let Some(weak) = Self::live_track(state, name) {
 			return Some(weak.peek());
@@ -333,8 +323,7 @@ impl Producer {
 		// this they would be stranded, since the name is taken the moment the
 		// track exists, so no handler could ever serve their queue entry.
 		if let Some(request) = state.requests.take(name.as_ref()) {
-			let used = state.used(&name);
-			let track = request.with_stats(self.stats.clone()).used(used).accept(info.clone());
+			let track = request.with_stats(self.stats.clone()).accept(info.clone());
 			// Cache it like a served request so concurrent lookups coalesce; a
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
@@ -345,7 +334,6 @@ impl Producer {
 
 		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone()).with_stats(self.stats.clone());
 		state.insert_track(track.weak())?;
-		let track = track.used(state.used(&name));
 		let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
 		Ok(track.listed(unlist))
 	}
@@ -406,7 +394,6 @@ impl Producer {
 		let mut state = self.state.lock();
 		let request = track::Request::new(self.info.clone(), name.clone()).with_stats(self.stats.clone());
 		state.insert_track(request.weak())?;
-		let request = request.used(state.used(&name));
 		Ok(request.listed(ListOnAccept {
 			state: self.state.clone(),
 			name,
@@ -1573,53 +1560,6 @@ mod test {
 		drop(track);
 		assert!(matches!(consumer.track("0.opus"), Err(Error::NotFound)));
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
-	}
-
-	/// A track that replaces an earlier one of its name refuses every sequence its
-	/// predecessor used, by append or explicitly, and continues past them once seeded.
-	#[test]
-	fn a_recreated_track_never_reuses_a_sequence() {
-		let producer = Info::new().produce();
-		let track = producer.create_track("a", None).unwrap();
-		track.append_group().unwrap().finish().unwrap();
-		track
-			.create_group(crate::group::Info { sequence: 4 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		drop(track);
-
-		let track = producer.create_track("a", None).unwrap();
-		assert!(matches!(track.append_group(), Err(Error::Reused)));
-		assert!(matches!(
-			track.create_group(crate::group::Info { sequence: 4 }),
-			Err(Error::Reused)
-		));
-		assert!(matches!(
-			track.create_group(crate::group::Info { sequence: 2 }),
-			Err(Error::Reused)
-		));
-		track
-			.create_group(crate::group::Info { sequence: 5 })
-			.unwrap()
-			.finish()
-			.unwrap();
-		assert_eq!(track.append_group().unwrap().sequence, 6);
-		track.abort(Error::Cancel).unwrap();
-
-		// A reservation filled later remembers too, and a name never used starts at 0.
-		let request = producer.reserve_track("a").unwrap();
-		let track = request.accept(track::Info::default());
-		assert!(matches!(track.append_group(), Err(Error::Reused)));
-		assert_eq!(
-			producer
-				.create_track("b", None)
-				.unwrap()
-				.append_group()
-				.unwrap()
-				.sequence,
-			0
-		);
 	}
 
 	/// A track handle reads what an open broadcast serves now, so a track that went away

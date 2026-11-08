@@ -159,14 +159,6 @@ export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pat
 }
 
 /** A half-open run of group sequences, `[start, end)`. */
-/** The sequences the tracks of one name used in their broadcast, shared by each track the producer creates under it. */
-export interface UsedSequences {
-	/** One past the highest sequence any of them created, 0n before any. */
-	next: bigint;
-	/** The newest of them by identity token, the only one that may still write: an older one removed while open would reuse identities. */
-	writer?: symbol;
-}
-
 export interface Run {
 	start: bigint;
 	end: bigint;
@@ -544,11 +536,6 @@ export const hooks: {
 	/** Whether the producer declared the track's end, released or not. Assigned by `track.ts`. */
 	trackFinished: (producer: Producer) => boolean;
 	/**
-	 * Refuse the sequences earlier tracks of the name used, and record this one's in `used`.
-	 * Assigned by `track.ts`.
-	 */
-	useSequences: (producer: Producer, used: UsedSequences) => void;
-	/**
 	 * Record that the publisher gave up the groups `[start, end)` with `error`: none will
 	 * arrive, so a reader waiting on one moves past it, a group still arriving in them ends with
 	 * `error`, the declared end does not wait for them, and a relay serving this track forwards
@@ -901,9 +888,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	trackFinished: () => {
-		throw new Error("track.ts not loaded");
-	},
-	useSequences: () => {
 		throw new Error("track.ts not loaded");
 	},
 	dropTrackGroups: () => {

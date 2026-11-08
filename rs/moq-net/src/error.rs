@@ -389,12 +389,6 @@ pub enum Error {
 	#[error("sequence was skipped")]
 	Skipped,
 
-	/// A group sequence an earlier stream of the track already used: a recreated track
-	/// creating one its predecessor used, or a restarted publisher whose sequences went
-	/// backwards. A name never gives new content an identity it already used.
-	#[error("sequence was already used")]
-	Reused,
-
 	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
 	/// by either side, as `Session::closed` reports it. Not a failure.
 	#[error("cancelled")]
@@ -717,7 +711,6 @@ impl From<&Error> for SessionError {
 			| Error::GroupTooLarge
 			| Error::TimestampMismatch
 			| Error::MalformedTrack
-			| Error::Reused
 			| Error::UnsupportedExtension => Self::Internal,
 			// A producer dropped without an end is a bug here, so it is never given a meaning.
 			Error::Dropped => Self::Internal,
@@ -762,8 +755,7 @@ impl From<&Error> for StreamError {
 			| Error::NavigationSegment
 			| Error::EmptySegment
 			| Error::InvalidEscape
-			| Error::MalformedTrack
-			| Error::Reused => Self::MalformedTrack,
+			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so
 			// re-sending the number could mistranslate it.
