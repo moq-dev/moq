@@ -39,3 +39,7 @@ Rules every child keeps:
 
 The counts come from a heuristic scan on 2026-11-06; re-scan each area
 before starting, since tests land and move.
+
+## Required
+
+- [A lint rejects expect(clock.drive(...)).rejects and .resolves](/quest/m1/mock-clock-tests/drive-expect-guard.md) - wrapping `drive` in `expect(...).rejects` or `.resolves` fails lint

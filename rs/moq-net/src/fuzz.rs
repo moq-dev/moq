@@ -476,18 +476,7 @@ pub fn requests_route(
 	prefix: impl Into<crate::Path>,
 	route: crate::origin::RouteInfo,
 ) -> Result<crate::origin::Route, crate::Error> {
-	origin.forward(prefix, route, None)
-}
-
-/// Land a claim taking over the peer's `predecessor` claim, as a session lands an
-/// ANNOUNCE_TAKEOVER, for the origin bench.
-pub fn takeover_route(
-	origin: &crate::origin::Producer,
-	prefix: impl Into<crate::Path>,
-	route: crate::origin::RouteInfo,
-	predecessor: &crate::origin::Route,
-) -> Result<crate::origin::Route, crate::Error> {
-	origin.forward(prefix, route, Some(predecessor))
+	origin.forward(prefix, route)
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.

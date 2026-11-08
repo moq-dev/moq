@@ -76,6 +76,8 @@ pub(super) struct Routed {
 	/// The requested prefix, absolute.
 	prefix: Path,
 	root: Path,
+	/// The session's origin handle, whose exclusions and mounts also gate the claims.
+	origin: crate::origin::Producer,
 	routes: HashMap<u64, WireRoute>,
 	next_route: u64,
 	claims: HashMap<u64, WireClaim>,
@@ -136,6 +138,7 @@ impl Routed {
 			session_key,
 			prefix,
 			root,
+			origin: subscriber.origin.clone(),
 			routes: HashMap::new(),
 			next_route: 0,
 			claims: HashMap::new(),
@@ -206,7 +209,7 @@ impl Routed {
 				*floor = revision;
 				// The node never held a claim the limit leaves out, so it neither starts nor ends.
 				let changes = (changes.into_iter())
-					.filter(|(path, _)| admits(&self.root, &self.permit, path))
+					.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
 					.collect();
 				let revision = revision.filter(|_| certifies);
 				self.stream.batch(route.node, changes, revision);
@@ -221,30 +224,6 @@ impl Routed {
 			} => {
 				let path = self.path(prefix, &decoder.start(suffix)?)?;
 				let claim = claim(instance, epoch, cost)?;
-				self.start(decoder.last(), route, path, claim)?;
-			}
-			Msg::Takeover {
-				predecessor,
-				suffix,
-				route,
-				instance,
-				epoch,
-				cost,
-			} => {
-				let (_, suffix) = decoder.takeover(predecessor, suffix)?;
-				let path = self.path(prefix, &suffix)?;
-				// The predecessor is a live claim of the same route covering the new one.
-				let taken = self.claims.get(&predecessor).ok_or(Error::ProtocolViolation)?;
-				if taken.route != route || !path.has_prefix(&taken.path) {
-					return Err(Error::ProtocolViolation);
-				}
-				let continues = (taken.path.clone(), taken.claim.instance.clone());
-				// At its own path it replaces the predecessor.
-				if continues.0 == path {
-					self.end(predecessor)?;
-				}
-				let mut claim = claim(instance, epoch, cost)?;
-				claim.continues = Some(continues);
 				self.start(decoder.last(), route, path, claim)?;
 			}
 			Msg::Update { id, cost, .. } => {
@@ -366,7 +345,7 @@ impl Routed {
 			let route = &self.routes[id];
 			if let Some((claims, floor)) = &route.committed {
 				let changes = (claims.iter())
-					.filter(|(path, _)| admits(&self.root, &self.permit, path))
+					.filter(|(path, _)| admits(&self.origin, &self.root, &self.permit, path))
 					.map(|(path, claim)| (path.clone(), Some(claim.clone())));
 				stream.batch(route.node, changes.collect(), floor.filter(|_| certifies));
 			}
@@ -466,29 +445,12 @@ impl Routed {
 				return;
 			}
 		}
-		// The route this one takes over, as this stream serves it at the instance it
-		// continues, so what resolved through that one beneath the claim carries on.
-		let taken = (served.claim.continues.as_ref())
-			.and_then(|(taken, instance)| {
-				let entry = self.served.get_mut(&(id, taken.clone()))?;
-				(entry.route.route.instance.as_ref() == Some(instance)).then_some((taken, entry))
-			})
-			.map(|(taken, entry)| match *taken == key.1 {
-				// In place, its sources serve what the new one continues: they live on with
-				// it rather than closing with the old route.
-				true => (&entry.route.dynamic, Some(std::mem::take(&mut entry.route.live))),
-				false => (&entry.route.dynamic, None),
-			});
 		// A new instance or epoch replaces the old route, attached before it goes.
 		tracing::debug!(route = %subscriber.log_path(&path), node = id, "announce");
-		let (predecessor, live) = taken.unzip();
-		match subscriber.origin.forward(&path, route.clone(), predecessor) {
+		match subscriber.origin.forward(&path, route.clone()) {
 			Ok(dynamic) => {
 				let wake = crate::util::QueueWake::new(key.clone(), self.ready.clone());
-				let mut entry = AnnouncedRoute::new(route, dynamic, wake);
-				if let Some(live) = live.flatten() {
-					entry.live = live;
-				}
+				let entry = AnnouncedRoute::new(route, dynamic, wake);
 				entry.waker.wake_by_ref();
 				self.served.insert(key.clone(), ServedClaim { named, route: entry });
 				self.stream.serving(id, &key.1);
@@ -555,7 +517,6 @@ fn claim(instance: Option<crate::Instance>, epoch: u64, cost: crate::origin::Cos
 		instance: instance.ok_or(Error::ProtocolViolation)?,
 		epoch,
 		cost: cost.value(),
-		continues: None,
 		upstream: false,
 		learned: false,
 	})
@@ -570,9 +531,13 @@ fn hops(id: route::Id) -> crate::Hops {
 }
 
 /// Whether `permit`'s limit admits the peer's claim at the absolute `path`.
-fn admits(root: &Path, permit: &crate::auth::Permit, path: &Path) -> bool {
-	path.strip_prefix(root)
-		.is_some_and(|relative| permit.within_limit(relative.as_str()))
+/// Whether the node may hold the peer's claim at `path`: the permit's limit admits
+/// it, and the origin would serve it rather than refuse it (an excluded subtree or mount).
+fn admits(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::Permit, path: &Path) -> bool {
+	origin.publishable(path)
+		&& path
+			.strip_prefix(root)
+			.is_some_and(|relative| permit.within_limit(relative.as_str()))
 }
 
 /// The absolute regions a permit confines the peer's claims to.
@@ -655,6 +620,59 @@ mod tests {
 
 		routed.limit(&subscriber, &public).unwrap();
 		assert_eq!(served(&routed), ["live/a/public/x"]);
+	}
+
+	/// A claim beneath a subtree the origin handle excludes never enters the node, on
+	/// the floor or on a replay, even though the permit admits it; a covering claim
+	/// overlapping the handle's scope still does.
+	#[kio::test]
+	async fn an_excluded_claim_never_enters_the_node() {
+		let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+		subscriber.origin = {
+			let patterns: crate::Patterns = ["live/*/public/**", ".stats/**"]
+				.into_iter()
+				.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
+				.collect();
+			subscriber.origin.scope("", &patterns).unwrap()
+		}
+		.exclude(".stats")
+		.unwrap();
+		let prefix = Path::empty();
+		let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
+		let mut decoder = AnnounceDecoder::default();
+		let floor = Msg::Floor {
+			id: 0,
+			revision: Some(0),
+		};
+		let route = Msg::RouteStart {
+			node: 7,
+			advert: ADVERT,
+		};
+		for msg in [
+			route,
+			start("live"),
+			start(".stats/node"),
+			start(".stats/node/evil"),
+			floor,
+		] {
+			routed.receive(&prefix, msg, &mut decoder).unwrap();
+		}
+		let shown = |routed: &super::Routed| -> Vec<String> {
+			routed.node.shown().keys().map(|(_, path)| path.to_string()).collect()
+		};
+		routed.outputs(&subscriber);
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
+
+		// A narrower limit certifies nothing, so widening it again replays every
+		// committed claim into a fresh view; only the replay filter keeps `.stats` out.
+		routed.limit(&subscriber, &limited("live/**")).unwrap();
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
+
+		routed.limit(&subscriber, &Default::default()).unwrap();
+		assert_eq!(shown(&routed), ["live"]);
+		assert_eq!(served(&routed), ["live"]);
 	}
 
 	/// An unscoped stream narrowed to a limit that leaves a claim out certifies nothing,
@@ -857,77 +875,5 @@ mod tests {
 			routed.receive(&prefix, Msg::EndedId { id }, &mut decoder).unwrap();
 		}
 		assert_eq!(pending(&routed), 0, "claims started and ended between floors");
-	}
-
-	/// A takeover in place keeps the sources the predecessor minted open: they serve the
-	/// instance it continues. A restart in place closes them.
-	#[kio::test]
-	async fn a_takeover_in_place_keeps_the_predecessors_sources() {
-		for takeover in [true, false] {
-			let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-			let prefix = Path::empty();
-			let mut routed = super::Routed::new(&subscriber, &prefix, 1, &Default::default()).unwrap();
-			let mut decoder = AnnounceDecoder::default();
-			let path = Path::from_static("room/host");
-			let advert = Advert {
-				seqno: 0,
-				metric: 0,
-				down_only: false,
-			};
-			let start = Msg::Active {
-				suffix: PathRef::literal(path.clone()),
-				route: 0,
-				instance: Some(Instance::random()),
-				epoch: 0,
-				hops: Default::default(),
-				cost: Cost::new(0),
-			};
-			for msg in [Msg::RouteStart { node: 7, advert }, start] {
-				routed.receive(&prefix, msg, &mut decoder).unwrap();
-			}
-			routed
-				.receive(
-					&prefix,
-					Msg::Floor {
-						id: 0,
-						revision: Some(0),
-					},
-					&mut decoder,
-				)
-				.unwrap();
-			routed.outputs(&subscriber);
-			let minted = routed.served[&(7, path.clone())].route.live.consume();
-
-			let instance = Some(Instance::random());
-			let replace = match takeover {
-				true => Msg::Takeover {
-					predecessor: 0,
-					suffix: PathRef::literal(path.clone()),
-					route: 0,
-					instance,
-					epoch: 0,
-					cost: Cost::new(0),
-				},
-				false => Msg::Restart {
-					id: 0,
-					instance,
-					epoch: 0,
-					cost: Cost::new(0),
-				},
-			};
-			routed.receive(&prefix, replace, &mut decoder).unwrap();
-			routed
-				.receive(
-					&prefix,
-					Msg::Floor {
-						id: 0,
-						revision: Some(1),
-					},
-					&mut decoder,
-				)
-				.unwrap();
-			routed.outputs(&subscriber);
-			assert_eq!(minted.is_closed(), !takeover, "takeover: {takeover}");
-		}
 	}
 }

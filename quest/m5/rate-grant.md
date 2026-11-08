@@ -44,3 +44,5 @@ target never exceeds the cap minus overhead; a raised cap lets it climb back.
 Public API: the in-band grant types in `rs/moq-net` and `js/net` gain the two
 rates, and the publishers gain a clamp. Wire: the AUTH grant gains optional
 rates, on the next unpublished lite version after lite-07 only.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/net](/quest/m2/api-shape/net.md) makes `auth::Grant` `#[non_exhaustive]` before the cut, so the rates are additive fields.

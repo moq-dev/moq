@@ -60,3 +60,5 @@ server entry above):
 
 Public API: constructors that spawned return a handle to poll instead; an Impact
 migration note per published crate. Wire: none.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [spawn-constructors](/quest/m2/spawn-constructors.md) settles public spawning entry points before the cut; this quest keeps the private spawns.

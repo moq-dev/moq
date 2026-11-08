@@ -7,7 +7,6 @@ import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, ClaimsSchema, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
-import * as Path from "./path.ts";
 import { encodeGrants } from "./wire.ts";
 
 const program = new Command();
@@ -37,8 +36,6 @@ program
 					...(options.publish && { publish: options.publish }),
 					...(options.subscribe && { subscribe: options.subscribe }),
 				});
-				// A scope root `Key.sign` would refuse could never sign anything beneath it.
-				Path.validate(scope.root);
 				key = { ...key, scope };
 			}
 

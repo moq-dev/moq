@@ -67,14 +67,38 @@ Decided 2026-11-05 (maintainer, /quest-audit): ✅ this waits for
 [Drop set](/quest/m1/drop-set.md), since both rewrite the lite-07
 SUBSCRIBE_DROP draft wording and the drop signal's `Delivered` argument.
 
-Public API: additive for a separate read; breaking if folded into `recv_group`
-(its `Result<Option<group::Consumer>>` return changes for every caller), with
-MIGRATE notes. `@moq/net` and the bindings mirror it only with a named consumer.
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): ✅ key the drop signal by group start and land after
+[time addressing's model](/quest/m2/time-addressing/model.md), so its public
+API never ships sequence-keyed (rejected: landing first and rekeying with
+the model). ✅ Drops surface as a `Gap { range, error }` item on
+`track::Ordered`, which already skips gaps through `poll_drop`, mirroring
+the container consumer's `Read::Gap` (`rs/moq-mux/src/container/consumer.rs`);
+`recv_group` is unchanged (rejected: a separate `recv_drop` read; a drop
+variant on `recv_group`). Answer the maintainer's question above first: if
+receive-window eviction can wait for the header, take the no-wire path, and
+remove this quest from [lite07-finalize](/quest/m2/lite07-finalize.md)'s
+Required.
+
+Open, for whoever starts this, with the maintainer: a `Gap`'s start-keyed
+`range` doesn't say how many groups it covers once starts are sparse, yet
+the Goal has readers count losses. Recommended: `Gap` also carries the
+number of groups dropped, which the drop set's runs already know.
+
+Public API: breaking for `track::Ordered` only. Its one read,
+`poll_next_group` (and its async wrapper), returns
+`Result<Option<Item>>` instead of `Result<Option<group::Consumer>>`, where
+`Item` is a group or a `Gap { range, error }`; `Ok(None)` still ends the
+read and `Err` still carries a track abort.
+Callers match the new item, and a caller that ignores drops takes the group
+arm; the PR's MIGRATE notes say so. `recv_group` and the unordered cursor are
+unchanged, so a reader that needs drop accounting reads through `Ordered`.
+`@moq/net` and the bindings mirror it only with a named consumer.
 Wire: possibly lite-07 (SUBSCRIBE_DROP for a stopped group), decided here.
 
 ## Required
 
 - [Drop set](/quest/m1/drop-set.md) - owns the per-cursor drop runs this reports
+- [Address groups by timestamp](/quest/m2/time-addressing/model.md) - the drop range is keyed by start
 
 ## Related
 - [The receive-windows benchmark](/quest/m1/receive-windows-evicted.md) - its overcommitted cells wait on this (skipped by [moq-dev/moq#7838](https://github.com/moq-dev/moq/pull/7838) until it lands)

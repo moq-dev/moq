@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
-import { dialed, handover, isLocal, pinnedTransport, type Redirect, target } from "./goaway.ts";
+import { dialed, handover, pinnedTransport, type Redirect, target } from "./goaway.ts";
 
 const current = new URL("https://relay.example/room?jwt=secret");
 
@@ -22,6 +22,11 @@ test("an explicit URI the policy will not follow is refused, not ignored", () =>
 		["follow", "https://[::ffff:127.0.0.1]/"],
 		["follow", "https://[::ffff:7f00:1]/"],
 		["follow", "moqt://169.254.169.254/"],
+		// Raw QUIC dials over https, which reads each of these as 127.0.0.1.
+		["follow", "moql://127.1/"],
+		["follow", "moql://0x7f000001/"],
+		["follow", "moql://2130706433/"],
+		["follow", "moqt://[::FFFF:127.0.0.1]/"],
 	];
 	for (const [policy, uri] of refused) {
 		expect(() => target(policy, uri, current, false), `${policy}: ${uri}`).toThrow(RefusedRedirect);
@@ -61,30 +66,11 @@ test("a certificate pin holds the host even under follow", () => {
 	expect(target("follow", "https://relay.example:5443/", current, true)?.port).toBe("5443");
 });
 
-test("local literals are recognized in every spelling", () => {
-	const local = [
-		"https://127.0.0.1/",
-		"https://localhost/",
-		"https://a.localhost/",
-		"https://[::1]/",
-		"https://[::]/",
-		"https://10.0.0.1/",
-		"https://172.16.0.1/",
-		"https://192.168.1.1/",
-		"https://169.254.1.1/",
-		"https://0.0.0.0/",
-		"https://[::ffff:10.0.0.1]/",
-		"https://[fe80::1]/",
-		"https://[fc00::1]/",
-		"moqt://127.0.0.1/",
-		"moqt://[::ffff:127.0.0.1]/",
-		"unix:///tmp/moq.sock",
-	];
-	for (const url of local) expect(isLocal(new URL(url)), url).toBe(true);
-
-	for (const url of ["https://example.com/", "https://8.8.8.8/", "https://172.32.0.1/", "https://[2606:4700::1]/"]) {
-		expect(isLocal(new URL(url)), url).toBe(false);
-	}
+test("same-host compares the host a raw QUIC URL dials", () => {
+	const raw = new URL("moql://relay.example/room");
+	expect(target("same-host", "moql://RELAY.example:4443/room", raw, false)?.port).toBe("4443");
+	expect(target("same-host", "https://relay.example/room", raw, false)?.protocol).toBe("https:");
+	expect(() => target("same-host", "moql://other.example/", raw, false)).toThrow(RefusedRedirect);
 });
 
 test("a WebSocket fallback that connected is the host a redirect is judged against", () => {

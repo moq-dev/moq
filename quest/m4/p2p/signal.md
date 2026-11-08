@@ -5,20 +5,21 @@
 An opted-in browser discovers the other opted-in peers on its relay session,
 exposes candidates for the application to select, and ends up holding an established
 `@moq/net` connection to each selected peer ICE can reach, wired into the shared origin
-in both directions. The application supplies the ICE servers and the roster
-size above which new negotiations stop using them. No new relay behavior.
+in both directions. The application supplies the ICE servers, per peer when
+it wants. No new relay behavior.
 
 ## Plan
 
 `Peers` in `@moq/p2p` takes the shared origin, a reconnect-safe handle to the
 relay connection's auth, and the policy knobs from the
-[questline README](/quest/m4/p2p/README.md): `enabled`, `prefix`,
-`iceServers`, `max`, `meta`, plus application-owned selection and per-connection
-priority/cost. Decided 2026-10-13: only explicitly selected peers are dialed;
+[questline README](/quest/m4/p2p/README.md): `prefix`, `iceServers`,
+`meta`, plus application-owned selection and per-connection
+priority/cost. `Peers` exists only while P2P is on; the on/off `enabled`
+lives on the element as an attribute. Decided 2026-10-13: only explicitly selected peers are dialed;
 there is no default dial-all. Prefer a selected set/handle to a callback,
 settling the public shape with its consumer. Publishing into the origin reaches
 the relay and its announce stream is the roster. Tests inject transport
-factories and cover pairing, application selection, and the roster gate.
+factories and cover pairing, application selection, and per-peer ICE servers.
 
 Identity, decided 2026-11-02 (maintainer, /quest-unblock): each peer generates a keypair, and its
 roster `<id>` (also the perfect-negotiation tiebreak) is its public key, like an
@@ -54,11 +55,20 @@ then each ICE candidate as it arrives; the target answers on
 `<prefix><self>/<target>`. Every peer subscribes to its own `<prefix><self>/`
 prefix.
 
-The gate: a peer connection is built with `iceServers` when the roster holds
-`max` peers or fewer, and with an empty list otherwise. Host and mDNS
-candidates are always gathered, so LAN pairs form at any roster size.
-Established pairs are never closed by the gate. This is a STUN policy, not a
-connection budget; test roster churn and pending negotiations separately.
+ICE servers, decided 2026-11-07 (maintainer, /quest-plan from the API sweep
+of open PRs and remaining quests): each selected or admitted peer takes its
+own `iceServers`, defaulting to `Peers`' list, which replaces the earlier
+roster-size gate and its `max` knob. An application that wants to stop using
+STUN past some roster size passes an empty list for the peers it selects or
+admits then. Host and mDNS candidates are gathered where the browser's privacy
+policy allows, so an empty list can still pair on a LAN when local-network
+access and mDNS resolution work, or across the Internet through a publicly
+reachable host candidate, and a selected native peer may still connect over
+its advertised WebTransport URL; otherwise the peers stay on the relay.
+Changing a peer's list never closes an established pair; it applies to the
+peer's next negotiation (a failed pair stays failed until a re-announce, as
+Lifecycle says). Test roster churn and pending
+negotiations separately.
 
 Native entries: when `info.webtransport` is present the dialer tries its
 URLs in advertised order, using `connect` with the listener's fingerprint
