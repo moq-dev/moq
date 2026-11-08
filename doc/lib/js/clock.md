@@ -89,7 +89,7 @@ workspace dependencies reach `@moq/clock` loads a preload
 fails a workspace that doesn't. The preload fails a test when a timer it armed
 through `@moq/clock` fires on the host clock, so a test can't prove that nothing
 happened by waiting in real time; lint bans the native timers in test files. A
-timer already due when armed, such as `sleep(0)`, or a `timeout()` whose
+timer already due when armed, such as `sleep(Duration.ZERO)`, or a `timeout()` whose
 operation settles first never waits, and a timer firing after its test ended
 fails nothing. A test on real sockets, devices, or processes calls `hostTime()`
 from `@moq/clock/test` first; without the preload it does nothing.

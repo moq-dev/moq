@@ -35,8 +35,8 @@
 Added 2026-11-07 (maintainer, /quest-plan from the 2026-11-07 API sweep of open PRs and remaining quests): the worker-safe renderer output and room's narrower surface.
 
 Found by the 2026-11-07 API shape audit (JS core and browser media); see
-the [epic](/quest/m2/api-shape/README.md). Durations are
-[js-time-types](/quest/m2/js-time-types.md); hosted assets and the
+the [epic](/quest/m2/api-shape/README.md). Durations are already
+`Clock.Duration` objects; hosted assets and the
 `supported` default are m1 quests. Each change updates its package's
 `api/*.api.md`, and moq.dev's npm consumer is checked for each removed
 export.
