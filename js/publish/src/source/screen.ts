@@ -52,7 +52,7 @@ export class Screen {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<ScreenInput>;
 
-	/** The video constraints the next picker uses, or false to capture audio only. */
+	/** The video constraints the next picker uses. Browsers require video, so false makes the picker fail. */
 	video: Signal<Video.Constraints | boolean | undefined>;
 	/** The audio constraints the next picker uses, or false to capture video only. */
 	audio: Signal<Audio.Constraints | boolean | undefined>;
@@ -121,11 +121,14 @@ export class Screen {
 			);
 		effect.cleanup(release);
 
+		// Closing can land between the picker settling and this task resuming; the cleanup's state wins.
+		const abort = effect.abort;
 		effect.spawn(async () => {
 			let media: MediaStream | undefined;
 			try {
 				media = await effect.race(pending);
 			} catch (error) {
+				if (abort.aborted) return;
 				// The spec reports a refused or dismissed picker as NotAllowedError, and nothing else does.
 				const end: ScreenEnd =
 					error instanceof DOMException && error.name === "NotAllowedError"
@@ -134,7 +137,7 @@ export class Screen {
 				this.#state.set({ kind: "ended", ...end });
 				return;
 			}
-			if (!media) return;
+			if (!media || abort.aborted) return;
 
 			const v = media.getVideoTracks().at(0) as Video.StreamTrack | undefined;
 			const a = media.getAudioTracks().at(0) as Audio.StreamTrack | undefined;
