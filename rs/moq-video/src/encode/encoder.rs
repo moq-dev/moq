@@ -155,9 +155,9 @@ pub struct Config {
 	/// at most this long for a picture it can decode. [`Encoder::cut`] opens one
 	/// sooner. Rounded to whole frames at `framerate`, never below one; see
 	/// [`effective_join`](Self::effective_join). Measured by the frames'
-	/// timestamps, so a source running slower than `framerate` still opens a group
-	/// this often, overshooting by less than one of its frames. [`Encoder::new`]
-	/// refuses zero. Defaults to two seconds.
+	/// timestamps on a backend that can cut, so a source running slower than
+	/// `framerate` still opens a group this often, overshooting by less than one of
+	/// its frames. [`Encoder::new`] refuses zero. Defaults to two seconds.
 	pub join: std::time::Duration,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
@@ -233,9 +233,10 @@ impl Config {
 		std::time::Duration::from_nanos(nanos.try_into().unwrap_or(u64::MAX))
 	}
 
-	/// Frames between keyframes: [`join`](Self::join) rounded to the nearest
-	/// frame, and never below one, since a positive join shorter than a frame
-	/// still opens a group per frame.
+	/// Frames between keyframes at `framerate`: [`join`](Self::join) rounded to
+	/// the nearest frame, and never below one, since a positive join shorter than
+	/// a frame still opens a group per frame. Each backend keys on this count, and
+	/// the encoder keys sooner when the timestamps reach it first.
 	pub(crate) fn keyframe_interval(&self) -> u32 {
 		self.framerate.frames(self.join).max(1)
 	}
@@ -461,9 +462,9 @@ impl Encoder {
 	///
 	/// Returns [`Error::CutUnsupported`] when this backend cannot force a group
 	/// boundary (a V4L2 driver without the force-keyframe control), in which case
-	/// nothing is queued: groups keep falling where [`Config::join`] puts them, and
-	/// the caller decides whether that layout is acceptable rather than finding
-	/// out from the stream.
+	/// nothing is queued: groups keep falling every [`Config::join`]'s worth of
+	/// frames at [`Config::framerate`], and the caller decides whether that layout
+	/// is acceptable rather than finding out from the stream.
 	pub fn cut(&mut self) -> Result<(), Error> {
 		self.check_cut()?;
 		self.pending_cut = true;
