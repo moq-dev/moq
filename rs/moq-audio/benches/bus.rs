@@ -6,8 +6,9 @@
 //!   source into every mix; `sparse` routes one source into each, which should
 //!   cost little more than the sources alone.
 //! - `bus_minus`: a program of every source plus a mix-minus per source, the
-//!   per-guest return feed, which should grow with the source count rather
-//!   than its square.
+//!   per-guest return feed, swept over the source count and how many sources
+//!   each minus removes. It should grow with the source count rather than its
+//!   square, and with the removed count only once a minus removes most sources.
 //!
 //! Run with `cargo bench -p moq-audio --bench bus`.
 
@@ -100,18 +101,23 @@ fn bench_minus(c: &mut Criterion) {
 	let mut group = c.benchmark_group("bus_minus");
 	group.throughput(Throughput::Elements(BLOCK as u64));
 
-	for count in [1usize, 4, 16, 64] {
-		let (bus, mut driver, mut sources, block) = sources(count, 48_000);
-		let program = bus.mix();
-		for (_, strip) in &sources {
-			program.route(strip);
-		}
-		let minuses: Vec<_> = sources.iter().map(|(_, strip)| program.minus(strip)).collect();
+	for removed in [1usize, 4, 16] {
+		for count in [16usize, 64] {
+			let (bus, mut driver, mut sources, block) = sources(count, 48_000);
+			let program = bus.mix();
+			for (_, strip) in &sources {
+				program.route(strip);
+			}
+			// Each guest's minus removes itself and the next `removed - 1` sources.
+			let minuses: Vec<_> = (0..count)
+				.map(|guest| program.minus((0..removed).map(|offset| &sources[(guest + offset) % count].1)))
+				.collect();
 
-		group.bench_function(BenchmarkId::from_parameter(count), |b| {
-			b.iter(|| run(&mut driver, &mut sources, &block));
-		});
-		drop(minuses);
+			group.bench_function(BenchmarkId::new(format!("remove{removed}"), count), |b| {
+				b.iter(|| run(&mut driver, &mut sources, &block));
+			});
+			drop(minuses);
+		}
 	}
 	group.finish();
 }
