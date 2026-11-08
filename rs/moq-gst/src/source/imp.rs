@@ -1468,7 +1468,10 @@ impl Follower {
 					if !drains {
 						return false;
 					}
-					if let Reading::Reader(reader) = std::mem::replace(&mut entry.reading, Reading::Idle) {
+					// A later catalog update finds it already draining: it keeps playing out.
+					if let Reading::Reader(reader) | Reading::Draining(reader) =
+						std::mem::replace(&mut entry.reading, Reading::Idle)
+					{
 						entry.reading = Reading::Draining(reader);
 					}
 					true
@@ -3231,7 +3234,8 @@ mod session_tests {
 	/// short: the pad owes downstream every frame of the track and an EOS.
 	///
 	/// The subscriber's view of that arrival order is reproduced exactly: the head of the track,
-	/// then the catalog update, then the tail and the clean end.
+	/// then the catalog update, then the tail and the clean end. A second update lands while the
+	/// rendition drains, which must leave it draining.
 	#[test]
 	fn a_retired_rendition_drains_to_eos() {
 		const HEAD: u64 = 3;
@@ -3247,6 +3251,9 @@ mod session_tests {
 			.unwrap();
 		let _audio = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let _audio2 = broadcast
+			.create_track("audio2", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		{
 			let mut guard = catalog.modify().unwrap();
@@ -3319,6 +3326,19 @@ mod session_tests {
 			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
 		}
 		await_pad(&element, "audio_");
+
+		// A second update while the video drains, whose new audio pad proves it was acted on.
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.audio.renditions.insert("audio2".to_string(), audio_rendition());
+		}
+		for _ in 0..100 {
+			if pads(&element, "audio_").len() == 2 {
+				break;
+			}
+			block(Duration::from_millis(50));
+		}
+		assert_eq!(pads(&element, "audio_").len(), 2, "the second update never landed");
 
 		// A reader the update cancelled still has to notice. It takes its pad with it when it does,
 		// so the wait is only ever served in full by one that is still reading.
