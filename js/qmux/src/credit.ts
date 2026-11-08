@@ -118,16 +118,6 @@ export class Credit {
 		return avail > 0n ? avail : 0n;
 	}
 
-	/** Get the current max value. */
-	get max(): bigint {
-		return this.#max;
-	}
-
-	/** Get the current used value. */
-	get used(): bigint {
-		return this.#used;
-	}
-
 	#wake(): void {
 		const waiters = this.#waiters;
 		this.#waiters = new Set();
