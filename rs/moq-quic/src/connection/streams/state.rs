@@ -11,7 +11,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 
 use super::{
-	Next, Recv, Retransmits, Schedule, Send, SendState, StreamHalf, ThinRetransmits,
+	Next, Reader, Recv, Retransmits, Schedule, Send, SendState, StreamHalf, ThinRetransmits,
 	lease::Rank,
 	send::{End, Error},
 };
@@ -267,7 +267,7 @@ impl StreamsState {
 		}
 
 		let (new_bytes, closed) = rs.ingest(frame, payload_len, self.data_recvd, self.local_max_data)?;
-		let (stopped, evicted) = (rs.stopped, rs.lease.evicted);
+		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 
@@ -362,7 +362,7 @@ impl StreamsState {
 			// Redundant reset
 			return Ok(false);
 		};
-		let (stopped, evicted) = (rs.stopped, rs.lease.evicted);
+		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
 		let credit = if stopped {
@@ -717,10 +717,14 @@ impl StreamsState {
 			// are required to encode it.
 			let max_buf_size = max_buf_size - buf.len() - 1 - VarInt::size(id.into());
 			let (offsets, encode_length) = stream.pending.poll_transmit(max_buf_size);
-			let fin = offsets.end == stream.pending.offset() && matches!(stream.state, SendState::DataSent { .. });
-			if fin {
-				stream.fin_pending = false;
-			}
+			let fin = offsets.end == stream.pending.offset()
+				&& match &mut stream.state {
+					SendState::DataSent { fin_pending, .. } => {
+						*fin_pending = false;
+						true
+					}
+					SendState::Ready | SendState::ResetSent { .. } => false,
+				};
 
 			let meta = frame::StreamMeta { id, offsets, fin };
 			trace!(id = %meta.id, off = meta.offsets.start, len = meta.offsets.end - meta.offsets.start, fin = meta.fin, "STREAM");
@@ -857,7 +861,11 @@ impl StreamsState {
 		};
 		let was_pending = stream.is_pending();
 		// The Reliable Size of a reset stream supersedes any FIN
-		stream.fin_pending |= frame.fin && !stream.is_reset();
+		if frame.fin
+			&& let SendState::DataSent { fin_pending, .. } = &mut stream.state
+		{
+			*fin_pending = true;
+		}
 		stream.pending.retransmit(frame.offsets);
 		if !was_pending && stream.is_pending() {
 			self.pending.push(frame.id, &mut stream.slot, stream.priority);
@@ -1314,7 +1322,8 @@ impl StreamsState {
 	///
 	/// Returns whether a `MAX_DATA` frame should be enqueued for that credit.
 	pub(super) fn stream_recv_freed(&mut self, id: StreamId, mut recv: Box<Recv>) -> bool {
-		let transmit = self.discard_lease(id, &mut recv.lease);
+		let evicted = recv.reader == Reader::Evicted;
+		let transmit = self.discard_lease(id, &mut recv.lease, evicted);
 		self.unlooked.remove(&id);
 		self.stream_freed(id, StreamHalf::Recv);
 		transmit
@@ -1348,7 +1357,6 @@ mod tests {
 	use super::*;
 	use crate::{
 		TransportErrorCode,
-		connection::State as ConnState,
 		connection::Streams,
 		connection::streams::{recv, send},
 		connection::waits::Counter,
@@ -1376,12 +1384,12 @@ mod tests {
 			for index in 0..127 {
 				let id = StreamId::new(Side::Client, dir, index);
 				data(&mut server, id, 0, 1, false);
-				assert_eq!(Streams::new(&mut server, &ConnState::Established).accept(dir), Some(id));
+				assert_eq!(Streams::new(&mut server, false).accept(dir), Some(id));
 			}
 			for index in 127..131 {
 				let id = StreamId::new(Side::Client, dir, index);
 				data(&mut server, id, 0, 1, true);
-				assert_eq!(Streams::new(&mut server, &ConnState::Established).accept(dir), Some(id));
+				assert_eq!(Streams::new(&mut server, false).accept(dir), Some(id));
 				let mut stream = recv(&mut server, &mut pending, id);
 				let mut chunks = stream.read().unwrap();
 				assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
@@ -1392,7 +1400,7 @@ mod tests {
 						id,
 						state: &mut server,
 						pending: &mut pending,
-						conn_state: &ConnState::Established,
+						closed: false,
 					};
 					stream.finish().unwrap();
 					stream.release();
@@ -1435,7 +1443,7 @@ mod tests {
 						for (&id, reader) in ids.iter().zip(&readers) {
 							data(&mut server, id, 0, 0, false);
 							server.waits.register(id, Wait::Read, reader);
-							assert_eq!(Streams::new(&mut server, &ConnState::Established).accept(dir), Some(id));
+							assert_eq!(Streams::new(&mut server, false).accept(dir), Some(id));
 						}
 						for packet in 0..packets {
 							for &id in &ids {
@@ -1473,7 +1481,7 @@ mod tests {
 									id,
 									state: &mut server,
 									pending: &mut pending,
-									conn_state: &ConnState::Established,
+									closed: false,
 								};
 								stream.finish().unwrap();
 								stream.release();
@@ -1508,14 +1516,14 @@ mod tests {
 			let mut pending = Retransmits::default();
 			let mut sent = Vec::new();
 			for index in 0..streams {
-				let id = Streams::new(&mut server, &ConnState::Established)
+				let id = Streams::new(&mut server, false)
 					.open(Dir::Uni, Default::default())
 					.unwrap();
 				let mut stream = send::Stream {
 					id,
 					state: &mut server,
 					pending: &mut pending,
-					conn_state: &ConnState::Established,
+					closed: false,
 				};
 				assert_eq!(stream.write(&mut &b"x"[..]), Err(send::Error::Blocked));
 				stream.reset(0u32.into()).unwrap();
@@ -1556,7 +1564,7 @@ mod tests {
 					id,
 					state: &mut server,
 					pending: &mut pending,
-					conn_state: &ConnState::Established,
+					closed: false,
 				}
 				.release();
 				assert!(server.ends.capacity() <= server.ends.len() * 4);
@@ -1580,11 +1588,11 @@ mod tests {
 			initial_max_data: 0u32.into(),
 			..TransportParameters::default()
 		});
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		for _ in 0..512 {
 			let id = Streams {
 				state: &mut server,
-				conn_state: &state,
+				closed: false,
 			}
 			.open(Dir::Uni, Default::default())
 			.unwrap();
@@ -1592,7 +1600,7 @@ mod tests {
 				id,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			assert_eq!(stream.write(&mut &b"blocked"[..]), Err(send::Error::Blocked));
 			assert_eq!(stream.write(&mut &b"blocked"[..]), Err(send::Error::Blocked));
@@ -1618,10 +1626,10 @@ mod tests {
 			initial_max_stream_data_uni: 1024u32.into(),
 			..TransportParameters::default()
 		});
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -1629,7 +1637,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		assert_eq!(stream.write(&mut &b"blocked"[..]), Err(send::Error::Blocked));
 		stream.finish().unwrap();
@@ -1655,10 +1663,10 @@ mod tests {
 				initial_max_data: if peer_credit { 1u32.into() } else { 1024u32.into() },
 				..TransportParameters::default()
 			});
-			let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+			let mut pending = Retransmits::default();
 			let holder = Streams {
 				state: &mut server,
-				conn_state: &state,
+				closed: false,
 			}
 			.open(Dir::Uni, Default::default())
 			.unwrap();
@@ -1667,14 +1675,14 @@ mod tests {
 					id: holder,
 					state: &mut server,
 					pending: &mut pending,
-					conn_state: &state
+					closed: false
 				}
 				.write(&mut &b"x"[..]),
 				Ok(1)
 			);
 			let id = Streams {
 				state: &mut server,
-				conn_state: &state,
+				closed: false,
 			}
 			.open(Dir::Uni, Default::default())
 			.unwrap();
@@ -1682,7 +1690,7 @@ mod tests {
 				id,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			let (write, end) = (Counter::new(), Counter::new());
 			assert!(stream.poll_write(&write, &mut &b"blocked"[..]).is_pending());
@@ -1710,14 +1718,14 @@ mod tests {
 			initial_max_stream_data_uni: 1024u32.into(),
 			..TransportParameters::default()
 		});
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let writers: Vec<_> = (0..4).map(|_| Counter::new()).collect();
 		let ids: Vec<_> = writers
 			.iter()
 			.map(|writer| {
 				let id = Streams {
 					state: &mut server,
-					conn_state: &state,
+					closed: false,
 				}
 				.open(Dir::Uni, Default::default())
 				.unwrap();
@@ -1725,7 +1733,7 @@ mod tests {
 					id,
 					state: &mut server,
 					pending: &mut pending,
-					conn_state: &state,
+					closed: false,
 				};
 				assert_eq!(stream.write(&mut &b"x"[..]), Err(send::Error::Blocked));
 				assert!(stream.poll_write(writer, &mut &b"x"[..]).is_pending());
@@ -1737,7 +1745,7 @@ mod tests {
 			id: ids[1],
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		}
 		.reset(0u32.into())
 		.unwrap();
@@ -1745,7 +1753,7 @@ mod tests {
 			id: ids[2],
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		}
 		.finish()
 		.unwrap();
@@ -1774,10 +1782,10 @@ mod tests {
 			initial_max_stream_data_uni: 1000u32.into(),
 			..TransportParameters::default()
 		});
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -1785,7 +1793,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		}
 		.write(&mut &[42; 24][..])
 		.unwrap();
@@ -1820,7 +1828,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		}
 		.write(&mut &[7; 24][..])
 		.unwrap();
@@ -1838,10 +1846,10 @@ mod tests {
 			initial_max_stream_data_uni: 1000u32.into(),
 			..TransportParameters::default()
 		});
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -1849,7 +1857,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		}
 		.write(&mut &[42; 24][..])
 		.unwrap();
@@ -1875,10 +1883,10 @@ mod tests {
 			initial_max_stream_data_uni: 1000u32.into(),
 			..TransportParameters::default()
 		});
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -1886,7 +1894,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		}
 		.write(&mut &[42; 24][..])
 		.unwrap();
@@ -1902,7 +1910,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		}
 		.reset(0u32.into())
 		.unwrap();
@@ -2250,10 +2258,10 @@ mod tests {
 			..TransportParameters::default()
 		});
 
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -2262,7 +2270,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 
 		let error_code = 0u32.into();
@@ -2312,10 +2320,10 @@ mod tests {
 			..TransportParameters::default()
 		});
 
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let mut streams = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		};
 
 		let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
@@ -2326,7 +2334,7 @@ mod tests {
 			id: id_mid,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		mid.write(&mut &b"mid"[..]).unwrap();
 
@@ -2334,7 +2342,7 @@ mod tests {
 			id: id_low,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		low.set_priority(-1).unwrap();
 		low.write(&mut &b"low"[..]).unwrap();
@@ -2343,7 +2351,7 @@ mod tests {
 			id: id_high,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		high.set_priority(1).unwrap();
 		high.write(&mut &b"high"[..]).unwrap();
@@ -2369,10 +2377,10 @@ mod tests {
 				..TransportParameters::default()
 			});
 
-			let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+			let mut pending = Retransmits::default();
 			let mut streams = Streams {
 				state: &mut server,
-				conn_state: &state,
+				closed: false,
 			};
 			let id_low = streams.open(Dir::Bi, Default::default()).unwrap();
 			let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
@@ -2381,7 +2389,7 @@ mod tests {
 				id: id_low,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			low.set_priority(-1).unwrap();
 			assert_eq!(low.write(&mut &b"low"[..]).unwrap(), 3);
@@ -2403,7 +2411,7 @@ mod tests {
 				id: id_high,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			high.set_priority(1).unwrap();
 			assert_eq!(high.write(&mut &b"high"[..]).unwrap(), 4);
@@ -2430,10 +2438,10 @@ mod tests {
 			..TransportParameters::default()
 		});
 
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let mut streams = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		};
 
 		let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
@@ -2443,7 +2451,7 @@ mod tests {
 			id: id_mid,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		assert_eq!(mid.write(&mut &b"mid"[..]).unwrap(), 3);
 		assert_eq!(server.pending.len(), 1);
@@ -2452,7 +2460,7 @@ mod tests {
 			id: id_high,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		high.set_priority(1).unwrap();
 		assert_eq!(high.write(&mut &[0; 200][..]).unwrap(), 200);
@@ -2463,7 +2471,7 @@ mod tests {
 			id: id_high,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		high.set_priority(-1).unwrap();
 		assert_eq!(server.pending.len(), 2);
@@ -2490,10 +2498,10 @@ mod tests {
 			..TransportParameters::default()
 		});
 
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let mut streams = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		};
 		let ids: Vec<_> = (0..3)
 			.map(|_| streams.open(Dir::Bi, Default::default()).unwrap())
@@ -2505,7 +2513,7 @@ mod tests {
 				id,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			stream.set_priority(priority).unwrap();
 			stream.write(&mut &[0; 200][..]).unwrap();
@@ -2522,7 +2530,7 @@ mod tests {
 			id: starved,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		}
 		.set_priority(10)
 		.unwrap();
@@ -2542,10 +2550,10 @@ mod tests {
 				..TransportParameters::default()
 			});
 
-			let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+			let mut pending = Retransmits::default();
 			let mut streams = Streams {
 				state: &mut server,
-				conn_state: &state,
+				closed: false,
 			};
 
 			// a, b and c all have the same priority
@@ -2557,7 +2565,7 @@ mod tests {
 				id: id_a,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			stream_a.write(&mut &[b'a'; 100][..]).unwrap();
 
@@ -2565,7 +2573,7 @@ mod tests {
 				id: id_b,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			stream_b.write(&mut &[b'b'; 100][..]).unwrap();
 
@@ -2573,7 +2581,7 @@ mod tests {
 				id: id_c,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			stream_c.write(&mut &[b'c'; 100][..]).unwrap();
 
@@ -2616,10 +2624,10 @@ mod tests {
 			..TransportParameters::default()
 		});
 
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let mut streams = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		};
 
 		// a, and b have the same priority, c has higher priority
@@ -2631,7 +2639,7 @@ mod tests {
 			id: id_a,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream_a.write(&mut &[b'a'; 100][..]).unwrap();
 
@@ -2639,7 +2647,7 @@ mod tests {
 			id: id_b,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream_b.write(&mut &[b'b'; 100][..]).unwrap();
 
@@ -2657,7 +2665,7 @@ mod tests {
 			id: id_c,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream_c.set_priority(1).unwrap();
 		stream_c.write(&mut &[b'b'; 100][..]).unwrap();
@@ -2720,10 +2728,10 @@ mod tests {
 			initial_max_stream_data_uni: 42u32.into(),
 			..TransportParameters::default()
 		});
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let mut streams = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		};
 
 		let id = streams.open(Dir::Uni, Default::default()).unwrap();
@@ -2731,7 +2739,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream.write(&mut &b"hello"[..]).unwrap();
 		stream.reset(0u32.into()).unwrap();
@@ -3176,11 +3184,10 @@ mod tests {
 		assert_eq!(open.wakes(), 0, "no open was refused");
 
 		let mut retransmits = Retransmits::default();
-		let conn_state = ConnState::Established;
 
 		let stream_id = Streams {
 			state: &mut server,
-			conn_state: &conn_state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.expect("should be able to open a stream");
@@ -3189,7 +3196,7 @@ mod tests {
 			id: stream_id,
 			state: &mut server,
 			pending: &mut retransmits,
-			conn_state: &conn_state,
+			closed: false,
 		};
 
 		// Check that the stream accepts `initial_send_window` bytes
@@ -3248,11 +3255,10 @@ mod tests {
 		assert_eq!(open.wakes(), 0, "no open was refused");
 
 		let mut retransmits = Retransmits::default();
-		let conn_state = ConnState::Established;
 
 		let stream_id = Streams {
 			state: &mut server,
-			conn_state: &conn_state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.expect("should be able to open a stream");
@@ -3261,7 +3267,7 @@ mod tests {
 			id: stream_id,
 			state: &mut server,
 			pending: &mut retransmits,
-			conn_state: &conn_state,
+			closed: false,
 		};
 
 		let initial_send_len = initial_send_window as usize;
@@ -3510,10 +3516,10 @@ mod tests {
 	#[test]
 	fn held_reset_waits_for_prefix_ack() {
 		let mut server = server_with_reset_stream_at(false);
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -3521,7 +3527,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream.write(&mut &b"hello world"[..]).unwrap();
 		let mut buf = Vec::new();
@@ -3554,10 +3560,10 @@ mod tests {
 	#[test]
 	fn stale_reset_ack_keeps_shrunk_reset() {
 		let mut server = reset_at_server();
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -3565,7 +3571,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream.write(&mut &b"hello world"[..]).unwrap();
 		stream.reset_at(stream.offset().rewind(4), 7u32.into()).unwrap();
@@ -3583,10 +3589,10 @@ mod tests {
 	#[test]
 	fn acked_reset_shrunk_waits_for_replacement() {
 		let mut server = reset_at_server();
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -3594,7 +3600,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream.write(&mut &b"hello world"[..]).unwrap();
 		let mut buf = Vec::new();
@@ -3624,10 +3630,10 @@ mod tests {
 	fn stop_sending_abandons_reliable_prefix() {
 		for reset_stream_at in [false, true] {
 			let mut server = server_with_reset_stream_at(reset_stream_at);
-			let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+			let mut pending = Retransmits::default();
 			let id = Streams {
 				state: &mut server,
-				conn_state: &state,
+				closed: false,
 			}
 			.open(Dir::Uni, Default::default())
 			.unwrap();
@@ -3635,7 +3641,7 @@ mod tests {
 				id,
 				state: &mut server,
 				pending: &mut pending,
-				conn_state: &state,
+				closed: false,
 			};
 			stream.write(&mut &b"hello world"[..]).unwrap();
 			stream.reset_at(stream.offset().rewind(4), 7u32.into()).unwrap();
@@ -3657,10 +3663,10 @@ mod tests {
 	#[test]
 	fn reset_at_retains_prefix_until_acked() {
 		let mut server = reset_at_server();
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -3668,7 +3674,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream.write(&mut &b"hello world"[..]).unwrap();
 		let mut buf = Vec::new();
@@ -3701,10 +3707,10 @@ mod tests {
 	#[test]
 	fn reset_at_after_stop_sending_drops_prefix() {
 		let mut server = reset_at_server();
-		let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+		let mut pending = Retransmits::default();
 		let id = Streams {
 			state: &mut server,
-			conn_state: &state,
+			closed: false,
 		}
 		.open(Dir::Uni, Default::default())
 		.unwrap();
@@ -3712,7 +3718,7 @@ mod tests {
 			id,
 			state: &mut server,
 			pending: &mut pending,
-			conn_state: &state,
+			closed: false,
 		};
 		stream.write(&mut &b"hello world"[..]).unwrap();
 		stream.state.received_stop_sending(id, 9u32.into()).unwrap();
@@ -3993,7 +3999,7 @@ mod tests {
 		assert_eq!(client.credit_stats().evicted, 2);
 		assert_eq!(readers.woken(&mut client), [ids[1], ids[2]]);
 		assert_eq!(client.local_max_data, max_data + WINDOW / 2);
-		assert!(!client.leased(ids[0]).unwrap().evicted);
+		assert!(client.leased(ids[0]).is_some() && !client.is_evicted(ids[0]));
 	}
 
 	/// However its reader consumes tiny frames, and however many arrive, the lease holds copies
@@ -4372,7 +4378,7 @@ mod tests {
 		assert!(matches!(wait(&mut client, high, 2000), Err(recv::Error::Blocked)));
 		assert!(matches!(wait(&mut client, low, 2000), Err(recv::Error::Blocked)));
 		assert!(
-			client.leased(low).is_some_and(|lease| !lease.evicted),
+			client.leased(low).is_some() && !client.is_evicted(low),
 			"a byte of credit left"
 		);
 		assert_eq!(client.credit_stats().evicted, 0);
@@ -4380,7 +4386,7 @@ mod tests {
 		data(&mut client, low, WINDOW - 1, 1, false);
 		// The arrival woke the reader of `low`, which may yet consume.
 		assert_eq!(readers.woken(&mut client), [low]);
-		assert!(!client.leased(low).unwrap().evicted);
+		assert!(client.leased(low).is_some() && !client.is_evicted(low));
 		let blocked = wait_transmit(&mut client, low, 2000);
 		assert_eq!(blocked, (Err(recv::Error::Blocked), true));
 		assert_eq!(readers.woken(&mut client), [low], "the evicted reader wakes");
@@ -4418,7 +4424,7 @@ mod tests {
 		assert!(matches!(wait(&mut client, high, 2000), Err(recv::Error::Blocked)));
 		assert!(matches!(wait(&mut client, low, 2000), Err(recv::Error::Blocked)));
 		data(&mut client, low, WINDOW - 1, 1, false);
-		assert!(!client.leased(low).unwrap().evicted);
+		assert!(client.leased(low).is_some() && !client.is_evicted(low));
 
 		// This wait spends the last byte of credit and evicts its own stream.
 		let waiter = Counter::new();
@@ -4590,7 +4596,7 @@ mod tests {
 			recv(&mut client, &mut pending, waiting).peek(2 * WINDOW),
 			(Err(recv::Error::Blocked), true)
 		);
-		assert!(client.leased(parked).unwrap().evicted);
+		assert!(client.leased(parked).is_some() && client.is_evicted(parked));
 		assert!(!pending.max_stream_id[Dir::Uni as usize], "its reader has yet to hear");
 
 		let pending = stop(&mut client, parked, 0);

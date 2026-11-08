@@ -3,9 +3,8 @@
 //! This module provides helpers to generate self-signed certificates suitable for DTLS,
 //! compute fingerprints, and format them for display.
 
-use aws_lc_rs::digest;
-use rand::random;
-use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256};
+use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, PKCS_ECDSA_P256_SHA256, SerialNumber};
+use rind::digest;
 use std::fmt;
 
 /// Certificate utility error types
@@ -33,12 +32,11 @@ impl std::error::Error for CertificateError {}
 
 pub use crate::vendor::dimpl::DtlsCertificate;
 
-/// Generate a self-signed certificate for DTLS
-///
-/// This function requires the `rcgen` feature to be enabled.
+/// Generate a self-signed ECDSA P-256 certificate for DTLS, valid for a year.
 pub fn generate_self_signed_certificate() -> Result<DtlsCertificate, CertificateError> {
 	// Create a key pair for the certificate
-	let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|_| CertificateError::GenerationFailed)?;
+	let key_pair =
+		rind_rcgen::KeyPair::generate(&PKCS_ECDSA_P256_SHA256).map_err(|_| CertificateError::GenerationFailed)?;
 
 	// Set up certificate parameters
 	let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|_| CertificateError::GenerationFailed)?;
@@ -62,8 +60,9 @@ pub fn generate_self_signed_certificate() -> Result<DtlsCertificate, Certificate
 	// of this process, but also across all certificates of other processes/machines!
 	// See: https://github.com/versatica/mediasoup/issues/127#issuecomment-474460153
 	// and https://github.com/algesten/str0m/issues/517
-	let serial_buf: [u8; 16] = random();
-	params.serial_number = Some(serial_buf.to_vec().into());
+	let mut serial = [0u8; 16];
+	rind::rand::fill(&mut serial).map_err(|_| CertificateError::GenerationFailed)?;
+	params.serial_number = Some(SerialNumber::from_slice(&serial));
 
 	// Build the certificate
 	let cert = params
@@ -73,8 +72,8 @@ pub fn generate_self_signed_certificate() -> Result<DtlsCertificate, Certificate
 	// Get the certificate in DER format
 	let cert_der = cert.der().to_vec();
 
-	// Get the private key in DER format
-	let key_der = key_pair.serialize_der();
+	// Get the private key in PKCS#8 DER format
+	let key_der = key_pair.to_pkcs8().secret_pkcs8_der().to_vec();
 
 	Ok(DtlsCertificate {
 		certificate: cert_der,
@@ -83,8 +82,6 @@ pub fn generate_self_signed_certificate() -> Result<DtlsCertificate, Certificate
 }
 
 /// Calculate a certificate fingerprint using SHA-256
-///
-/// This function requires the `rcgen` feature to be enabled.
 pub fn calculate_fingerprint(cert_der: &[u8]) -> Vec<u8> {
 	// Use SHA-256 to calculate the fingerprint
 	digest::digest(&digest::SHA256, cert_der).as_ref().to_vec()

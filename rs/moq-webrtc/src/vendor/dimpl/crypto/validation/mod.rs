@@ -335,20 +335,20 @@ const VALIDATION_P384_CERT: &[u8] = include_bytes!("p384_cert.der");
 const VALIDATION_P384_SHA384_SIG: &[u8] = include_bytes!("p384_sha384_sig.der");
 
 #[cfg(test)]
-mod tests_aws_lc_rs {
+mod tests_rind {
 	use super::*;
-	use crate::vendor::dimpl::crypto::aws_lc_rs;
+	use crate::vendor::dimpl::crypto::rind;
 	use crate::vendor::dimpl::dtls12::message::Dtls12CipherSuite;
 
 	#[test]
 	fn test_default_provider_validates() {
-		let provider = aws_lc_rs::default_provider();
+		let provider = rind::default_provider().unwrap();
 		assert!(provider.validate().is_ok());
 	}
 
 	#[test]
 	fn test_default_provider_has_cipher_suites() {
-		let provider = aws_lc_rs::default_provider();
+		let provider = rind::default_provider().unwrap();
 		let count = provider.supported_cipher_suites().count();
 		// ECDHE: AES-128, AES-256, ChaCha20
 		// PSK: CCM-8
@@ -357,20 +357,20 @@ mod tests_aws_lc_rs {
 
 	#[test]
 	fn test_default_provider_has_kx_groups() {
-		let provider = aws_lc_rs::default_provider();
+		let provider = rind::default_provider().unwrap();
 		let count = provider.supported_kx_groups().count();
 		assert_eq!(count, 3); // X25519, P-256, and P-384
 	}
 
 	#[test]
 	fn test_default_provider_has_ecdh() {
-		let provider = aws_lc_rs::default_provider();
+		let provider = rind::default_provider().unwrap();
 		assert!(provider.has_ecdh());
 	}
 
 	#[test]
 	fn test_supported_cipher_suites_for_signature_algorithm() {
-		let provider = aws_lc_rs::default_provider();
+		let provider = rind::default_provider().unwrap();
 		let ecdsa_suites: Vec<_> = provider
 			.supported_cipher_suites_for_signature_algorithm(SignatureAlgorithm::ECDSA)
 			.map(|cs| cs.suite())

@@ -31,16 +31,16 @@
 //! use std::sync::Arc;
 //! use std::time::Instant;
 //! use crate::vendor::dimpl::{Config, Dtls, certificate};
-//! use crate::vendor::dimpl::crypto::aws_lc_rs;
+//! use crate::vendor::dimpl::crypto::rind;
 //!
 //! let cert = certificate::generate_self_signed_certificate().unwrap();
-//! // Use the default aws-lc-rs provider (implicit)
+//! // Use the default rind provider (implicit)
 //! let config = Arc::new(Config::default());
 //!
 //! // Or explicitly set the provider
 //! let config = Arc::new(
 //!     Config::builder()
-//!         .with_crypto_provider(aws_lc_rs::default_provider())
+//!         .with_crypto_provider(rind::default_provider().unwrap())
 //!         .build()
 //!         .unwrap()
 //! );
@@ -213,7 +213,7 @@ pub trait SigningKey: CryptoSafe {
 	///
 	/// Used during negotiation to intersect with the peer's offered
 	/// algorithms. Backends that lock the hash at key-load time (e.g.
-	/// aws-lc-rs) return only the locked hash; backends that support
+	/// rind) return only the locked hash; backends that support
 	/// arbitrary prehash signing (e.g. RustCrypto) may return several.
 	fn supported_hash_algorithms(&self) -> &[HashAlgorithm];
 }
@@ -370,7 +370,7 @@ pub trait HmacProvider: CryptoSafe {
 ///
 /// This struct holds references to all cryptographic components needed
 /// for DTLS. Users can provide custom implementations of each component
-/// to replace the default aws-lc-rs-based provider.
+/// to replace the default rind-based provider.
 ///
 /// # Components
 ///
@@ -388,10 +388,10 @@ pub trait HmacProvider: CryptoSafe {
 /// ```ignore
 /// # #[cfg(all())]
 /// # fn main() {
-/// use crate::vendor::dimpl::crypto::{CryptoProvider, aws_lc_rs};
+/// use crate::vendor::dimpl::crypto::{CryptoProvider, rind};
 ///
 /// // Use the default provider
-/// let provider = aws_lc_rs::default_provider();
+/// let provider = rind::default_provider().unwrap();
 ///
 /// // Or build a custom one (using defaults for demonstration)
 /// let custom_provider = CryptoProvider {
@@ -466,10 +466,10 @@ impl CryptoProvider {
 	/// ```ignore
 	/// # #[cfg(all())]
 	/// # fn main() {
-	/// use crate::vendor::dimpl::crypto::{CryptoProvider, aws_lc_rs};
+	/// use crate::vendor::dimpl::crypto::{CryptoProvider, rind};
 	///
 	/// // Install a default provider (can only be called once per process)
-	/// CryptoProvider::install_default(aws_lc_rs::default_provider());
+	/// CryptoProvider::install_default(rind::default_provider().unwrap());
 	/// # }
 	/// # #[cfg(not(all()))]
 	/// # fn main() {}
