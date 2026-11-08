@@ -98,7 +98,7 @@ pub struct Backoff {
 	#[serde(skip)]
 	pub healthy: Option<crate::cli::Duration>,
 
-	/// Maximum time to spend retrying before giving up. Defaults to 10s; zero retries forever.
+	/// Maximum time to spend retrying before giving up. Unset or zero retries forever.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way finishes:
 	/// each candidate but the last gets up to 5s, and the last runs to `--connect-timeout`,
@@ -170,12 +170,12 @@ impl Backoff {
 
 	/// The configured retry-delay cap, or its default; zero leaves the delay uncapped.
 	pub fn max(&self) -> Duration {
-		self.resolve().max
+		self.resolve().max.unwrap_or_default()
 	}
 
-	/// The retry deadline window, with zero meaning unlimited and unset using the default.
+	/// The retry deadline window, or its default; zero retries forever.
 	pub fn timeout(&self) -> Duration {
-		self.resolve().timeout
+		self.resolve().timeout.unwrap_or_default()
 	}
 
 	/// The policy these knobs configure, with each unset one at its default.
@@ -184,13 +184,18 @@ impl Backoff {
 		backoff.multiplier = self.multiplier;
 		let knobs = [
 			(&mut backoff.initial, self.initial),
-			(&mut backoff.max, self.max),
 			(&mut backoff.healthy, self.healthy),
-			(&mut backoff.timeout, self.timeout),
 		];
 		for (knob, set) in knobs {
 			if let Some(set) = set {
 				*knob = set.into();
+			}
+		}
+		// A configured zero turns the bound off.
+		let bounds = [(&mut backoff.max, self.max), (&mut backoff.timeout, self.timeout)];
+		for (bound, set) in bounds {
+			if let Some(set) = set {
+				*bound = Some(set.into()).filter(|set: &Duration| !set.is_zero());
 			}
 		}
 		backoff

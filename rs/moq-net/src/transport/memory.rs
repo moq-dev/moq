@@ -445,10 +445,7 @@ impl poll::Session for Session {
 
 	/// Streams share no connection window, and one holds at most its buffer.
 	fn receive_window(&self) -> Option<super::ReceiveWindow> {
-		Some(super::ReceiveWindow::new(
-			u64::MAX,
-			self.conn().config.stream_buffer as u64,
-		))
+		Some(super::ReceiveWindow::new(None, self.conn().config.stream_buffer as u64))
 	}
 
 	fn stream_credit(&self, dir: super::Dir) -> Option<super::StreamCredit> {

@@ -928,7 +928,7 @@ root = ["ca.pem"]
 
 		refuse("[runtime]\npin = true\n", "runtime.pin requires runtime.workers");
 		refuse(
-			"[runtime]\nworkers = 0\npin = true\n",
+			"[runtime]\nworkers = \"shared\"\npin = true\n",
 			"runtime.pin requires runtime.workers",
 		);
 
@@ -1135,7 +1135,10 @@ ws = false
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
-		assert_eq!(config.runtime.workers, Some(8));
+		assert_eq!(
+			config.runtime.workers,
+			crate::runtime::Workers::Count(8.try_into().unwrap())
+		);
 		assert!(!config.runtime.pin, "TOML's runtime.pin=false must survive the merge");
 		assert!(
 			!config.runtime.io_uring,

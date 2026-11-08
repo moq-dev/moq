@@ -153,11 +153,16 @@ impl Shared<dyn ErasedSession> {
 	/// over half the connection window, returning how much it reserved.
 	fn reserve(&self) -> Option<u64> {
 		let window = self.session.receive_window()?;
-		let charge = window.stream.min(window.connection);
-		let cap = window.connection / 2;
+		let charge = window
+			.connection
+			.map_or(window.stream, |connection| window.stream.min(connection.get()));
 		self.paused
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |paused| {
-				paused.checked_add(charge).filter(|total| *total <= cap)
+				let total = paused.checked_add(charge)?;
+				window
+					.connection
+					.is_none_or(|connection| total <= connection.get() / 2)
+					.then_some(total)
 			})
 			.ok()?;
 		Some(charge)
@@ -1079,8 +1084,10 @@ mod test {
 	#[test]
 	fn paused_streams_hold_at_most_half_the_connection_window() {
 		let gate = kio::Producer::new(true);
-		let session =
-			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
+		);
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
 		assert!(streams[0].pause());
 		assert!(streams[0].pause(), "a paused stream reserves once");
@@ -1100,12 +1107,14 @@ mod test {
 		use crate::model::pace::AHEAD;
 
 		let gate = kio::Producer::new(true);
-		let session =
-			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
+		);
 		assert_eq!(accept(&session).window(), 20);
 
 		let session = Session::new(
-			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(u64::MAX, u64::MAX)),
+			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
 		);
 		assert_eq!(accept(&session).window(), AHEAD, "capped at half the live tail");
 
@@ -1222,8 +1231,10 @@ mod test {
 	#[test]
 	fn a_stream_paces_at_the_window_widened_after_it_arrived() {
 		let gate = kio::Producer::new(true);
-		let session =
-			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(10, 20)));
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(10), 20)),
+		);
 		let early = accept(&session);
 		let limits = Limits {
 			receive_window: std::num::NonZeroU64::new(100),
@@ -1240,8 +1251,10 @@ mod test {
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
 		assert!(!accept(&session).pause());
 
-		let session =
-			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
+		);
 		let mut stream = accept(&session);
 		drop(session);
 		assert!(!stream.pause());

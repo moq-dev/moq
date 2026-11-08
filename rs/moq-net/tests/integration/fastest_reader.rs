@@ -20,7 +20,7 @@ const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"
 
 /// Receive windows whose stream credit, 64 MiB, is past the 16 MiB pacing cap.
 fn uncapped() -> ReceiveWindow {
-	ReceiveWindow::new(u64::MAX, 64 * MB as u64)
+	ReceiveWindow::new(None, 64 * MB as u64)
 }
 
 fn origin(hop: u64) -> origin::Producer {
@@ -82,7 +82,10 @@ async fn relay(version: &str) -> Relay {
 async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 	// The stream credit the relay grants, and how many 1 MiB frames it then holds.
 	let cases = [
-		(ReceiveWindow::new(16 * MB as u64, 4 * MB as u64), 3..=5),
+		(
+			ReceiveWindow::new(std::num::NonZeroU64::new(16 * MB as u64), 4 * MB as u64),
+			3..=5,
+		),
 		(uncapped(), 15..=18),
 	];
 	for version in VERSIONS {
@@ -217,7 +220,7 @@ async fn a_session_past_its_credit_cap_reads_on() {
 	for version in VERSIONS {
 		let mut relay = relay(version).await;
 		// One paused stream's credit is already more than half the connection window.
-		let window = moq_net::transport::ReceiveWindow::new(MB as u64, MB as u64);
+		let window = moq_net::transport::ReceiveWindow::new(std::num::NonZeroU64::new(MB as u64), MB as u64);
 		relay.pair.server_transport.set_receive_window(Some(window));
 
 		let mut group = relay.track.append_group().unwrap();
@@ -295,8 +298,10 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 		let upstream = peer(version, &publisher, &first).await;
 		let downstream = peer(version, &first, &second).await;
 		for pair in [&upstream, &downstream] {
-			pair.server_transport
-				.set_receive_window(Some(ReceiveWindow::new(4 * MB as u64, MB as u64)));
+			pair.server_transport.set_receive_window(Some(ReceiveWindow::new(
+				std::num::NonZeroU64::new(4 * MB as u64),
+				MB as u64,
+			)));
 		}
 		let broadcast = publisher
 			.route("chain", moq_net::origin::RouteOptions::hidden())

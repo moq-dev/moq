@@ -416,7 +416,7 @@ async fn worker_tokio_custom_route_and_quic() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
-	config.runtime.workers = Some(2);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(2).unwrap());
 	config.runtime.pin = false;
 	embed_and_stop(config).await;
 }
@@ -439,7 +439,7 @@ async fn uring_custom_route_and_quic() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
-	config.runtime.workers = Some(2);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(2).unwrap());
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
 	embed_and_stop(config).await;
@@ -508,7 +508,7 @@ async fn worker_tokio_webrtc_feed() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
-	config.runtime.workers = Some(2);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(2).unwrap());
 	config.runtime.pin = false;
 	webrtc_feed(config).await;
 }

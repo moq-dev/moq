@@ -1511,7 +1511,7 @@ impl TrackState {
 	fn max_age_bound(&self) -> Option<Duration> {
 		let published = self.info.as_ref()?.max_age;
 		match published {
-			Some(age) => Some(age.min(self.broadcast.cache_duration)),
+			Some(age) => Some(self.broadcast.cache_duration.map_or(age, |ceiling| age.min(ceiling))),
 			None => self.demand_bound(),
 		}
 	}
@@ -1520,8 +1520,7 @@ impl TrackState {
 	/// when unlimited. It needs no info, so a track asks upstream for the same demand
 	/// before and after its info lands, and the publisher enforces its own max age.
 	fn demand_bound(&self) -> Option<Duration> {
-		let ceiling = self.broadcast.cache_duration;
-		(ceiling != Duration::MAX).then_some(ceiling)
+		self.broadcast.cache_duration
 	}
 
 	/// The live edge a subscription served `servable` measures drift against: the
@@ -12089,7 +12088,7 @@ mod test {
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
 		Producer::new(
 			Arc::new(broadcast::Info {
-				cache_duration: cap,
+				cache_duration: Some(cap),
 				..Default::default()
 			}),
 			name,
@@ -12205,7 +12204,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn the_aggregate_is_not_clamped_to_the_publisher_max_age() {
 		let broadcast = broadcast::Info {
-			cache_duration: Duration::from_secs(30),
+			cache_duration: Some(Duration::from_secs(30)),
 			..Default::default()
 		}
 		.produce();

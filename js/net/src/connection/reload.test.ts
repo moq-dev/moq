@@ -195,7 +195,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: Milli(0) },
+		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: null },
 	});
 	try {
 		await clock.advance(Nano.fromMilli(Milli(100)));
@@ -307,7 +307,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
 	});
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	try {
@@ -351,7 +351,7 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
 	});
 
 	try {
@@ -396,7 +396,7 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 			enabled: true,
 			url,
 			websocket: { enabled: false },
-			delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+			delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
 		});
 		const watch = new Effect();
 		watch.run((effect) => {
@@ -465,7 +465,7 @@ test("a refused credential replaced since its dial redials with the new one", as
 		versions: ["moq-lite-06"],
 		websocket: { enabled: false },
 		tokens,
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
 	});
 	try {
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
@@ -493,7 +493,7 @@ test("new tokens redial a URL that stopped on refusing the old ones", async () =
 		versions: ["moq-lite-06"],
 		websocket: { enabled: false },
 		tokens,
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
 	});
 	try {
 		await clock.drive(waitFor(reload.error, (error) => error !== undefined));
@@ -536,7 +536,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		url,
 		websocket: { enabled: false },
 		// Unlimited retries prove that `closed` settles only because the rejection is terminal.
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
 	});
 
 	try {
@@ -587,7 +587,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 		websocket: { enabled: false },
 		// Unlimited retries, so a second attempt can only happen because the first failure
 		// was treated as retryable rather than terminal.
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
 	});
 
 	try {
@@ -1339,11 +1339,7 @@ const backoffs: [string, ReloadDelay, number[]][] = [
 	// Past `initial` but short of the default bar, so each end is a failed attempt.
 	["a session short of the default healthy bar escalates", {}, [10, 20, 40]],
 	["a session past the healthy bar resets", { healthy: Milli(50) }, [10, 10, 10]],
-	[
-		"a zero max leaves the delay uncapped",
-		{ initial: Milli(1000), multiplier: 4, max: Milli(0) },
-		[1000, 4000, 16000],
-	],
+	["a null max leaves the delay uncapped", { initial: Milli(1000), multiplier: 4, max: null }, [1000, 4000, 16000]],
 	["a max below initial caps the first delay too", { max: Milli(5) }, [5, 5, 5]],
 	["a zero multiplier keeps the delay constant", { multiplier: 0 }, [10, 10, 10]],
 	["a fractional multiplier below 1 keeps the delay constant", { multiplier: 0.5 }, [10, 10, 10]],
@@ -1406,7 +1402,7 @@ test("backoff: an uncapped delay saturates instead of overflowing", async () => 
 	const reload = new Reload({
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(10), multiplier: 1e300, max: Milli(0) },
+		delay: { initial: Milli(10), multiplier: 1e300, max: null },
 	});
 	try {
 		for (let session = 0; session < 2; session++) {
@@ -1432,7 +1428,7 @@ test("a delay field with no meaning is refused when the loop is built", () => {
 	const invalid: ReloadDelay[] = [
 		// Zero would count every session as healthy.
 		{ healthy: Milli(0) },
-		// Zero `max` is uncapped and zero `timeout` unlimited, so infinity has no spelling here.
+		// `null` spells an uncapped `max` and an unlimited `timeout`, so infinity has no meaning here.
 		...bad.flatMap((value) => [{ initial: value }, { max: value }, { healthy: value }, { timeout: value }]),
 		{ multiplier: Number.NaN },
 		{ multiplier: Number.POSITIVE_INFINITY },

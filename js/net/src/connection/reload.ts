@@ -49,8 +49,8 @@ export type ReloadDelay = {
 	/** The multiplier for the delay after each failure (default: 2; below 1 keeps it constant). */
 	multiplier?: number;
 
-	/** The maximum delay (default: 5000ms; zero leaves it uncapped). A cap below `initial` caps the first delay too. */
-	max?: Milli;
+	/** The maximum delay (default: 5000ms; `null` leaves it uncapped). A cap below `initial` caps the first delay too. */
+	max?: Milli | null;
 
 	/**
 	 * How long a session must stay up to count as healthy (default: 1000ms; must be positive).
@@ -63,13 +63,13 @@ export type ReloadDelay = {
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
-	 * (default: 0, unlimited). Counts from the first dial, and restarts after a healthy session
+	 * (default: `null`, unlimited). Counts from the first dial, and restarts after a healthy session
 	 * outside a redirect loop, a URL change, or a disable/re-enable. It decides whether another
 	 * attempt starts and never cuts one that is running, so giving up can take up to one attempt
 	 * longer than the window; {@link ConnectProps.timeout} bounds each attempt. A peer that
 	 * restarts, draining each session with a GOAWAY naming no URI, restarts it too.
 	 */
-	timeout?: Milli;
+	timeout?: Milli | null;
 };
 
 /**
@@ -125,7 +125,7 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
 	multiplier: 2,
 	max: Milli(5000),
 	healthy: Milli(1000),
-	timeout: Milli(0),
+	timeout: null,
 };
 
 /**
@@ -137,20 +137,22 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
  */
 function pacing(delay: ReloadDelay) {
 	const initial = Milli(delay.initial ?? DEFAULT_DELAY.initial);
-	const max = Milli(delay.max ?? DEFAULT_DELAY.max);
-	const cap = max > 0 ? max : undefined;
+	// `null` means no bound, so only `undefined` takes the default.
+	const max = delay.max === undefined ? DEFAULT_DELAY.max : delay.max;
+	const cap = max === null ? null : Milli(max);
 	const multiplier = delay.multiplier ?? DEFAULT_DELAY.multiplier;
 	if (!Number.isFinite(multiplier)) throw new RangeError(`invalid delay.multiplier: ${multiplier}`);
 	// Zero would count every session as healthy, resetting the retry window forever under a
 	// peer that drops each one on sight.
 	const healthy = Milli(delay.healthy ?? DEFAULT_DELAY.healthy);
 	if (healthy === 0) throw new RangeError("delay.healthy must be positive");
-	const timeout = Milli(delay.timeout ?? DEFAULT_DELAY.timeout);
+	const window = delay.timeout === undefined ? DEFAULT_DELAY.timeout : delay.timeout;
+	const timeout = window === null ? null : Milli(window);
 	// A multiplier below 1 means no growth, not a delay that shrinks to nothing.
 	const growth = Math.max(multiplier, 1);
 
 	return {
-		initial: cap === undefined ? initial : Milli(Math.min(initial, cap)),
+		initial: cap === null ? initial : Milli(Math.min(initial, cap)),
 		healthy,
 		timeout,
 		// How long a session must last to start a new run of redirects. One that outlived the
@@ -739,7 +741,7 @@ export class Reload {
 	// When a retry window starting `at` expires.
 	#window(at: Instant): number {
 		const { timeout } = this.#pacing();
-		return timeout > 0 ? Instant.add(at, Nano.fromMilli(timeout)) : Number.POSITIVE_INFINITY;
+		return timeout === null ? Number.POSITIVE_INFINITY : Instant.add(at, Nano.fromMilli(timeout));
 	}
 
 	/**

@@ -36,6 +36,10 @@ pub(crate) const CLUSTER_PATH: &str = "/.cluster";
 /// ticks turn into real conditional GETs.
 const CONNECT_API_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How long an ephemeral peer client retries its one socket before the redial loop moves
+/// to a fresh one.
+const EPHEMERAL_RETRY: Duration = Duration::from_secs(10);
+
 /// One cluster peer to dial, as listed in [`Config::connect`] or returned
 /// by an `api.url` endpoint.
 ///
@@ -2258,8 +2262,8 @@ impl Cluster {
 	/// An `ephemeral` client is one session's alone: it binds an ephemeral port on
 	/// the template's bind address, and its reconnect loop always gives up, so a
 	/// redial moves to a fresh socket rather than retrying one the path may be
-	/// dropping. A zero backoff timeout, which would retry the one socket forever,
-	/// takes moq-tokio's default instead; the redial loop already retries forever.
+	/// dropping. A backoff timeout that would retry the one socket forever takes
+	/// [`EPHEMERAL_RETRY`] instead; the redial loop already retries forever.
 	///
 	/// A LAN `target` keeps only request-path versions. A `target` fingerprint is
 	/// pinned on a clean TLS config, so the relay's CA roots cannot combine with it.
@@ -2274,7 +2278,7 @@ impl Cluster {
 			bind.set_port(0);
 			connect.bind = Some(bind);
 			if connect.backoff.timeout().is_zero() {
-				connect.backoff.timeout = None;
+				connect.backoff.timeout = Some(EPHEMERAL_RETRY.into());
 			}
 		}
 		if target.is_some_and(|target| target.lan) {
@@ -3473,7 +3477,7 @@ mod tests {
 		.expect("cluster");
 
 		let origin = cluster.origin.clone();
-		assert_eq!(origin.config().cache_duration, duration);
+		assert_eq!(origin.config().cache_duration, Some(duration));
 		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
 		let broadcast = origin

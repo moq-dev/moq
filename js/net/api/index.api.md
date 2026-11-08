@@ -143,9 +143,9 @@ export namespace Connection {
 	export type Backoff = {
 		healthy?: Milli;
 		initial?: Milli;
-		max?: Milli;
+		max?: Milli | null;
 		multiplier?: number;
-		timeout?: Milli;
+		timeout?: Milli | null;
 	};
 	export interface CertificateHash {
 		algorithm?: "sha-256";

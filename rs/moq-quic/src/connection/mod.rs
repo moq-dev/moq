@@ -1698,8 +1698,8 @@ impl Connection {
 	}
 
 	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
-	pub fn receive_window(&self) -> u64 {
-		self.streams.receive_window()
+	pub fn receive_window(&self) -> std::num::NonZeroU64 {
+		std::num::NonZeroU64::new(self.streams.receive_window()).expect("receive windows are non-zero limits")
 	}
 
 	/// The most receive credit one stream may hold: the largest per-stream window ever in force,

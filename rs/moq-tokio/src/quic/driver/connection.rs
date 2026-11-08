@@ -490,7 +490,7 @@ impl Connection {
 	#[cfg(feature = "net")]
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
-		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
+		moq_net::transport::ReceiveWindow::new(Some(state.inner.receive_window()), state.inner.stream_receive_window())
 	}
 
 	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,

@@ -47,7 +47,7 @@ async fn wire_sources(io_uring: bool) {
 	config.stats.interval = Some(Duration::from_secs(3600).into());
 	config.drain_timeout = Some(Duration::ZERO.into());
 	if io_uring {
-		config.runtime.workers = Some(1);
+		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
 	}

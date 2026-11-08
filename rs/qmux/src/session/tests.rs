@@ -217,7 +217,7 @@ async fn partial_messages_evict_the_lowest_priority_stream() {
 		let (client, server) = pair(config(version), server).await;
 		assert_eq!(
 			poll::Session::receive_window(&server),
-			Some(net::ReceiveWindow::new(window, window))
+			Some(net::ReceiveWindow::new(std::num::NonZeroU64::new(window), window))
 		);
 
 		let mut sends = Vec::new();
@@ -278,7 +278,10 @@ async fn set_limits_widens_and_refuses_a_rate_cap() {
 	limits.receive_rate = Some(moq_quic::Rate::Unlimited);
 	limits.send_rate = Some(moq_quic::Rate::Unlimited);
 	server.set_limits(limits).expect("unlimited rates");
-	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, 16 << 20);
+	assert_eq!(
+		poll::Session::receive_window(&server).unwrap().connection,
+		std::num::NonZeroU64::new(16 << 20)
+	);
 
 	limits.send_rate = Some(moq_quic::Rate::BytesPerSecond(std::num::NonZeroU64::new(1000).unwrap()));
 	assert!(matches!(server.set_limits(limits), Err(Error::InvalidConfig(_))));
@@ -299,7 +302,10 @@ async fn the_transport_widens_unless_its_window_is_fixed() {
 
 	let (_client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
 	poll::Session::set_limits(&server, limits).expect("widened");
-	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, 16 << 20);
+	assert_eq!(
+		poll::Session::receive_window(&server).unwrap().connection,
+		std::num::NonZeroU64::new(16 << 20)
+	);
 
 	let mut fixed = config(Version::QMux02);
 	fixed.fixed_receive_window = true;

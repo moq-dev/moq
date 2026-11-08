@@ -475,7 +475,7 @@ async fn uri_setup_paths(io_uring: bool) {
 	let mut config = config(dir.path(), false);
 	config.listen.version = versions.clone();
 	if io_uring {
-		config.runtime.workers = Some(1);
+		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
 	}
