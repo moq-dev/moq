@@ -9792,8 +9792,7 @@ mod tests {
 		assert_eq!(announced.expect_next_active("room").await.cost, Cost::new(5));
 		let _sticky = hold(&consumer, "room/job", &a).await;
 
-		b.update(RouteInfo::new().with_hops(hops(&[11])).with_cost(3))
-			.unwrap();
+		b.update(RouteInfo::new().with_hops(hops(&[11])).with_cost(3)).unwrap();
 		assert_eq!(announced.expect_next_restarted("room").await.cost, Cost::new(3));
 		quiet(&mut announced).await;
 	}
@@ -10003,9 +10002,7 @@ mod tests {
 		// Broad and cheap; narrow and expensive. Both present relative to a cursor
 		// rooted below them, and the narrow one is what a request there resolves.
 		let _broad = producer.announce("room", RouteInfo::new().with_cost(1)).unwrap();
-		let _narrow = producer
-			.announce("room/alice", RouteInfo::new().with_cost(9))
-			.unwrap();
+		let _narrow = producer.announce("room/alice", RouteInfo::new().with_cost(9)).unwrap();
 
 		let consumer = producer
 			.consume()
@@ -10849,9 +10846,7 @@ mod tests {
 		let echo = producer
 			.forward(
 				"room",
-				RouteInfo::new()
-					.with_instance(instance(), 0)
-					.with_hops(hops(&[10, 7])),
+				RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10, 7])),
 			)
 			.unwrap();
 		drop(incumbent);
@@ -11336,9 +11331,7 @@ mod tests {
 				.unwrap()
 		};
 		let _chat = scoped("*/chat").forward("", RouteInfo::new().with_cost(1)).unwrap();
-		let _video = scoped("*/video")
-			.forward("", RouteInfo::new().with_cost(5))
-			.unwrap();
+		let _video = scoped("*/video").forward("", RouteInfo::new().with_cost(5)).unwrap();
 
 		let mut video = producer
 			.consume()
@@ -11406,9 +11399,7 @@ mod tests {
 	async fn root_cursor_keeps_the_more_specific_covering_route() {
 		let producer = origin(1).produce();
 		let broad = producer.forward("room", RouteInfo::new().with_cost(1)).unwrap();
-		let narrow = producer
-			.forward("room/live", RouteInfo::new().with_cost(9))
-			.unwrap();
+		let narrow = producer.forward("room/live", RouteInfo::new().with_cost(9)).unwrap();
 		let mut announced = producer
 			.consume()
 			.scope("room/live/video", &Patterns::from(Pattern::all()))
@@ -11435,9 +11426,7 @@ mod tests {
 			.join("/");
 		let mut announced = producer.consume().routes();
 
-		let dynamic = producer
-			.forward(&path, RouteInfo::new())
-			.expect("max depth is allowed");
+		let dynamic = producer.forward(&path, RouteInfo::new()).expect("max depth is allowed");
 		announced.expect_next_active(&path).await;
 
 		let _pending = producer.consume().request(&path, None);
@@ -11894,10 +11883,7 @@ mod tests {
 		let direct = || RouteInfo::new().with_hops(hops(&[9, 2])).with_via(origin(2));
 		let first = peer.forward("room", direct()).unwrap();
 		let relayed = peer
-			.forward(
-				"room",
-				RouteInfo::new().with_hops(hops(&[9, 2, 3])).with_via(origin(3)),
-			)
+			.forward("room", RouteInfo::new().with_hops(hops(&[9, 2, 3])).with_via(origin(3)))
 			.unwrap();
 		announced.expect_next_active("room").await;
 		announced.assert_next_wait();
@@ -11927,9 +11913,7 @@ mod tests {
 			let producer = origin(1).produce();
 			let peer = producer.clone().with_link(Link::Peer);
 			let mut announced = producer.consume().routes();
-			let route = RouteInfo::new()
-				.with_instance(instance(), 0)
-				.with_hops(hops(&[9, 2]));
+			let route = RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[9, 2]));
 			let first = peer.forward("room", route.clone()).unwrap();
 			let second = peer.forward("room", route.clone()).unwrap();
 			announced.expect_next_active("room").await;
@@ -11953,9 +11937,7 @@ mod tests {
 	async fn withdrawn_route_no_longer_covers_requests() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().with_link(Link::Peer);
-		let direct = peer
-			.forward("room", RouteInfo::new().with_hops(hops(&[9, 2])))
-			.unwrap();
+		let direct = peer.forward("room", RouteInfo::new().with_hops(hops(&[9, 2]))).unwrap();
 		let _relayed = peer
 			.forward("room", RouteInfo::new().with_hops(hops(&[9, 2, 3])))
 			.unwrap();
@@ -12021,10 +12003,7 @@ mod tests {
 		let ingest = producer
 			.forward(
 				"both",
-				RouteInfo::new()
-					.with_hops(hops(&[5]))
-					.with_via(origin(5))
-					.with_cost(9),
+				RouteInfo::new().with_hops(hops(&[5])).with_via(origin(5)).with_cost(9),
 			)
 			.unwrap();
 		assert_eq!(local.expect_next_active("both").await.source(), Source::Local);
@@ -12081,10 +12060,7 @@ mod tests {
 		let mesh = peer
 			.forward(
 				"both",
-				RouteInfo::new()
-					.with_hops(hops(&[8]))
-					.with_via(origin(8))
-					.with_cost(9),
+				RouteInfo::new().with_hops(hops(&[8])).with_via(origin(8)).with_cost(9),
 			)
 			.unwrap();
 		assert_eq!(toward_core.expect_next_active("both").await.source(), Source::Peer(8));
@@ -12941,10 +12917,7 @@ mod tests {
 
 		// Pending requests reject; new work refuses.
 		assert!(matches!(pending.now_or_never().expect("rejected"), Err(Error::Closed)));
-		assert!(matches!(
-			producer.announce("x", RouteInfo::new()),
-			Err(Error::Closed)
-		));
+		assert!(matches!(producer.announce("x", RouteInfo::new()), Err(Error::Closed)));
 		assert!(matches!(
 			producer.route("x", RouteOptions::hidden()),
 			Err(Error::Closed)
@@ -13781,9 +13754,7 @@ mod tests {
 			let echo = producer
 				.forward(
 					"room",
-					RouteInfo::new()
-						.with_instance(instance(), 0)
-						.with_hops(hops(&[10, 7])),
+					RouteInfo::new().with_instance(instance(), 0).with_hops(hops(&[10, 7])),
 				)
 				.unwrap();
 
@@ -14363,17 +14334,13 @@ mod tests {
 		let leaf_front = leaf_consumer.request("room/alice", None).await.expect("resolves");
 
 		let mid = origin(2).produce();
-		let mid_server = mid
-			.forward("room", RouteInfo::new().with_hops(hops(&[10])))
-			.unwrap();
+		let mid_server = mid.forward("room", RouteInfo::new().with_hops(hops(&[10]))).unwrap();
 		let mid_pending = mid.consume().request("room/alice", None);
 		queued(&mid_server).await.serve(&leaf_front);
 		let mid_resolved = mid_pending.await.expect("mid resolves");
 
 		let edge = origin(3).produce();
-		let edge_server = edge
-			.forward("room", RouteInfo::new().with_hops(hops(&[20])))
-			.unwrap();
+		let edge_server = edge.forward("room", RouteInfo::new().with_hops(hops(&[20]))).unwrap();
 		let edge_pending = edge.consume().request("room/alice", None);
 		queued(&edge_server).await.serve(&mid_resolved);
 		let edge_resolved = edge_pending.await.expect("edge resolves");
@@ -15327,9 +15294,7 @@ mod tests {
 	#[kio::test]
 	async fn source_selection_leases_survive_reprices_but_never_revive_pending_work() {
 		let producer = origin(1).produce();
-		let broad = producer
-			.forward("room", RouteInfo::new().with_via(origin(2)))
-			.unwrap();
+		let broad = producer.forward("room", RouteInfo::new().with_via(origin(2))).unwrap();
 		let selected = broad.request_validity(&Path::from_static("room/a")).unwrap();
 		let pending = selected.current();
 		assert!(!pending.is_closed());
@@ -15362,17 +15327,12 @@ mod tests {
 	async fn source_selection_answering_ends_only_on_a_replacement() {
 		let producer = origin(1).produce();
 		let path = Path::from_static("room/a");
-		let first = producer
-			.forward("room", RouteInfo::new().with_via(origin(2)))
-			.unwrap();
+		let first = producer.forward("room", RouteInfo::new().with_via(origin(2))).unwrap();
 		let selected = first.request_validity(&path).unwrap();
 		let answering = selected.answering();
 		// A route that loses to the selected one replaces nothing.
 		let worse = producer
-			.forward(
-				"room",
-				RouteInfo::new().with_via(origin(2)).with_cost(Cost::from(7)),
-			)
+			.forward("room", RouteInfo::new().with_via(origin(2)).with_cost(Cost::from(7)))
 			.unwrap();
 		assert!(!answering.is_closed());
 		drop(worse);
@@ -15390,18 +15350,14 @@ mod tests {
 		assert!(!answering.is_closed());
 
 		// Announced again, the path has a new instance: a replacement.
-		let _again = producer
-			.forward("room", RouteInfo::new().with_via(origin(2)))
-			.unwrap();
+		let _again = producer.forward("room", RouteInfo::new().with_via(origin(2))).unwrap();
 		assert!(answering.is_closed());
 	}
 
 	#[kio::test]
 	async fn source_selection_unregisters_without_retaining_the_source() {
 		let producer = origin(1).produce();
-		let route = producer
-			.forward("room", RouteInfo::new().with_via(origin(2)))
-			.unwrap();
+		let route = producer.forward("room", RouteInfo::new().with_via(origin(2))).unwrap();
 		let path = Path::from_static("room/a");
 		let selected = route.request_validity(&path).unwrap();
 		let lease = selected.current();
@@ -15470,10 +15426,7 @@ mod tests {
 		let producer = origin(1).produce();
 		for path in ["room/./cam", "room/../cam", ".", ".."] {
 			assert!(producer.route(path, RouteOptions::hidden()).is_err(), "created {path}");
-			assert!(
-				producer.announce(path, RouteInfo::new()).is_err(),
-				"announced {path}"
-			);
+			assert!(producer.announce(path, RouteInfo::new()).is_err(), "announced {path}");
 		}
 		let scoped = producer
 			.scope("room/..", &Patterns::from_iter([Pattern::all()]))
@@ -15613,9 +15566,7 @@ mod tests {
 			.collect();
 		let consumer = producer.consume().scope("project", &patterns).unwrap();
 		let cam = producer.announce("project/cam.hang", RouteInfo::new()).unwrap();
-		let overlap = producer
-			.announce("project/room/mic.hang", RouteInfo::new())
-			.unwrap();
+		let overlap = producer.announce("project/room/mic.hang", RouteInfo::new()).unwrap();
 		let chat = producer.announce("project/lobby.chat", RouteInfo::new()).unwrap();
 		let mut routing = consumer.clone().covering().routes();
 		routing.expect_next_active("cam.hang").await;
@@ -15626,9 +15577,7 @@ mod tests {
 		selected.expect_next_active("lobby.chat").await;
 		selected.assert_next_wait();
 
-		let nested = producer
-			.announce("project/room/lobby.chat", RouteInfo::new())
-			.unwrap();
+		let nested = producer.announce("project/room/lobby.chat", RouteInfo::new()).unwrap();
 		selected.expect_next_active("room/lobby.chat").await;
 		overlap.update(RouteInfo::new().with_cost(2)).unwrap();
 		drop(overlap);
@@ -15652,10 +15601,7 @@ mod tests {
 
 		let first_instance = crate::Instance::random();
 		let exact = producer
-			.announce(
-				"room/alice",
-				RouteInfo::new().with_instance(first_instance.clone(), 0),
-			)
+			.announce("room/alice", RouteInfo::new().with_instance(first_instance.clone(), 0))
 			.unwrap();
 		assert!(
 			matches!(selected.expect_next().await, RouteEvent::Start(a) if a.prefix.is_empty() && a.captures.is_some())
@@ -15777,9 +15723,7 @@ mod tests {
 	#[kio::test]
 	async fn local_broadcast_wins_announcement_ties() {
 		let producer = origin(1).produce();
-		let remote = producer
-			.announce("room/alice", RouteInfo::new().with_cost(9))
-			.unwrap();
+		let remote = producer.announce("room/alice", RouteInfo::new().with_cost(9)).unwrap();
 		let local = producer.route("room/alice", RouteOptions::hidden()).unwrap();
 		local.announce().unwrap();
 

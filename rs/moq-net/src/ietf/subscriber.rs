@@ -10720,10 +10720,7 @@ mod tests {
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce(
-				"room/host",
-				crate::origin::RouteInfo::new().with_hops(upstream.clone()),
-			)
+			.announce("room/host", crate::origin::RouteInfo::new().with_hops(upstream.clone()))
 			.unwrap();
 		announced.expect_next_active("room/host").await;
 		let _advertised = publishing.expect_next_active("room/host").await;

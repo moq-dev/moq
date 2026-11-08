@@ -550,11 +550,7 @@ impl Origin {
 	}
 
 	/// Run `f` against the route, then check its origin is still healthy.
-	pub fn route_with<R>(
-		&self,
-		route: Id,
-		f: impl FnOnce(Held<'_>) -> Result<R, moq_net::Error>,
-	) -> Result<R, Error> {
+	pub fn route_with<R>(&self, route: Id, f: impl FnOnce(Held<'_>) -> Result<R, moq_net::Error>) -> Result<R, Error> {
 		let entry = self.route_entry(route)?;
 		let result = f(entry.held());
 		entry.driver.check()?;

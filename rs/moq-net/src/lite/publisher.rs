@@ -3633,9 +3633,7 @@ mod announce_test {
 	fn a_lite07_prefix_past_the_root_announces_nothing() {
 		let origin = Hop::new(1).unwrap().produce();
 		let root = "r".repeat(100);
-		let _route = origin
-			.announce(format!("{root}/x"), origin::RouteInfo::new())
-			.unwrap();
+		let _route = origin.announce(format!("{root}/x"), origin::RouteInfo::new()).unwrap();
 		let consumer = origin
 			.consume()
 			.scope(root.as_str(), &crate::Patterns::from(crate::Pattern::all()))
@@ -3757,11 +3755,7 @@ mod announce_test {
 		drop(removed);
 		let mut churn = Vec::new();
 		for limit in 1..=4 {
-			churn.push(
-				origin
-					.announce(format!("a/{limit}"), origin::RouteInfo::new())
-					.unwrap(),
-			);
+			churn.push(origin.announce(format!("a/{limit}"), origin::RouteInfo::new()).unwrap());
 			*budget.write().ok().unwrap() = limit;
 			assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
 		}
@@ -4317,11 +4311,7 @@ mod announce_test {
 	#[kio::test]
 	async fn clamped_cost_change_is_quiet() {
 		let mut h = harness().await;
-		let route = |cost| {
-			crate::origin::RouteInfo::new()
-				.with_hops(pub_hops())
-				.with_cost(cost)
-		};
+		let route = |cost| crate::origin::RouteInfo::new().with_hops(pub_hops()).with_cost(cost);
 		h.announcement.update(route(u64::MAX)).unwrap();
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;

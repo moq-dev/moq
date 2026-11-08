@@ -2642,9 +2642,7 @@ mod tests {
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let _cam = origin
-			.announce("solo-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _cam = origin.announce("solo-cam", crate::origin::RouteInfo::new()).unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);
@@ -2749,9 +2747,7 @@ mod tests {
 
 	fn auth_session(auth: bool) -> AuthSession {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let cam = origin
-			.announce("solo-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let cam = origin.announce("solo-cam", crate::origin::RouteInfo::new()).unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());

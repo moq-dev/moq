@@ -10878,10 +10878,7 @@ mod serve_tests {
 			session.push(&update_with_tokens(&[TOKEN]));
 			let request = taken_token(&mut running, &mut requests).await;
 
-			let other = h
-				._origin
-				.announce("other", crate::origin::RouteInfo::new())
-				.unwrap();
+			let other = h._origin.announce("other", crate::origin::RouteInfo::new()).unwrap();
 			settle().await;
 			assert!(futures::poll!(running.as_mut()).is_pending());
 			drop(other);
@@ -11053,10 +11050,7 @@ mod serve_tests {
 		let request = taken_token(&mut running, &mut requests).await;
 
 		session.log.fail_writes();
-		let _other = h
-			._origin
-			.announce("other", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _other = h._origin.announce("other", crate::origin::RouteInfo::new()).unwrap();
 		for _ in 0..10 {
 			assert!(
 				futures::poll!(running.as_mut()).is_pending(),
@@ -18314,10 +18308,7 @@ mod tests {
 		let mut clean_hops = crate::Hops::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let clean = origin
-			.announce(
-				"route-flip-cam",
-				crate::origin::RouteInfo::new().with_hops(clean_hops),
-			)
+			.announce("route-flip-cam", crate::origin::RouteInfo::new().with_hops(clean_hops))
 			.unwrap();
 		settle().await;
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -18372,9 +18363,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let _cam = origin
-			.announce("lonely-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _cam = origin.announce("lonely-cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		// Every stream is answered with the same refusal, so a retry would show up as a
@@ -18446,9 +18435,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let _local = origin
-			.announce("local-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _local = origin.announce("local-cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		// The only stream is the PUBLISH_NAMESPACE request we open ourselves.
@@ -18492,9 +18479,7 @@ mod tests {
 	async fn publish_namespace_withdraws_by_reset() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-			let local = origin
-				.announce("local-cam", crate::origin::RouteInfo::new())
-				.unwrap();
+			let local = origin.announce("local-cam", crate::origin::RouteInfo::new()).unwrap();
 			settle().await;
 
 			let session =
@@ -18558,9 +18543,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let _local = origin
-			.announce("local-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _local = origin.announce("local-cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		let ok = crate::lite::test_transport::Log::default();
@@ -18652,9 +18635,7 @@ mod tests {
 		} = case;
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let _cam = origin.announce("cam", crate::origin::RouteInfo::new()).unwrap();
-		let _stats = origin
-			.announce(".stats/node", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _stats = origin.announce(".stats/node", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE; stream 2, if opened at all, is our
@@ -18800,9 +18781,7 @@ mod tests {
 	async fn a_non_solicit_subscribe_namespace_carries_namespace() {
 		for version in [Version::Draft18] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-			let early = origin
-				.announce("early-cam", crate::origin::RouteInfo::new())
-				.unwrap();
+			let early = origin.announce("early-cam", crate::origin::RouteInfo::new()).unwrap();
 			settle().await;
 
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
@@ -18846,9 +18825,7 @@ mod tests {
 				"{version:?}: existing match",
 			);
 
-			let _late = origin
-				.announce("late-cam", crate::origin::RouteInfo::new())
-				.unwrap();
+			let _late = origin.announce("late-cam", crate::origin::RouteInfo::new()).unwrap();
 			for _ in 0..100 {
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				if occurrences(&log, b"late-cam") >= 1 {
@@ -18895,9 +18872,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let first = origin
-			.announce("first-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let first = origin.announce("first-cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		// The first advertisement has send capacity, and the peer answers it.
@@ -18932,9 +18907,7 @@ mod tests {
 
 		// Send capacity runs out before the second advertisement can send its header.
 		set_gate(&gate, false);
-		let _second = origin
-			.announce("second-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _second = origin.announce("second-cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		// Retiring the first needs no new stream, so the loop has to reach
@@ -19063,9 +19036,7 @@ mod tests {
 		let _standby = origin
 			.announce(
 				"solo-cam",
-				crate::origin::RouteInfo::new()
-					.with_instance(instance, 0)
-					.with_cost(0),
+				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -19170,9 +19141,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::new()
-					.with_instance(instance, 0)
-					.with_cost(0),
+				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -19266,9 +19235,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::new()
-					.with_instance(instance, 0)
-					.with_cost(0),
+				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -19464,8 +19431,7 @@ mod tests {
 			"{version}: PUBLISH_NAMESPACE carries the auth"
 		);
 
-		cam.update(crate::origin::RouteInfo::new().with_auth(second))
-			.unwrap();
+		cam.update(crate::origin::RouteInfo::new().with_auth(second)).unwrap();
 		let expected = request_update(
 			version,
 			&ietf::PublishNamespaceUpdate {
@@ -19543,8 +19509,7 @@ mod tests {
 		poll_until(&mut run, &log, b"cam", 1).await;
 		assert_eq!(occurrences(&log, b"late-secret"), 0, "named before it had an auth");
 
-		cam.update(crate::origin::RouteInfo::new().with_auth(token))
-			.unwrap();
+		cam.update(crate::origin::RouteInfo::new().with_auth(token)).unwrap();
 		poll_until(&mut run, &log, b"cam", 2).await;
 
 		assert_eq!(occurrences(&log, b"cam"), 2, "the request was not made again");
@@ -19562,16 +19527,10 @@ mod tests {
 		let auth = crate::auth::Link::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
 		let a = origin
-			.announce(
-				"cam-a",
-				crate::origin::RouteInfo::new().with_auth(present(b"a-first")),
-			)
+			.announce("cam-a", crate::origin::RouteInfo::new().with_auth(present(b"a-first")))
 			.unwrap();
 		let b = origin
-			.announce(
-				"cam-b",
-				crate::origin::RouteInfo::new().with_auth(present(b"b-first")),
-			)
+			.announce("cam-b", crate::origin::RouteInfo::new().with_auth(present(b"b-first")))
 			.unwrap();
 		settle().await;
 
@@ -19682,12 +19641,7 @@ mod tests {
 		let origin = unheld_origin();
 		let mut cams: HashMap<&str, _> = ["a-cam", "b-cam"]
 			.into_iter()
-			.map(|name| {
-				(
-					name,
-					origin.announce(name, crate::origin::RouteInfo::new()).unwrap(),
-				)
-			})
+			.map(|name| (name, origin.announce(name, crate::origin::RouteInfo::new()).unwrap()))
 			.collect();
 		settle().await;
 
@@ -20008,9 +19962,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::RouteInfo::new()
-					.with_instance(instance, 0)
-					.with_cost(0),
+				crate::origin::RouteInfo::new().with_instance(instance, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -20043,12 +19995,8 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let _first = origin
-			.announce("first-cam", crate::origin::RouteInfo::new())
-			.unwrap();
-		let _second = origin
-			.announce("second-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _first = origin.announce("first-cam", crate::origin::RouteInfo::new()).unwrap();
+		let _second = origin.announce("second-cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		// Every stream opens and then goes silent: an exhausted script parks rather than
@@ -20153,8 +20101,7 @@ mod tests {
 						assert!(futures::poll!(run.as_mut()).is_pending());
 						if matches!(stage, Stage::UpdateWrite) {
 							let second = auth.present(bytes::Bytes::from_static(b"second"), false).unwrap();
-							cam.update(crate::origin::RouteInfo::new().with_auth(second))
-								.unwrap();
+							cam.update(crate::origin::RouteInfo::new().with_auth(second)).unwrap();
 							settle().await;
 							assert!(futures::poll!(run.as_mut()).is_pending());
 							assert!(
@@ -20246,9 +20193,7 @@ mod tests {
 	async fn an_advertisement_without_credit_is_retried_and_spends_no_id() {
 		for version in [Version::Draft18] {
 			let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-			let _cam = origin
-				.announce("lonely-cam", crate::origin::RouteInfo::new())
-				.unwrap();
+			let _cam = origin.announce("lonely-cam", crate::origin::RouteInfo::new()).unwrap();
 			settle().await;
 			let session =
 				crate::lite::test_transport::ScriptedSession::new(publish_namespace_ok(version).await).without_credit();
@@ -20298,9 +20243,7 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
-		let _cam = origin
-			.announce("lonely-cam", crate::origin::RouteInfo::new())
-			.unwrap();
+		let _cam = origin.announce("lonely-cam", crate::origin::RouteInfo::new()).unwrap();
 		settle().await;
 
 		// No send capacity from the start: an admitted header cannot finish.
