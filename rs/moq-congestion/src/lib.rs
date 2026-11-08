@@ -20,11 +20,7 @@ mod rate;
 pub mod scream;
 mod unlimited;
 
-pub use bbr3::Bbr3;
-pub use cubic::Cubic;
-pub use gcc::Gcc;
 pub use rate::Packet;
-pub use scream::Scream;
 pub use unlimited::Unlimited;
 
 /// Common interface for different congestion controllers
@@ -266,8 +262,6 @@ pub struct Init {
     pub mtu: u16,
     /// The transport's RTT estimate before any sample.
     pub rtt: Duration,
-    /// The most bytes per second to pace at, whatever the controller computes.
-    pub max_pacing_rate: Option<u64>,
     /// Seeds whatever the controller randomizes, such as BBR3's probe phases, so a seeded
     /// connection replays it.
     pub seed: u64,
@@ -303,7 +297,6 @@ mod tests {
             now: Instant::ZERO,
             mtu,
             rtt: Duration::from_millis(100),
-            max_pacing_rate: None,
             seed: 0,
         }
     }

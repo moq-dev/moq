@@ -278,8 +278,8 @@ export interface ConnectProps {
 	auth?: Auth.Handle;
 
 	/**
-	 * The implementation this side advertises in SETUP. Defaults to {@link IMPLEMENTATION};
-	 * a wrapper prepends its own token, like `my-app/1.0 moq-net-js/0.4.2`. Empty sends nothing.
+	 * The implementation this side advertises in SETUP, a User-Agent style product token such as
+	 * `my-app/1.0`. Defaults to this library's, like `moq-net-js/0.4.2`. Empty sends nothing.
 	 */
 	implementation?: string;
 

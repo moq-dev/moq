@@ -20,14 +20,14 @@ export default class extends HTMLElement {
 	get announce(): AnnounceMode | undefined;
 	set announce(value: AnnounceMode);
 	attributeChangedCallback(name: "source" | "url" | "stats" | "announce" | "name" | "capture" | "backend" | "versions" | "muted" | "invisible" | "preview" | "echo-path", oldValue: string | null, newValue: string | null): void;
-	audio: Audio.Encoder;
+	readonly audio: Audio.Encoder;
 	get backend(): Preview.Backend;
 	set backend(value: Preview.Backend);
-	broadcast: Broadcast;
+	readonly broadcast: Broadcast;
 	get capture(): CaptureMode;
 	set capture(value: CaptureMode);
 	connectedCallback(): void;
-	connection: Net.Connection;
+	readonly connection: Net.Connection;
 	readonly controls: {
 		announce: Signals.Signal<AnnounceMode | undefined>;
 		backend: Signals.Signal<Preview.Backend>;
@@ -65,6 +65,6 @@ export default class extends HTMLElement {
 	set url(value: string | URL | undefined);
 	get versions(): readonly string[] | undefined;
 	set versions(value: readonly string[] | undefined);
-	video: Video.Encoder;
+	readonly video: Video.Encoder;
 }
 ```

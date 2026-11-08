@@ -3134,6 +3134,9 @@ export class Subscriber {
 		};
 		hooks.sourceStart = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.start();
+			// A relative anchor still pending reads every group, so a fill asked below would claim
+			// the history it never names. Mirrors the Rust `cursor.sync()` in `poll_start`.
+			subscriber.#settle();
 			const producer = subscriber.#state.producer;
 			const start = producer && sourceStart(producer);
 			if (start === "pending") return start;

@@ -56,11 +56,6 @@ export interface SessionOptions extends WebTransportOptions {
 	versions?: Record<string, Version | Version[] | null>;
 }
 
-export interface StreamCredit {
-	available: bigint;
-	blocked: boolean;
-}
-
 export class StreamError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
 	constructor(code: number, message?: string);
 	readonly source: "stream";
@@ -137,7 +132,6 @@ export default class implements WebTransport {
 	readonly ready: Promise<void>;
 	get reliability(): "reliable-only";
 	setSendBufferSize(bytes: number): void;
-	streamCredit(dir: "uni" | "bi"): StreamCredit;
 }
 
 export function install(options?: InstallOptions): boolean;

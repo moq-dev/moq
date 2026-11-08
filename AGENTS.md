@@ -17,6 +17,7 @@ Trust this checkout's source over published API references, which may describe a
 
 - Impair networks with bufferbloat, queuing until packets drop, instead of random loss.
 - Anything that fans out gets a benchmark swept over both axes.
+- Model a lifecycle as one enum or union whose variants carry their data, mark it terminal only after the work that can fail, and guard each value with one lock (see State in `REVIEW.md`).
 
 # Public API
 

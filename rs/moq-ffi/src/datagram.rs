@@ -132,7 +132,7 @@ impl MoqDatagramProducer {
 	/// Insert a datagram at its explicit sequence; later appends continue past the highest one.
 	pub fn insert(&self, datagram: MoqDatagram) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let datagram = moq_net::Datagram {
+		let datagram = moq_net::datagram::Datagram {
 			sequence: datagram.sequence,
 			timestamp: datagram.timestamp.map(TryInto::try_into).transpose()?,
 			payload: datagram.payload.into(),
@@ -310,7 +310,7 @@ impl MoqDatagramRequest {
 	}
 
 	/// Reject this request with an application error code.
-	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
+	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let request = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		request.reject(moq_net::Error::App(error_code));
