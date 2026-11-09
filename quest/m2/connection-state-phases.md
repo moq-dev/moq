@@ -16,9 +16,8 @@ a field that means nothing in the current phase can't be read:
 
 ## Plan
 
-Split from [FFI handle state](/quest/m1/explicit-state/ffi-state.md) when it
-started (2026-11-08), as that item recorded: it breaks every binding, so
-under the [explicit-state epic](/quest/m1/explicit-state/README.md)'s
+Split from the FFI handle state quest (2026-11-08): it breaks every binding,
+so under the [explicit-state epic](/quest/m1/explicit-state/README.md)'s
 milestone rule it is its own m2 quest. Its PR marks its title `!` and says
 how to migrate.
 
