@@ -689,7 +689,11 @@ mod tests {
 		assert_eq!(held(&set), ["second", "extra"]);
 
 		set.commit(&preview);
-		assert_eq!(held(&set), ["extra"], "the committed dial carries the credential itself");
+		assert_eq!(
+			held(&set),
+			["extra"],
+			"the committed dial carries the credential itself"
+		);
 	}
 
 	/// A replacement replaced again before its answer added nothing to the grant, so it is
