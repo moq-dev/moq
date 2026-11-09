@@ -681,19 +681,40 @@ pub struct Monitor {
 	last_presence: moq_net::stats::Presence,
 }
 
-/// The current lifecycle phase of a reconnecting connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where a reconnecting connection is, with the data that phase carries.
+#[derive(Clone, Debug)]
 pub enum Phase {
 	/// No session has connected yet.
-	Connecting,
+	Connecting {
+		/// The latest failed dial, or none before the first one fails.
+		failure: Option<Error>,
+	},
 	/// A session is serving.
-	Connected,
+	Connected {
+		/// The live session's transport.
+		transport: crate::Transport,
+		/// The live session's negotiated version.
+		version: Version,
+	},
 	/// No session is serving while the connection redials.
-	Disconnected,
+	Disconnected {
+		/// Why nothing serves: the last session's close reason or the latest failed dial.
+		failure: Option<Error>,
+	},
 	/// The old session serves while its replacement dials.
-	Migrating,
+	Migrating {
+		/// The serving session's transport.
+		transport: crate::Transport,
+		/// The serving session's negotiated version.
+		version: Version,
+		/// The replacement's latest failed dial.
+		failure: Option<Error>,
+	},
 	/// The reconnect loop has stopped for good.
-	Closed,
+	Closed {
+		/// The error it gave up with, or none when stopped locally.
+		failure: Option<Error>,
+	},
 }
 
 /// One coherent observation of a connection's lifecycle.
@@ -701,40 +722,43 @@ pub enum Phase {
 pub struct Observation {
 	/// An opaque revision to pass back to the next state wait.
 	pub revision: u64,
-	/// The current lifecycle phase, distinct from cumulative statistics presence.
-	pub phase: Phase,
 	/// How many sessions have connected, including replacements.
 	pub connects: u64,
 	/// When a session last connected, retained while offline.
 	pub last_connected: Option<kio::clock::Instant>,
-	/// The live session's transport, or none while offline.
-	pub transport: Option<crate::Transport>,
-	/// The latest failed attempt or terminal failure, cleared by a successful connect.
-	pub failure: Option<Error>,
-	/// The live session's negotiated version, or none while offline.
-	pub version: Option<Version>,
+	/// The current lifecycle phase and its data, distinct from cumulative statistics presence.
+	pub phase: Phase,
 }
 
 impl State {
 	fn observation(&self) -> Observation {
-		let live = self.lifecycle.live();
+		let phase = match &self.lifecycle {
+			Lifecycle::Connecting { failure } => Phase::Connecting {
+				failure: failure.clone(),
+			},
+			Lifecycle::Live(live) => match &live.migrating {
+				Some(migrating) => Phase::Migrating {
+					transport: live.transport,
+					version: live.session.version(),
+					failure: migrating.failure.clone(),
+				},
+				None => Phase::Connected {
+					transport: live.transport,
+					version: live.session.version(),
+				},
+			},
+			Lifecycle::Offline { failure, .. } => Phase::Disconnected {
+				failure: failure.clone(),
+			},
+			Lifecycle::Closed(failure) => Phase::Closed {
+				failure: failure.clone(),
+			},
+		};
 		Observation {
 			revision: self.revision,
-			phase: match &self.lifecycle {
-				Lifecycle::Connecting { .. } => Phase::Connecting,
-				Lifecycle::Live(live) if live.migrating.is_some() => Phase::Migrating,
-				Lifecycle::Live(_) => Phase::Connected,
-				Lifecycle::Offline { .. } => Phase::Disconnected,
-				Lifecycle::Closed(_) => Phase::Closed,
-			},
 			connects: self.connects,
 			last_connected: self.last_connected,
-			transport: live.map(|live| live.transport),
-			failure: match &self.lifecycle {
-				Lifecycle::Closed(err) => err.clone(),
-				lifecycle => lifecycle.failure().cloned(),
-			},
-			version: live.map(|live| live.session.version()),
+			phase,
 		}
 	}
 }
@@ -1816,9 +1840,8 @@ mod tests {
 		};
 		let second = first.clone();
 		let initial = first.state();
-		assert_eq!(initial.phase, Phase::Connecting);
+		assert!(matches!(initial.phase, Phase::Connecting { failure: None }));
 		assert_eq!(initial.connects, 0);
-		assert!(initial.version.is_none());
 		let failure = Error::ConnectFailed;
 		// The update precedes registration: reading a token must not lose this wake.
 		shared.retrying(&failure);
@@ -1826,8 +1849,7 @@ mod tests {
 		let Poll::Ready(Ok(next)) = first.poll_state(&waiter, initial.revision) else {
 			panic!("missed earlier update")
 		};
-		assert_eq!(next.phase, Phase::Connecting);
-		assert!(next.failure.is_some());
+		assert!(matches!(next.phase, Phase::Connecting { failure: Some(_) }));
 		assert!(
 			matches!(second.poll_state(&waiter, initial.revision), Poll::Ready(Ok(_))),
 			"independent observer lost its update"
@@ -1845,10 +1867,12 @@ mod tests {
 		shared.end(Some(failure));
 		drop(shared);
 		let final_state = first.state();
-		assert_eq!(final_state.phase, Phase::Closed);
-		assert!(final_state.failure.is_some(), "terminal cause must remain observable");
 		assert!(
-			matches!(first.poll_state(&waiter, repeated.revision), Poll::Ready(Ok(state)) if state.phase == Phase::Closed)
+			matches!(final_state.phase, Phase::Closed { failure: Some(_) }),
+			"terminal cause must remain observable"
+		);
+		assert!(
+			matches!(first.poll_state(&waiter, repeated.revision), Poll::Ready(Ok(state)) if matches!(state.phase, Phase::Closed { .. }))
 		);
 		assert!(matches!(
 			first.poll_state(&waiter, final_state.revision),
@@ -1909,7 +1933,7 @@ mod tests {
 		};
 		let (woken, _waiter) = Woken::watch(&monitor);
 		drop(shared);
-		assert_eq!(woken.phases(), [Phase::Closed]);
+		assert!(matches!(woken.phases()[..], [Phase::Closed { .. }]));
 	}
 
 	#[cfg(feature = "tcp")]
@@ -1925,7 +1949,7 @@ mod tests {
 		connection.abort(moq_net::Error::Cancel);
 		connection.closed().await.unwrap();
 		let final_state = monitor.state_changed(initial.revision).await.unwrap();
-		assert_eq!(final_state.phase, Phase::Closed);
+		assert!(matches!(final_state.phase, Phase::Closed { .. }));
 		assert_eq!(final_state.connects, 0);
 		assert!(monitor.state_changed(final_state.revision).await.is_err());
 	}
@@ -2296,7 +2320,7 @@ mod tests {
 
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 		let mut state = monitor.state();
-		while state.phase != Phase::Connected {
+		while !matches!(state.phase, Phase::Connected { .. }) {
 			state = kio::clock::timeout(WAIT, monitor.state_changed(state.revision))
 				.await
 				.unwrap()
@@ -2309,7 +2333,10 @@ mod tests {
 			.expect("the connection did not close");
 		assert!(closed.is_err(), "the abort ends the loop with an error");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
-		assert_eq!(woken.phases(), [Phase::Closed], "the loop is not redialing");
+		assert!(
+			matches!(woken.phases()[..], [Phase::Closed { .. }]),
+			"the loop is not redialing"
+		);
 	}
 
 	/// A loop that gives up reports its error next, never a `Disconnected` it will not redial

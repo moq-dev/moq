@@ -346,7 +346,19 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 		code: 0,
 		kind: 0,
 	};
-	let failed = state.failure < 0;
+	use moq_connection_phase::*;
+	// Flatten the phase data: a phase without a failure reports zero, one without a version empty.
+	let data = &state.data;
+	let (failure, version) = unsafe {
+		match state.phase {
+			MOQ_CONNECTION_PHASE_CONNECTING => (data.connecting.failure, None),
+			MOQ_CONNECTION_PHASE_CONNECTED => (0, Some(data.connected.version)),
+			MOQ_CONNECTION_PHASE_DISCONNECTED => (data.disconnected.failure, None),
+			MOQ_CONNECTION_PHASE_MIGRATING => (data.migrating.failure, Some(data.migrating.version)),
+			MOQ_CONNECTION_PHASE_CLOSED => (data.closed.failure, None),
+		}
+	};
+	let failed = failure < 0;
 	let error = failed.then(|| {
 		unsafe { std::ffi::CStr::from_ptr(moq_error()) }
 			.to_string_lossy()
@@ -356,10 +368,12 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 	let _ = sink.tx.send(Seen {
 		phase: state.phase,
 		connects: state.connects,
-		failure: state.failure,
+		failure,
 		error,
 		protocol,
-		version: borrowed_string(state.protocol.data, state.protocol.len).unwrap_or_default(),
+		version: version
+			.and_then(|version| borrowed_string(version.data, version.len))
+			.unwrap_or_default(),
 	});
 }
 
@@ -773,10 +787,10 @@ fn publish_media_labels_config_without_naming_track() {
 fn session_snapshot_error_preserves_destination() {
 	let mut dst: moq_connection_snapshot = unsafe { std::mem::zeroed() };
 	dst.stats.rtt_us = 123;
-	dst.protocol.len = 456;
+	dst.version.len = 456;
 	assert!(unsafe { moq_session_snapshot(0, &mut dst) } < 0);
 	assert_eq!(dst.stats.rtt_us, 123);
-	assert_eq!(dst.protocol.len, 456);
+	assert_eq!(dst.version.len, 456);
 }
 
 #[test]
@@ -8262,7 +8276,7 @@ fn server_accepts_a_session() {
 		assert_eq!(connected.phase, moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED);
 		assert_eq!(connected.connects, 1);
 		assert_eq!(connected.failure, 0);
-		assert!(!connected.version.is_empty(), "a live session names its protocol");
+		assert!(!connected.version.is_empty(), "a live session names its version");
 	}
 
 	let mut stats: moq_connection_stats = unsafe { std::mem::zeroed() };

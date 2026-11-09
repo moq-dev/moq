@@ -214,7 +214,7 @@ typedef GrantConsumer = MoqGrantConsumer;
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;
 
-/// A connection lifecycle transition reported by [Session.state].
+/// Where a connection is in its lifecycle, carrying that phase's failure or version.
 typedef ConnectionPhase = MoqConnectionPhase;
 
 /// One coherent connection lifecycle snapshot.

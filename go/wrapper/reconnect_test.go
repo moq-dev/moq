@@ -230,8 +230,8 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
-	if err := subscriber.Session().State().Failure; err != nil {
-		t.Fatalf("failure before any drop: %v", err)
+	if state := subscriber.Session().State(); !isConnected(state) {
+		t.Fatalf("not serving before any drop: %+v", state)
 	}
 	if version := subscriber.Session().Stats().Version; version == nil || *version == "" {
 		t.Fatal("a live session must report its negotiated version")
@@ -245,9 +245,9 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	// Both workers observe the reconnect and advance their connect count past the first.
 	waitConnects(t, ctx, publisher.Session(), 2)
 	waitConnects(t, ctx, subscriber.Session(), 2)
-	// The connect that advanced the count also cleared the drop's reason.
-	if err := subscriber.Session().State().Failure; err != nil {
-		t.Fatalf("failure after reconnect: %v", err)
+	// The connect that advanced the count also left the drop's reason behind.
+	if state := subscriber.Session().State(); !isConnected(state) {
+		t.Fatalf("not serving after reconnect: %+v", state)
 	}
 
 	// The publisher re-announces the broadcast the fresh relay never saw.
@@ -364,7 +364,7 @@ func TestFirstDialState(t *testing.T) {
 	session := client.Session()
 	defer session.Cancel(0)
 	state := session.State()
-	if state.Phase != moq.ConnectionPhaseConnecting || state.Connects != 0 {
+	if phase, ok := state.Phase.(moq.ConnectionPhaseConnecting); !ok || phase.Failure != nil || state.Connects != 0 {
 		t.Fatalf("initial state: %+v", state)
 	}
 	for i := 0; i < 2; i++ {
@@ -372,7 +372,7 @@ func TestFirstDialState(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if state.Failure == nil || state.Connects != 0 || state.Version != nil {
+		if phase, ok := state.Phase.(moq.ConnectionPhaseConnecting); !ok || phase.Failure == nil || state.Connects != 0 {
 			t.Fatalf("failed dial state: %+v", state)
 		}
 	}
@@ -385,4 +385,10 @@ func TestFirstDialState(t *testing.T) {
 	if _, err := session.StateChanged(ctx, state.Revision); err != nil {
 		t.Fatalf("independent waiter: %v", err)
 	}
+}
+
+// isConnected reports whether a session serves with a negotiated version.
+func isConnected(state moq.ConnectionState) bool {
+	phase, ok := state.Phase.(moq.ConnectionPhaseConnected)
+	return ok && phase.Version != ""
 }
