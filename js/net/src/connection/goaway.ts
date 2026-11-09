@@ -146,7 +146,18 @@ function schemeTier(protocol: string): number {
  * @internal
  */
 export function isLocal(url: URL): boolean {
-	const host = url.hostname.toLowerCase();
+	let host = url.hostname.toLowerCase();
+	// A non-special scheme (`moqt:`) keeps its host opaque; reading it back through
+	// https decodes every IPv4 spelling the dial accepts (`127.1`, `0x7f000001`).
+	if (host !== "" && !host.startsWith("[") && !SPECIAL.has(url.protocol)) {
+		try {
+			host = new URL(`https://${host}/`).hostname;
+		} catch {
+			// Not a valid special host, so not an address literal either.
+		}
+	}
+	// A trailing dot names the same host.
+	if (host.endsWith(".")) host = host.slice(0, -1);
 	// No host at all, e.g. a `unix:` socket path.
 	if (host === "") return true;
 	if (host === "localhost" || host.endsWith(".localhost")) return true;
@@ -159,6 +170,8 @@ export function isLocal(url: URL): boolean {
 	const v4 = parseIpv4(host);
 	return v4 !== undefined && isLocalV4(v4);
 }
+
+const SPECIAL = new Set(["http:", "https:", "ws:", "wss:", "ftp:", "file:"]);
 
 function parseIpv4(host: string): number[] | undefined {
 	const parts = host.split(".");
