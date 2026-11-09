@@ -244,7 +244,7 @@ async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Cla
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-	const now = wall() / 1000;
+	const now = wall().asUnixMillis() / 1000;
 	if (claims.exp !== undefined && claims.exp <= now) throw new Error("Token has expired");
 	if (claims.nbf !== undefined && claims.nbf > now) throw new Error("Token is not yet valid");
 	ensureClaimsWithinScope(key, claims);

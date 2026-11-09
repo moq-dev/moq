@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 				}
 				group.finish()?;
 			}
-			producer.finish()?;
+			let _producer = producer.finish()?;
 			for sequence in 0..3 {
 				let mut next = consumer.next_group().await?.context("short track")?;
 				ensure!(next.sequence == sequence, "wrong group order");

@@ -522,7 +522,8 @@ impl Owned {
 	/// End the track cleanly, best effort: it is usually already going away.
 	fn finish(self) {
 		let ended = match self {
-			Self::Track(track) => track.finish().map_err(Error::from),
+			// The caller is done with the track, so the finished handle goes with it.
+			Self::Track(track) => track.finish().map(drop).map_err(Error::from),
 			Self::Producer(mut producer) => producer.finish(),
 			Self::Done => Ok(()),
 		};

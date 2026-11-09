@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+
 import { ObjectDatagram } from "./ietf/datagram.ts";
 import * as Filter from "./ietf/filter.ts";
 import { GoAway } from "./ietf/goaway.ts";
@@ -127,10 +127,10 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(() => params.fillTimeout).toThrow(RangeError);
 		expect(() => Filter.decodeFill(fields(version, 1, 0x0a, UNSAFE), version)).toThrow(RangeError);
 		const safe = new Parameters();
-		safe.fillTimeout = Milli(Number.MAX_SAFE_INTEGER);
+		safe.fillTimeout = Number.MAX_SAFE_INTEGER;
 		const bytes = await Writer.collect(version, (w) => safe.encode(w, version));
 		expect((await Parameters.decode(new Reader(undefined, bytes, version), version)).fillTimeout).toBe(
-			Milli(Number.MAX_SAFE_INTEGER),
+			Number.MAX_SAFE_INTEGER,
 		);
 	});
 

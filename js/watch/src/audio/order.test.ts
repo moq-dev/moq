@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import { Duration } from "@moq/clock";
 import { Order } from "./order";
 
-type Read = { group: bigint; frame: { timestamp: number } };
-const read = (group: bigint, timestamp: number): Read => ({ group, frame: { timestamp } });
-const timestamps = (reads: Read[]) => reads.map(({ frame }) => frame.timestamp);
+type Read = { group: bigint; frame: { timestamp: Duration } };
+const read = (group: bigint, timestamp: number): Read => ({ group, frame: { timestamp: Duration.micros(timestamp) } });
+const timestamps = (reads: Read[]) => reads.map(({ frame }) => frame.timestamp.asMicros());
 
 describe("Order", () => {
 	it("releases a held head sorted once a newer group arrives", () => {
@@ -16,10 +17,10 @@ describe("Order", () => {
 	// A publisher may keep a long run of audio in one group, which never brings a newer one.
 	it("releases a head once its first group runs past the floor", () => {
 		const order = new Order<Read>(() => ({ floor: 100, maxDelay: 1000 }));
-		expect(order.push(read(5n, 0))).toEqual([]);
-		expect(order.push(read(4n, -20))).toEqual([]);
-		expect(order.push(read(5n, 100))).toEqual([]);
-		expect(timestamps(order.push(read(5n, 120)))).toEqual([-20, 0, 100, 120]);
+		expect(order.push(read(5n, 20))).toEqual([]);
+		expect(order.push(read(4n, 0))).toEqual([]);
+		expect(order.push(read(5n, 120))).toEqual([]);
+		expect(timestamps(order.push(read(5n, 140)))).toEqual([0, 20, 120, 140]);
 	});
 
 	// With no floor, playback starts on the first frame, but the head still has to arrive first.
@@ -72,11 +73,11 @@ describe("Order", () => {
 	it("reads its bounds as the head arrives", () => {
 		let floor = 20;
 		const order = new Order<Read>(() => ({ floor, maxDelay: 1000 }));
-		expect(order.push(read(5n, 0))).toEqual([]);
+		expect(order.push(read(5n, 20))).toEqual([]);
 		floor = 100;
-		expect(order.push(read(5n, 40))).toEqual([]);
-		expect(order.push(read(4n, -20))).toEqual([]);
-		expect(timestamps(order.push(read(5n, 120)))).toEqual([-20, 0, 40, 120]);
+		expect(order.push(read(5n, 60))).toEqual([]);
+		expect(order.push(read(4n, 0))).toEqual([]);
+		expect(timestamps(order.push(read(5n, 140)))).toEqual([0, 20, 60, 140]);
 	});
 
 	it("holds nothing live", () => {

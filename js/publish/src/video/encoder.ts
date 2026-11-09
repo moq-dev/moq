@@ -1,4 +1,4 @@
-import { Micro, Milli, type Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import type { Stats as Report } from "@moq/hang";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -23,7 +23,7 @@ import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
 
 // The keyframe interval when the config sets none.
-const DEFAULT_JOIN = Milli.fromSecond(2 as Second);
+const DEFAULT_JOIN = Duration.secs(2);
 
 /**
  * Cumulative encoder output totals, measured from the chunks the encoder produces: the counters
@@ -61,7 +61,7 @@ export interface Config {
 	 * there until a new network broadcast declares again. Anything but a positive duration refuses
 	 * the rendition. (default: 2000 milliseconds)
 	 */
-	join?: Milli;
+	join?: Duration;
 
 	/** If not provided, the encoder will use the best bitrate for the given width, height, and framerate. */
 	maxBitrate?: number;
@@ -403,7 +403,7 @@ export class Encoder {
 	#encode(
 		tracks: Getter<Moq.Track.Producer | undefined>,
 		order: Order,
-		join: Getter<Milli | undefined>,
+		join: Getter<Duration | undefined>,
 		effect: Effect,
 	): void {
 		const track = effect.get(tracks);
@@ -414,8 +414,9 @@ export class Encoder {
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
 		const demand = track.demand();
 
-		let lastKeyframe: Micro | undefined;
-		let lastEncoded: Micro | undefined;
+		// Microseconds, as VideoFrame timestamps are.
+		let lastKeyframe: number | undefined;
+		let lastEncoded: number | undefined;
 		// The catalog declares no reordering, so each chunk must present after the one before it.
 		let lastOutput: number | undefined;
 		// The largest group demand asked for that a keyframe already answers, including one still in
@@ -445,7 +446,7 @@ export class Encoder {
 					lastOutput = frame.timestamp;
 					const key = frame.type === "key";
 					if (key) {
-						lastKeyframe = frame.timestamp as Micro;
+						lastKeyframe = frame.timestamp;
 					}
 
 					this.#out.stats.update((stats) => ({
@@ -455,7 +456,7 @@ export class Encoder {
 						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
 					}));
 
-					producer.encode(frame, frame.timestamp as Micro, key);
+					producer.encode(frame, Duration.micros(frame.timestamp), key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
 					if (!tearingDown && this.#estimator.write(frame.timestamp, order, key)) {
@@ -531,19 +532,19 @@ export class Encoder {
 							// declared allows; a backward one still fails the track at output.
 							if (frame.timestamp === lastEncoded) continue;
 							if (targetFrameRate && lastEncoded !== undefined) {
-								const minGap = Micro.fromSecond((1 / targetFrameRate) as Second);
+								const minGap = 1_000_000 / targetFrameRate;
 								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
 							}
-							lastEncoded = frame.timestamp as Micro;
+							lastEncoded = frame.timestamp;
 
 							// The catalog's declared join interval is the longest GOP, fixed for the network
 							// broadcast, so a live raise past it stops there.
 							const requested = config?.join ?? DEFAULT_JOIN;
 							// Refused with the config (see #runDimensions), so an encoder already running stops
 							// rather than keyframing every frame.
-							if (!(requested > 0)) continue;
+							if (requested.isZero()) continue;
 							const declared = join.peek();
-							const interval = declared === undefined ? requested : Milli(Math.min(requested, declared));
+							const interval = (declared === undefined ? requested : requested.min(declared)).asMicros();
 
 							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
 							// caller asked for one, or a join wants a group past the largest. No spacing: the
@@ -553,11 +554,11 @@ export class Encoder {
 							const keyFrame =
 								resized ||
 								since === undefined ||
-								since >= Micro.fromMilli(interval) ||
+								since >= interval ||
 								this.#cut ||
 								(wanted !== undefined && wanted > covered());
 							if (keyFrame) {
-								lastKeyframe = frame.timestamp as Micro;
+								lastKeyframe = frame.timestamp;
 								resized = false;
 								// Any keyframe serves an outstanding request and every join before it.
 								this.#cut = false;
@@ -592,7 +593,7 @@ export class Encoder {
 					track.closed.peek() === undefined
 				) {
 					// One frame interval after the last picture, in whole microseconds like any VideoFrame.
-					const interval = Micro.fromSecond((1 / (config.framerate ?? 30)) as Second);
+					const interval = 1_000_000 / (config.framerate ?? 30);
 					const frame = black(config, Math.round(lastEncoded + interval));
 					try {
 						encoder.encode(frame, { keyFrame: true });
@@ -788,8 +789,8 @@ export class Encoder {
 
 		const user = effect.get(this.config);
 		// Refused here, with the other knobs, so an invalid join settles the encoder without a config.
-		if (user?.join !== undefined && !(user.join > 0)) {
-			throw new Error(`join must be greater than 0 ms: ${user.join}`);
+		if (user?.join?.isZero()) {
+			throw new Error(`join must be greater than 0: ${user.join}`);
 		}
 
 		const sourcePixels = display.width * display.height;

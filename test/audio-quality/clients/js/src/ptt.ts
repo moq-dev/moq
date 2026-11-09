@@ -1,7 +1,7 @@
 /** Measure the shipped push-to-talk path on one monotonic page clock. @module */
 import "@moq/publish/element";
 import "@moq/watch/element";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Track } from "@moq/net";
 import type MoqPublish from "@moq/publish/element";
@@ -92,7 +92,7 @@ globalThis.AudioWorkletNode = class extends NativeNode {
 const encode = Container.Legacy.Producer.prototype.encode;
 Container.Legacy.Producer.prototype.encode = function (frame, timestamp, keyframe) {
 	const result = encode.call(this, frame, timestamp, keyframe);
-	records.sent.push({ at: performance.now(), timestamp, bytes: frame.byteLength });
+	records.sent.push({ at: performance.now(), timestamp: Math.floor(timestamp.asMicros()), bytes: frame.byteLength });
 	return result;
 };
 const subscribe = Track.Consumer.prototype.subscribe;
@@ -116,7 +116,7 @@ const publish = document.createElement("moq-publish") as MoqPublish;
 publish.url = required("relay");
 publish.name = "ptt.hang";
 publish.invisible = true;
-publish.audio.codec.set({ mime: "opus", frameDuration: Milli(60), bitrate: 128_000 });
+publish.audio.codec.set({ mime: "opus", frameDuration: Duration.millis(60), bitrate: 128_000 });
 publish.source = "camera";
 document.body.append(publish);
 
@@ -144,7 +144,7 @@ const capture = new Capture({
 	// Decoder subscriptions include codec warmup beyond Sync's budget. The observer must
 	// request the same age so its own subscription cannot discard an otherwise visible frame.
 	maxDelay: new Derived([watch.sync.out.maxDelay, audio.source.out.config], (max, config) =>
-		Milli(max + (config?.warmup ?? 0)),
+		max.add(Duration.millis(config?.warmup ?? 0)),
 	),
 });
 const arrivals: Arrival[] = [];
@@ -210,7 +210,7 @@ publish.audio.out.catalog.subscribe((config) => {
 	if (now !== selectable) records.catalog.push({ at: performance.now(), selectable: now });
 	selectable = now;
 });
-watch.sync.out.delay.subscribe((delay) => records.delays.push({ at: performance.now(), delay }));
+watch.sync.out.delay.subscribe((delay) => records.delays.push({ at: performance.now(), delay: delay.asMillis() }));
 // Playback counts from the measurement's start, so the warmup's tune-in is not charged to it.
 let baseline = { underruns: 0, stalls: 0 };
 const playback = () => {
@@ -244,7 +244,7 @@ export const measurement = {
 	},
 	reset() {
 		for (const list of Object.values(records)) list.length = 0;
-		records.delays.push({ at: performance.now(), delay: watch.sync.out.delay.peek() });
+		records.delays.push({ at: performance.now(), delay: watch.sync.out.delay.peek().asMillis() });
 		capture.drain();
 		arrivals.length = 0;
 		const stats = audio.out.stats.peek();

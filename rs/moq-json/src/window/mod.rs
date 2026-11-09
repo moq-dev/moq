@@ -677,7 +677,7 @@ mod test {
 			let mut checkpoint = track.append_group().unwrap();
 			checkpoint.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
 			checkpoint.finish().unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 
 			assert_eq!(
 				drain(&mut consumer),
@@ -902,7 +902,7 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track.clone(), ProducerConfig::default());
 		producer.push(&rec(1)).unwrap();
-		track.finish().unwrap();
+		let _track = track.finish().unwrap();
 		producer.finish().unwrap();
 
 		let waiter = kio::Waiter::noop();

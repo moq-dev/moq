@@ -1,5 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Duration, Manual, yieldNow } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
@@ -198,7 +198,7 @@ test("an announcement survives the first of its two sources ending", async () =>
 	peer.close();
 	await handler;
 
-	expect(await settlesWithin(announced.next(), clock, Milli(250))).toBe(false);
+	expect(await settlesWithin(announced.next(), clock, Duration.millis(250))).toBe(false);
 });
 
 test("announced lists literal matches unless covering asks for overlapping routes too", async () => {
@@ -312,11 +312,11 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 	subscription.writer.close();
 
 	// Whatever the loop managed to attach, the stream gave back on its way out.
-	await clock.advance(Nano.zero);
+	await clock.advance(Duration.ZERO);
 
 	const fresh = subscriber.routes();
 	await acceptSubscribeNamespace(pair.client);
-	expect(await settlesWithin(fresh.next(), clock, Milli(250))).toBe(false);
+	expect(await settlesWithin(fresh.next(), clock, Duration.millis(250))).toBe(false);
 });
 
 /** The Hop IDs a cluster-negotiated session declared, ours first. */
@@ -990,7 +990,7 @@ test.each(["acceptance", "refusal"])("returning demand preserves pending setup u
 	const peer = await nextStream(pair.client);
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
 	await Subscribe.decode(peer.reader, VERSION);
-	await clock.advance(Nano.fromMilli(Milli(6_000)));
+	await clock.advance(Duration.millis(6_000));
 	first.close();
 	await resumed.promise;
 	if (!returned) throw new Error("demand did not return");
@@ -1008,7 +1008,7 @@ test.each(["acceptance", "refusal"])("returning demand preserves pending setup u
 		expect(returned.closed.peek()).toBeUndefined();
 	} else {
 		// No answer budget: an hour later the same setup still waits for the publisher.
-		await clock.advance(Nano.fromMilli(Milli(3_600_000)));
+		await clock.advance(Duration.millis(3_600_000));
 		expect(returned.closed.peek()).toBeUndefined();
 		await peer.writer.u53(RequestError.id);
 		await new RequestError({ errorCode: 0x10, reasonPhrase: "not here" }).encode(peer.writer, VERSION);
@@ -1421,7 +1421,10 @@ test.each([
 	[VERSION, true, [3, 4]],
 ])("draft %s with FIRST_OBJECT=%s: a header-only stream delivers %p", async (version, firstObject, expected) => {
 	// A budget, so the empty group outlives its successor's arrival.
-	const { subscriber, track } = await subscribeTrack({ version, subscription: { delay: { max: Milli(60_000) } } });
+	const { subscriber, track } = await subscribeTrack({
+		version,
+		subscription: { delay: { max: Duration.millis(60_000) } },
+	});
 
 	await subscriber.handleGroup(
 		new GroupMessage({
@@ -1851,7 +1854,7 @@ for (const negotiated of [false, true]) {
 		const track = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ delay: { max: Milli(250) } });
+			.subscribe({ delay: { max: Duration.millis(250) } });
 		const peer = await nextStream(pair.client);
 		expect(await peer.reader.u53()).toBe(Subscribe.id);
 		const request = await Subscribe.decode(peer.reader, VERSION);
@@ -1860,7 +1863,7 @@ for (const negotiated of [false, true]) {
 		await new SubscribeOk({ trackAlias: ALIAS }).encode(peer.writer, VERSION);
 		await track.info();
 		// The aggregate can change before SUBSCRIBE_OK: the first update must catch it.
-		const tolerant = track.fork({ delay: { max: Milli(900) }, priority: 9 });
+		const tolerant = track.fork({ delay: { max: Duration.millis(900) }, priority: 9 });
 		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
 		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
 		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);

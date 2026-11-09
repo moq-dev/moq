@@ -1,5 +1,5 @@
 /** Shared finish assertions for native JS and the existing browser client. @module */
-import type { Milli } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
@@ -9,7 +9,7 @@ export async function readFinish(
 	origin: Moq.Origin.Producer,
 	path: string,
 	frames: number,
-	maxDelay: Milli,
+	maxDelay: Duration,
 ): Promise<string> {
 	const source = origin.consume();
 	const routes = source.announced();

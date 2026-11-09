@@ -2053,7 +2053,7 @@ mod tests {
 			write_keyframe(&mut group);
 			group.finish().unwrap();
 			match finish {
-				true => source._track.finish().unwrap(),
+				true => drop(source._track.clone().finish().unwrap()),
 				false => source._track.clone().abort(moq_net::Error::Cancel).unwrap(),
 			}
 

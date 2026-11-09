@@ -1,6 +1,6 @@
 /** Follow a Rust server's GOAWAY redirect by subscribing to its replacement announcement. */
 import assert from "node:assert/strict";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Reload } from "../../../../js/net/src/connection/reload.ts";
 import { wireOf } from "../../../../js/net/src/wire.ts";
@@ -14,7 +14,7 @@ const connection = new Reload({
 	url: new URL(first),
 	versions: [version],
 	consume: origin,
-	websocket: { enabled: true, delay: Milli(0) },
+	websocket: { enabled: true, delay: Duration.millis(0) },
 	goaway: { redirect: "follow" },
 });
 let replacementProbe: Moq.Track.Subscriber | undefined;
