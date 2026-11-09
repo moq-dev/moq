@@ -229,6 +229,12 @@ two random-mesh withdrawal tests, which hit nextest's 60 s kill in
 `just check` and are quarantined with `#[ignore]` by
 [moq-dev/moq#8336](https://github.com/moq-dev/moq/pull/8336).
 
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
+`js/net`'s datagram session-close-after-end test again, whose lite-05 case
+failed the merge queue for [moq-dev/moq#8276](https://github.com/moq-dev/moq/pull/8276)
+after [moq-dev/moq#8321](https://github.com/moq-dev/moq/pull/8321) re-enabled it.
+It is quarantined with `test.skip` for every version until its child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -240,3 +246,4 @@ Public API: none. Wire: none.
 - [js/net's compressed-frame cap test holds up under load](/quest/m0/test-flakes-2/compressed-frame-cap.md) - the cap is proven without a 32 MiB payload, and its `test.skip` is removed
 - [js/net's lite-07 re-dropped re-offer test holds up under load](/quest/m0/test-flakes-2/redropped-reoffer.md) - update 3 is ordered before the re-offer opens by an event, not a yield count, and its `test.skip` is removed
 - [moq-net's random-mesh withdrawal tests fit the gate](/quest/m0/test-flakes-2/mesh-withdraw-runtime.md) - the 200-seed mesh tests cost seconds of CPU, and their `#[ignore]` is removed
+- [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
