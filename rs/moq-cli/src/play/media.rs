@@ -684,6 +684,8 @@ async fn play_audio<O: Output>(
 		let mut declare = false;
 		// The frame being written starts the utterance after a declared silence.
 		let mut utterance = false;
+		// The last frame written was trimmed, so a trim of this one continues that skip.
+		let mut trimming = false;
 		loop {
 			let (event, delay, crossing, arrived_at) = loop {
 				if let Some(event) = received.lock().unwrap().pop_front() {
@@ -852,6 +854,15 @@ async fn play_audio<O: Output>(
 			}
 			let skip = fit.skip as usize * stride;
 			let written = sink.write(&frame.data[skip.min(frame.data.len())..])?;
+			let trimmed = fit.skip + written.dropped_sample_frames as u64;
+			if trimmed > 0 {
+				output.send(Event::Trimmed {
+					audio: Duration::from_secs_f64(trimmed as f64 / sample_rate as f64),
+					skip: !std::mem::replace(&mut trimming, true),
+				});
+			} else {
+				trimming = false;
+			}
 			// A dropped write leaves the utterance to start on the next frame the sink accepts.
 			if utterance && written.accepted_sample_frames > 0 {
 				utterance = false;
@@ -2018,7 +2029,7 @@ mod tests {
 			match event {
 				Event::Failed(err) => panic!("playback failed: {err}"),
 				Event::Ended | Event::Finished => panic!("the player stopped following the path"),
-				Event::Wake | Event::Utterance(_) => {}
+				Event::Wake | Event::Utterance(_) | Event::Trimmed { .. } => {}
 			}
 		}
 		assert!(!player.is_finished(), "the player stopped following the path");
