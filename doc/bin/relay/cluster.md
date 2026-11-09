@@ -278,8 +278,9 @@ decides which relays receive the cluster token.
 
 ## Identity
 
-Each relay has a Hop ID: the value it adds to a route's hop list for loop
-detection and shortest-path routing. It is random on every start, so a
+Each relay has an identity that it declares in SETUP and uses for loop
+detection and routing: a Hop ID added to each route's hop list, or on
+moq-lite-07 a Node ID naming the route's origin. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
 to pin it.
 
