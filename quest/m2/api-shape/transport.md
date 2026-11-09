@@ -41,8 +41,6 @@ perf-only.
 Found by the 2026-11-07 API shape audit (transport); see the
 [epic](/quest/m2/api-shape/README.md). The relay's io_uring path builds its
 configs the way the tokio path does, so it loses its conversion code. The
-moq-quic config knobs and re-export fan-out are in
-[moq-quic-unused-surface](/quest/m2/moq-quic-unused-surface.md), and the
-shared sans-IO driver in [quic-sansio-driver](/quest/m3/quic-sansio-driver.md).
+shared sans-IO driver is in [quic-sansio-driver](/quest/m3/quic-sansio-driver.md).
 Run the uring benches before and after, since the default controller
 changes.

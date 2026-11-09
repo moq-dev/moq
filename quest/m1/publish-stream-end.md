@@ -41,4 +41,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Publish capture phases](/quest/m1/explicit-state/publish-capture.md) - [moq-dev/moq#8262](https://github.com/moq-dev/moq/pull/8262) reworks capture phases nearby, but touches none of these lines
+- [Publish capture phases](https://github.com/moq-dev/moq/pull/8262) reworks capture phases nearby, but touches none of these lines
