@@ -223,7 +223,8 @@ struct Last {
 enum Handed {
 	/// Nothing handed out, or its end already reported.
 	Nothing,
-	/// A broadcast was handed out and still serves the path.
+	/// A broadcast was handed out and its end is not yet due, even if a refused takeover means
+	/// it no longer serves the path.
 	Live,
 	/// The broadcast handed out stopped serving the path, and its end is owed.
 	Ended,
