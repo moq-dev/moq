@@ -50,6 +50,7 @@ moves what remains of them once their claims merge.
 - [js/qmux's WebSocket ponyfill ends its writable on close](/quest/m1/qmux-ws-close.md) - writes after close reject, and a reused AbortSignal stops holding closed sockets
 - [@moq/json accepts only what it can reconstruct](/quest/m1/json-decode-limits.md) - nesting past 128 levels and out-of-range numbers are refused at parse like Rust, and schema output shares no decoder state
 - [A WebSocket fallback session returns to QUIC](/quest/m1/websocket-quic-upgrade.md) - a session that fell back to WebSocket re-probes QUIC and migrates back once UDP works, and a post-outage redial prefers QUIC
+- [The video decoder configures with the codec its probe accepted](/quest/m1/video-probe-codec.md) - Safari's `avc3` to `avc1` retry reaches the decoder without rewriting the catalog's codec
 
 ## Related
 
