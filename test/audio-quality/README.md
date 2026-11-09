@@ -318,7 +318,8 @@ player's own count, which its stats panel shows, is read alongside:
 - `av_lag_ms`: how far the audio playhead trails the shared clock video plays from (`sync.now()`),
   sampled while playing. Audio and video keep separate clocks that align once the delay covers the
   arrivals, so this is the latency audio adds beyond the target: positive is audio late, negative
-  early. Its replay ceilings hold audio from settling later to buy fewer underruns. Unset natively.
+  early. Its replay ceilings hold audio from settling later to buy fewer underruns. Natively, the
+  presentation clock `moq play` paces video from (`sync::Consumer::position`).
 - `converge_ms`: from first audio to the last time the target moved more than one 20 ms bucket from
   its final value.
 - `render_load`: Chromium's render capacity, the share of each quantum's budget the graph used.

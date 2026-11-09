@@ -710,6 +710,11 @@ impl Consumer {
 		self.current.lock().unwrap().state.lock().unwrap().due(timestamp)
 	}
 
+	/// The media time the clock presents at `at`, or `None` before the first anchor.
+	pub fn position(&self, at: Instant) -> Option<Duration> {
+		self.current.lock().unwrap().state.lock().unwrap().position(at)
+	}
+
 	/// The newest due picture's index in presentation order, or `None` to repeat the previous one.
 	///
 	/// Pass queued timestamps in ascending order and discard entries through the
