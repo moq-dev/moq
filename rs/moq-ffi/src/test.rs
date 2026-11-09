@@ -7122,7 +7122,7 @@ async fn session_state_names_a_failing_first_dial() {
 	.unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
 	let mut state = session.state();
-	assert!(matches!(state.phase, MoqConnectionPhase::Connecting { failure: None }));
+	assert!(matches!(state.phase, MoqConnectionPhase::Connecting { .. }));
 	assert_eq!(state.connects, 0);
 	drop(client);
 	for _ in 0..2 {

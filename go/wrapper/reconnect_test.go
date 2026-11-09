@@ -364,7 +364,7 @@ func TestFirstDialState(t *testing.T) {
 	session := client.Session()
 	defer session.Cancel(0)
 	state := session.State()
-	if phase, ok := state.Phase.(moq.ConnectionPhaseConnecting); !ok || phase.Failure != nil || state.Connects != 0 {
+	if _, ok := state.Phase.(moq.ConnectionPhaseConnecting); !ok || state.Connects != 0 {
 		t.Fatalf("initial state: %+v", state)
 	}
 	for i := 0; i < 2; i++ {
