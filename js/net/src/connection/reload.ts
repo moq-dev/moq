@@ -9,10 +9,13 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
+import { isWebTransportSupported } from "./browser.ts";
 import {
 	type ConnectProps,
-	connect,
+	establish,
 	normalizeVersions,
+	Reached,
+	reachable,
 	type WebSocketProps,
 	type WebTransportProps,
 } from "./connect.ts";
@@ -23,6 +26,15 @@ import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
 import { heldOf } from "./tokens.ts";
+
+/**
+ * The wait before a session on the WebSocket fallback first probes WebTransport, before jitter.
+ * Each failed probe doubles it, up to {@link PROBE_MAX}, matching moq-tokio.
+ */
+const PROBE_INITIAL = Milli(10_000);
+
+/** The longest wait between WebTransport probes, before jitter. */
+const PROBE_MAX = Milli(300_000);
 
 function sameTokens(a: readonly string[], b: readonly string[]): boolean {
 	return a.length === b.length && a.every((token, i) => token === b[i]);
@@ -552,6 +564,9 @@ export class Reload {
 			let connected: Instant | undefined;
 
 			try {
+				// The WebTransport session a probe opened, which the next dial finishes its MoQ
+				// handshake over instead of racing.
+				let reached: Reached | undefined;
 				// Loops only to migrate: a GOAWAY off a healthy session dials its replacement
 				// straight away, with no backoff.
 				for (;;) {
@@ -561,23 +576,30 @@ export class Reload {
 					this.#deadline ??= this.#window(now());
 
 					this.#setDialing(true);
-					this.#dialedTokens = this.tokens.peek();
+					this.#dialedTokens = reached?.tokens ?? this.tokens.peek();
 					let connection: Session;
+					const reusing = reached;
+					reached = undefined;
 					try {
-						connection = await connect({
-							url: dialing,
-							tokens: this.#dialedTokens,
-							// A redirect names the relay; a fallback URL pinned for the old one does not follow.
-							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
-							versions: this.versions,
-							webtransport: this.webtransport,
-							timeout: this.timeout,
-							publish: this.publish,
-							consume: this.consume,
-							auth: this.auth,
-							viewers: this.viewers,
-							signal,
-						});
+						connection = await establish(
+							{
+								url: dialing,
+								tokens: this.#dialedTokens,
+								// A redirect names the relay; a fallback URL pinned for the old one does not follow.
+								websocket: this.#redirect.peek()
+									? { ...this.websocket, url: undefined }
+									: this.websocket,
+								versions: this.versions,
+								webtransport: this.webtransport,
+								timeout: this.timeout,
+								publish: this.publish,
+								consume: this.consume,
+								auth: this.auth,
+								viewers: this.viewers,
+								signal,
+							},
+							reusing,
+						);
 					} catch (err) {
 						this.#setDialing(false);
 						throw err;
@@ -598,9 +620,30 @@ export class Reload {
 
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
-					// torn down. Anything else is the peer's GOAWAY.
-					const ended = await effect.race(connection.closed, connection.draining);
-					if (ended === undefined) return;
+					// torn down. Anything else is the peer's GOAWAY, or WebTransport reachable
+					// again under a session on the WebSocket fallback.
+					const probing = new AbortController();
+					const probe = this.#probe(connection, dialing, probing.signal);
+					const first = await effect
+						.race(connection.closed, connection.draining, probe)
+						.finally(() => probing.abort());
+					// The peer's GOAWAY wins over a probe that got through in the same turn, so its
+					// redirect is never lost.
+					const drain = connection.draining.peek();
+					const raced = first instanceof Reached && drain !== undefined ? drain : first;
+					// A probe the race did not take still holds an open WebTransport session.
+					void probe.then((left) => {
+						if (left !== raced) left.transport.close();
+					});
+					if (raced === undefined) return;
+					// Leaving the fallback is a GOAWAY of our own: the session drains as the
+					// predecessor while the replacement finishes its handshake over the probe.
+					if (raced instanceof Reached) {
+						console.info("WebTransport reachable again; leaving the WebSocket fallback");
+						wireOf(connection).leave();
+						reached = raced;
+					}
+					const ended = raced instanceof Reached ? { uri: "" } : raced;
 					if (ended === null || ended instanceof Error) {
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
@@ -616,7 +659,20 @@ export class Reload {
 					const socket = this.#redirect.peek() ? undefined : this.websocket?.url;
 					const at = dialed(dialing, connection.transport, socket);
 					const before = this.#redirect.peek();
-					if (!this.#migrate(connection, at, ended)) return;
+					if (!this.#migrate(connection, at, ended)) {
+						reached?.transport.close();
+						return;
+					}
+					// Moving off the fallback is no peer's redirect or restart, and the probe
+					// backoff already paces it, so its replacement dials at once. A fallback that
+					// served past the healthy bar still earns the healthy reset.
+					if (reached) {
+						if (Instant.durationSince(now(), connected) >= Nano.fromMilli(this.#pacing().healthy)) {
+							this.#delay = undefined;
+							this.#deadline = undefined;
+						}
+						continue;
+					}
 					const after = this.#redirect.peek();
 
 					// Two peers that each hold a session past the healthy bar can still bounce us between
@@ -666,6 +722,34 @@ export class Reload {
 				this.#retry(effect, connected, err);
 			}
 		});
+	}
+
+	/**
+	 * Resolve with the WebTransport session that reaches `dialing` while `connection` runs on the
+	 * WebSocket fallback, probing on a jittered backoff from {@link PROBE_INITIAL} up to {@link PROBE_MAX}.
+	 * Never resolves for a session on another transport, where WebTransport is unsupported, or
+	 * once `signal` aborts.
+	 */
+	async #probe(connection: Session, dialing: URL, signal: AbortSignal): Promise<Reached> {
+		const never = new Promise<never>(() => {});
+		if (connection.transport !== "websocket" || !isWebTransportSupported()) return never;
+		try {
+			for (let delay = PROBE_INITIAL; ; delay = Milli(Math.min(delay * 2, PROBE_MAX))) {
+				await sleep(Nano.fromMilli(Milli(delay * (0.5 + Math.random() / 2))), { signal });
+				const props = {
+					tokens: this.tokens.peek(),
+					versions: this.versions,
+					webtransport: this.webtransport,
+					websocket: this.#redirect.peek() ? undefined : this.websocket,
+					timeout: this.timeout,
+				};
+				const reached = await reachable(dialing, props, signal);
+				if (reached) return reached;
+			}
+		} catch {
+			// The sleep rejects once the session ends.
+			return never;
+		}
 	}
 
 	/**

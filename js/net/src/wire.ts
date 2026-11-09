@@ -143,6 +143,12 @@ export interface Established {
 	 * discovery never holds two where one covers the other.
 	 */
 	readonly exclusive: boolean;
+	/**
+	 * Tell the peer this side is moving, with a GOAWAY naming no URI where the version carries
+	 * one, and stop taking new tokens, so the auth handle backs a replacement while this session
+	 * keeps serving.
+	 */
+	leave(): void;
 	// private: plumbing
 	/**
 	 * This session's side of its auth handle.
