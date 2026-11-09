@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { Micro, Milli, type Second } from "@moq/clock";
 import { AudioRingBuffer } from "./ring-buffer";
 
 function read(buffer: AudioRingBuffer, samples: number, channelCount = 2): Float32Array[] {
@@ -955,6 +955,66 @@ describe("time stretch", () => {
 		await converge(buffer, frames(600), 1);
 		// Fast accelerate removes up to 15 ms of every 30 ms window until the ring is under 480 ms.
 		expect(buffer.length).toBeLessThan(frames(480));
+	});
+
+	describe("buffered on the shared clock", () => {
+		const buffered = (latency: number) =>
+			new AudioRingBuffer({ rate: RATE, channels: 1, latency: latency as Milli, buffered: true });
+
+		// Plays `seconds` of quanta with the clock `behind` ms ahead of where the playhead started,
+		// topping the ring up to its 100 ms floor the way the paced decode loop does. Returns how far
+		// the playhead trails the clock after each quantum, in frames.
+		function follow(buffer: AudioRingBuffer, seconds: number, behind: number | undefined, end?: number) {
+			const start = frames(1000);
+			let written = start;
+			const lags: number[] = [];
+			for (let rendered = 0; rendered < frames(seconds * 1000); rendered += QUANTUM) {
+				const playhead = buffer.anchored
+					? Math.round((Milli.fromMicro(buffer.timestamp) * RATE) / 1000)
+					: start;
+				while (written - playhead < frames(100)) {
+					write(buffer, ((written * 1000) / RATE) as Milli, frames(20), { value: 0.5 });
+					written += frames(20);
+				}
+				if (end !== undefined && rendered === 0) buffer.end(Micro.fromMilli(end as Milli));
+				const clock = behind === undefined ? undefined : start + frames(behind) + rendered;
+				const output = [new Float32Array(QUANTUM)];
+				expect(
+					buffer.read(output, clock === undefined ? undefined : Micro.fromSecond((clock / RATE) as Second)),
+				).toBe(QUANTUM);
+				if (clock !== undefined)
+					lags.push(Math.round(clock + QUANTUM - (Milli.fromMicro(buffer.timestamp) * RATE) / 1000));
+			}
+			return lags;
+		}
+
+		it("accelerates a playhead behind the clock back onto it, never past it, dropping nothing", () => {
+			const buffer = buffered(100);
+			const lags = follow(buffer, 3, 300);
+			// Fast accelerate halves each window until the lag is under 20 ms, and the ordinary one then
+			// removes a period only while one fits, so the playhead rests within a period behind the clock.
+			for (const lag of lags) expect(lag).toBeGreaterThanOrEqual(0);
+			for (const lag of lags.slice(-50)) expect(lag).toBeLessThan(PERIOD);
+			expect(buffer.accelerated).toBeGreaterThan(300 - 2.5);
+			expect(buffer.skips).toBe(0);
+			expect(buffer.underruns).toBe(0);
+		});
+
+		it("plays at the encoded pace on or ahead of the clock, or without one", () => {
+			for (const behind of [0, -200, undefined]) {
+				const buffer = buffered(100);
+				follow(buffer, 1, behind);
+				expect(buffer.accelerated).toBe(Milli.zero);
+				expect(Milli.fromMicro(buffer.timestamp)).toBe(2000 as Milli);
+			}
+		});
+
+		// Live, a tail's depth says nothing about the clock; buffered, the clock is measured directly.
+		it("catches up a tail before a declared end", () => {
+			const buffer = buffered(100);
+			follow(buffer, 1, 100, 6000);
+			expect(buffer.accelerated).toBeGreaterThan(100 - 2.5);
+		});
 	});
 
 	it("drops the staged window with the audio a re-anchor skips", () => {

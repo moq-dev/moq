@@ -335,3 +335,93 @@ it("plays an advertised flush span past the decoded floor at its delay without a
 	expect(lag).toBeGreaterThanOrEqual(5020);
 	expect(lag).toBeLessThan(5040);
 });
+
+// A buffered player keeps no depth to steer on, so it measures how far its playhead trails the shared
+// clock and plays faster until back on it. It never skips: every frame plays, and the container keeps
+// every group, since audio on the clock stays within the max delay of the newest arrival.
+describe("buffered replay against the shared clock", () => {
+	let warn: Mock<typeof console.warn>;
+	beforeEach(() => {
+		warn = spyOn(console, "warn").mockImplementation(() => {});
+	});
+	afterEach(() => warn.mockRestore());
+
+	/** Plays `trace`, returning how far audio trails the clock once settled, and what was dropped. */
+	async function play(trace: Arrival[], options: Options, settled: (at: number) => boolean) {
+		const lags: number[] = [];
+		let heard = 0;
+		let last: Quantum | undefined;
+		for await (const quantum of replay(trace, options)) {
+			heard += quantum.output.filter((v) => v !== 0).length;
+			if (settled(quantum.at) && !quantum.stalled && quantum.clock !== undefined) {
+				lags.push(quantum.clock - quantum.timestamp);
+			}
+			last = quantum;
+		}
+		if (!last) throw new Error("nothing played");
+		return {
+			min: Math.min(...lags),
+			max: Math.max(...lags),
+			skips: last.skips,
+			trimmed: last.trimmed,
+			accelerated: last.accelerated,
+			// Frames the consumer passed over rather than delivered.
+			lost: trace.length - last.arrivals.filter((a) => a.kind === "frame").length,
+			heard: (heard * 1000) / RATE,
+		};
+	}
+
+	it("catches up after each stall", async () => {
+		// Every ten seconds, 400 ms of frames are held and land at once.
+		const trace = paced(60, (i) => 30 + (i % 500 >= 250 && i % 500 < 270 ? (270 - (i % 500)) * 20 : 0)).sort(
+			(a, b) => a.at - b.at,
+		);
+		const options = {
+			rate: RATE,
+			config: CONFIG,
+			delay: Milli(100),
+			lookahead: Milli(500),
+			duration: observed(60),
+		};
+		// Two seconds after each stall ends. Without the stretch, audio trailed by 317 ms for good and the
+		// consumer dropped 12 frames.
+		const result = await play(trace, options, (at) => at >= 2000 && at % 10_000 >= 7500);
+		expect(result.min).toBeGreaterThanOrEqual(0);
+		expect(result.max).toBeLessThan(2.5);
+		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("follows a publisher clock running 1% fast at auto", async () => {
+		const trace = paced(60, (i) => 30 - (i * 20) / 101);
+		const options = {
+			rate: RATE,
+			config: CONFIG,
+			delay: "auto" as const,
+			lookahead: Milli(500),
+			duration: observed(60),
+		};
+		// Without the stretch, audio trailed by 60 to 290 ms and the consumer dropped 273 frames as slow
+		// groups.
+		const result = await play(trace, options, (at) => at >= 5000);
+		expect(result.min).toBeGreaterThanOrEqual(0);
+		expect(result.max).toBeLessThan(23);
+		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("plays every word of an utterance that stalls mid-burst, catching up after", async () => {
+		// Twenty seconds of speech generated four times faster than real time, held for 3.5 s after its
+		// first two seconds, so playback runs dry and resumes about two seconds behind the clock.
+		const trace = paced(20, (i) => (i < 100 ? 30 : 3500) - i * 15);
+		const options = { rate: RATE, config: CONFIG, delay: Milli(100), lookahead: Milli(30_000), duration: 22_000 };
+		// Without the stretch, audio trailed by 1969 ms to the end.
+		const result = await play(trace, options, (at) => at >= 15_000);
+		expect(result.min).toBeGreaterThanOrEqual(0);
+		expect(result.max).toBeLessThanOrEqual(4);
+		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
+		// Every frame played, less only what the stretch shortened.
+		expect(result.heard + result.accelerated).toBe(20_000);
+		expect(warn).not.toHaveBeenCalled();
+	});
+});

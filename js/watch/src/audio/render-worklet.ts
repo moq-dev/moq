@@ -1,5 +1,6 @@
+import type { Micro } from "@moq/clock";
 import { ComfortNoise } from "./comfort";
-import type { Message, State } from "./render";
+import type { Clock, Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 
 // Samples to fade over when playback stops or resumes short of a full quantum. A shortfall
@@ -16,6 +17,8 @@ class Render extends AudioWorkletProcessor {
 	#playing = true;
 	// Whether the previous quantum ended short, so the next one fades back in.
 	#short = false;
+	// The shared clock's latest reading, which a buffered ring converges on.
+	#clock?: Clock;
 
 	constructor() {
 		super();
@@ -28,6 +31,7 @@ class Render extends AudioWorkletProcessor {
 				this.#playing = msg.playing ?? true;
 				this.#underflow = 0;
 				this.#short = false;
+				this.#clock = undefined;
 			} else if (msg.type === "data") {
 				this.#ring?.write(msg.timestamp, msg.data);
 			} else if (msg.type === "latency") {
@@ -48,8 +52,12 @@ class Render extends AudioWorkletProcessor {
 				}
 				this.#epoch = msg.epoch;
 				this.#playing = msg.playing ?? true;
+				// A reset ends the timeline the clock was read on.
+				this.#clock = undefined;
 			} else if (msg.type === "playing" && msg.epoch === this.#epoch) {
 				this.#playing = msg.playing;
+			} else if (msg.type === "clock") {
+				this.#clock = msg;
 			}
 		};
 	}
@@ -57,7 +65,12 @@ class Render extends AudioWorkletProcessor {
 	process(_inputs: Float32Array[][], outputs: Float32Array[][], _parameters: Record<string, Float32Array>) {
 		const output = outputs[0];
 		const ring = this.#ring;
-		const samplesRead = this.#playing ? (ring?.read(output) ?? 0) : 0;
+		const clock = this.#clock;
+		const shared =
+			clock?.timestamp !== undefined
+				? ((clock.timestamp + (currentTime - clock.time) * 1_000_000) as Micro)
+				: undefined;
+		const samplesRead = this.#playing ? (ring?.read(output, shared) ?? 0) : 0;
 		// A declared silence between two buffered utterances plays as comfort noise, faded like any other.
 		const quiet = this.#playing ? ring?.quiet : undefined;
 		if (quiet) {

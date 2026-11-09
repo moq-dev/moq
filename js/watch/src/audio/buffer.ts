@@ -1,7 +1,7 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
-import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
+import type { Clock, Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
 
 /**
  * Decides when the decode loop may decode a frame, which is how the target delay is split between
@@ -311,11 +311,13 @@ export class AudioBuffer {
 			delay: Milli;
 			/** Anchor to the first frame and play through, holding the lookahead upstream. */
 			buffered: boolean;
+			/** The shared clock a buffered ring plays faster to catch back up to whenever it trails. */
+			clock?: { now(): Milli | undefined };
 			/** Hold consumption until the shared startup floor is ready. */
 			playing?: Getter<boolean>;
 		},
 	) {
-		const { channels, rate, buffered, playing } = props;
+		const { channels, rate, buffered, playing, clock } = props;
 		this.#playing = props.playing;
 		this.#worklet = worklet;
 		this.channels = channels;
@@ -351,6 +353,16 @@ export class AudioBuffer {
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
+					// Read the clock and the context's time together, so a late message misplaces neither.
+					if (buffered && clock) {
+						const now = clock.now();
+						const msg: Clock = {
+							type: "clock",
+							...(now !== undefined && { timestamp: Milli.toMicro(now) }),
+							time: worklet.context.currentTime,
+						};
+						worklet.port.postMessage(msg);
+					}
 				}
 			}
 		});
@@ -378,7 +390,7 @@ export class AudioBuffer {
 
 	/**
 	 * Insert audio samples at the given timestamp, transferring their buffers. A write may land out of
-	 * order, but samples behind what live playback already staged, up to 30 ms past the playhead, are dropped.
+	 * order, but samples behind what playback already staged, up to 30 ms past the playhead, are dropped.
 	 */
 	insert(timestamp: Micro, data: Float32Array[]): void {
 		const end = (timestamp + Micro.fromSecond(((data[0]?.length ?? 0) / this.rate) as Second)) as Micro;

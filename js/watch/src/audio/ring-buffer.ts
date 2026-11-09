@@ -45,8 +45,9 @@ export class AudioRingBuffer {
 	// decode would otherwise widen the band for the life of the ring.
 	#chunk = 0;
 
-	// Live playback converges on the floor by accelerating each window of received PCM on its way out.
-	// The read index is past the staged window, which spans `#window` samples of the ring.
+	// Live playback converges on the floor, and buffered playback on the shared clock, by accelerating
+	// each window of received PCM on its way out. The read index is past the staged window, which spans
+	// `#window` samples of the ring.
 	readonly #stretch: Stretch;
 	#window = 0;
 	// The ring's length right after the latest write, less what the stretch has removed since. That
@@ -57,7 +58,8 @@ export class AudioRingBuffer {
 	// Whether the staged window lies in a declared silence, which plays unstretched as comfort noise.
 	#windowQuiet = false;
 
-	// Buffered mode: play through everything buffered without skipping ahead.
+	// Buffered mode: play through everything buffered without skipping ahead, catching up to the
+	// shared clock by playing faster instead.
 	readonly #buffered: boolean;
 	// Un-stall threshold in samples (how much to buffer before playback starts).
 	#latencySamples: number;
@@ -427,7 +429,13 @@ export class AudioRingBuffer {
 		this.#peak = 0;
 	}
 
-	read(output: Float32Array[]): number {
+	/**
+	 * Fill `output` from the playhead, returning how many frames it supplied. A buffered ring given
+	 * `clock`, where the shared clock stands at the first output frame, accelerates whenever its
+	 * playhead trails it, until it is back on the clock. It never runs ahead: a live ring steers on its
+	 * own depth instead, and a buffered one without a clock plays at the encoded pace.
+	 */
+	read(output: Float32Array[], clock?: Micro): number {
 		if (output.length !== this.channels) throw new Error("wrong number of channels");
 		for (const dst of output) if (dst.length !== output[0].length) throw new Error("mismatching number of samples");
 		this.#quiet = undefined;
@@ -442,9 +450,13 @@ export class AudioRingBuffer {
 		}
 
 		const stretch = this.#stretch;
+		const shared =
+			this.#buffered && clock !== undefined ? Math.round(Second.fromMicro(clock) * this.rate) : undefined;
 		let samples = 0;
 		while (samples < output[0].length) {
-			if (stretch.available === 0 && !this.#stage(output[0].length - samples)) break;
+			// A window stages only once the previous one has played out, so the playhead is the read index.
+			const behind = shared === undefined ? undefined : shared + samples - this.#readIndex;
+			if (stretch.available === 0 && !this.#stage(output[0].length - samples, behind)) break;
 			const from = samples;
 			samples += stretch.read(output, samples);
 			// A quantum overlaps at most one declared silence unless an utterance is shorter than it,
@@ -469,22 +481,24 @@ export class AudioRingBuffer {
 		return samples;
 	}
 
-	// Move the next window off the ring into the stretch, which accelerates a live ring onto its floor.
-	// A window stops at the edge of a declared silence, which plays unstretched, so the stretch never
-	// moves where one starts or ends. Whatever cannot stretch stages only the `need` this quantum
-	// reads, so a write still lands anywhere past the playhead. Returns false once the ring is empty.
-	#stage(need: number): boolean {
+	// Move the next window off the ring into the stretch, which accelerates a live ring onto its floor,
+	// and a buffered ring `behind` the shared clock by that many frames back onto it. A window stops at
+	// the edge of a declared silence, which plays unstretched, so the stretch never moves where one
+	// starts or ends. Whatever cannot stretch stages only the `need` this quantum reads, so a write
+	// still lands anywhere past the playhead. Returns false once the ring is empty.
+	#stage(need: number, behind?: number): boolean {
 		const buffered = this.#writeIndex - this.#readIndex;
 		if (buffered <= 0) return false;
 
 		this.#prune();
 		const pause = this.#pauses[0];
 		const quiet = pause !== undefined && pause.start <= this.#readIndex;
-		// Audio before a declared end is a finite tail: it drains as received, since the next utterance
-		// re-anchors the ring anyway.
+		// Live, audio before a declared end is a finite tail: it drains as received, since the next
+		// utterance re-anchors the ring anyway, and its depth says nothing about the clock. A buffered
+		// ring measures the clock itself, so a tail behind it catches up like any other audio.
 		const end = this.#previous ?? this.#end;
 		const ending = end !== undefined && this.#readIndex < end;
-		const enabled = !quiet && !ending && !this.#buffered;
+		const enabled = !quiet && (this.#buffered ? behind !== undefined && behind > 0 : !ending);
 		let frames = Math.min(buffered, this.#stretch.window, enabled ? buffered : need);
 		if (pause) frames = Math.min(frames, (quiet ? pause.end : pause.start) - this.#readIndex);
 
@@ -494,7 +508,7 @@ export class AudioRingBuffer {
 			for (let i = 0; i < frames; i++) dst[i] = src[(this.#readIndex + i) % src.length];
 		}
 		const stretch = this.#stretch;
-		stretch.process(frames, this.#peak - this.#latencySamples, enabled);
+		stretch.process(frames, this.#buffered ? (behind ?? 0) : this.#peak - this.#latencySamples, enabled);
 		this.#peak -= frames - stretch.length;
 		this.#accelerated += Math.max(0, frames - stretch.length);
 		this.#readIndex += frames;

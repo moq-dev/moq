@@ -606,8 +606,9 @@ export default class MoqWatch extends HTMLElement {
 	 *
 	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up
 	 * future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
-	 * once they would sit further than `delay + lookahead` past the playhead. Call `reset()` at each
-	 * utterance boundary. Not a jitter buffer: live streams leave it at zero and tune `delay`.
+	 * once they would sit further than `delay + lookahead` past the playhead. Audio never skips, and
+	 * catches up after a stall by playing slightly faster. Call `reset()` at each utterance boundary.
+	 * Not a jitter buffer: live streams leave it at zero and tune `delay`.
 	 */
 	get lookahead(): Milli {
 		return this.controls.lookahead.peek();

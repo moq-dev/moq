@@ -228,3 +228,38 @@ it("clears comfort noise when the timeline resets", () => {
 	send({ type: "reset", epoch: 1 });
 	expect([...read(20)]).toEqual(Array(20).fill(0));
 });
+
+// The main thread reads the shared clock once per state report, so the worklet carries it forward on
+// its own `currentTime` between readings, until a reset ends the timeline it was read on.
+it("carries the shared clock forward on its own time for a buffered ring to catch up to", () => {
+	const render = new Render();
+	const send = (data: Message) => render.port.onmessage?.({ data } as MessageEvent<Message>);
+	const rate = 48_000;
+	const play = (seconds: number) => {
+		for (let i = 0; i < (seconds * rate) / 128; i++) {
+			expect(render.process([], [[new Float32Array(128)]], {})).toBe(true);
+			time += 128 / rate;
+		}
+		return render.sent.at(-1);
+	};
+	let time = 10;
+	const previous = Object.getOwnPropertyDescriptor(globalThis, "currentTime");
+	Object.defineProperty(globalThis, "currentTime", { configurable: true, get: () => time });
+	try {
+		send({ type: "init", channels: 1, rate, latency: Milli(100), buffered: true });
+		send({ type: "data", timestamp: Micro(1_000_000), data: [new Float32Array(rate * 0.9).fill(0.5)] });
+		// Half a second before this first quantum, the clock read 700 ms: it now stands 1.2 s, 200 ms past
+		// the playhead at 1 s.
+		send({ type: "clock", timestamp: Micro(700_000), time: 9.5 });
+		const caught = play(0.5);
+		expect(caught?.accelerated).toBeGreaterThan(200 - 2.5);
+		expect(caught?.accelerated).toBeLessThanOrEqual(200);
+
+		send({ type: "reset", epoch: 1 });
+		send({ type: "data", timestamp: Micro(1_000_000), data: [new Float32Array(rate * 0.9).fill(0.5)] });
+		expect(play(0.5)?.accelerated).toBe(caught?.accelerated);
+	} finally {
+		if (previous) Object.defineProperty(globalThis, "currentTime", previous);
+		else Reflect.deleteProperty(globalThis, "currentTime");
+	}
+});

@@ -553,3 +553,59 @@ describe("AudioBuffer past its decoded floor", () => {
 		}
 	});
 });
+
+// Each state report reads the shared clock alongside the context's time, so the worklet maps the clock
+// onto its own however late the report or the reply lands. A live ring steers on its own depth.
+it("reads the shared clock with the context's time on each current report of a buffered ring", () => {
+	for (const buffered of [true, false]) {
+		const sent: Message[] = [];
+		const port = Object.assign(new EventTarget(), {
+			postMessage: (msg: Message) => sent.push(msg),
+			start() {},
+		});
+		const context = { currentTime: 12.5 };
+		let clock: Milli | undefined = Milli(800);
+		const buffer = new AudioBuffer({ port, context } as unknown as AudioWorkletNode, {
+			channels: 1,
+			rate: 1000,
+			delay: Milli(100),
+			buffered,
+			clock: { now: () => clock },
+		});
+		const state = (epoch: number) => {
+			const data: State = {
+				type: "state",
+				timestamp: ms(700),
+				stalled: false,
+				anchored: true,
+				underruns: 0,
+				skips: 0,
+				trimmed: Milli.zero,
+				accelerated: Milli.zero,
+				silent: false,
+				epoch,
+			};
+			port.dispatchEvent(new MessageEvent("message", { data }));
+		};
+		try {
+			state(0);
+			clock = undefined;
+			context.currentTime = 13;
+			state(0);
+			// A report from before a reset belongs to the previous timeline.
+			buffer.reset();
+			state(0);
+			const clocks = sent.filter((msg) => msg.type === "clock");
+			expect(clocks).toEqual(
+				buffered
+					? [
+							{ type: "clock", timestamp: ms(800), time: 12.5 },
+							{ type: "clock", time: 13 },
+						]
+					: [],
+			);
+		} finally {
+			buffer.close();
+		}
+	}
+});

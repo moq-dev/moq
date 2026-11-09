@@ -1,7 +1,7 @@
 import type { Micro, Milli } from "@moq/clock";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = Init | Data | Latency | Reset | Truncate | Playing | End;
+export type Message = Init | Data | Latency | Reset | Truncate | Playing | End | Clock;
 
 /** Create the worklet's ring. */
 export interface Init {
@@ -42,6 +42,18 @@ export interface Data {
 	type: "data";
 	data: Float32Array[];
 	timestamp: Micro;
+}
+
+/**
+ * Where the shared clock stands, for a buffered ring to time-stretch back onto. The clock runs at real
+ * time, so one reading maps it onto the worklet's own time until the next.
+ */
+export interface Clock {
+	type: "clock";
+	// The clock's media time at context time `time`, unset while the clock has none.
+	timestamp?: Micro;
+	// The AudioContext's `currentTime` when the clock was read, in seconds.
+	time: number;
 }
 
 /** Latency update: the floor held as decoded PCM. */

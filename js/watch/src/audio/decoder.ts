@@ -402,6 +402,7 @@ export class Decoder {
 				rate: sampleRate,
 				delay: this.sync.out.delay.peek(),
 				buffered,
+				clock: this.sync,
 				playing: this.sync.playing,
 			});
 			effect.cleanup(() => ring.close());

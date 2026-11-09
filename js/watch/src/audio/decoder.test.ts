@@ -63,6 +63,8 @@ let worklets: FakeWorklet[] = [];
 // every quantum read reports the ring's state back, the way `render-worklet.ts` does.
 class FakeWorklet {
 	ring?: AudioRingBuffer;
+	// Read with each clock message; this fake renders no real time, so it applies no clock.
+	readonly context = { currentTime: 0 };
 	#epoch = 0;
 	#playing = true;
 	readonly port = Object.assign(new EventTarget(), {
