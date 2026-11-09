@@ -46,7 +46,8 @@ abstract class NativeStream<T> extends Stream<T> {
           if (resumed != null) await resumed!.future;
           if (stopped()) return;
           final next = read();
-          reading = _Pending<T>(next);
+          // `read` may cancel the listener before it returns, which stays terminal.
+          if (!stopped()) reading = _Pending<T>(next);
           final T value;
           try {
             value = await next;

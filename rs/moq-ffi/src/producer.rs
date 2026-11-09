@@ -769,7 +769,12 @@ impl MoqTrackProducer {
 		let mut phase = std::mem::take(&mut *self.phase.lock().unwrap());
 		let raw = phase.raw()?.clone();
 		match (f(raw), phase) {
-			(Ok(writer), TrackPhase::Open { family: Some(family), .. }) => family.adopt(Arc::new(writer)),
+			(
+				Ok(writer),
+				TrackPhase::Open {
+					family: Some(family), ..
+				},
+			) => family.adopt(Arc::new(writer)),
 			// A finished track has no family left to join, and ends at its declared end.
 			(Ok(writer), _) => Ok(Arc::new(writer)),
 			(Err(err), phase) => {

@@ -25012,7 +25012,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqserver_cancel() != 56970) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqserver_cert_fingerprints() != 57398) {
+  if (uniffi_moq_ffi_checksum_method_moqserver_cert_fingerprints() != 32082) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqserver_listen() != 9040) {

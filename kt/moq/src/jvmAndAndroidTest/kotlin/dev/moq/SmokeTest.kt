@@ -709,7 +709,9 @@ class SmokeTest {
             // Finished, so a handle left open would read the end instead of failing.
             track.finish()
             val consumer = broadcast.consume().subscribeTrack("thrown", null)
-            assertFailsWith<IllegalStateException> { consumer.groups().collect { error("collector failed") } }
+            assertFailsWith<IllegalStateException> {
+                consumer.groups().collect { error("collector failed") }
+            }
             assertFailsWith<MoqException.Cancelled> { consumer.nextGroup() }
         }
     }

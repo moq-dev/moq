@@ -267,13 +267,14 @@ async def test_nested_enter_is_refused():
             bind="127.0.0.1:0",
             once=True,
         ) as client:
+            peer = await asyncio.wait_for(accept, timeout=10)
             session = client.session
             with pytest.raises(RuntimeError, match="already entered"):
                 async with client:
                     pass
             assert client.session is session
         assert client.session is None
-        (await asyncio.wait_for(accept, timeout=10)).cancel(0)
+        peer.cancel(0)
 
 
 async def test_server_request_close():
