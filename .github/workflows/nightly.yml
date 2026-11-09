@@ -247,7 +247,7 @@ jobs:
   # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
   benchmark-site:
     name: Benchmark site
-    needs: [nightly, sizes]
+    needs: [nightly, sizes, gate-cost]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -700,6 +700,39 @@ jobs:
         with:
           name: bench-size
           path: target/bench/size
+          retention-days: 45
+
+  # The merge gate's own build and test cost under fixed scenarios, for the
+  # benchmark history (see bench/README.md). x86 because hosted ARM runners
+  # expose no hardware counters, and no Rust cache, which would replay
+  # compilations rather than measure them. The scenarios run every module in
+  # turn, cold and then after a moq-net edit, so they take hours.
+  gate-cost:
+    name: Gate cost
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      # The hosted image's default of 4 hides every hardware counter; 2 allows user-space ones.
+      - name: Allow user-space instruction counts
+        run: sudo sysctl -w kernel.perf_event_paranoid=2
+      - name: Measure the gate
+        id: measure
+        run: nix develop --command just gh gate-cost
+      - name: Record benchmark outcome
+        if: ${{ !cancelled() }}
+        run: nix develop --command just gh benchmark-report status "${{ steps.measure.outcome }}" target/bench/nightly/gate-cost
+      - name: Preserve results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-gate-cost
+          path: target/bench/nightly/gate-cost
           retention-days: 45
 
   fuzz:

@@ -16,7 +16,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 BIGGER = {"MB/s", "MiB/s", "B/s", "ops/s", "frames/s", "frames"}
-SMALLER = {"ns", "us", "µs", "ms", "s", "ms/MB", "x", "bytes", "B", "MiB", "packets", "streams"}
+SMALLER = {"ns", "us", "µs", "ms", "s", "ms/MB", "x", "bytes", "B", "MiB", "packets", "streams", "instructions"}
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def value(number):
@@ -226,6 +227,59 @@ def sizes(directory):
             for key, size in sorted(report["bytes"].items())
         ]
     )
+
+
+def cost(directory):
+    """Read the gate cost scenarios: each module's wall and CPU time, each crate's compile
+    instructions, and each test binary's and test file's summed test time."""
+    raw = directory / "raw"
+    toolchains = "; ".join((raw / "toolchains.txt").read_text().splitlines())
+    scenarios = sorted(path for path in raw.iterdir() if path.is_dir())
+    if not scenarios:
+        raise ValueError(f"no gate cost scenarios in {raw}")
+    entries = []
+    for scenario in scenarios:
+        name = scenario.name
+        load = " ".join((scenario / "loadavg").read_text().split()[:3])
+        extra = f"Load average {load} before the scenario; {toolchains}"
+        for line in (scenario / "modules.txt").read_text().splitlines():
+            wall, cpu, label = line.split(" ", 2)
+            if label == "whole run":
+                key, note = "total", {"extra": extra}
+            elif match := re.fullmatch(r"(\w+) (\w+)", label):
+                key, note = f"module/{match[2]}/{match[1]}", {}
+            else:
+                raise ValueError(f"{name}: a gate phase did not pass: {label}")
+            entries.append({"name": f"{name}/{key}/wall", "unit": "s", "value": value(int(wall)), **note})
+            entries.append({"name": f"{name}/{key}/cpu", "unit": "s", "value": value(int(cpu) / 1000), **note})
+
+        # The repository's own crates split by target kind; a dependency's builds sum into one series.
+        crates, cpu = {}, 0
+        for line in (scenario / "rustc.tsv").read_text().splitlines():
+            package, manifest, kind, milliseconds, instructions = line.split("\t")
+            key = f"{package}/{kind}" if Path(manifest).is_relative_to(ROOT) else package
+            crates[key] = crates.get(key, 0) + int(instructions)
+            cpu += int(milliseconds)
+        entries.append({"name": f"{name}/rustc/cpu", "unit": "s", "value": value(cpu / 1000)})
+        entries.append({"name": f"{name}/rustc/instructions", "unit": "instructions", "value": sum(crates.values())})
+        entries += [
+            {"name": f"{name}/crate/{key}/instructions", "unit": "instructions", "value": value(total)}
+            for key, total in sorted(crates.items())
+        ]
+
+        # Slot time, the sum of each test's elapsed time, does not shrink with more workers.
+        tests = {}
+        for case in ElementTree.parse(scenario / "nextest.xml").getroot().iter("testcase"):
+            key = f"rust-test/{case.get('classname')}"
+            tests[key] = tests.get(key, 0) + float(case.get("time"))
+        for report in sorted((scenario / "js").glob("**/junit.xml")):
+            package = report.parent.relative_to(scenario / "js")
+            for suite in ElementTree.parse(report).getroot().findall("testsuite"):
+                tests[f"js-test/{(package / suite.get('file')).as_posix()}"] = float(suite.get("time"))
+        entries += [
+            {"name": f"{name}/{key}", "unit": "s", "value": value(seconds)} for key, seconds in sorted(tests.items())
+        ]
+    return checked(entries)
 
 
 def prepare(directory, output):
@@ -547,7 +601,7 @@ def index(directory, commit=None, paired_path=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("rust", "rust-test", "js", "size", "prepare"):
+    for command in ("rust", "rust-test", "js", "size", "cost", "prepare"):
         sub = commands.add_parser(command)
         sub.add_argument("directory", type=Path)
         sub.add_argument("output", type=Path)
@@ -573,6 +627,8 @@ def main():
         write(args.output, javascript(args.directory))
     elif args.command == "size":
         write(args.output, sizes(args.directory))
+    elif args.command == "cost":
+        write(args.output, cost(args.directory))
     elif args.command == "prepare":
         prepare(args.directory, args.output)
     elif args.command == "status":

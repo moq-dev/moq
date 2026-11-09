@@ -811,7 +811,7 @@ sparkline of the last 30 nightly points. The baseline is the median of the
 previous 7 points. A change beyond both 10% of the baseline and 3 times those
 points' median absolute deviation is flagged, so each series' own noise sets its
 bar: red is worse and green is better, by the series' direction (time, CPU,
-size, and ratios lower; throughput higher). Flagged rows open at the top, worst
+instructions, size, and ratios lower; throughput higher). Flagged rows open at the top, worst
 first; everything else sits in a collapsed section per source, behind a text
 filter. A series with fewer than 8 points is grey.
 
@@ -852,6 +852,31 @@ The table includes these measurements:
   bundles the [size report](../sh/size/README.md) measures, recorded even on a
   night its growth check fails. Release build times stay out.
 
+- The merge gate's own cost (`bench-gate-cost`), which `just gh gate-cost`
+  measures on a hosted x86 runner in two scenarios: `cold`, a `just ci --all`
+  from an empty target directory with no Rust cache, then `moq-net`, the
+  diff-scoped `just ci` an agent runs after an edit to moq-net, on what `cold`
+  built. Modules run one at a time (`CHECK_JOBS=1`), so each module's cost is its
+  own rather than whichever lane reached a shared build first. Each scenario
+  records:
+  - `total` and `module/MODULE/PHASE`: wall and CPU seconds from the dispatcher,
+    which writes them to `CHECK_TIMES`. CPU counts the processes a phase waited
+    for, so a daemon's work, such as a Nix build or Gradle's, is wall time only.
+  - `rustc`, and `crate/PACKAGE/KIND` (`lib`, `bin`, `test`, `build` for the
+    build script's compile) for the repository's own crates or `crate/PACKAGE`
+    for a dependency: user-space instructions of every rustc run, which
+    `sh/gh/rustc-cost.sh` counts under `perf stat` as the `RUSTC_WRAPPER`.
+    Instructions are the low-noise series for compiles; build script runs, such
+    as aws-lc-sys's C build, count only in their module.
+  - `rust-test/BINARY` and `js-test/FILE`: summed test seconds (slot time, which
+    more workers do not shrink) from the workspace nextest run's JUnit report and
+    a Bun JUnit report per package.
+
+  The total's history keeps the load average before the scenario and the
+  toolchain versions. Reproduce it from a clean checkout with an empty target
+  directory, with the Rust cache off (no mbx shim on PATH) and
+  `kernel.perf_event_paranoid` at 2 or below; it takes hours.
+
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.
 Malformed, empty, nonfinite, or duplicate measurements fail validation. The
@@ -888,8 +913,8 @@ A new source uploads a `bench-*` artifact containing `report.json`, a nonempty
 JSON array of `{ "name": "case/dimensions", "unit": "ns", "value": 123 }`,
 and `outcome.json` containing `{ "status": "success" }`. Names must be unique
 within a source; dimensions belong in the name. Supported units are `ns`, `us`,
-`µs`, `ms`, `s`, `ms/MB`, `x`, `bytes`, `B`, `MiB`, `MB/s`, `MiB/s`, `B/s`,
-`ops/s`, and `frames/s`. Optional `range` and `extra` fields retain uncertainty
+`µs`, `ms`, `s`, `ms/MB`, `x`, `bytes`, `B`, `MiB`, `packets`, `streams`,
+`instructions`, `MB/s`, `MiB/s`, `B/s`, `ops/s`, `frames/s`, and `frames`. Optional `range` and `extra` fields retain uncertainty
 and context. Validate and split sources into cost and throughput histories with
 `just gh benchmark-report prepare INPUT_DIRECTORY OUTPUT_DIRECTORY`; extending
 the table requires no new renderer or data branch. A source's `paired.json`, as

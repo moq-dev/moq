@@ -150,17 +150,35 @@ def run(action, plan):
 
     command("uv", "run", "--no-project", "python", str(ROOT / "sh/js/install.py"), "frozen")
     if action == "test":
+        # JS_TEST_REPORTS=DIR keeps each test file's time in a JUnit report under DIR at
+        # its package's path, for the nightly gate cost scenarios. Every test script is
+        # `bun test`, which takes the reporter flags; the packages then run in turn.
+        reports = os.environ.get("JS_TEST_REPORTS")
+
+        def junit(directory):
+            if not reports:
+                return []
+            (Path(reports) / directory).mkdir(parents=True, exist_ok=True)
+            return ["--reporter=junit", f"--reporter-outfile={Path(reports) / directory / 'junit.xml'}"]
+
         command("python3", "sh/js/playwright.test.py")
         command(
             "bun",
             "test",
+            *junit("."),
             "js/common/api.test.ts",
             "js/common/constructors.test.ts",
             "js/common/deps.test.ts",
             "js/common/worklet.test.ts",
             "js/common/release.test.ts",
         )
-        scripts("test")
+        if not reports:
+            scripts("test")
+            return
+        for package in packages.values():
+            if "test" in package["manifest"].get("scripts", {}):
+                directory = package["directory"]
+                command("bun", "run", "test", *junit(directory), cwd=ROOT / directory)
         return
     if action == "build":
         scripts("build")
