@@ -4725,7 +4725,7 @@ test("the reserved sequence is refused", () => {
 	expect(() => hooks.receiveGroup(producer, { sequence: reserved, start: 0 })).toThrow(RangeError);
 	producer.createGroup(reserved - 1n).finish();
 	expect(() => producer.appendGroup()).toThrow(RangeError);
-	// A run's exclusive end may sit just past the last group.
-	producer.skipGroups(1n << 63n, 1n << 64n);
-	expect(() => producer.skipGroups(0n, (1n << 64n) + 1n)).toThrow(RangeError);
+	// A run's exclusive end may sit at the reserved sequence, never past it.
+	producer.skipGroups(1n << 63n, reserved);
+	expect(() => producer.skipGroups(0n, 1n << 64n)).toThrow(RangeError);
 });
