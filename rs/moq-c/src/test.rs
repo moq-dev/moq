@@ -6976,9 +6976,15 @@ fn video_raw_decode() {
 		}
 		let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
-		frames.extend(encoder.encode(&frame).unwrap());
+		encoder.encode(&frame).unwrap();
+		while let Some(encoded) = encoder.receive().unwrap() {
+			frames.push(encoded);
+		}
 	}
-	frames.extend(encoder.finish().unwrap());
+	encoder.flush().unwrap();
+	while let Some(encoded) = encoder.receive().unwrap() {
+		frames.push(encoded);
+	}
 	assert!(!frames.is_empty(), "encoder produced no frames");
 
 	let origin = id(moq_origin_create());
