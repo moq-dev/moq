@@ -335,6 +335,7 @@ impl<O: Output> Media<O> {
 								track,
 								decoder,
 								interval,
+								warmup,
 							})
 						};
 						Ok::<_, anyhow::Error>((track, decoder, refresh))
@@ -355,6 +356,7 @@ impl<O: Output> Media<O> {
 								changed: self.drained.clone(),
 								output: self.output.clone(),
 								max_delay,
+								min_delay: self.args.video_delay(),
 								delay: held,
 							};
 							let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -1242,6 +1244,7 @@ mod tests {
 			changed: media.drained.clone(),
 			output: recorder.clone(),
 			max_delay: delay,
+			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
 		};
 		let audio_task = tokio::spawn(async move {
@@ -1370,6 +1373,7 @@ mod tests {
 			changed: media.drained.clone(),
 			output: recorder.clone(),
 			max_delay: delay,
+			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
 		};
 		let audio_task = tokio::spawn(async move {
@@ -1739,6 +1743,7 @@ mod tests {
 			changed: media.drained.clone(),
 			output: recorder.clone(),
 			max_delay: delay,
+			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
 		};
 		let video_task = tokio::spawn(video_play.run(
@@ -2479,6 +2484,7 @@ mod tests {
 				changed: media.drained.clone(),
 				output: recorder.clone(),
 				max_delay: delay,
+				min_delay: delay,
 				delay: tokio::sync::watch::channel(None).1,
 			}
 			.run(track, decoder, None),

@@ -54,7 +54,10 @@ pub(super) struct Video<O> {
 	pub changed: Arc<tokio::sync::Notify>,
 	pub output: O,
 	pub max_delay: Duration,
-	/// The rendition's catalog `delay`, held as this track's playout target.
+	/// The subscription's playout delay before any catalog `delay`.
+	pub min_delay: Duration,
+	/// The rendition's catalog `delay`, held as this track's playout target and
+	/// added to every budget above.
 	pub delay: tokio::sync::watch::Receiver<Option<Duration>>,
 }
 
@@ -68,6 +71,8 @@ pub(super) struct Refresh<D> {
 	pub decoder: D,
 	/// The catalog's frame interval, when it declares a rate.
 	pub interval: Option<Duration>,
+	/// The extra budget its subscription holds over the min-delay decoder's.
+	pub warmup: Duration,
 }
 
 /// The production sink and the deterministic buffered decoder used by tests.
@@ -123,6 +128,14 @@ fn soonest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 }
 
 impl<O: Output> Video<O> {
+	/// A subscription's budget once it holds the catalog `delay`, plus `warmup`.
+	fn budget(&self, delay: Duration, warmup: Duration) -> moq_net::track::Delay {
+		moq_net::track::Delay {
+			min: Some(self.min_delay + delay + warmup),
+			max: Some(self.max_delay + delay + warmup),
+		}
+	}
+
 	/// Play `track`, and with `refresh` also run its max-delay decoder.
 	pub async fn run<D: Decoder>(
 		self,
@@ -149,6 +162,20 @@ impl<O: Output> Video<O> {
 		let advanced = tokio::sync::Notify::new();
 		let role = self.presentation.track(moq_mux::container::Kind::Video);
 		let receive = async {
+			// Video has no jitter estimate, so its target is the encoder delay alone,
+			// which holds audio back with it. Every budget grows with it, or media the
+			// later schedule still waits for would be evicted first.
+			let mut encoder = self.delay.clone();
+			let hold = |track: &mut Track, delay: Option<Duration>| {
+				let Some(delay) = delay else { return Duration::ZERO };
+				track.set_delay(self.budget(delay, Duration::ZERO));
+				if role.set_target(delay) {
+					self.changed.notify_one();
+					self.output.send(Event::Wake);
+				}
+				delay
+			};
+			let mut held = hold(&mut track, *encoder.borrow_and_update());
 			// The group of a declared end whose restart waits for a later group, so the
 			// media buffered before the end still plays out, and the transition that
 			// later group resumes.
@@ -166,11 +193,17 @@ impl<O: Output> Video<O> {
 					.filter(|segment| segment.oldest().is_some())
 					.filter_map(|segment| segment.arrived)
 					.min()
-					.is_some_and(|arrived| arrived.elapsed() > self.max_delay)
+					.is_some_and(|arrived| arrived.elapsed() > self.max_delay + held)
 				{
 					advanced.notified().await;
 				}
-				let read = track.read().await?;
+				let read = tokio::select! {
+					read = track.read() => read?,
+					Ok(()) = encoder.changed() => {
+						held = hold(&mut track, *encoder.borrow_and_update());
+						continue;
+					}
+				};
 				let mut buffers = buffers.lock().unwrap();
 				let active = buffers.len() == 1 && !advancing.load(std::sync::atomic::Ordering::Relaxed);
 				let before = buffers.front().unwrap().generation;
@@ -195,15 +228,7 @@ impl<O: Output> Video<O> {
 								..Default::default()
 							});
 						}
-						// Video has no jitter estimate, so its target is the encoder delay alone,
-						// which holds audio back with it.
-						let held = self.delay.borrow().is_some_and(|delay| role.set_target(delay));
-						let anchored =
-							active && buffers.len() == 1 && role.received(role.map(frame.timestamp)?, Instant::now());
-						if held {
-							self.changed.notify_one();
-						}
-						if held || anchored {
+						if active && buffers.len() == 1 && role.received(role.map(frame.timestamp)?, Instant::now()) {
 							self.output.send(Event::Wake);
 						}
 						let back = buffers.back_mut().unwrap();
@@ -212,7 +237,7 @@ impl<O: Output> Video<O> {
 						if back.resumes.is_none() && back.after.is_none() {
 							origin.lock().unwrap().get_or_insert(group);
 						}
-						back.push(frame, self.max_delay);
+						back.push(frame, self.max_delay + held);
 						back.arrived.get_or_insert_with(Instant::now);
 						false
 					}
@@ -523,6 +548,7 @@ impl<O: Output> Video<O> {
 			let Some(Refresh {
 				track: mut refresh,
 				decoder: mut codec,
+				warmup,
 				..
 			}) = refresh
 			else {
@@ -544,8 +570,21 @@ impl<O: Output> Video<O> {
 			// The group of the last end this decoder read. Its own subscription may
 			// deliver the replacement before the min-delay decoder reads that end.
 			let mut fence = None;
+			let mut encoder = self.delay.clone();
+			if let Some(delay) = *encoder.borrow_and_update() {
+				refresh.set_delay(self.budget(delay, warmup));
+			}
 			loop {
-				let (group, mut frame) = match refresh.read().await? {
+				let read = tokio::select! {
+					read = refresh.read() => read?,
+					Ok(()) = encoder.changed() => {
+						if let Some(delay) = *encoder.borrow_and_update() {
+							refresh.set_delay(self.budget(delay, warmup));
+						}
+						continue;
+					}
+				};
+				let (group, mut frame) = match read {
 					Some(Read::Frame { group, frame }) => (group, frame),
 					Some(Read::Gap { .. }) => {
 						push(codec.flush().await?);
@@ -749,6 +788,7 @@ mod tests {
 			changed: media.drained.clone(),
 			output: media.output.clone(),
 			max_delay,
+			min_delay: max_delay,
 			delay: tokio::sync::watch::channel(None).1,
 		}
 	}
@@ -906,6 +946,7 @@ mod tests {
 				track: max,
 				decoder: refresh_decoder(Duration::ZERO),
 				interval: Some(Duration::from_millis(33)),
+				warmup: Duration::ZERO,
 			};
 			tokio::spawn(playback(&media, delay).run(track, decoder, Some(refresh)))
 		} else {
@@ -1617,6 +1658,7 @@ mod tests {
 			// Slower than real time to start, so the earlier sweep takes a while.
 			decoder: refresh_decoder(Duration::from_millis(10)),
 			interval: Some(Duration::from_millis(33)),
+			warmup: Duration::ZERO,
 		};
 		let task = tokio::spawn(playback(&media, delay).run(min, Buffered::new(0), Some(refresh)));
 		let shown = live(&media, publish, task, 31..90, 0..0, Duration::ZERO).await;
@@ -1649,6 +1691,7 @@ mod tests {
 			track: max,
 			decoder: refresh_decoder(Duration::from_millis(10)),
 			interval: Some(Duration::from_millis(33)),
+			warmup: Duration::ZERO,
 		};
 		let task = tokio::spawn(playback(&media, delay).run(min, Buffered::new(0), Some(refresh)));
 		// The fourth sweep is held up past the min-delay budget, not the max-delay one.
@@ -1694,6 +1737,7 @@ mod tests {
 			track: max,
 			decoder: refresh_decoder(Duration::from_millis(10)),
 			interval: Some(Duration::from_millis(33)),
+			warmup: Duration::ZERO,
 		};
 		let task = tokio::spawn(playback(&media, delay).run(min, Buffered::new(0), Some(refresh)));
 		let start = Instant::now();
@@ -1774,6 +1818,7 @@ mod tests {
 			track: max_track,
 			decoder: refresh_decoder(Duration::ZERO),
 			interval: Some(Duration::from_millis(33)),
+			warmup: Duration::ZERO,
 		};
 		let task = tokio::spawn(playback(&media, delay).run(min_track, Buffered::new(0), Some(refresh)));
 		let start = Instant::now();
