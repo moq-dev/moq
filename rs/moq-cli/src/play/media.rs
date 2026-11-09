@@ -832,7 +832,9 @@ async fn play_audio<O: Output>(
 			let written = sink.write(&frame.data[skip.min(frame.data.len())..])?;
 			let trimmed = fit.skip + written.dropped_sample_frames as u64;
 			if trimmed > 0 {
-				output.send(Event::Trimmed(Duration::from_secs_f64(trimmed as f64 / sample_rate as f64)));
+				output.send(Event::Trimmed(Duration::from_secs_f64(
+					trimmed as f64 / sample_rate as f64,
+				)));
 			}
 			// A dropped write leaves the utterance to start on the next frame the sink accepts.
 			if utterance && written.accepted_sample_frames > 0 {

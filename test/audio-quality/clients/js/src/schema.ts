@@ -129,7 +129,8 @@ export const METRICS = {
 		unit: "ms",
 		clock: "media",
 		aggregations: ["total", "per_min"],
-		description: "The player's own count of received audio its time stretch removed by playing faster. Native only.",
+		description:
+			"The player's own count of received audio its time stretch removed by playing faster. Native only.",
 	},
 	stalled: {
 		unit: "share",

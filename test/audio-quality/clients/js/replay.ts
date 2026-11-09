@@ -134,7 +134,7 @@ for (const { row, trace } of rows) {
 		config: trace.config as unknown as Catalog.AudioConfig,
 		duration: trace.duration,
 	});
-	let last: { at: number; timestamp: number; stalled: boolean; delay: number; underruns: number } | undefined;
+	let last: Parameters<typeof sample>[0] | undefined;
 	for await (const quantum of quanta) {
 		// The render clock is the simulated one: the trace's `at`, which starts at zero.
 		ledger.add(frame, quantum.output.length, classify([quantum.output]));
@@ -149,6 +149,7 @@ for (const { row, trace } of rows) {
 			stalled: quantum.stalled,
 			delay: quantum.delay,
 			underruns: quantum.underruns,
+			trimmed: quantum.trimmed,
 		};
 
 		if (quantum.at >= next) {

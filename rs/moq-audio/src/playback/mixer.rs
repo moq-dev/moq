@@ -953,7 +953,10 @@ mod tests {
 		let observation = observer.read().unwrap();
 		// The 10 ms prime and the push, less the buffer read and the latency kept.
 		let trimmed = 480 + 40_000 - 512 - 480;
-		assert_eq!(observation.trimmed, Duration::from_secs_f64(trimmed as f64 / RATE as f64));
+		assert_eq!(
+			observation.trimmed,
+			Duration::from_secs_f64(trimmed as f64 / RATE as f64)
+		);
 		assert_eq!(observation.accelerated, Duration::ZERO);
 	}
 }

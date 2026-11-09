@@ -85,7 +85,7 @@ describe("render dispatch", () => {
 				stalled: false,
 				anchored: true,
 				underruns: 0,
-				trimmed: 0,
+				trimmed: Milli.zero,
 				silent: false,
 			},
 		]);
@@ -114,7 +114,7 @@ describe("render dispatch", () => {
 				stalled: false,
 				anchored: true,
 				underruns: 0,
-				trimmed: 0,
+				trimmed: Milli.zero,
 				silent: false,
 			},
 		]);

@@ -94,6 +94,7 @@ export namespace Audio {
 		late: number;
 		stalled: Clock.Milli;
 		stalls: number;
+		trimmed: Clock.Milli;
 		underruns: number;
 	}
 	export type Supported = (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
