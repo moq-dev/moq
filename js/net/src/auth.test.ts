@@ -1110,8 +1110,8 @@ test("a listing waits for its token before reaching the wire", async () => {
 		expect(transport.sendStreams.bidi.length).toBe(opened);
 		const issued = unanswered.accept(grant([], ["room"]));
 		await adding;
-		expect(await tracks.next()).toEqual({ kind: "synced" });
 		expect(await tracks.next()).toMatchObject({ kind: "added", name: "video" });
+		expect(await tracks.next()).toEqual({ kind: "synced" });
 		tracks.close();
 		issued.close();
 	} finally {

@@ -33,7 +33,3 @@ Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 ## Required
 
 - [Plan: watch worker](/quest/m3/plan-watch-worker.md) - picks the worker model and rewrites this quest
-
-## Related
-
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - time-stretches in the worklet this feeds

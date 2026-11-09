@@ -1091,10 +1091,6 @@ export class Subscriber {
 			lister.abort(refused);
 			return;
 		}
-		// Synced with this hop, which holds nothing yet: a relay never waits on its upstream,
-		// so the peer's tracks follow as live adds.
-		lister.synced();
-
 		// Each listed track holds an announces slot: discovery state the peer makes us hold.
 		const listed = new Set<string>();
 		const unused = new AbortController();
@@ -1139,9 +1135,10 @@ export class Subscriber {
 					if (event.kind === "finished") lister.finish(event.name);
 					else lister.remove(event.name);
 				} else {
-					// This hop synced its readers when the listing began; only the order matters here.
 					if (synced) throw new ProtocolViolation("duplicate SYNCED");
 					synced = true;
+					// Synced when the peer is, so a track listed after it is new upstream too.
+					lister.synced();
 				}
 			}
 		} catch (err) {
