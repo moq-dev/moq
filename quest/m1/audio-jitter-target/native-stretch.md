@@ -156,7 +156,11 @@ bench waits below remain.
   [moq-dev/moq#8361](https://github.com/moq-dev/moq/pull/8361), whose
   native rows decide where audio arrives and report `av_lag_ms` beside
   [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308)'s
-  `player_skips` and `trimmed_ms`; the calibration budgets `av_lag_ms` too. Find them with `gh run list --workflow
+  `player_skips` and `trimmed_ms`; the calibration budgets `av_lag_ms` too,
+  as measured: a p50 within one pitch period counts as aligned, and the AAC
+  `step` underruns that follow a persistent delay increase are accepted
+  (decided 2026-11-09 on
+  [moq-dev/moq#8361](https://github.com/moq-dev/moq/pull/8361)). Find them with `gh run list --workflow
   nightly.yml --event schedule`, download each with `gh run download <id>
   -n audio-quality-run` within its 7 days, keep its native rows in the
   calibration PR's body, and apply the calibration rule once seven exist.
