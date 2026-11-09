@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -193,9 +192,9 @@ test("fill round trips", () => {
 		// An omitted filter inherits the subscription's, which is a different request from an
 		// explicit unfiltered one.
 		{ filter: undefined, rangeFilters: false },
-		{ fillTimeout: Milli(0), filter: undefined, rangeFilters: false },
+		{ fillTimeout: 0, filter: undefined, rangeFilters: false },
 		{
-			fillTimeout: Milli(250),
+			fillTimeout: 250,
 			filter: { kind: "relative", groups: 1n },
 			groupOrder: "ascending",
 			rangeFilters: false,
@@ -212,7 +211,7 @@ test("fill round trips", () => {
 // FILL_TIMEOUT sorts first, so the parameters after it are deltas from its id.
 test("fill encodes its FILL_TIMEOUT first", () => {
 	const fill: Filter.Fill = {
-		fillTimeout: Milli(100),
+		fillTimeout: 100,
 		filter: { kind: "relative", groups: 1n },
 		rangeFilters: false,
 	};

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Micro } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Varint } from "@moq/net";
 import { Format } from "./index.ts";
 
@@ -33,7 +33,7 @@ test("Format treats an empty payload as a duration marker", () => {
 	const fmt = new Format("video");
 	const [decoded] = fmt.decode(frame);
 	expect(decoded.payload.byteLength).toBe(0);
-	expect(fmt.end(decoded)).toBe(33_000 as Micro);
+	expect(fmt.end(decoded)).toEqual(Duration.micros(33_000));
 });
 
 test("Format preserves empty data payloads", () => {
@@ -57,7 +57,7 @@ test("Format decodes timestamp at default microseconds timescale", () => {
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
-	expect(decoded.timestamp).toBe(12_345 as Micro);
+	expect(decoded.timestamp).toEqual(Duration.micros(12_345));
 	expect(decoded.payload).toEqual(payload);
 	expect(decoded.keyframe).toBe(false);
 });
@@ -75,7 +75,7 @@ test("Format honors per-frame timescale property", () => {
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
-	expect(decoded.timestamp).toBe(2_000_000 as Micro);
+	expect(decoded.timestamp).toEqual(Duration.micros(2_000_000));
 });
 
 test("Format skips unknown odd-typed properties", () => {
@@ -93,7 +93,7 @@ test("Format skips unknown odd-typed properties", () => {
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
-	expect(decoded.timestamp).toBe(10 as Micro);
+	expect(decoded.timestamp).toEqual(Duration.micros(10));
 	expect(decoded.payload).toEqual(payload);
 });
 
@@ -136,7 +136,7 @@ test("Format decodes the draft-03 timestamp property", () => {
 	const fmt = new Format();
 	const [decoded] = fmt.decode(frame);
 
-	expect(decoded.timestamp).toBe(4242 as Micro);
+	expect(decoded.timestamp).toEqual(Duration.micros(4242));
 	expect(decoded.payload).toEqual(payload);
 });
 
@@ -148,7 +148,7 @@ test("Format skips an unknown property whose value needs all 62 bits", () => {
 		Varint.encode(1_000),
 	);
 	const [decoded] = new Format().decode(buildFrame(props, new Uint8Array([1])));
-	expect(decoded.timestamp).toBe(1_000 as Micro);
+	expect(decoded.timestamp).toEqual(Duration.micros(1_000));
 });
 
 test("Format rejects a timestamp past 2^53 - 1 instead of rounding", () => {

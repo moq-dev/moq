@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano, now, Second, yieldNow } from "@moq/clock";
+import { Duration, type Installed, Instant, Manual, now, yieldNow } from "@moq/clock";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -81,6 +81,21 @@ describe("Signal", () => {
 		obj.set({ a: 2 });
 		await settle();
 		expect(seen).toEqual([{ a: 2 }]);
+		dispose();
+	});
+
+	test("clock values compare by value, nested or not", async () => {
+		const signal = new Signal({ delay: Duration.millis(5) });
+		let notified = 0;
+		const dispose = signal.subscribe(() => notified++);
+
+		signal.set({ delay: Duration.micros(5000) });
+		await settle();
+		expect(notified).toBe(0);
+
+		signal.set({ delay: Duration.millis(6) });
+		await settle();
+		expect(notified).toBe(1);
 		dispose();
 	});
 
@@ -714,7 +729,7 @@ describe("Effect", () => {
 			expect(runs).toBe(1); // parked awaiting the task
 
 			// Five seconds pass. The warning fires, but the next run must stay shut.
-			await clock.advance(Nano.fromSecond(Second(5)));
+			await clock.advance(Duration.secs(5));
 			expect(runs).toBe(1);
 			expect(warn).toHaveBeenCalled();
 
@@ -763,7 +778,7 @@ describe("Effect", () => {
 			await settle();
 
 			// The wait let go, so five seconds later a closed effect is not warned about.
-			await clock.advance(Nano.fromSecond(Second(5)));
+			await clock.advance(Duration.secs(5));
 			const warned = warn.mock.calls.some((call) => String(call[0]).includes("spawn is still running"));
 			expect(warned).toBe(false);
 		} finally {
@@ -1018,7 +1033,7 @@ describe("Effect", () => {
 	});
 
 	test("timer, timeout, and interval run on the installed clock until cleanup", async () => {
-		const ms = (value: number) => Nano.fromMilli(Milli(value));
+		const ms = (value: number) => Duration.millis(value);
 		const clock = new Manual();
 		const installed = clock.install();
 		const fired: string[] = [];
@@ -1610,11 +1625,11 @@ test("an effect interval arms its first period synchronously and steps subsequen
 	const effect = new Effect();
 	const at: number[] = [];
 	try {
-		effect.interval(() => at.push(clock.now()), Nano(10));
-		clock.jump(Nano(10));
-		await clock.advance(Nano.zero);
+		effect.interval(() => at.push(clock.now().since(Instant.ZERO).asNanos()), Duration.nanos(10));
+		clock.jump(Duration.nanos(10));
+		await clock.advance(Duration.ZERO);
 		expect(at).toEqual([10]);
-		await clock.advance(Nano(30));
+		await clock.advance(Duration.nanos(30));
 		expect(at).toEqual([10, 20, 30, 40]);
 	} finally {
 		effect.close();
@@ -1625,7 +1640,7 @@ test("an effect interval arms its first period synchronously and steps subsequen
 test("an effect interval refuses a zero period synchronously", () => {
 	const effect = new Effect();
 	try {
-		expect(() => effect.interval(() => {}, Nano.zero)).toThrow(RangeError);
+		expect(() => effect.interval(() => {}, Duration.ZERO)).toThrow(RangeError);
 	} finally {
 		effect.close();
 	}
@@ -1637,13 +1652,13 @@ test("an effect interval delays a full period after a stalled event loop", async
 	const effect = new Effect();
 	const at: number[] = [];
 	try {
-		effect.interval(() => at.push(clock.now()), Nano(10));
-		clock.jump(Nano(35));
-		await clock.advance(Nano.zero);
+		effect.interval(() => at.push(clock.now().since(Instant.ZERO).asNanos()), Duration.nanos(10));
+		clock.jump(Duration.nanos(35));
+		await clock.advance(Duration.ZERO);
 		expect(at).toEqual([35]);
-		await clock.advance(Nano(9));
+		await clock.advance(Duration.nanos(9));
 		expect(at).toEqual([35]);
-		await clock.advance(Nano(1));
+		await clock.advance(Duration.nanos(1));
 		expect(at).toEqual([35, 45]);
 	} finally {
 		effect.close();
@@ -1653,7 +1668,7 @@ test("an effect interval delays a full period after a stalled event loop", async
 
 test("an effect interval starts its next period on a newly installed clock's origin", async () => {
 	const first = new Manual();
-	first.jump(Nano(1000));
+	first.jump(Duration.nanos(1000));
 	const installedFirst = first.install();
 	const second = new Manual();
 	let installedSecond: Installed | undefined;
@@ -1661,12 +1676,12 @@ test("an effect interval starts its next period on a newly installed clock's ori
 	const at: number[] = [];
 	try {
 		effect.interval(() => {
-			at.push(now());
+			at.push(now().since(Instant.ZERO).asNanos());
 			if (at.length === 1) installedSecond = second.install();
-		}, Nano(10));
-		await first.advance(Nano(10));
+		}, Duration.nanos(10));
+		await first.advance(Duration.nanos(10));
 		expect(at).toEqual([1010]);
-		await second.advance(Nano(10));
+		await second.advance(Duration.nanos(10));
 		expect(at).toEqual([1010, 10]);
 	} finally {
 		effect.close();

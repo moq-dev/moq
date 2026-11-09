@@ -1,5 +1,4 @@
 /** Sweep failed group sends over independent publishers and subscribers. */
-import { Milli } from "@moq/clock";
 import { randomHop } from "../src/hop.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { decodeSubscribeResponseMaybe, Subscribe } from "../src/lite/subscribe.ts";
@@ -59,7 +58,7 @@ try {
 									broadcast: Path.from("bench"),
 									track: "video",
 									priority: 0,
-									maxDelay: Milli(30_000),
+									maxDelay: 30_000,
 									startGroup: 0n,
 								}),
 								server,

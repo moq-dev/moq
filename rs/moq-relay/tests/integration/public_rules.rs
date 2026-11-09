@@ -106,7 +106,10 @@ async fn first_broadcast(url: url::Url) -> String {
 
 	let update = kio::clock::timeout(TIMEOUT, async {
 		match announcements.next().await.expect("origin closed") {
-			moq_net::origin::RouteEvent::Start(update) => update,
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::Start,
+				announce: update,
+			} => update,
 			other => panic!("expected announce, got {other:?}"),
 		}
 	})
