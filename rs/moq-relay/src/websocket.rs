@@ -2,8 +2,7 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::{self, protocol::Role};
+use tokio_tungstenite::tungstenite;
 
 use axum::{
 	extract::{ConnectInfo, Extension, OriginalUri, Request, State},
@@ -118,15 +117,6 @@ fn switching_protocols(key: &HeaderValue, protocol: &str) -> Response {
 		.expect("every header is a valid value")
 }
 
-/// The socket config for an upgraded connection: a message is one qmux record, so the socket
-/// buffers no more than one before qmux sees it.
-fn socket_config() -> tungstenite::protocol::WebSocketConfig {
-	let max = moq_tokio::websocket::max_message_size();
-	tungstenite::protocol::WebSocketConfig::default()
-		.max_message_size(Some(max))
-		.max_frame_size(Some(max))
-}
-
 /// How many upgrades reclaimed the listener's socket, so a test can tell the direct path ran.
 #[cfg(test)]
 pub(crate) static RECLAIMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -153,13 +143,23 @@ async fn serve_upgraded(
 	}
 }
 
-/// Run a MoQ session over the WebSocket on `io`, whose first bytes, `read`, were already read.
+/// Run a MoQ session over the WebSocket on `io`, after `read`, the bytes hyper already
+/// read past the request.
+///
+/// A client sends no frame until it has the 101, so bytes already read past the request
+/// came from a peer that broke the handshake, and the connection is dropped.
 async fn serve_socket<S>(io: S, read: Bytes, options: moq_tokio::websocket::Options, state: Arc<WebState>)
 where
 	S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-	let socket = WebSocketStream::from_partially_read(io, read.to_vec(), Role::Server, Some(socket_config())).await;
-	let handshake = moq_tokio::websocket::accept(socket, options);
+	if !read.is_empty() {
+		tracing::debug!(
+			bytes = read.len(),
+			"dropped a WebSocket client that sent frames before the upgrade"
+		);
+		return;
+	}
+	let handshake = moq_tokio::websocket::accept(io, options);
 	let Some(request) = state.shutdown.until_deadline(handshake).await else {
 		return;
 	};
@@ -253,7 +253,6 @@ fn supported_subprotocols(versions: &moq_net::Versions) -> Vec<String> {
 mod tests {
 	use super::*;
 	use axum::{Router, routing::any};
-	use futures::{Sink, Stream};
 	use std::{
 		pin::Pin,
 		sync::atomic::{AtomicBool, Ordering},
@@ -483,8 +482,7 @@ mod tests {
 				let response = switching_protocols(&key, &wire);
 				tokio::spawn(async move {
 					let upgraded = upgrade.await.expect("upgrade");
-					let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-					let (session, driver) = qmux::ws::Upgraded::new(socket, &wire)
+					let (session, driver) = qmux::ws::Upgraded::new(TokioIo::new(upgraded), &wire)
 						.accept()
 						.await
 						.expect("the upgrade selected a QMux subprotocol");
@@ -617,63 +615,52 @@ mod tests {
 		drop(session);
 	}
 
-	/// One leg of an in-memory WebSocket pair.
+	/// One end of an in-memory connection.
 	///
 	/// Reading can be frozen: once the flag is set the stream parks forever
-	/// instead of yielding `None`. That is the failure this is here to model --
+	/// instead of yielding data or EOF. That is the failure this is here to model --
 	/// a peer whose host or network vanished sends no close frame and no FIN, so
 	/// the socket stays readable-but-silent indefinitely.
 	struct Pipe {
-		incoming: mpsc::UnboundedReceiver<tungstenite::Message>,
-		outgoing: mpsc::UnboundedSender<tungstenite::Message>,
+		io: tokio::io::DuplexStream,
 		frozen: Arc<AtomicBool>,
 	}
 
 	impl Pipe {
-		fn new(
-			incoming: mpsc::UnboundedReceiver<tungstenite::Message>,
-			outgoing: mpsc::UnboundedSender<tungstenite::Message>,
-			frozen: Arc<AtomicBool>,
-		) -> Self {
-			Self {
-				incoming,
-				outgoing,
-				frozen,
-			}
+		fn new(io: tokio::io::DuplexStream, frozen: Arc<AtomicBool>) -> Self {
+			Self { io, frozen }
 		}
 	}
 
-	impl Stream for Pipe {
-		type Item = Result<tungstenite::Message, tungstenite::Error>;
-
-		fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+	impl AsyncRead for Pipe {
+		fn poll_read(
+			mut self: Pin<&mut Self>,
+			cx: &mut Context<'_>,
+			buf: &mut tokio::io::ReadBuf<'_>,
+		) -> Poll<std::io::Result<()>> {
 			if self.frozen.load(Ordering::Relaxed) {
 				return Poll::Pending;
 			}
-			self.incoming.poll_recv(cx).map(|msg| msg.map(Ok))
+			Pin::new(&mut self.io).poll_read(cx, buf)
 		}
 	}
 
-	impl Sink<tungstenite::Message> for Pipe {
-		type Error = tungstenite::Error;
-
-		fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
+	impl AsyncWrite for Pipe {
+		fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+			// A peer that went away is hanging up, not an error to surface here: the
+			// read half reports the close it sent first.
+			match Pin::new(&mut self.io).poll_write(cx, buf) {
+				Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => Poll::Ready(Ok(buf.len())),
+				other => other,
+			}
 		}
 
-		fn start_send(self: Pin<&mut Self>, message: tungstenite::Message) -> Result<(), Self::Error> {
-			// A receiver that went away is the peer hanging up, not an error we
-			// need to surface: the read half reports the close.
-			let _ = self.outgoing.send(message);
-			Ok(())
+		fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+			Pin::new(&mut self.io).poll_flush(cx)
 		}
 
-		fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
-		}
-
-		fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
+		fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+			Pin::new(&mut self.io).poll_shutdown(cx)
 		}
 	}
 
@@ -688,8 +675,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn keep_alive_reaps_a_silent_peer() {
 		let alpn = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
-		let (client_to_server, server_incoming) = mpsc::unbounded_channel();
-		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
+		let (server_io, client_io) = tokio::io::duplex(1 << 16);
 		let frozen = Arc::new(AtomicBool::new(false));
 
 		let admission = moq_net::server::Admission::default();
@@ -702,7 +688,7 @@ mod tests {
 		);
 		options.link.alpn = Some(alpn.clone());
 		let server = tokio::spawn(moq_tokio::websocket::accept(
-			Pipe::new(server_incoming, server_to_client, frozen.clone()),
+			Pipe::new(server_io, frozen.clone()),
 			options,
 		));
 
@@ -710,13 +696,10 @@ mod tests {
 		// timeout is out of the picture before we go silent. It never speaks moq,
 		// so the server is parked awaiting SETUP -- exactly where an idle
 		// publisher's session sits between groups.
-		let (client, driver) = qmux::ws::Upgraded::new(
-			Pipe::new(client_incoming, client_to_server, Arc::new(AtomicBool::new(false))),
-			&alpn,
-		)
-		.connect()
-		.await
-		.unwrap();
+		let (client, driver) = qmux::ws::Upgraded::new(Pipe::new(client_io, Arc::new(AtomicBool::new(false))), &alpn)
+			.connect()
+			.await
+			.unwrap();
 		tokio::spawn(driver);
 
 		// Paused time only advances once every task is idle, so this resolves
@@ -742,8 +725,7 @@ mod tests {
 		use moq_net::transport::Error as _;
 
 		let alpn = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
-		let (client_to_server, server_incoming) = mpsc::unbounded_channel();
-		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
+		let (server_io, client_io) = tokio::io::duplex(1 << 16);
 		let timeout = Duration::from_secs(10);
 
 		let admission = moq_net::server::Admission::default();
@@ -757,18 +739,15 @@ mod tests {
 		options.link.alpn = Some(alpn.clone());
 		let start = kio::clock::now();
 		let server = tokio::spawn(moq_tokio::websocket::accept(
-			Pipe::new(server_incoming, server_to_client, Arc::new(AtomicBool::new(false))),
+			Pipe::new(server_io, Arc::new(AtomicBool::new(false))),
 			options,
 		));
 
 		// A live qmux peer that answers keep-alives but never speaks moq.
-		let (client, driver) = qmux::ws::Upgraded::new(
-			Pipe::new(client_incoming, client_to_server, Arc::new(AtomicBool::new(false))),
-			&alpn,
-		)
-		.connect()
-		.await
-		.unwrap();
+		let (client, driver) = qmux::ws::Upgraded::new(Pipe::new(client_io, Arc::new(AtomicBool::new(false))), &alpn)
+			.connect()
+			.await
+			.unwrap();
 		tokio::spawn(driver);
 
 		let err = server

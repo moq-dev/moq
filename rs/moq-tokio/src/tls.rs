@@ -3669,6 +3669,27 @@ mod tests {
 		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_ok());
 	}
 
+	/// A root file holding several CAs trusts every one of them, not only the first.
+	#[cfg(all(feature = "watch", feature = "quic"))]
+	#[test]
+	fn a_root_bundle_is_loaded_whole() {
+		let (unrelated, _, _, _, _) = signed_certificates();
+		let (signer, server, _, _, _) = signed_certificates();
+		let dir = tempfile::TempDir::new().unwrap();
+		let bundle = dir.path().join("bundle.pem");
+		std::fs::write(&bundle, format!("{unrelated}{signer}")).unwrap();
+
+		let roots = read_roots(&[bundle]).unwrap();
+		assert_eq!(roots.len(), 2);
+		let verifier = Connect::build_root_server_verifier(&roots, false, &crypto::provider().unwrap()).unwrap();
+		let name = ServerName::try_from("localhost").unwrap();
+		assert!(
+			verifier
+				.verify_server_cert(&server, &[], &name, &[], UnixTime::now())
+				.is_ok()
+		);
+	}
+
 	#[test]
 	fn build_uses_platform_verifier_by_default() {
 		// No custom roots, system trust on: resolves to the OS platform verifier

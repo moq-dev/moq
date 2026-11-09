@@ -113,6 +113,7 @@ hashbrown = { version = "0.17.1", default-features = false }
 hashlink = "0.12.2"
 hex = "0.4"
 http-body = "1.0.1"
+httparse = "1.10"
 humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper = "1.11"
