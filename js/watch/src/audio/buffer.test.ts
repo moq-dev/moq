@@ -33,6 +33,8 @@ function open(): {
 				anchored: timestamp !== undefined,
 				underruns: 0,
 				skips: 0,
+				trimmed: 0,
+				accelerated: 0,
 				silent: false,
 				epoch,
 			};
@@ -441,6 +443,8 @@ function fake(delay: number, buffered = false) {
 			anchored: true,
 			underruns: 0,
 			skips: 0,
+			trimmed: 0,
+			accelerated: 0,
 			silent: false,
 			epoch,
 		};

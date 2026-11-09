@@ -84,6 +84,7 @@ export namespace Audio {
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
+		accelerated: Clock.Duration;
 		arrival?: {
 			timestamp: Clock.Duration;
 			wall: Clock.Wall;
@@ -94,6 +95,7 @@ export namespace Audio {
 		skips: number;
 		stalled: Clock.Duration;
 		stalls: number;
+		trimmed: Clock.Duration;
 		underruns: number;
 	}
 	export type Supported = (config: Hang.Catalog.AudioConfig) => Promise<boolean>;

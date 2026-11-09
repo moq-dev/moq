@@ -1,4 +1,4 @@
-import type { Duration } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
 import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
@@ -281,6 +281,14 @@ export class AudioBuffer {
 	/** How many times the ring skipped ahead, dropping queued audio, cumulative. */
 	readonly skips: Getter<number> = this.#skips;
 
+	readonly #trimmed = new Signal<Duration>(Duration.ZERO);
+	/** Media the ring's skips dropped unplayed, less declared silence, cumulative. */
+	readonly trimmed: Getter<Duration> = this.#trimmed;
+
+	readonly #accelerated = new Signal<Duration>(Duration.ZERO);
+	/** Media the stretch removed by playing faster, cumulative. */
+	readonly accelerated: Getter<Duration> = this.#accelerated;
+
 	readonly #silent = new Signal<boolean>(false);
 	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
 	readonly silent: Getter<boolean> = this.#silent;
@@ -338,6 +346,8 @@ export class AudioBuffer {
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
 				this.#skips.set(data.skips);
+				this.#trimmed.set(Duration.millis(data.trimmed));
+				this.#accelerated.set(Duration.millis(data.accelerated));
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);

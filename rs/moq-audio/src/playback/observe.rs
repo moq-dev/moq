@@ -71,6 +71,15 @@ pub struct Observation {
 	/// Device time filled with comfort noise for a silence the publisher
 	/// declared, since the first audible quantum.
 	pub comfort: Duration,
+	/// Times a sink being written had its queue trimmed back to its latency.
+	pub skips: u64,
+	/// Written audio discarded unplayed to bring a sink's queue back down to
+	/// its latency, summed over the sinks being written. A sink's opening
+	/// silence and comfort noise never count; silence the writer wrote does.
+	pub trimmed: Duration,
+	/// Media a sink's time stretch removed by playing faster, summed
+	/// over the sinks being written. Inaudible by design, unlike a trim.
+	pub accelerated: Duration,
 	/// Whether nothing is playing: no sink is being written to, or every one
 	/// still waits for its first samples.
 	pub stalled: bool,
@@ -96,6 +105,11 @@ pub(super) struct Shared {
 	quiet: AtomicU64,
 	/// [`Observation::comfort`] in nanoseconds.
 	comfort: AtomicU64,
+	skips: AtomicU64,
+	/// [`Observation::trimmed`] in nanoseconds.
+	trimmed: AtomicU64,
+	/// [`Observation::accelerated`] in nanoseconds.
+	accelerated: AtomicU64,
 	stalled: AtomicBool,
 	/// The reading [`Observer`]'s generation, or 0 with none: events only queue
 	/// while one reads. Each event carries it, so a send racing one observer's
@@ -132,6 +146,9 @@ impl Default for Shared {
 			quanta: AtomicU64::new(0),
 			quiet: AtomicU64::new(0),
 			comfort: AtomicU64::new(0),
+			skips: AtomicU64::new(0),
+			trimmed: AtomicU64::new(0),
+			accelerated: AtomicU64::new(0),
 			stalled: AtomicBool::new(true),
 			observer: AtomicU64::new(0),
 			generation: AtomicU64::new(0),
@@ -199,6 +216,9 @@ impl Observer {
 			quanta: shared.quanta.load(Ordering::Relaxed),
 			quiet: shared.quiet.load(Ordering::Relaxed),
 			comfort: Duration::from_nanos(shared.comfort.load(Ordering::Relaxed)),
+			skips: shared.skips.load(Ordering::Relaxed),
+			trimmed: Duration::from_nanos(shared.trimmed.load(Ordering::Relaxed)),
+			accelerated: Duration::from_nanos(shared.accelerated.load(Ordering::Relaxed)),
 			stalled: shared.stalled.load(Ordering::Relaxed),
 			..Default::default()
 		};
@@ -389,6 +409,21 @@ impl Ledger {
 
 		self.frames += frames as u64;
 		self.shared.clock.store(self.nanos(self.frames), Ordering::Relaxed);
+	}
+
+	/// Count what the sinks being written discarded: `skips` trims of their
+	/// queues dropping `trimmed` frames, and `accelerated` frames by stretching.
+	/// Nothing counts once the measurement is over.
+	pub(super) fn shed(&self, skips: u64, trimmed: usize, accelerated: usize) {
+		if self.finished().is_some() {
+			return;
+		}
+		self.shared.skips.fetch_add(skips, Ordering::Relaxed);
+		for (frames, total) in [(trimmed, &self.shared.trimmed), (accelerated, &self.shared.accelerated)] {
+			if frames > 0 {
+				total.fetch_add((frames as f64 * 1e9 / self.rate).round() as u64, Ordering::Relaxed);
+			}
+		}
 	}
 
 	/// Classify the quantum just completed.

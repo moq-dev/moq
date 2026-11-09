@@ -14,6 +14,10 @@ export class AudioRingBuffer {
 	#parked = false;
 	#underruns = 0;
 	#skips = 0;
+	// Samples of media a skip dropped, and that the stretch removed by accelerating, gap zeros
+	// included and declared silence excluded, as moq-audio counts them.
+	#trimmed = 0;
+	#accelerated = 0;
 
 	// Where the publisher declared its audio ends, as a sample index, until the next reset.
 	#end?: number;
@@ -103,6 +107,16 @@ export class AudioRingBuffer {
 	/** How many times the ring skipped ahead, dropping queued audio rather than playing it. */
 	get skips(): number {
 		return this.#skips;
+	}
+
+	/** Media the ring's skips dropped unplayed, less declared silence, cumulative. */
+	get trimmed(): number {
+		return (this.#trimmed / this.rate) * 1000;
+	}
+
+	/** Media the stretch removed by playing faster, cumulative. */
+	get accelerated(): number {
+		return (this.#accelerated / this.rate) * 1000;
 	}
 
 	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
@@ -227,7 +241,7 @@ export class AudioRingBuffer {
 		const latency = this.#latencySamples;
 		const queued = end - this.#readIndex + this.#stretch.available;
 		if (end - this.#readIndex > this.capacity) {
-			this.#skip(end - this.capacity);
+			this.#skip(end - this.capacity, start);
 		} else if (band && pause && pause.start <= this.#readIndex && queued > latency + this.#chunk) {
 			// Skip only the silence past the queued floor, which the staged window counts toward, so the
 			// read index only moves forward and never re-stages PCM the window already holds.
@@ -241,7 +255,7 @@ export class AudioRingBuffer {
 					latency + Math.floor(((this.capacity - latency) * 3) / 4),
 				)
 		) {
-			this.#skip(end - latency);
+			this.#skip(end - latency, start);
 		}
 
 		// Fill gaps with zeros if there's a discontinuity
@@ -328,9 +342,14 @@ export class AudioRingBuffer {
 		if (!this.#anchored || (this.#stalled && this.length <= 0 && this.#ended())) this.#silent = true;
 	}
 
-	// Move the read index forward to `index`, dropping any queued audio it passes, staged included.
-	#skip(index: number): void {
-		if (index > this.#readIndex && this.length > 0) this.#skips++;
+	// Move the read index forward to `index`, dropping any queued audio it passes, staged included,
+	// and the front of the incoming chunk at `start` when `index` lies past it. An empty ring only
+	// re-anchors over a gap it never held: neither counter moves, as in moq-audio.
+	#skip(index: number, start: number): void {
+		if (index > this.#readIndex && this.length > 0) {
+			this.#skips++;
+			this.#trimmed += this.#discarded(index, start);
+		}
 		// The staged window lies behind the new index, so it is dropped with the rest, as moq-audio's
 		// trim discards staged output first.
 		const length = this.length;
@@ -341,6 +360,21 @@ export class AudioRingBuffer {
 		this.#readIndex = index;
 		this.#peak = Math.max(0, this.#peak - (length - this.length));
 		this.#prune();
+	}
+
+	// Media a skip to `index` drops: the unplayed share of the staged window, what the ring holds up
+	// to `index`, and the incoming chunk's front below it, less declared silence. The gap between the
+	// write index and the chunk at `start` was never held, so it is no trim.
+	#discarded(index: number, start: number): number {
+		const stretch = this.#stretch;
+		const held = Math.min(index, this.#writeIndex);
+		const front = Math.max(start, this.#writeIndex);
+		let dropped = held - this.#readIndex + Math.max(0, index - front);
+		if (stretch.available > 0 && !this.#windowQuiet) dropped += (stretch.available * this.#window) / stretch.length;
+		for (const pause of this.#pauses) {
+			dropped -= Math.max(0, Math.min(held, pause.end) - Math.max(this.#readIndex, pause.start));
+		}
+		return dropped;
 	}
 
 	// Forget the declared silences the playhead has passed.
@@ -462,6 +496,7 @@ export class AudioRingBuffer {
 		const stretch = this.#stretch;
 		stretch.process(frames, this.#peak - this.#latencySamples, enabled);
 		this.#peak -= frames - stretch.length;
+		this.#accelerated += Math.max(0, frames - stretch.length);
 		this.#readIndex += frames;
 		this.#window = frames;
 		this.#windowQuiet = quiet;

@@ -90,6 +90,10 @@ export interface Quantum {
 	underruns: number;
 	/** The ring's cumulative skips, as the player's stats count them: each jump that dropped queued audio. */
 	skips: number;
+	/** The received audio those skips dropped, cumulative, in ms. */
+	trimmed: number;
+	/** The received audio the stretch removed by playing faster, cumulative, in ms. */
+	accelerated: number;
 }
 
 /** Samples as the milliseconds `AudioBuffer` posts to the worklet. */
@@ -287,6 +291,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				delay: delay.asMillis(),
 				underruns: ring.underruns,
 				skips: ring.skips,
+				trimmed: ring.trimmed,
+				accelerated: ring.accelerated,
 			};
 		}
 	} finally {

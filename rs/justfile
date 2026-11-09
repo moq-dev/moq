@@ -568,7 +568,7 @@ gst-smoke *args:
 codspeed:
     VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation \
         -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
-        --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
+        --features moq-audio/bus,moq-json/bench,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
         --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
         --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video \

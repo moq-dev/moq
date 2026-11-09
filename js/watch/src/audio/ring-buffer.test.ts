@@ -906,6 +906,9 @@ describe("time stretch", () => {
 		settled(peaks, 100);
 		// Every sample written either played or is still buffered, so nothing was skipped.
 		expect(buffer.skips).toBe(0);
+		expect(buffer.trimmed).toBe(0);
+		// At least the 200 ms it started above the floor, less the period it may rest above it.
+		expect(buffer.accelerated).toBeGreaterThan(200 - 2.5);
 		expect(Math.round((buffer.timestamp * RATE) / 1_000_000) + buffer.length).toBeGreaterThan(written - frames(30));
 		for (let i = 1; i < timestamps.length; i++) {
 			const step = timestamps[i] - timestamps[i - 1];
@@ -955,9 +958,57 @@ describe("time stretch", () => {
 		expect(buffer.skips).toBe(1);
 		expect(buffer.length).toBe(frames(100));
 		expect(buffer.timestamp / 1000).toBeCloseTo(400, 6);
+		// Everything before the new playhead but the quantum that played.
+		expect(buffer.trimmed).toBeCloseTo(400 - (QUANTUM * 1000) / RATE, 6);
+		expect(buffer.accelerated).toBe(0);
 		const [output] = read(buffer, QUANTUM, 1);
 		expect(output.length).toBe(QUANTUM);
 		expect(output.every((sample) => sample === 0.5)).toBe(true);
+	});
+
+	it("trims a gap's zeros as media", () => {
+		const buffer = live(100);
+		write(buffer, 0, frames(100), { value: 0.25 });
+		read(buffer, QUANTUM, 1);
+		// A 100 ms gap, then enough to cross the 480 ms fast threshold and re-anchor at 410 ms.
+		write(buffer, 200, frames(10), { value: 0.5 });
+		write(buffer, 210, frames(300), { value: 0.5 });
+		expect(buffer.skips).toBe(1);
+		expect(buffer.timestamp / 1000).toBeCloseTo(410, 6);
+		expect(buffer.trimmed).toBeCloseTo(410 - (QUANTUM * 1000) / RATE, 6);
+	});
+
+	it("trims no declared silence", () => {
+		const buffer = live(100);
+		write(buffer, 0, frames(100), { value: 0.25 });
+		read(buffer, QUANTUM, 1);
+		// A declared silence over [100, 200) ms, then more than the ring's 1 s capacity, which skips to
+		// 250 ms through the silence and the incoming chunk's first 50 ms.
+		buffer.end(100_000);
+		buffer.next();
+		write(buffer, 200, frames(1050), { value: 0.5 });
+		expect(buffer.skips).toBe(1);
+		expect(buffer.timestamp / 1000).toBeCloseTo(250, 6);
+		expect(buffer.trimmed).toBeCloseTo(250 - 100 - (QUANTUM * 1000) / RATE, 6);
+	});
+
+	it("trims only what the ring held, never the gap a re-anchor jumps", () => {
+		const buffer = live(100);
+		write(buffer, 0, frames(100), { value: 0.25 });
+		read(buffer, QUANTUM, 1);
+		// A group past its age budget: the next audio lands 2 s on, past the ring's capacity.
+		write(buffer, 2000, frames(20), { value: 0.5 });
+		expect(buffer.skips).toBe(1);
+		expect(buffer.trimmed).toBeCloseTo(100 - (QUANTUM * 1000) / RATE, 6);
+	});
+
+	it("counts nothing when an empty ring re-anchors", () => {
+		const buffer = live(100);
+		write(buffer, 0, frames(100), { value: 0.25 });
+		while (buffer.length > 0) read(buffer, QUANTUM, 1);
+		write(buffer, 3000, frames(20), { value: 0.5 });
+		expect(buffer.skips).toBe(0);
+		expect(buffer.trimmed).toBe(0);
 	});
 
 	it("counts a re-anchor that drops only the staged window as a skip", () => {

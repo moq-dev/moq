@@ -1450,7 +1450,7 @@ fn test_av1_catalog() {
 	let color = video.color.as_ref().expect("the range");
 	assert_eq!(
 		(color.primaries, color.range),
-		(None, Some(hang::catalog::Range::Limited))
+		(None, Some(hang::catalog::ColorRange::Limited))
 	);
 	let Container::Cmaf { init, .. } = &video.container else {
 		panic!("expected Cmaf container");

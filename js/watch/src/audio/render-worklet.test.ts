@@ -85,6 +85,8 @@ describe("render dispatch", () => {
 				anchored: true,
 				underruns: 0,
 				skips: 0,
+				trimmed: 0,
+				accelerated: 0,
 				silent: false,
 			},
 		]);
@@ -114,6 +116,8 @@ describe("render dispatch", () => {
 				anchored: true,
 				underruns: 0,
 				skips: 0,
+				trimmed: 0,
+				accelerated: 0,
 				silent: false,
 			},
 		]);

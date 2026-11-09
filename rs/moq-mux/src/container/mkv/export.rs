@@ -54,7 +54,7 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	delay: Duration,
+	delay: moq_net::track::Delay,
 	jitter: crate::jitter::Buffer<String, Frame>,
 	/// An already released frame waiting for the previous cluster to be returned.
 	held: Option<(String, Frame)>,
@@ -336,7 +336,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			delay: Duration::ZERO,
+			delay: moq_net::track::Delay::default(),
 			jitter: crate::jitter::Buffer::new(Duration::ZERO),
 			held: None,
 			fragment_duration: None,
@@ -347,15 +347,17 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Release frames a fixed delay after their decode time, dropping late frames.
+	/// Set how far behind the live edge the export plays.
 	///
-	/// A source whose clock runs further off ours than the output's may follow fails the export
-	/// once it has used half the delay. The same delay bounds each source's staleness. Zero (the default) releases each frame as
-	/// soon as it is read and drops none as late, but a stalled group is still skipped once a
-	/// newer one is ready.
-	pub fn with_delay(mut self, delay: Duration) -> Self {
+	/// [`Delay::min`](moq_net::track::Delay::min) releases each frame that long after its decode
+	/// time, dropping frames that arrive later, and is where each per-track source starts. A source
+	/// whose clock runs further off ours than the output's may follow fails the export once it has
+	/// used half of it. [`Delay::max`](moq_net::track::Delay::max) is how late a source's group may
+	/// fall before it is skipped. Zero for both (the default) releases each frame as soon as it is
+	/// read and drops none as late, but a stalled group is still skipped once a newer one is ready.
+	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
 		self.delay = delay;
-		self.jitter = crate::jitter::Buffer::new(delay);
+		self.jitter = crate::jitter::Buffer::new(delay.min.unwrap_or_default());
 		self
 	}
 
@@ -555,7 +557,7 @@ impl<S: Stream> Export<S> {
 					track.start_group(name, &mut self.jitter)?;
 				}
 				// A declared depth is checked even when nothing is scheduled by decode time.
-				if video && (track.declared.is_some() || !self.delay.is_zero()) {
+				if video && (track.declared.is_some() || !self.delay.min.unwrap_or_default().is_zero()) {
 					track.push(name, arrival, &mut self.jitter)?;
 				} else {
 					self.jitter.push(name.clone(), arrival)?;
@@ -883,8 +885,8 @@ pub(super) fn matroska_colour(color: &hang::catalog::Color) -> Option<MatroskaSp
 	}
 	if let Some(range) = color.range {
 		children.push(MatroskaSpec::Range(match range {
-			hang::catalog::Range::Limited => 1,
-			hang::catalog::Range::Full => 2,
+			hang::catalog::ColorRange::Limited => 1,
+			hang::catalog::ColorRange::Full => 2,
 		}));
 	}
 	if let Some(v) = color.transfer {

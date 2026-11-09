@@ -97,6 +97,10 @@ export interface Stats {
 	underruns: number;
 	/** How many times playback skipped ahead, dropping buffered audio rather than playing it faster. */
 	skips: number;
+	/** Media those skips dropped unplayed, less declared silence. */
+	trimmed: Duration;
+	/** Media the time stretch removed by playing faster. */
+	accelerated: Duration;
 	/** Frames that arrived after their playout time. */
 	late: number;
 	/** Renditions that failed to decode. */
@@ -114,6 +118,8 @@ const EMPTY: Stats = {
 	bytesReceived: 0,
 	underruns: 0,
 	skips: 0,
+	trimmed: Duration.ZERO,
+	accelerated: Duration.ZERO,
 	late: 0,
 	errors: 0,
 	stalls: 0,
@@ -438,6 +444,24 @@ export class Decoder {
 				skipped = skips;
 				if (added <= 0) return;
 				this.#count(undefined, {}, (stats) => ({ skips: stats.skips + added }));
+			});
+			// Each ring's totals start at zero too, so carry each forward by its rise.
+			let trimmed = Duration.ZERO;
+			let accelerated = Duration.ZERO;
+			effect.run((inner) => {
+				const total = inner.get(ring.trimmed);
+				const added = total.sub(trimmed);
+				trimmed = total;
+				if (added.gt(Duration.ZERO))
+					this.#count(undefined, {}, (stats) => ({ trimmed: stats.trimmed.add(added) }));
+			});
+			effect.run((inner) => {
+				const total = inner.get(ring.accelerated);
+				const added = total.sub(accelerated);
+				accelerated = total;
+				if (added.gt(Duration.ZERO)) {
+					this.#count(undefined, {}, (stats) => ({ accelerated: stats.accelerated.add(added) }));
+				}
 			});
 
 			effect.set(this.#out.root, worklet);

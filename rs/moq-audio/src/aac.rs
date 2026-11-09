@@ -72,16 +72,12 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 				));
 			}
 
-			let config = moq_mux::codec::aac::Config {
-				profile,
-				sample_rate: catalog.sample_rate,
-				channel_count: catalog.channel_count,
-			};
+			let config = moq_mux::codec::aac::Config::new(profile, catalog.sample_rate, catalog.channel_count);
 
-			// Synthesis still drops bits the config cannot hold: the object type is
-			// masked to five bits, and the sample rate to 24. Encode refuses a channel
-			// count that does not pick a channelConfiguration, but check the catalog
-			// first so the error stays the decoder's.
+			// Only AAC-LC decodes, and synthesis still truncates the sample rate to 24
+			// bits. Encode refuses a channel count that does not pick a
+			// channelConfiguration, but check the catalog first so the error stays the
+			// decoder's.
 			validate(&config)?;
 
 			config.encode().map_err(moq_mux::Error::from)?
@@ -212,9 +208,9 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_an_extended_profile_before_synthesis_masks_it() {
-		// mp4a.40.34 is MP3-in-MP4. The 5-bit object type field can't hold 34, so
-		// synthesizing a config would mask it down to 2 and read back as AAC-LC.
+	fn rejects_an_extended_profile_before_synthesis() {
+		// mp4a.40.34 is MP3-in-MP4, which this decoder can't play: validate refuses
+		// any profile but AAC-LC before a config is synthesized.
 		let err = description(&catalog(34, 44_100, 2), 34).unwrap_err();
 		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("mp4a.40.34")));
 	}
