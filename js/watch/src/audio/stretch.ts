@@ -9,6 +9,9 @@
  * @license BSD-3-Clause, with WebRTC's patent grant: see WEBRTC-LICENSE and WEBRTC-PATENTS in this package.
  */
 
+/** A full processing window of received PCM, in milliseconds. */
+export const WINDOW = 30;
+
 /** What a window boundary decides, named as the shared corpus names it. */
 export type Decision = "Hold" | "Accelerate" | "Fast";
 
@@ -55,7 +58,7 @@ export class Stretch {
 
 	constructor(rate: number, channels: number) {
 		this.#rate = rate;
-		this.window = Math.max(1, Math.floor((rate * 30) / 1000));
+		this.window = Math.max(1, Math.floor((rate * WINDOW) / 1000));
 		this.#middle = Math.floor((rate * 15) / 1000);
 		this.#band = Math.floor((rate * 20) / 1000);
 		this.#rest = Math.floor((rate * 50) / 1000);

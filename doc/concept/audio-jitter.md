@@ -622,8 +622,8 @@ packet, so a hole in the media plays as a hole. The estimator above is
 unchanged. Both share the pitch search, admission, seams, and
 [PCM corpus](audio-jitter/stretch/corpus.json) below; they differ only in
 [what they decide on](#browser-decision). Buffered browser playback plays
-every sample it holds and never skips, but accelerates the same way to catch
-back up to the shared clock.
+every sample it holds, but accelerates the same way to catch back up to the
+shared clock.
 
 The source is WebRTC's
 [`TimeStretch`](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/audio_coding/neteq/time_stretch.cc),
@@ -688,13 +688,16 @@ outrun the target underrun instead: that is the cost of a target short of the
 spread, and the estimator's to fix, not the stretch's.
 
 Buffered playback holds its lookahead upstream and feeds the ring only up to
-its target, so its depth says nothing about the clock. It decides on
+its target plus one 30 ms window, so it can always stage a full window to
+stretch, and its depth says nothing about the clock. It decides on
 `excess = clock - playhead` instead, the shared clock video plays from less the
 playhead at the window's start, by the same three rules. A stall, a rise of the
 delay, or a publisher clock running fast leaves audio behind the clock; it
 plays faster until it is back within a pitch period, and never ahead of it,
 since future-dated frames are what buffered playback holds. That holds for the
 tail before a declared end too, since the clock, not the depth, measures it.
+A delay under one window rests up to the window less the delay behind instead,
+since a window stretches only once 30 ms past the playhead has arrived.
 The main thread reads the clock with each of the worklet's state reports,
 paired with the `AudioContext`'s `currentTime`, and the worklet carries it
 forward on its own time until the next.

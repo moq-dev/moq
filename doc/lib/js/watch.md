@@ -246,8 +246,8 @@ that falls behind the delay back onto it, playing it slightly faster, and skips
 ahead only when media piles up far past it. Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
 `lookahead` to how far ahead it may run and it plays through at the encoded
-pace, never skipping. After a stall, or anything else that leaves audio behind
-video, it catches up by playing slightly faster, so lip sync returns:
+pace. After a stall, or anything else that leaves audio behind video, it catches
+up by playing slightly faster rather than skipping, so lip sync returns:
 
 ```html
 <moq-watch url="..." name="bot/tts.hang" delay="100ms" lookahead="30s"></moq-watch>

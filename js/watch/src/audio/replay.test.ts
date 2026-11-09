@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "b
 import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
+import { WINDOW } from "./stretch";
 
 const RATE = 48000;
 const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catalog.AudioConfig;
@@ -388,6 +389,20 @@ describe("buffered replay against the shared clock", () => {
 		const result = await play(trace, options, (at) => at >= 2000 && at % 10_000 >= 7500);
 		expect(result.min).toBeGreaterThanOrEqual(0);
 		expect(result.max).toBeLessThan(2.5);
+		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("catches up after each stall on a floor shorter than a stretch window", async () => {
+		const trace = paced(60, (i) => 30 + (i % 500 >= 250 && i % 500 < 270 ? (270 - (i % 500)) * 20 : 0)).sort(
+			(a, b) => a.at - b.at,
+		);
+		const options = { rate: RATE, config: CONFIG, delay: Milli(10), lookahead: Milli(500), duration: observed(60) };
+		// Without a full window released ahead of the floor, audio trailed by 397 ms for good. A window
+		// stretches only once 30 ms past the playhead has arrived, so audio rests within that less the delay.
+		const result = await play(trace, options, (at) => at >= 2000 && at % 10_000 >= 7500);
+		expect(result.min).toBeGreaterThanOrEqual(0);
+		expect(result.max).toBeLessThan(WINDOW - 10);
 		expect(result).toMatchObject({ skips: 0, trimmed: 0, lost: 0 });
 		expect(warn).not.toHaveBeenCalled();
 	});

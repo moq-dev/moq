@@ -36,6 +36,8 @@ class Render extends AudioWorkletProcessor {
 				this.#ring?.write(msg.timestamp, msg.data);
 			} else if (msg.type === "latency") {
 				this.#ring?.setLatency(msg.latency);
+				// The clock moves with the delay, so a reading from before it would pull audio ahead.
+				this.#clock = undefined;
 				if (msg.park !== undefined) {
 					this.#ring?.park();
 					this.#epoch = msg.park;

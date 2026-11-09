@@ -230,7 +230,8 @@ it("clears comfort noise when the timeline resets", () => {
 });
 
 // The main thread reads the shared clock once per state report, so the worklet carries it forward on
-// its own `currentTime` between readings, until a reset ends the timeline it was read on.
+// its own `currentTime` between readings, until a reset ends the timeline it was read on or a delay
+// change moves the clock.
 it("carries the shared clock forward on its own time for a buffered ring to catch up to", () => {
 	const render = new Render();
 	const send = (data: Message) => render.port.onmessage?.({ data } as MessageEvent<Message>);
@@ -254,6 +255,11 @@ it("carries the shared clock forward on its own time for a buffered ring to catc
 		const caught = play(0.5);
 		expect(caught?.accelerated).toBeGreaterThan(200 - 2.5);
 		expect(caught?.accelerated).toBeLessThanOrEqual(200);
+
+		// A delay change moves the clock, so the reading from before it no longer counts.
+		send({ type: "clock", timestamp: Micro(2_000_000), time });
+		send({ type: "latency", latency: Milli(100) });
+		expect(play(0.1)?.accelerated).toBe(caught?.accelerated);
 
 		send({ type: "reset", epoch: 1 });
 		send({ type: "data", timestamp: Micro(1_000_000), data: [new Float32Array(rate * 0.9).fill(0.5)] });

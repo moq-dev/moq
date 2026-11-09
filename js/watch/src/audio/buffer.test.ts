@@ -180,9 +180,10 @@ describe("AudioBuffer", () => {
 			const ahead = buffer.wait(120_000 as Micro, signal);
 			expect(Bun.peek.status(ahead)).toBe("pending");
 
-			// The floor lands and plays past the frame's headroom.
+			// The floor lands and plays past the frame's headroom, and a playing ring takes one stretch window more.
 			await state(60_000, false, 0);
-			expect(Bun.peek.status(buffer.wait(170_000 as Micro, signal))).toBe("pending");
+			expect(Bun.peek.status(buffer.wait(190_000 as Micro, signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(200_000 as Micro, signal))).toBe("pending");
 			expect(Bun.peek.status(ahead)).toBe("fulfilled");
 		} finally {
 			close();
@@ -225,8 +226,8 @@ describe("AudioBuffer", () => {
 			// The frame past the gap un-stalls the ring, which plays the gap out up to it.
 			await state(10_000_000, false, 0);
 			expect(Bun.peek.status(next)).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(10_090_000 as Micro, signal))).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(10_110_000 as Micro, signal))).toBe("pending");
+			expect(Bun.peek.status(buffer.wait(10_130_000 as Micro, signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(10_150_000 as Micro, signal))).toBe("pending");
 		} finally {
 			close();
 		}
@@ -277,13 +278,14 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(gate.wait(ms(10_000), new AbortController().signal))).toBe("fulfilled");
 	});
 
-	it("holds buffered playback to the floor ahead of the playhead", () => {
+	// One stretch window past the floor, so the ring can always stage a full window to catch up with.
+	it("holds buffered playback to the floor and a stretch window ahead of the playhead", () => {
 		const gate = new Backpressure(1000, true, Milli(200));
 		gate.observe(ms(0), false);
 		const wait = gate.wait(ms(1000), new AbortController().signal);
-		gate.observe(ms(799), false);
+		gate.observe(ms(769), false);
 		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.observe(ms(800), false);
+		gate.observe(ms(770), false);
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
 	});
 
@@ -396,7 +398,7 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(wait)).toBe("pending");
 		gate.decoded(ms(1020), ms(20));
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(1520), signal))).toBe("pending");
+		expect(Bun.peek.status(gate.wait(ms(1560), signal))).toBe("pending");
 	});
 
 	// A replacement rendition keeps the ring, and the decoder it replaced never answers its frames.

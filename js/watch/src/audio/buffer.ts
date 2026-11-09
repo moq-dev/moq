@@ -2,6 +2,7 @@ import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
 import type { Clock, Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
+import { WINDOW } from "./stretch";
 
 /**
  * Decides when the decode loop may decode a frame, which is how the target delay is split between
@@ -17,7 +18,9 @@ import type { Clock, Data, End, Init, Latency, Playing, Reset, State, Truncate }
  *     plays through and cannot shed what overflows it;
  *   - while playing, once the playhead is within the floor of where its output lands, keeping the
  *     ring on its floor. Live, that is where the output ends: the ring's time stretch measures its
- *     depth right after each write, and reads a tail past the floor as audio behind the clock;
+ *     depth right after each write, and reads a tail past the floor as audio behind the clock.
+ *     Buffered, it is where the output starts, plus one stretch window, so the ring can always
+ *     stage a full window to catch up to the clock;
  *   - while playing live, also once the media queued behind it covers the hold, so media past the
  *     target reaches the ring, whose skip band catches up to the live edge. Buffered mode plays
  *     through instead.
@@ -235,7 +238,9 @@ export class Backpressure {
 	#due(timestamp: Micro): boolean {
 		const playhead = this.#playhead;
 		if (!this.#stalled && playhead !== undefined) {
-			const tail = this.#buffered ? 0 : this.#frame;
+			// Buffered, a frame is released a stretch window early, so the ring always holds a full window
+			// to accelerate back onto the clock, even on a floor shorter than one.
+			const tail = this.#buffered ? -Micro.fromMilli(Milli(WINDOW)) : this.#frame;
 			if (timestamp + tail - this.#offset - this.#headroom <= playhead) return true;
 			return !this.#buffered && this.#covered(timestamp);
 		}
