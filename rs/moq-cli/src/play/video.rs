@@ -658,12 +658,22 @@ impl<O: Output> Video<O> {
 							}
 						}
 					};
-					match at {
-						Some(at) => tokio::select! {
-							_ = woken => {},
-							_ = kio::clock::sleep_until(at) => {},
-						},
-						None => woken.await,
+					// A delay rise while parked must grow this subscription's budget now,
+					// or it evicts frames the later schedule still waits for.
+					let sleep = async {
+						match at {
+							Some(at) => kio::clock::sleep_until(at).await,
+							None => std::future::pending().await,
+						}
+					};
+					tokio::select! {
+						_ = woken => {},
+						_ = sleep => {},
+						Ok(()) = encoder.changed() => {
+							if let Some(delay) = *encoder.borrow_and_update() {
+								refresh.set_delay(self.budget(delay, warmup));
+							}
+						}
 					}
 				};
 				let Some(mapped) = mapped else {
