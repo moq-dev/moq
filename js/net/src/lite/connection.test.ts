@@ -1,12 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
-import Qmux from "@moq/qmux";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Session as Qmux } from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { inspect } from "../connection/stats.ts";
 import { SessionCode, SessionError } from "../error.ts";
-import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { acceptBudget, Stream, Writer } from "../stream.ts";
@@ -102,7 +101,7 @@ async function sendGoaway(server: WebTransport, uri: string): Promise<void> {
 }
 
 test("a lite GOAWAY keeps the session open, and a second one closes it", async () => {
-	hostTime();
+	using clock = manual();
 	const pair = createMockTransportPair(ALPN_04);
 	const connection = new Connection({
 		url: new URL("https://relay.example/"),
@@ -110,22 +109,14 @@ test("a lite GOAWAY keeps the session open, and a second one closes it", async (
 		version: Version.DRAFT_04,
 	});
 
-	let closed = false;
-	void connection.closed.then(() => {
-		closed = true;
-	});
-
 	try {
 		await sendGoaway(pair.server, "");
 		const drain = await connection.draining;
 		expect(drain.uri).toBe("");
-
-		await sleep(Nano.fromMilli(Milli(20)));
-		expect(closed).toBe(false);
+		expect(await settlesWithin(connection.closed, clock, Milli(20))).toBe(false);
 
 		await sendGoaway(pair.server, "https://other.example/");
-		await sleep(Nano.fromMilli(Milli(50)));
-		expect(closed).toBe(true);
+		expect(await settlesWithin(connection.closed, clock, Milli(50))).toBe(true);
 	} finally {
 		connection.abort();
 	}

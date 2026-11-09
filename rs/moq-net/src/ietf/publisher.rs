@@ -89,10 +89,12 @@ fn track_properties(
 	version: Version,
 	negotiated: bool,
 ) -> Result<ietf::Properties, Error> {
-	let compressed = info.compress && negotiated;
+	let compressed = info.compressed() && negotiated;
 	super::flate::egress(info, compressed)?;
 	let mut plain = info.clone();
-	plain.compress = compressed;
+	if !compressed {
+		plain.compression = crate::track::Compression::None;
+	}
 	let info = &plain;
 	if !wanted {
 		return Ok(ietf::Properties::default());
@@ -2007,8 +2009,6 @@ struct RunSubscription {
 	/// The fills updates asked for.
 	fills: crate::util::TaskSet,
 	fills_done: bool,
-	/// How serving the track ended, once it did.
-	served: Option<Result<(), Error>>,
 	/// An update asking for a fill, held until the fills and the group being opened finish.
 	waiting: Option<super::request_stream::Update>,
 	/// The Largest Location the REQUEST_OK for a renewal being verified reports.
@@ -2036,7 +2036,6 @@ impl RunSubscription {
 			fill,
 			fills: crate::util::TaskSet::owned(),
 			fills_done: true,
-			served: None,
 			waiting: None,
 			renewal_largest: None,
 			pausing: false,
@@ -2120,11 +2119,7 @@ impl RunSubscription {
 							}
 						}
 
-						if self.served.is_none()
-							&& let Poll::Ready(done) = serve.poll(waiter)
-						{
-							self.served = Some(done);
-						}
+						let served = serve.poll(waiter);
 						if self.fill.is_none()
 							&& self.fills_done && serve.tail.is_none()
 							&& serve.opening.is_none()
@@ -2132,12 +2127,10 @@ impl RunSubscription {
 						{
 							break 'turn Turn::Update(update);
 						}
-						match (
-							&self.served,
-							self.fill.is_none() && self.fills_done && self.waiting.is_none(),
-						) {
-							(Some(Ok(())), true) => Turn::Served(Ok(())),
-							(Some(Err(err)), true) => Turn::Served(Err(err.clone())),
+						match served {
+							Poll::Ready(res) if self.fill.is_none() && self.fills_done && self.waiting.is_none() => {
+								Turn::Served(res)
+							}
 							_ => return Poll::Pending,
 						}
 					};
@@ -4140,8 +4133,7 @@ impl Publisher {
 			match event {
 				crate::origin::RouteEvent::Start(update)
 				| crate::origin::RouteEvent::Update(update)
-				| crate::origin::RouteEvent::Restart(update)
-				| crate::origin::RouteEvent::Takeover { announce: update, .. } => {
+				| crate::origin::RouteEvent::Restart(update) => {
 					initial.insert(update.prefix.clone(), update);
 				}
 				crate::origin::RouteEvent::End(update) => {
@@ -5910,11 +5902,6 @@ impl ForwardNamespaces {
 					(update, true, false)
 				}
 				crate::origin::RouteEvent::Restart(update) => (update, true, true),
-				// moq-transport has no takeover: another instance, in place or not.
-				crate::origin::RouteEvent::Takeover { announce, predecessor } => {
-					let restart = predecessor == announce.prefix;
-					(announce, true, restart)
-				}
 				crate::origin::RouteEvent::End(update) => (update, false, false),
 			})));
 		}
@@ -6433,12 +6420,9 @@ struct TrackServe {
 	/// Where the group streams are ranked: the subscription's send group, or the session's
 	/// queue once [`Self::ranked`] on a transport without groups.
 	ranking: Ranking<GroupOf<Transport>>,
-	/// The track finished: the in-flight group machines drain, then FIN.
-	draining: bool,
+	phase: ServePhase,
 	/// Group streams opened, shared with the group machines.
 	opened: Arc<AtomicU64>,
-	/// The track's exclusive end, once its groups ran out because it finished.
-	end: Option<track::Position>,
 	terminal: Arc<Terminal>,
 	compression: bool,
 	/// A track that always has another group ready still lets the session's other tasks run.
@@ -6448,12 +6432,25 @@ struct TrackServe {
 	dynamic: bool,
 }
 
+/// Where serving a track's groups stands. Only [`TrackServe`] holds it, so an update that
+/// widens a drained range serves again on the next poll.
+enum ServePhase {
+	/// Handing out groups as they arrive.
+	Serving,
+	/// The groups ran out, so the group machines in flight drain, then FIN. Holds the track's
+	/// exclusive end when the track finishing is what ran them out. Entered only once no
+	/// group waits to open and no fill tail is owed.
+	Draining(Option<track::Position>),
+	/// Reading the track failed, which ends the subscription.
+	Failed(Error),
+}
+
+/// Forwards a broadcast's datagram track; dropped once that track ends or fails.
 struct DatagramForward {
 	consumer: crate::datagram::Consumer,
-	ready: bool,
-	ended: bool,
 	timescale: Option<Timescale>,
-	publisher: i8,
+	/// The datagram track's priority, once its info resolved.
+	publisher: Option<i8>,
 	demand: bool,
 }
 
@@ -6506,9 +6503,8 @@ impl TrackServe {
 			children: kio::Tasks::new(),
 			priority,
 			ranking,
-			draining: false,
+			phase: ServePhase::Serving,
 			opened: Default::default(),
-			end: None,
 			terminal: Default::default(),
 			budget: kio::coop::Budget::new(32),
 			dynamic,
@@ -6523,16 +6519,14 @@ impl TrackServe {
 		self.datagrams = Some(DatagramForward {
 			consumer: datagrams,
 			demand,
-			ready: false,
-			ended: false,
 			timescale: self.timescale.filter(|_| stamp),
-			publisher: 0,
+			publisher: None,
 		});
 		self
 	}
 
 	fn compression(mut self, negotiated: bool) -> Self {
-		self.compression = negotiated && self.track.info().compress;
+		self.compression = negotiated && self.track.info().compressed();
 		self
 	}
 
@@ -6617,7 +6611,9 @@ impl TrackServe {
 		let end = range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group));
 		self.track.set_range((Bound::Included(start), end));
 		self.range = range;
-		self.draining = false;
+		if let ServePhase::Draining(_) = self.phase {
+			self.phase = ServePhase::Serving;
+		}
 		Ok(fill.map(|fill| SubscriptionFill {
 			fill,
 			largest: edge.largest,
@@ -6686,7 +6682,9 @@ impl TrackServe {
 		if self.datagram_track.is_some() {
 			return None;
 		}
-		let end = self.end?;
+		let ServePhase::Draining(Some(end)) = self.phase else {
+			return None;
+		};
 		if self.terminal.sent.load(Ordering::Relaxed) {
 			return None;
 		}
@@ -6777,8 +6775,10 @@ impl TrackServe {
 		{
 			let _ = self.terminal.end.set(end);
 		}
-		if self.draining {
-			return self.children.poll(waiter).map(Ok);
+		match &self.phase {
+			ServePhase::Serving => {}
+			ServePhase::Draining(_) => return self.children.poll(waiter).map(Ok),
+			ServePhase::Failed(err) => return Poll::Ready(Err(err.clone())),
 		}
 
 		let _ = self.children.poll(waiter);
@@ -6844,13 +6844,17 @@ impl TrackServe {
 						let _ = self.children.poll(waiter);
 						return Poll::Pending;
 					}
-					self.draining = true;
-					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
-						self.end = Some(end);
-					}
+					let end = match self.track.poll_finished(waiter) {
+						Poll::Ready(Ok(end)) => Some(end),
+						_ => None,
+					};
+					self.phase = ServePhase::Draining(end);
 					return self.children.poll(waiter).map(Ok);
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Ready(Err(err)) => {
+					self.phase = ServePhase::Failed(err.clone());
+					return Poll::Ready(Err(err));
+				}
 				Poll::Pending => break,
 			}
 		}
@@ -6867,53 +6871,42 @@ impl TrackServe {
 			if self.budget.poll_yield(waiter).is_pending() {
 				return;
 			}
-			let datagram = {
-				let Some(forward) = self.datagrams.as_mut() else {
-					return;
-				};
-				if forward.ended {
-					return;
-				}
-				if !forward.ready {
-					match forward.consumer.poll_info(waiter) {
-						Poll::Pending => return,
-						Poll::Ready(Ok(info)) => {
-							// Object times use the stream subscription's advertised timescale.
-							forward.publisher = info.priority;
-							forward.ready = true;
-						}
-						Poll::Ready(Err(err)) => {
-							tracing::debug!(%err, "datagram track ended before it started");
-							forward.ended = true;
-							return;
-						}
-					}
-				}
-				match forward.consumer.poll_recv(waiter) {
+			let Some(forward) = self.datagrams.as_mut() else {
+				return;
+			};
+			let publisher = match forward.publisher {
+				Some(publisher) => publisher,
+				None => match forward.consumer.poll_info(waiter) {
 					Poll::Pending => return,
-					Poll::Ready(Ok(None)) => {
-						forward.ended = true;
-						if let Some(track) = &mut self.datagram_track {
-							let _ = track.finish();
-						}
-						return;
-					}
+					// Object times use the stream subscription's advertised timescale.
+					Poll::Ready(Ok(info)) => *forward.publisher.insert(info.priority),
 					Poll::Ready(Err(err)) => {
-						tracing::debug!(%err, "stopping datagrams on this subscription");
-						if let Some(track) = &self.datagram_track {
-							let _ = track.clone().abort(err);
-						}
-						forward.ended = true;
+						tracing::debug!(%err, "datagram track ended before it started");
+						self.datagrams = None;
 						return;
 					}
-					Poll::Ready(Ok(Some(datagram))) => {
-						let timescale = forward.timescale;
-						let publisher = forward.publisher;
-						(datagram, timescale, publisher)
+				},
+			};
+			let datagram = match forward.consumer.poll_recv(waiter) {
+				Poll::Pending => return,
+				Poll::Ready(Ok(Some(datagram))) => datagram,
+				Poll::Ready(Ok(None)) => {
+					self.datagrams = None;
+					if let Some(track) = &mut self.datagram_track {
+						let _ = track.finish();
 					}
+					return;
+				}
+				Poll::Ready(Err(err)) => {
+					tracing::debug!(%err, "stopping datagrams on this subscription");
+					self.datagrams = None;
+					if let Some(track) = &self.datagram_track {
+						let _ = track.clone().abort(err);
+					}
+					return;
 				}
 			};
-			let (datagram, timescale, publisher) = datagram;
+			let timescale = forward.timescale;
 			emit_datagram(
 				&self.session,
 				self.version,
@@ -11407,10 +11400,7 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h
-				._origin
-				.forward("live", crate::origin::RouteInfo::default(), None)
-				.unwrap();
+			let claim = h._origin.forward("live", crate::origin::RouteInfo::default()).unwrap();
 			let auth = crate::auth::Link::new(false);
 			auth.handle().authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth);
@@ -11430,10 +11420,7 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h
-				._origin
-				.forward("live", crate::origin::RouteInfo::default(), None)
-				.unwrap();
+			let claim = h._origin.forward("live", crate::origin::RouteInfo::default()).unwrap();
 			let auth = crate::auth::Link::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
@@ -11750,10 +11737,7 @@ mod serve_tests {
 		let version = Version::Draft22;
 		for path in [".", "./child", ".session", ".session/extension"] {
 			let h = serve(version);
-			let claim = h
-				._origin
-				.forward("", crate::origin::RouteInfo::default(), None)
-				.unwrap();
+			let claim = h._origin.forward("", crate::origin::RouteInfo::default()).unwrap();
 			settle().await;
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 				.await
@@ -12132,6 +12116,85 @@ mod serve_tests {
 				);
 			}
 		}
+	}
+
+	/// An update that reopens a drained subscription with a fill tail serves that tail.
+	///
+	/// The track finishes with its last group still open, outside the live range, so the
+	/// subscription drains while its fill waits for stream credit. The update behind that
+	/// fill moves the range back onto the open group: its fill covers the group's head and
+	/// its tail the frames still to come.
+	#[kio::test]
+	async fn an_update_reopening_a_drained_subscription_serves_its_tail() {
+		let version = Version::Draft22;
+		let credit = kio::Producer::new(false);
+		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_open_uni_gate(credit.consume());
+		let h = serve_session(version, crate::track::Info::timed(), session);
+		let mut group = h.track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.write_frame(timestamp(), b"head".as_slice()).unwrap();
+		kio::clock::sim::yield_now().await;
+		let mut request = ScriptedSession::new(Vec::new());
+		request.log = h.log.clone();
+		let stream = Stream::open(&crate::driver::Transport::new(request.clone()), version)
+			.await
+			.unwrap();
+		let at_head = Filter::Absolute {
+			start: Location { group: 1, object: 0 },
+			end: None,
+		};
+		let msg = subscribe(
+			Filter::Absolute {
+				start: Location { group: 5, object: 0 },
+				end: None,
+			},
+			Some(ietf::Fill {
+				group_order: None,
+				filter: Some(at_head),
+				range_filters: false,
+			}),
+		);
+		let mut serving = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+		serve_until(serving.as_mut(), "the subscription is accepted", || {
+			!h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some()
+		})
+		.await;
+		// Group 1 stays open: the end falls after it.
+		h.track.finish().unwrap();
+		let update = ietf::SubscribeUpdate {
+			request_id: RequestId(2),
+			subscriber_priority: None,
+			forward: None,
+			filter: Some(at_head),
+			authorization_token: None,
+			new_group: None,
+			max_age: None,
+			fill: Some(ietf::Fill {
+				group_order: None,
+				filter: None,
+				range_filters: false,
+			}),
+		};
+		let mut bytes = Vec::new();
+		let mut encoder = Encoder::new(&mut bytes, version.into());
+		encoder.varint(ietf::SubscribeUpdate::ID).unwrap();
+		update.encode(&mut encoder, version).unwrap();
+		request.push(&bytes);
+		for _ in 0..200 {
+			assert!(
+				futures::poll!(serving.as_mut()).is_pending(),
+				"the fill holds the request"
+			);
+		}
+
+		*credit.write().ok().expect("credit is live") = true;
+		serve_until(serving.as_mut(), "the update is accepted, its tail still owed", || {
+			Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_some()
+		})
+		.await;
+		group.write_frame(timestamp(), b"tail".as_slice()).unwrap();
+		group.finish().unwrap();
+		serving.await.unwrap();
+		assert_eq!(occurrences(&h.log, b"tail"), 1, "the update's tail is served");
 	}
 
 	/// A fill-only update keeps a live join's floor, so a fill short of the live edge does not
@@ -13899,11 +13962,7 @@ mod serve_tests {
 				{
 					*namespace = crate::Path::from_static("lobby");
 				}
-				Some(
-					h._origin
-						.forward("lobby", crate::origin::RouteInfo::default(), None)
-						.unwrap(),
-				)
+				Some(h._origin.forward("lobby", crate::origin::RouteInfo::default()).unwrap())
 			}
 			FetchParked::Responding => None,
 		};
@@ -14446,7 +14505,7 @@ mod serve_tests {
 		IdleEnded,
 		/// An idle copy whose track ends after its newest group: that group's last object.
 		IdleFinished,
-		/// A live feed whose newest group was aborted mid-write: unknown.
+		/// A live feed whose newest group was aborted mid-write: the last object before it.
 		Aborted,
 	}
 
@@ -14512,7 +14571,7 @@ mod serve_tests {
 				)
 				.await;
 				match largest {
-					Largest::Finished | Largest::Live | Largest::IdleFinished => assert_eq!(
+					Largest::Finished | Largest::Live | Largest::IdleFinished | Largest::Aborted => assert_eq!(
 						fetch_refusal(buf, version),
 						INVALID_RANGE,
 						"{version} {largest:?} start={start}"
@@ -15511,11 +15570,7 @@ mod serve_tests {
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
-				Some(
-					origin
-						.forward("room", crate::origin::RouteInfo::default(), None)
-						.unwrap(),
-				),
+				Some(origin.forward("room", crate::origin::RouteInfo::default()).unwrap()),
 				None,
 			),
 			Parked::Acking | Parked::Ending => {
@@ -15752,9 +15807,7 @@ mod serve_tests {
 		let mut idle = None;
 		match setup {
 			Setup::Resolving => {
-				let route = origin
-					.forward("room", crate::origin::RouteInfo::default(), None)
-					.unwrap();
+				let route = origin.forward("room", crate::origin::RouteInfo::default()).unwrap();
 				let request = {
 					let requested = std::pin::pin!(route.requested());
 					match futures::future::select(requested, serving.as_mut()).await {
@@ -20551,13 +20604,14 @@ mod tests {
 struct LiveEdge {
 	/// The newest group sequence, `None` before any group exists.
 	latest: Option<u64>,
-	/// The precise Largest Object. `None` when the track is empty, or when the newest
-	/// group's frames cannot be read right now (none written yet), in which case nothing
-	/// is advertised and no fill is servable.
+	/// The precise Largest Object: the newest object held, skipping a newest group whose
+	/// frames cannot be read. `None` when no object is held, in which case nothing is
+	/// advertised and no fill is servable.
 	largest: Option<Location>,
-	/// One past the Largest Object, which is where a Next Object subscription begins.
-	/// When the edge is imprecise this falls back to the next group boundary: never below
-	/// the true Next Object, at worst under-delivering the current group's tail.
+	/// Where a Next Object subscription begins: one past the Largest Object, or past a
+	/// newest group that cannot be read. When the edge is imprecise this falls back to the
+	/// next group boundary: never below the true Next Object, at worst under-delivering the
+	/// current group's tail.
 	next: Option<Location>,
 }
 
@@ -20621,9 +20675,12 @@ fn cached_edge(track: &track::Consumer) -> LiveEdge {
 				next: Some(next),
 			}
 		}
+		// The newest group cannot be read, such as one aborted when this copy went idle, so
+		// the largest is the last object held before it, and nothing of the newest group
+		// can be served, so a subscription starts past it.
 		_ => LiveEdge {
 			latest: Some(latest),
-			largest: None,
+			largest: largest_before(track, latest),
 			next: Some(Location {
 				group: latest.saturating_add(1),
 				object: 0,
@@ -21177,6 +21234,35 @@ mod range_tests {
 		assert_eq!(edge.next, Some(Location { group: 0, object: 1 }));
 	}
 
+	/// A newest group that cannot be read, such as one aborted when an idle copy cancelled
+	/// it, leaves the last object held before it as the largest, while a subscription still
+	/// starts past it so nothing is stranded behind its floor.
+	#[test]
+	fn an_aborted_newest_group_leaves_the_earlier_largest() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		let mut first = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for _ in 0..2 {
+			first
+				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+				.unwrap();
+		}
+		first.finish().unwrap();
+		let mut newest = track.create_group(group::Info { sequence: 1 }).unwrap();
+		newest
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+			.unwrap();
+		newest.abort(Error::Cancel).unwrap();
+
+		let edge = live_edge(&track.consume());
+		assert_eq!(edge.latest, Some(1));
+		assert_eq!(edge.largest, Some(Location { group: 0, object: 1 }));
+		assert_eq!(edge.next, Some(Location { group: 2, object: 0 }));
+	}
+
 	/// Both ends carry through, object bounds included, so the boundary groups can be
 	/// trimmed rather than widened.
 	#[test]
@@ -21418,7 +21504,7 @@ mod compression_tests {
 			encoder.varint(super::super::flate::COMPRESSION).unwrap();
 			encoder.varint(1).unwrap();
 			let info = track::Info {
-				compress: true,
+				compression: crate::track::Compression::Deflate,
 				properties: Some(Arc::new(crate::model::object::TrackProperties {
 					version,
 					values: vec![crate::model::object::Property {
@@ -21439,7 +21525,7 @@ mod compression_tests {
 			assert!(decoded.compress);
 			assert_eq!(decoded.unknown, outgoing.unknown);
 			let mut contradiction = info.clone();
-			contradiction.compress = false;
+			contradiction.compression = crate::track::Compression::None;
 			assert!(
 				contradiction
 					.properties
@@ -21454,7 +21540,7 @@ mod compression_tests {
 					Err(Error::Unsupported)
 				));
 			}
-			let plain = track::Info::default().with_compress(true);
+			let plain = track::Info::default().with_compression(crate::track::Compression::Deflate);
 			assert!(!track_properties(&plain, true, version, false).unwrap().compress);
 		}
 	}
@@ -21476,7 +21562,7 @@ mod compression_tests {
 			let track = track::Producer::new(
 				Arc::new(crate::broadcast::Info::default()),
 				"data",
-				track::Info::timed().with_compress(true),
+				track::Info::timed().with_compression(crate::track::Compression::Deflate),
 			);
 			let subscriber = track.subscribe(None);
 			let frames = [vec![b'a'; 1024], vec![b'b'; 1024], Vec::new()];

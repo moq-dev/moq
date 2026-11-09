@@ -774,7 +774,10 @@ impl Target {
 /// metadata differs. A sealed TIMESCALE travels downstream unchanged, so it must too.
 fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info {
 	let mut info = track::Info::default()
-		.with_compress(properties.compress)
+		.with_compression(match properties.compress {
+			true => crate::track::Compression::Deflate,
+			false => crate::track::Compression::None,
+		})
 		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
 		// A track without the property gets the default.
@@ -2865,7 +2868,7 @@ impl Subscriber {
 		if self.going_away.is_set() {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
-		entry.dynamic = Some(self.origin.forward(path, route, None)?);
+		entry.dynamic = Some(self.origin.forward(path, route)?);
 		entry.generation += 1;
 		tracing::info!(route = %crate::path::Rooted(self.origin.root(), path), "namespace authorized again");
 		Ok(Some(entry.generation))
@@ -2958,7 +2961,7 @@ impl Subscriber {
 					return Ok(());
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let dynamic = self.origin.forward(&path, route.clone(), None)?;
+				let dynamic = self.origin.forward(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route: route.clone(),
@@ -4593,15 +4596,20 @@ impl SubscribeOnce {
 			// An absolute feed starts where it asked, whatever the answer's Largest; a
 			// live join's starts there.
 			let from = live.sent_bounds.0.filter(|_| !self.live);
-			match largest {
+			let answered = match largest {
 				// A feed ending before the answer's Largest never shows it, so the
 				// answer alone makes the copy current. A live join's feed is open.
 				Some(largest) if !self.live && live.sent_bounds.1.is_some_and(|end| end <= largest.group) => {
 					track.set_live_ahead(largest, from)
 				}
 				largest => track.set_live(largest, from),
-			}
+			};
 			live.resuming = None;
+			// An answer behind the copy's cache fails it.
+			if let Err(err) = answered {
+				tracing::warn!(%err, "subscribe ok behind the cache");
+				return Poll::Ready(ServeEnd::Invalid(err));
+			}
 		}
 		// The last subscriber left: the upstream subscription goes with it, as on
 		// lite, and the copy lingers for fetches and a returning subscriber.
@@ -6289,7 +6297,10 @@ impl OpenGroup {
 						{
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
 							// Never arriving whole, the group is dropped so readers stop owing it.
-							track.drop_groups(sequence..sequence + 1, crate::StreamError::NotFound);
+							track.give_up(
+								sequence..sequence + 1,
+								crate::track::Hole::drop(crate::StreamError::NotFound),
+							);
 							return Poll::Ready(Err(Error::Unsupported));
 						}
 						return Poll::Ready(Ok(Opened::Group(create(track)?, start)));
@@ -6332,7 +6343,10 @@ impl OpenGroup {
 						(Some(start), Some((producer, _))) => Ok(Opened::Group(producer, start)),
 						(Some(start), None) => {
 							tracing::warn!(sequence, start, "no fill to stitch a mid-group stream onto");
-							track.drop_groups(sequence..sequence + 1, crate::StreamError::NotFound);
+							track.give_up(
+								sequence..sequence + 1,
+								crate::track::Hole::drop(crate::StreamError::NotFound),
+							);
 							Err(Error::Unsupported)
 						}
 						(None, Some((producer, next))) => Ok(Opened::Group(producer, next)),
@@ -7567,12 +7581,6 @@ impl RecvGroupFetch {
 /// properties, never past FETCH_OK's End Location. A group's objects end where the next
 /// group's begin, since a FETCH carries every object of its range in order. Before
 /// draft-22 the stream must also reach an object bound inside the last group.
-///
-/// Once a reader of the track lost a group to eviction, each group after the first waits,
-/// its stream unread, until a reader picked up the one before, so a run wider than the
-/// cache never evicts its own groups ahead of its readers (see [`track::Fill::poll_run_paced`]).
-/// The pause holds receive credit, so it is taken only while the session's paused streams
-/// leave room for it, as within a group.
 struct GroupFetchObjects {
 	version: Version,
 	/// The next Object ID expected in the current group.
@@ -7581,9 +7589,6 @@ struct GroupFetchObjects {
 	first: bool,
 	/// The object whose payload is being read: its group, its Object ID, and where it goes.
 	payload: Option<(u64, u64, FetchPayloadRead)>,
-	/// The first object of the next group and its sequence, read while the run waits for its
-	/// readers to pick up the group before.
-	paced: Option<(FetchedObject, u64)>,
 }
 
 /// Where a fetch object's payload goes.
@@ -7605,7 +7610,6 @@ impl GroupFetchObjects {
 			prior_group: None,
 			first: true,
 			payload: None,
-			paced: None,
 		}
 	}
 
@@ -7634,38 +7638,22 @@ impl GroupFetchObjects {
 				}
 			}
 
-			let (object, sequence) = match self.paced.take() {
-				Some(paced) => paced,
-				None => {
-					let Some(object) = ready!(poll_fetch_object(stream, self.first, waiter))? else {
-						break;
-					};
-					self.first = false;
-					if !object.subgroup_ok && !object.datagram {
-						tracing::warn!("subgroup ID is not supported, dropping group fetch");
-						return Poll::Ready(Err(Error::Unsupported));
-					}
-
-					let group = resolve_fetch_group(self.prior_group, object.group)?;
-					if let Some(group) = group {
-						self.prior_group = Some(group);
-					}
-					// The first object always names its group, so a later one leaving it out stays in it.
-					let sequence = group.or(writer.sequence()).ok_or(Error::ProtocolViolation)?;
-					(object, sequence)
-				}
+			let Some(object) = ready!(poll_fetch_object(stream, self.first, waiter))? else {
+				break;
 			};
+			self.first = false;
+			if !object.subgroup_ok && !object.datagram {
+				tracing::warn!("subgroup ID is not supported, dropping group fetch");
+				return Poll::Ready(Err(Error::Unsupported));
+			}
+
+			let group = resolve_fetch_group(self.prior_group, object.group)?;
+			if let Some(group) = group {
+				self.prior_group = Some(group);
+			}
+			// The first object always names its group, so a later one leaving it out stays in it.
+			let sequence = group.or(writer.sequence()).ok_or(Error::ProtocolViolation)?;
 			if writer.sequence() != Some(sequence) {
-				// The group before is whole, so its readers see it end while the stream waits,
-				// unread, for them to pick it up: flow control then holds the publisher back.
-				writer.finish()?;
-				match stream.poll_pace(waiter, writer.fetch.fill.poll_run_paced(waiter)) {
-					Poll::Ready(res) => res?,
-					Poll::Pending => {
-						self.paced = Some((object, sequence));
-						return Poll::Pending;
-					}
-				}
 				self.next = writer.open(sequence, object.datagram)?;
 			} else if object.datagram {
 				// A datagram group has one object, so it never shares one with a stream.
@@ -10858,8 +10846,7 @@ mod tests {
 			crate::origin::RouteEvent::End(_) => None,
 			crate::origin::RouteEvent::Start(announce)
 			| crate::origin::RouteEvent::Update(announce)
-			| crate::origin::RouteEvent::Restart(announce)
-			| crate::origin::RouteEvent::Takeover { announce, .. } => Some(announce.route),
+			| crate::origin::RouteEvent::Restart(announce) => Some(announce.route),
 		}
 	}
 
@@ -11819,12 +11806,7 @@ mod tests {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: vec![0x00, 0xff],
 		};
-		let verdict = auth.verify_request(
-			token,
-			Some(hold.clone()),
-			crate::auth::RequestKind::PublishNamespace,
-			&path,
-		);
+		let verdict = auth.verify_request(token, Some(hold.clone()));
 		let _issued = requests.next().await.unwrap().accept(crate::auth::Grant::all());
 		let answered = verdict.grant().await;
 		let grant = crate::auth::RequestGrant::new(
@@ -14227,9 +14209,8 @@ fn has_time(subscription: &track::Subscription) -> bool {
 fn needs_resolution(subscription: &track::Subscription) -> bool {
 	subscription.ranges.iter().any(|range| {
 		let start = match range.start {
-			track::Anchor::Absolute(_) => false,
-			track::Anchor::Relative(back) => back != 0 && back != u64::MAX,
-			track::Anchor::Time(_) => true,
+			track::Anchor::Oldest | track::Anchor::Absolute(_) | track::Anchor::Relative(0) => false,
+			track::Anchor::Relative(_) | track::Anchor::Time(_) => true,
 		};
 		start || matches!(range.end, Some(track::Anchor::Time(_) | track::Anchor::Relative(_)))
 	})
@@ -17020,7 +17001,7 @@ mod stitch_tests {
 			run.track.broadcast().pool.poll(now + crate::ledger::GRACE, &waiter);
 			assert_eq!(
 				reader.poll_drop(&waiter),
-				Poll::Ready((1..3, crate::StreamError::NotFound)),
+				Poll::Ready((1..3, crate::track::Hole::drop(crate::StreamError::NotFound))),
 				"{version}"
 			);
 			assert!(reader.poll_drop(&waiter).is_pending(), "each drop is reported once");
@@ -17180,116 +17161,6 @@ mod stitch_tests {
 		assert!(matches!(receive.await, Err(Error::Evicted)));
 	}
 
-	/// What a slow reader of a FETCH run ten times wider than the cache gets, taking a group
-	/// each time the run's stream is polled, once a reader of the track lost a group to
-	/// eviction or not. An ascending reader reads in sequence, a descending one as groups
-	/// arrive.
-	async fn read_a_fetch_run_slowly(outran: bool, order: track::Order) -> Vec<u64> {
-		const GROUPS: u64 = 40;
-		const SIZE: usize = 10_000;
-		let payload = vec![0u8; SIZE];
-		let mut objects = Vec::new();
-		// The first Group ID is 0, and each later one, a delta, 0 again: the next group.
-		for _ in 0..GROUPS {
-			objects.extend(group_fetch_objects(0, 0, &[&payload[..]]));
-		}
-		// The session grants a stream credit of one group, so a paused stream holds one.
-		let window = crate::transport::ReceiveWindow::new(GROUPS * SIZE as u64, SIZE as u64);
-		let session = ScriptedSession::per_stream_eof(vec![objects]).with_receive_window(window);
-		let mut run = GroupFetchRun::with_session(VERSION, session).await;
-		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(4 * SIZE as u64));
-		run.track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info {
-				pool,
-				..Default::default()
-			}),
-			"video",
-			track::Info::default().with_timescale(None).with_max_age(None),
-		);
-		let dynamic = run.track.requests();
-		run.track.start_at(GROUPS).unwrap();
-		let mut live = run.track.create_group(group::Info { sequence: GROUPS }).unwrap();
-		live.write_frame(None, &payload[..]).unwrap();
-		let waiter = kio::Waiter::noop();
-		if outran {
-			// A reader judges the live edge cached and loses it before taking it.
-			let mut lost = run
-				.track
-				.subscribe(
-					track::Subscription::default()
-						.with_ranges([track::Range::groups(0..GROUPS + 1)])
-						.with_delay(track::Delay::default().with_max(None)),
-				)
-				.ordered();
-			assert!(lost.poll_next_group(&waiter).is_pending());
-			run.track.evict(GROUPS);
-		}
-
-		let subscriber = run.track.subscribe(
-			track::Subscription::default()
-				.with_ranges([track::Range::groups(0..GROUPS)])
-				.with_order(order)
-				.with_delay(track::Delay::default().with_max(None)),
-		);
-		type Read = Box<dyn FnMut(&kio::Waiter) -> Poll<crate::Result<Option<group::Consumer>>>>;
-		let mut reader: Read = match order {
-			track::Order::Ascending => {
-				let mut ordered = subscriber.ordered();
-				Box::new(move |waiter| ordered.poll_next_group(waiter))
-			}
-			track::Order::Descending => {
-				let mut subscriber = subscriber;
-				Box::new(move |waiter| subscriber.poll_recv_group(waiter))
-			}
-		};
-		assert!(reader(&waiter).is_pending(), "group 0 is a miss");
-		let fill = dynamic.requested_fill().await.expect("the reader asked for the run");
-		assert_eq!((fill.start().group, fill.end()), (0, GROUPS));
-		let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
-			fill: std::sync::Arc::new(fill),
-			timescale: None,
-			first: 0,
-			last: GROUPS - 1,
-			start: 0,
-			end: None,
-		}));
-		let mut receiving = run.subscriber.clone();
-		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot));
-		let (mut read, mut received) = (Vec::new(), false);
-		for _ in 0..4 * GROUPS {
-			if !received && let Poll::Ready(res) = futures::poll!(&mut receive) {
-				res.expect("the run is received");
-				received = true;
-			}
-			match reader(&waiter) {
-				Poll::Ready(Ok(Some(group))) => read.push(group.sequence),
-				// What it lost is given up, which ends its range.
-				Poll::Ready(Ok(None)) => break,
-				Poll::Ready(Err(err)) => panic!("the reader failed: {err}"),
-				Poll::Pending if received => break,
-				Poll::Pending => {}
-			}
-		}
-		read
-	}
-
-	/// Once a reader of the track lost a group to eviction, a FETCH run writes its next group
-	/// only once a reader picked up the one before, leaving the stream unread meanwhile, so a
-	/// slow reader of a run far wider than the cache gets all of it. Until then the run moves
-	/// at the stream's speed and evicts what the reader has yet to take.
-	#[kio::test]
-	async fn a_fetch_run_waits_for_its_reader_once_one_lost_a_group() {
-		for order in [track::Order::Ascending, track::Order::Descending] {
-			let paced = read_a_fetch_run_slowly(true, order).await;
-			assert_eq!(paced, (0..40).collect::<Vec<_>>(), "{order:?}");
-			let unpaced = read_a_fetch_run_slowly(false, order).await;
-			assert!(
-				unpaced.len() < 40,
-				"the unpaced run outran its {order:?} reader: {unpaced:?}"
-			);
-		}
-	}
-
 	#[kio::test]
 	async fn internal_group_fetch_setup_cancellation_is_cancel() {
 		let mut run = GroupFetchRun::new(VERSION, Vec::new()).await;
@@ -17335,9 +17206,7 @@ mod stitch_tests {
 				tasks.0.clone(),
 				Default::default(),
 			);
-			// Through the subscriber's transport, so it pauses as a session's stream does where
-			// the session grants a receive window.
-			let stream = Stream::open(&subscriber.session, version).await.unwrap();
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
@@ -17346,7 +17215,7 @@ mod stitch_tests {
 
 			Self {
 				subscriber,
-				stream: stream.reader,
+				stream: Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
 				track,
 				_tasks: tasks,
 			}
@@ -19804,7 +19673,7 @@ mod compression_negotiation_tests {
 			assert!(refused(&properties, version, true).is_none(), "{version}");
 		}
 		let info = accepted_info(&properties, Version::Draft22);
-		assert!(info.compress);
+		assert_eq!(info.compression, crate::track::Compression::Deflate);
 		assert!(info.properties.unwrap().values.is_empty());
 	}
 }

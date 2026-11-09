@@ -47,8 +47,6 @@ use request_queue::RequestQueue;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-// The payload type stays flat at the crate root beside `Timestamp`.
-pub use datagram::Datagram;
 pub use time::*;
 pub use timed::Timed;
 
@@ -61,6 +59,10 @@ pub mod origin {
 	#[cfg(feature = "async")]
 	// private: capability gap
 	pub(crate) use super::origin_impl::Lookup;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::Mounted;
+	#[cfg(feature = "async")]
+	pub(crate) use super::origin_impl::NodeFilter;
 	pub use super::origin_impl::{
 		Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
 		RouteOptions, Source,

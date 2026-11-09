@@ -84,6 +84,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed AAC configuration mirroring the relevant fields of an
 /// AudioSpecificConfig.
+///
+/// Marked `#[non_exhaustive]`: build one with [`new`](Self::new) or [`parse`](Self::parse).
+#[non_exhaustive]
 pub struct Config {
 	/// The leading audioObjectType: 2 for AAC-LC, 5 for HE-AAC (SBR), 29 for HE-AACv2 (PS).
 	pub profile: u8,
@@ -94,6 +97,15 @@ pub struct Config {
 }
 
 impl Config {
+	/// A config for `profile` (the audioObjectType) at the decoded `sample_rate` and `channel_count`.
+	pub fn new(profile: u8, sample_rate: u32, channel_count: u32) -> Self {
+		Self {
+			profile,
+			sample_rate,
+			channel_count,
+		}
+	}
+
 	/// Parse an AudioSpecificConfig buffer.
 	///
 	/// Handles basic formats (object_type < 31), extended formats
@@ -236,11 +248,16 @@ impl Config {
 	/// over an AAC-LC core at half the output rate, mono under PS. A channel count that does
 	/// not pick a channelConfiguration is refused rather than written as another layout.
 	pub fn encode(&self) -> Result<Bytes> {
-		// audioObjectType is a 5-bit field; a wider type is masked, not escaped.
-		let profile = self.profile & 0x1F;
+		let profile = self.profile;
 
 		let mut out = BitWriter::default();
-		out.write(5, profile.into());
+		// audioObjectType 32 and above escapes the 5-bit field with 31 and a 6-bit extension.
+		if profile >= 32 {
+			out.write(5, 31);
+			out.write(6, u32::from(profile - 32));
+		} else {
+			out.write(5, profile.into());
+		}
 		if matches!(profile, OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
 			let channel_count = if profile == OBJECT_TYPE_PS {
 				1
@@ -651,6 +668,8 @@ mod tests {
 		assert_eq!(cfg.profile, 36);
 		assert_eq!(cfg.sample_rate, 48_000);
 		assert_eq!(cfg.channel_count, 2);
+		let encoded = cfg.encode().unwrap();
+		assert_eq!(Config::parse(&mut encoded.as_ref()).unwrap().profile, 36);
 	}
 
 	#[test]

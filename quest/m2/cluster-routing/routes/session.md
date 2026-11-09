@@ -1,150 +1,50 @@
-# [XL] Route session integration
+# [L] Route session integration: bounded state
 
 ## Goal
 
-One `Router` per origin node, fed by every lite-07 session, drives that
-node's origin and every announce stream it answers. Its shown claims and
-selected routes become the origin's routes, its outbox becomes each
-stream's ROUTE and ANNOUNCE messages, and the first hop pins each request
-to the identity it selected. A lite-06 peer is translated at the relay. A
-peer can make the router hold only bounded state. The configuration
-changes the contract decided ship with it.
-
-lite-07's live wire switches to the route layer that
-`drafts/draft-lcurley-moq-lite.md` specifies, in Rust: ANNOUNCE_START, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and
-ANNOUNCE_TAKEOVER name a Route ID and carry the Announce Cost in place of
-the Hop ID list (`HopsRef`, `Hop Base`/`Hop Keep`, and `cluster.max_hops`
-go from lite-07); ANNOUNCE_OK loses its Hop ID and SETUP its Hop parameter;
-TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry the Node ID; a Cost
-parameter of 0 is refused; the subscriber sends ROUTE_REQUEST and echoes
-ROUTE_END. The new messages' codecs already exist (`AnnounceBroadcast`'s
-route variants and `AnnounceReply`); until this lands the subscriber
-refuses route messages. A hop-less ANNOUNCE cannot run before the router
-drives sessions, which is why the switch lands here.
+The route layer drives every lite-07 session
+([#8023](https://github.com/moq-dev/moq/pull/8023)): one `route::Node` per
+origin, Route IDs on the wire, requests pinned to the first hop's origin node,
+lite-06 translated at the relay. What remains: the state a node keeps per
+stream it answers is bounded by the origins that stream reads, not the whole
+node table, and the public API drops what the route layer replaced.
 
 ## Plan
 
 - Scope route state to interested origins, not the CDN's whole node table.
-  Send a route before any announcement referencing it. The epic's handoff contract
-  defines held routes, letting go, and collection.
-- ✅ Decided 2026-10-15 (maintainer): retract and re-file when a session's
-  grant union crosses the scoped boundary in either direction (a `**` token
-  added, or its expiry). Every forwarded route the session delivered is
-  retracted, and its current advertisements are re-filed under the new key,
-  so no route, feasibility distance, or alias stays under the old one.
-  Expiry cannot be refused, so refusing the transition was not an option.
-- Only the first hop selects the origin. It keeps `route_order`'s shape over
-  the origin nodes announcing the path: longest prefix, newest epoch (within
-  one instance only, per [Instance and epoch](https://github.com/moq-dev/moq/pull/7489),
-  decided 2026-10-30), the link's priority (`origin::Producer::with_preference`), seed plus route
-  metric, then a rendezvous hash of the path and the identity, and the newest
-  connection only for an otherwise identical route. The hash drops the hop
-  chain, which differs per node, so every node agrees on a pool member
-  (`pool_ties_agree_only_on_a_path_and_identity_hash`). The request then names
-  that identity, and every later hop follows its own route to it, so
-  forwarding needs a route but not the claim.
-- Reselecting the origin at every hop loops although each origin's routes are
-  loop-free (RFC 8966 s2.7): a ring of same-epoch origins whose relays
-  prioritize different links, and nested wildcards where a relay has not
-  heard the specific claim, both cycle past requester exclusion; joining
-  another relay's subscription by path or instance deadlocks; and without an
-  instance a later hop splices another publisher under the requester's
-  announcement with no Restart (`local_priorities_loop_path_only_requests`,
-  `overlapping_wildcards_loop_where_specific_claims_are_unheard`,
-  `aggregation_cycles_starve_without_a_forwarding_constraint`,
-  `reselection_without_an_instance_splices_another_publisher`,
-  `sweep_forwarding_progress`). A relay therefore joins a forwarded request
-  only to a subscription following its route to the same identity. When that
-  identity becomes unreachable the forwarded request ends, and the first hop
-  re-resolves, resuming only on a matching epoch. A request carrying a cost
-  bound instead also never loops, but stalls where a transit hop has not
-  heard the claim and still splices epochless sources.
-- Mixed versions: a lite-06 peer keeps today's path vector, translated at the
-  relay that speaks both, for the rollout window only.
-- Interest changes: key the router by announce stream, not session. The old
-  stream stays open, its routes counting and its batches discarded, until
-  the new stream has answered, so no route drops in between. A stream is
-  just another neighbor key to the router.
-- A batch carries changes against the last batch on its stream. Restricting
-  a view to an interest is still linear in that origin's claims per change;
-  make it incremental here.
-- Decided 2026-11-05 (maintainer, /quest-plan, the epic's Plan items 10 to
-  12): each stream's floor is a whole-interest marker. Project the router's
-  per-region view onto it, certifying nothing unless the view knows the
-  route's claims across the stream's interest at one revision; present per
-  route only the most specific claim covering the interest, moved rather
-  than ended when it is withdrawn; and certify absence only for what the
-  stream's `Hidden` filter shows. Rerun the handoff sweeps through that
-  projection: a scope a relay lost now goes offline downstream only on
-  ROUTE_END, the accepted cost, so update the scoped fixtures' expectations
-  to it, while no sweep may revive a known withdrawal or report a false END.
-  Also cover a fresh claim that arrives only on an uncertified stream while
-  an older certified floor on another stream proves it absent
-  ([review](https://github.com/moq-dev/moq/pull/7764#discussion_r4485081975)):
-  the merge rule hides it until the certifying peer refreshes or lets go,
-  and the test pins that bound.
-- Bound what a peer makes the router hold (routes, claims, views per
-  session) by design, as the session caps announcements today.
-- Public API: the route-change surface on `broadcast::Route` and its
-  bindings will likely change, `Hops` and saturating `Cost` go, zero-cost
-  links are refused (update `?cost=0` examples and report the breaking
-  configuration change), a per-connection `proxy` preference is added, and
-  `cluster.id`/`--cluster-id` is removed rather than kept as an unused label
-  (decided 2026-10-13). `Preference` continues to rank feasible transit
-  routes; report it.
-- Open, for the implementer to settle and record: how much of today's route
-  trie, fronts, and `route_order` survives intact.
-
-Decided 2026-10-27 (maintainer): the route layer deletes the epochless instance
-machinery in `rs/moq-net/src/model/origin.rs`: `Instance::Route(generation)`
-and its renewals, `restarted_since`, the held-restart Release for epochless
-routes, and Selection retirement, leaving Follow's same-epoch
-Update/Restart split as the only takeover rule. Once each origin is its own
-ANNOUNCE and the first hop pins the request to its identity, the first hop's
-route is the instance, so the per-hop renewal has nothing left to protect.
-An epochless change of serving route stays a Restart, including the
-same-origin next-hop change with no epoch (test it), and the routing
-contract's epochless fixtures keep passing. Minting an epoch for every route
-instead was tried and rejected
-([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)): each relay
-mints at its own time, so mint order outranks cost, preference, and the
-local-broadcast tie and relays disagree on a pool path's winner, while
-ranking a minted epoch last keeps the renewal it was meant to delete.
-
-Moved 2026-10-30 (maintainer, the [route epic](https://github.com/moq-dev/moq/blob/1a6ac473d75fcbfd5d23bdbdfd64eb4750b077ad/quest/m1/api-audit/route/README.md)):
-[Instance and epoch](https://github.com/moq-dev/moq/pull/7489) now deletes that
-epochless machinery, so the route layer no longer does. A session mints
-an `instance` (`~` plus random bits) for any route that
-arrives without one, and newest-wins compares epochs only within one
-instance, so mint order no longer outranks cost or preference. The rest of
-the 2026-10-27 decision stands. The broadcast epoch fields here become that
-publisher instance and its per-instance epoch, in place of the UUIDv7
-epoch. The route layer's own origin-node identity, with its seqno and
-revision, stays separate ("keep administrative identity and broadcast epoch
-separate", in the epic).
-
-Decided 2026-11-05 (maintainer, /quest-plan): a scoped peer's identities
-are keyed by a route key the peer proves in its lite-07 SETUP: the session's
-`PeerSetup::route_key` once its SETUP arrives, and `None` for a peer that proved
-none. Relays set theirs with `--cluster-route-key`. Every identity a scoped, proven peer sends, its own included, is qualified
-under its proven key, so relays sharing a key file fail over as one. A peer that proves no
-key gets a per-session key. `Scope::qualify` still takes the key from the
-caller, so this quest does not wait on the proof. Options shown:
-
-- ✅ A route key the peer proves once per session in SETUP, before the lite-07 cut
-  (2026-11-05, maintainer, /quest-plan; supersedes the per-announce proof option)
-- A route label carried in the grant (the earlier recommendation), with the
-  proven key added after the cut
-- A per-session key now
-- A key the relay operator configures per scoped remote
-
-Research behind it: proving a neighbor's own key cannot remove qualification,
-since a public key is public and a scoped peer could still forward a victim's
-key with an inflated seqno; origin-signed routes still leave cost lies and
-blackholing, at the price of per-update signatures and expiry refreshes. Keyed
-by a proven key, every remaining attack stays inside the forger's grant, with
-no grant field, no issuer-coordinated labels, and support for token-less
-admission.
+  Today the router advertises every route to every watching stream. The
+  epic's handoff contract now has a sender send a route on a stream only
+  while it meets the stream's interest, with a floor certifying the last
+  withdrawal before the route ends (`routes/README.md` Plan item 15, decided
+  2026-11-06): start the route before its first claim in or covering the
+  interest, and end it after the floor that certifies its last such claim's
+  withdrawal. Update `a_disjoint_interest_is_answered_with_nothing` to match.
+  What a peer makes the router hold is already capped: each route and claim
+  it sends takes one of the session's announce slots
+  (`a_lite07_claim_past_the_cap_closes_the_session`). What this bounds is
+  the state this node keeps per stream it answers.
+- Present incrementally. `View::present` walks every claim of a route per
+  change and per interest (`Router::advertise`), so a large origin costs
+  linear work per update. Do it with the scoping change, which reshapes the
+  same per-stream presentation.
+- Public API: the hop chains leave it before the cut. Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests):
+  ✅ now, behind a private chain type that lite-06 and the moq-transport
+  cluster extension keep filling (rejected: when lite-06 retires, which ships
+  them in the cut and breaks them later; only the `Cost` constants now). The
+  sweep found no reader outside this repository, and /quest-unblock confirmed
+  ✅ now the same day. It is a breaking change; the PR marks its title with `!`.
+  - `Hops`, `RouteInfo::hops`, `RouteInfo::is_anonymous`, and
+    `Cost::{MAX, DRAIN}` become `pub(crate)`; `Cost::{new, value}` stay.
+    JS `RouteInfo.hops`, moq-ffi's `MoqRouteInfo` hops, and moq-c's route
+    info drop their mirrors.
+  - A drained route is the lowest preference, never a saturated metric
+    ("drain is a preference state", in the
+    [epic](/quest/m2/cluster-routing/README.md)), so sessions stop stamping
+    `Cost::DRAIN` on GOAWAY, including on moq-transport.
+  - An origin has one identity on both wires, seeded from `Config.hop`. Today
+    the lite-07 route node is `route::Node::random()`
+    (`rs/moq-net/src/model/origin.rs`) and lite-06 derives a different hop
+    from it (`route_hop`).
 
 ## Related
 

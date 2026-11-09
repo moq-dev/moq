@@ -1,6 +1,6 @@
 //! POC is a timestamp only when the stream declares a proportional clock.
 //!
-//! h264-reader owns AVC syntax; scuffle-h265 owns HEVC SPS/VUI syntax. The
+//! h264-reader owns AVC syntax; `codec::h265::Sps` owns HEVC SPS/VUI syntax. The
 //! private HEVC reader stops at the first independent slice's POC prefix.
 //! Only owned POC state survives between calls.
 
@@ -203,11 +203,13 @@ impl Clock {
 			for bytes in bootstrap.into_iter().chain(nals(&unit.data)?) {
 				let kind = (bytes[0] >> 1) & 63;
 				match kind {
+					// Pictures are timed by their base layer, whose slices only reference its own sets.
+					33 | 34 if !crate::codec::h265::is_base_layer(&bytes) => {}
 					33 => {
-						let sps = crate::codec::h265::parse_full_rbsp(&bytes).map_err(|err| err.to_string())?;
+						let sps = crate::codec::h265::Sps::parse(&bytes).map_err(|err| err.to_string())?;
 						Arc::make_mut(&mut ctx)
 							.sets
-							.insert(sps.sps_seq_parameter_set_id, Arc::new(sps));
+							.insert(u32::from(sps.head.id), Arc::new(sps));
 					}
 					34 => {
 						let rbsp = crate::codec::annexb::rbsp_bytes(&bytes, 2).ok_or("invalid HEVC PPS")?;
@@ -291,7 +293,7 @@ fn hevc_prefix(
 	rbsp: &[u8],
 	kind: u8,
 	pictures: &BTreeMap<u32, HevcPps>,
-	sets: &BTreeMap<u64, Arc<scuffle_h265::SpsRbsp>>,
+	sets: &BTreeMap<u32, Arc<crate::codec::h265::Sps>>,
 ) -> Result<(i64, u32, Option<Rate>), String> {
 	let mut r = BitReader::new(rbsp);
 	let err = |err: BitReaderError| format!("{err:?}");
@@ -303,7 +305,8 @@ fn hevc_prefix(
 	}
 	let id = r.read_ue("slice_pic_parameter_set_id").map_err(err)?;
 	let pps = pictures.get(&id).ok_or("missing HEVC PPS")?;
-	let sps = sets.get(&u64::from(pps.sps)).ok_or("missing HEVC SPS")?;
+	let sps = sets.get(&pps.sps).ok_or("missing HEVC SPS")?;
+	let tail = sps.tail.as_ref().ok_or("HEVC SPS refused after its head")?;
 	// The first independent slice has no segment address or inherited header.
 	// Stop as soon as its POC is available, before reference lists and slice data.
 	r.skip(pps.extra.into(), "slice_reserved_flag").map_err(err)?;
@@ -314,23 +317,21 @@ fn hevc_prefix(
 	if pps.output {
 		r.skip(1, "pic_output_flag").map_err(err)?;
 	}
-	if sps.separate_colour_plane_flag {
+	if sps.head.separate_colour_plane_flag {
 		r.skip(2, "colour_plane_id").map_err(err)?;
 	}
-	let width = u32::from(sps.log2_max_pic_order_cnt_lsb_minus4) + 4;
+	let width = u32::from(tail.log2_max_pic_order_cnt_lsb);
 	let lsb = if matches!(kind, 19 | 20) {
 		0
 	} else {
 		i64::from(r.read_var::<u32>(width, "slice_pic_order_cnt_lsb").map_err(err)?)
 	};
-	let info = sps.vui_parameters.as_ref().and_then(|vui| vui.vui_timing_info.as_ref());
-	let rate = info
-		.filter(|info| info.poc_proportional_to_timing_flag)
-		.map(|info| Rate {
-			numerator: u64::from(info.num_units_in_tick.get())
-				* (u64::from(info.num_ticks_poc_diff_one_minus1.unwrap_or(0)) + 1),
-			denominator: info.time_scale.get(),
-		});
+	let rate = tail.vui.timing.as_ref().and_then(|timing| {
+		Some(Rate {
+			numerator: u64::from(timing.num_units_in_tick) * timing.ticks_poc_diff_one?,
+			denominator: timing.time_scale,
+		})
+	});
 	Ok((lsb, width, rate))
 }
 
@@ -615,11 +616,9 @@ mod tests {
 			for output in [false, true] {
 				for separate in [false, true] {
 					for extra in [0, 7] {
-						let mut sps = scuffle_h265::SpsNALUnit::parse(crate::codec::h265::fixtures::SPS)
-							.unwrap()
-							.rbsp;
-						sps.separate_colour_plane_flag = separate;
-						sps.log2_max_pic_order_cnt_lsb_minus4 = 12;
+						let mut sps = crate::codec::h265::Sps::parse(crate::codec::h265::fixtures::SPS).unwrap();
+						sps.head.separate_colour_plane_flag = separate;
+						sps.tail.as_mut().unwrap().log2_max_pic_order_cnt_lsb = 16;
 						let sets = BTreeMap::from([(0, Arc::new(sps))]);
 						let pictures = BTreeMap::from([(
 							0,
@@ -742,6 +741,6 @@ impl Clone for AvcContext {
 
 #[derive(Clone, Default)]
 struct HevcContext {
-	sets: BTreeMap<u64, Arc<scuffle_h265::SpsRbsp>>,
+	sets: BTreeMap<u32, Arc<crate::codec::h265::Sps>>,
 	pictures: BTreeMap<u32, HevcPps>,
 }

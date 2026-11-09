@@ -97,6 +97,9 @@ class FakeWorklet {
 	get length(): number {
 		return this.ring?.length ?? 0;
 	}
+	get skips(): number {
+		return this.ring?.skips ?? 0;
+	}
 	// Render one quantum and report the ring's state back to the main thread.
 	read(output: Float32Array[]): number {
 		const ring = this.ring;
@@ -108,6 +111,9 @@ class FakeWorklet {
 			stalled: ring.stalled,
 			anchored: ring.anchored,
 			underruns: ring.underruns,
+			skips: ring.skips,
+			trimmed: ring.trimmed,
+			accelerated: ring.accelerated,
 			silent: ring.silent,
 			epoch: this.#epoch,
 		};
@@ -361,6 +367,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		context: decoder.out.context,
 		stalled: () => decoder.out.stalled.peek(),
 		stats: () => decoder.out.stats.peek(),
+		timestamp: () => decoder.out.timestamp.peek(),
+		feedback: () => decoder.feedback(Moq.Path.from("watched")),
 		arrivals: () => decoder.arrivals(),
 		error: decoder.out.error,
 		play,
@@ -1000,6 +1008,93 @@ for (const cmaf of [false, true]) {
 	});
 }
 
+describe("Decoder stalls", () => {
+	// Play a quantum, so the rendition is playing, then end it the given way and run the ring dry.
+	async function stopAfterPlaying(stop: (playback: Awaited<ReturnType<typeof play>>) => void) {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			expect(ring.read([new Float32Array(128), new Float32Array(128)])).toBe(128);
+			await microtasks();
+			expect(playback.stalled()).toBe(false);
+
+			stop(playback);
+			await microtasks();
+			drain(ring);
+			await microtasks();
+			return { stalls: playback.stats()?.stalls ?? 0, feedback: playback.feedback().audio?.stalls ?? 0 };
+		} finally {
+			playback.close();
+		}
+	}
+
+	it("counts a playing rendition that runs dry", async () => {
+		expect(await stopAfterPlaying(() => {})).toEqual({ stalls: 1, feedback: 1 });
+	});
+
+	it("counts nothing once the rendition leaves the catalog", async () => {
+		expect(await stopAfterPlaying((playback) => playback.remove())).toEqual({ stalls: 0, feedback: 0 });
+	});
+
+	it("counts nothing once the rendition fails to decode", async () => {
+		const counts = await stopAfterPlaying(() => codecErrors.at(-1)?.(new DOMException("bad", "EncodingError")));
+		expect(counts).toEqual({ stalls: 0, feedback: 0 });
+	});
+
+	it("counts nothing after a switch to instant", async () => {
+		expect(await stopAfterPlaying((playback) => playback.delay.set("instant"))).toEqual({ stalls: 0, feedback: 0 });
+	});
+
+	it("counts nothing while the decoder is disabled", async () => {
+		expect(await stopAfterPlaying((playback) => playback.decoding.set(false))).toEqual({ stalls: 0, feedback: 0 });
+	});
+
+	it("treats the return from instant as a startup", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			ring.read([new Float32Array(128), new Float32Array(128)]);
+			await microtasks();
+			playback.delay.set("instant");
+			await microtasks();
+			// The worklet keeps rendering the flushed ring, which reports it stalled.
+			ring.read([new Float32Array(128), new Float32Array(128)]);
+			await microtasks();
+			expect(playback.stalled()).toBe(true);
+			// The ring waits for the returning rendition's first audio, which is no stall.
+			playback.delay.set(Milli(100));
+			await microtasks();
+			await playback.play(12);
+			ring.read([new Float32Array(128), new Float32Array(128)]);
+			await microtasks();
+			expect(playback.stats()?.stalls ?? 0).toBe(0);
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("clears the playhead and stall state with the ring that reported them", async () => {
+		const playback = await play(Milli(100));
+		try {
+			await playback.play(12);
+			const [ring] = playback.rings();
+			ring.read([new Float32Array(128), new Float32Array(128)]);
+			await microtasks();
+			expect(playback.timestamp()).toBeDefined();
+			expect(playback.stalled()).toBe(false);
+
+			playback.enabled.set(false);
+			await microtasks();
+			expect(playback.timestamp()).toBeUndefined();
+			expect(playback.stalled()).toBe(true);
+		} finally {
+			playback.close();
+		}
+	});
+});
+
 describe("fatal decoder errors", () => {
 	// A failure in the read loop, not a WebCodecs callback, must still reach `error` and release the
 	// subscription, instead of leaving the player apparently live.
@@ -1268,7 +1363,7 @@ describe("Decoder across a rename", () => {
 			const delay = playback.sync.out.delay.peek();
 			expect(delay).toBeGreaterThan(Milli(200));
 			const ring = playback.ring();
-			const before = { ...playback.counts, buffered: ring?.length ?? 0 };
+			const before = { silent: playback.counts.silent, skips: ring?.skips ?? 0 };
 			let lowest = delay;
 			const watch = new Effect();
 			watch.subscribe(playback.sync.out.delay, (value) => {
@@ -1279,10 +1374,8 @@ describe("Decoder across a rename", () => {
 			await playback.run(26_000);
 			watch.close();
 
-			const { inserted, played, silent } = playback.counts;
-			const buffered = playback.ring()?.length ?? 0;
-			const skipped = inserted - before.inserted - (played - before.played) - (buffered - before.buffered);
-			expect({ skipped, silent: silent - before.silent }).toEqual({ skipped: 0, silent: 0 });
+			const skips = (playback.ring()?.skips ?? 0) - before.skips;
+			expect({ skips, silent: playback.counts.silent - before.silent }).toEqual({ skips: 0, silent: 0 });
 			expect(playback.ring()).toBe(ring);
 			expect(lowest).toBeGreaterThanOrEqual(delay);
 		} finally {
@@ -1626,13 +1719,17 @@ for (const cmaf of [false, true]) {
 					(buffered ? [0, 20, 40, 60, 80] : [140, 160]).map((ms) => start + ms * 1000),
 				);
 
-				// A running live ring sheds old audio when it gets ahead; a buffered ring plays it all.
+				// A running live ring sheds old audio and lands on its floor once it reaches the fast
+				// accelerate threshold, four times a 100 ms floor plus its 20 ms band; a buffered ring
+				// plays it all.
 				const ring = worklets.at(-1)?.ring;
 				if (!ring) throw new Error("no running audio ring");
 				ring.reset();
 				const samples = [new Float32Array(4800), new Float32Array(4800)];
-				for (const timestamp of [0, 100_000, 200_000]) ring.write(Micro(timestamp), samples);
-				expect(ring.length).toBe(samples[0].length * (buffered ? 3 : 1));
+				for (let timestamp = 0; timestamp < 500_000; timestamp += 100_000)
+					ring.write(Micro(timestamp), samples);
+				expect(ring.length).toBe(samples[0].length * (buffered ? 5 : 1));
+				expect(ring.skips).toBe(buffered ? 0 : 1);
 			} finally {
 				playback.close();
 				await microtasks();

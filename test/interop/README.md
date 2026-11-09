@@ -20,6 +20,13 @@ and Bun over WebSocket and WebTransport. Fresh readers request or follow the
 claim's own path and child paths. A reader-first case checks that an absent
 request ends while its follower waits for the publisher to arrive.
 
+Until [`js/net` speaks lite-07's route layer](../../quest/m2/cluster-routing/routes/js.md),
+native JS dials its defaults in the matrix, leaving its grant unchecked, and every
+lane that would run it on lite-07 records a skip naming that quest: claims, track
+replacement, sockets, the browser route key proof, and the lite-07 compress and
+drop legs. The compressed catalog runs without its lite-07 reader, and
+`--versions moq-lite-07-wip` refuses JS clients.
+
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
@@ -237,7 +244,9 @@ a varint rather than the draft's 64 bits, so `@moq/net` sends no proof from
 Firefox, and the tab must connect unproven. A build that cannot prove yet skips,
 or fails under `CI_STRICT`, which release PRs set, so the lite-07 cut waits for
 both browsers to prove. A build the table says cannot prove but that does fails,
-so the table follows the browsers.
+so the table follows the browsers. Until
+[routes/js.md](../../quest/m2/cluster-routing/routes/js.md) ports `js/net` to the
+route layer, the lane records a skip naming it.
 
 ## moq-transport
 
@@ -546,11 +555,14 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-Firefox's replacement case is quarantined from the default run after intermittent
-audio-tone failures. Investigate the missing tone samples alongside
-[the audio playout work](https://github.com/moq-dev/moq/pull/8058), then restore it.
-Run it explicitly with `just test media --media-engines firefox --media-cases replacement`;
-its content, sync, switch, and fallback assertions remain active.
+The replacement case is quarantined from the default run on every engine until
+[the JS route-layer port](../../quest/m2/cluster-routing/routes/js.md) lands,
+because both publishers use lite-07. Firefox also has a separate quarantine for
+intermittent audio-tone failures; investigate those alongside
+[the audio playout work](https://github.com/moq-dev/moq/pull/8058) before restoring
+Firefox's default case. Run replacement explicitly with
+`just test media --media-cases replacement` (add `--media-engines firefox` for
+Firefox); its content, sync, switch, and fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media

@@ -44,16 +44,13 @@ mod bloom_token_log;
 use bloom_token_log::BloomTokenLog;
 
 pub mod connection;
-pub use crate::connection::{CreditStats, Datagrams, Event, FrameStats, PathStats, Streams, UdpStats, recv, send};
+pub use crate::connection::streams::{recv, send};
 
 pub mod stream;
 #[cfg(feature = "mux")]
 #[doc(hidden)]
 pub use connection::mux;
 pub(crate) use stream::{Dir, Id as StreamId};
-
-// The configs take and report rustls types, so callers name the same version.
-pub use rustls;
 
 mod config;
 mod limits;

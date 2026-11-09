@@ -33,6 +33,8 @@ fn import(url: &str, fingerprint: &str) -> Child {
 /// Start `moq <global> import ts`, publishing `name` from stdin to the relay at `url`.
 fn import_as(url: &str, fingerprint: &str, global: &[&str], name: &str) -> Child {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	// The guard on host timers is for tests, not the binaries they run.
+	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
 	for (var, _) in std::env::vars_os() {
 		if var.to_string_lossy().starts_with("MOQ_") {
@@ -88,7 +90,7 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 	let event = running(&mut child, "the announce", announced.next())
 		.await
 		.expect("origin closed");
-	let moq_tokio::moq_net::announce::Event::Present(announce) = event else {
+	let moq_net::announce::Event::Present(announce) = event else {
 		panic!("the first announce event is {event:?}, not a start");
 	};
 	assert_eq!(announce.prefix.as_str(), "demo");

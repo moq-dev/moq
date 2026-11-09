@@ -86,6 +86,8 @@ pub const MOQ_ERROR_UNSUPPORTED_CATALOG: i32 = -43;
 pub const MOQ_ERROR_UNSUPPORTED_CONFIG: i32 = -44;
 /// A number is outside the range the call accepts.
 pub const MOQ_ERROR_OUT_OF_RANGE: i32 = -45;
+/// The session or peer does not support the requested operation.
+pub const MOQ_ERROR_UNSUPPORTED: i32 = -46;
 
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
@@ -354,6 +356,10 @@ pub enum Error {
 	/// above what a PROBE target carries.
 	#[error("out of range: {0}")]
 	OutOfRange(String),
+
+	/// The session or peer does not support the requested operation.
+	#[error("unsupported: {0}")]
+	Unsupported(String),
 }
 
 impl From<moq_json::Error> for Error {
@@ -502,6 +508,7 @@ impl ffi::ReturnCode for Error {
 		match self {
 			// A refused request's expiry has no session or stream code, so it gets its own status.
 			Error::Moq(moq_net::Error::Expired) => MOQ_ERROR_EXPIRED,
+			Error::Moq(moq_net::Error::Unsupported) => MOQ_ERROR_UNSUPPORTED,
 			Error::Moq(_) => MOQ_ERROR_MOQ,
 			Error::Url(_) => MOQ_ERROR_URL,
 			Error::Utf8(_) => MOQ_ERROR_UTF8,
@@ -545,6 +552,7 @@ impl ffi::ReturnCode for Error {
 			Error::InvalidConfig(_) => MOQ_ERROR_INVALID_CONFIG,
 			Error::UnresolvableBroadcast(_) => MOQ_ERROR_UNRESOLVABLE_BROADCAST,
 			Error::OutOfRange(_) => MOQ_ERROR_OUT_OF_RANGE,
+			Error::Unsupported(_) => MOQ_ERROR_UNSUPPORTED,
 		}
 	}
 }

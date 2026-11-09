@@ -87,6 +87,16 @@ pub struct Config {
 	/// [`Frame::resize`](crate::Frame::resize) to the rest; the hint only lets a
 	/// decoder that can make that a no-op do so.
 	pub scale_hint: Option<Size>,
+	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
+	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
+	/// without a copy. A named node is used even when it fails to open.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	pub vaapi: Option<std::path::PathBuf>,
+	/// The V4L2 M2M decoder node, such as `/dev/video10`. `None` searches every
+	/// node for one that decodes H.264, which a driver whose format enumeration
+	/// is wrong can defeat.
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	pub v4l2: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -265,13 +275,21 @@ impl Decoder {
 	pub fn decode(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Wait for the first keyframe: a decoder started mid-GOP can't decode
 		// delta frames, and the parameter sets ride along with the keyframe.
-		if !self.got_keyframe {
-			if !keyframe {
-				return Ok(Vec::new());
-			}
-			self.got_keyframe = true;
+		if !self.got_keyframe && !keyframe {
+			return Ok(Vec::new());
 		}
 
+		let frames = self.submit(payload, timestamp, keyframe);
+		// Set by how the keyframe went rather than by its arrival: one that failed
+		// leaves nothing for the deltas behind it to predict from.
+		if keyframe {
+			self.got_keyframe = frames.is_ok();
+		}
+		self.deliver(frames?)
+	}
+
+	/// Convert one access unit and hand it to the backend.
+	fn submit(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		let access_unit = self.conversion.access_unit(payload, keyframe)?;
 		if keyframe
 			&& let Some(color) = super::vui::signalled(self.codec, &access_unit)
@@ -279,8 +297,7 @@ impl Decoder {
 		{
 			self.switches.push_back((timestamp, color));
 		}
-		let frames = self.backend.decode(access_unit, timestamp, keyframe)?;
-		self.deliver(frames)
+		self.backend.decode(access_unit, timestamp, keyframe)
 	}
 
 	/// Return the frames the backend still holds once the stream has ended.
@@ -707,14 +724,14 @@ mod tests {
 			.unwrap();
 		let mut export =
 			moq_mux::container::fmp4::Export::new(moq_mux::Source::new(origin.consume(), broadcast), catalog)
-				.with_max_delay(std::time::Duration::from_secs(30));
+				.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(true);
+		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(true);
 		import.decode(&init).unwrap();
 		import.decode(&fragment).unwrap();
 
@@ -844,6 +861,28 @@ mod tests {
 		assert_eq!(color(Default::default()), Some(Color::BT601));
 	}
 
+	/// A keyframe the backend fails to decode leaves the gate closed, so the
+	/// deltas behind it never reach a codec holding no reference for them.
+	#[test]
+	fn a_keyframe_that_fails_to_decode_keeps_the_gate_closed() {
+		let kind = super::Kind::Named(probe::IMMEDIATE_NAME.into());
+		let mut decoder = super::Decoder::new(&probe_catalog(), &decode_config(kind)).unwrap();
+		let at = |micros| Timestamp::from_micros(micros).unwrap();
+
+		let corrupt = bytes::Bytes::from_static(probe::CORRUPT);
+		assert!(decoder.decode(&corrupt, at(0), true).is_err());
+		let delta = bytes::Bytes::from_static(&[0]);
+		assert!(decoder.decode(&delta, at(33_333), false).unwrap().is_empty());
+
+		// The next keyframe that decodes opens it.
+		assert_eq!(decoder.decode(&delta, at(66_666), true).unwrap().len(), 1);
+		assert_eq!(decoder.decode(&delta, at(99_999), false).unwrap().len(), 1);
+
+		// And one that fails mid-stream closes it again.
+		assert!(decoder.decode(&corrupt, at(133_332), true).is_err());
+		assert!(decoder.decode(&delta, at(166_665), false).unwrap().is_empty());
+	}
+
 	/// An inline-H.264 catalog the test probes accept.
 	fn probe_catalog() -> hang::catalog::VideoConfig {
 		hang::catalog::VideoConfig::new(hang::catalog::H264 {
@@ -861,6 +900,7 @@ mod tests {
 			kind: super::Kind::Named(probe::NATIVE_NAME.into()),
 			output,
 			scale_hint,
+			..Default::default()
 		};
 		let mut decoder = super::Decoder::new(&probe_catalog(), &config).expect("the native probe opens");
 		let mut frames = decoder

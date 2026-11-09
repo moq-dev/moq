@@ -16,8 +16,11 @@ type State =
 	| { kind: "ready"; producer: netGroup.Producer; next: number }
 	/** No head is coming: refused, empty, failed, claimed, or the subscription went. */
 	| { kind: "done" }
-	/** The track ended, so no tail is coming and a head is the whole group. */
-	| { kind: "ended" };
+	/**
+	 * The track ended, so no tail is coming and a head is the whole group: `producer` is a head
+	 * its fetch stream is still writing.
+	 */
+	| { kind: "ended"; producer?: netGroup.Producer };
 
 /**
  * The join of one live group: the head a draft-18 joining FETCH or a draft-22 fill brings and
@@ -47,8 +50,6 @@ export class Join {
 	#tail: Tail;
 	#settled: Promise<void>;
 	#settle!: () => void;
-	// A head still being written when the track ended, finished with its stream.
-	#ended?: netGroup.Producer;
 
 	/**
 	 * `counted` says the head's stream is one of the subscription's own, which PUBLISH_DONE's
@@ -87,16 +88,19 @@ export class Join {
 	 * sequence, the join gave up, or a second stream answers the one request.
 	 */
 	open(create: () => netGroup.Producer): netGroup.Producer | undefined {
-		const { kind } = this.#state;
-		// After the track ended the head still lands, as the whole group.
-		if (kind !== "pending" && kind !== "ended") return undefined;
-		const producer = create();
-		if (kind === "ended") {
-			this.#ended = producer;
+		const state = this.#state;
+		if (state.kind === "pending") {
+			const producer = create();
+			this.#state = { kind: "writing", producer, next: 0 };
 			return producer;
 		}
-		this.#state = { kind: "writing", producer, next: 0 };
-		return producer;
+		// After the track ended the head still lands, as the whole group.
+		if (state.kind === "ended" && !state.producer) {
+			const producer = create();
+			this.#state = { kind: "ended", producer };
+			return producer;
+		}
+		return undefined;
 	}
 
 	/** The head wrote its next object. */
@@ -104,32 +108,38 @@ export class Join {
 		if (this.#state.kind === "writing") this.#state.next += 1;
 	}
 
-	/** The fetch stream ended cleanly: the head waits for its tail, or none came at all. */
-	finish(): void {
-		if (this.#ended) {
-			this.#ended.finish();
-			this.#ended = undefined;
-			return;
-		}
+	/**
+	 * A fetch stream ended cleanly, having written `producer` (what `open` gave it): the head
+	 * waits for its tail, or none came at all. A stream `open` turned away changes nothing.
+	 */
+	finish(producer: netGroup.Producer | undefined): void {
 		const state = this.#state;
-		if (state.kind === "writing") {
-			this.#transition({ kind: "ready", producer: state.producer, next: state.next });
-		} else if (state.kind === "pending") {
+		if (state.kind === "pending") {
 			// An empty fetch stream: there is no head.
 			this.#transition({ kind: "done" });
+		} else if (state.kind === "writing" && state.producer === producer) {
+			this.#transition({ kind: "ready", producer: state.producer, next: state.next });
+		} else if (state.kind === "ended" && state.producer && state.producer === producer) {
+			state.producer.finish();
+			this.#state = { kind: "done" };
 		}
 	}
 
-	/** The fetch stream failed: a half-written head is a group with no end. */
-	fail(err: Error): void {
-		if (this.#ended) {
-			this.#ended.abort(err);
-			this.#ended = undefined;
-			return;
-		}
+	/**
+	 * A fetch stream failed, having written `producer` (what `open` gave it, if anything): a
+	 * half-written head is a group with no end. A stream `open` turned away changes nothing.
+	 */
+	fail(err: Error, producer: netGroup.Producer | undefined): void {
 		const state = this.#state;
-		if (state.kind === "writing" || state.kind === "ready") state.producer.abort(err);
-		if (state.kind !== "ended") this.#transition({ kind: "done" });
+		if (state.kind === "pending") {
+			this.#transition({ kind: "done" });
+		} else if (state.kind === "writing" && state.producer === producer) {
+			state.producer.abort(err);
+			this.#transition({ kind: "done" });
+		} else if (state.kind === "ended" && state.producer && state.producer === producer) {
+			state.producer.abort(err);
+			this.#state = { kind: "done" };
+		}
 	}
 
 	/**
@@ -211,8 +221,8 @@ export class Join {
 	end(): void {
 		const state = this.#state;
 		if (state.kind === "ready") state.producer.finish();
-		if (state.kind === "writing") this.#ended = state.producer;
-		if (state.kind !== "done") this.#transition({ kind: "ended" });
+		if (state.kind === "pending" || state.kind === "ready") this.#transition({ kind: "ended" });
+		if (state.kind === "writing") this.#transition({ kind: "ended", producer: state.producer });
 	}
 
 	/**
@@ -221,10 +231,16 @@ export class Join {
 	 */
 	cancel(err: Error): void {
 		const state = this.#state;
-		if (state.kind === "writing" || state.kind === "ready") state.producer.abort(err);
-		this.#ended?.abort(err);
-		this.#ended = undefined;
-		if (state.kind !== "done" && state.kind !== "ended") this.#transition({ kind: "done" });
+		if (state.kind === "writing" || state.kind === "ready") {
+			state.producer.abort(err);
+			this.#transition({ kind: "done" });
+		} else if (state.kind === "pending") {
+			this.#transition({ kind: "done" });
+		} else if (state.kind === "ended") {
+			// Already settled: only a head still being written is left to drop.
+			state.producer?.abort(err);
+			this.#state = { kind: "done" };
+		}
 	}
 
 	#transition(next: State): void {

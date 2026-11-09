@@ -131,7 +131,7 @@ async fn datagram_roundtrip(version: &str, plaintext: &[u8]) {
 		consumer.set_priority(1);
 		let mut priority = producer.priority();
 		while priority != Some(1) {
-			priority = kio::wait(|waiter| producer.poll_priority(waiter, priority)).await;
+			priority = kio::wait(|waiter| producer.poll_priority_changed(waiter)).await;
 		}
 
 		let sequence = producer.append(Timestamp::from_millis(9).unwrap(), plaintext).unwrap();

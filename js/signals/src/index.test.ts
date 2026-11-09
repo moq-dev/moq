@@ -1,6 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano, now, Second, sleep, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { type Installed, Manual, Milli, Nano, now, Second, yieldNow } from "@moq/clock";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -121,6 +120,97 @@ describe("Signal", () => {
 		await settle();
 		expect(seen).toEqual([]); // it subscribed at 2, which never changed
 		dispose();
+	});
+
+	test("a silent write never hides a later change from a new listener", async () => {
+		const signal = new Signal(0);
+		signal.set(1, false); // nobody listens
+
+		const seen: number[] = [];
+		const dispose = signal.subscribe((v) => seen.push(v));
+		expect(signal.peek()).toBe(1); // the listener starts from 1
+
+		signal.set(0);
+		await settle();
+		expect(seen).toEqual([0]);
+		dispose();
+	});
+
+	test("cyclic and very deep values compare without throwing", async () => {
+		const cyclic = () => {
+			const value: { self?: unknown; n: number } = { n: 1 };
+			value.self = value;
+			return value;
+		};
+		const deep = () => {
+			let value: unknown = 0;
+			for (let i = 0; i < 100_000; i++) value = { value };
+			return value;
+		};
+
+		const signal = new Signal<unknown>(cyclic());
+		let notified = 0;
+		const dispose = signal.subscribe(() => notified++);
+		const errors = spyOn(console, "error").mockImplementation(() => {});
+		try {
+			// Past the depth bound, equal values compare unequal: an extra notification is safe.
+			signal.set(cyclic());
+			await settle();
+			signal.set(deep());
+			await settle();
+			signal.set(deep());
+			await settle();
+			expect(notified).toBe(3);
+			expect(errors).not.toHaveBeenCalled();
+		} finally {
+			errors.mockRestore();
+			dispose();
+		}
+	});
+
+	test("watch delivers the current value once, even when a write lands first", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const dispose = signal.watch((v) => seen.push(v));
+		signal.set(1);
+		await settle();
+		expect(seen).toEqual([1]);
+
+		signal.set(2);
+		await settle();
+		expect(seen).toEqual([1, 2]);
+		dispose();
+	});
+
+	test("watch delivers the current value once when a flush is already queued", async () => {
+		const signal = new Signal(0);
+		const other = signal.subscribe(() => {});
+		signal.set(1);
+		const seen: number[] = [];
+		const dispose = signal.watch((v) => seen.push(v));
+		await settle();
+		expect(seen).toEqual([1]);
+		dispose();
+		other();
+	});
+
+	test("watch delivers the current value when a queued flush nets no change", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const dispose = signal.watch((v) => seen.push(v));
+		signal.set(1);
+		signal.set(0);
+		await settle();
+		expect(seen).toEqual([0]);
+		dispose();
+	});
+
+	test("disposing a watch right away cancels its first delivery", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		signal.watch((v) => seen.push(v))();
+		await settle();
+		expect(seen).toEqual([]);
 	});
 
 	test("any number of subscribers is legitimate", async () => {
@@ -865,6 +955,41 @@ describe("Effect", () => {
 		expect(log).toEqual(["served", "released"]);
 	});
 
+	test("get() from a stale spawn does not subscribe the next run", async () => {
+		const tick = new Signal(0);
+		const other = new Signal(0);
+		const gate = Promise.withResolvers<void>();
+		let runs = 0;
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.spawn(async () => {
+				await gate.promise;
+				expect(e.get(other)).toBe(0);
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1); // stale window
+
+			gate.resolve();
+			await settle();
+			expect(runs).toBe(2);
+
+			// Only the dead run read `other`.
+			other.set(1);
+			await settle();
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+		}
+	});
+
 	test("cleanup after close fires immediately", async () => {
 		const effect = new Effect((e) => {
 			e.get(new Signal(0));
@@ -1193,10 +1318,12 @@ function thenable<T>(): PromiseLike<T> & { reactions: number; resolve: (value: T
 
 describe("race", () => {
 	test("settles with the first value to settle", async () => {
-		hostTime();
-		const slow = sleep(Nano.fromMilli(Milli(20))).then(() => "slow" as const);
-		const fast = sleep(Nano.fromMilli(Milli(1))).then(() => "fast" as const);
-		expect(await race([slow, fast])).toBe("fast");
+		const slow = Promise.withResolvers<string>();
+		const fast = Promise.withResolvers<string>();
+		const winner = race([slow.promise, fast.promise]);
+		fast.resolve("fast");
+		expect(await winner).toBe("fast");
+		slow.resolve("slow");
 	});
 
 	test("rejects with the first rejection", async () => {

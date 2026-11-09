@@ -573,7 +573,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
     dynamic = track.requests()
     pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
     fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
-    assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
+    assert (fill.start, fill.end) == (moq.Position(group=7, frame=0), 8)
     assert fill.priority == 11
     assert fill.wanted() == 7
     assert fill.is_wanted(7)
@@ -589,7 +589,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compress=True))
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
     producer = moq.json.SnapshotProducer(broadcast, track)
     consumer = moq.json.SnapshotConsumer(broadcast.consume(), "status")
 
@@ -623,7 +623,7 @@ async def test_json_stream_roundtrip():
 
 async def test_json_window_roundtrip():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compress=True))
+    track = broadcast.publish_track("log", moq.TrackInfo(timescale=1_000_000, compression=moq.Compression.DEFLATE))
     producer = moq.json.WindowProducer(track)
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     demand = producer.demand()
@@ -635,9 +635,9 @@ async def test_json_window_roundtrip():
 
     for n in range(3):
         event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-        assert event == moq.json.Timed(moq.json.WindowPush(n, {"n": n}), moq.Timestamp(n * 1_000, 1_000_000))
+        assert event == moq.json.Timed(moq.json.WindowEventPush(n, {"n": n}), moq.Timestamp(n * 1_000, 1_000_000))
     event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert event == moq.json.Timed(moq.json.WindowPop(range(0, 2)), moq.Timestamp(3_000, 1_000_000))
+    assert event == moq.json.Timed(moq.json.WindowEventPop(range(0, 2)), moq.Timestamp(3_000, 1_000_000))
 
     producer.finish()
     with pytest.raises(moq.Error.Closed):
@@ -656,10 +656,10 @@ async def test_json_window_cut_restates_the_window():
     producer.pop(1, moq.Timestamp(3, 1_000))
     events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(4)]
     assert events == [
-        moq.json.WindowPush(0, {"n": 0}),
-        moq.json.WindowPush(1, {"n": 1}),
-        moq.json.WindowPush(2, {"n": 2}),
-        moq.json.WindowPop(range(0, 1)),
+        moq.json.WindowEventPush(0, {"n": 0}),
+        moq.json.WindowEventPush(1, {"n": 1}),
+        moq.json.WindowEventPush(2, {"n": 2}),
+        moq.json.WindowEventPop(range(0, 1)),
     ]
 
     producer.cut()
@@ -675,7 +675,7 @@ async def test_json_window_cut_restates_the_window():
 
     # The restated records were already delivered, so the reader sees only the new one.
     event = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert event.value == moq.json.WindowPush(3, {"n": 3})
+    assert event.value == moq.json.WindowEventPush(3, {"n": 3})
     producer.finish()
 
 
@@ -697,9 +697,9 @@ async def test_json_window_skips_records_outside_the_checkpoint():
     consumer = moq.json.WindowConsumer(await broadcast.consume().subscribe_track("log"))
     events = [(await asyncio.wait_for(anext(consumer), timeout=5.0)).value for _ in range(3)]
     assert events == [
-        moq.json.WindowSkip(range(0, 3)),
-        moq.json.WindowPush(3, {"n": 3}),
-        moq.json.WindowPush(4, {"n": 4}),
+        moq.json.WindowEventSkip(range(0, 3)),
+        moq.json.WindowEventPush(3, {"n": 3}),
+        moq.json.WindowEventPush(4, {"n": 4}),
     ]
 
     producer.finish()
@@ -709,7 +709,7 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
-    timed = moq.TrackInfo(timescale=1_000, compress=True)
+    timed = moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE)
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", timed))
     stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", timed))
     snapshot_demand = snapshot.demand()
@@ -839,9 +839,9 @@ async def test_dynamic_broadcast_request():
     assert request is not None
     assert request.path == "dynamic/broadcast"
 
-    # A hidden job route answers once it announces, under its own instance.
+    # A hidden job route answers once it announces, under the instance its prefix route lends.
     served = request.route(hidden=True)
-    assert served.instance != dynamic.instance
+    assert served.instance == dynamic.instance
     track = served.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     served.announce()
     with pytest.raises(Exception):
@@ -1548,9 +1548,13 @@ async def test_read_frame_keeps_group_across_cancelled_call():
 def test_audio_encoder_returns_namespaced_records():
     """The codec-only encoder's results are named under ``moq.audio``."""
     encoder = moq.audio.Encoder(moq.audio.EncoderOutput(codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1))
-    packet = encoder.encode([0.0] * encoder.frame_size)
+    encoder.encode([0.0] * encoder.frame_size)
+    packet = encoder.receive()
     assert isinstance(packet, moq.audio.Packet)
     assert packet.data
+    assert encoder.receive() is None
+    encoder.flush()
+    assert encoder.receive() is None
     finish = encoder.finish()
     assert isinstance(finish, moq.audio.EncoderFinish)
 
@@ -1566,7 +1570,9 @@ def test_audio_encoder_frame_init_and_bitrate():
     assert init.format == moq.media.AudioFormat.OPUS
     assert init.data[:8] == b"OpusHead"
     encoder.set_bitrate(32_000)
-    assert encoder.encode([0.0] * encoder.frame_size).data
+    encoder.encode([0.0] * encoder.frame_size)
+    packet = encoder.receive()
+    assert packet is not None and packet.data
 
     with pytest.raises(moq.Error.Audio):
         moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=15)))
@@ -1702,6 +1708,7 @@ async def test_decode_video_frame():
     decoder.cancel()
     assert isinstance(frame, moq.VideoDecodedFrame)
     assert frame.timestamp().scale == 1_000_000
+    assert frame.surface() is None
 
     i420 = frame.pixels(moq.VideoPixelFormat.I420)
 
@@ -1713,6 +1720,15 @@ async def test_decode_video_frame():
 
     video.finish()
     broadcast.close()
+
+
+def test_video_surface_unknown_kind() -> None:
+    """A surface kind this package predates maps to the fallback arm instead of failing."""
+    from moq._records import _surface
+
+    assert _surface(None) is None
+    assert _surface(cast(Any, moq_ffi.MoqVideoSurface.PIXEL_BUFFER(7))) == moq.VideoSurfacePixelBuffer(7)
+    assert _surface(cast(Any, object())) == moq.VideoSurfaceUnknown()
 
 
 async def test_broadcast_is_reachable_only_while_announced():

@@ -107,6 +107,15 @@ pub enum Error {
 		status: u16,
 	},
 
+	/// A playlist or init segment, which import must hold whole, was larger than it holds.
+	#[error("{url} is larger than the {limit} bytes import holds")]
+	ResourceTooLarge {
+		/// The resource, without its credentials.
+		url: url::Url,
+		/// The most bytes import holds for this kind of resource.
+		limit: usize,
+	},
+
 	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
 	#[error("HLS {kind} sequence {value} is too large to encode")]
 	SequenceOverflow {
@@ -196,6 +205,17 @@ impl Error {
 		}
 	}
 
+	/// Whether the source denied access to a broadcast or track, which a server answers with `403`.
+	pub fn is_denied(&self) -> bool {
+		match self {
+			Self::Moq(moq_net::Error::Unauthorized) | Self::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)) => {
+				true
+			}
+			Self::CatalogFailed { source } | Self::MediaFailed { source, .. } => source.is_denied(),
+			_ => false,
+		}
+	}
+
 	/// Whether this is the source's settled answer, which another import pass cannot change.
 	///
 	/// A response that arrived is the server's answer, and only a narrow set of statuses invites
@@ -248,6 +268,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A denial stays one however the export wraps it.
+	#[test]
+	fn denial_survives_wrapping() {
+		let denied = Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized));
+		let wrapped = Error::CatalogFailed {
+			source: Box::new(Error::MediaFailed {
+				track: "video".into(),
+				source: Box::new(denied),
+			}),
+		};
+		assert!(wrapped.is_denied());
+		assert!(!Error::Moq(moq_net::Error::NotFound).is_denied());
+	}
 
 	#[tokio::test]
 	async fn http_error_redacts_url() {

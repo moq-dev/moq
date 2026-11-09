@@ -23,7 +23,7 @@ use tokio::sync::watch;
 pub struct Trigger {
 	tx: watch::Sender<Option<Window>>,
 	drain_timeout: Duration,
-	activity: moq_net::server::Activity,
+	admission: moq_net::server::Admission,
 }
 
 impl Trigger {
@@ -45,7 +45,7 @@ impl Trigger {
 		}
 
 		// Admission records its own completion, even if nobody polls `drained`.
-		self.activity.drain();
+		self.admission.drain();
 	}
 }
 
@@ -118,6 +118,7 @@ impl Signals {
 
 /// The sessions a drain is waiting on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tally {
 	/// Served sessions whose closure has not yet been observed by supervision.
 	pub open: usize,
@@ -127,6 +128,7 @@ pub struct Tally {
 
 /// How the drain ended, including sessions cut by its deadline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Drained {
 	/// Sessions still open at the deadline that were force-closed.
 	pub forced: usize,
@@ -161,7 +163,7 @@ struct Window {
 /// and drains itself via [`drain_session`](Self::drain_session) when it fires.
 #[derive(Clone)]
 pub struct Observer {
-	pub(crate) activity: moq_net::server::Activity,
+	pub(crate) admission: moq_net::server::Admission,
 	rx: watch::Receiver<Option<Window>>,
 	state: watch::Sender<State>,
 	changes: watch::Receiver<State>,
@@ -178,7 +180,7 @@ impl Observer {
 		let trigger = Trigger {
 			tx,
 			drain_timeout,
-			activity: observer.activity.clone(),
+			admission: observer.admission.clone(),
 		};
 		(trigger, observer)
 	}
@@ -200,7 +202,7 @@ impl Observer {
 			state,
 			changes,
 			seen: Tally::default(),
-			activity: Default::default(),
+			admission: Default::default(),
 			drain_timeout,
 		}
 	}
@@ -250,9 +252,9 @@ impl Observer {
 		}
 	}
 
-	/// The admission tracker the drain waits on; give it to your own listener's `Config::activity`.
-	pub fn activity(&self) -> &moq_net::server::Activity {
-		&self.activity
+	/// The admission tracker the drain waits on; give it to your own listener's `Config::admission`.
+	pub fn admission(&self) -> &moq_net::server::Admission {
+		&self.admission
 	}
 
 	/// When the drain window ends, if [`Trigger::start`] has fired.
@@ -277,9 +279,11 @@ impl Observer {
 			self.state.send_modify(|state| state.tally.open += 1);
 		}
 		Serving {
-			_active: self.activity.enter(),
-			counted,
-			closed: None,
+			_active: self.admission.enter(),
+			count: match counted {
+				true => Count::Open,
+				false => Count::Uncounted,
+			},
 			shutdown: self.clone(),
 		}
 	}
@@ -317,7 +321,7 @@ impl Observer {
 		let window = self.rx.borrow().expect("started");
 		let wait_ended = tokio::select! {
 			biased;
-			closed = self.activity.close() => closed.min(window.deadline),
+			closed = self.admission.close() => closed.min(window.deadline),
 			() = self.expired() => window.deadline,
 		};
 		// Either way, wait for the counted sessions: past the deadline they are still
@@ -416,47 +420,60 @@ impl Observer {
 pub struct Serving {
 	// `None` only once the drain closed admission, which the connection's own
 	// admission prevents while it is held before the SETUP reply.
-	_active: Option<moq_net::server::Active>,
-	/// False for a session served after the deadline, which is not counted.
-	counted: bool,
-	closed: Option<Instant>,
+	_active: Option<moq_net::server::Admitted>,
+	count: Count,
 	pub(crate) shutdown: Observer,
+}
+
+/// Where a [`Serving`] session is counted in the [`Tally`].
+#[derive(Clone, Copy)]
+enum Count {
+	/// Served after the deadline, so not counted at all.
+	Uncounted,
+	/// Counted as open.
+	Open,
+	/// Closed at this instant, and counted as ending until it drops.
+	Ending(Instant),
 }
 
 impl Serving {
 	pub(crate) async fn drain(&self, session: &moq_net::Session) {
-		self.shutdown.drain(session, self.counted).await;
+		let counted = !matches!(self.count, Count::Uncounted);
+		self.shutdown.drain(session, counted).await;
 	}
 
+	/// The session closed: count it as ending until this drops. Only the first call counts.
 	pub(crate) fn closed(&mut self) {
-		self.closed = Some(Instant::now());
-		if self.counted {
-			self.shutdown.state.send_modify(|state| {
-				state.tally.open -= 1;
-				state.tally.ending += 1;
-			});
+		if !matches!(self.count, Count::Open) {
+			return;
 		}
+		self.count = Count::Ending(Instant::now());
+		self.shutdown.state.send_modify(|state| {
+			state.tally.open -= 1;
+			state.tally.ending += 1;
+		});
 	}
 }
 
 impl Drop for Serving {
 	fn drop(&mut self) {
-		if self.counted {
-			let now = Instant::now();
-			let ending = self
-				.closed
-				.zip(self.shutdown.deadline())
-				.is_some_and(|(closed, deadline)| closed < deadline && now >= deadline);
-			self.shutdown.state.send_modify(|state| {
-				if self.closed.is_some() {
-					state.tally.ending -= 1;
-				} else {
-					state.tally.open -= 1;
-				}
-				state.ending += usize::from(ending);
-				state.last_left = Some(state.last_left.map_or(now, |last| last.max(now)));
-			});
-		}
+		let closed = match self.count {
+			Count::Uncounted => return,
+			Count::Open => None,
+			Count::Ending(closed) => Some(closed),
+		};
+		let now = Instant::now();
+		let ending = closed
+			.zip(self.shutdown.deadline())
+			.is_some_and(|(closed, deadline)| closed < deadline && now >= deadline);
+		self.shutdown.state.send_modify(|state| {
+			match closed {
+				Some(_) => state.tally.ending -= 1,
+				None => state.tally.open -= 1,
+			}
+			state.ending += usize::from(ending);
+			state.last_left = Some(state.last_left.map_or(now, |last| last.max(now)));
+		});
 	}
 }
 
@@ -560,7 +577,7 @@ mod tests {
 		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let addr = relay.web_addrs().http.unwrap();
 		let trigger = relay.shutdown_trigger().clone();
-		let activity = relay.shutdown().activity.clone();
+		let admission = relay.shutdown().admission.clone();
 		let running = tokio::spawn(relay.run());
 
 		// Upgraded, then silent: no MoQ SETUP ever follows.
@@ -574,21 +591,21 @@ mod tests {
 		// Only timers decide what follows.
 		tokio::time::pause();
 		trigger.start();
-		kio::clock::timeout(window + Duration::from_secs(1), activity.close())
+		kio::clock::timeout(window + Duration::from_secs(1), admission.close())
 			.await
 			.expect("a withheld SETUP outlived the drain deadline");
 		running.await.unwrap().unwrap();
 	}
 
 	/// An embedder's own listener shares the relay's admission tracking through
-	/// [`Observer::activity`], so a connection it holds keeps the drain open.
+	/// [`Observer::admission`], so a connection it holds keeps the drain open.
 	#[tokio::test(start_paused = true)]
 	async fn embedder_admission_holds_drain() {
 		let mut config = crate::Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let _admissions = relay.admissions().unwrap();
-		let active = relay.shutdown().activity().enter().unwrap();
+		let active = relay.shutdown().admission().enter().unwrap();
 		let trigger = relay.shutdown_trigger().clone();
 		let running = tokio::spawn(relay.run());
 		trigger.start();
@@ -679,7 +696,7 @@ mod tests {
 		admission.grant(consumer);
 		let connection = connecting.await.unwrap().unwrap();
 		let draining = connection.draining().unwrap();
-		let goaway = moq_net::kio::wait(|waiter| draining.poll(waiter)).await.unwrap();
+		let goaway = kio::wait(|waiter| draining.poll(waiter)).await.unwrap();
 		assert_eq!(goaway.uri(), "");
 		connection.closed().await.unwrap();
 		running.await.unwrap().unwrap();
@@ -755,13 +772,26 @@ mod tests {
 		.unwrap();
 	}
 
+	/// A session reported closed twice is counted as ending once, and leaves the tally
+	/// empty when it drops.
+	#[tokio::test(start_paused = true)]
+	async fn a_session_closed_twice_ends_once() {
+		let (_trigger, shutdown) = Observer::new(Duration::from_secs(10));
+		let mut serving = shutdown.serve();
+		serving.closed();
+		serving.closed();
+		assert_eq!(shutdown.tally(), Tally { open: 0, ending: 1 });
+		drop(serving);
+		assert_eq!(shutdown.tally(), Tally::default());
+	}
+
 	/// A drain whose admissions emptied before the deadline still waits for a session
 	/// counted without one, rather than racing its cleanup.
 	#[tokio::test(start_paused = true)]
 	async fn an_emptied_drain_still_waits_for_counted_sessions() {
 		let (trigger, shutdown) = Observer::new(Duration::from_secs(10));
 		trigger.start();
-		shutdown.activity.close().await;
+		shutdown.admission.close().await;
 		let serving = shutdown.serve();
 		let drained = tokio::spawn({
 			let shutdown = shutdown.clone();

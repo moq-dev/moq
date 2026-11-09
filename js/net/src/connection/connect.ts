@@ -1,5 +1,5 @@
 import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
-import Session, { type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
+import { Session as Qmux, type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
 import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
@@ -11,13 +11,13 @@ import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
-import { redact } from "../util/log.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
-import type { Established } from "./established.ts";
+import { parse, show } from "./endpoint.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import type { Session } from "./session.ts";
 import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
 
@@ -278,8 +278,8 @@ export interface ConnectProps {
 	auth?: Auth.Handle;
 
 	/**
-	 * The implementation this side advertises in SETUP. Defaults to {@link IMPLEMENTATION};
-	 * a wrapper prepends its own token, like `my-app/1.0 moq-net-js/0.4.2`. Empty sends nothing.
+	 * The implementation this side advertises in SETUP, a User-Agent style product token such as
+	 * `my-app/1.0`. Defaults to this library's, like `moq-net-js/0.4.2`. Empty sends nothing.
 	 */
 	implementation?: string;
 
@@ -332,8 +332,8 @@ const websocketWon = new Set<string>();
 
 /** The {@link websocketWon} key for the URL the WebSocket fallback dials. */
 function websocketKey(url: URL): string {
-	const port = url.port || (url.protocol === "http:" || url.protocol === "ws:" ? "80" : "443");
-	return `${url.hostname}:${port}`;
+	const endpoint = parse(url);
+	return `${endpoint.url.hostname}:${endpoint.port}`;
 }
 
 /** The default connect signal: never aborts. */
@@ -344,7 +344,7 @@ const NEVER_ABORTED = new AbortController().signal;
  *
  * @returns A promise that resolves to an established session
  */
-export async function connect({ url, ...props }: ConnectProps): Promise<Established> {
+export async function connect({ url, ...props }: ConnectProps): Promise<Session> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.versions = normalizeVersions(props);
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
@@ -393,27 +393,16 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	}
 }
 
-/**
- * The URL a browser transport dials. A raw QUIC `moqt:` or `moql:` URL is reached over
- * WebTransport with its scheme swapped for https (draft-ietf-moq-transport-18 §3.1.3); the
- * CONNECT carries the scheme, so a server refuses the raw one. Rebuilt rather than assigned,
- * since the URL setter refuses a change from a non-special scheme to a special one.
- */
-function dialable(url: URL): URL {
-	if (url.protocol !== "moqt:" && url.protocol !== "moql:") return url;
-	return new URL(`https:${url.href.slice(url.protocol.length)}`);
-}
-
 /** Dial `raw`, resolving with the session and the credential the winning transport presented. */
 async function connectInner(
 	raw: URL,
 	tokens: readonly string[],
 	props: Omit<ConnectProps, "url">,
 	abort: Promise<void>,
-): Promise<[Established, Presentation]> {
+): Promise<[Session, Presentation]> {
 	const offered = offer(props.versions);
 	const dial = credential(raw, tokens, offered.setupToken);
-	const url = dialable(dial.url);
+	const url = parse(dial.url).url;
 	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
 	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
@@ -472,7 +461,7 @@ async function connectInner(
 	// Race the available transports, using `.any` to ignore if one participant has an error.
 	// `webtransport`/`websocket` are `Promise | undefined`, so test existence explicitly: a
 	// promise is always truthy, so bare truthiness here would be a misused-promise.
-	const contenders: Promise<WebTransport | Session | undefined>[] = [];
+	const contenders: Promise<WebTransport | Qmux | undefined>[] = [];
 	if (websocket !== undefined) contenders.push(websocket);
 	if (webtransport !== undefined) contenders.push(webtransport);
 	const session = await Promise.any(contenders).catch((err: unknown) => {
@@ -492,11 +481,11 @@ async function connectInner(
 	void abort.then(() => session.close());
 
 	// Record who won the race to this server, so QUIC's next head start follows the last result.
-	if (session instanceof Session) {
-		console.debug(redact(url), "connected via WebSocket");
+	if (session instanceof Qmux) {
+		console.debug(show(parse(url)), "connected via WebSocket");
 		websocketWon.add(server);
 	} else {
-		console.debug(redact(url), "connected via WebTransport");
+		console.debug(show(parse(url)), "connected via WebTransport");
 		websocketWon.delete(server);
 	}
 
@@ -510,7 +499,7 @@ async function connectInner(
 		session.close();
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
-	const won = session instanceof Session && fallbackDial ? fallbackDial : dial;
+	const won = session instanceof Qmux && fallbackDial ? fallbackDial : dial;
 	return [await connectTransport(url, session as WebTransport, wiring(won), offered.setup), won];
 }
 
@@ -519,7 +508,7 @@ async function connectTransport(
 	session: WebTransport,
 	wiring: SessionProps,
 	setup: Lite.Version[],
-): Promise<Established> {
+): Promise<Session> {
 	const closed = session.closed.then(fromClose, error);
 	const terminal = closed.then((cause) => {
 		throw cause ?? new Error("session closed during SETUP");
@@ -557,11 +546,11 @@ async function negotiate(
 	session: WebTransport,
 	wiring: SessionProps,
 	setup: Lite.Version[],
-): Promise<Established> {
+): Promise<Session> {
 	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
 	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
-	console.debug(redact(url), "negotiated ALPN:", protocol ?? "(none)");
+	console.debug(show(parse(url)), "negotiated ALPN:", protocol ?? "(none)");
 
 	const ietf =
 		protocol === Ietf.ALPN.DRAFT_22
@@ -613,7 +602,7 @@ async function handshakeAlpn(
 	session: WebTransport,
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
-): Promise<Established> {
+): Promise<Session> {
 	// Spread whole, so every negotiated flag reaches the connection.
 	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
 	// committed to IETF, so fetch it alongside SETUP.
@@ -682,7 +671,7 @@ async function resolveCertificateHashes(options?: WebTransportProps): Promise<We
 }
 
 // Close every transport the race opened other than `winner`.
-function closeLosers(contenders: Promise<WebTransport | Session | undefined>[], winner: unknown): void {
+function closeLosers(contenders: Promise<WebTransport | Qmux | undefined>[], winner: unknown): void {
 	for (const contender of contenders) {
 		void contender.then(
 			(transport) => {
@@ -711,7 +700,12 @@ async function hedgeWebTransport(
 	alpns: string[],
 	options?: WebTransportProps,
 ): Promise<WebTransport | undefined> {
-	const first = connectWebTransport(url, cancel, alpns, options);
+	// Resolve pins (and fetch an http:// fingerprint) once, before the hedge delay starts, so a slow
+	// fingerprint fetch can't start a second dial and both dials share the one fetch.
+	const target = await resolveWebTransport(url, cancel, alpns, options);
+	if (!target) return undefined;
+
+	const first = dialWebTransport(target, cancel);
 
 	// The first dial opening, failing, or being cancelled settles this before the delay does.
 	const hedge = await timeout(Nano.fromMilli(WEBTRANSPORT_HEDGE), first).then(
@@ -719,9 +713,9 @@ async function hedgeWebTransport(
 		(err: unknown) => err instanceof Elapsed,
 	);
 	if (!hedge) return first;
-	console.debug(redact(url), `WebTransport not open after ${WEBTRANSPORT_HEDGE}ms; dialing a second`);
+	console.debug(show(parse(url)), `WebTransport not open after ${WEBTRANSPORT_HEDGE}ms; dialing a second`);
 
-	const dials = [first, connectWebTransport(url, cancel, alpns, options)];
+	const dials = [first, dialWebTransport(target, cancel)];
 	try {
 		const winner = await Promise.any(dials);
 		closeLosers(dials, winner);
@@ -733,12 +727,18 @@ async function hedgeWebTransport(
 	}
 }
 
-async function connectWebTransport(
+interface WebTransportTarget {
+	url: URL;
+	options: WebTransportOptions;
+}
+
+/** Resolve the URL and options to dial, or `undefined` once `cancel` resolves. */
+async function resolveWebTransport(
 	url: URL,
 	cancel: Promise<void>,
 	alpns: string[],
 	options?: WebTransportProps,
-): Promise<WebTransport | undefined> {
+): Promise<WebTransportTarget | undefined> {
 	let finalUrl = url;
 
 	// Our custom pinning fields are normalized separately; the rest are DOM options.
@@ -766,7 +766,10 @@ async function connectWebTransport(
 		// Dev-only path: http:// can't be a real WebTransport origin, so we fetch the
 		// self-signed cert's hash over plain HTTP and pin it. Production uses https://
 		// and never reaches here. Keep this at debug so it doesn't read as a problem.
-		console.debug(redact(fingerprintUrl), "performing an insecure fingerprint fetch; use https:// in production");
+		console.debug(
+			show(parse(fingerprintUrl)),
+			"performing an insecure fingerprint fetch; use https:// in production",
+		);
 
 		const fingerprint = await fetchFingerprint(fingerprintUrl, cancel);
 		if (!fingerprint) return undefined;
@@ -781,7 +784,11 @@ async function connectWebTransport(
 		finalOptions.serverCertificateHashes = hashes;
 	}
 
-	const quic = new WebTransport(finalUrl, finalOptions);
+	return { url: finalUrl, options: finalOptions };
+}
+
+async function dialWebTransport(target: WebTransportTarget, cancel: Promise<void>): Promise<WebTransport | undefined> {
+	const quic = new WebTransport(target.url, target.options);
 
 	// Both .ready and .closed reject on failure; catch .closed to avoid an unhandled rejection.
 	quic.closed.catch(() => {});
@@ -859,14 +866,14 @@ async function connectWebSocket(
 	delay: number,
 	cancel: Promise<void>,
 	options: QmuxOptions,
-): Promise<Session | undefined> {
+): Promise<Qmux | undefined> {
 	const timer = sleep(Nano.fromMilli(Milli(delay)));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
 
 	for (let wait = WEBSOCKET_REDIAL; ; wait = Milli(wait * 2)) {
-		const quic = new Session(url, options);
+		const quic = new Qmux(url, options);
 
 		// Wait for the WebSocket to connect, for the cancel promise to resolve, or for the
 		// redial. `ready` rejects on a refused/failed connection, so a throw here is the
@@ -883,7 +890,7 @@ async function connectWebSocket(
 			if (outcome === "open") return quic;
 			quic.close();
 			if (outcome !== "redial") return undefined;
-			console.debug(redact(url), `WebSocket not open after ${wait}ms; dialing again`);
+			console.debug(show(parse(url)), `WebSocket not open after ${wait}ms; dialing again`);
 		} finally {
 			disarm.abort();
 		}

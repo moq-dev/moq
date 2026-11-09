@@ -407,7 +407,7 @@ final class SmokeTests: XCTestCase {
         let request = try XCTUnwrap(requested)
         XCTAssertEqual(try request.path, "live/cam")
         let served = try request.route(hidden: true)
-        XCTAssertNotEqual(served.instance, dynamic.instance)
+        XCTAssertEqual(served.instance, dynamic.instance)
         let broadcast = try served.broadcast
         XCTAssertTrue(broadcast === (try served.broadcast))
         // Only announcing answers the requester.
@@ -511,7 +511,8 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let producer = try Json.SnapshotProducer<Status>(
             broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000, compress: true)))
+            track: try broadcast.publishTrack(
+                name: "status", info: TrackInfo(timescale: 1_000_000, compression: .deflate)))
         let consumer = try Json.SnapshotConsumer<Status>(
             broadcast: try broadcast.consume(), name: "status")
 
@@ -562,7 +563,8 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.WindowProducer<Event>(
-            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compress: true)))
+            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000, compression: .deflate))
+        )
         let consumer = try Json.WindowConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "log"))
 
@@ -887,6 +889,7 @@ final class SmokeTests: XCTestCase {
             return XCTFail("expected a decoded frame")
         }
         decoder.cancel()
+        XCTAssertNil(frame.surface())
 
         let planar = try frame.pixels(format: .i420)
         XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)

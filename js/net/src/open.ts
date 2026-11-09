@@ -298,8 +298,8 @@ export function lines(quic: WebTransport): Lines {
 	const options = (sendOrder: number) =>
 		sendOrder === 0 ? { waitUntilAvailable: true } : { sendOrder, waitUntilAvailable: true };
 	const streams = new OpenStreams(transportOf(quic) === "websocket");
-	// Before any RTT sample, wait 100 ms.
-	const patience = async () => (await transportStats(quic)).rtt ?? session.probe?.peek().rtt ?? Milli(100);
+	// Before any RTT sample, wait 100 ms. A transport may report 0 until its first sample.
+	const patience = async () => (await transportStats(quic)).rtt || session.probe?.peek().rtt || Milli(100);
 	const session: Lines = {
 		uni: new Line(
 			(sendOrder) => quic.createUnidirectionalStream(options(sendOrder)) as Promise<SendStream>,

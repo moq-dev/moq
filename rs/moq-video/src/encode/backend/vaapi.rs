@@ -5,13 +5,13 @@
 //! with the parameter sets in band, matching avc3 and hev1, and labels the color
 //! space in the VUI. H.265 is the Main profile.
 //!
-//! As of moq-vaapi 0.0.3 libva is `dlopen`'d at runtime, so a VAAPI-enabled build
+//! libva is `dlopen`'d at runtime, so a VAAPI-enabled build
 //! needs no libva at build time and the binary carries no `NEEDED libva`. A
 //! libva-less host, or a present-but-unusable VA stack (no render node, no usable
 //! driver), makes `Encoder::new` return an error; under automatic selection
 //! [`backend::open`](super::open) then moves on to openh264, like the NVENC backend.
 //! The render node is the one the decoder and the GPU resize share, unless that
-//! one cannot encode H.265, and `MOQ_VAAPI_DEVICE` can name it; see
+//! one cannot encode H.265, and `Config::vaapi` can name it; see
 //! `frame::vaapi::device`.
 //!
 //! A [`Surface::DmaBuf`] is encoded without touching the CPU. An NV12 buffer at
@@ -35,11 +35,13 @@
 //! frames, VA-API decodes handed over as DMA-BUFs, and packed RGB buffers at
 //! and above the encoder's size, decode each stream with openh264, and compare
 //! pixels. The H.265 case decodes with the VA-API decoder, since there is no
-//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). They skip
-//! on a machine without a VA-API device.
+//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of
+//! them, ignored ones included, also pass on an AMD RX 9070 with radeonsi (Mesa
+//! 26.2.6). They skip on a machine without a VA-API device, except the ignored
+//! `vaapi_1080p_ladder_stays_on_the_gpu`, which requests hardware explicitly and
+//! fails without it.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
@@ -90,7 +92,7 @@ impl Vaapi {
 			Codec::H265 => moq_vaapi::Codec::H265,
 		};
 		let vaapi = VaapiConfig {
-			device: vaapi::device(codec).map(Path::to_path_buf),
+			device: vaapi::device(codec, config.vaapi.as_deref()),
 			color: vaapi::color(color)?,
 			codec,
 			..VaapiConfig::new(
@@ -101,7 +103,7 @@ impl Vaapi {
 				interval,
 			)
 		};
-		let encoder = Encoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
+		let encoder = Encoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
 
 		tracing::info!(
 			encoder = NAME,
@@ -165,7 +167,7 @@ impl Vaapi {
 		i420_to_nv12(&i420, &mut self.nv12);
 		self.encoder
 			.encode_nv12(&self.nv12, cut)
-			.map_err(|e| Error::Codec(e.context("VAAPI encode")))
+			.map_err(|e| Error::codec(e.context("VAAPI encode")))
 	}
 }
 
@@ -207,7 +209,7 @@ impl Backend for Vaapi {
 		// applies from the next one without an IDR.
 		self.encoder
 			.set_bitrate(bitrate.min(u32::MAX as u64) as u32)
-			.map_err(|e| Error::Codec(e.context("VAAPI bitrate change")))
+			.map_err(|e| Error::codec(e.context("VAAPI bitrate change")))
 	}
 
 	fn can_cut(&self) -> bool {
@@ -644,7 +646,7 @@ mod hardware_tests {
 	/// The tests above check pixels with an independent software decoder; this
 	/// proof deliberately compiles without a software codec.
 	#[test]
-	#[ignore = "requires an Intel VA-API decode/VPP/encode device"]
+	#[ignore = "requires a VA-API decode/VPP/encode device"]
 	fn vaapi_1080p_ladder_stays_on_the_gpu() {
 		const FRAMES: usize = 12;
 		let size = Size::new(1920, 1080);

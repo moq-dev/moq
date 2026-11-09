@@ -8,9 +8,9 @@
 import assert from "node:assert/strict";
 import { createInterface } from "node:readline";
 import { Manual, Milli, Nano } from "@moq/clock";
-import Session from "@moq/qmux";
+import { Session } from "@moq/qmux";
+import { DEFAULT_EXPIRY } from "../../js/net/src/cache.ts";
 import { connect } from "../../js/net/src/connection/connect.ts";
-import { CACHE_EXPIRY } from "../../js/net/src/ledger.ts";
 import { Producer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
 import { wireOf } from "../../js/net/src/wire.ts";
@@ -71,8 +71,9 @@ try {
 			continue;
 		}
 		assert.equal(line, "evict", `unknown command: ${line}`);
-		// A prune slice past the cache window, so the next scan evicts what nobody touched.
-		await clock.advance(Nano.fromMilli(Milli(CACHE_EXPIRY + 10_000)));
+		// Past the cache window and the sweep that trails it by up to half a window, so the
+		// copy has evicted what nobody touched.
+		await clock.advance(Nano.fromMilli(Milli(2 * DEFAULT_EXPIRY)));
 		console.log("evicted");
 	}
 } finally {

@@ -7,7 +7,6 @@ import { Effect } from "@moq/signals";
 import { Getter } from "@moq/signals";
 import { GetterInit } from "@moq/signals";
 import { Path } from "@moq/net";
-import { Player } from "@moq/watch";
 import { Readonlys } from "@moq/signals";
 import { Root } from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
@@ -111,19 +110,21 @@ export interface LocalProps {
 
 export class Member {
 	constructor(kind: Kind, path: Path.Valid, connection: Connection);
-	readonly audio: Audio.Decoder;
-	readonly broadcast: import("@moq/watch").Broadcast;
+	readonly audio: Readonlys<{
+		stats: Getter<Audio.Stats | undefined>;
+		timestamp: Getter<Clock.Milli | undefined>;
+	}>;
 	readonly canvas: Signal<HTMLCanvasElement | undefined>;
 	close(): void;
-	readonly emitter: Audio.Emitter;
 	readonly kind: Kind;
 	readonly muted: Signal<boolean>;
 	readonly path: Path.Valid;
-	readonly player: Player;
 	readonly preview: Getter<Preview>;
-	readonly renderer: import("@moq/watch").Video.Renderer;
 	readonly user: Readonlys<UserInput>;
-	readonly video: import("@moq/watch").Video.Decoder;
+	readonly video: Readonlys<{
+		stats: Getter<import("@moq/watch").Video.Stats | undefined>;
+		timestamp: Getter<Clock.Milli | undefined>;
+	}>;
 	readonly volume: Signal<number>;
 }
 

@@ -5,7 +5,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use moq_rtsp::fake::{self, Media, Server};
-use moq_tokio::moq_net;
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 
@@ -25,6 +24,8 @@ async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>
 /// Start `moq import rtsp`, publishing `camera` from `rtsp` to the relay at `url`.
 fn import(url: &str, fingerprint: &str, rtsp: &str) -> Child {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
+	// The guard on host timers is for tests, not the binaries they run.
+	command.env_remove("KIO_DENY_HOST_TIMERS");
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
 	for (name, _) in std::env::vars_os() {
 		if name.to_string_lossy().starts_with("MOQ_") {
@@ -63,9 +64,7 @@ async fn next_broadcast(
 			.await
 			.expect("origin closed")
 		{
-			moq_net::origin::RouteEvent::Start(_)
-			| moq_net::origin::RouteEvent::Restart(_)
-			| moq_net::origin::RouteEvent::Takeover { .. } => break,
+			moq_net::origin::RouteEvent::Start(_) | moq_net::origin::RouteEvent::Restart(_) => break,
 			moq_net::origin::RouteEvent::End(_) | moq_net::origin::RouteEvent::Update(_) => {}
 		}
 	}

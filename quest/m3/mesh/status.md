@@ -3,14 +3,15 @@
 ## Goal
 
 Each mesh node, a relay node with the mesh enabled or an application
-embedding `Endpoint`, publishes `mesh/<id>/.status`, signed: its peers, its
+embedding `Endpoint`, publishes `mesh/node/<id>/.status`, signed: its peers, its
 links (each with its smoothed and minimum RTT, and for a relay uplink the
 relay's identity), its routes, and its services. A subscriber can draw the
 whole mesh from these tracks alone.
 
 ## Plan
 
-Decided 2026-10-25 (maintainer): the data is a track on `mesh/<id>`, not an
+Decided 2026-10-25 (maintainer): the data is a track on the node's
+member subtree (`mesh/node/<id>` since 2026-11-07), not an
 HTTP API.
 
 Decided 2026-10-31 (maintainer, moq.pro mesh planning interview): per-link

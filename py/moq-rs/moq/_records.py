@@ -18,6 +18,7 @@ from moq_ffi import (
     MoqAnchor,
     MoqBackoff,
     MoqClientTls,
+    MoqCompression,
     MoqCongestionControl,
     MoqConnectionStats,
     MoqDatagram,
@@ -142,19 +143,28 @@ class Datagram:
 class Anchor:
     """Where one end of a :class:`Range` falls, mirroring moq-net's ``track::Anchor``.
 
-    Build one with ``Anchor.ABSOLUTE(group=...)``, ``Anchor.RELATIVE(groups=...)``, or
-    ``Anchor.TIME(timestamp=...)``.
+    Build one with ``Anchor.OLDEST()``, ``Anchor.ABSOLUTE(group=...)``,
+    ``Anchor.RELATIVE(groups=...)``, or ``Anchor.TIME(timestamp=...)``.
     """
 
+    OLDEST: ClassVar[type[_AnchorOldest]]
     ABSOLUTE: ClassVar[type[_AnchorAbsolute]]
     RELATIVE: ClassVar[type[_AnchorRelative]]
     TIME: ClassVar[type[_AnchorTime]]
 
     def _ffi(self) -> MoqAnchor:
-        raise TypeError("build an Anchor with Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
+        raise TypeError("build an Anchor with Anchor.OLDEST, Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
 
 
 # The generated variants subclass MoqAnchor only at runtime, so each _ffi casts for pyright.
+@dataclass(frozen=True)
+class _AnchorOldest(Anchor):
+    """The oldest group still around, as far back as the max delay allows. A start only."""
+
+    def _ffi(self) -> MoqAnchor:
+        return cast(MoqAnchor, MoqAnchor.OLDEST())
+
+
 @dataclass(frozen=True)
 class _AnchorAbsolute(Anchor):
     """This group, delivered from its first frame."""
@@ -185,6 +195,7 @@ class _AnchorTime(Anchor):
         return cast(MoqAnchor, MoqAnchor.TIME(timestamp=self.timestamp._ffi()))
 
 
+Anchor.OLDEST = _AnchorOldest
 Anchor.ABSOLUTE = _AnchorAbsolute
 Anchor.RELATIVE = _AnchorRelative
 Anchor.TIME = _AnchorTime
@@ -289,15 +300,15 @@ class TrackInfo:
     how many times its first frame a group's later bytes may grow before a joining
     subscriber asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
-    ``compress`` DEFLATEs each group on the wire to peers that support it; readers
-    always see the original frames.
+    ``compression`` compresses each group on the wire to peers that support it, ``None``
+    sending frames as written; readers always see the original frames.
     """
 
     priority: int = 0
     max_age: timedelta | None = timedelta(0)
     refresh: int | None = None
     timescale: int | None = None
-    compress: bool = False
+    compression: MoqCompression | None = None
 
     def _ffi(self) -> MoqTrackInfo:
         return MoqTrackInfo(
@@ -306,7 +317,7 @@ class TrackInfo:
             max_age_unlimited=self.max_age is None,
             refresh=self.refresh,
             timescale=self.timescale,
-            compress=self.compress,
+            compression=self.compression,
         )
 
     @staticmethod
@@ -316,7 +327,7 @@ class TrackInfo:
             max_age=None if info.max_age_unlimited else (info.max_age or timedelta(0)),
             refresh=info.refresh,
             timescale=info.timescale,
-            compress=info.compress,
+            compression=info.compression,
         )
 
 
@@ -514,6 +525,30 @@ class VideoDecodedFrame:
         """The picture converted to tightly packed CPU pixels in ``format``."""
         return self._inner.pixels(format)
 
-    def surface(self) -> MoqVideoSurface | None:
+    def surface(self) -> VideoSurface | None:
         """The decoder's platform surface, when the decoder output asked for one."""
-        return self._inner.surface()
+        return _surface(self._inner.surface())
+
+
+class VideoSurface:
+    """A decoded frame's platform surface; match it with a fallback arm, since new platforms add kinds."""
+
+
+@dataclass(frozen=True)
+class VideoSurfacePixelBuffer(VideoSurface):
+    """An Apple ``CVPixelBufferRef`` (IOSurface-backed NV12) address, valid while its frame lives."""
+
+    pointer: int
+
+
+@dataclass(frozen=True)
+class VideoSurfaceUnknown(VideoSurface):
+    """A surface kind this version of the package does not know yet."""
+
+
+def _surface(surface: MoqVideoSurface | None) -> VideoSurface | None:
+    if surface is None:
+        return None
+    if isinstance(surface, MoqVideoSurface.PIXEL_BUFFER):
+        return VideoSurfacePixelBuffer(surface.pointer)
+    return VideoSurfaceUnknown()

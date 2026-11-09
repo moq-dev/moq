@@ -8,10 +8,10 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import { Stream } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import { after } from "../util/timer.ts";
-import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import type { Session } from "./session.ts";
 
 /** Options for {@link Connection.accept}. */
 export interface AcceptProps {
@@ -25,7 +25,7 @@ export interface AcceptProps {
 	/** Abort the handshake and release the transport; ignored after acceptance completes. */
 	signal?: AbortSignal;
 
-	/** The moq-lite version to select in a `moql` SETUP, instead of the client's first. */
+	/** The only moq-lite version to accept in a `moql` SETUP, instead of the client's first; refused unless the client offers it. */
 	version?: number;
 
 	/**
@@ -67,7 +67,7 @@ type SessionProps = {
  *
  * @returns A promise that resolves to an established session
  */
-export async function accept({ transport, url, ...props }: AcceptProps): Promise<Established> {
+export async function accept({ transport, url, ...props }: AcceptProps): Promise<Session> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.signal?.throwIfAborted();
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
@@ -108,7 +108,7 @@ async function acceptInner(
 	transport: WebTransport,
 	url: URL,
 	props: Omit<AcceptProps, "transport" | "url">,
-): Promise<Established> {
+): Promise<Session> {
 	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
 	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol = (transport as { protocol?: string }).protocol;
@@ -154,7 +154,7 @@ async function acceptAlpn(
 	url: URL,
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
-): Promise<Established> {
+): Promise<Session> {
 	// Spread whole, so every negotiated flag reaches the connection.
 	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
 	// committed to IETF, so fetch it alongside SETUP.
@@ -179,18 +179,13 @@ async function acceptNegotiated(
 	url: URL,
 	wiring: SessionProps,
 	version?: number,
-): Promise<Established> {
+): Promise<Session> {
 	// The SETUP keeps lite-02's framing whichever version it offers.
 	const stream = await Stream.accept(transport, Lite.Version.DRAFT_02);
 	if (!stream) throw new Error("no incoming bidi stream for SETUP");
 
 	const client = await Lite.ClientSetup.decode(stream.reader);
-	const selected = version ?? client.versions.find(Lite.isNegotiated);
-	if (selected === undefined || !Lite.isNegotiated(selected)) {
-		throw new Error(
-			`no common version found; client offered: ${client.versions.map((v) => v.toString(16)).join(", ")}`,
-		);
-	}
+	const selected = select(client, version);
 
 	await new Lite.ServerSetup(selected).encode(stream.writer);
 	if (handsOff(selected)) {
@@ -198,4 +193,20 @@ async function acceptNegotiated(
 		return new Lite.Connection({ url, quic: transport, version: selected, ...wiring });
 	}
 	return new Lite.Connection({ url, quic: transport, version: selected, session: stream, ...wiring });
+}
+
+/**
+ * The moq-lite version a server answers a `moql` SETUP with: the client's first, or `pinned`
+ * only when the client offered it. Mirrors `setup::Client::select` in moq-net.
+ *
+ * @internal
+ */
+export function select(client: Lite.ClientSetup, pinned?: number): Lite.Version {
+	const selected = client.versions.find((v) => (pinned === undefined ? Lite.isNegotiated(v) : v === pinned));
+	if (selected === undefined || !Lite.isNegotiated(selected)) {
+		throw new Error(
+			`no common version found; client offered: ${client.versions.map((v) => v.toString(16)).join(", ")}`,
+		);
+	}
+	return selected;
 }

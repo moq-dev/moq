@@ -41,7 +41,7 @@ const FRAMES: u64 = 4;
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -1142,7 +1142,9 @@ async fn replaced_under_another_instance_ends_lite_07() {
 /// instance, compressed only when `compress` is set. `D` reads through `R` over lite-07,
 /// which forwards the compressed bytes. `P1`'s session to `R` dies between groups. A copy
 /// that frames the track the same way resumes. One that doesn't is refused: `D` never
-/// reads `P2`'s groups under `P1`'s framing, and the track ends with the refusal.
+/// reads `P2`'s groups under `P1`'s framing, and the track ends with the refusal. `D`
+/// holds a route to each origin node through `R`, so `D` itself moves to `P2`'s and
+/// refuses it.
 async fn compression_changes_behind_a_relay(compress: bool) {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let instance = moq_net::Instance::random();
@@ -1159,7 +1161,13 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 			.unwrap();
 		let track = broadcast
 			.broadcast()
-			.create_track("video", timed().with_compress(compress))
+			.create_track(
+				"video",
+				timed().with_compression(match compress {
+					true => moq_net::track::Compression::Deflate,
+					false => moq_net::track::Compression::None,
+				}),
+			)
 			.unwrap();
 		broadcast.announce().unwrap();
 		let link = priced_link(version, &publisher, &relay, cost).await;
@@ -1215,17 +1223,13 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 	settle().await;
 
 	// The refusal ends the track: no group of `P2`'s reaches the reader, not even
-	// one that fails to decode. `R` refuses with `Unsupported`, which has no stream
-	// code, so it reaches `D` as INTERNAL.
+	// one that fails to decode.
 	let rest: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 	if compress {
 		assert!(rest.is_empty(), "trailing delivery: {rest:?}");
 	} else {
 		assert!(
-			matches!(
-				rest.as_slice(),
-				[(u64::MAX, Err(Error::Stream(moq_net::StreamError::Internal)))]
-			),
+			matches!(rest.as_slice(), [(u64::MAX, Err(Error::Unsupported))]),
 			"the track did not end with the refusal: {rest:?}"
 		);
 	}

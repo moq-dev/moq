@@ -30,7 +30,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -588,7 +587,10 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = WindowConfig()
             val track =
-                broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
+                broadcast.publishTrack(
+                    "log",
+                    TrackInfo(timescale = 1_000_000uL, compression = Compression.DEFLATE),
+                )
             val producer = WindowProducer(track, config)
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
             for (n in 1..3) producer.push(
@@ -921,7 +923,7 @@ class SmokeTest {
                 val request = assertNotNull(dynamic.requested())
                 assertEquals("live/cam", request.path())
                 request.route(RouteOptions(hidden = true)).use { job ->
-                    assertNotEquals(dynamic.instance(), job.instance())
+                    assertEquals(dynamic.instance(), job.instance())
                     job.broadcast().use { fill ->
                         // Only announcing answers the requester.
                         job.announce()
@@ -1189,6 +1191,7 @@ class SmokeTest {
 
                         // The frame outlives its consumer's cancellation.
                         decoder.cancel()
+                        assertNull(frame.surface())
 
                         val planar = frame.pixels(VideoPixelFormat.I420)
                         assertEquals(

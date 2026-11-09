@@ -94,14 +94,14 @@ func (g *GrantConsumer) Grant() *Grant {
 
 // Changed blocks until the grant differs from the one this last returned, or
 // held when it was made, and returns it. It errors once a client's connection
-// or a server's session ends, or after Close; a reconnect is not an end.
+// or a server's session ends, or after Cancel; a reconnect is not an end.
 func (g *GrantConsumer) Changed(ctx context.Context) (*Grant, error) {
 	grant, err := bridge.Call(ctx, nil, g.inner.Changed)
 	return grantFromFFI(grant), err
 }
 
-// Close ends every current and future Changed call.
-func (g *GrantConsumer) Close() { g.inner.Cancel() }
+// Cancel ends every current and future Changed call.
+func (g *GrantConsumer) Cancel() { g.inner.Cancel() }
 
 // Tokens returns the credentials a native client session presents, to replace
 // while it runs, or nil for a server-accepted session, which presents none.
@@ -307,7 +307,7 @@ func (s *Session) Cancel(code uint32) {
 	s.inner.Cancel(code)
 }
 
-// RecvBandwidth holds receive-estimate demand until its consumer is closed.
+// RecvBandwidth holds receive-estimate demand until its consumer is cancelled.
 func (s *Session) RecvBandwidth() *BandwidthConsumer {
 	inner := s.inner.RecvBandwidth()
 	if inner == nil {
@@ -324,8 +324,8 @@ func (b *BandwidthConsumer) Rate() *uint64 { return b.inner.Rate() }
 
 // RateChanged waits for the estimate to change and returns the new Rate, or fails once its producer closes.
 func (b *BandwidthConsumer) RateChanged(ctx context.Context) (*uint64, error) {
-	return bridge.Call(ctx, b.inner.Cancel, b.inner.RateChanged)
+	return bridge.Call(ctx, nil, b.inner.RateChanged)
 }
 
-// Close releases this consumer's demand, including a pending wait.
-func (b *BandwidthConsumer) Close() { b.inner.Cancel() }
+// Cancel releases this consumer's demand, including a pending wait.
+func (b *BandwidthConsumer) Cancel() { b.inner.Cancel() }

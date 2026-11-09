@@ -1,5 +1,4 @@
 use anyhow::Context;
-use hang::moq_net;
 use moq_mux::container::{flv, fmp4, ts};
 
 /// Container format read from stdin on the import (source) side.
@@ -7,8 +6,8 @@ use moq_mux::container::{flv, fmp4, ts};
 pub enum PublishFormat {
 	/// Raw AVC (H.264) Annex B elementary stream.
 	Avc3,
-	/// Fragmented MP4 (CMAF), republished whole as CMAF when `passthrough`.
-	Fmp4 { passthrough: bool },
+	/// Fragmented MP4 (CMAF), republished whole as CMAF when `cmaf`.
+	Fmp4 { cmaf: bool },
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
 	Ts { program: Option<u16> },
 	/// MPEG-TS published whole, paced on `pcr_pid` when given rather than the PMT's clock.
@@ -158,6 +157,18 @@ pub struct CaptureArgs {
 	/// The released spelling of `--audio off`.
 	#[usage(long = "no-audio", hide = true)]
 	no_audio: bool,
+
+	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
+	/// first that encodes, decodes, and scales.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	pub vaapi_device: Option<std::path::PathBuf>,
+
+	/// The V4L2 M2M encoder node, such as `/dev/video11`. Defaults to the first
+	/// that encodes H.264.
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	#[usage(long, env = "MOQ_V4L2_ENCODER", value_hint = usage_rs::ValueHint::FilePath)]
+	pub v4l2_encoder: Option<std::path::PathBuf>,
 }
 
 enum PublishDecoder {
@@ -377,7 +388,7 @@ impl Pending {
 	/// Announce the broadcast if its catalog has gone out, returning whether it has.
 	fn announce(&mut self) -> anyhow::Result<bool> {
 		if !matches!(
-			self.catalog.poll_largest(&moq_net::kio::Waiter::noop()),
+			self.catalog.poll_largest(&kio::Waiter::noop()),
 			std::task::Poll::Ready(Some(_))
 		) {
 			return Ok(false);
@@ -427,9 +438,9 @@ impl Publish {
 					import: Box::new(import),
 				}
 			}
-			PublishFormat::Fmp4 { passthrough } => {
+			PublishFormat::Fmp4 { cmaf } => {
 				let timebase = catalog.timebase();
-				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_passthrough(*passthrough);
+				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_cmaf(*cmaf);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
@@ -678,21 +689,24 @@ impl Publish {
 					let catalog = catalog.clone();
 					async move {
 						match video {
-							Some(options) => moq_video::encode::publish_capture(broadcast, catalog, options)
-								.await
-								.map_err(anyhow::Error::from),
+							Some(options) => {
+								let (_publication, driver) =
+									moq_video::encode::publish_capture(broadcast, catalog, options)?;
+								driver.run().await.map_err(anyhow::Error::from)
+							}
 							None => Ok(()),
 						}
 					}
 				};
 				let audio_fut = async move {
 					match audio {
-						Some((config, encode, on_demand)) => {
+						Some((config, encode, retain)) => {
 							let capture = moq_audio::capture::Producer::open(config).await?;
 							let mut options = moq_audio::encode::Capture::new(capture.consume());
 							options.encode = encode;
-							options.on_demand = on_demand;
-							let (_control, driver) = moq_audio::encode::Control::new(broadcast, catalog, options)?;
+							options.retain = retain;
+							let (_publication, driver) =
+								moq_audio::encode::publish_capture(broadcast, catalog, options)?;
 							let mut publish = std::pin::pin!(driver.run());
 							tokio::select! {
 								result = capture.run() => {
@@ -1131,6 +1145,14 @@ impl CaptureArgs {
 		};
 		options.bandwidth = bandwidth;
 		options.on_demand = self.video == Mode::Demand;
+		#[cfg(all(target_os = "linux", feature = "vaapi"))]
+		{
+			options.vaapi = self.vaapi_device.clone();
+		}
+		#[cfg(all(target_os = "linux", feature = "v4l2"))]
+		{
+			options.v4l2 = self.v4l2_encoder.clone();
+		}
 		Ok(options)
 	}
 
@@ -1905,7 +1927,7 @@ pub(crate) mod tests {
 		let mut track = consumer.track(Catalog::DEFAULT_NAME).unwrap();
 		let mut published = || {
 			matches!(
-				track.poll_largest(&moq_net::kio::Waiter::noop()),
+				track.poll_largest(&kio::Waiter::noop()),
 				std::task::Poll::Ready(Some(_))
 			)
 		};
@@ -2125,8 +2147,8 @@ pub(crate) mod tests {
 		for (format, input) in [
 			(PublishFormat::Ts { program: None }, TS),
 			(PublishFormat::TsPassthrough { pcr_pid: None }, TS),
-			(PublishFormat::Fmp4 { passthrough: false }, FMP4),
-			(PublishFormat::Fmp4 { passthrough: true }, FMP4),
+			(PublishFormat::Fmp4 { cmaf: false }, FMP4),
+			(PublishFormat::Fmp4 { cmaf: true }, FMP4),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();

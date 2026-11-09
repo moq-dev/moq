@@ -3,8 +3,8 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
+import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
@@ -76,19 +76,22 @@ export interface ConnectionProps {
 	client?: boolean;
 	/** The connection credential the client's SETUP presents, on versions that carry one (lite-07+). */
 	token?: Uint8Array;
-	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
+	/** The implementation our SETUP advertises (lite-05+). Defaults to this library's; empty sends nothing. */
 	implementation?: string;
 	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
 	probeTarget?: Getter<number>;
 }
+
+/** Where a session is: open, delivering what it owes before it closes, or closed. */
+type Phase = { kind: "open" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
 
 /**
  * Represents a connection to a MoQ server.
  *
  * @internal
  */
-export class Connection implements Established {
-	#closing?: Promise<void>;
+export class Connection implements Session {
+	#phase: Phase = { kind: "open" };
 	// The URL of the connection.
 	readonly url: URL;
 
@@ -116,10 +119,10 @@ export class Connection implements Established {
 	// The received unidirectional streams still being read, which a closing session drains.
 	#unis = new Set<Promise<void>>();
 
-	/** The peer's PROBE estimates; see {@link Established.probe}. */
+	/** The peer's PROBE estimates; see {@link Session.probe}. */
 	readonly probe: Getter<Probe>;
 
-	// Our tokens and grants, and the answers to the peer's; see {@link Established.auth}.
+	// Our tokens and grants, and the answers to the peer's; see {@link Session.auth}.
 	#auth: AuthSession;
 
 	/** Random per-connection Hop ID. Shared by Publisher (for outbound hop
@@ -149,7 +152,7 @@ export class Connection implements Established {
 	#probeTarget?: Getter<number>;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
 
-	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
 	readonly peerImplementation = this.#peerImplementation.promise;
 
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
@@ -214,7 +217,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
+			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -262,7 +265,7 @@ export class Connection implements Established {
 		void this.#run();
 	}
 
-	/** Our tokens and grants; see {@link Established.auth}. */
+	/** Our tokens and grants; see {@link Session.auth}. */
 	get auth(): Auth.Handle {
 		return this.#auth.handle;
 	}
@@ -276,16 +279,27 @@ export class Connection implements Established {
 	 * its own, so it holds the close until the deadline.
 	 */
 	close(): Promise<void> {
-		this.#closing ??= withTimeout(
-			this.#publisher.drain(),
-			Nano.fromMilli(Milli(1000)),
-			"session close timed out",
-		).finally(() => this.abort());
-		return this.#closing;
+		switch (this.#phase.kind) {
+			case "open": {
+				const done = withTimeout(
+					this.#publisher.drain(),
+					Nano.fromMilli(Milli(1000)),
+					"session close timed out",
+				).finally(() => this.abort());
+				this.#phase = { kind: "closing", done };
+				return done;
+			}
+			case "closing":
+				return this.#phase.done;
+			case "closed":
+				return Promise.resolve();
+		}
 	}
 
 	/** End the session immediately without waiting for delivery. */
 	abort(): void {
+		if (this.#phase.kind === "closed") return;
+		this.#phase = { kind: "closed" };
 		this.#auth.close();
 		this.#publisher.close();
 		// Received tracks end in #run once what already arrived drains, as on the peer's close.
@@ -360,7 +374,7 @@ export class Connection implements Established {
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
+	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
 		return announce.list(this.#subscriber.routes(scope, options));
 	}
@@ -550,19 +564,19 @@ export class Connection implements Established {
 		}
 	}
 
-	/** Snapshot the transport's counters; see {@link Established.stats}. */
+	/** Snapshot the transport's counters; see {@link Session.stats}. */
 	async stats(): Promise<Stats> {
 		const stats = await transportStats(this.#quic);
 		if (hasDatagrams(this.#version)) stats.datagramsUnrouted = this.#subscriber.datagramsUnrouted;
 		return stats;
 	}
 
-	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
 	get draining(): GetPromise<Drain> {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */
+	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
 	get closed(): Promise<Error | null> {
 		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
 	}

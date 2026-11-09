@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_srt::{Reject, Request, Server};
 use moq_tokio::RedactedUrl;
 use url::Url;
@@ -95,13 +94,7 @@ pub async fn listen_import(
 	latency: Duration,
 	program: Option<moq_srt::Program>,
 ) -> anyhow::Result<()> {
-	let ImportTarget {
-		origin,
-		name,
-		max_age,
-		linger,
-		bandwidth,
-	} = target;
+	let ImportTarget { origin, name, ingest } = target;
 	let name = moq_net::Path::new(&name)?;
 	let mut server = Server::bind(addr, latency).await?;
 	tracing::info!(%addr, %name, "SRT listening (import)");
@@ -112,16 +105,9 @@ pub async fn listen_import(
 			Request::Publish(publish) => {
 				let origin = origin.clone();
 				let name = name.clone();
-				let bandwidth = bandwidth.clone();
+				let ingest = ingest.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish
-						.with_max_age(max_age)
-						.with_bandwidth(bandwidth)
-						.with_program(program)
-						.with_linger(linger)
-						.accept(&origin, &name)
-						.await
-					{
+					if let Err(err) = publish.with_program(program).accept(&origin, &name, &ingest).await {
 						let err = suggest_program(err);
 						tracing::warn!(%name, err = format!("{err:#}"), "SRT ingest ended with error");
 					}
@@ -189,12 +175,12 @@ pub async fn connect_import(
 	notify_ready();
 
 	let client = moq_srt::Client::new(addr, resource)
-		.with_max_delay(latency)
-		.with_max_age(target.max_age)
-		.with_bandwidth(target.bandwidth)
-		.with_program(program)
-		.with_linger(target.linger);
-	client.pull(&target.origin, name).await.map_err(suggest_program)
+		.with_latency(latency)
+		.with_program(program);
+	client
+		.pull(&target.origin, name, &target.ingest)
+		.await
+		.map_err(suggest_program)
 }
 
 /// Push a broadcast from the Origin to a remote SRT server (export).
@@ -210,10 +196,10 @@ pub async fn connect_export(
 	notify_ready();
 
 	let client = moq_srt::Client::new(addr, resource)
-		.with_max_delay(args.endpoint.latency.into())
+		.with_latency(args.endpoint.latency.into())
 		.with_follow(args.follow.into())
 		.with_stitch(args.stitch);
-	Ok(client.publish(&origin, &name).await?)
+	Ok(client.publish(&origin, moq_srt::dial::Publish::new(name)).await?)
 }
 
 /// Parse `srt://host:port?streamid=<resource>` into a resolved address and resource.

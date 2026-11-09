@@ -794,7 +794,10 @@ mod compression_tests {
 	fn inflated_size_is_admitted_before_any_inflate() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast
-			.create_track("data", crate::track::Info::default().with_compress(true))
+			.create_track(
+				"data",
+				crate::track::Info::default().with_compression(crate::track::Compression::Deflate),
+			)
 			.unwrap();
 		let group = track.append_group().unwrap();
 		let header = crate::frame::Header {

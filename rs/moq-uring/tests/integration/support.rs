@@ -89,9 +89,9 @@ pub fn bundle() -> anyhow::Result<Bundle> {
 /// Open a WebTransport session to `request` from tokio, through the driver's
 /// own `connect`, trusting whatever certificate the server presents.
 pub async fn web_connect(
-	request: moq_tokio::quic::web::proto::ConnectRequest,
+	request: web_transport_proto::ConnectRequest,
 	transport: moq_tokio::quic::driver::transport::Config,
-) -> Result<moq_tokio::quic::web::Session, moq_tokio::quic::web::ClientError> {
+) -> Result<moq_tokio::quic::web::Session, moq_tokio::quic::web::Error> {
 	use moq_tokio::quic::{driver, web};
 
 	let host = request.url.host_str().expect("url host").to_string();
@@ -115,6 +115,6 @@ pub async fn web_connect(
 	};
 	let socket = std::net::UdpSocket::bind(bind).expect("bind");
 	let endpoint = driver::endpoint::Endpoint::new(Default::default(), socket).expect("endpoint");
-	let conn = endpoint.connect(&config, addr, &host)?.await?;
+	let conn = endpoint.connect(&config, addr, &host).expect("dial").await?;
 	web::Session::connect(conn, request).await
 }

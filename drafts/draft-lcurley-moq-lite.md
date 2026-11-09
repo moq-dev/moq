@@ -139,6 +139,8 @@ A continuous stream is named by an Instance, carried on its claims (see [ANNOUNC
 Within one Instance, group sequences never restart and never name two different groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
 A publisher that starts its group sequences over, such as a restarted process, uses a new Instance, while replicas of the same content share one.
 A publisher MAY keep an Instance across restarts only if it continues the sequence space and announces a higher Epoch each time.
+A Track recreated within one Instance likewise continues past every Group Sequence its predecessor published.
+A receiver does not detect a publisher that breaks this, which corrupts only that Broadcast for its subscribers.
 The Epoch is a counter within one Instance that picks its live incarnation while a stale claim lingers; it is never compared across Instances.
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a claim covering every broadcast path beneath it.
@@ -344,9 +346,9 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x32  | GROUP_TOO_LARGE | The group grew past the publisher's cache budget and was aborted. |
 | ------- | ------------- | ----------- |
-|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. |
+|  0x33  | NOT_FOUND | The requested group, track, or broadcast is not here. A sequence its publisher declared it will never produce is named by SUBSCRIBE_SKIP instead; any other sequence a publisher never had, including a gap it never declared, is named with NOT_FOUND unless it is past the subscriber's budget (see [SUBSCRIBE_DROP](#subscribe-drop)). |
 | ------- | ------------- | ----------- |
-|  0x34  | OLD | The group was superseded by a newer group and dropped. |
+|  0x34  | OLD | The group was superseded by a newer group and dropped. In SUBSCRIBE_DROP, the next SUBSCRIBE_UPDATE reopens it: the publisher re-offers the group or drops it again. |
 | ------- | ------------- | ----------- |
 |  0x35  | EVICTED | The group was dropped under memory pressure. Unlike OLD it was still current, so it can be re-fetched. |
 | ------- | ------------- | ----------- |
@@ -411,7 +413,6 @@ The publisher replies with a single ANNOUNCE_OK message followed by the matching
 - ANNOUNCE_END: the origin withdrew a claim.
 - ANNOUNCE_UPDATE: a claim's cost changed.
 - ANNOUNCE_RESTART: a claim now serves another Instance, or a higher Epoch of the same one.
-- ANNOUNCE_TAKEOVER: a matching claim continues what a live claim served beneath it.
 - ANNOUNCE_FLOOR: a batch of a route's claims is complete.
 - SYNCED: the initial set is complete.
 
@@ -423,16 +424,16 @@ The initial set is relative to this hop: a relay answers with what it holds with
 The publisher MAY coalesce changes to a claim it has not yet sent, and sends no more claims before SYNCED than the initial set holds.
 A retraction of a claim or route already sent MAY precede SYNCED.
 
-Each ROUTE_START implicitly assigns the next Route ID on the stream, and each ANNOUNCE_START or ANNOUNCE_TAKEOVER the next Announce ID: two counters starting at 0 that increment by 1 per assignment.
+Each ROUTE_START implicitly assigns the next Route ID on the stream, and each ANNOUNCE_START the next Announce ID: two counters starting at 0 that increment by 1 per assignment.
 Neither id appears on the wire where it is assigned; both endpoints derive it from the message order on the (reliable, ordered) stream, and other messages reference it instead of repeating the origin node or the claim's prefix.
 Ids are never reused within a stream.
 A ROUTE_END retires its Route ID and the Announce ID of every claim under the route; an ANNOUNCE_END retires one Announce ID.
 
 A stream has at most one live route per origin node, and each route at most one live claim per prefix.
 Another origin claiming the same prefix is another claim, under its own route.
-An ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces a claim while keeping its id live, and an ANNOUNCE_TAKEOVER at its predecessor's own prefix replaces it under a new id; a claim never moves to another route.
+An ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces a claim while keeping its id live; a claim never moves to another route.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives a message referencing a Route ID or Announce ID that was never assigned or already retired, a ROUTE_START for an origin node that already has a live route on the stream, an ANNOUNCE_START or ANNOUNCE_TAKEOVER for a prefix its route already claims other than as its predecessor, or any message before ANNOUNCE_OK.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives a message referencing a Route ID or Announce ID that was never assigned or already retired, a ROUTE_START for an origin node that already has a live route on the stream, an ANNOUNCE_START for a prefix its route already claims, or any message before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that every route and claim on it is gone.
 
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, including one resolved by [Compression](#announce-compression).
@@ -457,9 +458,9 @@ A floor that certifies nothing proves no claim absent: the stream's claims stay 
 While a receiver has a usable route to the origin and every peer whose last advertised route to it is feasible here has answered the current request, it lets go of a claim none of those peers certifies or carries: it goes offline, which is not an ANNOUNCE_END.
 
 #### Compression {#announce-compression}
-An ANNOUNCE_START or ANNOUNCE_TAKEOVER MAY copy the head of its path from a live claim on the same stream, its base.
-`Path Base` names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Path Base`, so 1 names the latest ANNOUNCE_START or ANNOUNCE_TAKEOVER, and 0 names no base.
-The receiver resolves the base against the claims live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing, including a predecessor that the ANNOUNCE_TAKEOVER naming it as a base retires.
+An ANNOUNCE_START MAY copy the head of its path from a live claim on the same stream, its base.
+`Path Base` names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Path Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
+The receiver resolves the base against the claims live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
 The base need not share the new claim's route.
 A publisher MAY always send a `Path Base` of 0.
 
@@ -522,7 +523,6 @@ Claims with the same Instance serve the same Broadcast, so a relay MAY move a li
 A relay MUST NOT move a subscription to a claim with a different Instance: it stays on its Instance's claims and ends with the last of them.
 When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the claim goes; new requests resolve the winner, and the ANNOUNCE_RESTART tells subscribers to request again.
 A receiver of an ANNOUNCE_RESTART (or of the ANNOUNCE_END and ANNOUNCE_START standing in for one) MUST NOT serve a new request under its prefix from anything resolved through the replaced claim.
-An ANNOUNCE_TAKEOVER is the one exception to staying on an Instance: what was resolved through its predecessor beneath its prefix is the Broadcast the new claim serves, so those subscriptions continue on the new claim and new requests MAY join them, whatever either claim's Instance.
 A version before this one carries no Instance, so a receiver of such a session mints one for each ANNOUNCE_START it receives, with Epoch 0, and forwards it as the claim's Instance.
 A minted Instance SHOULD start with `~` (0x7E), so a reader can tell it names an announcement rather than the publisher's stream; a publisher SHOULD NOT name its own Instance with that prefix.
 A minted Instance is new for every announcement, so a publisher reconnecting or re-announcing through such a hop is another stream.
@@ -543,6 +543,7 @@ When choosing which claim to advertise for a prefix, the requested path is the p
 
 A claim resolved this way serves the request like any other, and the claim is not consumed by it.
 A relay MUST NOT announce a path merely because it resolved it: the covering claim stays the only advertisement until the advertiser announces the concrete path, which it SHOULD do once it is producing, so a later request finds the running broadcast by its exact path instead of resolving a second producer.
+The advertiser MAY announce the path under the claim's Instance, so subscriptions resolved through the claim continue on it (see [Routing](#routing)); when that announcement ends, a claim still serving its Instance restarts under a new one, so a restarted answer is another Broadcast.
 
 An advertiser that will not serve a resolved request resets the request stream with a typed code (see [Error Codes](#error-codes)).
 Every refusal is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
@@ -566,16 +567,16 @@ The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret
 
 The publisher sends SUBSCRIBE_OK once the start is resolved, and SUBSCRIBE_FINISH as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_FINISH](#subscribe-finish)).
 Neither closes the stream: the publisher keeps reading SUBSCRIBE_UPDATE messages, so an update can still widen the Ranges, including into an ended Track's history, and the publisher serves or drops what it newly covers.
-The subscriber judges a Range complete from what it observed: the Groups it received, the SUBSCRIBE_DROP messages, the Range Starts in SUBSCRIBE_OK and SUBSCRIBE_STARTED, and SUBSCRIBE_FINISH.
+The subscriber judges a Range complete from what it observed: the Groups it received, the SUBSCRIBE_SKIP and SUBSCRIBE_DROP messages, the Range Starts in SUBSCRIBE_OK and SUBSCRIBE_STARTED, and SUBSCRIBE_FINISH.
 Drops and Groups name absolute sequences, so the subscriber judges them against its latest Ranges, and an update still in flight changes nothing it has counted.
-The publisher never closes its side first: a subscription whose every Range has an `End` other than None and whose every Group has been delivered or dropped stays open for an update to widen it.
+The publisher never closes its side first: a subscription whose every Range has an `End` other than None and whose every Group has been delivered, skipped, or dropped stays open for an update to widen it.
 
 A subscriber fills Groups it misses by asking for them as Ranges, adding them to an open subscription with SUBSCRIBE_UPDATE or opening a bounded SUBSCRIBE when none is open, rather than with a FETCH of each Group; FETCH remains for one Group, or a slice of one.
-A publisher never sends a Group twice on one subscription, so a Group the subscription already delivered or named in SUBSCRIBE_DROP is asked for with a SUBSCRIBE of its own.
-The subscriber asks that way, once, for a Group a subscription dropped with OLD that it still wants, with a `Subscriber Max Age` its age does not reach, and never for a Group that may still arrive on the existing subscription.
+A publisher never sends a Group twice on one subscription, except to re-offer one whose stream it reset, so a Group the subscription already delivered or named in a final SUBSCRIBE_DROP is asked for with a SUBSCRIBE of its own.
+A Group dropped with OLD that the subscriber still wants needs no new SUBSCRIBE: a SUBSCRIBE_UPDATE with a `Subscriber Max Age` its age does not reach reopens it on the same subscription (see [SUBSCRIBE_UPDATE](#subscribe-update)).
 
 The subscriber closes its side (FIN) once it wants nothing more from the subscription, and the publisher then closes its side (FIN), cancelling any Group Stream still open.
-After SUBSCRIBE_FINISH, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every sequence in range has arrived, been named by SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
+After SUBSCRIBE_FINISH, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every sequence in range has arrived, been named by SUBSCRIBE_SKIP or SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
 A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 Either endpoint MAY reset the stream at any time.
 
@@ -830,7 +831,8 @@ A frame MAY contain an empty payload, potentially indicating a gap in the group.
 The GROUP message's `Frame Start` gives the index of the first FRAME on the stream, so a stream carrying only part of a Group is self-describing.
 It is redundant with the subscription's own start Position in the steady state, and carried anyway because a SUBSCRIBE_UPDATE that moves the bound races the Group Streams already in flight: the two travel on different streams with no ordering between them, so the receiver would otherwise have to guess which bound a given Group Stream was opened under.
 
-A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription.
+A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription, except to re-offer a Group whose stream it reset (see [SUBSCRIBE_DROP](#subscribe-drop)).
+The re-offer can arrive before that reset: a subscriber holds a Group Stream for a sequence whose earlier stream is still arriving unread until that stream ends, then discards it if the earlier stream completed the Group, or reads it if the earlier stream was reset.
 A subscriber assembling a Group from more than one publisher does so across separate subscriptions, and is responsible for concatenating the runs in index order and for ignoring any frame it has already received.
 
 Both the publisher and subscriber MAY reset the stream at any time.
@@ -867,7 +869,7 @@ A subscriber MUST silently drop a datagram with an unknown Subscribe ID, or one 
 
 **Sequence**:
 The datagram's sequence number within its datagram Track, which the publisher assigns in the order it produces them.
-It is the Track's own, not a Group Sequence.
+It is the Track's own, not a Group Sequence, and names no cached content: a Sequence may repeat, as from a restarted publisher, and a subscriber delivers a repeat like any other datagram.
 
 **Timestamp**:
 The absolute presentation timestamp of the datagram, in the Track's `Timescale`.
@@ -1113,7 +1115,7 @@ An Announce Stream ending before SYNCED is a PROTOCOL_VIOLATION; a Tracks Stream
 
 ## ROUTE_START {#route-start}
 A publisher sends a ROUTE_START message when it reaches an origin node (see [Routing](#routing)).
-Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, ANNOUNCE_FLOOR, ANNOUNCE_START, and ANNOUNCE_TAKEOVER (see [Announce](#announce)).
+Each ROUTE_START implicitly assigns the next Route ID on the stream, later referenced by ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, ANNOUNCE_FLOOR, and ANNOUNCE_START (see [Announce](#announce)).
 
 ~~~
 ROUTE_START Message {
@@ -1241,7 +1243,7 @@ A publisher MUST close the session with a PROTOCOL_VIOLATION if it receives any 
 
 ## ANNOUNCE_START {#announce-start}
 A publisher sends an ANNOUNCE_START message to advertise a claim of a route's origin node: that paths under a prefix can be served.
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and ANNOUNCE_TAKEOVER (see [Announce](#announce)).
+Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [Announce](#announce)).
 
 Only the suffix is encoded on the wire, as the full claim prefix can be constructed by prepending the requested prefix.
 
@@ -1282,7 +1284,7 @@ A relay forwards the Instance unchanged.
 Which incarnation of the Instance the claim serves: a counter the publisher raises within one Instance, 0 unless it keeps an Instance across restarts.
 A relay forwards the Epoch unchanged.
 
-Only an ANNOUNCE_RESTART or ANNOUNCE_TAKEOVER changes the Instance or the Epoch; ANNOUNCE_UPDATE never does.
+Only an ANNOUNCE_RESTART changes the Instance or the Epoch; ANNOUNCE_UPDATE never does.
 
 **Announce Cost**:
 The origin's price for this prefix, in the units of the [Cost Parameter](#cost-parameter): 0 for content it already produces, larger for a standby that starts work on demand.
@@ -1308,7 +1310,7 @@ ANNOUNCE_END Message {
 Set to 0x1 to indicate an ANNOUNCE_END message.
 
 **Announce ID**:
-The ordinal implicitly assigned by a prior ANNOUNCE_START or ANNOUNCE_TAKEOVER on this stream.
+The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 A claim that is announced again after an ANNOUNCE_END gets a fresh id from its next ANNOUNCE_START.
 
 
@@ -1362,44 +1364,6 @@ As defined for [ANNOUNCE_END](#announce-end).
 **Instance**, **Epoch**, and **Announce Cost**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the claim's.
 
-## ANNOUNCE_TAKEOVER {#announce-takeover}
-A publisher sends an ANNOUNCE_TAKEOVER message to advertise a claim that continues what a live claim, its predecessor, served beneath the new claim's prefix.
-A worker advertising a prefix under its own Instance answers a request under it by publishing that path under a fresh Instance; the ANNOUNCE_TAKEOVER keeps subscriptions already resolved through the prefix rather than resetting them to the more specific claim.
-It is an ANNOUNCE_START in every other respect and assigns the next Announce ID.
-
-~~~
-ANNOUNCE_TAKEOVER Message {
-  Type (i) = 0x5
-  Message Length (i)
-  Predecessor (i),
-  Path Base (i),
-  Path Keep (i),
-  Claim Prefix Suffix (s),
-  Route ID (i),
-  Instance (b),
-  Epoch (i),
-  Announce Cost (i),
-}
-~~~
-
-**Type**:
-Set to 0x5 to indicate an ANNOUNCE_TAKEOVER message.
-
-**Predecessor**:
-The Announce ID of a live claim under the same route whose prefix covers the new claim's prefix.
-One at the predecessor's own prefix retires the predecessor's id, which this claim replaces; otherwise the predecessor stays live.
-The receiver MUST close the session with a PROTOCOL_VIOLATION if the predecessor was never assigned, is already retired, is under another route, or does not cover the new prefix.
-
-**Path Base**, **Path Keep**, **Claim Prefix Suffix**, **Route ID**, **Instance**, **Epoch**, and **Announce Cost**:
-As defined for [ANNOUNCE_START](#announce-start), resolved before the predecessor retires.
-
-The receiver treats whatever it resolved through the predecessor beneath the new prefix as served by the new claim: subscriptions on it continue, and a new request for those paths MAY join them.
-Only what the predecessor's current claim resolved continues; anything resolved before an earlier ANNOUNCE_RESTART of it does not.
-
-A publisher MUST send an ANNOUNCE_TAKEOVER only when the new claim serves exactly what the subscriber resolved through the predecessor beneath its prefix: the publisher that answered requests through the predecessor now advertises their paths.
-A relay forwards one only when the subscriber was last sent that predecessor, and every claim the relay sent at its prefix serves the same Instance; otherwise it sends an ANNOUNCE_START, or an ANNOUNCE_RESTART at the predecessor's own prefix.
-
-
 ## ANNOUNCE_FLOOR {#announce-floor}
 A publisher sends an ANNOUNCE_FLOOR message to close a batch of a route's claims (see [Floors](#floors)).
 
@@ -1439,6 +1403,7 @@ SUBSCRIBE Message {
   Subscriber Min Age (i)
   Range Count (i)
   Range (..) ...
+  Update (i)
 }
 
 Range {
@@ -1492,7 +1457,7 @@ A value of 0 is a PROTOCOL_VIOLATION, since a subscription that asks for nothing
 
 **Range**:
 A span of the Track to deliver, from its `Start` up to its `End`.
-The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, in `Group Order` across all of them, and accounts with SUBSCRIBE_DROP for every Group it will not deliver.
+The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, in `Group Order` across all of them, and accounts with SUBSCRIBE_SKIP or SUBSCRIBE_DROP for every Group it will not deliver.
 Each Range implicitly takes the next Range ID on the stream, starting at 0, which a [SUBSCRIBE_UPDATE](#subscribe-update) uses to retire it.
 
 **Anchor Type**:
@@ -1506,6 +1471,10 @@ Which fields follow, and what the Anchor names:
 Any other value is a PROTOCOL_VIOLATION.
 The publisher resolves a Relative or Time Anchor against the Track as it holds it.
 A Range resolves once: an update that leaves it live does not resolve it again.
+
+**Update**:
+The number of the subscription's terms this message sets: 0 on SUBSCRIBE, and on each SUBSCRIBE_UPDATE a larger value than the one before it.
+A [SUBSCRIBE_DROP](#subscribe-drop) echoes the number in effect when its groups were given up, so the subscriber can tell a stale verdict on its current terms from one an update has since replaced.
 
 A `Start` is a floor, not a request; `Subscriber Max Age` is the only thing that asks for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
@@ -1524,6 +1493,10 @@ A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscript
 Every field but the Ranges restates the subscription, and the latest one applies.
 The Ranges are an edit, growing or shrinking the subscription: the update retires the live Ranges it names by Range ID, then adds its own, each taking the next Range ID.
 Lowering a `Start` covers the groups below the old one that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
+Growing the subscription asks for what it newly covers: the publisher MUST serve the newly covered Groups it holds and never delivered on this subscription.
+Every SUBSCRIBE_UPDATE, whatever it changes, reopens every stale (OLD) SUBSCRIBE_DROP sent before it: the publisher MUST serve each Group named in one that it still holds, that the new terms cover, and that is no longer stale under them, and MUST name each that is still stale in a SUBSCRIBE_DROP carrying the new `Update`.
+A SUBSCRIBE_DROP with any other Error Code is final, and no update reopens it.
+A SUBSCRIBE_UPDATE never resets the subscription, since a reset would race Group Streams already in flight, and shrinking it sends no SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 
 ~~~
 SUBSCRIBE_UPDATE Message {
@@ -1536,11 +1509,13 @@ SUBSCRIBE_UPDATE Message {
   Range ID (i) ...
   Range Count (i)
   Range (..) ...
+  Update (i)
   Wanted Group (i)
 }
 ~~~
 
 See [SUBSCRIBE](#subscribe) for information about each field.
+An `Update` no larger than the previous one only confuses the subscriber's own accounting of stale drops; the publisher echoes the latest value it read.
 Moving a `Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; it only bounds what the publisher sends from here on.
 
 **Remove Count** and **Range ID**:
@@ -1839,7 +1814,9 @@ A Range retired before its start resolved gets none.
 
 ## SUBSCRIBE_DROP {#subscribe-drop}
 
-A publisher names groups it will not deliver with SUBSCRIBE_DROP on the Subscribe Stream.
+A publisher names groups that existed but that it will not deliver with SUBSCRIBE_DROP on the Subscribe Stream: an aborted or reset group, one evicted or expired with no copy left to serve it, or one past the subscriber's budget (OLD).
+Sequences the publisher declared it will never produce are named by [SUBSCRIBE_SKIP](#subscribe-skip) instead.
+A sequence the publisher never had but never declared skipped, such as a gap between the Groups it created or one a relay never received, might have existed, so it is named in SUBSCRIBE_DROP: with OLD when it is past the subscriber's budget, otherwise with NOT_FOUND.
 
 ~~~
 SUBSCRIBE_DROP Message {
@@ -1848,18 +1825,71 @@ SUBSCRIBE_DROP Message {
   Group Start (i)
   Group End (i)
   Error Code (i)
+  Update (i)
 }
 ~~~
 
 **Group Start** and **Group End** are the inclusive range of group sequences the publisher gave up.
 `Group Start = Group End + 1` is an empty range; a larger Group Start is a PROTOCOL_VIOLATION.
-**Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example NOT_FOUND for a sequence the publisher never had, or OLD for one past its budget.
-A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
 
-For every sequence in the subscription's range, the publisher MUST send a Group Stream or name it in SUBSCRIBE_DROP.
-This includes sequences it skipped and streams reset before their headers were delivered.
+**Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example OLD for one past the subscriber's budget, EVICTED for one the publisher no longer holds, or NOT_FOUND for one a relay never received.
+A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
+A stale (OLD) drop is the exception: it ends no group whose Group Stream arrived, since that stream wins over it (see below), and a publisher that gives up a stream it opened resets it.
+
+**Update**:
+The [SUBSCRIBE](#subscribe) or [SUBSCRIBE_UPDATE](#subscribe-update) `Update` in effect when the publisher gave the groups up.
+A subscriber MUST treat an `Update` larger than the last one it sent as a PROTOCOL_VIOLATION.
+
+A drop whose Error Code is OLD is a stale verdict, which holds only under the update it names.
+The subscriber judges it against the `Subscriber Max Age` it sent with that update, from its own record: the drop does not carry the budget.
+A stale drop whose `Update` a later update has replaced is no verdict, since the update may have moved the Range or budget it was judged against: the subscriber still owes those groups, and a relay asks for such a group again rather than drop it for its own readers.
+The next SUBSCRIBE_UPDATE reopens every stale drop the subscriber accounted for, which it owes again until the publisher serves the group or drops it again under the new `Update`, as described in [SUBSCRIBE_UPDATE](#subscribe-update).
+A relay that received a stale drop settles with it only a reader whose own budget is no wider than the one the relay sent with that update and whose Ranges include every group the relay's own Ranges name above the dropped sequence, since the verdict on a group was judged against the groups above it.
+
+A drop with any other Error Code is final, whatever its `Update`, and replaces a stale drop of the same sequences, so no update reopens them.
+
+A later [SUBSCRIBE_SKIP](#subscribe-skip) for the same sequences overrides a drop, whatever its Error Code: the subscriber records them as skipped from then on, and a relay forwards the skip even over a drop it already forwarded.
+A subscriber that already ended readers on the drop does not deliver anything again: those readers stay ended.
+A drop that follows a skip of the same sequences changes nothing.
+
+A Group Stream for a sequence the subscriber already saw dropped, as after such a re-offer, wins over the drop: the subscriber delivers it.
+A Group Stream also wins over a stale drop of its sequence that arrives after it, since the stream can overtake a drop the publisher sent first.
+Either way the Group Stream accounts for the sequence, and the next SUBSCRIBE_UPDATE does not reopen it: the publisher, having served it, neither serves it again nor names it in another drop.
+
+For every sequence in the subscription's range, the publisher MUST send a Group Stream or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
+This includes streams reset before their headers were delivered.
 A reliably delivered reset retaining the Group Stream header accounts for that group instead.
-The publisher SHOULD send SUBSCRIBE_DROP as soon as it gives a sequence up, without waiting for SUBSCRIBE_FINISH.
+The publisher SHOULD name a sequence as soon as it gives it up, without waiting for SUBSCRIBE_FINISH.
+
+Before moq-lite-07, SUBSCRIBE_DROP carries no `Update`, its Error Code is application-specific, and it also names the sequences moq-lite-07 names in SUBSCRIBE_SKIP; every such drop is final.
+
+## SUBSCRIBE_SKIP {#subscribe-skip}
+
+A publisher names sequences it declared it will never produce with SUBSCRIBE_SKIP on the Subscribe Stream.
+
+~~~
+SUBSCRIBE_SKIP Message {
+  Type (i) = 0x3
+  Message Length (i)
+  Group Start (i)
+  Group End (i)
+}
+~~~
+
+**Group Start** and **Group End** are the inclusive range of sequences that will never hold a group.
+`Group Start = Group End + 1` is an empty range; a larger Group Start is a PROTOCOL_VIOLATION.
+
+A skip names only sequences the original publisher declared it will never produce, and it is final: no Group will ever exist at those sequences, whatever the terms.
+A publisher MUST NOT later create a Group at a sequence it skipped, and a subscriber MUST NOT deliver a Group Stream for one.
+It carries no error and ends no reader, since there is nothing to read; a subscriber stops waiting for those sequences.
+A skip overrides an earlier SUBSCRIBE_DROP of the same sequences, whatever its Error Code, since never produced is the most authoritative account of a sequence: no update reopens them, and a relay forwards the skip downstream even over a drop it already forwarded.
+A subscriber that already ended readers on that drop does not deliver anything again: those readers stay ended.
+A skip never overrides a Group that arrived, since that Group was produced; a subscriber ignores a skip for such a sequence, which is a protocol error the publisher made, and MAY log it.
+
+A gap in the sequence numbers says nothing on its own: a publisher may create Groups out of order, or create again a sequence whose Group it aborted, so it never skips a sequence merely because a higher Group exists or the Track ended without it.
+Only the application producing the Track knows a sequence will never exist, for example when it numbers Groups sparsely, or when it moves on to the next Group and so declares that it will not go back to fill the sequences below.
+A publisher SHOULD send the skip as soon as it declares it.
+A relay forwards a skip it received unchanged, and never skips a sequence on its own: one it never received is named in SUBSCRIBE_DROP (see [SUBSCRIBE_DROP](#subscribe-drop)).
 
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
@@ -2156,10 +2186,10 @@ The `Message Length` describes the payload size on the wire.
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining claims that end before delivery.
 - Added `Instance` and `Epoch` to ANNOUNCE_START and ANNOUNCE_RESTART, and `Instance` to TRACK, TRACKS, SUBSCRIBE, and FETCH. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): a live advertisement now serves another Instance, or a higher Epoch of the same one.
-- Added ANNOUNCE_TAKEOVER (0x5): a claim that continues what a live claim served beneath it, such as a job answering a request through a worker's prefix at its exact path, so subscriptions resolved through the prefix are not reset.
+- An advertiser MAY announce a path it answers through a claim under the claim's Instance, so subscriptions resolved through the claim continue, and a claim still serving that Instance when the announcement ends restarts under a new one.
 - A receiver mints an Instance, starting with `~`, for each announcement a session of an earlier version delivers.
-- Added announce compression: ANNOUNCE_START and ANNOUNCE_TAKEOVER gain `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
-- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START and ANNOUNCE_TAKEOVER names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list, ANNOUNCE_OK's Hop ID, and the SETUP Hop parameter (0x5).
+- Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
+- Split routing into two layers on the Announce Stream. ROUTE_START (0x6), ROUTE_UPDATE (0x7), and ROUTE_END (0x8) advertise how the publisher reaches an origin node, named by a Node ID, with a seqno, an additive metric, and a down-only bit, and loops are prevented by Babel's feasibility condition. Every ANNOUNCE_START names its route's Route ID in place of the Hop ID list, so a link change sends one ROUTE_UPDATE per origin rather than an update per claim. Removed the Hop ID list, ANNOUNCE_OK's Hop ID, and the SETUP Hop parameter (0x5).
 - Added ROUTE_HOLD (0xB), which holds a route while it recovers; ROUTE_END lets it go. Neither withdraws the origin's claims, and the subscriber echoes every ROUTE_END back.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
@@ -2199,6 +2229,8 @@ The `Message Length` describes the payload size on the wire.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_FINISH. Every sequence is accounted for by a Group Stream or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
 - Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it.
+- Added SUBSCRIBE_SKIP (type 0x3) for sequences the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped sequence. A skip overrides an earlier drop of the same sequences, whatever its Error Code, without re-delivering to readers the drop already ended, and never overrides a Group that arrived. A gap in the sequence numbers is not a skip, since Groups may be created out of order; a sequence never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
+- Added `Update` to SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_DROP: the number of the terms in effect. A stale (OLD) drop holds only under the update it names, judged against the budget the subscriber sent with it; every later SUBSCRIBE_UPDATE reopens it, and the publisher re-offers the group or drops it again under the new `Update`. Any other drop is final. A Group Stream wins over its earlier drop, and over a stale drop that arrives after it; no update reopens a sequence its Group Stream accounted for. A re-offered Group Stream that overtakes the reset of the stream it replaces waits, unread, until that stream ends, and is read only if it was reset.
 - SUBSCRIBE_FINISH declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.
 - A publisher that withheld SUBSCRIBE_OK sends it, then the drops it withheld, once no group can resolve the start: every Group of a bounded subscription was given up, or the Track finished.

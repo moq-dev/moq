@@ -1,5 +1,7 @@
 //! Encode raw PCM and publish it as a moq audio track.
 
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -76,8 +78,9 @@ impl Default for Options {
 /// a subscriber that opens the catalog before any frames arrive still sees the
 /// track.
 pub struct Producer {
-	// None after a successful finish: keep the track and catalog rendition, not the codec.
-	encoder: Option<Encoder>,
+	/// The codec while input is accepted. Ending keeps the track and catalog rendition, not the
+	/// codec.
+	codec: Codec,
 	bitrate: moq_net::bandwidth::Rate,
 	input: Input,
 	/// Converts the input layout to the codec's, when they differ.
@@ -94,6 +97,9 @@ pub struct Producer {
 	grouped: u64,
 	/// Samples emitted since the current anchor (reset by [`reanchor`](Self::reanchor)).
 	frames_produced: u64,
+	/// Stamps of the frames the codec has been given but has not yet returned a packet for,
+	/// oldest first: it returns one packet per frame in order, however late.
+	in_flight: VecDeque<Timestamp>,
 	/// Wall-clock anchor in microseconds, taken from the first frame after each
 	/// (re)start. Emitted PTS = `anchor + frames_produced / codec_rate`. `None`
 	/// until the first write so the next frame re-anchors to its timestamp.
@@ -105,6 +111,33 @@ pub struct Producer {
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it published most recently.
 	activity: Activity,
+}
+
+/// The codec while the producer accepts input, or how it ended.
+enum Codec {
+	Live(Encoder),
+	/// [`finish`](Producer::finish) published every packet and ended the track.
+	Finished,
+	/// Ending failed, aborting the track: every later call reports the cause.
+	Failed(Error),
+}
+
+impl Codec {
+	fn get(&self) -> Result<&Encoder, Error> {
+		match self {
+			Self::Live(encoder) => Ok(encoder),
+			Self::Finished => Err(moq_net::Error::Closed.into()),
+			Self::Failed(err) => Err(err.clone()),
+		}
+	}
+
+	fn get_mut(&mut self) -> Result<&mut Encoder, Error> {
+		match self {
+			Self::Live(encoder) => Ok(encoder),
+			Self::Finished => Err(moq_net::Error::Closed.into()),
+			Self::Failed(err) => Err(err.clone()),
+		}
+	}
 }
 
 struct Terminal {
@@ -216,7 +249,7 @@ impl Reserved {
 			active: true,
 			reset_pending: false,
 			bitrate,
-			encoder: Some(registered.encoder),
+			codec: Codec::Live(registered.encoder),
 			input: registered.input,
 			remix: registered.remix,
 			resampler: registered.resampler,
@@ -225,6 +258,7 @@ impl Reserved {
 			group_samples: registered.group_samples,
 			grouped: 0,
 			frames_produced: 0,
+			in_flight: VecDeque::new(),
 			anchor_us: None,
 			pending_discontinuity: false,
 			decoder_boundary: true,
@@ -301,7 +335,7 @@ impl Producer {
 
 	/// Retune the live encoder to `bitrate`.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
-		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
+		let encoder = self.codec.get_mut()?;
 		let previous = encoder.bitrate();
 		encoder.set_bitrate(bitrate)?;
 		// Advertise the configured target in place, so encoded-byte estimates cannot replace it.
@@ -317,7 +351,7 @@ impl Producer {
 	}
 
 	fn encoder(&self) -> Result<&Encoder, Error> {
-		self.encoder.as_ref().ok_or(moq_net::Error::Closed.into())
+		self.codec.get()
 	}
 
 	/// Re-anchor the timeline to the next frame's timestamp, dropping any
@@ -328,7 +362,7 @@ impl Producer {
 	/// `reanchor`. If the codec had started, a marker group is published before
 	/// the next packet so subscribers jump the playhead.
 	pub fn reanchor(&mut self) {
-		if self.encoder.as_ref().is_some_and(Encoder::started) || !self.backlog.is_empty() {
+		if self.codec.get().is_ok_and(Encoder::started) || !self.backlog.is_empty() {
 			self.pending_discontinuity = true;
 		}
 		self.reset_state();
@@ -341,9 +375,10 @@ impl Producer {
 		self.pending.clear();
 		self.reset_pending = true;
 		if self.backlog.is_empty()
-			&& let Some(encoder) = self.encoder.as_mut()
+			&& let Ok(encoder) = self.codec.get_mut()
 		{
 			encoder.reset();
+			self.in_flight.clear();
 		}
 		// The resampler holds samples of its own, plus filter state primed by them.
 		// Left alone, `finish` would flush that pre-reset audio onto the track
@@ -370,11 +405,9 @@ impl Producer {
 	/// produced, which [`activity`](Self::activity) reports.
 	///
 	/// Writes after a successful [`finish`](Self::finish) fail with
-	/// [`moq_net::Error::Closed`].
+	/// [`moq_net::Error::Closed`], and after a failed one with its cause.
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
-		if self.encoder.is_none() {
-			return Err(moq_net::Error::Closed.into());
-		}
+		self.encoder()?;
 		let timestamp_us = u64::try_from(frame.timestamp.as_micros())
 			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
 		let anchor_us = *self.anchor_us.get_or_insert(timestamp_us);
@@ -457,14 +490,35 @@ impl Producer {
 			self.track.discontinuity()?;
 			self.decoder_boundary = true;
 		}
-		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
+		let encoder = self.codec.get_mut()?;
 		if reset {
 			encoder.reset();
+			self.in_flight.clear();
 		}
-		let packet = encoder.encode(samples)?;
-		self.activity = packet.activity;
-		self.publish(packet, timestamp)?;
-		self.decoder_boundary = false;
+		encoder.encode(samples)?;
+		self.publish_ready(Some(timestamp))
+	}
+
+	/// Publish every packet the codec has ready, each stamped with the frame it pairs with:
+	/// the oldest held stamp, then `submitted`, the frame just encoded, which is queued only
+	/// when the codec holds its packet, so a codec that holds nothing never fills the queue.
+	fn publish_ready(&mut self, mut submitted: Option<Timestamp>) -> Result<(), Error> {
+		while let Some(packet) = self.codec.get_mut()?.receive()? {
+			let Some(timestamp) = self.in_flight.pop_front().or_else(|| submitted.take()) else {
+				return Err(Error::Codec(format!(
+					"{} returned more packets than it was given frames",
+					self.encoder()?.name()
+				)));
+			};
+			self.activity = packet.activity;
+			// The codec and its timestamp queue already advanced past this packet, so no later
+			// write could stamp what follows: end the producer with the cause.
+			if let Err(err) = self.publish(packet, timestamp) {
+				return self.close(Err(err));
+			}
+			self.decoder_boundary = false;
+		}
+		self.in_flight.extend(submitted);
 		Ok(())
 	}
 
@@ -613,7 +667,8 @@ impl Producer {
 	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
 	/// run after a successful finish. The codec and input scratch are released, while the
 	/// track and its catalog rendition stay published. Writes and bitrate changes then
-	/// fail with [`moq_net::Error::Closed`].
+	/// fail with [`moq_net::Error::Closed`]. A finish that fails ends the track with an error
+	/// instead, and every later call returns its cause.
 	pub fn finish(&mut self) -> Result<(), Error> {
 		self.end(None)
 	}
@@ -626,9 +681,38 @@ impl Producer {
 	}
 
 	fn end(&mut self, err: Option<moq_net::Error>) -> Result<(), Error> {
-		if self.encoder.is_none() {
-			return Ok(());
+		match &self.codec {
+			Codec::Live(_) => {}
+			Codec::Finished => return Ok(()),
+			Codec::Failed(cause) => return Err(cause.clone()),
 		}
+		let result = self.drain(err);
+		self.close(result)
+	}
+
+	/// Settle the codec as finished or failed with `result`, releasing encoding resources.
+	fn close(&mut self, result: Result<(), Error>) -> Result<(), Error> {
+		if !matches!(self.codec, Codec::Live(_)) {
+			return result;
+		}
+		self.codec = match &result {
+			Ok(()) => Codec::Finished,
+			Err(cause) => {
+				// Every published packet stays readable, then subscribers get an error rather than an
+				// end that would claim the source was published whole.
+				let _ = self.track.fail(moq_net::StreamError::Internal.into());
+				Codec::Failed(cause.clone())
+			}
+		};
+		self.pending = Vec::new();
+		self.in_flight = VecDeque::new();
+		self.remix = None;
+		self.resampler = None;
+		result
+	}
+
+	/// Publish everything still held, then end the track with `err` or cleanly.
+	fn drain(&mut self, err: Option<moq_net::Error>) -> Result<(), Error> {
 		// Preserve the final retained history after capture ends, even without live demand.
 		self.active = true;
 		while let Some(raw) = self.backlog.pop() {
@@ -636,9 +720,10 @@ impl Producer {
 			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
 		}
 		if self.reset_pending
-			&& let Some(encoder) = self.encoder.as_mut()
+			&& let Ok(encoder) = self.codec.get_mut()
 		{
 			encoder.reset();
+			self.in_flight.clear();
 		}
 		// Whatever the resampler still holds belongs to this track: its last partial
 		// chunk, plus the audio its filter is running behind on. Dropping it here
@@ -651,6 +736,17 @@ impl Producer {
 		// so only the final partial frame reaches the encoder's terminal drain.
 		let anchor_us = self.anchor_us.unwrap_or(0);
 		self.publish_full_frames(anchor_us)?;
+		// What the codec still holds came from full frames, so it goes out at their stamps, leaving
+		// the terminal drain's packets to start where the source's partial tail does.
+		self.codec.get_mut()?.flush()?;
+		self.publish_ready(None)?;
+		if !self.in_flight.is_empty() {
+			return Err(Error::Codec(format!(
+				"{} kept {} packet(s) past its flush",
+				self.encoder()?.name(),
+				self.in_flight.len()
+			)));
+		}
 		// A gap no full frame carried, such as history expiring right before capture ended,
 		// still separates the final partial frame from the epoch before it.
 		if std::mem::take(&mut self.pending_discontinuity) && !self.decoder_boundary && !self.pending.is_empty() {
@@ -666,11 +762,7 @@ impl Producer {
 		let start = Self::timestamp(anchor_us, self.frames_produced, delay, codec_rate)?;
 		// The source ends where it ends: priming only moves the packets carrying it.
 		let end = Self::timestamp(anchor_us, self.frames_produced + source_frames as u64, 0, codec_rate)?;
-		let finish = self
-			.encoder
-			.as_mut()
-			.ok_or(moq_net::Error::Closed)?
-			.drain(&self.pending)?;
+		let finish = self.codec.get_mut()?.drain(&self.pending)?;
 		let discard_padding = finish.discard_padding();
 		let packets = finish.into_packets();
 
@@ -698,9 +790,6 @@ impl Producer {
 			None => self.track.finish()?,
 			Some(err) => self.track.fail(err)?,
 		}
-		self.encoder = None;
-		self.pending = Vec::new();
-		self.remix = None;
 		Ok(())
 	}
 
@@ -1170,6 +1259,7 @@ mod tests {
 			producer.finish().unwrap();
 			assert_eq!(backend.resources(), 0, "retired {index} codecs");
 			assert_eq!(producer.pending.capacity(), 0);
+			assert_eq!(producer.in_flight.capacity(), 0);
 			assert!(producer.remix.is_none());
 			assert!(producer.resampler.is_none());
 			assert_eq!(producer.bitrate(), bitrate);
@@ -1385,6 +1475,40 @@ mod tests {
 			packets += 1;
 		}
 		assert_eq!(packets, 11);
+	}
+
+	/// A failed finish is final: writes are refused with its cause rather than reaching the codec
+	/// at the input rate, now that the resampler is gone, and a retry reports the cause rather than
+	/// publishing the terminal packets again.
+	#[tokio::test]
+	async fn a_failed_finish_refuses_later_calls() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 44_100,
+			layout: Layout::Mono,
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".to_string()),
+			config: Config::new(48_000, Layout::Mono),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let frame = |samples: usize| {
+			let data: Vec<u8> = vec![0.25f32; samples].iter().flat_map(|s| s.to_le_bytes()).collect();
+			Frame::new(data.into(), moq_net::Timestamp::ZERO)
+		};
+		producer.write(&frame(4_410)).unwrap();
+
+		// Another handle ends the track, so finishing cannot publish the tail.
+		producer.track.track().clone().abort(moq_net::Error::Cancel).unwrap();
+		let cause = producer.finish().unwrap_err().to_string();
+
+		// Short of a codec frame, so nothing but the guard could refuse it.
+		let err = producer.write(&frame(100)).unwrap_err();
+		assert_eq!(err.to_string(), cause);
+		assert_eq!(producer.finish().unwrap_err().to_string(), cause);
 	}
 
 	/// `reanchor` promises to drop buffered samples, and the resampler buffers
@@ -1766,11 +1890,11 @@ mod tests {
 					"packets forward before the group fills"
 				);
 			}
-			assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
+			assert!(partial.poll_read_frame(&kio::Waiter::noop()).is_pending());
 
 			if deferred {
 				producer.reanchor();
-				assert!(partial.poll_read_frame(&moq_net::kio::Waiter::noop()).is_pending());
+				assert!(partial.poll_read_frame(&kio::Waiter::noop()).is_pending());
 			} else {
 				producer.discontinuity().unwrap();
 				assert!(partial.read_frame().await.unwrap().is_none());
@@ -1845,6 +1969,59 @@ mod tests {
 		assert_eq!(pts(1_000_000).await, vec![956_000, 977_333, 998_666, 1_020_000]);
 		// Priming before a zero anchor stamps at zero; the input still starts on time.
 		assert_eq!(pts(0).await, vec![0, 0, 0, 20_000]);
+	}
+
+	/// A codec that holds frames returns their packets late, and each still goes out at the stamp
+	/// of the frame it encoded, including the one only `finish` flushes out ahead of the drain.
+	#[tokio::test]
+	async fn held_packets_keep_their_frames_stamps() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let consumer = broadcast.consume();
+
+		let input = Input::new(48_000, Layout::Mono);
+		let options = Options {
+			track: Some("audio".to_string()),
+			config: Config::from_input(crate::encode::Codec::Aac, &input),
+			..Options::default()
+		};
+		let stub = crate::encode::backend::stub::install();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		drop(stub);
+
+		let track = consumer
+			.track("audio")
+			.unwrap()
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
+			.await
+			.unwrap();
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
+
+		// The stub holds the third frame, so only `finish` releases it.
+		producer.write(&pcm_frame(&[0.1; 3 * 1024], 1_000_000)).unwrap();
+		producer.finish().unwrap();
+
+		let mut published = Vec::new();
+		while let Some(frame) = packet(&mut reader).await {
+			let index = u64::from_be_bytes(frame.payload[..].try_into().unwrap());
+			published.push((index, frame.timestamp.as_micros()));
+		}
+		// Each frame is stamped 2112 frames of priming early, the drain's three silent ones too.
+		assert_eq!(
+			published,
+			vec![
+				(0, 956_000),
+				(1, 977_333),
+				(2, 998_666),
+				(3, 1_020_000),
+				(4, 1_041_333),
+				(5, 1_062_666),
+			]
+		);
 	}
 
 	/// The encoder needs no correction for the resampler's own delay: it anchors

@@ -18,8 +18,12 @@ behind the encode seam on Windows.
 - Round-trip regression through the Media Foundation decoder; verification on
   a Windows host, since the per-PR CI compiles only.
 
+This backend implements the zero-or-more packet return and `flush` that
+moq-audio's encoder took in m2 before the cut
+(decided 2026-11-07, maintainer, /quest-plan from the API sweep of open PRs
+and remaining quests), so it adds no break and waits on no other encoder backend; its round-trip test still needs its platform decoder.
+
 ## Required
 
-- [AudioToolbox encode](/quest/m5/audio-encode-audiotoolbox.md) - changes `Encoder::encode` to a zero-or-more packet return with a flush, which this backend implements
 - [Media Foundation decode](/quest/m5/audio-decode-mediafoundation.md) - the round-trip regression decodes through it
 

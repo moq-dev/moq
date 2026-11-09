@@ -82,16 +82,24 @@ struct State {
 	sequence: u64,
 	/// The newest discontinuity seen, retained when the playlist window becomes empty.
 	discontinuity: u64,
-	/// The media track ended: the rendition is over (`EXT-X-ENDLIST`).
-	ended: bool,
-	/// The run was replaced: the listed rows are final, so nothing appends, trims, or fails them.
-	cut: bool,
-	/// The media track or the catalog failed, so every listing refuses with this error.
-	failed: Option<crate::Error>,
+	/// Whether rows still arrive, and if not, why.
+	phase: Phase,
 	/// Bumped whenever the window is cleared, so a cursor can tell its position is stale.
 	resets: u64,
 	/// Total rows appended, so a cursor can detect eviction even before its first read.
 	produced: u64,
+}
+
+/// Whether a window still lists new rows, and if not, why. Each later phase is final.
+enum Phase {
+	/// Rows arrive as the media watcher reads them.
+	Live,
+	/// The media track ended, or the bound sibling did: the rendition is over (`EXT-X-ENDLIST`).
+	Ended,
+	/// The run was replaced: the listed rows are final, so nothing appends, trims, or fails them.
+	Cut,
+	/// The media track or the catalog failed, so every listing refuses with this error.
+	Failed(crate::Error),
 }
 
 /// The most segments a playlist window lists, however short they are.
@@ -193,8 +201,8 @@ impl State {
 			sequence: self.sequence,
 			discontinuity: self.rows.front().map_or(self.discontinuity, |row| row.discontinuity),
 			segments: self.rows.iter().cloned().collect(),
-			ended: self.ended,
-			failed: self.failed.clone(),
+			ended: matches!(self.phase, Phase::Ended | Phase::Cut),
+			failed: self.failure(),
 			closed: false,
 		}
 	}
@@ -207,9 +215,20 @@ impl State {
 		}
 		Ok(match self.rows.get((position.1 - first) as usize) {
 			Some(row) => Next::Ready(row.clone()),
-			None if self.ended || self.failed.is_some() => Next::Done,
-			None => Next::Pending,
+			None if self.live() => Next::Pending,
+			None => Next::Done,
 		})
+	}
+
+	fn live(&self) -> bool {
+		matches!(self.phase, Phase::Live)
+	}
+
+	fn failure(&self) -> Option<crate::Error> {
+		match &self.phase {
+			Phase::Failed(err) => Some(err.clone()),
+			_ => None,
+		}
 	}
 }
 
@@ -222,21 +241,20 @@ impl Producer {
 				rows: VecDeque::new(),
 				sequence: start,
 				discontinuity: 0,
-				ended: false,
-				cut: false,
-				failed: None,
+				phase: Phase::Live,
 				resets: 0,
 				produced: 0,
 			}),
 		}
 	}
 
-	/// Append a row, evicting the front of the window past `window` (see [`evicts`]).
+	/// Append a row, evicting the front of the window past `window` (see [`evicts`]). A window
+	/// that ended, failed, or was cut lists nothing more.
 	pub fn push(&self, row: Row, window: Duration) {
 		let Ok(mut state) = self.state.write() else {
 			return;
 		};
-		if state.cut {
+		if !state.live() {
 			return;
 		}
 
@@ -267,10 +285,11 @@ impl Producer {
 		state.sequence = state.rows.front().unwrap().segment;
 	}
 
-	/// Clear every retained row after the media timestamps went back.
+	/// Clear every retained row, after the media timestamps went back or a new publisher run
+	/// replaced them. An ended or failed window stays so; a cut window keeps what it listed.
 	pub fn clear(&self) {
 		if let Ok(mut state) = self.state.write()
-			&& !state.cut
+			&& !matches!(state.phase, Phase::Cut)
 		{
 			state.rows.clear();
 			state.resets += 1;
@@ -279,18 +298,21 @@ impl Producer {
 
 	/// Mark the media finished: the playlist gets `EXT-X-ENDLIST` and cursors end once drained.
 	pub fn end(&self) {
-		if let Ok(mut state) = self.state.write() {
-			state.ended = true;
+		if let Ok(mut state) = self.state.write()
+			&& state.live()
+		{
+			state.phase = Phase::Ended;
 		}
 	}
 
 	/// Mark the window failed with `err`: every listing refuses with it instead of ending, and
-	/// cursors return it once drained. No row is pushed after.
+	/// cursors return it once drained. No row is pushed after. The first failure stays, and a cut
+	/// window keeps the rows it listed.
 	pub fn fail(&self, err: crate::Error) {
 		if let Ok(mut state) = self.state.write()
-			&& !state.cut
+			&& matches!(state.phase, Phase::Live | Phase::Ended)
 		{
-			state.failed.get_or_insert(err);
+			state.phase = Phase::Failed(err);
 		}
 	}
 
@@ -298,9 +320,10 @@ impl Producer {
 	/// playlist gets `EXT-X-ENDLIST`, cursors drain those rows and then end, and whatever the
 	/// replaced run sends later is refused. A window that already failed keeps its failure.
 	pub fn cut(&self) {
-		if let Ok(mut state) = self.state.write() {
-			state.cut = true;
-			state.ended = true;
+		if let Ok(mut state) = self.state.write()
+			&& matches!(state.phase, Phase::Live | Phase::Ended)
+		{
+			state.phase = Phase::Cut;
 		}
 		self.close();
 	}
@@ -310,12 +333,17 @@ impl Producer {
 	#[cfg(feature = "server")]
 	pub fn finished(&self) -> bool {
 		let state = self.state.read();
-		state.ended || state.failed.is_some() || state.is_closed()
+		!state.live() || state.is_closed()
+	}
+
+	/// Whether the window still lists new rows: it has not ended, failed, or been cut.
+	pub(crate) fn lists(&self) -> bool {
+		self.state.read().live()
 	}
 
 	/// Why the window failed, if it did.
 	pub fn failure(&self) -> Option<crate::Error> {
-		self.state.read().failed.clone()
+		self.state.read().failure()
 	}
 
 	/// Close the channel: no more rows will arrive. A [`Consumer`] drains the segments it
@@ -382,12 +410,12 @@ impl Producer {
 
 	/// Poll until the window lists a row, ends, fails, or closes.
 	pub fn poll_listed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		match self.state.poll_ref(waiter, |state| {
-			match !state.rows.is_empty() || state.ended || state.failed.is_some() {
+		match self
+			.state
+			.poll_ref(waiter, |state| match !state.rows.is_empty() || !state.live() {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
-			}
-		}) {
+			}) {
 			Poll::Ready(_) => Poll::Ready(()),
 			Poll::Pending => Poll::Pending,
 		}
@@ -425,9 +453,9 @@ impl Producer {
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
 	pub fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		match self.state.poll_ref(waiter, |state| match state.failed {
-			Some(_) => Poll::Ready(()),
-			None => Poll::Pending,
+		match self.state.poll_ref(waiter, |state| match state.phase {
+			Phase::Failed(_) => Poll::Ready(()),
+			_ => Poll::Pending,
 		}) {
 			Poll::Ready(Ok(())) => Poll::Ready(()),
 			_ => Poll::Pending,
@@ -446,6 +474,21 @@ impl Producer {
 			fetch: None,
 		}
 	}
+}
+
+/// A segment without its media, reported by [`Consumer::peek`].
+pub struct Info {
+	/// The segment number, as [`Segment::segment`].
+	pub segment: u64,
+	/// The bytes its groups carry on the wire; 0 for a gap. Its fragment is a little larger,
+	/// adding ~12-16 bytes per frame plus a small fixed header, so treat this as a lower bound.
+	pub bytes: usize,
+	/// Presentation duration.
+	pub duration: Duration,
+	/// Wall-clock start time, as [`Segment::program_date_time`].
+	pub program_date_time: Option<Wall>,
+	/// The absolute discontinuity sequence, as [`Segment::discontinuity`].
+	pub discontinuity: u64,
 }
 
 /// A segment with its transmuxed media, yielded by a [`Consumer`].
@@ -484,7 +527,7 @@ pub struct Consumer {
 	/// The reset epoch and next append position; errors leave it unchanged.
 	position: (u64, u64),
 	feed: Option<Feed>,
-	/// The next row's media being fetched, kept across polls.
+	/// The next row's media being fetched or sized, kept across polls.
 	fetch: Option<Fetch>,
 }
 
@@ -512,6 +555,43 @@ impl Consumer {
 		kio::wait(|waiter| self.rendition.poll_latest_init(waiter, &mut load)).await
 	}
 
+	/// The next segment's [`Info`], so a caller can reserve memory and time before
+	/// [`next`](Self::next) builds its media.
+	///
+	/// Counts each frame of the segment's groups as it is read, without decoding or keeping any,
+	/// so nothing is held while the caller waits, and `next` reads them again. `None` once the
+	/// rendition ends cleanly. Fails as `next` would on a missing segment, and never advances the
+	/// cursor.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_peek(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Info>>> {
+		if self.fetch.as_ref().is_some_and(|fetch| !fetch.sizes()) {
+			self.fetch = None;
+		}
+		let (row, bytes) = loop {
+			let Some(fetch) = &mut self.fetch else {
+				let Some(row) = ready!(self.poll_row(waiter))? else {
+					return Poll::Ready(Ok(None));
+				};
+				if row.stop {
+					break (row, 0);
+				}
+				self.fetch = Some(Fetch::sizing(row));
+				continue;
+			};
+			let bytes = ready!(fetch.poll_size(&self.rendition, waiter));
+			let row = self.fetch.take().expect("fetching above").row().clone();
+			let bytes = bytes?.ok_or(crate::Error::SegmentUnavailable { segment: row.segment })?;
+			break (row, bytes);
+		};
+		Poll::Ready(Ok(Some(Info {
+			segment: row.segment,
+			bytes,
+			duration: row.duration,
+			program_date_time: self.rendition.wall_clock(row.pts),
+			discontinuity: row.discontinuity,
+		})))
+	}
+
 	/// The next segment, with its media; `None` only once the rendition ends cleanly, so a
 	/// recording that reads to `None` is complete.
 	///
@@ -531,6 +611,9 @@ impl Consumer {
 	/// media is never read under the old rows.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Segment>>> {
+		if self.fetch.as_ref().is_some_and(Fetch::sizes) {
+			self.fetch = None;
+		}
 		let (row, media) = loop {
 			let Some(fetch) = &mut self.fetch else {
 				let Some(row) = ready!(self.poll_row(waiter))? else {
@@ -669,6 +752,34 @@ mod tests {
 
 		live.end();
 		assert!(live.window().ended);
+	}
+
+	// An ended window lists nothing more: the playlist already went out with `EXT-X-ENDLIST`.
+	#[test]
+	fn an_ended_window_refuses_rows() {
+		let live = Producer::new(0);
+		let window = Duration::from_secs(30);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.end();
+		live.push(row(1, 1, 2_000, 2_000), window);
+		let snapshot = live.window();
+		assert!(snapshot.ended);
+		let segments: Vec<_> = snapshot.segments.iter().map(|row| row.segment).collect();
+		assert_eq!(segments, [0]);
+	}
+
+	// A restart still drops an ended window's rows, so the new run's generation never lists the
+	// previous run's segments. The window stays ended.
+	#[test]
+	fn an_ended_window_still_clears() {
+		let live = Producer::new(0);
+		let window = Duration::from_secs(30);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.end();
+		live.clear();
+		let snapshot = live.window();
+		assert!(snapshot.ended);
+		assert!(snapshot.segments.is_empty());
 	}
 
 	// A cut freezes the listed rows: later records, trims, resets, and failures are refused, and

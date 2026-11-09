@@ -7,10 +7,11 @@
 //! the dialed path, `anon/**` at `/anon` meant `anon/anon/**`, and at `/rooms/123`
 //! it let an anonymous client into `rooms/123/anon/**`.
 
+#![cfg(feature = "websocket")]
+
 use std::time::Duration;
 
 use moq_relay::{auth, cluster, web};
-use moq_tokio::moq_net;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -21,7 +22,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
-	#[cfg(feature = "websocket")]
 	{
 		config.websocket.delay = Some((Duration::ZERO).into());
 	}
@@ -40,19 +40,10 @@ async fn spawn_relay(auth: auth::Config) -> (u16, tokio::task::JoinHandle<()>) {
 		.expect("auth init");
 	let cluster = crate::spawn_cluster(cluster::Options::default());
 
-	// Only the certificate handle is used; stream listeners bind lazily.
-	let mut server_config = moq_tokio::listen::Config::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
-	server_config.tls.generate = vec!["localhost".into()];
-	let certificates = server_config
-		.init(Default::default())
-		.expect("server init")
-		.certificates();
-
 	let mut web_config = web::Config::default();
 	web_config.ws = true;
 	web_config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
-	let web = web::Web::new(auth, cluster, certificates, web_config)
+	let web = web::Web::new(auth, cluster, crate::certificates(), web_config)
 		.bind()
 		.expect("bind web listener");
 	let port = web.addrs().http.expect("HTTP listener is configured").port();

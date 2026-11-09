@@ -488,7 +488,10 @@ mod tests {
 		};
 		let rendition = config.probe().await.unwrap();
 		let reserved = source_catalog.reserve().with_interval(config.effective_join());
-		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
+		let track = source_broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = EncodeProducer::new(track, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {
@@ -507,15 +510,15 @@ mod tests {
 		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
 		// the second `next()` would then block forever waiting for a group that was
 		// skipped.
-		let mut export =
-			moq_mux::container::fmp4::Export::new(source, catalog).with_max_delay(std::time::Duration::from_secs(30));
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(true);
+		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(true);
 		import.decode(&init).unwrap();
 		import.decode(&fragment).unwrap();
 
@@ -741,6 +744,7 @@ mod tests {
 			kind: Kind::Named(probe::NATIVE_NAME.into()),
 			output: crate::Output::Cpu,
 			scale_hint: Some(crate::Size::new(160, 120)),
+			..Default::default()
 		};
 		let max_delay = std::time::Duration::from_secs(10);
 		let mut consumer = pollster::block_on(Consumer::new(
@@ -1330,11 +1334,15 @@ mod tests {
 		// leading by more than a frame, so it is shown at once.
 		let mut live = group(&mut track, 2, &[8]);
 		shown.push(read(&mut consumer).await);
+		// Mocked time, so the timeout fires only once every task has run, well inside the
+		// sweep; no decode runs while the max-delay decoder waits on the stalled group.
+		tokio::time::pause();
 		assert!(
 			kio::clock::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
 				.await
 				.is_err()
 		);
+		tokio::time::resume();
 		assert_eq!(
 			consumer.selector.source(),
 			Lane::Min,

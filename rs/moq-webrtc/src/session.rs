@@ -8,6 +8,7 @@
 //! to a remote URL (client side), or whether the media flow is RTP-in
 //! ([`MediaSink`]) or RTP-out ([`crate::egress::EgressSource`]).
 
+use crate::vendor::str0m;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::egress::{EgressClock, EgressSource, Format, WriteRequest};
-use crate::rate::{self, Cap, Meter};
+use crate::rate::{self, Meter};
 use crate::{Error, Result, codec};
 
 /// str0m's outbound video buffer depth (packets), which also backs NACK resends.
@@ -149,12 +150,12 @@ impl Session {
 
 	/// Meter an ingest against `limit`'s cap, following its updates, and steer the
 	/// publisher under it with REMB on every video line that negotiated it.
-	pub(crate) fn with_rate(mut self, limit: &rate::Limit) -> Self {
-		let limit = limit.subscribe();
-		let cap = *limit.borrow();
+	pub(crate) fn with_rate(mut self, mut limit: moq_net::bandwidth::Limit) -> Self {
+		// One read sets both the meter and the cap `changed` compares against.
+		let cap = limit.get();
 		self.rate = Some(IngestRate {
 			meter: Meter::new(cap, Instant::now()),
-			limit: Some(limit),
+			limit,
 			remb: Vec::new(),
 			next_remb: Instant::now(),
 			steered: cap.is_some(),
@@ -179,19 +180,23 @@ impl Session {
 		}
 	}
 
+	/// Drive the media session until it fails or the peer disconnects, which is `Ok`.
 	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
 		// Any end but the peer's DELETE, a disconnect or an offer that never connected
 		// included, ends the sink's tracks with its cause, so subscribers see the publisher
 		// go rather than its tracks dropped unfinished.
-		if let Err(err) = &result
-			&& let MediaRole::Ingest(sink) = &mut self.role
-		{
-			sink.abort(moq_net::Error::Transport(err.to_string()));
+		if let MediaRole::Ingest(sink) = &mut self.role {
+			let cause = match &result {
+				Ok(()) => "session closed".to_string(),
+				Err(err) => err.to_string(),
+			};
+			sink.abort(moq_net::Error::Transport(cause));
 		}
 		result
 	}
 
+	/// Returns `Ok` only when the peer disconnects.
 	async fn run_loop(&mut self) -> Result<()> {
 		loop {
 			let remb_at = self.rate.as_ref().and_then(IngestRate::remb_at);
@@ -225,24 +230,18 @@ impl Session {
 					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
 				}
 
-				changed = async {
-					match self.rate.as_mut().and_then(|rate| rate.limit.as_mut()) {
-						Some(limit) => limit.changed().await.map(|()| *limit.borrow_and_update()),
+				cap = async {
+					match self.rate.as_mut() {
+						Some(rate) => rate.limit.changed().await,
 						None => std::future::pending().await,
 					}
 				} => {
 					let rate = self.rate.as_mut().expect("only a rated session watches its cap");
-					match changed {
-						Ok(cap) => {
-							tracing::debug!(?cap, "ingest cap updated");
-							rate.meter.set(cap, Instant::now());
-							rate.steered |= cap.is_some();
-							// REMB follows an update at once.
-							rate.next_remb = Instant::now();
-						}
-						// Every handle is gone, so the cap can no longer change: keep the last one.
-						Err(_) => rate.limit = None,
-					}
+					tracing::debug!(?cap, "ingest cap updated");
+					rate.meter.set(cap, Instant::now());
+					rate.steered |= cap.is_some();
+					// REMB follows an update at once.
+					rate.next_remb = Instant::now();
 				}
 
 				_ = async {
@@ -256,7 +255,7 @@ impl Session {
 					Ok(crate::ice::Event::Rtc(event)) => self.handle_event(event)?,
 					// No STUN servers are configured, so there is nothing to trickle.
 					Ok(_) => {}
-					Err(crate::ice::Error::Closed) => return Err(Error::SessionClosed),
+					Err(crate::ice::Error::Closed) => return Ok(()),
 					Err(crate::ice::Error::Timeout) => return Err(Error::IceTimeout),
 					Err(crate::ice::Error::Rtc(err)) => return Err(Error::Rtc(err)),
 				},
@@ -395,7 +394,7 @@ impl Session {
 		// A REMB ceiling holds until the next one replaces it, so a lifted cap keeps sending
 		// the largest REMB can carry rather than going quiet and leaving the old ceiling.
 		let bitrate = match rate.meter.cap() {
-			Some(cap) => str0m::bwe::Bitrate::bps(cap.steer().as_bps()),
+			Some(cap) => str0m::bwe::Bitrate::bps(rate::steer(cap).as_bps()),
 			None => str0m::bwe::Bitrate::MAX,
 		};
 		let mut rtc = self.agent.rtc_mut();
@@ -420,8 +419,8 @@ impl Session {
 /// steers the publisher under it.
 struct IngestRate {
 	meter: Meter,
-	/// Live cap updates; `None` once every handle is dropped.
-	limit: Option<tokio::sync::watch::Receiver<Option<Cap>>>,
+	/// Live cap updates.
+	limit: moq_net::bandwidth::Limit,
 	/// Video lines that negotiated REMB.
 	remb: Vec<str0m::media::Mid>,
 	next_remb: Instant,
@@ -569,21 +568,17 @@ fn to_u64(value: i128) -> u64 {
 	value.clamp(0, u64::MAX as i128) as u64
 }
 
-/// Log a finished session at the right level, then fold an ordinary peer disconnect
-/// ([`Error::SessionClosed`]) into `Ok` so only genuine failures error. Keeps normal
-/// WebRTC churn out of the warning stream. `role` labels the path (e.g. `"whip server"`).
+/// Log a finished session at the right level, keeping normal WebRTC churn out of the
+/// warning stream. `role` labels the path (e.g. `"whip server"`).
 pub(crate) fn end(role: &str, result: Result<()>) -> Result<()> {
 	match &result {
-		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
+		Ok(()) => tracing::debug!(role, "session ended"),
 		// An abandoned offer (peer answered but never connected) is normal churn, not
 		// a failure: keep it out of the warning stream.
 		Err(Error::IceTimeout) => tracing::debug!(role, "session ended: ICE never connected"),
 		Err(err) => tracing::warn!(%err, role, "session ended"),
 	}
-	match result {
-		Ok(()) | Err(Error::SessionClosed) => Ok(()),
-		Err(err) => Err(err),
-	}
+	result
 }
 
 /// Convert a str0m [`MediaTime`](str0m::media::MediaTime) to microseconds.
@@ -647,19 +642,19 @@ impl Bridges {
 /// can't fulfil (WHEP server). For both, the negotiated SDP intersects with
 /// what we can actually deliver, so `MediaAdded` only fires for codecs that
 /// [`crate::egress::EgressSource`] can match to a rendition.
-pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConfig {
+pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> Result<str0m::RtcConfig> {
 	use str0m::format::Codec;
 	// str0m fulfils NACK resends from the video send buffer (default 1000
 	// packets). MoQ has no PLI path back to the publisher, so a late joiner's
 	// recovery is whatever the peer can NACK out of this buffer while the current
 	// group is still in flight. Widen it so a large keyframe plus the rest of the
 	// group stays recoverable instead of aging out after ~1000 packets.
-	let mut config = str0m::RtcConfig::new()
+	let mut config = rtc_config()?
 		.clear_codecs()
 		.set_send_buffer_video(EGRESS_SEND_BUFFER_VIDEO);
 	for c in codecs {
 		config = match c {
-			Codec::Opus => config.enable_opus(true, false),
+			Codec::Opus => config.enable_opus(true),
 			Codec::H264 => config.enable_h264(true),
 			Codec::H265 => config.enable_h265(true),
 			Codec::Vp8 => config.enable_vp8(true),
@@ -669,15 +664,23 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConf
 			_ => config,
 		};
 	}
-	config
+	Ok(config)
+}
+
+/// A str0m config, refusing a CPU that rind, the stack's crypto, cannot run on.
+///
+/// str0m falls back on rind's provider, which panics on such a CPU instead.
+pub(crate) fn rtc_config() -> std::result::Result<str0m::RtcConfig, moq_crypto::cpu::UnsupportedCpu> {
+	moq_crypto::cpu::check()?;
+	Ok(str0m::RtcConfig::new())
 }
 
 /// Build a codec-restricted [`Rtc`] for the client egress path (which lets
 /// str0m mint its own ICE credentials). The server egress path uses
 /// [`rtc_config_with_codecs`] directly so it can inject the mux's known
 /// credentials before building.
-pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
-	rtc_config_with_codecs(codecs).build(kio::clock::now().into_std())
+pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Result<Rtc> {
+	Ok(rtc_config_with_codecs(codecs)?.build(kio::clock::now().into_std()))
 }
 
 /// Bind an ephemeral UDP socket for a single client session, read by its own

@@ -8,7 +8,7 @@ use moq_mux::catalog::hang::Extra;
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubscription, MoqTrackConsumer};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
-use crate::ffi::{Background, Polled};
+use crate::ffi::{Background, OneShot, Polled};
 use crate::media::MoqFrame;
 
 /// A location within a track, mirroring [`moq_net::track::Position`].
@@ -57,10 +57,25 @@ pub struct MoqTrackInfo {
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
-	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
-	/// Readers always see the original frames.
-	#[uniffi(default = false)]
-	pub compress: bool,
+	/// How each group is compressed on the wire to peers that support it, or null to send
+	/// frames as written. Readers always see the original frames.
+	#[uniffi(default = None)]
+	pub compression: Option<MoqCompression>,
+}
+
+/// How a track's frames are compressed, mirroring [`moq_net::track::Compression`]; an
+/// uncompressed track has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqCompression {
+	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
+	Deflate,
+}
+
+fn compression(compression: Option<MoqCompression>) -> moq_net::track::Compression {
+	match compression {
+		None => moq_net::track::Compression::None,
+		Some(MoqCompression::Deflate) => moq_net::track::Compression::Deflate,
+	}
 }
 
 impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
@@ -81,7 +96,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			})?;
 			out = out.with_timescale(scale);
 		}
-		Ok(out.with_compress(info.compress))
+		Ok(out.with_compression(compression(info.compression)))
 	}
 }
 
@@ -99,7 +114,8 @@ impl From<&moq_net::track::Info> for MoqTrackInfo {
 			max_age_unlimited: info.max_age.is_none(),
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
-			compress: info.compress,
+			// A codec this binding cannot name yet reads as uncompressed, as its frames do.
+			compression: (info.compression == moq_net::track::Compression::Deflate).then_some(MoqCompression::Deflate),
 		}
 	}
 }
@@ -413,7 +429,7 @@ impl MoqBroadcastRequests {
 	/// Returns a [`MoqTrackRequest`]: accept it for raw writes with
 	/// [`MoqTrackRequest::accept`], publish media onto it with
 	/// [`crate::media::MoqMediaTrackProducer::audio`], or reject it with
-	/// [`MoqTrackRequest::abort`]. The requesting subscriber stays pending until then.
+	/// [`MoqTrackRequest::reject`]. The requesting subscriber stays pending until then.
 	///
 	/// Returns an error once the broadcast is closed or aborted.
 	pub async fn requested_track(&self) -> Result<Arc<MoqTrackRequest>, MoqError> {
@@ -500,18 +516,13 @@ impl MoqFill {
 
 #[uniffi::export]
 impl MoqFill {
-	/// The first group to fill.
-	pub fn start_group(&self) -> u64 {
-		self.inner.start().group
-	}
-
-	/// The frame within the first group to start from.
-	pub fn start_frame(&self) -> u64 {
-		self.inner.start().frame
+	/// The first group to fill, and the frame within it to start from.
+	pub fn start(&self) -> MoqPosition {
+		self.inner.start().into()
 	}
 
 	/// The exclusive end group.
-	pub fn end_group(&self) -> u64 {
+	pub fn end(&self) -> u64 {
 		self.inner.end()
 	}
 
@@ -550,7 +561,7 @@ impl MoqFill {
 	}
 
 	/// Insert group `sequence` and return a producer for filling it. The first group starts
-	/// at [`start_frame`](Self::start_frame), so its frames keep their indices.
+	/// at [`start`](Self::start)'s frame, so its frames keep their indices.
 	pub fn accept(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let group = self.inner.accept(sequence, None)?;
@@ -585,25 +596,28 @@ impl MoqFill {
 ///
 /// Mirrors [`moq_net::track::Request`]: [`accept`](Self::accept) it to start producing raw
 /// frames, hand it to [`crate::media::MoqMediaTrackProducer::audio`] to publish media,
-/// or [`abort`](Self::abort) it to reject the waiting subscriber.
+/// or [`reject`](Self::reject) it to fail the waiting subscriber.
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequest {
-	inner: std::sync::Mutex<Option<moq_net::track::Request>>,
+	inner: OneShot<moq_net::track::Request>,
 	children: Children,
 }
 
 impl MoqTrackRequest {
 	pub(crate) fn new(request: moq_net::track::Request, children: Children) -> Self {
 		Self {
-			inner: std::sync::Mutex::new(Some(request)),
+			inner: OneShot::new(request),
 			children,
 		}
 	}
 
-	/// Take the inner request so an importer can accept it (setting the timescale). Used by
-	/// [`crate::media::MoqMediaTrackProducer::audio`].
-	pub(crate) fn take(&self) -> Result<moq_net::track::Request, MoqError> {
-		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
+	/// Answer with an importer that accepts the request itself (setting the timescale), as
+	/// [`crate::media::MoqMediaTrackProducer::audio`] does.
+	pub(crate) fn answer<R>(
+		&self,
+		f: impl FnOnce(moq_net::track::Request) -> Result<R, MoqError>,
+	) -> Result<R, MoqError> {
+		self.inner.answer(f)
 	}
 }
 
@@ -611,15 +625,12 @@ impl MoqTrackRequest {
 impl MoqTrackRequest {
 	/// The requested track name.
 	pub fn name(&self) -> Result<String, MoqError> {
-		let guard = self.inner.lock().unwrap();
-		let request = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(request.name().to_string())
+		self.inner.peek(|request| request.name().to_string())
 	}
 
 	/// Watch this track's subscribers, including after the request is accepted.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
-		let guard = self.inner.lock().unwrap();
-		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
+		self.inner.peek(|request| MoqTrackDemand::new(request.demand()))
 	}
 
 	/// Create a handler for uncached group fetches before accepting this track.
@@ -629,9 +640,8 @@ impl MoqTrackRequest {
 	/// the transition from request to producer.
 	pub fn requests(&self) -> Result<Arc<MoqTrackRequests>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let guard = self.inner.lock().unwrap();
-		let request = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackRequests::new(request.requests())))
+		self.inner
+			.peek(|request| Arc::new(MoqTrackRequests::new(request.requests())))
 	}
 
 	/// Accept the request as a raw track, fixing its [`MoqTrackInfo`] (timescale, etc.).
@@ -643,22 +653,24 @@ impl MoqTrackRequest {
 	pub fn accept(&self, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let info = raw_track_info(info)?;
-		let request = self.take()?;
-		// Without a handle keeping it open, the broadcast has ended.
-		let Some(_broadcast) = self.children.broadcast() else {
-			request.reject(moq_net::Error::Unroutable);
-			return Err(MoqError::Closed);
-		};
-		let track = request.accept(Some(info));
-		MoqTrackProducer::child(track, &self.children)
+		self.inner.answer(|request| {
+			// Without a handle keeping it open, the broadcast has ended.
+			let Some(_broadcast) = self.children.broadcast() else {
+				request.reject(moq_net::Error::Unroutable);
+				return Err(MoqError::Closed);
+			};
+			let track = request.accept(Some(info));
+			MoqTrackProducer::child(track, &self.children)
+		})
 	}
 
 	/// Reject the request with an application error code, failing the waiting subscriber.
-	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
+	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let request = self.take()?;
-		request.reject(moq_net::Error::App(error_code));
-		Ok(())
+		self.inner.answer(|request| {
+			request.reject(moq_net::Error::App(error_code));
+			Ok(())
+		})
 	}
 }
 
@@ -803,6 +815,19 @@ impl MoqTrackProducer {
 		let raw = guard.as_mut().ok_or(MoqError::Closed)?;
 		let group = raw.create_group(moq_net::group::Info { sequence })?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
+	}
+
+	/// Declare that groups `start` up to the exclusive `end` will never be produced.
+	///
+	/// Readers waiting on them move past without ending, and a relay forwards the skip. A
+	/// skip is final: creating a group there is then refused. A group already written keeps
+	/// what it is. [`append_group`](Self::append_group) skips the gap below it on its own.
+	pub fn skip_groups(&self, start: u64, end: u64) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		let guard = self.inner.lock().unwrap();
+		let raw = guard.as_ref().ok_or(MoqError::Closed)?;
+		raw.skip_groups(start..end);
+		Ok(())
 	}
 
 	/// Write `frame` as a single-frame group.
@@ -997,7 +1022,7 @@ mod metadata_tests {
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);
 		assert!(matches!(
-			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),
+			consumer.poll_read_frame(&kio::Waiter::noop()),
 			std::task::Poll::Ready(Err(moq_net::Error::Unroutable))
 		));
 	}
@@ -1034,7 +1059,7 @@ mod metadata_tests {
 			max_age_unlimited,
 			refresh: None,
 			timescale: None,
-			compress: false,
+			compression: None,
 		};
 		let zero = Some(std::time::Duration::ZERO);
 		let five = Some(std::time::Duration::from_secs(5));

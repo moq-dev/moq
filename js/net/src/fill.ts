@@ -16,7 +16,7 @@ import { NotFound } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { insertRun, NO_MAX_DELAY, runGaps } from "./internal.ts";
 import type { Info, Order } from "./track.ts";
-import { checkSequence, max, min } from "./util/sequence.ts";
+import { checkEnd, checkSequence, max, min } from "./util/sequence.ts";
 
 // A half-open run of group sequences, as `internal.ts` has it, kept local so the published
 // declarations never reach the package internals.
@@ -31,7 +31,7 @@ export interface FillTrack {
 	/** The track's name. */
 	readonly name: string;
 	/** Insert group `sequence` into the cache, committing `info` first if the track has none. */
-	accept(sequence: bigint, info: Partial<Info> | undefined): GroupProducer;
+	accept(sequence: bigint, info: Info | undefined): GroupProducer;
 	/** Record `[start, end)` as never to be delivered. */
 	drop(start: bigint, end: bigint, error: Error): void;
 	/** Whether the track still caches group `sequence`, not failed. */
@@ -62,7 +62,7 @@ export interface Asker {
 
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
-	accept(state: FillState, pending: Pending, sequence: bigint, info: Partial<Info> | undefined): GroupProducer;
+	accept(state: FillState, pending: Pending, sequence: bigint, info: Info | undefined): GroupProducer;
 	drop(state: FillState, pending: Pending, start: bigint, end: bigint): void;
 	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error): void;
 	settle(state: FillState, pending: Pending): void;
@@ -518,10 +518,10 @@ export class Fill {
 	/**
 	 * Insert group `sequence` into the track's cache, handing it to the readers waiting on it,
 	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
-	 * if it has none yet, as received metadata: an absent `maxAge` sets no publisher limit. Throws a `RangeError` outside the fill, and an error if the group was
+	 * if it has none yet. Throws a `RangeError` outside the fill, and an error if the group was
 	 * already answered or cached, or the track is closed.
 	 */
-	accept(sequence: bigint, info?: Partial<Info>): GroupProducer {
+	accept(sequence: bigint, info?: Info): GroupProducer {
 		checkSequence(sequence);
 		return fillOps.accept(this.#state, this.#pending, sequence, info);
 	}
@@ -533,7 +533,7 @@ export class Fill {
 	 */
 	dropGroups(start: bigint, end: bigint): void {
 		checkSequence(start);
-		checkSequence(end);
+		checkEnd(end);
 		fillOps.drop(this.#state, this.#pending, start, end);
 	}
 
@@ -544,7 +544,7 @@ export class Fill {
 	 */
 	refuseGroups(start: bigint, end: bigint, error: Error): void {
 		checkSequence(start);
-		checkSequence(end);
+		checkEnd(end);
 		fillOps.refuse(this.#state, this.#pending, start, end, error);
 	}
 

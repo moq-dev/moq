@@ -26,7 +26,7 @@ const IETF: &str = "moq-transport-18";
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 /// A relay and the clients connected to it.
@@ -76,6 +76,12 @@ impl Fixture {
 		let client = self.client(version).await;
 		Endpoint::new(&client, "room", id).unwrap()
 	}
+}
+
+/// Start `endpoint` accepting `tcp` dials, which announces its server broadcast, for a
+/// test that dials it by hand.
+fn listen(endpoint: &Endpoint) {
+	assert!(endpoint.poll_accept_tcp(&kio::Waiter::noop()).is_pending());
 }
 
 const MB: usize = 1 << 20;
@@ -292,12 +298,13 @@ struct ByHand {
 async fn dial_by_hand(fixture: &mut Fixture, bob: &Endpoint) -> ByHand {
 	let carol = fixture.client(LITE).await;
 	let endpoint = carol
-		.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden())
+		.route("room/.client/carol", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
 	endpoint.announce().unwrap();
 	let mut requests = endpoint.broadcast().requests();
 	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
-	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.socket/bob", None))
+	listen(bob);
+	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.server/bob", None))
 		.await
 		.expect("request timeout")
 		.expect("bob's endpoint");
@@ -544,7 +551,7 @@ async fn a_protocol_nobody_accepts_is_reset() {
 
 	// An unknown protocol is reset too.
 	let mallory = fixture.client(LITE).await;
-	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.socket/bob", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.server/bob", None))
 		.await
 		.expect("request timeout")
 		.expect("bob's endpoint");
@@ -588,9 +595,10 @@ async fn a_dial_waits_for_its_peer() {
 async fn an_accept_waits_for_its_dialer() {
 	let mut fixture = Fixture::new();
 	let bob = fixture.endpoint(LITE, "bob").await;
+	listen(&bob);
 	let carol = fixture.client(LITE).await;
 	let name = "tcp/carol/bob/0123456789abcdef0123456789abcdef";
-	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.socket/bob", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, carol.consume().request("room/.server/bob", None))
 		.await
 		.expect("request timeout")
 		.expect("bob's endpoint");
@@ -608,7 +616,7 @@ async fn an_accept_waits_for_its_dialer() {
 	);
 
 	let endpoint = carol
-		.route("room/.socket/carol", moq_net::origin::RouteOptions::hidden())
+		.route("room/.client/carol", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
 	let mut requests = endpoint.broadcast().requests();
 	endpoint.announce().unwrap();
@@ -630,8 +638,9 @@ async fn an_accept_waits_for_its_dialer() {
 async fn an_accept_ends_with_its_dial() {
 	let mut fixture = Fixture::new();
 	let bob = fixture.endpoint(LITE, "bob").await;
+	listen(&bob);
 	let mallory = fixture.client(LITE).await;
-	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.socket/bob", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.server/bob", None))
 		.await
 		.expect("request timeout")
 		.expect("bob's endpoint");
@@ -667,8 +676,9 @@ async fn a_replayed_session_never_connects() {
 	let session = accepted.session().to_string();
 
 	// Replayed from bob's side, which knows the session.
+	listen(&carol);
 	let mallory = fixture.client(LITE).await;
-	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.socket/carol", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.server/carol", None))
 		.await
 		.expect("request timeout")
 		.expect("carol's endpoint");
@@ -719,8 +729,11 @@ async fn a_forged_dial_never_connects() {
 		let alice = fixture.endpoint(LITE, "alice").await;
 		let bob = fixture.endpoint(LITE, "bob").await;
 		let mallory = fixture.client(LITE).await;
+		// Alice is a client, dialing elsewhere, so her client broadcast answers bob.
+		let _elsewhere = alice.dial_tcp("carol").unwrap();
+		listen(&bob);
 
-		let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.socket/bob", None))
+		let broadcast = kio::clock::timeout(TIMEOUT, mallory.consume().request("room/.server/bob", None))
 			.await
 			.expect("request timeout")
 			.expect("bob's endpoint");
@@ -754,7 +767,7 @@ async fn a_forged_dial_never_connects() {
 		let forged = kio::clock::timeout(TIMEOUT, forged).await.expect("forged timeout");
 		assert!(forged.is_err(), "the forger read bob's {protocol} half");
 
-		// Alice never heard of it as a dial either.
+		// Alice never heard of it as a dial either, even accepting.
 		assert!(kio::clock::timeout(SETTLE, alice.accept_tcp()).await.is_err());
 		assert!(kio::clock::timeout(SETTLE, alice.accept_track()).await.is_err());
 	}
@@ -832,8 +845,8 @@ async fn session_tracks_are_never_listed() {
 	);
 
 	let eve = fixture.client(LITE).await;
-	for id in ["alice", "bob"] {
-		let broadcast = kio::clock::timeout(TIMEOUT, eve.consume().request(format!("room/.socket/{id}"), None))
+	for id in [".client/alice", ".server/bob"] {
+		let broadcast = kio::clock::timeout(TIMEOUT, eve.consume().request(format!("room/{id}"), None))
 			.await
 			.expect("request timeout")
 			.expect("the endpoint");
@@ -851,17 +864,41 @@ async fn session_tracks_are_never_listed() {
 	dialed.producer.finish().unwrap();
 }
 
-/// An endpoint takes dials only from its first accept on, like a TCP listener: before it,
-/// a dial is reset rather than left waiting.
+/// An endpoint announces only the roles it takes: its first dial its client broadcast,
+/// and its first accept its server broadcast. So a dial to an endpoint that has only
+/// dialed finds no server and waits, until that endpoint accepts.
 #[kio::test]
-async fn an_endpoint_not_accepting_resets_dials() {
+async fn an_endpoint_announces_only_its_roles() {
 	let mut fixture = Fixture::new();
 	let alice = fixture.endpoint(LITE, "alice").await;
-	let _bob = fixture.endpoint(LITE, "bob").await;
-	let dialed = kio::clock::timeout(TIMEOUT, alice.dial_tcp("bob").unwrap())
+	let bob = fixture.endpoint(LITE, "bob").await;
+	let _elsewhere = bob.dial_tcp("carol").unwrap();
+	let mut dial = alice.dial_tcp("bob").unwrap();
+	assert!(
+		kio::clock::timeout(SETTLE, &mut dial).await.is_err(),
+		"a dial reached an endpoint that only dials"
+	);
+
+	let eve = fixture.client(LITE).await;
+	for (path, announced) in [
+		("room/.client/alice", true),
+		("room/.client/bob", true),
+		("room/.server/alice", false),
+		("room/.server/bob", false),
+	] {
+		let found = kio::clock::timeout(SETTLE, eve.consume().request(path, None)).await;
+		assert_eq!(matches!(found, Ok(Ok(_))), announced, "{path}");
+	}
+
+	let accept = async { bob.accept_tcp().await?.accept().await };
+	let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
 		.await
-		.expect("dial timeout");
-	assert!(dialed.is_err(), "a dial to an endpoint not accepting connected");
+		.expect("connect timeout");
+	let (mut dialed, accepted) = (dialed.unwrap(), accepted.unwrap());
+	assert_eq!(dialed.session(), accepted.session());
+	dialed.producer.finish().unwrap();
+	let found = kio::clock::timeout(TIMEOUT, eve.consume().request("room/.server/bob", None)).await;
+	assert!(matches!(found, Ok(Ok(_))), "bob's server broadcast");
 }
 
 /// An acceptor can finish its initial burst before the dialer gets the answer.

@@ -3,6 +3,7 @@
 //! `POST /<broadcast-path>` accepts a WHEP SDP offer and returns an SDP
 //! answer sourced from the matching MoQ broadcast on the subscribe origin.
 
+use crate::vendor::str0m::Candidate;
 #[cfg(feature = "server")]
 use axum::{
 	Router,
@@ -12,7 +13,6 @@ use axum::{
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
-use str0m::Candidate;
 
 use std::time::Duration;
 
@@ -97,13 +97,7 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(
-		server,
-		subscriber,
-		moq_net::Path::new(path).map_err(moq_net::Error::from)?,
-		offer,
-	)
-	.await
+	accept(server, Request::new(subscriber, moq_net::Path::new(path)?, offer)).await
 }
 
 #[cfg(feature = "server")]
@@ -111,8 +105,31 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 	crate::server::delete(&state.server, &path)
 }
 
-/// Accept a WHEP SDP offer and egress the MoQ broadcast `broadcast` (a path
-/// relative to `subscriber`'s root) to the negotiated WebRTC peer.
+/// A WHEP play for [`accept`]: the raw SDP offer, and the consumer and broadcast its media
+/// comes from.
+#[non_exhaustive]
+pub struct Request<'a> {
+	/// The consumer the broadcast is read from.
+	pub subscriber: &'a moq_net::origin::Consumer,
+	/// The broadcast to play, relative to the consumer's root.
+	pub broadcast: moq_net::Path,
+	/// The raw SDP offer.
+	pub offer: &'a str,
+}
+
+impl<'a> Request<'a> {
+	/// Play `broadcast` (a path relative to `subscriber`'s root) to the peer that sent `offer`.
+	pub fn new(subscriber: &'a moq_net::origin::Consumer, broadcast: impl Into<moq_net::Path>, offer: &'a str) -> Self {
+		Self {
+			subscriber,
+			broadcast: broadcast.into(),
+			offer,
+		}
+	}
+}
+
+/// Accept a WHEP SDP offer and egress the [`Request`]'s broadcast to the negotiated WebRTC
+/// peer.
 ///
 /// This is the negotiation core behind [`Server::subscribe_router`], exposed so an embedder can own
 /// the HTTP route and authentication: verify the request, resolve the authorized
@@ -135,15 +152,15 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
 /// on a malformed offer, and surfaces a broadcast still unannounced after 5s (or one
 /// outside `subscriber`'s scope) as [`Error::Moq`].
-pub async fn accept(
-	server: &Server,
-	subscriber: &moq_net::origin::Consumer,
-	broadcast: impl Into<moq_net::Path>,
-	offer: &str,
-) -> Result<Response> {
+pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
+	let Request {
+		subscriber,
+		broadcast,
+		offer,
+	} = request;
 	let offer = sdp::parse_offer(offer)?;
 
-	let source = resolve(subscriber, broadcast.into()).await?;
+	let source = resolve(subscriber, broadcast).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::NoRenditions);
@@ -155,7 +172,7 @@ pub async fn accept(
 	// fulfil; set the mux's known ICE credentials on the same config.
 	let mux = server.mux().await?;
 	let (creds, inbound, registration) = mux.register();
-	let mut rtc = session::rtc_config_with_codecs(&codecs)
+	let mut rtc = session::rtc_config_with_codecs(&codecs)?
 		.set_local_ice_credentials(creds)
 		.build(kio::clock::now().into_std());
 	for addr in mux.candidates() {
@@ -181,6 +198,7 @@ pub async fn accept(
 			session: Some(session),
 			registration: Some(registration),
 			cancel: Some(cancel),
+			linger: Duration::ZERO,
 			role: "whep server",
 		},
 	})
@@ -223,11 +241,8 @@ async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path) ->
 #[cfg(feature = "server")]
 fn status_for(err: &Error) -> StatusCode {
 	match err {
-		Error::InvalidSdp(_) | Error::Moq(moq_net::Error::EmptySegment | moq_net::Error::InvalidEscape) => {
-			StatusCode::BAD_REQUEST
-		}
+		Error::InvalidSdp(_) | Error::InvalidPath(_) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
 		Error::Moq(moq_net::Error::NotFound | moq_net::Error::Unroutable) => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,

@@ -25,7 +25,7 @@ ORIGIN="MoQ Project"
 LABEL="moq"
 SUITE="$DIST"
 DESCRIPTION="Media over QUIC apt repository"
-ARCHES=(amd64 arm64)
+ARCHES=(amd64 arm64 armhf)
 
 # Make rclone talk to R2. R2 is S3-compatible.
 export RCLONE_CONFIG_R2_TYPE=s3

@@ -1907,12 +1907,9 @@ export class Subscriber {
 		};
 		// A group that will never arrive whole is dropped, so readers stop owing it.
 		const dropHeadless = () =>
-			hooks.dropTrackGroups(
-				track,
-				group.groupId,
-				group.groupId + 1n,
-				new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }),
-			);
+			hooks.dropTrackGroups(track, group.groupId, group.groupId + 1n, {
+				error: new StreamError(StreamCode.NotFound, { message: "the group's head was lost" }),
+			});
 		// After an END_OF_GROUP or END_OF_TRACK status only the stream's end may follow: an
 		// object past the group's final one makes the track malformed.
 		const last = async () => {
@@ -2130,7 +2127,7 @@ export class Subscriber {
 					stream.tryDecode(decode) ??
 					(await race([stream.decodeMaybe(decode), producer?.closed ?? hooks.trackReleased(track)]));
 				if (object === null || object instanceof Error) {
-					join.fail(object ?? new Error("the track closed under the head"));
+					join.fail(object ?? new Error("the track closed under the head"), producer);
 					stream.stop(object ?? new StreamError(StreamCode.Cancel));
 					return;
 				}
@@ -2189,11 +2186,11 @@ export class Subscriber {
 				next += 1;
 			}
 			console.debug(`join head: group=${join.sequence} objects=${next}`);
-			join.finish();
+			join.finish(producer);
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
 			if (e instanceof JoinUnsupported) console.warn(`${e.message}, joining at the next whole group`);
-			join.fail(e);
+			join.fail(e, producer);
 			if (e instanceof ProtocolViolation) this.#fail(e.code, e.message);
 			// As for a subgroup object: the track is malformed, not just its head.
 			if (e instanceof StreamError && e.code === StreamCode.MalformedTrack) track.abort(e);

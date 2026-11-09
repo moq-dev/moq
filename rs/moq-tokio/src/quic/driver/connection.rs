@@ -25,9 +25,9 @@ pub use moq_quic::connection::{Error, Stats};
 use moq_quic::{
 	EndpointEvent, TransportError, TransportErrorCode, crypto,
 	endpoint::ConnectionHandle,
-	rustls::pki_types::CertificateDer,
 	stream::{Dir, Id as StreamId},
 };
+use rustls::pki_types::CertificateDer;
 
 /// In-progress connection attempt future
 ///
@@ -174,6 +174,8 @@ impl Future for ConnectionDriver {
 		let waiter = this.park.hold(cx);
 		let conn = &mut *this.conn.state.lock();
 		let _guard = this.span.enter();
+		// Every packet this poll opens or seals pays one DIT toggle rather than one per rind call.
+		let _dit = moq_crypto::cpu::Dit::hold();
 
 		if let Err(e) = conn.process_conn_events(cx) {
 			conn.terminate(e);
@@ -195,7 +197,6 @@ impl Future for ConnectionDriver {
 		// might need to reset a timer. Hence, we must loop until neither happens.
 		keep_going |= conn.drive_timer(cx);
 		conn.forward_endpoint_events();
-		conn.drain_events();
 
 		// Every datagram sent or received passes through this poll.
 		#[cfg(feature = "net")]
@@ -205,11 +206,11 @@ impl Future for ConnectionDriver {
 			this.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
 		}
 
+		// A local close still reaches a driver whose socket holds output back, which skips
+		// `poll_transmit` and so parks nothing there, to re-arm the timer for its closing
+		// period. Waiting on the close consumes no transmit.
+		conn.check_lost(waiter);
 		if !conn.inner.is_drained() {
-			// A local close still reaches a driver whose socket holds output back, which skips
-			// `poll_transmit` and so parks nothing there, to re-arm the timer for its closing
-			// period. Waiting on the close consumes no transmit.
-			let _ = conn.inner.poll_closed(waiter);
 			// Otherwise `poll_transmit` parked the waiter for the application's next call, and the
 			// ingress channel, the timer, and the socket hold the context.
 			if keep_going {
@@ -218,25 +219,36 @@ impl Future for ConnectionDriver {
 			}
 			return Poll::Pending;
 		}
-		if !conn.is_lost() {
-			unreachable!("drained connections always have an error");
-		}
+		// A close moq-quic never managed to send (the server's anti-amplification limit can
+		// withhold it) is published here too.
+		let reason = conn.inner.error().cloned();
+		conn.publish(reason.expect("drained connections always have an error"));
 		Poll::Ready(Ok(()))
 	}
 }
 
 impl Drop for ConnectionDriver {
 	fn drop(&mut self) {
-		// A panic poisoned the state, and without a driver nothing will time the connection out:
-		// fail every waiter now, so it reaches the poisoned lock instead of hanging.
-		if let Some(mut conn) = self.conn.state.poisoned() {
-			let reason = TransportError::new(
-				TransportErrorCode::INTERNAL_ERROR,
-				"connection driver panicked".to_string(),
-			);
-			conn.terminate(Error::TransportError(reason));
+		// Nothing drives the connection anymore, so no close goes out and no timer fires: publish
+		// its end now rather than leave every waiter hanging. After a normal end it is already
+		// published, and this keeps it.
+		if let Some(mut conn) = self.conn.state.lock_for_drop() {
+			match conn.inner.error().cloned() {
+				Some(reason) => conn.publish(reason),
+				None => conn.terminate(internal("connection driver stopped")),
+			}
+		} else if let Some(mut conn) = self.conn.state.poisoned() {
+			// A panic poisoned the state: fail every waiter, so it reaches the poisoned lock.
+			conn.terminate(internal("connection driver panicked"));
 		}
 	}
+}
+
+fn internal(reason: &str) -> Error {
+	Error::TransportError(TransportError::new(
+		TransportErrorCode::INTERNAL_ERROR,
+		reason.to_string(),
+	))
 }
 
 /// A QUIC connection.
@@ -346,14 +358,20 @@ impl Connection {
 
 	/// The error the connection closed with, for any reason.
 	///
+	/// A local close resolves this only once the driver has sent its CONNECTION_CLOSE, so a caller
+	/// may stop the runtime the moment it resolves and the peer still hears the close.
+	///
 	/// Despite the return type's name, closed connections are often not an error condition at the
 	/// application layer. Cases that might be routine include [`Error::LocallyClosed`]
 	/// and [`Error::ApplicationClosed`].
 	#[kio::wrapper]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		let mut state = self.0.state.lock();
-		let err = ready!(state.inner.poll_closed(waiter));
-		Poll::Ready(state.lost_as(err))
+		if let Some(err) = &state.closed {
+			return Poll::Ready(err.clone());
+		}
+		waiter.register(&mut state.closed_waiters);
+		Poll::Pending
 	}
 
 	/// Whether the connection is closed, and why.
@@ -361,7 +379,8 @@ impl Connection {
 	/// The close_reason is always set to `Some(Error)` when a socket is
 	/// closed; whether it was closed manually by calling [`Connection::close()`] or due to
 	/// an internal error (such as an idle timeout or the peer closing the
-	/// connection).
+	/// connection). Unlike [`closed`](Self::closed), a local close counts from the moment it
+	/// was asked for.
 	///
 	/// Note: when the connection is closed, `connection.close_reason().is_some()` will always be true.
 	pub fn close_reason(&self) -> Option<Error> {
@@ -410,7 +429,7 @@ impl Connection {
 	///
 	/// The datagram is scheduled like one of its group's streams at its priority, or among the
 	/// ungrouped streams without a group. Sending never blocks: a full buffer drops the oldest
-	/// datagram of the lowest-priority group, see [`moq_quic::Datagrams::send`]. A header chained
+	/// datagram of the lowest-priority group, see [`moq_quic::connection::Datagrams::send`]. A header chained
 	/// in front of a [`Bytes`] payload costs no copy of the payload.
 	///
 	/// # Panics
@@ -481,18 +500,6 @@ impl Connection {
 	#[cfg(feature = "net")]
 	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
 		self.0.state.lock().inner.export_keying_material(label, context)
-	}
-
-	/// The peer's stream credit in `dir`, as this connection last heard it.
-	#[cfg(feature = "net")]
-	pub(crate) fn stream_credit(&self, dir: moq_net::transport::Dir) -> moq_net::transport::StreamCredit {
-		let dir = match dir {
-			moq_net::transport::Dir::Uni => Dir::Uni,
-			moq_net::transport::Dir::Bi => Dir::Bi,
-		};
-		let mut state = self.0.state.lock();
-		let streams = state.inner.streams();
-		moq_net::transport::StreamCredit::new(streams.credit(dir), streams.blocked(dir))
 	}
 
 	/// How many send streams the connection still holds state for
@@ -656,15 +663,20 @@ pub(crate) struct State {
 	timer_deadline: Option<Instant>,
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
-	/// Why the connection failed, when moq-quic did not see it fail: the endpoint driver went away
+	/// The terminal error [`Connection::poll_closed`] reports, set once by the driver: moq-quic's
+	/// reason, a local close only once its CONNECTION_CLOSE is on the socket, or why the driver
+	/// stopped, which moq-quic cannot take and so wins over its reason everywhere.
 	///
-	/// moq-quic takes no foreign error, so this wins over its reason when handles report the loss.
-	external: Option<Error>,
+	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a local close as
+	/// soon as it is asked for, before anything sent it.
+	closed: Option<Error>,
+	closed_waiters: kio::WaiterList,
 	/// The endpoint's socket, sent through without keeping it open
 	slot: Arc<Slot>,
 	send_buffer: Vec<u8>,
-	/// We buffer a transmit when the underlying I/O would block
-	buffered_transmit: Option<moq_quic::Transmit>,
+	/// We buffer a transmit when the underlying I/O would block, with whether it carries the
+	/// CONNECTION_CLOSE: a close that came after it leaves it an ordinary packet
+	buffered_transmit: Option<(moq_quic::Transmit, bool)>,
 }
 
 impl State {
@@ -682,7 +694,8 @@ impl State {
 			timer_deadline: None,
 			conn_events,
 			endpoint_events,
-			external: None,
+			closed: None,
+			closed_waiters: kio::WaiterList::new(),
 			slot,
 			send_buffer: Vec::new(),
 			buffered_transmit: None,
@@ -699,8 +712,8 @@ impl State {
 
 		loop {
 			// Retry the last transmit, or get a new one.
-			let t = match self.buffered_transmit.take() {
-				Some(t) => t,
+			let (t, closes) = match self.buffered_transmit.take() {
+				Some(buffered) => buffered,
 				None => {
 					self.send_buffer.clear();
 					self.send_buffer.reserve(self.inner.current_mtu() as usize);
@@ -713,7 +726,8 @@ impl State {
 								None => 1,
 								Some(s) => t.size.div_ceil(s), // round up
 							};
-							t
+							// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
+							(t, self.inner.is_closed())
 						}
 						Poll::Pending => break,
 					}
@@ -723,7 +737,7 @@ impl State {
 			let len = t.size;
 			match self.slot.poll_send(&udp_transmit(&t, &self.send_buffer[..len]), cx) {
 				Poll::Pending => {
-					self.buffered_transmit = Some(t);
+					self.buffered_transmit = Some((t, closes));
 					return Ok(false);
 				}
 				// The datagram is lost, and moq-quic decides whether the connection survives it.
@@ -733,6 +747,10 @@ impl State {
 				}
 				Poll::Ready(Err(e)) => return Err(e),
 				Poll::Ready(Ok(())) => {}
+			}
+			// The socket now has the CONNECTION_CLOSE.
+			if closes && let Some(reason) = self.inner.error() {
+				self.publish(reason.clone());
 			}
 
 			if transmits >= MAX_TRANSMIT_DATAGRAMS {
@@ -757,6 +775,7 @@ impl State {
 	fn process_conn_events(&mut self, cx: &mut Context<'_>) -> Result<(), Error> {
 		loop {
 			match self.conn_events.poll_recv(cx) {
+				#[cfg(test)]
 				Poll::Ready(Some(ConnectionEvent::Rebind)) => {
 					self.inner.local_address_changed();
 				}
@@ -777,11 +796,6 @@ impl State {
 				}
 			}
 		}
-	}
-
-	/// Drain moq-quic's events, which no handle waits on: moq-quic wakes its waiters itself.
-	fn drain_events(&mut self) {
-		while self.inner.poll().is_some() {}
 	}
 
 	fn drive_timer(&mut self, cx: &mut Context<'_>) -> bool {
@@ -823,19 +837,39 @@ impl State {
 		true
 	}
 
-	/// Why the connection was lost, if it was: the driver's external reason, or moq-quic's
+	/// Why the connection was lost, if it was: the published reason, or moq-quic's
 	pub(crate) fn error(&self) -> Option<Error> {
-		self.external.clone().or_else(|| self.inner.error().cloned())
+		self.closed.clone().or_else(|| self.inner.error().cloned())
 	}
 
 	/// Whether the connection was lost, without cloning why
 	pub(crate) fn is_lost(&self) -> bool {
-		self.external.is_some() || self.inner.error().is_some()
+		self.closed.is_some() || self.inner.error().is_some()
 	}
 
 	/// The error handles report for a loss moq-quic reported as `err`
 	fn lost_as(&self, err: Error) -> Error {
-		self.external.clone().unwrap_or(err)
+		self.closed.clone().unwrap_or(err)
+	}
+
+	/// Publish `reason` as the terminal error, unless one already is, waking every
+	/// [`Connection::poll_closed`].
+	fn publish(&mut self, reason: Error) {
+		if self.closed.is_none() {
+			self.closed = Some(reason);
+			self.closed_waiters.wake();
+		}
+	}
+
+	/// Publish a loss moq-quic recorded, parking `waiter` until it records one.
+	///
+	/// A local close waits for `drive_transmit` to put its CONNECTION_CLOSE on the socket.
+	fn check_lost(&mut self, waiter: &kio::Waiter) {
+		if let Poll::Ready(reason) = self.inner.poll_closed(waiter)
+			&& !matches!(reason, Error::LocallyClosed { .. })
+		{
+			self.publish(reason);
+		}
 	}
 
 	/// The error handles report for a loss moq-quic reported without a reason, as a stream's
@@ -844,13 +878,15 @@ impl State {
 		self.error().expect("moq-quic reported a loss without a reason")
 	}
 
-	/// Fail the connection for `reason`, which moq-quic did not see: the endpoint driver went away
+	/// Fail the connection for `reason`, which moq-quic did not see: the endpoint driver or this
+	/// connection's driver went away
 	///
-	/// The reason is kept to win over moq-quic's, and a local close makes moq-quic wake every
-	/// waiter. The driver exits right after, so the close is never sent.
+	/// The reason is published to win over moq-quic's, unless a loss already was, and a local
+	/// close makes moq-quic wake every waiter. The driver exits right after, so the close is never
+	/// sent.
 	fn terminate(&mut self, reason: Error) {
 		let message = reason.to_string();
-		self.external = Some(reason);
+		self.publish(reason);
 		self.inner.close(Instant::now(), 0u32.into(), message);
 	}
 

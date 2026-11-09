@@ -116,7 +116,7 @@ typealias BroadcastRequests = uniffi.moq.MoqBroadcastRequests
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 
-/** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
+/** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or reject it. */
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
 
 /** A stream of the fills readers of one track need: runs of groups the cache lacks. */
@@ -186,8 +186,14 @@ fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
 /** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
 typealias Range = uniffi.moq.MoqRange
 
-/** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */
+/**
+ * Where one end of a [Range] falls: [AnchorOldest], [AnchorAbsolute], [AnchorRelative], or
+ * [AnchorTime].
+ */
 typealias Anchor = uniffi.moq.MoqAnchor
+
+/** The oldest group still around, as far back as the max delay allows. A start only. */
+typealias AnchorOldest = uniffi.moq.MoqAnchor.Oldest
 
 /** A group, delivered from its first frame. */
 typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
@@ -209,6 +215,11 @@ typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
+
+/**
+ * How a track's frames are compressed on the wire: `DEFLATE`, or `null` in [TrackInfo] for none.
+ */
+typealias Compression = uniffi.moq.MoqCompression
 
 /** One audio frame: PCM payload bytes plus a presentation timestamp. */
 typealias AudioFrame = uniffi.moq.MoqAudioFrame
@@ -232,7 +243,7 @@ typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
  * One decoded video frame, owning the decoder's surface until closed; `pixels(format)` converts it
  * to packed CPU pixels.
  */
-typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
+typealias VideoDecodedFrame = dev.moq.video.DecodedFrame
 
 /** The PCM layout the caller feeds an audio producer. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput

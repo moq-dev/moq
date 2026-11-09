@@ -29,9 +29,8 @@
 //! Readers draining a swapped track are swept over their count, the groups every
 //! route delivered, and the routes each reader still holds a copy of.
 //!
-//! A claim's answer taking over the claim is swept over the paths the claim already
-//! answered and the cursors watching it, and a takeover in place over the fronts
-//! resolved through what it takes over.
+//! A claim's answer, and its retraction moving the claim to a fresh instance, is swept
+//! over the paths the claim already answered and the cursors watching it.
 //!
 //! Peer claims land through the hidden `fuzz` module, as a session lands them.
 //!
@@ -51,7 +50,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Instance, Pattern, Patterns, Timestamp, auth, broadcast, kio, origin, track};
+use moq_net::{Instance, Pattern, Patterns, Timestamp, auth, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -669,12 +668,12 @@ fn answer(claim: &origin::Route, path: &str) -> origin::Route {
 	}
 }
 
-/// A claim's answer delivered to every cursor as a takeover of the claim, then retracted.
-/// Swept over the paths the claim already answered and the cursors watching it, so a
-/// continuity check that walks the table rather than the claim's prefix shows up as a
-/// slope.
-fn bench_takeover(c: &mut Criterion) {
-	let mut group = c.benchmark_group("origin/takeover");
+/// A claim's answer delivered to every cursor as a start, then retracted, which moves the
+/// claim to a fresh instance. Swept over the paths the claim already answered and the
+/// cursors watching it, so finding the lending claim by walking the table rather than the
+/// path's covering routes shows up as a slope.
+fn bench_lend(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/lend");
 	for (publishers, subscribers) in SHAPES {
 		group.bench_function(
 			BenchmarkId::from_parameter(format!("{publishers}p_{subscribers}s")),
@@ -701,12 +700,17 @@ fn bench_takeover(c: &mut Criterion) {
 					let (request, output) = ask(&format!("room/incoming{n}"));
 					for cursor in &mut cursors {
 						let event = cursor.next().now_or_never().flatten();
-						assert!(matches!(event, Some(origin::RouteEvent::Takeover { .. })), "{event:?}");
+						assert!(matches!(event, Some(origin::RouteEvent::Start(_))), "{event:?}");
 					}
 					drop(request);
 					drop(output);
 					for cursor in &mut cursors {
 						cursor.next().now_or_never().flatten().expect("retract delivered");
+						cursor
+							.next()
+							.now_or_never()
+							.flatten()
+							.expect("the claim's advance delivered");
 					}
 				});
 			},
@@ -983,43 +987,6 @@ fn bench_restart_fronts(c: &mut Criterion) {
 	group.finish();
 }
 
-/// A pool member taken over in place and retired, under `fronts` fronts resolved
-/// through it, against the same member restarting without a takeover. Each change
-/// pokes every front beneath the prefix, and the takeover carries each one's verdict
-/// forward under the table lock, so the takeover's cost over the restart is that pass.
-/// The fronts' tasks never run: this is the install alone.
-fn bench_takeover_fronts(c: &mut Criterion) {
-	let mut group = c.benchmark_group("origin/takeover_fronts");
-	for fronts in [100, 1_000, 10_000] {
-		for takeover in [false, true] {
-			let kind = if takeover { "takeover" } else { "restart" };
-			group.bench_function(format!("{fronts}f_{kind}"), |b| {
-				let mut pool = pool(1, fronts, 0);
-				let mut last = pool._members.pop().expect("one member");
-				let mut hop = POOL_HOP + 1;
-				b.iter(|| {
-					hop += 1;
-					let next = match takeover {
-						true => moq_net::fuzz::takeover_route(
-							&pool.producer,
-							moq_net::Path::from_static("pool"),
-							pool_route(hop),
-							&last,
-						),
-						false => moq_net::fuzz::requests_route(
-							&pool.producer,
-							moq_net::Path::from_static("pool"),
-							pool_route(hop),
-						),
-					};
-					drop(std::mem::replace(&mut last, next.unwrap()));
-				});
-			});
-		}
-	}
-	group.finish();
-}
-
 /// A member joining and leaving a pool that already serves `paths` paths.
 ///
 /// Every front under the prefix watches the routes covering it, so each one
@@ -1259,10 +1226,9 @@ fn runtime() -> tokio::runtime::Runtime {
 
 /// Everything under `room/`, which leaves out only the `muted` subscription.
 fn room() -> auth::Grant {
-	auth::Grant {
-		subscribe: Pattern::subtree("room").unwrap().into(),
-		..auth::Grant::all()
-	}
+	let mut grant = auth::Grant::all();
+	grant.subscribe = Pattern::subtree("room").unwrap().into();
+	grant
 }
 
 /// Steady-state delivery through a session's gates: one round across every
@@ -1860,14 +1826,13 @@ criterion_group!(
 	bench_announce_duplicate,
 	bench_reprice_duplicate,
 	bench_announce_fronts,
-	bench_takeover,
+	bench_lend,
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
 	bench_retire,
 	bench_restart_fronts,
 	bench_pool_churn,
-	bench_takeover_fronts,
 	bench_pool_cursors,
 	bench_handoff,
 	bench_narrow_delivery,

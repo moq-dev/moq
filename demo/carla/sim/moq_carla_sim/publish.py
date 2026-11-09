@@ -4,8 +4,8 @@ The layout is the one `demo/carla/README.md` documents and the web player
 speaks:
 
     carla/{truck}/{camera}.hang              video (sd, hd) + status
-    carla/.socket/{truck}                    the truck's socket endpoint
-    carla/.socket/driver-{id}                each driver's socket endpoint
+    carla/.server/{truck}                    the truck's server socket endpoint
+    carla/.client/{id}                       each driver's client socket endpoint
 """
 
 from __future__ import annotations
@@ -185,7 +185,7 @@ class StatusPublisher:
     """
 
     def __init__(self, broadcast: moq.BroadcastProducer) -> None:
-        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
+        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE))
         self._catalog = moq.media.CatalogProducer(broadcast)
         self._producer = moq.json.SnapshotProducer(broadcast, track)
         # Weak: watching demand neither keeps the track open nor locks it.
@@ -294,7 +294,7 @@ def _number_or_none(value: Any) -> float | None:
 
 
 # Every endpoint the trucks and their drivers talk through sits under this
-# prefix, as `{prefix}/.socket/{id}`.
+# prefix: a truck's as `{prefix}/.server/{truck}`, a driver's as `{prefix}/.client/{id}`.
 SOCKET_PREFIX = "carla"
 
 # How far a control may fall behind the newest before it is skipped: one player
@@ -304,10 +304,10 @@ CONTROL_DELAY = timedelta(milliseconds=250)
 
 
 class Drivers:
-    """A truck's socket endpoint: accepts each driver's session, fans its controls
-    into the command queue, and answers the driver on the same session.
+    """A truck's server socket endpoint: accepts each driver's session, fans its
+    controls into the command queue, and answers the driver on the same session.
 
-    Each driver dials from an endpoint of its own, one `track` session per lease,
+    Each driver dials from a client endpoint of its own, one `track` session per lease,
     whose messages are one control per group. Replies go back the same way, so a
     driver's acknowledgements never reach anyone else.
     """
@@ -320,8 +320,8 @@ class Drivers:
 
     @property
     def path(self) -> str:
-        """Where the truck's endpoint is announced."""
-        return f"{SOCKET_PREFIX}/.socket/{self._truck}"
+        """Where the truck's server endpoint is announced."""
+        return f"{SOCKET_PREFIX}/.server/{self._truck}"
 
     def reply(self, command: Command, message: dict[str, Any]) -> None:
         """Send `message` on the session that carried `command`, if it is still open.

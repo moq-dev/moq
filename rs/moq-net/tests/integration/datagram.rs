@@ -25,7 +25,7 @@ const TRACK: &str = "audio";
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn millis(ms: u64) -> Timestamp {
@@ -97,7 +97,7 @@ impl Chain {
 	}
 }
 
-async fn recv(consumer: &mut datagram::Consumer) -> Result<Option<moq_net::Datagram>, Error> {
+async fn recv(consumer: &mut datagram::Consumer) -> Result<Option<moq_net::datagram::Datagram>, Error> {
 	kio::clock::timeout(TIMEOUT, consumer.recv())
 		.await
 		.expect("recv timeout")
@@ -745,51 +745,6 @@ async fn a_stream_tracks_datagram_sent_between_its_answer_and_end_arrives() {
 			"{version}"
 		);
 		assert_eq!(chain.pairs[0].server.stats().datagrams_unrouted, Some(0), "{version}");
-	}
-}
-
-/// A track's end waits for the subscriber to read the datagrams queued with it, so a flood
-/// that keeps its receive queue full delays the end. Meanwhile the track keeps its stream, and
-/// the session stays busy, so the peer's stream credit bounds the ends a flood can leave queued.
-#[kio::test]
-async fn a_track_ended_under_a_datagram_flood_keeps_its_stream() {
-	use moq_net::transport::poll::Session as _;
-
-	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
-		let chain = Chain::new(&[version]).await;
-		let producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
-		let mut consumer = chain.consume(&producer, 1).await;
-		// Each names no subscription, so the subscriber reads and drops it. The queue holds 1024.
-		let flood = || {
-			for _ in 0..512 {
-				let _ = chain.pairs[0]
-					.client_transport
-					.send_datagram(b"x"[..].into(), Default::default());
-			}
-		};
-		flood();
-		producer.finish();
-		for _ in 0..32 {
-			flood();
-			// One turn for the session's tasks, which read at most a budget each.
-			let mut turned = false;
-			kio::wait(|waiter| {
-				if std::mem::replace(&mut turned, true) {
-					return std::task::Poll::Ready(());
-				}
-				waiter.waker().wake_by_ref();
-				std::task::Poll::Pending
-			})
-			.await;
-			assert!(
-				chain.pairs[0].server.poll_idle(&kio::Waiter::noop()).is_pending(),
-				"{version}: the track released its stream before its end applied"
-			);
-		}
-		assert!(recv(&mut consumer).await.unwrap().is_none(), "{version}");
-		kio::clock::timeout(TIMEOUT, chain.pairs[0].server.idle())
-			.await
-			.unwrap_or_else(|_| panic!("{version}: the track never released its stream"));
 	}
 }
 

@@ -30,6 +30,12 @@ export const PatternListSchema = z.array(
 	),
 );
 
+/**
+ * A time in whole unix seconds, from the epoch to the last second the Rust crate's clock
+ * holds. Anything else is refused, `null` included, so both languages read the same times.
+ */
+export const UnixSecondsSchema = z.int().check(z.gte(0), z.lte(18_446_744_073));
+
 // At most 2^53 - 1, so every JSON reader holds the cap exactly.
 const RateSchema = z.number().check(
 	z.refine((bps) => Number.isSafeInteger(bps) && bps > 0, {
@@ -121,12 +127,17 @@ export function decodeRoles<T extends { publish?: WireRole; subscribe?: WireRole
 
 /**
  * Nest each `_rate` field back into its role, so the decoded claims `Key.verify`
- * returns parse again. A role already in the capped form is left for the schema to refuse.
+ * returns parse again. Throws on a role already in the capped form, so a cap has one spelling.
  */
 export function nestRates<
 	T extends { publish?: unknown; subscribe?: unknown; publish_rate?: number; subscribe_rate?: number },
 >(claims: T) {
 	const { publish_rate, subscribe_rate, ...rest } = claims;
+	for (const role of [rest.publish, rest.subscribe]) {
+		if (role !== undefined && !Array.isArray(role)) {
+			throw new Error("a role is a pattern list, capped by publish_rate or subscribe_rate");
+		}
+	}
 	return {
 		...rest,
 		...(publish_rate !== undefined && { publish: { path: rest.publish ?? [], rate: publish_rate } }),

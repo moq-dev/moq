@@ -1,10 +1,11 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
+import { libav } from "../common/vite-plugin-libav.ts";
 import { worklet } from "../common/vite-plugin-worklet.ts";
 import { lazyMedia } from "./bundle.ts";
 
 export default defineConfig({
-	plugins: [worklet(), lazyMedia()],
+	plugins: [worklet(), libav(), lazyMedia()],
 	build: {
 		lib: {
 			entry: {

@@ -18,12 +18,6 @@ const compare = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
  */
 export const GRACE = Milli(1000);
 
-/**
- * How long idle cached content is kept, matching Rust `cache::DEFAULT_EXPIRY`: a group older
- * than this is evicted, so nothing waits for one longer.
- */
-export const CACHE_EXPIRY = Milli(30_000);
-
 /** The grace for a subscription with `delay.max`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
 export function grace(maxDelay: Milli): Milli {
 	return maxDelay > 0 ? maxDelay : GRACE;
@@ -152,6 +146,39 @@ export class Ledger {
 		}
 		if (below < end) gaps.push({ start: below, end });
 		return gaps;
+	}
+
+	/**
+	 * Take `[start, end)` back out of what is accounted for, owed again from `at`: a verdict that
+	 * accounted for it was reversed. The gap it leaves opens at `at`, so it is waited for a fresh
+	 * grace, even where it joins an older gap. Mirrors the Rust `Ledger::unaccount`.
+	 */
+	unaccount(start: bigint, end: bigint, at: Instant): void {
+		if (start >= end) return;
+		const lower = this.#runs.getPairOrNextLower(start)?.[1];
+		const overlapping: Run[] = [];
+		for (const [, run] of this.#runs.entries(lower?.start ?? start)) {
+			if (run.start >= end) break;
+			if (run.end > start) overlapping.push(run);
+		}
+		if (overlapping.length === 0) return;
+		for (const run of overlapping) {
+			this.#remove(run);
+			if (this.#last === run) this.#last = undefined;
+			if (run.start < start) {
+				const below = { start: run.start, end: start, since: run.since };
+				this.#runs.set(below.start, below);
+				this.#ages.set(below, undefined);
+			}
+			if (end < run.end) {
+				const above = { start: end, end: run.end, since: at };
+				this.#runs.set(above.start, above);
+				this.#ages.set(above, undefined);
+			}
+		}
+		const last = this.#runs.maxKey();
+		this.#last = last === undefined ? undefined : this.#runs.get(last);
+		this.demand(start, end, at);
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */

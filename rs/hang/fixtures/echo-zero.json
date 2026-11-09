@@ -12,8 +12,7 @@
 			"arrival": {
 				"timestamp": 0,
 				"wall": 0
-			},
-			"latency": 0
+			}
 		}
 	}
 }

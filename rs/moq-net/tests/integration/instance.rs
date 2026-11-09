@@ -13,7 +13,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) -> MockPair {
@@ -99,4 +99,78 @@ async fn moq_transport_mints_per_announcement() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		job_reannounced(version).await;
 	}
+}
+
+/// One publisher reaches a relay through two neighbors, and the one the relay prefers
+/// goes away. lite-07 carries the publisher's instance through both, so the relay keeps
+/// serving the same stream through the other. Every other wire mints one per announcement, so changing
+/// the next hop, with the same origin and no epoch, restarts the route rather than
+/// updating it in place.
+async fn next_hop_lost(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let preferred = produce_origin(2);
+	let standby = produce_origin(3);
+	let relay = produce_origin(4);
+	let _job = publisher
+		.route("job", moq_net::origin::RouteOptions::default())
+		.unwrap();
+	let _to_preferred = link(version, &publisher, &preferred).await;
+	let _to_standby = link(version, &publisher, &standby).await;
+	let mut announced = relay.consume().routes();
+	let first_hop = link(
+		version,
+		&preferred,
+		&relay.clone().with_preference(origin::Preference::new(1)),
+	)
+	.await;
+	let first = started(&mut announced).await;
+	let _second_hop = link(version, &standby, &relay).await;
+	if let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
+		panic!("{version}: the standby route changed the preferred one: {event:?}");
+	}
+
+	first_hop.server.abort(moq_net::Error::Cancel);
+	first_hop.client.abort(moq_net::Error::Cancel);
+	let event = kio::clock::timeout(Duration::from_secs(10), announced.next()).await;
+	match version.to_string().as_str() {
+		// The relay already serves the claim through every feasible route, so the
+		// standby carries on with nothing to announce.
+		"moq-lite-07-wip" => {
+			if let Ok(event) = event {
+				panic!("{version}: expected the same stream to continue, got {event:?}");
+			}
+			kio::clock::timeout(Duration::from_secs(10), relay.consume().request("job", None))
+				.await
+				.expect("request hung")
+				.expect("the standby serves the claim");
+		}
+		_ => match event.expect("announce hung").expect("announce ended") {
+			origin::RouteEvent::Restart(announce) => {
+				assert_ne!(
+					announce.route.instance(),
+					&first,
+					"{version}: spliced onto the old stream"
+				)
+			}
+			other => panic!("{version}: expected a restart, got {other:?}"),
+		},
+	}
+}
+
+#[kio::test]
+async fn next_hop_lost_lite07() {
+	next_hop_lost("moq-lite-07-wip").await;
+}
+
+#[kio::test]
+async fn next_hop_lost_restarts_older_lite() {
+	for version in ["moq-lite-06", "moq-lite-03"] {
+		next_hop_lost(version).await;
+	}
+}
+
+#[kio::test]
+async fn next_hop_lost_restarts_moq_transport() {
+	next_hop_lost("moq-transport-22").await;
 }

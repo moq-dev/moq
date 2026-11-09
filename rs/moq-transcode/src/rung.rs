@@ -78,12 +78,8 @@ pub(crate) struct Rung {
 	pub broadcast: moq_net::broadcast::Consumer,
 	/// The source rendition's catalog entry (codec + container).
 	pub config: VideoConfig,
-	/// Which encoder implementation to use.
-	pub encoder: moq_video::encode::Kind,
-	/// Which decoder implementation to use.
-	pub decoder: moq_video::decode::Kind,
-	/// How to resize decoded frames.
-	pub resize: moq_video::resize::Config,
+	/// The codec implementations, devices, and resize the transcode was configured with.
+	pub transcode: crate::Config,
 	/// Where to report that this rung is encoding.
 	pub active: crate::active::Producer,
 	/// The handle this rung's output is counted on, the one a caller bills.
@@ -121,11 +117,10 @@ impl Rung {
 	/// it. The sink owns a thread and stays on it.
 	async fn encode(&self, color: moq_video::Color) -> Result<moq_video::encode::Sink, Error> {
 		let framerate = self.info.framerate.unwrap_or(moq_video::FrameRate::new(30, 1).unwrap());
-		let mut config = moq_video::encode::Config::new(self.info.size.width, self.info.size.height, framerate);
+		let mut config = self.transcode.encoder(self.info.size, framerate);
 		config.bitrate = Some(self.info.bitrate);
-		config.kind = self.encoder.clone();
 		config.color = Some(color);
-		config.resize = Some(self.resize);
+		config.resize = Some(self.transcode.resize.clone());
 		// Every source group boundary is a cut; the join is only a backstop
 		// against pathologically long source groups.
 		config.join = std::time::Duration::from_secs(8);
@@ -769,10 +764,8 @@ struct Pipeline {
 
 impl Pipeline {
 	async fn new(rung: &Rung) -> Result<Self, Error> {
-		let mut decode = moq_video::decode::Config::new();
-		decode.kind = rung.decoder.clone();
-		decode.output = rung.resize.output;
-		decode.scale_hint = scale_hint(rung.info.size, rung.resize.output);
+		let mut decode = rung.transcode.decoder();
+		decode.scale_hint = scale_hint(rung.info.size, rung.transcode.resize.output);
 		// A `Sink` for the same reason as the encoder above: a fetch task holds this
 		// pipeline across a group read, so the codec must own its thread.
 		let decoder = moq_video::decode::Sink::open(&rung.config, &decode).await?;
@@ -867,17 +860,20 @@ impl Encoder {
 			&& *signalled != color
 		{
 			let (sink, _) = self.open.take().expect("checked above");
-			encoded = sink.finish().await?;
-			// The new parameter sets only reach a decoder on an IDR.
+			// The new parameter sets only reach a decoder on an IDR. Owed before the old encoder
+			// drains, so a drain that fails still leaves the next encoder owing it.
 			self.pending_cut = true;
+			encoded = sink.finish().await?;
 		}
 		let sink = match &mut self.open {
 			Some((sink, _)) => sink,
 			None => {
 				let mut sink = rung.encode(color).await?;
 				rung.rendition.opened(sink.applied());
-				if std::mem::take(&mut self.pending_cut) {
+				// Cleared only once applied: a cut that fails is still owed to the next encoder.
+				if self.pending_cut {
 					sink.cut().await?;
+					self.pending_cut = false;
 				}
 				&mut self.open.insert((sink, color)).0
 			}
@@ -945,9 +941,11 @@ mod tests {
 			),
 			broadcast,
 			config,
-			encoder: moq_video::encode::Kind::Software,
-			decoder: moq_video::decode::Kind::Software,
-			resize: Default::default(),
+			transcode: crate::Config {
+				encoder: moq_video::encode::Kind::Software,
+				decoder: moq_video::decode::Kind::Software,
+				..Default::default()
+			},
 			active,
 			retire,
 		};
@@ -1065,7 +1063,10 @@ mod tests {
 	/// Its subscribers must see that cause, rather than an unfinished producer drop.
 	#[tokio::test(start_paused = true)]
 	async fn cancelling_an_idle_rung_reports_cancel() {
-		let (rung, _source, _retire) = idle_rung();
+		let (rung, source, _retire) = idle_rung();
+		// The subscriber below starts the live path. Without a source track its feed fails
+		// on its own and ends the serve before the abort lands.
+		let video = source.create_track("video", None).unwrap();
 		let output = moq_net::broadcast::Info::default().produce();
 		let mut dynamic = output.requests();
 		let view = output.consume();
@@ -1073,6 +1074,10 @@ mod tests {
 		let request = dynamic.requested_track().await.unwrap();
 		let running = tokio::spawn(serve(rung, request));
 		let mut track = subscribing.await.unwrap();
+		// The track is admitted before `serve` is polled; the feed's subscription proves the
+		// live path is parked waiting for media rather than never started.
+		let mut demand = video.demand();
+		while demand.wanted_changed().await.unwrap().is_none() {}
 		running.abort();
 		assert!(running.await.unwrap_err().is_cancelled());
 		assert!(matches!(track.recv_group().await, Err(moq_net::Error::Cancel)));

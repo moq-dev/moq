@@ -24,7 +24,7 @@ const AUTH: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn declined(f: impl FnOnce(&mut Extensions)) -> Extensions {
@@ -46,8 +46,7 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 		match event {
 			moq_net::origin::RouteEvent::Start(update)
 			| moq_net::origin::RouteEvent::Update(update)
-			| moq_net::origin::RouteEvent::Restart(update)
-			| moq_net::origin::RouteEvent::Takeover { announce: update, .. } => {
+			| moq_net::origin::RouteEvent::Restart(update) => {
 				live |= update.prefix.as_str() == path;
 			}
 			moq_net::origin::RouteEvent::End(update) => {
@@ -132,11 +131,10 @@ async fn a_declined_auth_extension_is_not_negotiated() {
 				assert_eq!(session.auth().grant().peek(), None, "{context}");
 				// Only a request that names it can carry the token, so it resolves at once with
 				// a grant that stays unknown.
-				let (added, answer) = kio::clock::timeout(SETTLE, session.auth().add("token"))
+				let added = kio::clock::timeout(SETTLE, session.auth().add("token"))
 					.await
 					.unwrap_or_else(|_| panic!("{context}: add never resolved"))
 					.unwrap_or_else(|err| panic!("{context}: {err:?}"));
-				assert_eq!(answer, moq_net::auth::Answer::Requests, "{context}");
 				assert_eq!(added.grant().peek(), None, "{context}");
 				assert_eq!(session.auth().grant().peek(), None, "{context}");
 			}

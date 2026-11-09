@@ -120,8 +120,9 @@ done
 for source in current released; do
     mkdir -p "$HARNESS_RUN/hang-$source/src"
     cp "$DIR/compat/container.rs" "$HARNESS_RUN/hang-$source/src/main.rs"
+    manifest="$HARNESS_RUN/hang-$source/Cargo.toml"
     if [[ "$source" == current ]]; then dependency="{ path = \"$WORKSPACE/rs/hang\" }"; else dependency="\"=$(value hang)\""; fi
-    cat >"$HARNESS_RUN/hang-$source/Cargo.toml" <<TOML
+    cat >"$manifest" <<TOML
 [package]
 name = "compat-container"
 version = "0.0.0"
@@ -131,7 +132,14 @@ edition = "2024"
 hang = $dependency
 bytes = "1"
 TOML
-    cargo build --manifest-path "$HARNESS_RUN/hang-$source/Cargo.toml" --target-dir "$TARGET/compat-hang-$source"
+    # The adapter names moq-net itself, so it takes the copy this hang resolves.
+    if [[ "$source" == current ]]; then
+        net="{ path = \"$WORKSPACE/rs/moq-net\" }"
+    else
+        net="\"=$(cargo tree --manifest-path "$manifest" --invert moq-net --depth 0 --prefix none | awk '{ print substr($2, 2) }')\""
+    fi
+    echo "moq-net = $net" >>"$manifest"
+    cargo build --manifest-path "$manifest" --target-dir "$TARGET/compat-hang-$source"
     harness_stage "hang-$source/compat-container" "$TARGET/compat-hang-$source/debug/compat-container"
     "$HARNESS_RUN/hang-$source/compat-container" encode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
 done

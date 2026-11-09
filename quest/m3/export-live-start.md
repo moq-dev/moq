@@ -17,3 +17,5 @@ recorder ([moq-dev/studio#18](https://github.com/moq-dev/studio/pull/18)) sets 2
 and so every recording also starts up to 2 s before it was started
 (`rs/moq-studio/src/record.rs`). Only TS export reports stats today; fMP4 and
 MP4 report no sample counts, which the recorder needs to say what it wrote.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8298](https://github.com/moq-dev/moq/pull/8298) gives fMP4, MP4, MKV, and FLV a `moq_net::Delay { min, max }` before the cut, so splitting the start from the skip budget is an implementation fix, not a break.

@@ -52,7 +52,11 @@ enforcement needs it and nobody owned it.
   included, stays under the cap is untouched; under the cap nothing changes.
 
 Public API: a rate handle and a rate-limit close reason on moq-srt's server.
-Wire: none.
+The handle is `moq_net::bandwidth::Limit`, the one WHIP takes in
+`whip::Request.rate` (2026-11-07, maintainer, /quest-plan from the API shape
+audit), not a moq-srt copy. It reaches a server ingest as a field on
+`moq_mux::Ingest` or a new `#[non_exhaustive]` request, and a dial-out push
+as a field on `moq_srt::dial::Publish`, never as a `with_*` setter. Wire: none.
 
 ## Required
 

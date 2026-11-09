@@ -23,7 +23,7 @@ const REQUESTED: &str = ".dash/nobody";
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Drain every event the cursor has pending, as `kind prefix` lines.
@@ -35,7 +35,6 @@ fn drain(announced: &mut moq_net::origin::Routes) -> Vec<String> {
 			Event::Start(announce) => ("Start", announce),
 			Event::Update(announce) => ("Update", announce),
 			Event::Restart(announce) => ("Restart", announce),
-			Event::Takeover { announce, .. } => ("Takeover", announce),
 			Event::End(announce) => ("End", announce),
 		};
 		seen.push(format!("{kind} {}", announce.prefix));

@@ -17,7 +17,7 @@ pub struct Client {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
-	versions: Versions,
+	pub(crate) versions: Versions,
 	url: Option<url::Url>,
 	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
@@ -59,14 +59,6 @@ impl Client {
 	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
 		self
-	}
-
-	/// Set both publish and subscribe from one shared [`origin::Producer`].
-	///
-	/// Equivalent to [`with_publisher`](Self::with_publisher) and
-	/// [`with_subscriber`](Self::with_subscriber) with the same origin.
-	pub fn with_origin(self, origin: origin::Producer) -> Self {
-		self.with_publisher(&origin).with_subscriber(origin)
 	}
 
 	/// Cap what the server can make this session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
@@ -125,6 +117,11 @@ impl Client {
 	pub fn with_url(mut self, url: url::Url) -> Self {
 		self.url = Some(url);
 		self
+	}
+
+	/// The URL [`with_url`](Self::with_url) set, if any.
+	pub fn url(&self) -> Option<&url::Url> {
+		self.url.as_ref()
 	}
 
 	/// The request target our SETUP carries: the dialed URL's path, plus `?` and the
@@ -224,8 +221,9 @@ impl Client {
 	/// moq-transport via the MoQ Cluster extension).
 	///
 	/// The dialer is the side that knows what a link costs, because it chose the peer:
-	/// use `0` for a sibling in the same datacenter and something large for another
-	/// region across a metered backbone. So this prices both directions. We add it to
+	/// use `1` for a sibling in the same datacenter and something large for another
+	/// region across a metered backbone. Zero is refused on moq-lite-07, whose routing
+	/// needs every link to cost something. So this prices both directions. We add it to
 	/// the route cost of every announcement the peer sends us, and declare it in our
 	/// SETUP so the peer adds it to every announcement we send, which is what a server
 	/// accepting an anonymous connection needs: it cannot tell a sibling from a
@@ -1213,7 +1211,11 @@ mod tests {
 			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 			let client = Client::new()
 				.with_versions(Version::Lite(lite::Version::Lite04).into())
-				.with_stats(registry.tier(Tier::default()).session(crate::Path::from_static("root")));
+				.with_stats(
+					registry
+						.tier(Tier::default())
+						.session(crate::stats::SessionInfo::new(crate::Path::from_static("root"))),
+				);
 			let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 			let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake)).unwrap();
 			session.abort(abort);
@@ -1245,7 +1247,11 @@ mod tests {
 		let registry = Registry::new(Default::default());
 		let client = Client::new()
 			.with_versions(Version::Lite(lite::Version::Lite04).into())
-			.with_stats(registry.tier(Tier::default()).session(crate::Path::from_static("root")));
+			.with_stats(
+				registry
+					.tier(Tier::default())
+					.session(crate::stats::SessionInfo::new(crate::Path::from_static("root"))),
+			);
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
 		let (session, mut driver) =

@@ -45,7 +45,6 @@ num_enum = { workspace = true }
 roxmltree = "0.21.1"
 rustc-hash = { workspace = true }
 scuffle-av1 = { version = "0.1.4" }
-scuffle-h265 = { version = "0.2.2" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["base64"] }
@@ -108,7 +107,7 @@ name = "containers"
 harness = false
 
 [[bench]]
-name = "timeline"
+name = "sync"
 harness = false
 
 [[bench]]

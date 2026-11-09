@@ -51,9 +51,11 @@ The subset to implement, from the 2026-10-22 audit:
 A maintained crate was weighed against this. The codec is small, sits on the
 hot path, and must write into the driver's buffers, so qmux owns it.
 
-Public API: the `tokio_tungstenite` and `tungstenite` re-exports and the
-`tungstenite` types in `Client::with_config`, `Client::with_connector`,
-`Upgraded`, and `Error::WebSocket` go away. The Impact bullet says how to
+Public API: the `tokio_tungstenite` and `tungstenite` types in
+`Client::with_config`, `Client::with_connector`, `Upgraded`, and
+`Error::WebSocket` go away. The Impact bullet says how to
 migrate in `qmux` and `moq-tokio`. The existing qmux interop tests (the `qmux06`
 dev-dependency) and the browser path in `js/qmux` must keep passing
 unchanged.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): qmux's tungstenite exposure is removed before the cut in [api-shape/transport](/quest/m2/api-shape/transport.md), whatever this bench finds; this quest is perf-only.

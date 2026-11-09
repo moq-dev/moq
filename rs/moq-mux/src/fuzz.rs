@@ -194,7 +194,7 @@ pub fn catalog(data: &[u8]) -> bool {
 		moq_msf::DEFAULT_NAME
 	};
 	// Uncompressed: inflating a compressed group is moq-net's, ahead of any catalog parser.
-	let info = hang::Catalog::default_track_info().with_compress(false);
+	let info = hang::Catalog::default_track_info().with_compression(moq_net::track::Compression::None);
 	let track = broadcast
 		.create_track(name, info)
 		.expect("a fresh broadcast has no catalog");
@@ -329,7 +329,7 @@ pub fn seeds() -> Vec<Seed> {
 /// The catalog an import of bbb.mp4 publishes, with CMAF passthrough or without.
 fn imported(passthrough: bool) -> crate::catalog::hang::Catalog<()> {
 	let (broadcast, catalog) = broadcast();
-	let mut import = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+	let mut import = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_cmaf(passthrough);
 	import
 		.decode(&include_bytes!("container/fmp4/test_data/bbb.mp4")[..2035])
 		.expect("the fixture imports");

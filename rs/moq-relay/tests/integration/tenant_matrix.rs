@@ -21,7 +21,6 @@ use axum::routing::post;
 use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::Relay;
-use moq_tokio::moq_net;
 use moq_tokio::quic::driver;
 
 use crate::refusals::{client, config};
@@ -345,7 +344,7 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			// Synced counts only once every event queued before it was read.
-			let next = moq_net::kio::wait(|waiter| match routes.poll_next(waiter) {
+			let next = kio::wait(|waiter| match routes.poll_next(waiter) {
 				Poll::Ready(event) => Poll::Ready(event),
 				Poll::Pending => routes.poll_synced(waiter).map(|()| None),
 			})
@@ -353,12 +352,9 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 			use moq_net::origin::RouteEvent;
 			match next {
 				Some(RouteEvent::End(route)) => listed.remove(route.prefix.as_str()),
-				Some(
-					RouteEvent::Start(route)
-					| RouteEvent::Update(route)
-					| RouteEvent::Restart(route)
-					| RouteEvent::Takeover { announce: route, .. },
-				) => listed.insert(route.prefix.to_string()),
+				Some(RouteEvent::Start(route) | RouteEvent::Update(route) | RouteEvent::Restart(route)) => {
+					listed.insert(route.prefix.to_string())
+				}
 				None => return,
 			};
 		}

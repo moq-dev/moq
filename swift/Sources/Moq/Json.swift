@@ -10,7 +10,7 @@ import MoqFFI
 /// Foundation before the swift-foundation rewrite (iOS < 18 / macOS < 15), so encode an object
 /// or array there.
 ///
-/// Compression is the track's: publish JSON with `TrackInfo(compress: true)`, and a consumer reads
+/// Compression is the track's: publish JSON with `TrackInfo(compression: .deflate)`, and a consumer reads
 /// it with no option of its own.
 ///
 /// Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the

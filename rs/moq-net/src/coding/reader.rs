@@ -474,13 +474,12 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_pace(waiter, group.poll_admit(waiter, header, self.stream.window()))
 	}
 
-	/// Wait out `paced`, a pace gate on what this stream writes next, if the session has room
-	/// for the credit this stream holds while paused (see [`Pause`]); otherwise read on,
-	/// unpaced.
+	/// Wait out `paced`, the group's pace gate, if the session has room for the credit this
+	/// stream holds while paused (see [`Pause`]); otherwise read on, and the group sheds.
 	///
 	/// A paused stream is not read, so it is watched for a reset instead, which fails the
 	/// wait rather than leaving it to the group's reader to notice.
-	pub(crate) fn poll_pace(&mut self, waiter: &kio::Waiter, paced: Poll<()>) -> Poll<Result<(), Error>>
+	fn poll_pace(&mut self, waiter: &kio::Waiter, paced: Poll<()>) -> Poll<Result<(), Error>>
 	where
 		S: Pause,
 	{
@@ -604,7 +603,9 @@ mod tests {
 			stats::{Message, Registry, Tier, Totals},
 		};
 		let registry = Registry::new(Default::default());
-		let session = registry.tier(Tier::default()).session(crate::Path::from_static(""));
+		let session = registry
+			.tier(Tier::default())
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("")));
 		let version = lite::Version::Lite07;
 		let msg = lite::Probe {
 			bitrate: Some(123),

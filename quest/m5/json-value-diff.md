@@ -21,7 +21,7 @@ Compare three variants:
 2. The `Value` diff: serialize `T` to a `Value` once, then diff it against the
    previous `Value`.
 3. Compression only: deltas off, a full snapshot per frame in the same group,
-   and group DEFLATE through the track's `with_compress`.
+   and group DEFLATE through the track's `with_compression(Compression::Deflate)`.
 
 Measure each on producer CPU, consumer CPU, wire bytes after DEFLATE,
 allocations, and code size (`cargo llvm-lines` on a consumer crate such as
@@ -53,6 +53,8 @@ Context:
   patches after the snapshot. Align it with whatever this decides.
 - `moq_json::diff<T>` has no in-repo callers since #7400. With a `Value` diff
   it could take `&Value`, or be removed.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `moq_json::{diff, Diff}` become private before the cut ([moq-dev/moq#8298](https://github.com/moq-dev/moq/pull/8298)), so this work is internal.
 
 ## Related
 

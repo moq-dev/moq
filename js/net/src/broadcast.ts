@@ -4,6 +4,7 @@
  * @module
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
+import * as cache from "./cache.ts";
 import * as datagram from "./datagram.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
@@ -54,6 +55,16 @@ class BroadcastState {
 	unheld = false;
 	// Run synchronously once the broadcast closes, before `closed` notifies its observers.
 	closers = new Set<() => void>();
+	// The cache pool every track of the broadcast caches into, defaulting as Rust's
+	// `broadcast::Info` does: no byte capacity, and the default idle window.
+	pool = new cache.Pool({ expiry: cache.DEFAULT_EXPIRY });
+}
+
+// A new track of the broadcast, caching into its pool.
+function createProducer(state: BroadcastState, name: string): track.Producer {
+	const producer = new track.Producer(name);
+	hooks.poolTrack(producer, state.pool);
+	return producer;
 }
 
 // Datagram tracks never enter the stream listing or cache.
@@ -204,7 +215,7 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	const existing = lookup(state, name);
 	if (existing) return { producer: existing, requested: false };
 
-	const producer = new track.Producer(name);
+	const producer = createProducer(state, name);
 	if (!state.served) {
 		// Answer through the track rather than throwing, so a peer's subscribe is refused with
 		// the code instead of an unhandled error.
@@ -398,7 +409,7 @@ export class Producer {
 			const state = broadcast.#state;
 			if (state.closed.peek() !== undefined) throw new Error("broadcast is closed");
 			if (lookup(state, name)) throw new Error("duplicate reserved track");
-			const producer = new track.Producer(name);
+			const producer = createProducer(state, name);
 			const lookups = new Lookups();
 			state.lookups.set(producer, lookups);
 			state.requests.set(name, producer);
@@ -462,7 +473,7 @@ export class Producer {
 			throw new Error(`duplicate track: ${name}`);
 		}
 
-		const producer = new track.Producer(name).accept(info);
+		const producer = createProducer(this.#state, name).accept(info);
 		adopt(this.#state, producer, track.authoredInfo(info));
 		return producer;
 	}
@@ -646,8 +657,8 @@ export class Consumer {
 	 *
 	 * Lists the tracks its producer created (until they abort or are removed) and, for a
 	 * broadcast consumed from a session, the tracks the peer lists. Through a session the
-	 * listing syncs at once, with what this side holds, and the peer's tracks follow as live
-	 * adds; every listing of one broadcast shares one request to the peer. A track served only
+	 * peer's tracks arrive as they come and the listing syncs when the peer does; every
+	 * listing of one broadcast shares one request to the peer. A track served only
 	 * on request is never listed, and listing never requests one. Throws once the broadcast
 	 * has closed.
 	 */

@@ -82,8 +82,9 @@ libFuzzer writes the input to `artifacts/<target>/crash-<hash>` and prints the `
 command to reproduce it (add the prefix above). Fix the bug, then commit the input:
 
 ```bash
-cp rs/moq-net/fuzz/artifacts/lite/crash-<hash> rs/moq-net/fuzz/regressions/lite/
+cp rs/moq-net/fuzz/artifacts/ingest/crash-<hash> rs/moq-net/fuzz/regressions/ingest/
 ```
 
 `fuzz::tests::regressions` replays everything under `regressions/<target>/` as part of
-the normal test suite, so the case stays covered.
+the normal test suite, so the case stays covered. A crash on a single moq-lite message
+becomes a case in `../fixtures/lite.json` instead, which `js/net` replays too.

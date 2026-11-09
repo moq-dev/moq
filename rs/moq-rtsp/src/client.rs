@@ -1046,6 +1046,7 @@ mod tests {
 	/// far ahead as it paused, which continues the timeline rather than jumping it.
 	#[tokio::test]
 	async fn a_paused_stream_is_not_a_jump() {
+		kio::clock::host_time(); // real RTSP sockets, and the pause is real time
 		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
 		let (broadcast, catalog) = broadcast();
 		let mut client = Client::new(server.url()).unwrap();

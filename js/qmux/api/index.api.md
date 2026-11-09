@@ -40,6 +40,29 @@ export interface SendStreamStats {
 	bytesWritten: number;
 }
 
+export class Session implements WebTransport {
+	constructor(source: string | URL | WebSocketLike | WebSocketStreamLike, options?: SessionOptions);
+	static accept(socket: WebSocketLike | WebSocketStreamLike, options?: AcceptOptions): Session;
+	close(info?: {
+		closeCode?: number;
+		reason?: string;
+	}): void;
+	readonly closed: Promise<WebTransportCloseInfo>;
+	get congestionControl(): WebTransportCongestionControl;
+	createBidirectionalStream(options?: SendStreamOptions): Promise<BidirectionalStream>;
+	createUnidirectionalStream(options?: SendStreamOptions): Promise<SendStream>;
+	get datagrams(): WebTransportDatagramDuplexStream;
+	getStats(): Promise<{
+		datagrams: {};
+	}>;
+	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
+	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
+	get protocol(): string;
+	readonly ready: Promise<void>;
+	get reliability(): "reliable-only";
+	setSendBufferSize(bytes: number): void;
+}
+
 export class SessionError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
 	constructor(message: string, options?: {
 		cause?: unknown;
@@ -54,11 +77,6 @@ export interface SessionOptions extends WebTransportOptions {
 	requireProtocol?: boolean;
 	sendBufferSize?: number;
 	versions?: Record<string, Version | Version[] | null>;
-}
-
-export interface StreamCredit {
-	available: bigint;
-	blocked: boolean;
 }
 
 export class StreamError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
@@ -114,30 +132,6 @@ export interface WebSocketStreamOpenEvent {
 	protocol: string;
 	readable: ReadableStream<WebSocketStreamData>;
 	writable: WritableStream<WebSocketStreamData>;
-}
-
-export default class implements WebTransport {
-	constructor(source: string | URL | WebSocketLike | WebSocketStreamLike, options?: SessionOptions);
-	static accept(socket: WebSocketLike | WebSocketStreamLike, options?: AcceptOptions): import("@moq/qmux").default;
-	close(info?: {
-		closeCode?: number;
-		reason?: string;
-	}): void;
-	readonly closed: Promise<WebTransportCloseInfo>;
-	get congestionControl(): WebTransportCongestionControl;
-	createBidirectionalStream(options?: SendStreamOptions): Promise<BidirectionalStream>;
-	createUnidirectionalStream(options?: SendStreamOptions): Promise<SendStream>;
-	get datagrams(): WebTransportDatagramDuplexStream;
-	getStats(): Promise<{
-		datagrams: {};
-	}>;
-	readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStream>;
-	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
-	get protocol(): string;
-	readonly ready: Promise<void>;
-	get reliability(): "reliable-only";
-	setSendBufferSize(bytes: number): void;
-	streamCredit(dir: "uni" | "bi"): StreamCredit;
 }
 
 export function install(options?: InstallOptions): boolean;

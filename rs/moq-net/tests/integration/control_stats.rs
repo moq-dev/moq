@@ -14,7 +14,7 @@ use moq_net::{
 fn origin() -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(Default::default());
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 #[kio::test]
@@ -25,7 +25,9 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		let registry = Registry::new(Default::default());
 		let tier = Tier::new(moq_net::Path::from_static("internal"));
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
-		options.server_stats = registry.tier(tier.clone()).session(moq_net::Path::from_static(""));
+		options.server_stats = registry
+			.tier(tier.clone())
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("")));
 		options.client_publish = Some(publisher.consume());
 		options.server_subscribe = Some(subscriber.clone());
 		let _pair = connect_mock(options).await;
@@ -86,7 +88,9 @@ async fn setup_counts_under_the_admitted_stats() {
 		let (client_transport, server_transport) = create_mock_session_pair(transport);
 		let client = moq_net::Client::new().with_versions(version.into());
 		let server = moq_net::Server::new().with_versions(version.into());
-		let stats = registry.tier(tier.clone()).session(moq_net::Path::from_static(""));
+		let stats = registry
+			.tier(tier.clone())
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("")));
 		let client = async {
 			let (session, driver) = client.connect(now(), client_transport).await.unwrap();
 			spawn(driver);

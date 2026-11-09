@@ -1,5 +1,14 @@
 set fallback
 
+endpoint := "dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com"
+
+# The `r2:` remote for rclone, with the same credentials `nix copy` reads.
+export RCLONE_CONFIG_R2_TYPE := "s3"
+export RCLONE_CONFIG_R2_PROVIDER := "Cloudflare"
+export RCLONE_CONFIG_R2_ENDPOINT := "https://" + endpoint
+export RCLONE_CONFIG_R2_ACCESS_KEY_ID := env("AWS_ACCESS_KEY_ID", "")
+export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY := env("AWS_SECRET_ACCESS_KEY", "")
+
 # Deploy the nix.moq.dev worker.
 deploy:
     bun install --frozen-lockfile
@@ -29,7 +38,68 @@ push bucket +paths:
     key=$(mktemp)
     trap 'rm -f "$key"' EXIT
     printf '%s' "$NIX_SIGNING_KEY" >"$key"
-    nix copy --to "s3://{{ bucket }}?endpoint=dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com&region=auto&compression=zstd&secret-key=$key" {{ paths }}
+    nix copy --to "s3://{{ bucket }}?endpoint={{ endpoint }}&region=auto&compression=zstd&secret-key=$key" {{ paths }}
+
+# Record the store paths a CI job pushed for a commit, so `refresh` can find their closures.
+[no-cd]
+roots bucket rev name +paths:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${AWS_ACCESS_KEY_ID:?not set}"
+    : "${AWS_SECRET_ACCESS_KEY:?not set}"
+    PATH="$(nix build --no-link --print-out-paths --inputs-from {{ quote(justfile_directory() / "../..") }} nixpkgs#rclone^out)/bin:$PATH"
+    readlink -f {{ paths }} | rclone rcat "r2:{{ bucket }}/roots/{{ rev }}/{{ name }}"
+
+# Restart the upload age of every object in a commit's recorded closures older than a week.
+refresh bucket rev:
+    #!/usr/bin/env bash
+    # The bucket expires objects by upload age, and `nix copy` never rewrites
+    # one it already has, so a path every commit reuses keeps its first upload's
+    # age. Refreshed when published and then daily, the newest cached commit's
+    # closure stays well inside the 30-day expiry, even when nothing new is pushed.
+    set -euo pipefail
+    : "${AWS_ACCESS_KEY_ID:?not set}"
+    : "${AWS_SECRET_ACCESS_KEY:?not set}"
+    PATH="$(nix build --no-link --print-out-paths --inputs-from ../.. nixpkgs#rclone^out)/bin:$PATH"
+    remote="r2:{{ bucket }}/"
+    store="s3://{{ bucket }}?endpoint={{ endpoint }}&region=auto"
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+
+    rclone lsf --files-only "${remote}roots/{{ rev }}/" | sed 's|^|roots/{{ rev }}/|' >"$work/roots"
+    if [[ ! -s "$work/roots" ]]; then
+        echo "no closures recorded for {{ rev }}; a Cache push run records them" >&2
+        exit 1
+    fi
+    # Store paths hold no whitespace. No mapfile: macOS runners ship Bash 3.2.
+    paths=$(rclone cat "${remote}roots/{{ rev }}/")
+
+    # Every narinfo in the closures and the NAR each points to. A path missing
+    # from the bucket fails here: it already expired, and refreshing can't bring it back.
+    nix path-info --recursive --store "$store" $paths | sed -E 's|^/nix/store/([a-z0-9]{32})-.*|\1.narinfo|' >"$work/keys"
+    nix path-info --recursive --json --store "$store" $paths | jq -r '.. | objects | select(has("url")) | .url' >>"$work/keys"
+    cat "$work/roots" >>"$work/keys"
+    sort -u -o "$work/keys" "$work/keys"
+
+    # Ages come from the server's upload time, which the bucket's expiry counts,
+    # not the mtime metadata rclone writes.
+    list() { rclone lsf -R --files-only --files-from "$work/keys" --format tp --time-format unix --use-server-modtime "$remote"; }
+    cutoff=$(($(date +%s) - 7 * 24 * 60 * 60))
+    list | awk -F';' -v cutoff="$cutoff" '$1 < cutoff { print $2 }' >"$work/stale"
+    # Touching an S3 object copies it onto itself, which restarts its age.
+    rclone touch -R --files-from "$work/stale" "$remote"
+    echo "refreshed $(wc -l <"$work/stale") of $(wc -l <"$work/keys") objects for {{ rev }}"
+
+    list >"$work/after"
+    if [[ $(wc -l <"$work/after") -ne $(wc -l <"$work/keys") ]]; then
+        echo "objects missing from {{ bucket }} for {{ rev }}:" >&2
+        cut -d';' -f2 "$work/after" | sort | comm -23 "$work/keys" - >&2
+        exit 1
+    fi
+    if awk -F';' -v cutoff="$cutoff" '$1 < cutoff { found = 1; print $2 } END { exit !found }' "$work/after" >&2; then
+        echo "these objects kept their age after the refresh" >&2
+        exit 1
+    fi
 
 # Generate a signing key into the cache-write Environment and print its public half for flake.nix.
 keygen:

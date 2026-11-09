@@ -16,7 +16,7 @@
 //! that is a refusal of the stream rather than a fault. For H.265, which has no
 //! software decoder behind this one, that refusal is what lets a player pick
 //! another rendition. The render node is the one the encoder and the GPU resize
-//! share, unless that one cannot decode H.265, and `MOQ_VAAPI_DEVICE` can name
+//! share, unless that one cannot decode H.265, and `Config::vaapi` can name
 //! it; see `frame::vaapi::device`.
 //!
 //! Progressive 8-bit 4:2:0 only, which is everything a browser's `VideoEncoder`,
@@ -71,14 +71,22 @@ pub(crate) const NAME: &str = "vaapi";
 
 pub(crate) struct Vaapi {
 	decoder: Decoder,
-	/// Whether pictures are handed out as DMA-BUFs rather than downloaded, from
-	/// [`Config::output`]. Cleared if the driver turns out not to export, so a
-	/// host that decodes but cannot share what it decoded loses the fast path
-	/// rather than the stream.
-	exporting: bool,
-	/// Whether a picture has ever come back as a descriptor, which is what
-	/// settles the question above. See [`Vaapi::exported`].
-	has_exported: bool,
+	export: Export,
+}
+
+/// Whether pictures are handed out as DMA-BUFs rather than downloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Export {
+	/// [`Config::output`] asked for shared pictures, and none has come back yet,
+	/// so a failure is read as the driver being unable to export. See
+	/// [`Vaapi::exported`].
+	Trying,
+	/// A picture has come back as a descriptor, which settles it.
+	Exporting,
+	/// Downloaded: asked for, or the driver turned out not to export, so a host
+	/// that decodes but cannot share what it decoded loses the fast path rather
+	/// than the stream.
+	Downloading,
 }
 
 impl Vaapi {
@@ -109,19 +117,19 @@ impl Vaapi {
 				moq_vaapi::Codec::H265,
 				Some((VAProfile::VAProfileHEVCMain, "H.265 Main".to_owned())),
 			),
-			other => return Err(Error::Codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
+			other => return Err(Error::codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
 		};
 		if let Some((profile, name)) = required
-			&& offered(codec, profile) == Some(false)
+			&& offered(codec, config.vaapi.as_deref(), profile) == Some(false)
 		{
 			return Err(Error::UnsupportedCodec(format!("no VA-API driver here decodes {name}")));
 		}
 
 		let vaapi = VaapiConfig {
 			codec,
-			device: vaapi::device(codec).map(Path::to_path_buf),
+			device: vaapi::device(codec, config.vaapi.as_deref()),
 		};
-		let decoder = Decoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
+		let decoder = Decoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 
 		// The renderer imports the NV12 this exports, so `Render` keeps it too
 		// in a build that has the renderer; without one it would only download.
@@ -130,23 +138,23 @@ impl Vaapi {
 			Output::Cpu => false,
 			Output::Render => cfg!(feature = "render"),
 		};
+		let export = match exporting {
+			true => Export::Trying,
+			false => Export::Downloading,
+		};
 		tracing::info!(
 			decoder = NAME,
 			codec = stream.codec.label(),
 			exporting,
 			"opened decoder"
 		);
-		Ok(Box::new(Self {
-			decoder,
-			exporting,
-			has_exported: false,
-		}))
+		Ok(Box::new(Self { decoder, export }))
 	}
 
 	/// Decodes one access unit into GPU-resident frames, or `None` once the
 	/// driver has shown it will not export.
 	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Result<Vec<Frame>, Error>> {
-		if !self.exporting {
+		if self.export == Export::Downloading {
 			return None;
 		}
 
@@ -157,7 +165,7 @@ impl Vaapi {
 	/// The same for the stream's tail, so a track that ends does not switch to
 	/// downloading for its last few pictures.
 	fn flush_shared(&mut self) -> Option<Result<Vec<Frame>, Error>> {
-		if !self.exporting {
+		if self.export == Export::Downloading {
 			return None;
 		}
 
@@ -184,13 +192,17 @@ impl Vaapi {
 			Ok(frames) => {
 				// An access unit whose pictures are all still in the DPB proves
 				// nothing about exporting, so only a non-empty answer counts.
-				self.has_exported |= !frames.is_empty();
+				if !frames.is_empty() {
+					self.export = Export::Exporting;
+				}
 				Ok(frames)
 			}
-			Err(err) if self.has_exported => Err(Error::Codec(err.context("VAAPI decode to a shared surface"))),
+			Err(err) if self.export == Export::Exporting => {
+				Err(Error::codec(err.context("VAAPI decode to a shared surface")))
+			}
 			Err(err) => {
 				tracing::warn!(%err, "VAAPI cannot hand out decoded surfaces; downloading them instead");
-				self.exporting = false;
+				self.export = Export::Downloading;
 				Ok(Vec::new())
 			}
 		}
@@ -209,7 +221,7 @@ impl Backend for Vaapi {
 		let decoded = self
 			.decoder
 			.decode(&access_unit, timestamp)
-			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
 
 		convert(decoded)
 	}
@@ -223,7 +235,7 @@ impl Backend for Vaapi {
 		let decoded = self
 			.decoder
 			.flush()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
 
 		convert(decoded)
 	}
@@ -251,9 +263,9 @@ fn va_profile(profile_idc: u8) -> Option<VAProfile::Type> {
 /// `Some(false)` only when every node answered and none does. A node that can't
 /// be asked, such as one whose VA driver is missing, leaves the answer unknown,
 /// since a missing driver is a fault rather than the device's refusal.
-fn offered(codec: moq_vaapi::Codec, profile: VAProfile::Type) -> Option<bool> {
-	let nodes: Vec<PathBuf> = match vaapi::device(codec) {
-		Some(node) => vec![node.to_path_buf()],
+fn offered(codec: moq_vaapi::Codec, named: Option<&Path>, profile: VAProfile::Type) -> Option<bool> {
+	let nodes: Vec<PathBuf> = match vaapi::device(codec, named) {
+		Some(node) => vec![node],
 		None => DrmDeviceIterator::default().collect(),
 	};
 	if nodes.is_empty() {

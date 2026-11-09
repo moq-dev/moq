@@ -18,10 +18,6 @@ the encode seam as the platform candidate on macOS and iOS.
   `kAudioConverterPrimeInfo` gives the delay the timestamps fold in.
 - Bitrate through `kAudioConverterEncodeBitRate`, updated live where the
   converter allows.
-- This quest owns changing `Encoder::encode` from one packet per frame to
-  a zero-or-more packet return with a flush operation. MediaCodec requires
-  this shared contract even if AudioToolbox itself emits immediately. Prove
-  delayed and multiple outputs and flushing in the shared encoder tests.
 - Gate the seam's "AAC refused without a platform encoder" test to hosts
   without one.
 - Regression: a stereo and a 5.1 encode round-trip through the AudioToolbox
@@ -32,6 +28,11 @@ the encode seam as the platform candidate on macOS and iOS.
   so a zero epoch stamps `[0, 0, 0, 20_000]`, and `decode::Consumer` reads the
   duplicates as holes and resets AAC between them. Shift the whole timeline by
   the deficit instead, including the terminal end (found in #4081 review).
+
+This backend implements the zero-or-more packet return and `flush` that
+moq-audio's encoder took in m2 before the cut
+(decided 2026-11-07, maintainer, /quest-plan from the API sweep of open PRs
+and remaining quests), so it adds no break and waits on no other encoder backend; its round-trip test still needs its platform decoder.
 
 ## Required
 

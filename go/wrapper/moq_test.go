@@ -98,8 +98,8 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.KeepAlive(served)
-	if served.Instance() == dynamic.Instance() {
-		t.Fatal("a job's route serves a fresh instance")
+	if served.Instance() != dynamic.Instance() {
+		t.Fatal("a job's route continues the instance its prefix route lends")
 	}
 	broadcast, err := served.Broadcast()
 	if err != nil {
@@ -738,8 +738,8 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fill.StartGroup() != 7 || fill.EndGroup() != 8 || fill.Priority() != 11 {
-		t.Fatalf("unexpected fill: start=%d end=%d priority=%d", fill.StartGroup(), fill.EndGroup(), fill.Priority())
+	if fill.Start() != (moq.Position{Group: 7, Frame: 0}) || fill.End() != 8 || fill.Priority() != 11 {
+		t.Fatalf("unexpected fill: start=%+v end=%d priority=%d", fill.Start(), fill.End(), fill.Priority())
 	}
 	if wanted := fill.Wanted(); wanted == nil || *wanted != 7 {
 		t.Fatalf("unexpected fill: wanted=%v", wanted)
@@ -1202,8 +1202,8 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if mediaName != "requested-audio" {
 		t.Fatalf("media name = %q, want requested-audio", mediaName)
 	}
-	if _, err := request.Name(); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
+	if _, err := request.Name(); !errors.Is(err, moq.ErrAlreadyResponded) {
+		t.Fatalf("request name after accept error = %v, want ErrAlreadyResponded", err)
 	}
 
 	var mediaConsumer *moqmedia.TrackConsumer
@@ -1286,6 +1286,44 @@ func TestRecvGroupCancelRace(t *testing.T) {
 		}(consumer)
 	}
 	wg.Wait()
+}
+
+// TestRecvGroupCancelKeepsConsumer confirms a cancelled read aborts only
+// itself: the same consumer still receives the next group.
+func TestRecvGroupCancelKeepsConsumer(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Close()
+
+	track, err := broadcast.PublishTrack("x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+
+	if _, err := consumer.RecvGroup(newCancelOnWait()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled RecvGroup = %v, want context.Canceled", err)
+	}
+
+	group, err := track.AppendGroup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := consumer.RecvGroup(ctx)
+	if err != nil {
+		t.Fatalf("RecvGroup after cancel = %v", err)
+	}
+	if got == nil || got.Sequence() != group.Sequence() {
+		t.Fatalf("RecvGroup after cancel = %v, want group %d", got, group.Sequence())
+	}
 }
 
 // TestConsumerCancelConcurrent confirms Cancel is safe to call repeatedly from
@@ -1429,7 +1467,7 @@ func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
 	case <-waitCtx.Done():
 		t.Fatal("SubscribeTrack did not return after its context was cancelled")
 	}
-	_ = pending.Abort(0)
+	_ = pending.Reject(0)
 
 	resolved := make(chan error, 1)
 	go func() {
@@ -1568,7 +1606,7 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 
 	runtime.KeepAlive(pending)
 	for _, request := range pending {
-		_ = request.Abort(0)
+		_ = request.Reject(0)
 	}
 }
 

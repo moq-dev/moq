@@ -23,7 +23,7 @@ export interface GameConfig {
 	/** The origin the game broadcast arrives in; the connection feeds it. */
 	origin: Moq.Origin.Producer;
 	/** This viewer's socket endpoint, under {@link gamePrefix}, which dials the game's. */
-	endpoint: Moq.socket.Endpoint;
+	endpoint: Moq.Socket.Endpoint;
 	/** Shared signal tracking which game is currently expanded. */
 	expanded: Moq.Signals.Signal<string | undefined>;
 	/** MoQ path prefix for game broadcasts (e.g. "anon/boy/game"). */
@@ -72,7 +72,7 @@ export class Game {
 
 	/** The session currently expanded, shared by every game on the page. */
 	readonly expanded: Moq.Signals.Signal<string | undefined>;
-	readonly #endpoint: Moq.socket.Endpoint;
+	readonly #endpoint: Moq.Socket.Endpoint;
 
 	/** Whether the pointer is over this game's tile. */
 	readonly hovered = new Moq.Signals.Signal(false);
@@ -115,8 +115,9 @@ export class Game {
 	/** The Game Boy buttons currently held down. */
 	readonly heldButtons = new Set<string>();
 
-	// Internal command publishing state.
+	// The command waiting for the session to open, consumed once written.
 	#command = new Moq.Signals.Signal<Command | undefined>(undefined);
+	readonly #connection: Moq.Connection;
 	#feedbackActive = new Moq.Signals.Signal(false);
 
 	constructor(config: GameConfig) {
@@ -124,6 +125,7 @@ export class Game {
 		this.sessionId = sessionId;
 		this.expanded = expanded;
 		this.#endpoint = config.endpoint;
+		this.#connection = connection;
 
 		// Derive active state from expanded + hovered.
 		this.#signals.run(this.#runActive.bind(this));
@@ -213,8 +215,10 @@ export class Game {
 		this.sendCommand({ type: "buttons", buttons: [...this.heldButtons] });
 	}
 
-	/** Send a command to the emulator. */
+	/** Send a command to the emulator. Dropped while disconnected, since it would land late and out of context. */
 	sendCommand(cmd: Record<string, unknown>) {
+		if (this.#connection.status.peek() !== "connected") return;
+
 		// Open the session on input, with idle timeout.
 		this.#feedbackActive.set(true);
 
@@ -306,11 +310,9 @@ export class Game {
 	}
 
 	#runSession(connection: Moq.Connection, effect: Moq.Signals.Effect) {
-		// Gate on a live connection: a dial is answered only through the relay.
-		if (effect.get(connection.status) !== "connected") return;
-
-		if (!effect.get(this.active)) {
-			// Clear feedback state when deactivating.
+		// Gate on a live connection, since a dial is answered only through the relay. Losing it or
+		// deactivating drops pending input, which would otherwise replay on the next session.
+		if (effect.get(connection.status) !== "connected" || !effect.get(this.active)) {
 			this.#feedbackActive.set(false);
 			this.#command.set(undefined);
 			return;
@@ -320,7 +322,7 @@ export class Game {
 
 		// One session per activation: a reload or an idle timeout ends it, and the next input dials a new one.
 		const abort = new AbortController();
-		const stream = new Moq.Signals.Signal<Moq.socket.TrackStream | undefined>(undefined);
+		const stream = new Moq.Signals.Signal<Moq.Socket.TrackStream | undefined>(undefined);
 		effect.cleanup(() => {
 			abort.abort();
 			const open = stream.peek();
@@ -330,7 +332,7 @@ export class Game {
 		});
 
 		effect.spawn(async () => {
-			let open: Moq.socket.TrackStream;
+			let open: Moq.Socket.TrackStream;
 			try {
 				open = await this.#endpoint.dialTrack(this.sessionId, undefined, { signal: abort.signal });
 			} catch (err) {
@@ -354,7 +356,7 @@ export class Game {
 		effect.run(this.#runCommands.bind(this, stream));
 	}
 
-	#runCommands(stream: Moq.Signals.Signal<Moq.socket.TrackStream | undefined>, effect: Moq.Signals.Effect) {
+	#runCommands(stream: Moq.Signals.Signal<Moq.Socket.TrackStream | undefined>, effect: Moq.Signals.Effect) {
 		const open = effect.get(stream);
 		if (!open) return;
 
@@ -364,6 +366,7 @@ export class Game {
 		// One command per group, so a late one never holds up the next.
 		const value = { ...command.cmd, timestamps: command.timestamps };
 		open.producer.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
+		this.#command.set(undefined);
 	}
 
 	// Read the emulator's replies until the session ends.

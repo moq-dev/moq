@@ -1,6 +1,6 @@
 //! OBJECT_DATAGRAM: one Object carried in a QUIC datagram (draft-22 section 11.2.1).
 //!
-//! Public [`crate::Datagram`] writers emit Object ID 0; private relay metadata preserves
+//! Public [`crate::datagram::Datagram`] writers emit Object ID 0; private relay metadata preserves
 //! other IDs, properties, and status. The Type is a set of flags.
 
 use bytes::Bytes;

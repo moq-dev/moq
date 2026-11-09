@@ -105,8 +105,8 @@ pub enum Error {
 	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
 	KeylogUnset,
 
-	/// A zero `connect.backoff.healthy`, which would count every session as healthy.
-	#[error("connect.backoff.healthy must be non-zero")]
+	/// A zero `Backoff::healthy`, which would count every session as healthy.
+	#[error("the healthy backoff bar must be non-zero")]
 	BackoffHealthy,
 
 	/// The config was parsed from released spellings that no longer work. The
@@ -254,6 +254,11 @@ pub enum Error {
 	#[cfg(all(feature = "uds", unix))]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
+
+	/// [`crate::watch::Files`] could not watch a file's directory. The string has the details.
+	#[cfg(feature = "watch")]
+	#[error("failed to watch files: {0}")]
+	Watch(String),
 
 	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
 	/// such as a rate cap, which qmux cannot pace.

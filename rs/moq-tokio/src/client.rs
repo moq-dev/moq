@@ -80,6 +80,9 @@ pub struct Client {
 	/// in-memory sessions on a paused clock.
 	#[cfg(test)]
 	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
+	/// Where every dial goes instead of the network, set by [`Self::with_network`].
+	#[cfg(feature = "sim")]
+	network: Option<crate::sim::Network>,
 }
 
 /// A test stand-in for [`Client::dial`], handed the address and the MoQ client a real dial
@@ -176,18 +179,14 @@ impl Client {
 			qmux,
 			#[cfg(test)]
 			dialer: None,
+			#[cfg(feature = "sim")]
+			network: None,
 		})
 	}
 
 	/// Publish the given origin to every session this client opens.
 	pub fn with_publisher(mut self, publish: impl moq_net::Consume<moq_net::origin::Consumer>) -> Self {
 		self.moq = self.moq.with_publisher(publish);
-		self
-	}
-
-	/// Publish and subscribe through one shared origin.
-	pub fn with_origin(mut self, origin: moq_net::origin::Producer) -> Self {
-		self.moq = self.moq.with_origin(origin);
 		self
 	}
 
@@ -232,6 +231,13 @@ impl Client {
 	/// identity the caller has established; see [`moq_net::Client::with_peer_hop`].
 	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
 		self.moq = self.moq.with_peer_hop(hop);
+		self
+	}
+
+	/// Dial through `network` instead of opening sockets, whatever a URL's scheme.
+	#[cfg(feature = "sim")]
+	pub fn with_network(mut self, network: crate::sim::Network) -> Self {
+		self.network = Some(network);
 		self
 	}
 
@@ -368,18 +374,23 @@ impl Client {
 		&self,
 		attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
 	) -> crate::Result<Dialed> {
-		let addr = attempt.target().with_url(attempt.url().clone());
-		let client = match attempt.token() {
-			Some(token) => {
-				let mut client = self.clone();
-				client.moq = client.moq.with_token(token.clone());
-				std::borrow::Cow::Owned(client)
-			}
-			None => std::borrow::Cow::Borrowed(self),
-		};
+		let mut client = self.clone();
+		client.moq = attempt.client(&self.moq);
+		let url = client.moq.url().expect("an attempt sets the URL").clone();
+		let addr = attempt.target().with_url(url);
 		#[cfg(test)]
 		if let Some(dialer) = &self.dialer {
 			return dialer(addr, client.moq.clone()).await;
+		}
+		#[cfg(feature = "sim")]
+		if let Some(network) = &self.network {
+			let link = network.dial(addr.url().clone(), self.versions.clone()).await?;
+			// As a socket dial does, so a SETUP that carries the target carries this one.
+			let moq = client.moq.clone().with_url(addr.url().clone());
+			let (session, driver) = moq.connect(moq_net::time::Instant::now(), link).await?;
+			crate::runtime::Spawner::current().spawn(moq_net::time::run(driver));
+			// What the link stands in for: a session the relay labels as QUIC.
+			return Ok(Dialed::new(session, crate::Transport::Quic));
 		}
 
 		// Each compiled backend adds state to this dispatch future. Keep it off the
@@ -892,11 +903,7 @@ mod tests {
 	fn test_cli_version_help_lists_every_parseable_name() {
 		let help = Cli::render_help(Cli::command(), true).expect("long help");
 		// Every wire code this crate parses, including the opt-in `-wip` drafts.
-		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
-		for name in codes
-			.filter_map(moq_net::Version::from_code)
-			.map(|version| version.as_str())
-		{
+		for name in moq_net::Version::ALL.iter().map(|version| version.as_str()) {
 			assert!(help.contains(name), "missing {name} from --connect-version help");
 		}
 	}
@@ -1076,7 +1083,7 @@ mod tests {
 			.expect("failed to create track");
 		let mut group = track.append_group().expect("failed to append group");
 		group
-			.write_frame(crate::moq_net::Timestamp::ZERO, b"hello".as_ref())
+			.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 			.expect("failed to write frame");
 		group.finish().expect("failed to finish group");
 

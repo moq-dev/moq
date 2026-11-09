@@ -108,7 +108,7 @@ describe("unsupported catalog", () => {
 			const owner = new Origin.Producer();
 			const name = Path.from("room/live.hang");
 			const published = publish(owner, name);
-			const track = published.createTrack(Catalog.TRACK, { compress });
+			const track = published.createTrack(Catalog.TRACK, { compression: compress ? "deflate" : "none" });
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 			const enabled = new Signal(true);
 			const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled });
@@ -337,12 +337,12 @@ describe("relativeBroadcast", () => {
 			Moq.Instance.random(),
 			Moq.Instance.random(),
 		];
-		const catalogRoute = owner.route(Path.from("a/b"), { instance: catalogInstance });
+		const catalogRoute = owner.route(Path.from("a/b"), { instance: { id: catalogInstance, epoch: 0n } });
 		const catalog = catalogRoute.broadcast;
-		const siblingRoute = owner.route(Path.from("a/source"), { instance: siblingInstance });
+		const siblingRoute = owner.route(Path.from("a/source"), { instance: { id: siblingInstance, epoch: 0n } });
 		const sibling = siblingRoute.broadcast;
 		// A route over a wire that carries no instance has one its session minted.
-		const plainRoute = owner.route(Path.from("a/plain"), { instance: Moq.Instance.minted() });
+		const plainRoute = owner.route(Path.from("a/plain"), { instance: { id: Moq.Instance.minted(), epoch: 0n } });
 		const plain = plainRoute.broadcast;
 		const source = new Broadcast({
 			origin: owner,
@@ -381,7 +381,7 @@ describe("relativeBroadcast", () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
 		const [oldInstance, newInstance] = [Moq.Instance.random(), Moq.Instance.random()];
-		const oldRoute = owner.route(Path.from("a/source"), { instance: oldInstance });
+		const oldRoute = owner.route(Path.from("a/source"), { instance: { id: oldInstance, epoch: 0n } });
 		const old = oldRoute.broadcast;
 		const source = new Broadcast({
 			origin: owner,
@@ -406,7 +406,7 @@ describe("relativeBroadcast", () => {
 
 			// The announcement is the online signal: the plain reference follows the restart,
 			// while one naming the old instance never reads the new one.
-			const replacementRoute = owner.route(Path.from("a/source"), { instance: newInstance });
+			const replacementRoute = owner.route(Path.from("a/source"), { instance: { id: newInstance, epoch: 0n } });
 			const replacement = replacementRoute.broadcast;
 			await settle();
 			expect(following?.instance).toBe(newInstance);
@@ -425,7 +425,7 @@ describe("relativeBroadcast", () => {
 		const owner = new Origin.Producer();
 		const main = publish(owner, Path.from("a/b"));
 		const [oldInstance, newInstance] = [Moq.Instance.random(), Moq.Instance.random()];
-		const oldRoute = owner.route(Path.from("a/source"), { instance: oldInstance });
+		const oldRoute = owner.route(Path.from("a/source"), { instance: { id: oldInstance, epoch: 0n } });
 		const old = oldRoute.broadcast;
 		const named = { ...video("avc1.64001f", "./source"), instance: oldInstance } as Catalog.VideoConfig;
 		const source = new Broadcast({
@@ -439,7 +439,7 @@ describe("relativeBroadcast", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["named", "plain"]);
 
-			const replacementRoute = owner.route(Path.from("a/source"), { instance: newInstance });
+			const replacementRoute = owner.route(Path.from("a/source"), { instance: { id: newInstance, epoch: 0n } });
 			const replacement = replacementRoute.broadcast;
 			await withoutWarnings(settle);
 			expect(videoRenditions(source)).toEqual(["plain"]);
@@ -623,6 +623,33 @@ describe("restart", () => {
 
 		exact.close();
 		for (const answer of answers) answer.close();
+		source.close();
+		owner.close();
+		await settle();
+	});
+
+	it("plays a claim's job on the instance it resolved", async () => {
+		const owner = new Origin.Producer();
+		const name = Path.from("pool/job.hang");
+		const pool = owner.routePrefix(Path.from("pool"));
+		const answers = serve(pool);
+		const source = new Broadcast({ origin: owner, name, enabled: true, follow: true, catalogFormat: "manual" });
+		const handed: unknown[] = [];
+		const stop = source.out.active.subscribe((active) => {
+			if (active) handed.push(active);
+		});
+		await settle();
+		const active = source.out.active.peek();
+		expect(active?.instance).toBe(pool.instance);
+
+		// The job's exact route carries the pool's instance, so the player never restarts.
+		for (let i = 0; i < 5; i++) await settle();
+		expect(handed).toEqual([active]);
+		expect(source.out.error.peek()).toBeUndefined();
+
+		stop();
+		for (const answer of answers) answer.close();
+		pool.close();
 		source.close();
 		owner.close();
 		await settle();

@@ -10,7 +10,7 @@
 
 set working-directory := '.'
 
-# The test clock (`moq.testing`). `--features` replaces pyproject's list, so it
+# The test clock (`moq-rs/tests/clock.py`). `--features` replaces pyproject's list, so it
 # names the software encoder the tests use again.
 test_features := "--features testing,openh264"
 
@@ -58,7 +58,7 @@ audit:
 samples:
     ../sh/py/samples.sh
 
-# Run the unit tests, on a build with the test clock (`moq.testing`).
+# Run the unit tests, on a build with the test clock (`moq-rs/tests/clock.py`).
 test:
     uv sync --locked --no-install-workspace
     just _develop {{ test_features }}

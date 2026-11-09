@@ -143,25 +143,22 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	/// Whether the PMT of the clock's program has been read.
 	mapped: bool,
 
-	timebase: Option<Timebase>,
+	timing: Clock,
 	/// A `discontinuity_indicator` on the clock PID, waiting for the PCR that it flags (normally
 	/// in the same packet).
 	pending_break: bool,
-	/// Before the first group: the PCR time the importer started waiting for a group start at.
-	waiting_since: Option<u64>,
 	/// The PCR time of the last object written, which no later one goes below.
 	written: u64,
 
-	/// The object being filled, from its first packet.
-	open: Option<Object>,
-	/// Closed objects waiting on the next PCR for their timestamps.
-	queue: VecDeque<Object>,
-	group: Option<Group>,
+	groups: Groups,
 	/// Whether every group so far started at a random access point, and the layout allowed random
 	/// access throughout.
 	all_random_access: bool,
 
 	mux_rate: Meter,
+
+	/// Whether input is still accepted: [`finish`](Self::finish) ends it.
+	input: crate::container::Input,
 }
 
 /// Owns the `m2ts` catalog section once written, removing it however the track ends, as the
@@ -182,6 +179,28 @@ impl<E: crate::catalog::hang::CatalogExt> Drop for Section<E> {
 struct Program {
 	pcr_pid: Option<u16>,
 	video: Vec<u16>,
+}
+
+/// The clock pacing the multiplex.
+enum Clock {
+	/// No PCR yet: nothing can be timed, so no object opens.
+	Unseen,
+	Seen {
+		timebase: Timebase,
+		/// The object being filled, from its first packet.
+		open: Option<Object>,
+		/// Closed objects waiting on the next PCR for their timestamps.
+		queue: VecDeque<Object>,
+	},
+}
+
+/// The groups written so far.
+enum Groups {
+	/// Before the first group: the PCR time the importer started waiting for a group start at,
+	/// once the clock's program is mapped and a PCR seen.
+	Waiting(Option<u64>),
+	/// The group being written.
+	Writing(Group),
 }
 
 /// The PCRs since the importer's first, or since the last flagged jump.
@@ -257,15 +276,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			access_pid: None,
 			single: false,
 			mapped: false,
-			timebase: None,
+			timing: Clock::Unseen,
 			pending_break: false,
-			waiting_since: None,
 			written: 0,
-			open: None,
-			queue: VecDeque::new(),
-			group: None,
+			groups: Groups::Waiting(None),
 			all_random_access: true,
 			mux_rate: Meter::default(),
+			input: crate::container::Input::Open,
 		})
 	}
 
@@ -288,6 +305,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	/// Append `data` and publish every whole packet it completes. A trailing partial packet is
 	/// kept for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
+		self.input.check()?;
 		self.scratch.extend_from_slice(data);
 		if !self.sized {
 			self.probe_packet_size(false)?;
@@ -299,7 +317,31 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	///
 	/// No later PCR will arrive, so the objects since the last one are timed at the rate of the
 	/// interval before it. The catalog keeps the `m2ts` section until the importer drops.
+	///
+	/// A finish that fails ends the track with an error, and every later call returns its cause.
+	/// Calling it again after a success does nothing, and later input is refused with
+	/// [`Finished`](crate::Error::Finished).
 	pub fn finish(&mut self) -> crate::Result<()> {
+		match &self.input {
+			crate::container::Input::Open => {}
+			crate::container::Input::Finished => return Ok(()),
+			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => return Err(err.clone()),
+		}
+		let result = self.end();
+		match &result {
+			Ok(()) => self.input = crate::container::Input::Finished,
+			Err(err) => {
+				// The objects already written stay readable, then subscribers get an error.
+				let _ = self.media.fail(err.reason());
+				self.reservation = None;
+				self.input = crate::container::Input::Failed(err.clone());
+			}
+		}
+		result
+	}
+
+	/// Publish the rest of the input and finish the track, stopping at the first failure.
+	fn end(&mut self) -> crate::Result<()> {
 		if !self.sized {
 			self.probe_packet_size(true)?;
 			self.packets()?;
@@ -413,24 +455,29 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			start = Some(Start::RandomAccess);
 		}
 
-		if start.is_some() || (clock && self.started()) {
-			if !clock {
-				self.close_object();
+		let opens = start.is_some() || (clock && self.started());
+		let Clock::Seen { open, queue, .. } = &mut self.timing else {
+			return Ok(());
+		};
+		if opens {
+			// A PCR packet already closed the object before it.
+			if !clock && let Some(object) = open.take() {
+				queue.push_back(object);
 			}
 			let mut payload = BytesMut::with_capacity(TsPacket::SIZE * 8);
 			payload.extend_from_slice(pkt);
-			self.open = Some(Object {
+			*open = Some(Object {
 				at,
 				payload,
 				start,
 				discontinuity,
 			});
-		} else if let Some(open) = self.open.as_mut() {
+		} else if let Some(open) = open.as_mut() {
 			open.payload.extend_from_slice(pkt);
 		}
 
-		let waiting = self.open.as_ref().map_or(0, |open| open.payload.len() as u64)
-			+ self.queue.iter().map(|object| object.payload.len() as u64).sum::<u64>();
+		let waiting = open.as_ref().map_or(0, |open| open.payload.len() as u64)
+			+ queue.iter().map(|object| object.payload.len() as u64).sum::<u64>();
 		if waiting > GROUP_BYTES_MAX {
 			return Err(crate::Error::PcrGap {
 				pid: self.pcr_pid.unwrap_or_default(),
@@ -447,13 +494,19 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.close_object();
 		let flagged = std::mem::take(&mut self.pending_break);
 
-		let Some(timebase) = self.timebase.as_mut() else {
+		let Clock::Seen { timebase, .. } = &mut self.timing else {
 			// The first PCR starts the count at its own value.
-			self.timebase = Some(Timebase {
-				raw,
-				samples: VecDeque::from([Sample { at, ticks: raw }]),
-			});
-			self.waiting_since = self.mapped.then_some(raw);
+			self.timing = Clock::Seen {
+				timebase: Timebase {
+					raw,
+					samples: VecDeque::from([Sample { at, ticks: raw }]),
+				},
+				open: None,
+				queue: VecDeque::new(),
+			};
+			if let Groups::Waiting(since) = &mut self.groups {
+				*since = self.mapped.then_some(raw);
+			}
 			if self.mux_rate.pcr(raw, self.offset / TsPacket::SIZE as u64) {
 				self.record()?;
 			}
@@ -477,10 +530,15 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			// and the new side carries on from there.
 			self.drain_queue()?;
 			let ticks = (last + step).max(self.written);
-			self.timebase = Some(Timebase {
-				raw,
-				samples: VecDeque::from([Sample { at, ticks }]),
-			});
+			// The object before was closed and the queue drained, so both start empty.
+			self.timing = Clock::Seen {
+				timebase: Timebase {
+					raw,
+					samples: VecDeque::from([Sample { at, ticks }]),
+				},
+				open: None,
+				queue: VecDeque::new(),
+			};
 			if self.mux_rate.discontinuity() {
 				self.record()?;
 			}
@@ -488,8 +546,8 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 				self.record()?;
 			}
 			// The jump is not elapsed time, so the wait for the first group starts over.
-			if self.waiting_since.is_some() {
-				self.waiting_since = Some(ticks);
+			if let Groups::Waiting(Some(since)) = &mut self.groups {
+				*since = ticks;
 			}
 			return Ok(self.started().then_some(Start::Discontinuity));
 		}
@@ -505,10 +563,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			self.record()?;
 		}
 
-		let since = match &self.group {
-			Some(group) => Some(group.ticks),
-			None if self.mapped => Some(*self.waiting_since.get_or_insert(ticks)),
-			None => None,
+		let since = match &mut self.groups {
+			Groups::Writing(group) => Some(group.ticks),
+			Groups::Waiting(since) if self.mapped => Some(*since.get_or_insert(ticks)),
+			Groups::Waiting(_) => None,
 		};
 		Ok(since
 			.filter(|since| ticks.saturating_sub(*since) >= FALLBACK_TICKS && self.can_start())
@@ -518,28 +576,35 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	/// Whether a group may start here: once the first one has, always; before it, only once the
 	/// clock's program is mapped and a PCR has been seen.
 	fn can_start(&self) -> bool {
-		self.started() || (self.mapped && self.timebase.is_some())
+		self.started() || (self.mapped && matches!(self.timing, Clock::Seen { .. }))
 	}
 
 	/// Whether the first group has started, written or still waiting on its timestamp.
 	fn started(&self) -> bool {
-		self.group.is_some() || self.open.is_some() || !self.queue.is_empty()
+		matches!(self.groups, Groups::Writing(_))
+			|| matches!(&self.timing, Clock::Seen { open, queue, .. } if open.is_some() || !queue.is_empty())
 	}
 
 	fn close_object(&mut self) {
-		if let Some(object) = self.open.take() {
-			self.queue.push_back(object);
+		if let Clock::Seen { open, queue, .. } = &mut self.timing
+			&& let Some(object) = open.take()
+		{
+			queue.push_back(object);
 		}
 	}
 
 	/// Time and write every waiting object against the current timebase.
 	fn drain_queue(&mut self) -> crate::Result<()> {
-		while let Some(object) = self.queue.pop_front() {
-			let timebase = self.timebase.as_ref().expect("an object follows a PCR");
+		loop {
+			let Clock::Seen { timebase, queue, .. } = &mut self.timing else {
+				return Ok(());
+			};
+			let Some(object) = queue.pop_front() else {
+				return Ok(());
+			};
 			let ticks = locate(object.at, &timebase.samples);
 			self.write(object, ticks)?;
 		}
-		Ok(())
 	}
 
 	fn write(&mut self, object: Object, ticks: u64) -> crate::Result<()> {
@@ -550,31 +615,34 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// The first object, which starts a group, anchors the shift and is live on arrival.
 		let timestamp = self.shift.shift(timestamp)?;
 		let size = object.payload.len() as u64;
-		let start = object.start.or_else(|| {
-			self.group
-				.as_ref()
-				.filter(|group| group.bytes + size > GROUP_BYTES_MAX || group.objects >= GROUP_OBJECTS_MAX)
-				.map(|_| Start::Full)
-		});
+		let start = match (object.start, &mut self.groups) {
+			(Some(start), _) => Some(start),
+			(None, Groups::Writing(group)) => {
+				if group.bytes + size > GROUP_BYTES_MAX || group.objects >= GROUP_OBJECTS_MAX {
+					Some(Start::Full)
+				} else {
+					group.bytes += size;
+					group.objects += 1;
+					None
+				}
+			}
+			// Only an object that starts a group opens before the first one.
+			(None, Groups::Waiting(_)) => Some(Start::Fallback),
+		};
 
 		if let Some(start) = start {
-			if object.discontinuity && self.group.is_some() {
+			if object.discontinuity && matches!(self.groups, Groups::Writing(_)) {
 				self.media.discontinuity()?;
 			}
 			if start != Start::RandomAccess || !self.single {
 				self.all_random_access = false;
 			}
-			self.group = Some(Group {
+			self.groups = Groups::Writing(Group {
 				ticks,
-				bytes: 0,
-				objects: 0,
+				bytes: size,
+				objects: 1,
 			});
 		}
-
-		// Only an object that starts a group is ever opened before the first one.
-		let group = self.group.as_mut().expect("the first object starts a group");
-		group.bytes += size;
-		group.objects += 1;
 		self.media.write(crate::container::Frame {
 			timestamp,
 			duration: None,
@@ -590,7 +658,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	/// Write the section to the catalog if it changed. Nothing is written before the first group.
 	fn record(&mut self) -> crate::Result<()> {
-		if self.group.is_none() && self.section.is_none() {
+		if matches!(self.groups, Groups::Waiting(_)) && self.section.is_none() {
 			return Ok(());
 		}
 		let mut section = hang::catalog::M2ts::new(self.media.name());

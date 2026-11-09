@@ -7,11 +7,10 @@
 //! accept it on a separate TCP port via [`Listener`], or pass an HTTP server's
 //! upgraded socket to [`accept`] before admitting the returned request.
 
-use qmux::ws::tokio_tungstenite;
-use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
+use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use url::Url;
 
 use crate::cli::Duration as CliDuration;
@@ -114,7 +113,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub struct Options {
 	pub(crate) url: Url,
 	pub(crate) server: moq_net::Server,
-	pub(crate) active: moq_net::server::Active,
+	pub(crate) active: moq_net::server::Admitted,
 	/// The addresses and negotiated subprotocol captured before the upgrade.
 	pub link: crate::server::Link,
 	/// The verified TLS peer, when the HTTP server requested a certificate.
@@ -129,7 +128,7 @@ pub struct Options {
 
 impl Options {
 	/// Carry an accepted connection's guard, URL, and MoQ policy through its upgrade.
-	pub fn new(url: Url, server: moq_net::Server, active: moq_net::server::Active) -> Self {
+	pub fn new(url: Url, server: moq_net::Server, active: moq_net::server::Admitted) -> Self {
 		Self {
 			url,
 			server,
@@ -674,22 +673,15 @@ impl Listener {
 	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
 	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
 	/// retried, because the caller has no better answer than to ask again. A
-	/// per-connection upgrade failure is still yielded as `Some(Err(..))`.
-	///
-	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
-	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		crate::runtime::scope(async move {
-			self.accept_with_url()
-				.await
-				.map(|result| result.map(|(session, _, _)| session))
-		})
-		.await
+	/// per-connection upgrade failure is still returned as an error.
+	pub async fn accept(&self) -> Result<qmux::Session> {
+		crate::runtime::scope(async move { self.accept_with_url().await.map(|(session, _, _)| session) }).await
 	}
 
 	/// Accept the next connection and retain the WebSocket request URL, the chosen
 	/// sub-protocol, and the peer's address.
-	pub(crate) async fn accept_with_url(&self) -> Option<Result<(qmux::Session, Url, Accepted)>> {
-		Some(self.accept_pending().await.await)
+	pub(crate) async fn accept_with_url(&self) -> Result<(qmux::Session, Url, Accepted)> {
+		self.accept_pending().await.await
 	}
 
 	/// Accept a socket and return its independently driven WebSocket upgrade, so a
@@ -857,7 +849,7 @@ mod tests {
 	async fn listener_refuses_a_client_without_subprotocol() {
 		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = listener.local_addr().unwrap();
-		let accepted = tokio::spawn(async move { listener.accept_with_url().await.unwrap() });
+		let accepted = tokio::spawn(async move { listener.accept_with_url().await });
 
 		let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
 		let err = tokio_tungstenite::client_async(format!("ws://{addr}/room"), stream)
@@ -881,26 +873,31 @@ mod tests {
 
 	#[tokio::test]
 	async fn tls_host_name_override_dials_url_address() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("127.0.0.1", false, Some("relay.example")).await;
 	}
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("relay.example", true, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_literal() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", false, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_literal_fixed_addresses() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", true, None).await;
 	}
 
 	#[tokio::test]
 	async fn ipv6_tls_host_name_override() {
+		kio::clock::host_time(); // real TLS over loopback
 		check_tls_authority("[::1]", false, Some("::1")).await;
 	}
 
@@ -1036,11 +1033,11 @@ mod tests {
 			stream_receive_window: Some(256 * 1024),
 			..Default::default()
 		};
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let mut options = Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new().with_versions(moq_net::Versions::all()),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
 		options.quic = quic.resolve();
@@ -1071,9 +1068,9 @@ mod tests {
 	fn moqt_18_and_newer_pin_to_qmux01() {
 		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
 		// otherwise the pin silently stops matching.
-		let drafts: Vec<_> = [0xff000012, 0xff000014, 0xff000016]
+		let drafts: Vec<_> = ["moq-transport-18", "moq-transport-20", "moq-transport-22"]
 			.into_iter()
-			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
+			.map(|name| name.parse::<moq_net::Version>().unwrap().alpn())
 			.collect();
 		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 		for &alpn in QMUX01_ONLY_ALPNS {
@@ -1160,12 +1157,12 @@ mod timeout_tests {
 	#[tokio::test(start_paused = true)]
 	async fn silent_qmux_peer_is_refused_at_the_deadline() {
 		const ALPN: &str = "qmux-01.moq-lite-06";
-		let activity = moq_net::server::Activity::default();
+		let admission = moq_net::server::Admission::default();
 		let timeout = time::Duration::from_secs(1);
 		let mut options = Options::new(
 			"ws://localhost/".parse().unwrap(),
 			moq_net::Server::new().with_timeout(Some(timeout)),
-			activity.enter().unwrap(),
+			admission.enter().unwrap(),
 		);
 		options.link.alpn = Some(ALPN.into());
 		let (server, _peer) = tokio::io::duplex(4096);
@@ -1187,11 +1184,11 @@ mod timeout_tests {
 		const ALPN: &str = "qmux-01.moq-lite-06";
 		let short = time::Duration::from_secs(1);
 		for (timeout, expires) in [(Some(short), true), (None, false)] {
-			let activity = moq_net::server::Activity::default();
+			let admission = moq_net::server::Admission::default();
 			let mut options = Options::new(
 				"ws://localhost/".parse().unwrap(),
 				moq_net::Server::new().with_timeout(timeout),
-				activity.enter().unwrap(),
+				admission.enter().unwrap(),
 			);
 			options.link.alpn = Some(ALPN.into());
 			// Complete QMux over an in-memory WebSocket, then withhold MoQ SETUP.
@@ -1209,7 +1206,7 @@ mod timeout_tests {
 				peer = qmux::ws::Upgraded::new(peer, ALPN).connect() => crate::spawn_qmux(peer.unwrap()),
 				result = accept.as_mut() => panic!("accepted before SETUP: {:?}", result.map(|_| ())),
 			};
-			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
+			let _stream = kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
 				.await
 				.unwrap();
 			tokio::time::advance(timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT)).await;

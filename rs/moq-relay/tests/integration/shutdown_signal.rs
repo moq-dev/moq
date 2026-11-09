@@ -70,6 +70,7 @@ fn run_test<F: std::future::Future<Output = ()> + 'static>(test: fn() -> F) {
 
 #[test]
 fn sigint_drains_sessions_before_exiting() {
+	kio::clock::host_time(); // a real relay on real sockets
 	let _sigint = SIGINT.lock().unwrap_or_else(|e| e.into_inner());
 	run_test(sigint_drains_sessions_before_exiting_inner);
 }
@@ -102,14 +103,36 @@ fn a_failed_startup_leaves_the_signals_alone() {
 	);
 }
 
+/// A relay serving with its signal handling off installs no handler, so SIGINT keeps
+/// its default action and kills the process: a handler the relay installed would
+/// catch it instead, and drain on a signal the embedder owns. Only a fresh process
+/// shows it, as for [`a_failed_startup_leaves_the_signals_alone`]. Then the embedder
+/// drains on its own trigger.
 #[test]
 fn an_embedder_owns_the_signals() {
-	let _sigint = SIGINT.lock().unwrap_or_else(|e| e.into_inner());
-	run_test(an_embedder_owns_the_signals_inner);
+	kio::clock::host_time(); // a real relay on real sockets
+	const CHILD: &str = "MOQ_RELAY_EMBEDDER_SIGNALS_CHILD";
+	if std::env::var_os(CHILD).is_some() {
+		run_test(a_relay_without_signals_leaves_sigint_alone_inner);
+		return;
+	}
+	let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", "shutdown_signal::an_embedder_owns_the_signals"])
+		.env(CHILD, "1")
+		.status()
+		.expect("spawn the child test process");
+	use std::os::unix::process::ExitStatusExt;
+	assert_eq!(
+		status.signal(),
+		Some(libc::SIGINT),
+		"SIGINT did not kill a relay serving with its signals off: {status}"
+	);
+	run_test(an_embedder_drains_on_its_trigger_inner);
 }
 
 #[test]
 fn a_session_arriving_mid_drain_gets_what_is_left() {
+	kio::clock::host_time(); // a real relay on real sockets
 	run_test(a_session_arriving_mid_drain_gets_what_is_left_inner);
 }
 
@@ -120,11 +143,13 @@ fn a_drain_ends_once_every_session_leaves() {
 
 #[test]
 fn a_trigger_before_run_keeps_the_deadline() {
+	kio::clock::host_time(); // a real relay on real sockets
 	run_test(a_trigger_before_run_keeps_the_deadline_inner);
 }
 
 #[test]
 fn a_reconnecting_client_rides_out_a_restart() {
+	kio::clock::host_time(); // a real relay on real sockets
 	run_test(a_reconnecting_client_rides_out_a_restart_inner);
 }
 
@@ -153,13 +178,10 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	// handler, registered above.
 	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
 
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(5),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("no GOAWAY within 5s of SIGINT")
-	.expect("session closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("no GOAWAY within 5s of SIGINT")
+		.expect("session closed without a GOAWAY");
 	// Empty URI: the relay is restarting, not moving. The window itself is the
 	// sender's own timer here (only moq-transport puts it on the wire),
 	// so it is the elapsed time below that proves it was honored.
@@ -195,13 +217,10 @@ async fn a_signal_right_after_ready_drains_inner() {
 	// for SIGTERM, so in a process of its own (nextest) the relay's handler is all
 	// that keeps this from killing the test.
 	assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0, "failed to raise SIGTERM");
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(5),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("no GOAWAY within 5s of SIGTERM")
-	.expect("session closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("no GOAWAY within 5s of SIGTERM")
+		.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 	kio::clock::timeout(Duration::from_secs(15), run)
 		.await
@@ -232,13 +251,34 @@ async fn a_failed_startup_leaves_the_signals_alone_inner() {
 	unsafe { libc::raise(libc::SIGTERM) };
 }
 
-async fn an_embedder_owns_the_signals_inner() {
+async fn a_relay_without_signals_leaves_sigint_alone_inner() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
+	// A process started with SIGINT ignored, such as a background job of a script,
+	// passes that on: restore the default action, which the relay must then leave alone.
+	// SAFETY: nothing else in this fresh process watches SIGINT yet.
+	assert_ne!(
+		unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL) },
+		libc::SIG_ERR,
+		"failed to restore SIGINT's default action"
+	);
 
-	// The embedder's own handler, which is also what keeps SIGINT from killing
-	// the test process.
-	let mut interrupt =
-		tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect("register SIGINT");
+	let relay = Relay::load(relay_config())
+		.await
+		.expect("load relay")
+		.with_signals(false);
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
+	let _run = tokio::spawn(relay.run());
+	let _connection = connect(&client(Vec::new()), port).await;
+	let _straggler = straggler(port).await;
+
+	// SAFETY: raise has no memory-safety preconditions. With the default action
+	// this never returns.
+	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
+	panic!("a handler caught SIGINT for a relay serving with its signals off");
+}
+
+async fn an_embedder_drains_on_its_trigger_inner() {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
 
 	let relay = Relay::load(relay_config())
 		.await
@@ -253,32 +293,13 @@ async fn an_embedder_owns_the_signals_inner() {
 	let draining = connection.draining().expect("connected");
 	let _straggler = straggler(port).await;
 
-	// SAFETY: `raise` is async-signal-safe, and SIGINT's disposition is tokio's
-	// handler, registered above.
-	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
-	kio::clock::timeout(Duration::from_secs(5), interrupt.recv())
-		.await
-		.expect("the embedder never saw SIGINT");
-
-	// The signal is the embedder's: the relay keeps serving without a GOAWAY.
-	assert!(
-		kio::clock::timeout(DRAIN_TIMEOUT / 2, moq_net::kio::wait(|waiter| draining.poll(waiter)))
-			.await
-			.is_err(),
-		"the relay drained on a signal the embedder owns"
-	);
-	assert!(!run.is_finished(), "the relay exited on a signal the embedder owns");
-
-	// Until the embedder decides.
+	// The embedder decides when.
 	let started = kio::clock::now();
 	trigger.start();
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(5),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("no GOAWAY within 5s of the trigger")
-	.expect("session closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("no GOAWAY within 5s of the trigger")
+		.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
 	kio::clock::timeout(Duration::from_secs(15), run)
@@ -313,13 +334,10 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let _straggler = straggler(port).await;
 	trigger.start();
 	let deadline = kio::clock::now() + DRAIN_TIMEOUT;
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(5),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("no GOAWAY within 5s of the trigger")
-	.expect("session closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(5), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("no GOAWAY within 5s of the trigger")
+		.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 	let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
 	assert!(
@@ -333,13 +351,10 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let dialed = kio::clock::now();
 	let arrival = connect(&client, port).await;
 	let draining = arrival.draining().expect("connected");
-	let goaway = kio::clock::timeout(
-		Duration::from_secs(1),
-		moq_net::kio::wait(|waiter| draining.poll(waiter)),
-	)
-	.await
-	.expect("an arrival mid-drain was not sent a GOAWAY")
-	.expect("arrival closed without a GOAWAY");
+	let goaway = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.expect("an arrival mid-drain was not sent a GOAWAY")
+		.expect("arrival closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
 	// Only what is left of the window, not a fresh one that would outlive the
@@ -503,7 +518,7 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 /// A one-shot client offering `version` (every version when empty): a
 /// reconnecting one would migrate on the GOAWAY and hide whether the relay
 /// closed the original session.
-fn client(version: Vec<moq_tokio::moq_net::Version>) -> moq_tokio::Client {
+fn client(version: Vec<moq_net::Version>) -> moq_tokio::Client {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.version = version;

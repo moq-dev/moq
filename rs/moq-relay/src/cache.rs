@@ -113,7 +113,7 @@ impl Config {
 			let headroom = parse_limit(headroom)?;
 			anyhow::ensure!(headroom > 0, "cache headroom must be non-zero");
 			tracing::info!(?capacity, headroom, "cache governor enabled");
-			governed = Some(governor(pool.downgrade(), capacity, headroom).boxed());
+			governed = Some(governor(system()?, pool.downgrade(), capacity, headroom).boxed());
 		} else if let Some(capacity) = capacity {
 			tracing::info!(capacity, "cache capacity set");
 		}
@@ -140,7 +140,7 @@ fn parse_limit(value: &str) -> anyhow::Result<u64> {
 			percent > 0.0 && percent <= 100.0,
 			"memory percentage must be within (0, 100], got {percent}"
 		);
-		return Ok((total_memory() as f64 * percent / 100.0) as u64);
+		return Ok((total_memory()? as f64 * percent / 100.0) as u64);
 	}
 	let size: bytesize::ByteSize = value
 		.parse()
@@ -150,13 +150,17 @@ fn parse_limit(value: &str) -> anyhow::Result<u64> {
 
 /// Total memory this process can use: the cgroup limit when confined (e.g. a
 /// container), otherwise physical memory.
-fn total_memory() -> u64 {
-	let mut sys = sysinfo::System::new();
+fn total_memory() -> anyhow::Result<u64> {
+	let mut sys = system()?;
 	sys.refresh_memory();
-	match sys.cgroup_limits() {
+	Ok(match sys.cgroup_limits() {
 		Some(limits) => limits.total_memory,
 		None => sys.total_memory(),
-	}
+	})
+}
+
+fn system() -> anyhow::Result<sysinfo::System> {
+	sysinfo::System::new().map_err(|err| anyhow::anyhow!("failed to read system memory: {err}"))
 }
 
 /// Re-size the pool periodically so at least `headroom` bytes of system memory
@@ -167,8 +171,7 @@ fn total_memory() -> u64 {
 /// into the budget, so tying the task to it means the task ends when the last
 /// thing that could use the budget does, with no guard to route through the
 /// relay's construction shapes. Returns on the first tick after that.
-async fn governor(pool: cache::PoolWeak, capacity: Option<u64>, headroom: u64) {
-	let mut sys = sysinfo::System::new();
+async fn governor(mut sys: sysinfo::System, pool: cache::PoolWeak, capacity: Option<u64>, headroom: u64) {
 	let mut interval = kio::clock::interval(GOVERNOR_INTERVAL);
 	interval.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
 
@@ -286,7 +289,7 @@ mod tests {
 	fn drive(mut driver: crate::cluster::Driver) -> Arc<AtomicUsize> {
 		let running = Arc::new(AtomicUsize::new(driver.len()));
 		let report = running.clone();
-		tokio::spawn(moq_net::kio::wait(move |waiter| {
+		tokio::spawn(kio::wait(move |waiter| {
 			let poll = driver.poll(waiter);
 			report.store(driver.len(), Ordering::SeqCst);
 			poll
@@ -310,7 +313,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn governor_stops_when_pool_drops() {
 		let pool = cache::Pool::unbounded();
-		let governor = tokio::spawn(governor(pool.downgrade(), None, 1024));
+		let governor = tokio::spawn(governor(system().unwrap(), pool.downgrade(), None, 1024));
 
 		settle().await;
 		assert!(!governor.is_finished(), "governor should run while the pool lives");
@@ -323,7 +326,7 @@ mod tests {
 	async fn governor_runs_while_any_pool_clone_lives() {
 		let pool = cache::Pool::unbounded();
 		let clone = pool.clone();
-		let governor = tokio::spawn(governor(pool.downgrade(), None, 1024));
+		let governor = tokio::spawn(governor(system().unwrap(), pool.downgrade(), None, 1024));
 
 		drop(pool);
 		settle().await;
@@ -337,12 +340,12 @@ mod tests {
 	async fn setup_failure_stops_governor() {
 		let before = spawned();
 
-		// `--cluster-id 0` is rejected, so the cache is dropped before it is attached.
+		// `--cluster-max-hops 0` is rejected, so the cache is dropped before it is attached.
 		let cluster = crate::cluster::Config {
-			id: Some(0),
+			max_hops: Some(0),
 			..Default::default()
 		};
-		assert!(attach(&governed(), cluster).is_err(), "cluster id 0 is rejected");
+		assert!(attach(&governed(), cluster).is_err(), "a hop limit of 0 is rejected");
 
 		settle().await;
 		assert_eq!(spawned(), before, "a failed setup should not strand the governor");

@@ -18,10 +18,32 @@ Decided 2026-10-27 (maintainer), from
 the cheapest one; fix it with the route-selection rework here.
 - Feed the availability API from [Announcement availability](/quest/m2/cluster-routing/routes/availability.md).
 - Rust/JS interop covers the route messages, the floor marker, and the echo.
+- Decode the temporary lite-06 compatibility chain that lite-07 announcements carry ([mixed-version ring](/quest/m1/mixed-version-ring.md)). JS translates nothing, so it keeps no chain.
+- Restore the native JS lite-07 lanes. Decided 2026-11-06 (maintainer,
+  /quest-complete on [moq-dev/moq#8023](https://github.com/moq-dev/moq/pull/8023)),
+  asked how to handle the in-tree lanes running JS on lite-07-wip once the
+  Rust side moved to the route wire: ✅ **skip them until this quest lands**,
+  so the nightly report stays meaningful. Rejected: leave them red; hold
+  #8023 for this quest. Every skip names this quest (`rg routes/js.md
+  test rs .github sh/gh`): `JS_LITE07_SKIP` in `test/interop/interop.sh` and `socket.sh`
+  (native JS grant printing, claims, track replacement, sockets, the browser
+  route key proof, the lite-07 compress and drop legs, the compressed catalog's lite-07 reader, and
+  `--versions moq-lite-07-wip` with JS clients), `lite_tracks_interop` in
+  `test/justfile`, and the lite-07 legs of `max_age_relay_javascript` and
+  `relay_fill_javascript`. Also restore `test drain` in the nightly matrix,
+  restore the `Datagram tracks` interop workflow step and its report outcome, reset
+  `datagram_tracks_javascript`'s ignore reason, remove its test-inventory entries,
+  and remove the default media `replacement`
+  route-wire quarantine (every replacement publisher pins lite-07 even for
+  older readers). Keep the separate Firefox audio-tone quarantine until
+  [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) resolves it.
+  The local drain/datagram recipes and `just test media --media-cases replacement` remain
+  available to validate the port.
 
 ## Required
 
 - [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - the API this feeds
+- [Mixed-version ring](/quest/m1/mixed-version-ring.md) - defines the compatibility chain field this decodes
 
 ## Related
 

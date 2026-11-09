@@ -21,7 +21,7 @@ the smoke client (`test/smoke/clients/c`), which
   callbacks on the host's own loop through `moq_set_dispatcher`.
 
 Waits for the cut and the generator switch (found when first started,
-2026-10-28; decided 2026-10-31). Until the cut, [moq-c parity](/quest/m2/cut-gate/c/README.md) ships the
+2026-10-28; decided 2026-10-31). Until the cut, moq-c parity ([moq-dev/moq#8060](https://github.com/moq-dev/moq/pull/8060)) ships the
 hand-written crate at 0.22 and proves it with this interop client and the current
 `doc/lib/c`, and `doc/` describes only what ships, so either half landing first
 drops the shipping crate's proof and documents an unpublished API. The switch

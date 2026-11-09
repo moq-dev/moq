@@ -25,7 +25,7 @@ public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame, owning the decoder's surface until released;
 /// `pixels(format:)` converts it to packed CPU pixels.
-public typealias VideoDecodedFrame = MoqVideoDecodedFrame
+public typealias VideoDecodedFrame = Video.DecodedFrame
 /// The decoded PCM layout, its delay (playout and group staleness), and whether the
 /// playout delay is estimated.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
@@ -75,6 +75,8 @@ public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 /// Publisher-side track properties: priority, group ordering, max age,
 /// and timescale.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
+/// How a track's frames are compressed on the wire: `.deflate`, or `nil` in `TrackInfo` for none.
+public typealias Compression = MoqFFI.MoqCompression
 
 /// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet
 /// counters). Fields are `nil` when the transport backend doesn't report them.
@@ -129,8 +131,9 @@ public typealias Position = MoqFFI.MoqPosition
 extension Subscription {
     /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.absolute(group:)`, `.relative(groups:)`
-    /// back from the latest group, or `.time(timestamp:)` for the group containing it.
+    /// Where one end of a `Range` falls: `.oldest` (a start only), `.absolute(group:)`,
+    /// `.relative(groups:)` back from the latest group, or `.time(timestamp:)` for the group
+    /// containing it.
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder

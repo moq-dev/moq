@@ -1,8 +1,11 @@
 //! Point-to-point sessions over an origin, the way TCP connects two hosts.
 //!
-//! An [`Endpoint`] announces one hidden broadcast, `<prefix>/.socket/<id>`, used only to
-//! route dials to it. From it, an endpoint dials other endpoints and accepts their dials.
-//! Each connection is a session: two tracks, one in each endpoint's broadcast, both named
+//! An [`Endpoint`] is a server, a client, or both. As a server it announces the hidden
+//! broadcast `<prefix>/.server/<id>` at its first accept, and peers dial it there. As a
+//! client it announces `<prefix>/.client/<id>` at its first dial, and dials servers. The
+//! broadcasts are used only to route sessions, so ordinary grants decide each endpoint's
+//! roles. Each connection is a session: two tracks, one in the dialer's client broadcast
+//! and one in the acceptor's server broadcast, both named
 //! `<protocol>/<dialer>/<acceptor>/<session>`. Sessions are never announced or listed.
 //!
 //! A session speaks one of two protocols:
@@ -15,9 +18,9 @@
 //!   `accept_track` or [`Endpoint::poll_accept_track`], and read and write a
 //!   [`TrackStream`].
 //!
-//! A dialer `A` picks a random session id `S` and subscribes to `<prefix>/.socket/<B>` for
+//! A dialer `A` picks a random session id `S` and subscribes to `<prefix>/.server/<B>` for
 //! the track `<protocol>/A/B/S`. Endpoint `B` surfaces that request as an [`Incoming`] dial
-//! from `A` in its protocol's queue. To accept it, `B` subscribes to `<prefix>/.socket/<A>`
+//! from `A` in its protocol's queue. To accept it, `B` subscribes to `<prefix>/.client/<A>`
 //! for the same track name, and `A` answers only a session it dialed, so the exchange
 //! checks that `A` really asked `B`: a dial forged in `A`'s name is reset. Naming both ends
 //! binds a session to them, so an endpoint `A` dialed cannot replay the session to a third
@@ -38,9 +41,6 @@ use super::origin::{self, RouteOptions};
 use super::track::{self, Delay, Order, Subscription};
 use super::{frame, group};
 
-/// The segment every endpoint's broadcast sits under.
-const SOCKET: &str = ".socket";
-
 /// Refuse an id that is not one plain path segment: empty, or holding a `/` or a `\`.
 fn check_id(id: &str) -> Result<(), Error> {
 	if id.is_empty() || id.contains(['/', '\\']) {
@@ -49,10 +49,27 @@ fn check_id(id: &str) -> Result<(), Error> {
 	Ok(())
 }
 
-/// `<prefix>/.socket/<id>`, the broadcast of the endpoint `id`.
-fn endpoint_path(prefix: &Path, id: &str) -> Result<Path, Error> {
+/// What an endpoint's broadcast is for: a server accepts dials, and a client dials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+	Server,
+	Client,
+}
+
+impl Role {
+	/// The segment the role's broadcasts sit under.
+	fn segment(self) -> &'static str {
+		match self {
+			Self::Server => ".server",
+			Self::Client => ".client",
+		}
+	}
+}
+
+/// `<prefix>/<role>/<id>`, the endpoint `id`'s broadcast in `role`.
+fn endpoint_path(prefix: &Path, role: Role, id: &str) -> Result<Path, Error> {
 	check_id(id)?;
-	Ok(prefix.join(&Path::from_static(SOCKET))?.join(&Path::new(id)?)?)
+	Ok(prefix.join(&Path::from_static(role.segment()))?.join(&Path::new(id)?)?)
 }
 
 /// A fresh session id: 128 random bits as hex, so nobody can guess a session's tracks.
@@ -114,13 +131,13 @@ mod sealed {
 	pub struct Shared {
 		pub(super) id: Arc<str>,
 		pub(super) prefix: Path,
+		/// Where this endpoint's broadcasts are announced, at first use.
+		pub(super) publisher: origin::Producer,
 		/// Where the peers' endpoints are requested.
 		pub(super) origin: origin::Consumer,
 		/// Where the `tcp` sessions' pumps run: the origin's driver.
 		pub(super) tasks: crate::util::TasksWeak,
-		/// This endpoint's route, which owns its broadcast.
-		pub(super) route: origin::Route,
-		/// The sessions withholding the broadcast from their peer.
+		/// The sessions withholding the broadcasts from their peer.
 		pub(super) withheld: origin::HiddenWithheld,
 		pub(super) state: kio::Lock<State>,
 	}
@@ -336,13 +353,15 @@ struct Queue {
 	waiting: kio::WaiterList,
 }
 
-/// An endpoint's handler for the requests to its broadcast: the dials peers send.
+/// An endpoint's handler for the requests to its server broadcast: the dials peers send.
 ///
 /// A poller takes it out to poll it with no lock held, since taking a request wakes the
 /// dialer's subscription, and an inline executor can re-enter the endpoint from that wake.
+/// The client broadcast has none, so it answers a request for a session it does not hold
+/// with [`Error::NotFound`] at once.
 enum Handler {
-	/// Not made yet, until the first accept, so the endpoint answers a request for a
-	/// session it does not hold with [`Error::NotFound`] at once.
+	/// Not made yet, until the first accept makes the server broadcast with it, or no
+	/// longer, once the endpoint ended.
 	None,
 	/// Waiting for a poller.
 	Idle(super::broadcast::Requests),
@@ -353,6 +372,10 @@ enum Handler {
 
 /// What the endpoint's pollers share.
 struct State {
+	/// The route of the broadcast this endpoint dials from, from its first dial on.
+	client: Option<origin::Route>,
+	/// The route of the broadcast peers dial, from its first accept on.
+	server: Option<origin::Route>,
 	/// Where the dials peers send arrive.
 	handler: Handler,
 	tcp: Queue,
@@ -379,20 +402,72 @@ impl State {
 }
 
 impl Shared {
-	/// Queue every dial on hand and take the next in `protocol`, registering `waiter` for
-	/// more, and fail with the endpoint's end once it stopped.
+	/// This endpoint's broadcast in `role`, hidden until announced.
+	fn create(&self, role: Role) -> Result<origin::Route, Error> {
+		self.publisher
+			.route(endpoint_path(&self.prefix, role, &self.id)?, RouteOptions::hidden())
+	}
+
+	/// The route of the broadcast this endpoint dials from, announced by its first dial.
 	///
-	/// A dial of this endpoint's reserves its own track, so a request reaching the handler
-	/// with this endpoint as the dialer names a session it never dialed, or one it gave up,
-	/// such as an accept of a dial forged or replayed in this endpoint's name: it is reset
-	/// with [`Error::NotFound`], which fails that accept. So is a request naming another
-	/// acceptor, such as a session replayed from the endpoint it was dialed to. A request in
-	/// a protocol nobody accepts is reset with [`Error::Unsupported`].
+	/// Made outside the lock, since announcing wakes local consumers, and announced only
+	/// once it is the endpoint's, so a racing dial's spare is never seen.
+	fn client(&self) -> Result<origin::Route, Error> {
+		{
+			let state = self.state.lock();
+			if let Some(err) = &state.end {
+				return Err(err.clone());
+			}
+			if let Some(route) = &state.client {
+				return Ok(route.clone());
+			}
+		}
+		let route = self.create(Role::Client)?;
+		let mut state = self.state.lock();
+		if let Some(err) = &state.end {
+			return Err(err.clone());
+		}
+		if let Some(route) = &state.client {
+			return Ok(route.clone());
+		}
+		state.client = Some(route.clone());
+		drop(state);
+		route.announce()?;
+		Ok(route)
+	}
+
+	/// Make the broadcast peers dial, with its handler, and announce it: the first accept.
+	///
+	/// Called by the poller holding [`Handler::Taken`], so no other makes one.
+	fn serve(&self) -> Result<super::broadcast::Requests, Error> {
+		let route = self.create(Role::Server)?;
+		// Before announcing, so the first dial finds it.
+		let requests = route.broadcast().requests();
+		let mut state = self.state.lock();
+		if let Some(err) = &state.end {
+			return Err(err.clone());
+		}
+		state.server = Some(route.clone());
+		drop(state);
+		route.announce()?;
+		Ok(requests)
+	}
+
+	/// Queue every dial on hand and take the next in `protocol`, registering `waiter` for
+	/// more, and fail with the endpoint's end once it stopped. The first call announces the
+	/// server broadcast, and fails as [`origin::Producer::route`] does when the origin may
+	/// not publish it.
+	///
+	/// A request on the server broadcast naming this endpoint as the dialer names no dial
+	/// to it, since its own dials live in its client broadcast: it is reset with
+	/// [`Error::NotFound`]. So is a request naming another acceptor, such as a session
+	/// replayed from the endpoint it was dialed to. A request in a protocol nobody accepts
+	/// is reset with [`Error::Unsupported`].
 	///
 	/// The handler is polled with no lock held (see [`Handler`]), and resets and wakes go
 	/// out after the lock is released.
 	fn poll_dial(&self, protocol: Protocol, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
-		let mut requests = {
+		let taken = {
 			let mut state = self.state.lock();
 			state.queue(protocol).listening = true;
 			if state.end.is_some() {
@@ -402,11 +477,35 @@ impl Shared {
 				None
 			} else {
 				match std::mem::replace(&mut state.handler, Handler::Taken(kio::WaiterList::new())) {
-					Handler::Idle(requests) => Some(requests),
-					Handler::None => Some(self.route.broadcast().requests()),
+					Handler::Idle(requests) => Some(Some(requests)),
+					// No server broadcast yet: this poller makes it.
+					Handler::None => Some(None),
 					Handler::Taken(_) => unreachable!("checked above"),
 				}
 			}
+		};
+		let mut requests = match taken {
+			Some(None) => match self.serve() {
+				Ok(requests) => Some(requests),
+				Err(err) => {
+					// Given back for the next accept to try, waking those that found it taken,
+					// unless the endpoint closed meanwhile and took it.
+					let mut state = self.state.lock();
+					let waiting = match &mut state.handler {
+						Handler::Taken(waiting) => Some(waiting.take()),
+						_ => None,
+					};
+					if waiting.is_some() {
+						state.handler = Handler::None;
+					}
+					drop(state);
+					if let Some(mut waiting) = waiting {
+						waiting.wake();
+					}
+					return Poll::Ready(Err(err));
+				}
+			},
+			taken => taken.flatten(),
 		};
 		let mut taken = Vec::new();
 		let mut ended = None;
@@ -431,12 +530,12 @@ impl Shared {
 			state.end.get_or_insert(err);
 		}
 		// Put the handler back, unless the endpoint ended meanwhile: then it is dropped
-		// after the lock is released.
+		// after the lock is released, with the server broadcast if `close` hasn't taken it.
 		if let Some(handler) = requests.take() {
 			let next = match state.end {
 				None => Handler::Idle(handler),
 				Some(_) => {
-					retired = Some(handler);
+					retired = Some((handler, state.server.take()));
 					Handler::None
 				}
 			};
@@ -492,11 +591,13 @@ impl Shared {
 			}
 		};
 		drop(state);
-		if let Some(retired) = retired {
+		if let Some((handler, server)) = retired {
 			// Closed first, as `close` may not have yet: dropping the last handler rejects
 			// the dials still queued with `Dropped`, rather than the close's `Unroutable`.
-			self.route.broadcast().close();
-			drop(retired);
+			if let Some(server) = &server {
+				server.broadcast().close();
+			}
+			drop(handler);
 		}
 		for mut wake in wakes {
 			wake.wake();
@@ -521,13 +622,19 @@ impl Shared {
 
 	/// Poll for the endpoint's end, registering `waiter` for it.
 	fn poll_end(&self, waiter: &kio::Waiter) -> Result<(), Error> {
-		if let Some(err) = &self.state.lock().end {
-			return Err(err.clone());
+		let routes = {
+			let state = self.state.lock();
+			if let Some(err) = &state.end {
+				return Err(err.clone());
+			}
+			[state.client.clone(), state.server.clone()]
+		};
+		for route in routes.iter().flatten() {
+			if route.broadcast().poll_closed(waiter).is_ready() {
+				return Err(Error::Closed);
+			}
 		}
-		match self.route.broadcast().poll_closed(waiter) {
-			Poll::Ready(()) => Err(Error::Closed),
-			Poll::Pending => Ok(()),
-		}
+		Ok(())
 	}
 
 	fn close(&self) {
@@ -550,9 +657,12 @@ impl Shared {
 			wakes.push(queue.waiting.take());
 		}
 		let streams = std::mem::take(&mut state.streams);
+		let routes = [state.client.take(), state.server.take()];
 		drop(guard);
 
-		self.route.broadcast().close();
+		for route in routes.iter().flatten() {
+			route.broadcast().close();
+		}
 		// Reset outside the lock.
 		for stream in streams {
 			stream.abort(Error::Cancel);
@@ -564,18 +674,23 @@ impl Shared {
 			wake.wake();
 		}
 		drop(requests);
+		drop(routes);
 	}
 }
 
-/// A socket endpoint: announces `<prefix>/.socket/<id>`, dials other endpoints, and
-/// accepts their dials.
+/// A socket endpoint: a server, a client, or both.
+///
+/// Its first dial announces `<prefix>/.client/<id>`, which holds its half of each session
+/// it dials, and its first accept announces `<prefix>/.server/<id>`, where peers dial it and
+/// which holds its half of each session it accepts. So a pure client never announces a
+/// server broadcast, and the origin's grants decide which roles it may take.
 ///
 /// It accepts dials in a protocol from that protocol's first accept on, like a TCP
 /// listener: before that, a dial in it is reset with [`Error::Unsupported`], and after it,
-/// dials queue until accepted. Until the endpoint's first accept in any protocol, a dial
-/// to it is reset with [`Error::NotFound`], as for any track nobody serves.
+/// dials queue until accepted. Until the endpoint's first accept in any protocol, it has no
+/// server broadcast, so a dial to it waits as for a peer not online yet.
 ///
-/// Dropping it, or [`Self::close`], retracts the broadcast, resets the dials waiting to be
+/// Dropping it, or [`Self::close`], retracts its broadcasts, resets the dials waiting to be
 /// accepted, and resets every session it handed out: a [`TcpStream`] entirely, and this
 /// side's half of a [`TrackStream`]. The peer's half of a [`TrackStream`] is read through
 /// its [`TrackStream::consumer`], which the application owns: drop the streams too, which
@@ -595,29 +710,32 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-	/// Announce the endpoint `id` under `prefix` on `origin`, which also reaches the peers.
+	/// The endpoint `id` under `prefix` on `origin`, which also reaches the peers. Nothing
+	/// is announced until its first dial or accept.
 	///
 	/// `id` names the endpoint: a well-known name for a server, or a random one for a
-	/// client. It must be one path segment. Fails like
-	/// [`origin::Producer::route`] when `origin` may not publish
-	/// `<prefix>/.socket/<id>`.
+	/// client. It must be one path segment.
 	pub fn new(
 		origin: &origin::Producer,
 		prefix: impl TryInto<Path, Error: Into<Error>>,
 		id: &str,
 	) -> Result<Self, Error> {
 		let prefix = crate::path::convert(prefix)?;
-		let route = origin.route(endpoint_path(&prefix, id)?, RouteOptions::default())?;
+		for role in [Role::Server, Role::Client] {
+			endpoint_path(&prefix, role, id)?;
+		}
 		let consumer = origin.consume();
 		Ok(Self {
 			shared: Arc::new(Shared {
 				id: id.into(),
 				prefix,
+				publisher: origin.clone(),
 				withheld: consumer.hidden_withheld(),
 				origin: consumer,
 				tasks: origin.tasks(),
-				route,
 				state: kio::Lock::new(State {
+					client: None,
+					server: None,
 					handler: Handler::None,
 					tcp: Queue::default(),
 					track: Queue::default(),
@@ -633,23 +751,25 @@ impl Endpoint {
 		&self.shared.id
 	}
 
-	/// The prefix the endpoint's broadcast sits under, and where it finds its peers.
+	/// The prefix the endpoint's broadcasts sit under, and where it finds its peers.
 	pub fn prefix(&self) -> &Path {
 		&self.shared.prefix
 	}
 
-	/// Dial the endpoint `peer` in a new `tcp` session, resolving once the peer accepts it.
+	/// Dial the server `peer` in a new `tcp` session, resolving once the peer accepts it.
 	///
 	/// Waits for as long as the peer takes to accept: drop the returned future to give up,
-	/// which resets the session. That includes waiting for the peer's endpoint to be
-	/// announced. Fails with the peer's reset when it rejects the dial, or does not accept
-	/// `tcp` sessions, and with [`Error::Unsupported`] for a dial to this endpoint itself
-	/// or across a hop that can't carry it (see [`Endpoint`]).
+	/// which resets the session. That includes waiting for the peer's server broadcast to
+	/// be announced. Fails with the peer's reset when it rejects the dial, or does not
+	/// accept `tcp` sessions, and with [`Error::Unsupported`] for a dial to this endpoint
+	/// itself or across a hop that can't carry it (see [`Endpoint`]). The first dial
+	/// announces the client broadcast, and fails as [`origin::Producer::route`] does when
+	/// the origin may not publish it.
 	pub fn dial_tcp(&self, peer: &str) -> Result<kio::Pending<Dialing<TcpStream>>, Error> {
 		self.dial(peer, None)
 	}
 
-	/// Dial the endpoint `peer` in a new `track` session; see [`Self::dial_tcp`].
+	/// Dial the server `peer` in a new `track` session; see [`Self::dial_tcp`].
 	///
 	/// `info` describes this side's half; `None` keeps every message until read, with no
 	/// max age.
@@ -663,18 +783,16 @@ impl Endpoint {
 
 	fn dial<S: Stream>(&self, peer: &str, info: Option<track::Info>) -> Result<kio::Pending<Dialing<S>>, Error> {
 		let shared = &self.shared;
-		let path = endpoint_path(&shared.prefix, peer)?;
+		let path = endpoint_path(&shared.prefix, Role::Server, peer)?;
 		if peer == &*shared.id {
 			return Err(Error::Unsupported);
 		}
-		if let Some(err) = &shared.state.lock().end {
-			return Err(err.clone());
-		}
+		let client = shared.client()?;
 		let session = session_id();
 		let name = track_name(S::PROTOCOL.as_str(), &shared.id, peer, &session);
 		// This side's half, waiting for the peer to ask for it, which only the peer can:
 		// nobody else knows the session.
-		let answer = shared.route.broadcast().reserve_unlisted_track(name.clone())?;
+		let answer = client.broadcast().reserve_unlisted_track(name.clone())?;
 		// Followed rather than requested, so a peer not announced yet is waited for.
 		let resolving = Box::new(shared.origin.follow(path, None)?);
 		Ok(kio::Pending::new(Dialing {
@@ -709,7 +827,9 @@ impl Endpoint {
 	/// [`Endpoint`]).
 	///
 	/// The first call starts accepting `tcp` dials. They queue until taken, or until their
-	/// dialer gives up, so keep accepting, and accept or reject each one.
+	/// dialer gives up, so keep accepting, and accept or reject each one. The endpoint's
+	/// first accept in either protocol announces its server broadcast, and fails as
+	/// [`origin::Producer::route`] does when the origin may not publish it.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_accept_tcp(&self, waiter: &kio::Waiter) -> Poll<Result<Incoming<TcpStream>, Error>> {
 		self.poll_accept(waiter)
@@ -771,10 +891,12 @@ impl<S: Stream> Incoming<S> {
 		let shared = self.shared.clone();
 		let (peer, session) = (self.peer.clone(), self.session.clone());
 		let request = self.request.take().expect("taken only by accept, reject or drop");
-		// Followed rather than requested: the dialer announced its endpoint before it
-		// dialed, but a relay can deliver the dial first. A dial claiming an endpoint
+		// Followed rather than requested: the dialer announced its client broadcast before
+		// it dialed, but a relay can deliver the dial first. A dial claiming an endpoint
 		// nobody announces waits for as long as its dialer holds it open.
-		let step = match endpoint_path(&shared.prefix, &peer).and_then(|path| shared.origin.follow(path, None)) {
+		let step = match endpoint_path(&shared.prefix, Role::Client, &peer)
+			.and_then(|path| shared.origin.follow(path, None))
+		{
 			Ok(following) => Step::Resolving(Box::new(following)),
 			Err(err) => Step::Failed(err),
 		};
@@ -928,11 +1050,6 @@ pub struct Dialing<S: Stream> {
 }
 
 impl<S: Stream> Dialing<S> {
-	/// The session's id.
-	pub fn session(&self) -> &str {
-		&self.session
-	}
-
 	/// Poll for the peer to accept; see [`Endpoint::dial_tcp`].
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<S, Error>> {
 		let result = self.poll_inner(waiter);
@@ -1271,10 +1388,19 @@ mod tests {
 	#[test]
 	fn an_endpoint_path_holds_one_segment() {
 		let prefix = Path::from_static("room");
-		assert_eq!(endpoint_path(&prefix, "alice").unwrap().as_str(), "room/.socket/alice");
-		assert!(endpoint_path(&prefix, "a/b").is_err());
-		assert!(endpoint_path(&prefix, "").is_err());
-		assert!(endpoint_path(&prefix, "a\\b").is_err());
+		assert_eq!(
+			endpoint_path(&prefix, Role::Server, "alice").unwrap().as_str(),
+			"room/.server/alice"
+		);
+		assert_eq!(
+			endpoint_path(&prefix, Role::Client, "alice").unwrap().as_str(),
+			"room/.client/alice"
+		);
+		for role in [Role::Server, Role::Client] {
+			assert!(endpoint_path(&prefix, role, "a/b").is_err());
+			assert!(endpoint_path(&prefix, role, "").is_err());
+			assert!(endpoint_path(&prefix, role, "a\\b").is_err());
+		}
 	}
 
 	/// Taking a dial wakes the dialer's subscription, and an inline executor can re-enter
@@ -1307,7 +1433,8 @@ mod tests {
 			// Listening, so the dial queues for the handler.
 			assert!(endpoint.poll_accept_tcp(&noop).is_pending());
 
-			let broadcast = endpoint.shared.route.broadcast().consume();
+			let server = endpoint.shared.state.lock().server.clone().unwrap();
+			let broadcast = server.broadcast().consume();
 			let dial = broadcast
 				.track("tcp/alice/bob/0123456789abcdef0123456789abcdef")
 				.unwrap()
@@ -1347,7 +1474,8 @@ mod tests {
 		assert!(endpoint.poll_accept_track(&noop).is_pending());
 		assert!(endpoint.poll_accept_tcp(&noop).is_pending());
 
-		let broadcast = endpoint.shared.route.broadcast().consume();
+		let server = endpoint.shared.state.lock().server.clone().unwrap();
+		let broadcast = server.broadcast().consume();
 		let queued = || endpoint.shared.state.lock().track.dials.len();
 		let dial = |session: u32| {
 			let dial = broadcast

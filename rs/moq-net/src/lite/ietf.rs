@@ -1202,11 +1202,11 @@ mod hop_tests {
 		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
 		let info = track::Info::timed()
 			.with_timescale(Timescale::MILLI)
-			.with_compress(true);
+			.with_compression(crate::track::Compression::Deflate);
 		let track = broadcast.broadcast().create_track("video", info).unwrap();
 		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
 		let (_copy, mut subscriber) = subscribe(&downstream).await;
-		assert!(subscriber.info().compress);
+		assert_eq!(subscriber.info().compression, crate::track::Compression::Deflate);
 
 		let payload = |n: u8| vec![n; 300];
 		let mut group = track.append_group().unwrap();

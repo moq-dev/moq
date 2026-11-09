@@ -34,6 +34,7 @@ missing required CPU feature before starting transport cryptography.
 | [moq-archive](https://docs.rs/moq-archive) | [Record and serve broadcasts](/concept/archives) on any `object_store` backend. |
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-v4l](https://docs.rs/moq-v4l) | Safe Video4Linux 2 bindings. |
+| [moq-vaapi](https://docs.rs/moq-vaapi) | VA-API H.264 and H.265 hardware encode and decode, loading libva at runtime. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |
 | [moq-transcode](https://docs.rs/moq-transcode) | Just-in-time rendition ladders, GPU-resident on NVIDIA. |
 | [moq-auth](/lib/rs/moq-auth) | Relay authorization: JWT signing and verification, and the auth server contract. |
@@ -60,7 +61,7 @@ let origin = moq_tokio::origin::spawn();
 let client = moq_tokio::connect::Config::default().init(Default::default())?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 // Reconnects on its own; `closed()` resolves when it gives up.
-let session = client.with_origin(origin.clone()).connect(url);
+let session = client.with_publisher(&origin).with_subscriber(origin.clone()).connect(url);
 
 // Subscribe: wait for a route, resolve the broadcast at its path, read the catalog.
 let consumer = origin.consume();

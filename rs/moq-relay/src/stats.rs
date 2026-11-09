@@ -59,7 +59,9 @@ pub struct Config {
 	///
 	/// May be multi-segment (e.g. `sjc/1`, `sjc/2`) when a region has multiple
 	/// hosts; the segments nest under a shared region key on the advertised
-	/// path. Single-relay deployments can leave this unset.
+	/// path. Required when stats are enabled on a clustered relay, and on a
+	/// relay that only accepts peer dials, since its dialers see every peer's
+	/// broadcast; otherwise it may be unset.
 	#[usage(long = "stats-node", env = "MOQ_STATS_NODE", setting = "stats.node")]
 	pub node: Option<String>,
 
@@ -109,6 +111,43 @@ impl Config {
 	/// The linger after command-line overrides; `None` keeps the producer's default.
 	pub fn linger(&self) -> Option<Duration> {
 		self.linger.map(Into::into)
+	}
+
+	/// Refuse stats on a clustered relay without a node name: every node would
+	/// publish the same `<prefix>/node` broadcast and the origin keeps only one.
+	/// Run by both `Config::resolve` and [`Cluster::new`](crate::cluster::Cluster::new),
+	/// which embedders call directly.
+	pub(crate) fn check(&self, cluster: &crate::cluster::Config) -> anyhow::Result<()> {
+		if !self.enabled {
+			return Ok(());
+		}
+		// A malformed node was set, so it gets its own error rather than the missing-flag one.
+		let node = self
+			.node
+			.as_deref()
+			.map(Path::new)
+			.transpose()
+			.context("invalid stats.node")?;
+		#[cfg(feature = "cluster-lan")]
+		let lan = cluster.lan.enabled;
+		#[cfg(not(feature = "cluster-lan"))]
+		let lan = false;
+		let clustered = !cluster.connect.is_empty() || cluster.api.url.is_some() || cluster.node.is_some() || lan;
+		// An empty name is the root path, which publishes the shared unnamed broadcast.
+		anyhow::ensure!(
+			!clustered || node.is_some_and(|node| !node.is_empty()),
+			"--stats-enabled on a clustered relay requires --stats-node, so each node publishes its own stats"
+		);
+		Ok(())
+	}
+
+	/// The prefix stats publish under, reserved for the relay's own publisher, or
+	/// `None` when publishing is disabled.
+	pub(crate) fn reserved(&self) -> anyhow::Result<Option<Path>> {
+		if !self.enabled {
+			return Ok(None);
+		}
+		Ok(Some(Path::new(&self.prefix).context("invalid stats.prefix")?))
 	}
 
 	/// Build a [`moq_stats::Producer`] and its [`moq_stats::Publisher`] from this

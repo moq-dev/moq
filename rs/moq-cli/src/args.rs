@@ -159,12 +159,6 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// The `MOQ_*` variables read outside the command-line spec.
-#[cfg(any(feature = "capture", feature = "transcode", feature = "play"))]
-const DIRECT_ENV: &[&str] = moq_video::ENV;
-#[cfg(not(any(feature = "capture", feature = "transcode", feature = "play")))]
-const DIRECT_ENV: &[&str] = &[];
-
 /// Whether `flag` is one of the flags `T` declares.
 fn owns<T: usage_rs::spec::CommandArgs>(flag: &usage_rs::Flag<'_>) -> bool {
 	T::COMMAND.flags.iter().any(|own| own.key == flag.key)
@@ -188,7 +182,7 @@ impl Invocation {
 		match Self::try_parse_from(args).and_then(|parsed| {
 			// Here rather than in `try_parse_from`, which tests drive under whatever
 			// environment the test runner has.
-			moq_tokio::cli::check_env(&[Cli::spec(), Stage::spec()], DIRECT_ENV)
+			moq_tokio::cli::check_env(&[Cli::spec(), Stage::spec()], &[])
 				.map_err(|err| ParseError::new(ParseErrorKind::ValueValidation, format!("error: {err}\n")))?;
 			Ok(parsed)
 		}) {
@@ -347,19 +341,19 @@ impl Invocation {
 				}
 				// A reader refuses the whole catalog over a path it cannot resolve.
 				let broadcast = command.broadcast(&self.moq);
-				let rel = hang::moq_net::path::Relative::new(path)
-					.map_err(|err| anyhow::anyhow!("invalid --echo-path: {err}"))?;
-				let broadcast = hang::moq_net::Path::new(&broadcast)
-					.map_err(|err| anyhow::anyhow!("invalid --broadcast: {err}"))?;
+				let rel =
+					moq_net::path::Relative::new(path).map_err(|err| anyhow::anyhow!("invalid --echo-path: {err}"))?;
+				let broadcast =
+					moq_net::Path::new(&broadcast).map_err(|err| anyhow::anyhow!("invalid --broadcast: {err}"))?;
 				let Some(prefix) = broadcast.try_resolve(&rel) else {
 					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
 				};
 				// An origin refuses a broadcast a pattern could not name, so no viewer could
 				// publish its `<NAME>.echo` beneath this.
-				let feedback = prefix.join(&hang::moq_net::Path::from_static("viewer.echo"));
+				let feedback = prefix.join(&moq_net::Path::from_static("viewer.echo"));
 				let literal = feedback
 					.map_err(anyhow::Error::from)
-					.and_then(|feedback| Ok(hang::moq_net::Pattern::literal(feedback.as_str())?));
+					.and_then(|feedback| Ok(moq_net::Pattern::literal(feedback.as_str())?));
 				if let Err(err) = literal {
 					anyhow::bail!(
 						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
@@ -555,7 +549,7 @@ impl MoqSide {
 
 	/// The cluster this process publishes and subscribes on, with the driver that
 	/// must run for as long as it serves. Built once; the origin is its origin, whose
-	/// Hop ID is random per run unless `--cluster-id` names the node.
+	/// Hop ID is random per run.
 	pub fn cluster(&self) -> anyhow::Result<(moq_relay::cluster::Cluster, moq_relay::cluster::Driver)> {
 		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
@@ -891,9 +885,7 @@ impl ImportSource {
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
-			Self::Fmp4(args) => PublishFormat::Fmp4 {
-				passthrough: args.passthrough,
-			},
+			Self::Fmp4(args) => PublishFormat::Fmp4 { cmaf: args.cmaf },
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
 			},
@@ -951,8 +943,8 @@ impl ImportSource {
 pub struct Fmp4Import {
 	/// Publish each fragment whole as CMAF instead of splitting it into one frame per sample.
 	/// Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
-	#[usage(long = "cmaf")]
-	pub passthrough: bool,
+	#[usage(long)]
+	pub cmaf: bool,
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.
@@ -1081,7 +1073,7 @@ impl Export {
 			ExportSink::Flv(args) => found.extend(args.deprecated()),
 			ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
 			ExportSink::Rtmp(rtmp) => found.extend(rtmp.deprecated()),
-			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
+			ExportSink::Hls(hls) => found.extend(hls.deprecated()),
 			_ => {}
 		}
 		found
@@ -1591,8 +1583,8 @@ mod tests {
 				panic!("expected import")
 			};
 			match &import.source {
-				ImportSource::Fmp4(args) => assert!(args.passthrough),
-				ImportSource::Hls(args) => assert!(args.passthrough),
+				ImportSource::Fmp4(args) => assert!(args.cmaf),
+				ImportSource::Hls(args) => assert!(args.cmaf),
 				_ => panic!("expected fragment input"),
 			}
 		}
@@ -1794,7 +1786,7 @@ mod tests {
 	fn sinks_without_selection_refuse_it() {
 		let sinks = [
 			["ts"].as_slice(),
-			&["hls", "--listen", "127.0.0.1:8080"],
+			&["hls", "--hls-listen", "127.0.0.1:8080"],
 			&["rtmp", "--listen", "127.0.0.1:1935"],
 			&["srt", "--listen", "127.0.0.1:9000"],
 			&["rtc", "--listen", "127.0.0.1:8443"],
@@ -1870,10 +1862,7 @@ mod tests {
 		};
 		// `viewers` from `<n parts>` resolves to n parts, and the feedback sits one beneath.
 		let deep = |parts: usize| (0..parts).map(|i| format!("p{i}")).collect::<Vec<_>>().join("/");
-		let (fits, too_deep) = (
-			deep(hang::moq_net::Path::MAX_PARTS - 1),
-			deep(hang::moq_net::Path::MAX_PARTS),
-		);
+		let (fits, too_deep) = (deep(moq_net::Path::MAX_PARTS - 1), deep(moq_net::Path::MAX_PARTS));
 		for (broadcast, path) in [
 			("room", "viewers"),
 			("room/live", "../viewers"),
@@ -1901,7 +1890,11 @@ mod tests {
 		for sink in ["ts", "fmp4", "mkv", "flv", "h264", "h265"] {
 			export(&["--echo", "alice", sink]).unwrap().validate().unwrap();
 		}
-		for sink in [["hls", "--listen", "127.0.0.1:8080"].as_slice(), &["report"], &["echo"]] {
+		for sink in [
+			["hls", "--hls-listen", "127.0.0.1:8080"].as_slice(),
+			&["report"],
+			&["echo"],
+		] {
 			let err = export(&[["--echo", "alice"].as_slice(), sink].concat())
 				.unwrap()
 				.validate()
@@ -2082,7 +2075,7 @@ mod tests {
 
 	#[test]
 	fn independent_importers_cannot_select_a_shared_instance() {
-		let instance = hang::moq_net::Instance::random().to_string();
+		let instance = moq_net::Instance::random().to_string();
 		let refused = Invocation::try_parse_from([
 			"moq",
 			"--connect",
@@ -2121,8 +2114,37 @@ mod tests {
 
 		let reported = err.to_string();
 		assert!(reported.contains("--tls-cert"), "{reported}");
-		assert!(reported.contains("--listen-tls-cert"), "{reported}");
-		assert!(reported.contains("--listen-tls-root"), "{reported}");
+		assert!(reported.contains("--hls-tls-cert"), "{reported}");
+		assert!(reported.contains("--hls-tls-root"), "{reported}");
+	}
+
+	/// The released `export hls --listen*` spellings name their `--hls-*` replacements
+	/// rather than reach the MoQ listener's flags of the same name.
+	#[test]
+	fn released_hls_listener_flags_are_refused() {
+		for (old, value, new) in [
+			("--listen", "127.0.0.1:8080", "--hls-listen"),
+			("--listen-tls-cert", "cert.pem", "--hls-tls-cert"),
+			("--listen-tls-key", "key.pem", "--hls-tls-key"),
+			("--listen-tls-generate", "localhost", "--hls-tls-generate"),
+			("--listen-tls-root", "ca.pem", "--hls-tls-root"),
+		] {
+			let Err(err) = Invocation::try_parse_from([
+				"moq",
+				"--connect",
+				"http://relay/anon",
+				"--broadcast",
+				"room",
+				"export",
+				"hls",
+				old,
+				value,
+			]) else {
+				panic!("{old} on export hls must not start a run");
+			};
+			let reported = err.to_string();
+			assert!(reported.contains(old) && reported.contains(new), "{reported}");
+		}
 	}
 
 	/// One released spelling stops the run even when the rest of the command line is
@@ -2311,7 +2333,7 @@ mod tests {
 			"--broadcast",
 			"cam1.hang",
 			"hls",
-			"--listen",
+			"--hls-listen",
 			"0.0.0.0:8080",
 		])
 		.unwrap();
@@ -2682,7 +2704,7 @@ mod tests {
 			("--cluster-api-url", "https://api.example/peers", "--cluster-api-url"),
 			("--cluster-node", "https://self.example", "--cluster-node"),
 			("--cluster-token", "cluster.jwt", "--cluster-token"),
-			("--cluster-id", "1", "--cluster-id"),
+			("--cluster-max-hops", "8", "--cluster-max-hops"),
 			("--cluster-tier", "internal", "--cluster-tier"),
 		] {
 			let cli = Invocation::try_parse_from(["moq", flag, value, "auth", "generate"]).unwrap();
@@ -3216,11 +3238,7 @@ mod tests {
 
 		// As a set: a choice list reads ascending, and that ordering is a presentation call.
 		// Every wire code moq-net parses, including the opt-in `-wip` drafts.
-		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
-		let mut expected: Vec<&str> = codes
-			.filter_map(hang::moq_net::Version::from_code)
-			.map(|version| version.as_str())
-			.collect();
+		let mut expected: Vec<&str> = moq_net::Version::ALL.iter().map(|version| version.as_str()).collect();
 		expected.sort_unstable();
 		let mut found = Vec::new();
 		walk(Cli::spec().root, &mut found);

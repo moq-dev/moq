@@ -31,7 +31,6 @@ use std::time::Duration;
 use futures::FutureExt;
 
 use moq_relay::{Config, Relay};
-use moq_tokio::moq_net;
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
 /// and superseded groups stay readable.
@@ -1403,8 +1402,7 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 	match announced.next().await? {
 		moq_net::origin::RouteEvent::Start(route)
 		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route)
-		| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+		| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
 		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 	}
 }

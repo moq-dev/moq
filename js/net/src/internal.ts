@@ -8,10 +8,12 @@
 import { type Instant, Milli } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import type { Charge, Pool } from "./cache.ts";
 import type * as datagram from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
-import { toStreamCode } from "./error.ts";
-import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import { StreamCode, StreamError, toStreamCode } from "./error.ts";
+import type { Consumer as FrameConsumer } from "./frame.ts";
+import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
 import type * as Instance from "./instance.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
@@ -34,11 +36,13 @@ import * as Varint from "./varint.ts";
 import type { Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** The hidden broadcast segment reserved for socket endpoints. */
-export const SOCKET = ".socket";
-
 /** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
 export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
+
+/** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
+export function datagramTrackInfo(info: datagram.Info): Info {
+	return { compression: "none", timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
+}
 
 /** A subscription's {@link Delay.max} as the wire carries it: null for no limit, omitted for zero. */
 export function maxDelayOf(subscription: Pick<Subscription, "delay">): Milli {
@@ -189,26 +193,70 @@ export function removeRun<R extends Run>(runs: readonly R[], start: bigint, end:
 	);
 }
 
-/** A run of sequences given up, with the error they were given up with. */
-export interface DropRun extends Run {
+/**
+ * Why a group sequence will not be delivered. Mirrors the Rust `track::Hole`.
+ *
+ * lite-07 carries the two kinds in their own messages, SUBSCRIBE_SKIP and SUBSCRIBE_DROP;
+ * earlier versions name both in SUBSCRIBE_DROP.
+ */
+export interface Hole {
+	/** The error a reader waiting on the sequence ends with: NOT_FOUND for a skip. */
 	error: Error;
+	/** Never produced, such as a skipped sequence number: final, and it ends no reader. */
+	skip?: boolean;
+	/**
+	 * The budget in milliseconds a staleness verdict was judged under, undefined for a drop that
+	 * does not depend on it. Only a widening past it reverses the verdict.
+	 */
+	stale?: number;
+}
+
+/** A sequence never produced; see {@link Hole.skip}. */
+export function skipHole(): Hole {
+	return { error: new StreamError(StreamCode.NotFound, { message: "group never produced" }), skip: true };
+}
+
+/** A group judged stale under `budget` milliseconds. */
+export function staleHole(budget: number): Hole {
+	return { error: new StreamError(StreamCode.Old, { message: "group is past the budget" }), stale: budget };
+}
+
+/** A run of sequences given up, with why. */
+export interface DropRun extends Run, Hole {
+	/** Copied into a cursor from the track's runs, which it folds in afresh on each change. */
+	received?: boolean;
+}
+
+/** Whether two runs say the same thing, so they may merge. */
+function sameHole(a: DropRun, b: DropRun): boolean {
+	return (
+		toStreamCode(a.error) === toStreamCode(b.error) &&
+		!a.skip === !b.skip &&
+		a.stale === b.stale &&
+		!a.received === !b.received
+	);
 }
 
 /**
- * Sorted, disjoint `drops` with `[start, end)` given up with `error`, which replaces whatever
- * it overlaps. Neighbours given up with the same stream code merge, so a wide DROP stays one
- * run and a peer naming one sequence per DROP cannot grow the runs.
+ * Sorted, disjoint `drops` with `[start, end)` given up as `hole` says, which replaces whatever
+ * it overlaps. Neighbours given up alike merge, so a wide DROP stays one run and a peer naming
+ * one sequence per DROP cannot grow the runs.
  */
-export function insertDrop(drops: readonly DropRun[], start: bigint, end: bigint, error: Error): DropRun[] {
+export function insertDrop(
+	drops: readonly DropRun[],
+	start: bigint,
+	end: bigint,
+	hole: Hole & { received?: boolean },
+): DropRun[] {
 	if (start >= end) return [...drops];
 	const next = removeRun(drops, start, end);
 	let at = 0;
 	while (at < next.length && next[at].start < start) at++;
-	next.splice(at, 0, { start, end, error });
+	next.splice(at, 0, { start, end, error: hole.error, skip: hole.skip, stale: hole.stale, received: hole.received });
 	const merged: DropRun[] = [];
 	for (const run of next) {
 		const last = merged[merged.length - 1];
-		if (last && last.end === run.start && toStreamCode(last.error) === toStreamCode(run.error)) last.end = run.end;
+		if (last && last.end === run.start && sameHole(last, run)) last.end = run.end;
 		else merged.push({ ...run });
 	}
 	return merged;
@@ -240,7 +288,7 @@ export type Recv =
 	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
 	| { kind: "group"; group: GroupConsumer }
 	/** Sequences `[start, end)` this cursor gave up without serving, and why. */
-	| { kind: "drop"; start: bigint; end: bigint; error: Error }
+	| ({ kind: "drop"; start: bigint; end: bigint } & Hole)
 	/** Nothing readable, but the track is live and may produce more. */
 	| { kind: "idle" }
 	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
@@ -397,6 +445,13 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
+	/** See {@link hooks.reofferGroups}, answered by the serving copy. */
+	reofferGroups(start: bigint, end: bigint): { groups: GroupConsumer[]; givenUp: Run[] };
+	/**
+	 * See {@link hooks.reofferStale}: the stale runs queued here, those this reader reported, which a
+	 * route change keeps, and those the serving copy reported.
+	 */
+	reofferStale(): Run[];
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -426,7 +481,7 @@ export interface StagedTrack {
 
 /**
  * How a received copy's start bounds the fills its readers ask below it. Mirrors the Rust
- * `TrackState::start_resolved` and `fills_from_start`.
+ * `Start::Resolved` and `Producer::fills_from_start`.
  *
  * Below a start the publisher resolved from the budget (`resolvesStart`), a reader fills the
  * history its own budget reaches: an update can cross the response, so nobody knows which
@@ -478,6 +533,8 @@ export const hooks: {
 	 * as a dead route. Assigned by `track.ts`.
 	 */
 	releaseTrack: (producer: Producer) => void;
+	/** Cache a new track's groups into its broadcast's `pool`, before it caches any. Assigned by `track.ts`. */
+	poolTrack: (producer: Producer, pool: Pool) => void;
 	/**
 	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
 	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
@@ -491,16 +548,32 @@ export const hooks: {
 	 * Record that the publisher gave up the groups `[start, end)` with `error`: none will
 	 * arrive, so a reader waiting on one moves past it, a group still arriving in them ends with
 	 * `error`, the declared end does not wait for them, and a relay serving this track forwards
-	 * the drop. Mirrors the Rust `drop_groups`; assigned by `track.ts`.
+	 * the drop. A skip ends no reader, and replaces any drop; a drop leaves a skip in place.
+	 * Returns the runs recorded. Mirrors the Rust `give_up`; assigned by `track.ts`.
 	 */
-	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, error: Error) => void;
+	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, hole: Hole) => Run[];
 	/**
-	 * Mark a track as fed by a wire subscription, which owes missing groups. `starts` says how
-	 * that wire's start bounds the fills its readers ask below it. Assigned by `track.ts`.
+	 * `Producer.skipGroups`, returning the cached sequences it left alone, which a skip naming a
+	 * group that arrived contradicts. Mirrors the Rust `skip_received`; assigned by `track.ts`.
+	 */
+	skipTrackGroups: (producer: Producer, start: bigint, end: bigint) => Run[];
+	/**
+	 * Forget every run a received copy holds as stale: the terms its upstream judged them under
+	 * were replaced, so they are unknown again. `judged` is every group the new terms' ranges name,
+	 * undefined when unknown. Returns the runs forgotten: a group that arrived since its stale drop
+	 * replaced it, so it is not among them. Mirrors the Rust `supersede_stale`.
+	 */
+	supersedeStale: (producer: Producer, judged: readonly Run[] | undefined) => Run[];
+	/**
+	 * Mark a track as fed by a wire subscription, which owes missing groups, until
+	 * {@link cacheTrack} ends it. `starts` says how that wire's start bounds the fills its readers
+	 * ask below it. Assigned by `track.ts`.
 	 */
 	receiveTrack: (producer: Producer, starts?: FillStarts) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
 	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number }) => GroupProducer;
+	/** How the copy of `sequence` still arriving ends, if one is, for a duplicate to wait on. Assigned by `track.ts`. */
+	arrivingGroup: (producer: Producer, sequence: bigint) => GetPromise<Error | null> | undefined;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -521,7 +594,8 @@ export const hooks: {
 	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
 	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
-	 * waits on its START, as the Rust `request_start`.
+	 * waits on its START, as the Rust `request_start`. Only after {@link receiveTrack}: the start
+	 * is that subscription's, and ends with it.
 	 */
 	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint }) => void;
 	/**
@@ -634,6 +708,20 @@ export const hooks: {
 	 * below where SUBSCRIBE_START resolved never goes out, so a wider budget may still serve it.
 	 */
 	unreport: (subscriber: Subscriber, start: bigint, end: bigint) => void;
+	/**
+	 * Re-offer what a subscriber gave up as stale through dispositions, as a wire whose every update
+	 * reopens its stale drops does: each run is judged again under the new terms. Returns the runs
+	 * taken back, which are owed again. Mirrors the Rust crate-private
+	 * `track::Subscriber::reoffer_stale`.
+	 */
+	reofferStale: (subscriber: Subscriber) => Run[];
+	/**
+	 * Fresh reads of the groups in `[start, end)` a subscriber's track still caches, its range still
+	 * admits, and its current budget no longer judges stale, each expiring against that budget, and
+	 * the runs still given up: for a wire whose update re-offers a group whose stream it gave up as
+	 * stale. Mirrors the Rust crate-private `track::Subscriber::reoffer_groups`.
+	 */
+	reofferGroups: (subscriber: Subscriber, start: bigint, end: bigint) => { groups: GroupConsumer[]; givenUp: Run[] };
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -642,6 +730,11 @@ export const hooks: {
 	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown> };
+	/**
+	 * The parts of `[start, end)` the subscriber's track still holds as a received stale run: one
+	 * new terms superseded is gone. Mirrors the Rust crate-private `track::Subscriber::stale_held`.
+	 */
+	staleHeld: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
 	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
@@ -687,6 +780,13 @@ export const hooks: {
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
+	/** Bill a cached group's bytes to `charge` from now on, or stop billing them with undefined. */
+	chargeGroup: (group: GroupProducer, charge: Charge | undefined) => void;
+	/**
+	 * Shed whole frames from a group's front toward a cache `debt`, freeing about `cap` at most,
+	 * and end the `readers` its track holds that lost a shed frame; returns the bytes freed.
+	 */
+	shedGroup: (group: GroupProducer, debt: number, cap: number, readers: Iterable<GroupConsumer>) => number;
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
 	/**
@@ -733,7 +833,12 @@ export const hooks: {
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
-	/** Carry a handed-out group across its logical track's route changes. */
+	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
+	groupFailed: (group: GroupConsumer) => Error | undefined;
+	/**
+	 * Carry a group across its logical track's route changes. Attached before the group is handed
+	 * out, so its `closed` never settles on a failure the recovery continues past.
+	 */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read a payload chunk, releasing its wait when the output stream closes. */
 	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
@@ -742,10 +847,13 @@ export const hooks: {
 	/** Notify the owning track when a reader reaches its shed front. */
 	onShedRead: (group: GroupConsumer, notify: () => void) => void;
 	/**
-	 * Make an evicted mirror terminal while its track timeline still contains it. Whether the
-	 * mirror is released too: not when its group reads on, or may yet, from another copy.
+	 * Make an evicted mirror terminal while its track timeline still contains it, failing its
+	 * unread content with `lost`. Whether the mirror is released too: not when its group reads
+	 * on, or may yet, from another copy.
 	 */
-	evictGroup: (group: GroupConsumer) => boolean;
+	evictGroup: (group: GroupConsumer, lost: Error) => boolean;
+	/** Record a cache access on a group a reader takes, restarting its idle window. */
+	refreshGroup: (group: GroupConsumer) => void;
 	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Reserve an on-demand track without listing it or enabling a request handler. */
@@ -799,6 +907,9 @@ export const hooks: {
 	releaseTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
+	poolTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	trackReleased: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -809,6 +920,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	dropTrackGroups: () => {
+		throw new Error("track.ts not loaded");
+	},
+	skipTrackGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {
@@ -898,6 +1012,15 @@ export const hooks: {
 	unreport: () => {
 		throw new Error("track.ts not loaded");
 	},
+	supersedeStale: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reofferStale: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reofferGroups: () => {
+		throw new Error("track.ts not loaded");
+	},
 	deliveredRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -926,6 +1049,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	holdsGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	staleHeld: () => {
 		throw new Error("track.ts not loaded");
 	},
 	givenUp: () => {
@@ -973,6 +1099,9 @@ export const hooks: {
 	receiveGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
+	arrivingGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
 	groupOffset: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -983,6 +1112,12 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupCacheBytes: () => {
+		throw new Error("group.ts not loaded");
+	},
+	chargeGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	shedGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFrameCount: () => {
@@ -1039,6 +1174,9 @@ export const hooks: {
 	expireGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupFailed: () => {
+		throw new Error("group.ts not loaded");
+	},
 	recoverGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1052,6 +1190,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	refreshGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	onClosed: () => {

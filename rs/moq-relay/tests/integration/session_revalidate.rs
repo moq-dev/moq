@@ -16,7 +16,6 @@ use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::session::{Filter, List, Nudged};
 use moq_relay::{Connection, auth, cluster, internal, web};
-use moq_tokio::moq_net;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -154,6 +153,7 @@ impl Fixture {
 		Self::spawn(auth, false).await
 	}
 
+	#[cfg(feature = "websocket")]
 	async fn ws(auth: moq_relay::auth::Auth) -> Self {
 		Self::spawn(auth, true).await
 	}
@@ -176,17 +176,10 @@ impl Fixture {
 		cluster.stats = moq_net::stats::Registry::new(moq_net::stats::Config::new());
 		let stats = cluster.stats.clone();
 		let (url, handle) = if websocket {
-			let mut server_config = moq_tokio::listen::Config::default();
-			server_config.bind = Some("[::]:0".parse().unwrap());
-			server_config.tls.generate = vec!["localhost".into()];
-			let certificates = server_config
-				.init(Default::default())
-				.expect("server init")
-				.certificates();
 			let mut web_config = web::Config::default();
 			web_config.ws = true;
 			web_config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
-			let web = web::Web::new(auth, cluster, certificates, web_config)
+			let web = web::Web::new(auth, cluster, crate::certificates(), web_config)
 				.with_sessions(sessions.clone())
 				.bind()
 				.expect("bind web listener");
@@ -317,6 +310,7 @@ async fn wait_listed(fixture: &Fixture, n: usize) -> List {
 /// `refused`.
 #[tokio::test]
 async fn push_by_id_refuses_inside_the_cadence() {
+	kio::clock::host_time();
 	let script = Script::new(grant());
 	let fixture = Fixture::tcp(build_auth(script.spawn().await)).await;
 	let session = connect(fixture.path("/room"), "127.0.0.1:0").await;
@@ -405,6 +399,7 @@ async fn path_and_cidr_select_a_subset() {
 }
 
 /// A WebSocket session is listed and closes on a push like a QUIC one.
+#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn websocket_is_listed_and_closes_on_a_push() {
 	let script = Script::new(grant());
@@ -445,6 +440,7 @@ async fn empty_filter_reaches_all() {
 /// A retier arrives on the next reply after a push, and the session stays.
 #[tokio::test]
 async fn a_pushed_retier_arrives_on_the_next_reply() {
+	kio::clock::host_time();
 	let script = Script::new(grant());
 	let fixture = Fixture::tcp(build_auth(script.spawn().await)).await;
 	let session = connect(fixture.path("/room"), "127.0.0.1:0").await;

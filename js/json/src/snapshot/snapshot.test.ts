@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli, Nano, sleep } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { hooks } from "../../../net/src/internal.ts";
 import { Consumer } from "./consumer.ts";
@@ -207,34 +206,40 @@ test("next skips every superseded group, whatever budget another reader asks for
 // group 2 arriving while group 1 is still owed supersedes it at once, whatever budget another
 // reader of the track, such as the caller's own, asks for.
 test("reads skip a group the subscription still owes", async () => {
-	hostTime();
-	for (const max of [Milli.zero, Milli(1_000), null]) {
-		const track = new Track.Producer("test").accept({});
-		hooks.receiveTrack(track);
-		const other = track.subscribe({ delay: { max } });
-		const latest = new Consumer<Value>({ track });
-		const next = new Consumer<Value>({ track });
-		const put = (sequence: bigint) => {
-			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: new TextEncoder().encode(`{"n":${sequence}}`) });
-			group.finish();
-		};
+	// Time never moves, so a read that waited on the owed group would hang the test.
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		for (const max of [Milli.zero, Milli(1_000), null]) {
+			const track = new Track.Producer("test").accept({});
+			hooks.receiveTrack(track);
+			const other = track.subscribe({ delay: { max } });
+			const latest = new Consumer<Value>({ track });
+			const next = new Consumer<Value>({ track });
+			const put = (sequence: bigint) => {
+				const group = track.createGroup(sequence);
+				group.writeFrame({ payload: new TextEncoder().encode(`{"n":${sequence}}`) });
+				group.finish();
+			};
 
-		put(0n);
-		expect((await latest.latest())?.value).toEqual({ n: 0 });
-		expect((await next.next())?.value).toEqual({ n: 0 });
-		const reads = [latest.latest(), next.next()];
-		await sleep(Nano.fromMilli(Milli(1)));
-		put(2n);
-		expect((await Promise.all(reads)).map((state) => state?.value)).toEqual([{ n: 2 }, { n: 2 }]);
+			put(0n);
+			expect((await latest.latest())?.value).toEqual({ n: 0 });
+			expect((await next.next())?.value).toEqual({ n: 0 });
+			const reads = [latest.latest(), next.next()];
+			await clock.advance(Nano.zero);
+			put(2n);
+			expect((await Promise.all(reads)).map((state) => state?.value)).toEqual([{ n: 2 }, { n: 2 }]);
 
-		// The owed group landing late is superseded, not delivered.
-		put(1n);
-		const ends = [latest.latest(), next.next()];
-		track.finish();
-		expect(await Promise.all(ends)).toEqual([undefined, undefined]);
-		other.close();
-		track.close();
+			// The owed group landing late is superseded, not delivered.
+			put(1n);
+			const ends = [latest.latest(), next.next()];
+			track.finish();
+			expect(await Promise.all(ends)).toEqual([undefined, undefined]);
+			other.close();
+			track.close();
+		}
+	} finally {
+		installed.close();
 	}
 });
 
@@ -522,7 +527,7 @@ test("no ratio never refreshes", async () => {
 });
 
 test("a compressed refresh opens a fresh group", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 0, compress: true, maxAge: null });
+	const track = new Track.Producer("test").accept({ refresh: 0, compression: "deflate", maxAge: null });
 	const producer = new Producer<Value>({ track });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
@@ -713,7 +718,7 @@ test("an untimed state reads back untimed", async () => {
 // Each state carries the timestamp of the frame that produced it, snapshot or delta, so a caller can
 // hold it back until a playhead reaches it. `latest()` reports the head's own frame.
 test("each state reads back with its frame's timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compress: true });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compression: "deflate" });
 	const producer = new Producer<Value>({ track, deltas: true });
 	for (let n = 1; n <= 3; n++) {
 		producer.update({ value: { n, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(n * 1_000) });

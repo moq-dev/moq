@@ -12,9 +12,9 @@ use std::task::{Poll, ready};
 
 use bytes::{Buf, Bytes};
 
-use super::open::{self, Open};
+use super::open::{self, Dir, Open};
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, Dir, Limits, LimitsError, Probe, ReceiveWindow, StreamCredit, Wire};
+use super::{Address, CloseKind, Limits, LimitsError, Probe, ReceiveWindow, Wire};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl Session {
 			session,
 		});
 		Self {
-			opens: Arc::new(open::Lines::new(Arc::downgrade(&inner))),
+			opens: Default::default(),
 			inner,
 			closing: Default::default(),
 			work: Default::default(),
@@ -73,7 +73,7 @@ impl Session {
 		let listed = Arc::new(Listed {
 			state: Mutex::new(ListedState {
 				stream,
-				group: options.group.map(|group| group.priority.clone()),
+				group: options.group.map(|group| group.rank.clone()),
 				priority: options.priority,
 				preempt,
 				preempted: false,
@@ -117,6 +117,17 @@ impl Session {
 		&self.closing
 	}
 
+	/// Resolve once the session is ending: this side closed the transport, or it closed.
+	///
+	/// Unlike `poll_closed`, which a backend holds until its close is on the wire, this sees a
+	/// local close the moment it is sent.
+	pub(crate) fn poll_ending(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.closing.is_sent() {
+			return Poll::Ready(());
+		}
+		poll::Session::poll_closed(self, waiter).map(|_| ())
+	}
+
 	/// The subscriptions and fetches the session's tasks carry over this transport.
 	pub(crate) fn work(&self) -> &crate::session::Work {
 		&self.work
@@ -157,15 +168,6 @@ impl Shared<dyn ErasedSession> {
 /// open: once it is gone, nothing is paused.
 type Budget = Weak<Shared<dyn ErasedSession>>;
 
-/// The transport a session's lines read the peer's stream credit from, which they never keep
-/// open.
-pub(super) type Transport = Weak<Shared<dyn ErasedSession>>;
-
-/// The peer's stream credit in `dir`, or `None` once the transport is gone or cannot say.
-pub(super) fn stream_credit(transport: &Transport, dir: Dir) -> Option<StreamCredit> {
-	transport.upgrade()?.session.stream_credit(dir)
-}
-
 /// A boxed transport error, keeping both code registries and the message.
 #[derive(Debug)]
 pub(crate) struct Error(Box<dyn super::Error>);
@@ -205,14 +207,34 @@ impl super::Error for Error {
 /// A boxed send group. It only ever goes back to the session that opened it.
 pub(crate) struct Group {
 	inner: Box<dyn ErasedGroup>,
-	/// Shared by every clone, like the group itself, so an open ranks by its current priority.
-	priority: Arc<std::sync::atomic::AtomicI64>,
+	/// Shared by every clone, like the group itself, so an open ranks by the group's current
+	/// priority and turn.
+	rank: Arc<GroupRank>,
+}
+
+/// Where a send group ranks against the session's others: its priority, then its turn.
+pub(super) struct GroupRank {
+	priority: std::sync::atomic::AtomicI64,
+	/// When the group last took stream credit, counted by its session's [`open::Lines`].
+	turn: AtomicU64,
+}
+
+impl GroupRank {
+	/// The group's priority and turn.
+	pub(super) fn read(&self) -> (i64, u64) {
+		(self.priority.load(Ordering::Relaxed), self.turn.load(Ordering::Relaxed))
+	}
 }
 
 impl Group {
-	/// The group's current priority.
-	pub(crate) fn priority(&self) -> i64 {
-		self.priority.load(Ordering::Relaxed)
+	/// The group's priority and turn, as its opens rank.
+	pub(super) fn rank(&self) -> (i64, u64) {
+		self.rank.read()
+	}
+
+	/// Mark the group as having just taken stream credit, at `turn`.
+	pub(super) fn take_turn(&self, turn: u64) {
+		self.rank.turn.store(turn, Ordering::Relaxed);
 	}
 }
 
@@ -220,14 +242,14 @@ impl Clone for Group {
 	fn clone(&self) -> Self {
 		Self {
 			inner: self.inner.clone_box(),
-			priority: self.priority.clone(),
+			rank: self.rank.clone(),
 		}
 	}
 }
 
 impl poll::SendGroup for Group {
 	fn set_priority(&mut self, priority: i64) {
-		self.priority.store(priority, Ordering::Relaxed);
+		self.rank.priority.store(priority, Ordering::Relaxed);
 		self.inner.set_priority(priority)
 	}
 }
@@ -321,8 +343,8 @@ pub(super) struct Listed {
 
 struct ListedState {
 	stream: Box<dyn ErasedSend>,
-	/// The priority of the send group the stream is in, shared with the group's handles.
-	group: Option<Arc<std::sync::atomic::AtomicI64>>,
+	/// The rank of the send group the stream is in, shared with the group's handles.
+	group: Option<Arc<GroupRank>>,
 	priority: i64,
 	/// The stream code a reset to make room uses.
 	preempt: u32,
@@ -363,10 +385,7 @@ impl Listed {
 	pub(super) fn read(&self) -> open::OpenStream {
 		let state = self.lock();
 		open::OpenStream {
-			rank: open::Rank::new(
-				state.group.as_ref().map(|group| group.load(Ordering::Relaxed)),
-				state.priority,
-			),
+			rank: open::Rank::new(state.group.as_ref().map(|group| group.read()), state.priority),
 			acknowledged: state.stream.acknowledged(),
 		}
 	}
@@ -552,7 +571,6 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit>;
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
 
@@ -639,7 +657,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 	fn send_group(&self, priority: i64) -> Option<Group> {
 		poll::Session::send_group(self, priority).map(|group| Group {
 			inner: Box::new(group),
-			priority: Arc::new(std::sync::atomic::AtomicI64::new(priority)),
+			rank: Arc::new(GroupRank {
+				priority: priority.into(),
+				turn: AtomicU64::new(0),
+			}),
 		})
 	}
 
@@ -689,10 +710,6 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		poll::Session::set_limits(self, limits)
-	}
-
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
-		poll::Session::stream_credit(self, dir)
 	}
 
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
@@ -845,7 +862,10 @@ impl poll::Session for Session {
 	}
 
 	fn send_group(&self, priority: i64) -> Option<Group> {
-		self.inner.session.send_group(priority)
+		let group = self.inner.session.send_group(priority)?;
+		// A new group waits its turn behind the groups already waiting, not ahead of them.
+		group.take_turn(self.opens.next_turn());
+		Some(group)
 	}
 
 	fn send_datagram(&self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
@@ -897,10 +917,6 @@ impl poll::Session for Session {
 		self.inner.session.set_limits(limits)
 	}
 
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
-		self.inner.session.stream_credit(dir)
-	}
-
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
 		self.inner.session.export_keying_material(label, context)
 	}
@@ -927,7 +943,7 @@ impl poll::SendStream for SendStream {
 
 	fn set_group(&mut self, group: &Group) {
 		if let Sender::Listed(listing) = &self.0 {
-			listing.listed.lock().group = Some(group.priority.clone());
+			listing.listed.lock().group = Some(group.rank.clone());
 		}
 		self.with(false, |stream| stream.set_group(group))
 	}
@@ -1170,13 +1186,17 @@ mod test {
 			},
 		);
 		let read = |session: &Session| session.open_streams()[0];
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 1, stream: 2 });
+		let grouped = |session: &Session| match read(session).rank {
+			open::Rank::Grouped { group, stream, .. } => (group, stream),
+			open::Rank::Ungrouped { .. } => panic!("the stream is in a group"),
+		};
+		assert_eq!(grouped(&session), (1, 2));
 		assert_eq!(read(&session).acknowledged, None);
 
 		poll::SendGroup::set_priority(&mut low, 3);
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 3, stream: 2 });
+		assert_eq!(grouped(&session), (3, 2));
 		poll::SendStream::set_group(&mut stream, &high);
-		assert_eq!(read(&session).rank, open::Rank::Grouped { group: 5, stream: 2 });
+		assert_eq!(grouped(&session), (5, 2));
 	}
 
 	/// A stream accepted while the connection window was held back, such as one buffered

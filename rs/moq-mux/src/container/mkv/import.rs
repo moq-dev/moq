@@ -119,11 +119,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	hvcc: Option<HvccFilter>,
 	/// A seek waiting for the streaming block to end, since its later frames continue its group.
 	seek: Option<u64>,
-	/// Whether `finish()` ended the input, even if it failed before the input drained.
-	finished: bool,
-	/// Why a chunk was refused. The rest of that chunk was never read, so later input cannot
-	/// continue it.
-	failed: Option<crate::Error>,
+	/// Whether input is still accepted. A refused chunk was never read to its end, so later input
+	/// cannot continue it.
+	input: crate::container::Input,
 	/// Whether the Tracks element has been processed.
 	tracks_seen: bool,
 
@@ -196,13 +194,6 @@ impl Media {
 		match self {
 			Self::Video(track) => track.seek(sequence),
 			Self::Audio(track) => track.seek(sequence),
-		}
-	}
-
-	fn finish(&mut self) -> crate::Result<()> {
-		match self {
-			Self::Video(track) => track.finish(),
-			Self::Audio(track) => track.finish(),
 		}
 	}
 
@@ -328,8 +319,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			block: None,
 			hvcc: None,
 			seek: None,
-			finished: false,
-			failed: None,
+			input: crate::container::Input::Open,
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
 			cluster_timestamp: 0,
@@ -355,15 +345,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A refused chunk fails the import: later input is refused with the same error, and
 	/// [`finish`](Self::finish) ends the tracks with what was accepted.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		if self.finished && !data.is_empty() {
-			return Err(Error::TracksAfterFinish.into());
-		}
-		if let Some(err) = &self.failed {
-			return Err(err.clone());
-		}
+		self.input.check()?;
 		let result = self.drain(data);
 		if let Err(err) = &result {
-			self.failed = Some(err.clone());
+			self.input = crate::container::Input::Refused(err.clone());
 		}
 		result
 	}
@@ -556,8 +541,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			id::TRACK_ENTRY => {
 				let children = self.fields.pop().unwrap_or_default();
-				// Only `finish()` releases the reservation before Tracks, since a block needs a track.
-				let reserved = self.initial_reservation.clone().ok_or(Error::TracksAfterFinish)?;
+				let reserved = self.initial_reservation.clone().ok_or(Error::LateTracks)?;
 				self.add_track(&reserved, children)?;
 			}
 			id::VIDEO | id::AUDIO | id::COLOUR | id::MASTERING_METADATA | id::PROJECTION => {
@@ -911,6 +895,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// control is intentionally not exposed. While a block streams in, the seek waits for it to end,
 	/// since its later frames continue its group.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.input.check()?;
 		if self.block.is_some() {
 			self.seek = Some(sequence);
 			return Ok(());
@@ -924,12 +909,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	///
 	/// Input that ends inside an element other than an unknown-size Segment or Cluster is refused as
-	/// truncated, but the tracks still end with what was accepted.
+	/// truncated, but the tracks still end with what was accepted, as they do after a refused
+	/// [`decode`](Self::decode). Either way every track has ended. A finish that failed returns
+	/// the same error to every later call; one that succeeded refuses later input with
+	/// [`Finished`](crate::Error::Finished), or with the refusal it followed.
 	pub fn finish(&mut self) -> Result<()> {
-		self.finished = true;
-		let mut result = match self.failed {
-			None => self.drain_eof(),
-			Some(_) => Ok(()),
+		let mut result = match &self.input {
+			crate::container::Input::Finished => return Ok(()),
+			crate::container::Input::Failed(err) => return Err(err.clone()),
+			crate::container::Input::Refused(err) => {
+				// A frame the refusal cut short fails its group with the reason.
+				self.abort_block(err.reason());
+				Ok(())
+			}
+			crate::container::Input::Open => self.drain_eof(),
 		};
 		if let Err(err) = &result {
 			// A frame cut short fails its group with the reason, rather than waiting for the rest.
@@ -938,8 +931,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			// Finish every track even on refusal, keeping the first error.
-			result = result.and(track.track.finish());
+			// End every track even on refusal, keeping the first error. A track whose finish fails
+			// aborts with the cause, so none is left open.
+			result = result.and(track.track.end());
+		}
+		match &result {
+			// A refusal keeps refusing input with its own cause.
+			Ok(()) if matches!(self.input, crate::container::Input::Refused(_)) => {}
+			Ok(()) => self.input = crate::container::Input::Finished,
+			Err(err) => self.input = crate::container::Input::Failed(err.clone()),
 		}
 		result
 	}
@@ -1439,7 +1439,7 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(|_| Error::InvalidHvcc)?;
 
 	let mut description = BytesMut::new();
-	hvcc.encode_body(&mut description)?;
+	hvcc.encode_body(&mut description).map_err(crate::Error::mp4)?;
 
 	let mut config = VideoConfig::new(H265 {
 		in_band: false,
@@ -1467,7 +1467,7 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	}
 
 	let mut description = BytesMut::new();
-	av1c.encode_body(&mut description)?;
+	av1c.encode_body(&mut description).map_err(crate::Error::mp4)?;
 
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
 	config.color = crate::codec::av1::color(&av1c.config_obus);
@@ -1630,10 +1630,7 @@ mod tests {
 		}
 		import.finish().unwrap();
 		import.finish().unwrap();
-		assert!(matches!(
-			import.decode(&[0]),
-			Err(crate::Error::Mkv(Error::TracksAfterFinish))
-		));
+		assert!(matches!(import.decode(&[0]), Err(crate::Error::Finished)));
 	}
 
 	/// A WebM prefix declaring `entries`, leaving an unknown-size Segment and Cluster open.
@@ -2215,17 +2212,16 @@ mod tests {
 		}
 	}
 
+	/// A failed finish is final: later input and a retried finish report its cause.
 	#[test]
-	fn input_after_a_failed_finish_is_refused() {
+	fn a_failed_finish_reports_its_cause() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let mut import = Import::new(broadcast, catalog.reserve());
 		// An EBML header declaring a byte it never sends.
 		import.decode(&[0x1a, 0x45, 0xdf, 0xa3, 0x81]).unwrap();
 		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
-		assert!(matches!(
-			import.decode(&[0]),
-			Err(crate::Error::Mkv(Error::TracksAfterFinish))
-		));
+		assert!(matches!(import.decode(&[0]), Err(crate::Error::Mkv(Error::Truncated))));
+		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
 	}
 }

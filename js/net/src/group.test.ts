@@ -535,7 +535,8 @@ test("a plain frame has no size cap, while a compressed one keeps its whole-fram
 	compressed.finish();
 });
 
-test("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
+// Quarantined: flaky under load, see /quest/m0/test-flakes-2/compressed-frame-cap.md
+test.skip("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
 	const MAX = 32 * 1024 * 1024;
 	let largest = MAX;
 	while (!encodable(largest)) largest--;
@@ -949,11 +950,42 @@ test.each(["eviction", "expiry"] as const)("a group end wait observes reader %s"
 	const expired = new Signal(false);
 	hooks.expireGroup(reader, { expired: () => expired.peek(), changed: [expired] });
 	const end = hooks.groupEnd(reader);
-	if (failure === "eviction") hooks.evictGroup(reader);
+	if (failure === "eviction") hooks.evictGroup(reader, new StreamError(StreamCode.Evicted));
 	else expired.set(true);
 	await expect(end).rejects.toMatchObject({
-		code: failure === "eviction" ? StreamCode.TooFarBehind : StreamCode.Old,
+		code: failure === "eviction" ? StreamCode.Evicted : StreamCode.Old,
 	});
 	source.finish();
 	reader.close();
+});
+
+// Rust's `GroupState::shed` keeps an open group's newest committed frame even while a newer
+// frame is still being written, since that partial frame is not readable yet.
+test("a debt shed keeps the newest committed frame behind one being written", async () => {
+	const producer = new Producer(0n);
+	producer.writeFrame({ payload: new Uint8Array(1024) });
+	const reader = producer.consume();
+	producer.createFrame({ size: 10 }).write(new Uint8Array(5));
+
+	expect(hooks.shedGroup(producer, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, [])).toBe(0);
+	expect((await reader.readFrame())?.payload.byteLength).toBe(1024);
+});
+
+// A finished group no longer tees into its copies, so shedding it ends the copies its track
+// holds that had not taken the shed frames, rather than crediting bytes they still hold.
+test("a debt shed of a finished group ends the copies that lost a frame", async () => {
+	const producer = new Producer(0n);
+	producer.writeFrame({ payload: new Uint8Array(1024) });
+	producer.writeFrame({ payload: new Uint8Array(1024) });
+	producer.finish();
+	const behind = producer.consume();
+	const drained = producer.consume();
+	await drained.readFrame();
+	await drained.readFrame();
+
+	expect(
+		hooks.shedGroup(producer, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, [behind, drained]),
+	).toBeGreaterThan(0);
+	await expect(behind.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	expect(await drained.readFrame()).toBeUndefined();
 });

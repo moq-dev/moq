@@ -483,7 +483,7 @@ mod tests {
 		let stats = Registry::new(Default::default());
 		let session = stats
 			.tier(Tier::new(crate::Path::from_static("internal")))
-			.session(crate::Path::from_static(""));
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("")));
 		let gate = kio::Producer::new(false);
 		let mut writer =
 			Writer::new(SinkSend::gated(Log::default(), gate.consume()), lite::Version::Lite07).with_stats(&session);
@@ -509,6 +509,7 @@ mod tests {
 			.buffer(&lite::Track {
 				broadcast: crate::Path::from_static("test"),
 				instance: None,
+				node: 0,
 				track: "video".into(),
 			})
 			.unwrap();

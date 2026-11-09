@@ -870,6 +870,23 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 
+	it(`clears an outgoing ${kind} failure once the source changes before the replacement plays`, async () => {
+		const playback = await guardedPlayback(kind, [sample(1n, 100_000)]);
+		try {
+			playback.switchRendition();
+			await microtasks();
+			const failure = new DOMException("outgoing decoder failed", "EncodingError");
+			playback.fail(failure, 0);
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBe(failure);
+			playback.catalog.set({});
+			await microtasks();
+			expect(playback.decoder.out.error.peek()).toBeUndefined();
+		} finally {
+			playback.close();
+		}
+	});
+
 	it(`keeps a failed pending ${kind} rendition out of the active slot`, async () => {
 		const playback = await guardedPlayback(kind, [sample(1n, 100_000)]);
 		try {
@@ -1166,6 +1183,129 @@ it("a video track read from another path does not inherit the outgoing delay", a
 });
 
 // The first picture is useful before the startup floor, but elapsed wall time is not buffered media.
+describe("Decoder stalls", () => {
+	// A second of delay, past the buffering timeout, so the poster waits longer than a stall takes.
+	async function cold() {
+		const clock = manualAt(1000);
+		const feeds = new Feeds();
+		const playback = await guardedPlayback("legacy", [], [], false, 0, { initial: Milli(1000), feeds });
+		const stalls = () => playback.decoder.out.stats.peek()?.stalls ?? 0;
+		const feedback = () => playback.decoder.feedback(Moq.Path.from("watched")).video?.stalls ?? 0;
+		const close = async () => {
+			playback.close();
+			await microtasks();
+			clock.installed.close();
+		};
+		return { clock, feeds, playback, stalls, feedback, close };
+	}
+
+	it("counts only a picture that played and then froze, not the poster's wait", async () => {
+		const { clock, feeds, playback, stalls, feedback, close } = await cold();
+		try {
+			// Frames arrive in real time, each presenting a second after it arrives.
+			feeds.push(0, sample(0n, 0));
+			await microtasks();
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(0);
+			for (let ms = 100; ms <= 2000; ms += 100) {
+				await clock.advance(100);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+				// The poster waits a second for its turn, which is a startup.
+				if (ms === 900) expect(playback.decoder.out.stalled.peek()).toBe(true);
+			}
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(1_000_000);
+			expect(stalls()).toBe(0);
+
+			// The frames stop, and the last picture freezes past the buffering timeout.
+			for (let i = 0; i < 16; i++) await clock.advance(100);
+			expect(playback.decoder.out.stalled.peek()).toBe(true);
+			expect(stalls()).toBe(1);
+			expect(feedback()).toBe(1);
+		} finally {
+			await close();
+		}
+	});
+
+	it("holds the last picture through a declared end without a stall", async () => {
+		const { clock, feeds, playback, stalls, feedback, close } = await cold();
+		try {
+			feeds.push(0, sample(0n, 0));
+			for (let ms = 100; ms <= 2000; ms += 100) {
+				await clock.advance(100);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+			}
+			// The publisher ends the media, and the last picture holds well past the buffering timeout.
+			feeds.push(0, marker(0n, 2_100_000));
+			for (let i = 0; i < 30; i++) await clock.advance(100);
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(2_000_000);
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			expect(stalls()).toBe(0);
+			expect(feedback()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
+	it("a declared end clears a stall already raised and stops its stalled time", async () => {
+		const { clock, feeds, playback, stalls, feedback, close } = await cold();
+		const stalled = () => playback.decoder.out.stats.peek()?.stalled ?? 0;
+		try {
+			feeds.push(0, sample(0n, 0));
+			for (let ms = 100; ms <= 2000; ms += 100) {
+				await clock.advance(100);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+			}
+			// The frames stop, and the last picture freezes into a stall.
+			for (let i = 0; i < 16; i++) await clock.advance(100);
+			expect(playback.decoder.out.stalled.peek()).toBe(true);
+			expect(stalls()).toBe(1);
+			expect(stalled()).toBe(0);
+
+			// The publisher then declares the end: the stall closes and its time stops growing.
+			feeds.push(0, marker(0n, 2_100_000));
+			await microtasks();
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			const closed = stalled();
+			expect(closed).toBeGreaterThan(0);
+			for (let i = 0; i < 30; i++) await clock.advance(100);
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			expect(stalled()).toBe(closed);
+			expect(stalls()).toBe(1);
+			expect(feedback()).toBe(1);
+		} finally {
+			await close();
+		}
+	});
+
+	it("a declared end before the first picture ends startup buffering", async () => {
+		const { feeds, playback, stalls, close } = await cold();
+		try {
+			expect(playback.decoder.out.stalled.peek()).toBe(true);
+			feeds.push(0, marker(0n, 0));
+			await microtasks();
+			expect(playback.decoder.out.frame.peek()).toBeUndefined();
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			expect(stalls()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
+	it("clears the buffering state while disabled", async () => {
+		const { playback, close } = await cold();
+		try {
+			expect(playback.decoder.out.stalled.peek()).toBe(true);
+			playback.enabled.set(false);
+			await microtasks();
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+		} finally {
+			await close();
+		}
+	});
+});
+
 it("buffered video holds its poster until its own span reaches the floor", async () => {
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);

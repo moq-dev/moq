@@ -6,7 +6,7 @@
 //!   moq-mux importer expects and publishes it.
 //! - **Egress** ([`Track`]): the egress source subscribes to a moq-mux
 //!   broadcast and the track yields RTP-ready codec frames that the
-//!   session loop hands to [`str0m::media::Writer::write`].
+//!   session loop hands to [`str0m::media::Writer::write`](crate::vendor::str0m::media::Writer::write).
 
 pub mod av1;
 pub mod h264;
@@ -26,7 +26,7 @@ use crate::Result;
 /// One codec frame received from str0m, paired with a microsecond timestamp.
 ///
 /// Used by the ingest path. The session loop converts str0m's
-/// [`MediaTime`](str0m::media::MediaTime) to microseconds so individual
+/// [`MediaTime`](crate::vendor::str0m::media::MediaTime) to microseconds so individual
 /// bridges don't need to repeat the math.
 #[derive(Clone, Debug)]
 pub struct Frame {
@@ -37,7 +37,7 @@ pub struct Frame {
 /// Bridges depacketized media frames from str0m to a hang broadcast track.
 ///
 /// One bridge per `m=` line on the ingest side. The session loop calls
-/// [`Bridge::push`] once per [`MediaData`](str0m::media::MediaData) event
+/// [`Bridge::push`] once per [`MediaData`](crate::vendor::str0m::media::MediaData) event
 /// with the codec frame; the bridge handles any codec-specific transformations
 /// (e.g. Annex-B to AVCC for H.264) and forwards the frame into the matching
 /// moq-mux importer.
@@ -191,7 +191,7 @@ impl<I: DeferredImport> DeferredVideo<I> {
 ///
 /// `timestamp_us` stays in microseconds; the session loop converts it to
 /// the negotiated codec's clock domain when calling
-/// [`Writer::write`](str0m::media::Writer::write).
+/// [`Writer::write`](crate::vendor::str0m::media::Writer::write).
 #[derive(Clone, Debug)]
 pub struct PacketizedFrame {
 	pub timestamp_us: u64,

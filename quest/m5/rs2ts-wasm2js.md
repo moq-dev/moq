@@ -56,7 +56,7 @@ Split independently landable prerequisites into quests.
 Decided with the maintainer on 2026-10-23: an own rustc-driver translator is
 developed as a parallel research track in
 [moq-dev/rust2](https://github.com/moq-dev/rust2), starting with moq-net's
-codec ([its quest](https://github.com/moq-dev/rust2/blob/main/quest/m2/ts.md)).
+codec ([its model epic](https://github.com/moq-dev/rust2/blob/main/quest/m2/ts-model/README.md)).
 It does not replace wasm2js as the first route here. Once it translates
 reachable moq-net code, compare it as the source-translator row below; moq
 consumes it as a pinned flake input, never by vendoring.

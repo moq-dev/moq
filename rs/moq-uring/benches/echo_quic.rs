@@ -75,7 +75,7 @@ mod linux {
 				.build()
 				.expect("runtime");
 			runtime.block_on(async move {
-				let request = moq_tokio::quic::web::proto::ConnectRequest::new(
+				let request = web_transport_proto::ConnectRequest::new(
 					url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
 				);
 				let session = super::support::web_connect(request, Default::default())

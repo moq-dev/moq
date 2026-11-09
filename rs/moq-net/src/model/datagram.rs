@@ -119,7 +119,8 @@ impl Info {
 	}
 
 	/// Produce a standalone datagram track with this info, outside any broadcast.
-	pub fn produce(self, name: impl Into<Arc<str>>) -> Producer {
+	#[cfg(test)]
+	pub(crate) fn produce(self, name: impl Into<Arc<str>>) -> Producer {
 		Producer::new(name.into(), Some(self))
 	}
 }
@@ -238,6 +239,8 @@ pub struct Producer {
 	info: Info,
 	state: kio::Shared<State>,
 	stats: stats::Scope,
+	// The value `poll_priority_changed` last returned, or `None` before it returned any.
+	prev: Option<Option<i8>>,
 }
 
 impl Producer {
@@ -253,6 +256,7 @@ impl Producer {
 			info: info.unwrap_or_default(),
 			state: kio::Shared::new(state),
 			stats: stats::Scope::default(),
+			prev: None,
 		}
 	}
 
@@ -343,8 +347,21 @@ impl Producer {
 		self.state.read().priority()
 	}
 
+	/// [`priority`](Self::priority) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_priority_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<i8>> {
+		let priority = match self.prev {
+			None => self.priority(),
+			Some(last) => ready!(self.poll_priority(waiter, last)),
+		};
+		self.prev = Some(priority);
+		Poll::Ready(priority)
+	}
+
 	/// Resolves to [`Self::priority`] once it differs from `last`.
-	pub fn poll_priority(&self, waiter: &kio::Waiter, last: Option<i8>) -> Poll<Option<i8>> {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_priority(&self, waiter: &kio::Waiter, last: Option<i8>) -> Poll<Option<i8>> {
 		let state = ready!(self.state.poll(waiter, |state| match state.priority() == last {
 			true => Poll::Pending,
 			false => Poll::Ready(()),
@@ -378,7 +395,8 @@ impl Producer {
 	}
 
 	/// Whether this is the same track as `other`.
-	pub fn is_clone(&self, other: &Self) -> bool {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 }
@@ -391,6 +409,7 @@ impl Clone for Producer {
 			info: self.info,
 			state: self.state.clone(),
 			stats: self.stats.clone(),
+			prev: None,
 		}
 	}
 }
@@ -600,7 +619,8 @@ impl Consumer {
 	}
 
 	/// Whether this reads the same track as `other`.
-	pub fn is_clone(&self, other: &Self) -> bool {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 }
@@ -851,6 +871,23 @@ mod tests {
 		assert!(!producer.close_unused());
 		drop(low);
 		assert!(producer.close_unused());
+	}
+
+	#[test]
+	fn priority_changed_reports_the_current_value_then_each_change() {
+		let waiter = kio::Waiter::noop();
+		let mut producer = Info::default().produce("dg");
+		assert_eq!(producer.poll_priority_changed(&waiter), Poll::Ready(None));
+		assert!(producer.poll_priority_changed(&waiter).is_pending());
+		let mut consumer = producer.consume();
+		consumer.set_priority(4);
+		assert_eq!(producer.poll_priority_changed(&waiter), Poll::Ready(Some(4)));
+		assert!(producer.poll_priority_changed(&waiter).is_pending());
+		// A clone watches on its own, starting from the current value.
+		let mut clone = producer.clone();
+		assert_eq!(clone.poll_priority_changed(&waiter), Poll::Ready(Some(4)));
+		drop(consumer);
+		assert_eq!(producer.poll_priority_changed(&waiter), Poll::Ready(None));
 	}
 
 	#[test]

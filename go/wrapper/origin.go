@@ -95,8 +95,12 @@ func (r *Route) Broadcast() (*BroadcastProducer, error) {
 	return r.broadcast, nil
 }
 
-// Instance returns the stream this route serves, minted at creation unless
-// [RouteOptions] named one.
+// Instance returns the stream this route serves now. A named instance never
+// changes. Unnamed, a prefix route moves to a fresh one each time a job holding
+// its current one ends. A job's route takes its prefix route's current one when
+// it first announces or when this first reads it. Read first, the job announces
+// under it, and [Route.Announce] fails with Unroutable once the prefix route has
+// moved past it, so a signer built from it stays valid.
 func (r *Route) Instance() string {
 	return r.inner.InstanceId()
 }
@@ -138,9 +142,9 @@ func (r *Route) Requested(ctx context.Context) (*BroadcastRequest, error) {
 }
 
 // All ranges over requested broadcasts until the route ends, a call errors, or
-// the loop breaks.
+// the loop breaks. Ending ctx stops the loop but leaves the route advertised.
 func (r *Route) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
-	return bridge.Seq(ctx, r.Requested)
+	return bridge.Seq(ctx, nil, r.Requested)
 }
 
 // Cancel retracts the route now, rather than when the collector reclaims it.
@@ -162,8 +166,12 @@ func (r *BroadcastRequest) Path() (string, error) {
 
 // Route answers with the path's own exact route, owning a new broadcast.
 //
-// It serves a fresh instance unless options names one. Created visible, it
-// announces now and answers the waiting requesters; created hidden, they wait
+// Unless options names an instance, it takes the one its prefix route lends
+// when it first announces or [Route.Instance] first reads it, so readers that resolved the path through the prefix
+// route continue on it; its end then moves the prefix route to a fresh instance,
+// so a restarted job is a new stream. A prefix route that names its instance
+// lends none, and the route mints its own. Created visible, it announces now and answers
+// the waiting requesters; created hidden, they wait
 // until [Route.Announce], so the job can fill its catalog first.
 func (r *BroadcastRequest) Route(options RouteOptions) (*Route, error) {
 	inner, err := r.inner.Route(options)
@@ -246,7 +254,7 @@ type AnnounceConsumer struct {
 
 // Next returns the next path becoming present or absent, or (nil, nil) when the stream ends.
 func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
-	res, err := bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
+	res, err := bridge.Call(ctx, nil, a.inner.Next)
 	if err != nil || res == nil {
 		return nil, err
 	}
@@ -255,7 +263,7 @@ func (a *AnnounceConsumer) Next(ctx context.Context) (AnnounceEvent, error) {
 
 // All ranges over the listing's events until the stream ends or the loop breaks.
 func (a *AnnounceConsumer) All(ctx context.Context) iter.Seq2[AnnounceEvent, error] {
-	return bridge.Seq(ctx, a.Next)
+	return bridge.Seq(ctx, a.inner.Cancel, a.Next)
 }
 
 // Cancel stops the listing.
@@ -276,7 +284,7 @@ type Following struct {
 // instance, once another instance takes it over), then whatever serves it next. Drop
 // what was read from the previous instance then: its tracks end when its route does.
 func (a *Following) Available(ctx context.Context) (*BroadcastConsumer, error) {
-	inner, err := bridge.CallHandle(ctx, a.inner.Cancel, func(ctx context.Context) (*ffi.MoqBroadcastConsumer, error) {
+	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqBroadcastConsumer, error) {
 		res, err := a.inner.Available(ctx)
 		if err != nil || res == nil {
 			return nil, err

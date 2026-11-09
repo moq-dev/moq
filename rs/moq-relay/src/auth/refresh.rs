@@ -82,19 +82,15 @@ impl Credential {
 	}
 
 	fn wire(&self, role: Option<Role>) -> auth::Grant {
-		auth::Grant {
-			publish: if role == Some(Role::Subscriber) {
-				Default::default()
-			} else {
-				self.grant.publish.clone()
-			},
-			subscribe: if role == Some(Role::Publisher) {
-				Default::default()
-			} else {
-				self.grant.subscribe.clone()
-			},
-			expires: self.expires,
+		let mut grant = auth::Grant::default();
+		if role != Some(Role::Subscriber) {
+			grant.publish = self.grant.publish.clone();
 		}
+		if role != Some(Role::Publisher) {
+			grant.subscribe = self.grant.subscribe.clone();
+		}
+		grant.expires = self.expires;
+		grant
 	}
 }
 
@@ -688,7 +684,7 @@ mod tests {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry
 			.tier(moq_net::stats::Tier::default())
-			.session(moq_net::Path::from_static("room"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 		let lease = super::super::Lease::new("/room", consumer)
 			.unwrap()
 			.with_stats(stats.clone());
@@ -905,7 +901,7 @@ mod tests {
 			let registry = moq_net::stats::Registry::new(Default::default());
 			let stats = registry
 				.tier(moq_net::stats::Tier::default())
-				.session(moq_net::Path::from_static("room"));
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 			let lease = super::super::Lease::new("/room", consumer).unwrap().with_stats(stats);
 			let (client, supervising) = sessions(lease).await;
 			producer.revoke(reason.clone());
@@ -1084,7 +1080,7 @@ mod tests {
 			assert_eq!(admission.request.query.as_deref(), Some("jwt=replacement"));
 			admission.grant(lease::Consumer::fixed(grant("a/**", 20)));
 		});
-		let (token, _) = token.unwrap();
+		let token = token.unwrap();
 		clock.advance(Duration::from_secs(4));
 		assert!(
 			settles_pending(&mut supervising).await,
@@ -1118,14 +1114,14 @@ mod tests {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry
 			.tier(moq_net::stats::Tier::default())
-			.session(moq_net::Path::from_static("room"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 		let (client, session, mut lease) = connect(lease.unwrap().with_stats(stats)).await;
 		let auth = client.auth();
 		let (token, ()) = tokio::join!(
 			async {
 				tokio::select! {
 					reason = lease.ended() => panic!("the lease ended while renewing: {reason}"),
-					token = auth.add("replacement") => token.unwrap().0,
+					token = auth.add("replacement") => token.unwrap(),
 				}
 			},
 			async { admissions.next().await.unwrap().grant(replacement) },
@@ -1229,7 +1225,7 @@ mod tests {
 		let (token, ()) = tokio::join!(auth.add("replacement"), async {
 			admissions.next().await.unwrap().grant(consumer);
 		});
-		let (token, _) = token.unwrap();
+		let token = token.unwrap();
 		assert!(
 			token.grant().peek().unwrap().subscribe.is_empty(),
 			"publisher SETUP role widened"
@@ -1278,7 +1274,7 @@ mod tests {
 		assert!(
 			matches!(result, Err(moq_net::Error::Session(SessionError::Unauthorized))),
 			"an empty token reissued a credential the relay removed: {:?}",
-			result.map(|(token, _)| token.grant().peek())
+			result.map(|token| token.grant().peek())
 		);
 		assert!(!supervising.is_finished());
 		client.abort(moq_net::Error::Cancel);
