@@ -302,16 +302,35 @@ export namespace Source {
 		readonly out: Signals.Readonlys<Source.ScreenOutput>;
 		video: Signals.Signal<Video.Constraints | boolean | undefined>;
 	}
+	export type ScreenEnd = {
+		reason: "stopped";
+	} | {
+		reason: "dismissed";
+	} | {
+		error: Error;
+		reason: "error";
+	};
 	export type ScreenInput = {
 		enabled: Signals.Getter<boolean>;
 	};
 	export type ScreenOutput = {
-		source: Signals.Signal<Source.Media | undefined>;
+		source: Signals.Getter<Source.Media | undefined>;
+		state: Signals.Getter<Source.ScreenState>;
 	};
 	export interface ScreenProps extends Signals.Inputs<Source.ScreenInput> {
 		audio?: Audio.Constraints | boolean | Signals.Signal<Audio.Constraints | boolean | undefined>;
 		video?: Video.Constraints | boolean | Signals.Signal<Video.Constraints | boolean | undefined>;
 	}
+	export type ScreenState = {
+		kind: "off";
+	} | {
+		kind: "prompting";
+	} | {
+		kind: "live";
+		media: Source.Media;
+	} | {
+		kind: "ended";
+	} & Source.ScreenEnd;
 }
 
 export namespace Video {

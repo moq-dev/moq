@@ -26,7 +26,7 @@ function setup(initial: SourceType = "camera") {
 	const announcing = new Signal(false);
 	const connected = new Signal(true);
 	const source = new Signal<SourceType | undefined>(initial);
-	const mode = new Signal<AnnounceMode | undefined>("source");
+	const mode = new Signal<AnnounceMode>("source");
 	const broadcast = new Broadcast({
 		enabled: connected,
 		origin: new Origin.Producer(),
@@ -247,12 +247,9 @@ test.each(Object.keys(boundaries) as (keyof typeof boundaries)[])(
 	},
 );
 
-test("an invalid mode stops a latched announcement while always needs no selection", async () => {
+test("always needs no selection", async () => {
 	using env = setup();
 	await start(env);
-	env.mode.set(undefined);
-	await settle();
-	expect(env.announcing.peek()).toBe(false);
 	env.source.set(undefined);
 	env.mode.set("always");
 	await settle();

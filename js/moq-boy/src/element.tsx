@@ -31,6 +31,31 @@ function viewerId(): string {
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
 /**
+ * The element's `connection.enabled`, which the page may also write. The page's writes set what it
+ * wants and the element sets whether it can run (connected to a document, every path valid); it
+ * reads as on only while both hold. Kept apart, a page's disable survives the element suspending and
+ * resuming, whenever the page writes it: an explicit page choice wins.
+ */
+class Enabled extends Moq.Signals.Signal<boolean> {
+	#wanted = true;
+	#running = false;
+
+	constructor() {
+		super(false);
+	}
+
+	override set(value: boolean, notify?: boolean): void {
+		this.#wanted = value;
+		super.set(value && this.#running, notify);
+	}
+
+	run(running: boolean): void {
+		this.#running = running;
+		super.set(this.#wanted && running);
+	}
+}
+
+/**
  * `<moq-boy>` web component - discovers and manages Game Boy streaming sessions,
  * and renders the interactive UI in a Shadow DOM.
  *
@@ -58,11 +83,11 @@ export default class MoqBoy extends HTMLElement {
 
 	readonly #signals = new Moq.Signals.Effect();
 	// Set when the element is connected to the DOM.
-	readonly #connected = new Moq.Signals.Signal(false);
+	#connected = false;
 	// The path attributes holding an invalid path, which idle the element until each is fixed.
-	readonly #refused = new Moq.Signals.Signal<ReadonlySet<Observed>>(new Set());
-	// Whether to run: connected, with nothing refused.
-	readonly #enabled = new Moq.Signals.Signal(false);
+	readonly #refused = new Set<Observed>();
+	// Whether to run: `#update` gates it on the element's state, and the page may turn it off.
+	readonly #enabled = new Enabled();
 	readonly #prefix = new Moq.Signals.Signal<Moq.Path.Valid>(DEFAULT_PREFIX);
 	readonly #gamePrefixOverride = new Moq.Signals.Signal<Moq.Path.Valid | undefined>(undefined);
 	readonly #sessions = new Map<string, Game>();
@@ -71,10 +96,6 @@ export default class MoqBoy extends HTMLElement {
 	constructor() {
 		super();
 		cleanup.register(this, this.#signals);
-
-		this.#signals.run((effect) => {
-			this.#enabled.set(effect.get(this.#connected) && effect.get(this.#refused).size === 0);
-		});
 
 		// One origin, both directions: the viewer's endpoint is published into it and the
 		// relay's announced games and endpoints arrive in it, with no risk of echoing either back.
@@ -94,7 +115,8 @@ export default class MoqBoy extends HTMLElement {
 
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
-		this.#connected.set(true);
+		this.#connected = true;
+		this.#update();
 
 		// Render the UI into a Shadow DOM (reuse existing on reconnect).
 		const shadow = this.shadowRoot ?? this.attachShadow({ mode: "open" });
@@ -103,7 +125,8 @@ export default class MoqBoy extends HTMLElement {
 
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
-		this.#connected.set(false);
+		this.#connected = false;
+		this.#update();
 		this.#dispose?.();
 		this.#dispose = undefined;
 	}
@@ -115,9 +138,14 @@ export default class MoqBoy extends HTMLElement {
 			return;
 		}
 
-		// Refused until parsed, so an invalid path leaves the element idle and the error rethrown.
-		this.#refuse(name, true);
-		const path = newValue === null ? undefined : Moq.Path.from(newValue);
+		// An invalid path leaves the element idle until fixed, with the error rethrown.
+		let path: Moq.Path.Valid | undefined;
+		try {
+			path = newValue === null ? undefined : Moq.Path.from(newValue);
+		} catch (error) {
+			this.#refuse(name, true);
+			throw error;
+		}
 		this.#refuse(name, false);
 
 		if (name === "prefix") {
@@ -128,10 +156,13 @@ export default class MoqBoy extends HTMLElement {
 	}
 
 	#refuse(name: Observed, refused: boolean) {
-		const next = new Set(this.#refused.peek());
-		if (refused) next.add(name);
-		else next.delete(name);
-		this.#refused.set(next);
+		if (refused) this.#refused.add(name);
+		else this.#refused.delete(name);
+		this.#update();
+	}
+
+	#update() {
+		this.#enabled.run(this.#connected && this.#refused.size === 0);
 	}
 
 	/** The relay URL, mirrored by the `url` attribute. */

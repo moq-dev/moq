@@ -27,6 +27,7 @@ Decided 2026-10-30 with the maintainer (planning interview), after the str0m wor
 - [WHIP/WHEP builds carry no SCTP](/quest/m3/webrtc/sctp-feature.md) - SCTP compiles only with the `p2p` feature
 - [The vendored stack keeps only what browsers negotiate](/quest/m3/webrtc/browser-only.md) - PSK suites, `ccm`, and anything else no browser uses are gone
 - [The vendored stack exposes only what moq-webrtc calls](/quest/m3/webrtc/dead-api.md) - dead upstream API is deleted once clock settles the time seams
+- [A failed client socket ends a WebRTC session with an error](/quest/m3/webrtc/socket-error.md) - a client or `p2p` session whose socket fails ends with its I/O error, not `Ok` or `Closed`
 
 ## Related
 
