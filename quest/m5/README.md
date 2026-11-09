@@ -77,7 +77,6 @@ lite-07; bitrate enforcement is not part of the next release.
 - [#2279](/quest/m5/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [CEA-608/708](/quest/m5/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
 - [WebXR playback](/quest/m5/watch-webxr.md) - `<moq-watch>` renders equirectangular and stereo renditions through WebXR layers on a headset
-- [Protected playback in the browser](/quest/m5/drm-playback.md) - `<moq-watch>` plays CENC renditions through MSE and EME, once a consumer asks
 - [Paced replay](/quest/m5/archive-paced-replay.md) - an archive consumer pushes stored groups to live subscribers on one shared clock, so any live player plays it
 - [Encoder feedback](/quest/m5/stats-encoder-feedback.md) - a Rust encoder
   reads its viewers' feedback and adapts its bitrate

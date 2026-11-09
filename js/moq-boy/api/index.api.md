@@ -9,51 +9,6 @@ import { ZodMiniOptional } from "zod/mini";
 import { ZodMiniString } from "zod/mini";
 import { infer } from "zod/mini";
 
-export class Game {
-	constructor(config: GameConfig);
-	readonly active: Moq.Signals.Signal<boolean>;
-	readonly audioDecoder: Watch.Audio.Decoder;
-	readonly audioEmitter: Watch.Audio.Emitter;
-	readonly audioSource: Watch.Audio.Source;
-	readonly broadcast: Watch.Broadcast;
-	readonly canvas: Moq.Signals.Signal<HTMLCanvasElement | undefined>;
-	close(): void;
-	readonly delay: Moq.Signals.Signal<Watch.Delay>;
-	readonly expanded: Moq.Signals.Signal<string | undefined>;
-	readonly heldButtons: Set<string>;
-	readonly hovered: Moq.Signals.Signal<boolean>;
-	readonly latency: Moq.Signals.Signal<LatencyEntry[] | undefined>;
-	sendButtons(): void;
-	sendCommand(cmd: Record<string, unknown>): void;
-	readonly sessionId: string;
-	readonly status: Moq.Signals.Signal<{
-		buttons: string[];
-		location?: string | undefined;
-		players: number;
-		stats?: {
-			audio_secs: number;
-			emulation_secs: number;
-			video_secs: number;
-			wall_secs: number;
-		} | undefined;
-	} | undefined>;
-	readonly sync: Watch.Sync;
-	readonly userMuted: Moq.Signals.Signal<boolean>;
-	readonly videoDecoder: Watch.Video.Decoder;
-	readonly videoRenderer: Watch.Video.Renderer;
-	readonly videoSource: Watch.Video.Source;
-	readonly volume: Moq.Signals.Signal<number>;
-}
-
-export interface GameConfig {
-	connection: Moq.Connection;
-	endpoint: Moq.Socket.Endpoint;
-	expanded: Moq.Signals.Signal<string | undefined>;
-	gamePrefix: string;
-	origin: Moq.Origin.Producer;
-	sessionId: string;
-}
-
 export type GameStats = infer<typeof GameStatsSchema>;
 
 export const GameStatsSchema: ZodMiniObject<{
@@ -77,16 +32,10 @@ export const GameStatusSchema: ZodMiniObject<{
 	}, $strip>>;
 }, $strip>;
 
-export const KEY_MAP: Record<string, string>;
-
 export interface LatencyEntry {
 	label: string;
 	ms: number;
 }
 
-export * as Moq from "@moq/net";
-
 export { default as MoqBoy } from "@moq/boy/element";
-
-export * as Watch from "@moq/watch";
 ```

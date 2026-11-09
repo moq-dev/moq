@@ -657,8 +657,8 @@ export class Consumer {
 	 *
 	 * Lists the tracks its producer created (until they abort or are removed) and, for a
 	 * broadcast consumed from a session, the tracks the peer lists. Through a session the
-	 * listing syncs at once, with what this side holds, and the peer's tracks follow as live
-	 * adds; every listing of one broadcast shares one request to the peer. A track served only
+	 * peer's tracks arrive as they come and the listing syncs when the peer does; every
+	 * listing of one broadcast shares one request to the peer. A track served only
 	 * on request is never listed, and listing never requests one. Throws once the broadcast
 	 * has closed.
 	 */
