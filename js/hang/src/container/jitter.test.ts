@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Milli } from "@moq/clock";
 import { type Entry, History, Jitter } from "./jitter";
 
 // The conformance corpus beside doc/concept/audio-jitter.md, read directly so this is graded
@@ -57,7 +56,7 @@ describe("audio jitter conformance", () => {
 			let current: number | undefined;
 			for (let i = 0; i < c.arrival.length; i++) {
 				if (ends.has(i)) jitter.end();
-				jitter.observe(c.arrival[i] as Milli, c.media[i] as Milli);
+				jitter.observe(c.arrival[i], c.media[i]);
 				const value = target(jitter, c);
 				const listed = expected.get(i);
 				if (listed !== undefined) {
@@ -74,18 +73,18 @@ describe("audio jitter conformance", () => {
 
 describe("Jitter", () => {
 	it("starts at the prior's 95th percentile", () => {
-		expect(new Jitter().measured).toBe(100 as Milli);
+		expect(new Jitter().measured).toBe(100);
 	});
 
 	it("is not moved by a stale frame ahead of the live edge", () => {
 		// The #3517 regression: one frame from a stale group, then the live edge 14.5s of media later,
 		// then evenly paced audio with no real jitter. The jump must not read as a delay or a frame.
 		const jitter = new Jitter();
-		jitter.observe(0 as Milli, 0 as Milli);
+		jitter.observe(0, 0);
 		for (let i = 0; i < 500; i++) {
-			jitter.observe((10 + i * 20) as Milli, (14_500 + i * 20) as Milli);
+			jitter.observe(10 + i * 20, 14_500 + i * 20);
 		}
-		expect(jitter.measured).toBe(20 as Milli);
+		expect(jitter.measured).toBe(20);
 	});
 
 	it("ignores an end before any observation", () => {
@@ -93,9 +92,9 @@ describe("Jitter", () => {
 		// excuse the first unexplained gap.
 		const jitter = new Jitter();
 		jitter.end();
-		for (let i = 0; i < 500; i++) jitter.observe((50 + i * 20) as Milli, (i * 20) as Milli);
+		for (let i = 0; i < 500; i++) jitter.observe(50 + i * 20, i * 20);
 		const settled = jitter.measured;
-		jitter.observe((50 + 500 * 20 + 30_000) as Milli, (500 * 20 + 30_000) as Milli);
+		jitter.observe(50 + 500 * 20 + 30_000, 500 * 20 + 30_000);
 		expect(jitter.measured).toBeGreaterThan(settled);
 	});
 
@@ -104,8 +103,8 @@ describe("Jitter", () => {
 		const near = new Jitter();
 		const far = new Jitter();
 		for (let i = 0; i < 500; i++) {
-			near.observe((10 + i * 20) as Milli, (i * 20) as Milli);
-			far.observe((2000 + i * 20) as Milli, (i * 20) as Milli);
+			near.observe(10 + i * 20, i * 20);
+			far.observe(2000 + i * 20, i * 20);
 		}
 		expect(far.measured).toBe(near.measured);
 	});
@@ -114,18 +113,17 @@ describe("Jitter", () => {
 		// A path where every tenth frame lands 300ms late.
 		const warm = new Jitter();
 		for (let i = 0; i < 500; i++) {
-			warm.observe((i * 20 + (i % 10 === 0 ? 300 : 0)) as Milli, (i * 20) as Milli);
+			warm.observe(i * 20 + (i % 10 === 0 ? 300 : 0), i * 20);
 		}
 		const learned = warm.measured;
-		expect(learned).toBeGreaterThan(100 as Milli);
+		expect(learned).toBeGreaterThan(100);
 
 		const fork = warm.fork();
 		expect(fork.measured).toBe(learned);
 
 		// The replacement opens with a backlog: older media arriving at once, long after the warm
 		// track's frames. Measured against the warm track's arrivals it would read as seconds late.
-		for (let i = 0; i < 100; i++)
-			fork.observe((20_000 + Math.floor(i / 50) * 1000) as Milli, (8000 + i * 20) as Milli);
+		for (let i = 0; i < 100; i++) fork.observe(20_000 + Math.floor(i / 50) * 1000, 8000 + i * 20);
 		expect(fork.measured).toBeLessThanOrEqual(learned);
 		expect(warm.measured).toBe(learned);
 	});

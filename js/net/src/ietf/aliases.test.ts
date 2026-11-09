@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { DuplicateTrackAlias, RetiredTrackAlias, SharedTrackAlias, TrackAliases } from "./aliases.ts";
 
 test("waits for the control message that establishes an alias", async () => {
@@ -111,7 +111,7 @@ test("retired aliases are capped", async () => {
 
 	// The oldest tombstones are forgotten, so they fall back to the unknown-alias wait.
 	const forgotten = aliases.get(0n).catch((error: unknown) => error);
-	await clock.advance(Nano.fromMilli(Milli(1000)));
+	await clock.advance(Duration.millis(1000));
 	expect(await forgotten).toHaveProperty("message", "unknown track alias: 0");
 	await expect(aliases.get(73n)).rejects.toBeInstanceOf(RetiredTrackAlias);
 });

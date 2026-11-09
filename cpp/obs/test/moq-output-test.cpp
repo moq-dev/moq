@@ -427,6 +427,9 @@ struct MoQOutputStatsTest {
 		stale.bytes_sent = 123;
 		return output.CommitConnectionStats(session, std::move(stale), accepted);
 	}
+	// Runs the continuations already queued, the last that can report once the attempt
+	// is retired.
+	static void Drain(MoQOutput &output) { ::Drain(output.worker); }
 	static void Disconnect(MoQOutput &output)
 	{
 		std::lock_guard<std::mutex> lock(output.mutex);
@@ -955,7 +958,8 @@ int main()
 		o.CopyLastFailure(&code, &reason);
 		CHECK(!reason.empty());
 		CHECK(!o.IsLiveSession());
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		// The failure retired the attempt, so nothing it queued can report again.
+		MoQOutputStatsTest::Drain(o);
 		CHECK(signalCount() == 1);
 	}
 	printf("fatal before connect: ok\n");
@@ -1035,7 +1039,8 @@ int main()
 		MoQOutput o(nullptr, OUTPUT);
 		CHECK(o.Start());
 		o.Stop();
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		// The stop dropped the connect, so only a result it already queued could still run.
+		MoQOutputStatsTest::Drain(o);
 		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_SUCCESS);
 	}
@@ -1084,7 +1089,7 @@ int main()
 		CHECK(WaitFor([] { return signalCount() == 2; }));
 		CHECK(signalAt(0).begin_capture_at == 1);
 		CHECK(signalAt(1).begin_capture_at == 2);
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		MoQOutputStatsTest::Drain(o);
 		CHECK(signalCount() == 2);
 	}
 	printf("OBS-driven restart: ok\n");
@@ -1127,7 +1132,8 @@ int main()
 			const size_t starts = round % 2 ? 2 : 1;
 			CHECK(signalCount() <= starts + 1);
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		// A late report could only come from a continuation, and the destructor joined the
+		// worker that runs them.
 		CHECK(g_signals_after_destroy == 0);
 	}
 	printf("failures outliving the output: ok\n");

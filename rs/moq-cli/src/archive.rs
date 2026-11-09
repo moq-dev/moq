@@ -419,7 +419,7 @@ mod tests {
 				.await
 				.expect("the export subscribes")
 				.unwrap();
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			broadcast.broadcast().close();
 		}
 		let complete = [
@@ -498,7 +498,7 @@ mod tests {
 			group.write_frame(pts, format!("frame {sequence}")).unwrap();
 			group.finish().unwrap();
 		}
-		video.finish().unwrap();
+		let _video = video.finish().unwrap();
 		let recording =
 			tokio::spawn(moq_archive::Producer::new(open(&url).unwrap(), source.consume(), Default::default()).run());
 		// Its objects, then the markers once the broadcast ends.

@@ -1,5 +1,5 @@
 /** Publisher and consumer roles for the @moq/net stream path over a real WebTransport session. */
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { check, payload } from "../fixture.ts";
 import { longTasks, nextTask } from "./observe.ts";
@@ -35,7 +35,10 @@ async function publish(config: Transport): Promise<void> {
 	const publication = origin.route(Moq.Path.from(config.path), { hidden: true });
 	const producer = publication.broadcast;
 	// Retention covers the whole run, so a slow consumer cannot lose a group to eviction.
-	const track = producer.createTrack("data", { timescale: Moq.Time.Timescale.MILLI, maxAge: Milli(600_000) });
+	const track = producer.createTrack("data", {
+		timescale: Moq.Time.Timescale.MILLI,
+		maxAge: Duration.millis(600_000),
+	});
 	const demand = track.demand().wanted;
 	publication.announce();
 	const connection = await Moq.Connection.connect({
@@ -92,7 +95,9 @@ async function consume(config: Transport): Promise<Delivery> {
 	if (!broadcast) throw new Error("consume before prepare");
 	const groups = Math.ceil(config.frames / config.group);
 	const start = performance.now();
-	const subscriber = broadcast.track("data").subscribe({ delay: { max: Milli(600_000) }, order: "ascending" });
+	const subscriber = broadcast
+		.track("data")
+		.subscribe({ delay: { max: Duration.millis(600_000) }, order: "ascending" });
 	cleanup.push(() => subscriber.close());
 	let frames = 0;
 	let bytes = 0;

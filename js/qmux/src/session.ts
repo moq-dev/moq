@@ -1,15 +1,4 @@
-import {
-	Elapsed,
-	Instant,
-	type Interval,
-	interval,
-	Milli,
-	MissedTickBehavior,
-	Nano,
-	now,
-	Second,
-	timeout,
-} from "@moq/clock";
+import { Duration, Elapsed, Instant, type Interval, interval, MissedTickBehavior, now, timeout } from "@moq/clock";
 import { Credit, StreamLimit, Window } from "./credit.ts";
 import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
@@ -48,11 +37,11 @@ export interface Config {
 	receiveWindow?: bigint;
 	/** Receive window in bytes for every stream. */
 	streamReceiveWindow?: bigint;
-	/** Idle timeout in milliseconds, or null to disable it; zero is refused. */
-	idleTimeout?: number | null;
-	/** How long `ready` waits for the peer's transport parameters, in milliseconds, or null to wait
-	 *  indefinitely; zero is refused. The session closes when it passes. */
-	handshakeTimeout?: number | null;
+	/** Idle timeout, sent as whole milliseconds rounded up, or null to disable it; zero is refused. */
+	idleTimeout?: Duration | null;
+	/** How long `ready` waits for the peer's transport parameters, or null to wait indefinitely;
+	 *  zero is refused. The session closes when it passes. */
+	handshakeTimeout?: Duration | null;
 	/** Maximum QMux Record size in bytes (draft-01). */
 	maxRecordSize?: bigint;
 	/** Largest DATAGRAM *frame* (RFC 9221: type + length + payload) we advertise
@@ -69,8 +58,8 @@ const DEFAULT_CONFIG: Required<Config> = {
 	maxStreamsUni: 100n,
 	receiveWindow: 1_048_576n,
 	streamReceiveWindow: 262_144n,
-	idleTimeout: 30_000,
-	handshakeTimeout: 10_000,
+	idleTimeout: Duration.secs(30),
+	handshakeTimeout: Duration.secs(10),
 	maxRecordSize: Frame.DEFAULT_MAX_RECORD_SIZE,
 	// Fill a full record by default; the record layer bounds the size.
 	maxDatagramFrameSize: Frame.DEFAULT_MAX_RECORD_SIZE,
@@ -90,8 +79,11 @@ function resolveConfig(config?: Config): Required<Config> {
 	}
 	for (const [key, value] of Object.entries(resolved)) {
 		if (key === "idleTimeout" || key === "handshakeTimeout") {
-			if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)) {
-				throw new TypeError(`${key} must be a positive safe integer or null`);
+			if (value !== null && (!(value instanceof Duration) || value.isZero())) {
+				throw new TypeError(`${key} must be a positive Duration or null`);
+			}
+			if (value !== null && !Number.isSafeInteger(Math.ceil(value.asMillis()))) {
+				throw new TypeError(`${key} exceeds the safe integer millisecond range`);
 			}
 		} else if (key !== "maxDatagramFrameSize" || value !== null) {
 			if (typeof value !== "bigint") throw new TypeError(`${key} must be a bigint`);
@@ -107,7 +99,7 @@ function resolveConfig(config?: Config): Required<Config> {
 
 function configToTransportParams(config: Required<Config>): TransportParams {
 	return {
-		maxIdleTimeout: BigInt(config.idleTimeout ?? 0),
+		maxIdleTimeout: BigInt(config.idleTimeout === null ? 0 : Math.ceil(config.idleTimeout.asMillis())),
 		initialMaxData: config.receiveWindow,
 		initialMaxStreamDataBidiLocal: config.streamReceiveWindow,
 		initialMaxStreamDataBidiRemote: config.streamReceiveWindow,
@@ -465,7 +457,7 @@ const DEFAULT_SEND_BUFFER_SIZE = 64 * 1024;
 /** How long a closing session waits for a backed-up socket to take its close
  *  frame, matching Rust's `CLOSE_TIMEOUT`. A peer that stopped reading can't
  *  hold the socket open past it. */
-const CLOSE_TIMEOUT = Nano.fromSecond(Second(3));
+const CLOSE_TIMEOUT = Duration.secs(3);
 
 /** Present the caller's socket as a `WebSocketStreamLike`, whichever they passed.
  *
@@ -738,8 +730,8 @@ export class Session implements WebTransport {
 	#lastSendAt = now();
 	// Deadline bookkeeping for #idleActivityAt: the newest receive observed, the
 	// send last allowed to restart the deadline, and whether a send may restart it.
-	#recvSeen = Instant.zero;
-	#sendResetAt = Instant.zero;
+	#recvSeen = Instant.ZERO;
+	#sendResetAt = Instant.ZERO;
 	#sendCredit = true;
 	#nextPingSeq = 0;
 	// Highest sequence seen in a received QX_PING request (draft-02 requires them
@@ -986,7 +978,7 @@ export class Session implements WebTransport {
 		// a peer that never sends its parameters can't hold `ready` forever.
 		const handshake = this.#config.handshakeTimeout;
 		if (handshake !== null) {
-			timeout(Nano.fromMilli(Milli(handshake)), this.ready).catch((err) => {
+			timeout(handshake, this.ready).catch((err) => {
 				if (!(err instanceof Elapsed)) return;
 				this.#end({ clean: false, cause: new Error("handshake timeout") });
 			});
@@ -1195,14 +1187,14 @@ export class Session implements WebTransport {
 		if (timeoutMs === 0n) return;
 		// Poll at a fraction of the timeout - frequent enough to trigger pings on time
 		// but not so frequent it burns CPU on otherwise-quiet sessions.
-		const timeout = Nano.fromMilli(Milli(Number(timeoutMs)));
-		const timer = interval(Nano.fromMilli(Milli(Math.max(50, Number(timeoutMs) / 6))));
+		const timeout = Duration.millis(Number(timeoutMs));
+		const timer = interval(Duration.millis(Math.max(50, Number(timeoutMs) / 6)));
 		timer.setMissedTickBehavior(MissedTickBehavior.Delay);
 		this.#idleTimer = timer;
 		void this.#idleLoop(timer, timeout);
 	}
 
-	async #idleLoop(timer: Interval, timeout: Nano) {
+	async #idleLoop(timer: Interval, timeout: Duration) {
 		// The first tick is immediate; the first check belongs one period in.
 		let first = true;
 		for (;;) {
@@ -1235,21 +1227,20 @@ export class Session implements WebTransport {
 	 * re-arms the credit.
 	 */
 	#idleActivityAt(): Instant {
-		if (this.#lastRecvAt > this.#recvSeen) {
+		if (this.#lastRecvAt.gt(this.#recvSeen)) {
 			this.#recvSeen = this.#lastRecvAt;
 			this.#sendCredit = true;
 		}
-		if (this.#sendCredit && this.#lastSendAt > this.#sendResetAt) {
+		if (this.#sendCredit && this.#lastSendAt.gt(this.#sendResetAt)) {
 			this.#sendResetAt = this.#lastSendAt;
 			this.#sendCredit = false;
 		}
-		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
-		return this.#recvSeen > this.#sendResetAt ? this.#recvSeen : this.#sendResetAt;
+		return this.#recvSeen.max(this.#sendResetAt);
 	}
 
-	#idleTick(timeout: Nano) {
+	#idleTick(timeout: Duration) {
 		const at = now();
-		if (Instant.durationSince(at, this.#idleActivityAt()) > timeout) {
+		if (at.since(this.#idleActivityAt()).gt(timeout)) {
 			// No frames have been sent or received within the negotiated limit. Abnormal:
 			// without a rejection this is indistinguishable from a graceful close(), which
 			// also settles with closeCode 0.
@@ -1259,7 +1250,7 @@ export class Session implements WebTransport {
 		// Keep-alive: nudge the peer when our outbound side has been silent for a third
 		// of the timeout. Any frame counts as activity, so this only fires when truly idle.
 		// Nothing to keep alive before the peer has spoken at all.
-		if (this.#paramsReceived && Instant.durationSince(at, this.#lastSendAt) > timeout / 3) {
+		if (this.#paramsReceived && at.since(this.#lastSendAt).gt(timeout.div(3))) {
 			const seq = this.#nextPingSeq;
 			// Monotonic (never wraps within a session's life): the draft-02
 			// strictly-increasing rule requires it, and it must not wrap earlier

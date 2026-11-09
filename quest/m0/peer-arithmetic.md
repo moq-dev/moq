@@ -13,3 +13,5 @@ No value a peer sends or an application configures can panic a moq task or silen
 Found by the 2026-11-07 invariant audit (ietf-1, ietf-2, lite-3, lite-4, lite-9, model-3).
 
 Decided 2026-11-07 (maintainer, invariant-audit root causes): remove the operators rather than make them saturate, so each of the roughly 600 sites states what overflow means; most edits are mechanical. Breaking for the published `kio` crate; it stays in m0 because a remote peer can panic the publisher today. Removing `Sub` alongside `Add` is the same class (underflow before the clock's start). Each peer-reachable site gets a test at the extreme value.
+
+`@moq/clock` mirrors kio (decided 2026-11-07, maintainer, /quest-plan from the API sweep): once kio drops the operators, JS `Instant` and `Duration` get `checkedAdd` and `saturatingAdd` too, with `add` and `sub` following whatever kio keeps. `Duration.sub` already throws below zero and `saturatingSub` exists.

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { SessionCode, SessionError } from "./error.ts";
 import { HopSchema } from "./hop.ts";
 import { NativeSession } from "./ietf/session.ts";
@@ -46,7 +46,7 @@ function limited(mode: "queue" | "open") {
 	};
 }
 
-const HOUR = Nano.fromMilli(Milli(3_600_000));
+const HOUR = Duration.millis(3_600_000);
 
 // A publisher may hold its answer, so a request waits until its caller leaves, as in Rust.
 // Cancellation resets opened streams and gives up queued opens without spending their credit.
@@ -64,13 +64,13 @@ for (const protocol of ["lite", "ietf"] as const) {
 			const track = broadcast.track("video").subscribe();
 			try {
 				await transport.created;
-				await clock.advance(Nano.zero);
+				await clock.advance(Duration.ZERO);
 				await clock.advance(HOUR);
 				expect(track.closed.peek()).toBeUndefined();
 				track.close();
 				if (mode === "queue") {
 					transport.release();
-					await clock.advance(Nano.zero);
+					await clock.advance(Duration.ZERO);
 					expect(transport.written).toEqual([]);
 				} else {
 					await transport.aborted;
@@ -141,7 +141,7 @@ for (const operation of ["info", "fetch"] as const) {
 			});
 			try {
 				await transport.created;
-				await clock.advance(Nano.zero);
+				await clock.advance(Duration.ZERO);
 				await clock.advance(HOUR);
 				expect(failure).toBeUndefined();
 				const left = new Error("left");
@@ -149,10 +149,10 @@ for (const operation of ["info", "fetch"] as const) {
 				await request;
 				expect(failure).toBe(left);
 				// Credit granted once the caller has left can't send the request.
-				await clock.advance(Nano.zero);
+				await clock.advance(Duration.ZERO);
 				if (mode === "queue") {
 					transport.release();
-					await clock.advance(Nano.zero);
+					await clock.advance(Duration.ZERO);
 					expect(transport.written).toEqual([]);
 				} else {
 					await transport.aborted;
@@ -182,13 +182,13 @@ for (const protocol of ["lite", "ietf"] as const) {
 			const announced = subscriber.routes();
 			try {
 				await transport.created;
-				await clock.advance(Nano.zero);
-				await clock.advance(Nano.fromMilli(Milli(30_000)));
+				await clock.advance(Duration.ZERO);
+				await clock.advance(Duration.millis(30_000));
 				expect(announced.closed.peek()).toBeUndefined();
 				if (mode === "queue") {
 					expect(transport.written).toEqual([]);
 					transport.release();
-					await clock.advance(Nano.zero);
+					await clock.advance(Duration.ZERO);
 					expect(transport.written).not.toEqual([]);
 				}
 				expect(transport.options).toEqual([{ waitUntilAvailable: true }]);
@@ -216,7 +216,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 			await transport.created;
 			track.close();
 			transport.release();
-			await clock.advance(Nano.zero);
+			await clock.advance(Duration.ZERO);
 			expect(transport.written).toEqual([]);
 			const next = broadcast.track("next").subscribe();
 			await transport.writing;

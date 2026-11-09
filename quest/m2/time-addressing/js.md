@@ -14,6 +14,9 @@ increasing starts, the three group ends, reach from a group's own end, and
 (`delivered.ts`, `ledger.ts`, `track.ts`, `resume.ts`) follows
 previous-start links instead. Starts are `bigint`, as group IDs already are,
 so they are carried past 2^53 (decided 2026-11-03, maintainer).
+`Time.Timestamp.value` stays a `number` for now (2026-11-08, the JS time
+types PR, to keep frames allocation-free); revisit it here if a start must
+compare exactly with a timestamp past 2^53 ticks.
 
 The spike found no sparse-ID breakage in direct `@moq/net` sessions over
 lite-06 and lite-07; its relay fills follow Rust's once JavaScript received

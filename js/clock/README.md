@@ -4,15 +4,15 @@ Logical monotonic time, wall time, and timers from one clock per JavaScript real
 Use `Manual` to test time without replacing the host's timers.
 
 ```ts
-import { Manual, Milli, Nano, now, sleep } from "@moq/clock";
+import { Duration, Instant, Manual, now, sleep } from "@moq/clock";
 
 const clock = new Manual();
 const installed = clock.install();
 try {
-    const pending = sleep(Nano.fromMilli(Milli(10)));
-    await clock.advance(Nano.fromMilli(Milli(10)));
+    const pending = sleep(Duration.millis(10));
+    await clock.advance(Duration.millis(10));
     await pending;
-    console.log(now()); // 10,000,000 nanoseconds
+    console.log(now().since(Instant.ZERO).asMillis()); // 10
 } finally {
     installed.close();
 }

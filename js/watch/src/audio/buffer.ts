@@ -1,4 +1,4 @@
-import { Micro, Milli, type Second } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
 import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
@@ -34,18 +34,18 @@ export class Backpressure {
 
 	// The ring's floor in samples and as a duration, and the part of the target above it, held encoded.
 	#floor = 0;
-	#headroom = 0 as Micro;
-	#hold = 0 as Micro;
+	#headroom = 0;
+	#hold = 0;
 
 	// The newest media timestamp queued ahead of the decoder, unset while none is.
-	#queued?: Micro;
+	#queued?: number;
 
 	// The ring as last observed. The playhead is undefined until one is known on the current timeline.
-	#playhead?: Micro;
+	#playhead?: number;
 	#stalled = true;
 	// The first frame released on the current timeline. Until PCM lands and a report carries a
 	// playhead, it stands in for where the ring anchors, since the ring may already be playing.
-	#anchor?: Micro;
+	#anchor?: number;
 	// Whether the ring is parked for a hold the queued media does not cover yet. The worklet keeps a
 	// park until the next floor update, so only this decides when it ends: a write of output decoded
 	// before the park cannot.
@@ -58,8 +58,8 @@ export class Backpressure {
 	//
 	// The frames released and not yet decoded, oldest first, and where the first PCM inserted on this
 	// timeline starts (the ring anchors there) and the newest ends.
-	#decoding: Micro[] = [];
-	#inserted?: { start: Micro; end: Micro };
+	#decoding: number[] = [];
+	#inserted?: { start: number; end: number };
 	// How far output lands in the ring behind the frame it was decoded from (Opus pre-skip). A playing
 	// ring compares a frame to its playhead where the output lands, or an offset past the floor would
 	// drain it.
@@ -67,11 +67,11 @@ export class Backpressure {
 	// The duration of the latest output, which the next frame's is taken to match. A live frame released
 	// by where its output starts would land with its tail past the floor, and the stretch accelerating
 	// that away would only draw the next frame out sooner, playing through the hold.
-	#frame = 0 as Micro;
+	#frame = 0;
 
-	#waiters: Array<{ timestamp: Micro; resolve: () => void }> = [];
+	#waiters: Array<{ timestamp: number; resolve: () => void }> = [];
 
-	constructor(rate: number, buffered: boolean, delay: Milli) {
+	constructor(rate: number, buffered: boolean, delay: Duration) {
 		this.#rate = rate;
 		this.#buffered = buffered;
 		this.setLatency(delay);
@@ -89,10 +89,10 @@ export class Backpressure {
 	 * own. A floor update ends a park, so a ring already parked stays parked while the remaining hold
 	 * is uncovered.
 	 */
-	setLatency(delay: Milli): boolean {
+	setLatency(delay: Duration): boolean {
 		this.#floor = ringSamples(this.#rate, delay);
-		this.#headroom = Micro.fromSecond((this.#floor / this.#rate) as Second);
-		const hold = ringHold(delay);
+		this.#headroom = (this.#floor / this.#rate) * 1_000_000;
+		const hold = ringHold(delay).asMicros();
 		const rise = hold > this.#hold;
 		this.#hold = hold;
 
@@ -106,7 +106,7 @@ export class Backpressure {
 	}
 
 	/** Note the ring's playhead and whether it is stalled, and release every frame now due. */
-	observe(playhead: Micro | undefined, stalled: boolean): void {
+	observe(playhead: number | undefined, stalled: boolean): void {
 		this.#playhead = playhead;
 		this.#stalled = stalled;
 		this.#release();
@@ -116,7 +116,7 @@ export class Backpressure {
 	 * Note the newest media timestamp queued ahead of the decoder, or undefined once none is. Returns
 	 * true when that covers the hold of a parked ring, which a floor update then resumes.
 	 */
-	queued(newest: Micro | undefined): boolean {
+	queued(newest: number | undefined): boolean {
 		this.#queued = newest;
 		const playhead = this.#start();
 		const resume = this.#parked && playhead !== undefined && this.#covered(playhead + this.#headroom);
@@ -130,7 +130,7 @@ export class Backpressure {
 	 * unless it was discarded. It answers the oldest frame still decoding and every one it reaches
 	 * past: a decoder may emit nothing for a frame.
 	 */
-	decoded(end: Micro, landed?: Micro): void {
+	decoded(end: number, landed?: number): void {
 		if (landed !== undefined) this.#offset = end - landed;
 		let answered = 0;
 		while (answered < this.#decoding.length && (answered === 0 || this.#decoding[answered] < end)) answered++;
@@ -145,22 +145,22 @@ export class Backpressure {
 	}
 
 	/** Note that PCM from `start` to `end` reached the ring. */
-	inserted(start: Micro, end: Micro): void {
-		this.#frame = (end - start) as Micro;
+	inserted(start: number, end: number): void {
+		this.#frame = end - start;
 		const inserted = this.#inserted;
 		this.#inserted = { start: inserted?.start ?? start, end: inserted && inserted.end > end ? inserted.end : end };
 		this.#release();
 	}
 
 	/** Note that the ring dropped what it held at or after `timestamp`, keeping what is already due. */
-	truncated(timestamp: Micro): void {
+	truncated(timestamp: number): void {
 		const inserted = this.#inserted;
 		const start = this.#playhead ?? inserted?.start;
 		if (!inserted || start === undefined || timestamp >= inserted.end) return;
-		this.#inserted = { start: inserted.start, end: (timestamp > start ? timestamp : start) as Micro };
+		this.#inserted = { start: inserted.start, end: Math.max(timestamp, start) };
 	}
 
-	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
+	wait(timestamp: number, signal: AbortSignal): Promise<void> {
 		if (this.#closed || signal.aborted || this.#admit(timestamp)) return Promise.resolve();
 		return new Promise((resolve) => {
 			// An aborted wait drops its waiter, so a retired decode loop leaves nothing queued here.
@@ -217,13 +217,13 @@ export class Backpressure {
 
 	// The frame the ring plays from: its reported playhead, else where it anchored or will anchor,
 	// mapped back to the frame its output came from, which is what the queued media covers.
-	#start(): Micro | undefined {
+	#start(): number | undefined {
 		const start = this.#playhead ?? this.#inserted?.start;
-		if (start !== undefined) return (start + this.#offset) as Micro;
+		if (start !== undefined) return start + this.#offset;
 		return this.#anchor;
 	}
 
-	#admit(timestamp: Micro): boolean {
+	#admit(timestamp: number): boolean {
 		const due = this.#due(timestamp);
 		if (due) {
 			this.#anchor ??= timestamp;
@@ -232,7 +232,7 @@ export class Backpressure {
 		return due;
 	}
 
-	#due(timestamp: Micro): boolean {
+	#due(timestamp: number): boolean {
 		const playhead = this.#playhead;
 		if (!this.#stalled && playhead !== undefined) {
 			const tail = this.#buffered ? 0 : this.#frame;
@@ -251,7 +251,7 @@ export class Backpressure {
 		const start = playhead ?? inserted?.start;
 		const buffered = inserted && start !== undefined ? Math.max(0, inserted.end - start) : 0;
 		const decoding = this.#decoding;
-		const pending = decoding.length > 0 ? (decoding[decoding.length - 1] as number) - (decoding[0] as number) : 0;
+		const pending = decoding.length > 0 ? decoding[decoding.length - 1] - decoding[0] : 0;
 		return buffered + pending < this.#headroom;
 	}
 }
@@ -265,9 +265,9 @@ export class AudioBuffer {
 	readonly channels: number;
 	#worklet: AudioWorkletNode;
 
-	readonly #timestamp = new Signal<Micro>(0 as Micro);
+	readonly #timestamp = new Signal<number>(0);
 	/** Current playback timestamp, as the worklet last reported it. */
-	readonly timestamp: Getter<Micro> = this.#timestamp;
+	readonly timestamp: Getter<number> = this.#timestamp;
 
 	readonly #stalled = new Signal<boolean>(true);
 	/** Whether the ring is stalled (waiting to fill). */
@@ -281,13 +281,13 @@ export class AudioBuffer {
 	/** How many times the ring skipped ahead, dropping queued audio, cumulative. */
 	readonly skips: Getter<number> = this.#skips;
 
-	readonly #trimmed = new Signal<Milli>(Milli.zero);
+	readonly #trimmed = new Signal<Duration>(Duration.ZERO);
 	/** Media the ring's skips dropped unplayed, less declared silence, cumulative. */
-	readonly trimmed: Getter<Milli> = this.#trimmed;
+	readonly trimmed: Getter<Duration> = this.#trimmed;
 
-	readonly #accelerated = new Signal<Milli>(Milli.zero);
+	readonly #accelerated = new Signal<Duration>(Duration.ZERO);
 	/** Media the stretch removed by playing faster, cumulative. */
-	readonly accelerated: Getter<Milli> = this.#accelerated;
+	readonly accelerated: Getter<Duration> = this.#accelerated;
 
 	readonly #silent = new Signal<boolean>(false);
 	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
@@ -308,7 +308,7 @@ export class AudioBuffer {
 			channels: number;
 			rate: number;
 			/** The target delay. The ring holds up to a fixed floor of it decoded; the rest stays encoded. */
-			delay: Milli;
+			delay: Duration;
 			/** Anchor to the first frame and play through, holding the lookahead upstream. */
 			buffered: boolean;
 			/** Hold consumption until the shared startup floor is ready. */
@@ -346,8 +346,8 @@ export class AudioBuffer {
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
 				this.#skips.set(data.skips);
-				this.#trimmed.set(data.trimmed);
-				this.#accelerated.set(data.accelerated);
+				this.#trimmed.set(Duration.millis(data.trimmed));
+				this.#accelerated.set(Duration.millis(data.accelerated));
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
@@ -359,15 +359,15 @@ export class AudioBuffer {
 	}
 
 	// The floor as the worklet takes it.
-	#latency(): Milli {
-		return Milli.fromSecond((this.#backpressure.floor / this.rate) as Second);
+	#latency(): number {
+		return (this.#backpressure.floor / this.rate) * 1000;
 	}
 
 	/**
 	 * Note that the decoder produced output ending at `end` on its own timeline, which lands in the ring
 	 * up to `landed` unless it was discarded.
 	 */
-	decoded(end: Micro, landed?: Micro): void {
+	decoded(end: number, landed?: number): void {
 		this.#backpressure.decoded(end, landed);
 	}
 
@@ -380,8 +380,8 @@ export class AudioBuffer {
 	 * Insert audio samples at the given timestamp, transferring their buffers. A write may land out of
 	 * order, but samples behind what live playback already staged, up to 30 ms past the playhead, are dropped.
 	 */
-	insert(timestamp: Micro, data: Float32Array[]): void {
-		const end = (timestamp + Micro.fromSecond(((data[0]?.length ?? 0) / this.rate) as Second)) as Micro;
+	insert(timestamp: number, data: Float32Array[]): void {
+		const end = timestamp + ((data[0]?.length ?? 0) / this.rate) * 1_000_000;
 		this.#backpressure.inserted(timestamp, end);
 		const msg: Data = { type: "data", data, timestamp };
 		// Transfer the ArrayBuffers to avoid a copy: the caller loses access to them.
@@ -395,7 +395,7 @@ export class AudioBuffer {
 	 * Update the target delay. The ring holds up to a fixed floor of it decoded, and the rest stays
 	 * encoded upstream until the media queued behind a frame covers it.
 	 */
-	setLatency(delay: Milli): void {
+	setLatency(delay: Duration): void {
 		const park = this.#backpressure.setLatency(delay);
 		const msg: Latency = { type: "latency", latency: this.#latency() };
 		// One message, so the worklet never plays a quantum between the new floor and the park.
@@ -407,7 +407,7 @@ export class AudioBuffer {
 	 * Note the newest media timestamp queued ahead of the decoder, or undefined once none is. The
 	 * queue is what covers the part of the target held encoded, so it is what resumes a parked ring.
 	 */
-	queued(newest: Micro | undefined): void {
+	queued(newest: number | undefined): void {
 		if (!this.#backpressure.queued(newest)) return;
 		const msg: Latency = { type: "latency", latency: this.#latency() };
 		this.#worklet.port.postMessage(msg);
@@ -420,7 +420,7 @@ export class AudioBuffer {
 	 * but the previous track's write-ahead tail would otherwise play once the new audio runs out.
 	 * Unlike `reset()` this keeps playing, so there's no gap at the handover.
 	 */
-	truncate(timestamp: Micro): void {
+	truncate(timestamp: number): void {
 		this.#backpressure.truncated(timestamp);
 		const msg: Truncate = { type: "truncate", timestamp };
 		this.#worklet.port.postMessage(msg);
@@ -431,7 +431,7 @@ export class AudioBuffer {
 	 * the decoded audio short of it, so running dry there plays comfort noise rather than counting as
 	 * an underrun, until the next audio plays.
 	 */
-	end(timestamp: Micro): void {
+	end(timestamp: number): void {
 		const msg: End = { type: "end", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}
@@ -467,7 +467,7 @@ export class AudioBuffer {
 	 * instead of decoding it too far ahead of the floor-sized ring. Resolves at once for live playback
 	 * whose whole target fits the floor. Resolves early, releasing the wait, once `signal` aborts.
 	 */
-	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
+	wait(timestamp: number, signal: AbortSignal): Promise<void> {
 		// The worklet-reported playhead lags by a state-message interval, which only holds frames longer.
 		return this.#backpressure.wait(timestamp, signal);
 	}

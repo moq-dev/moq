@@ -983,7 +983,8 @@ impl Pad {
 		let result = match &mut track {
 			Sink::Media(media) => media.track.finish().map_err(anyhow::Error::from),
 			Sink::Text(text) => text.producer.finish().map_err(anyhow::Error::from),
-			Sink::Opaque(producer) => producer.clone().finish().map_err(anyhow::Error::from),
+			// `closed` retains its own clone, whose appends the end refuses.
+			Sink::Opaque(producer) => producer.clone().finish().map(drop).map_err(anyhow::Error::from),
 		};
 		if named {
 			self.names.end(track.name());
