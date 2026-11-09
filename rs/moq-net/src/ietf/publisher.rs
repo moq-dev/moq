@@ -8938,6 +8938,48 @@ mod group_priority_test {
 		assert!(matches!(serving.await, Err(Error::Old)));
 	}
 
+	/// A group whose stream opened but whose relay state never settled still expires once a
+	/// successor lands, rather than holding the stream until its ingest ends.
+	#[kio::test]
+	async fn a_group_waiting_for_its_relay_state_expires() {
+		let session = SinkSession::new(crate::lite::test_transport::Log::default());
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			track::Info::default(),
+		);
+		let mut subscriber = track.subscribe(None);
+		let _stalled = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("stalled group");
+
+		let mut serve = GroupServe::new(
+			crate::driver::Transport::new(session.clone()),
+			ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			Rank::solo(kio::Producer::new(0).consume()),
+			group,
+			None,
+			Version::Draft18,
+			GroupSlice::default(),
+		);
+		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"the relay state is unsettled"
+		);
+
+		let mut edge = track.create_group(group::Info { sequence: 1 }).unwrap();
+		edge.write_frame(None, b"edge".as_slice()).unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
 	/// A local group that never held the requested prefix fails rather than serving its
 	/// tail as the whole group, with or without an end inside it.
 	#[kio::test]
