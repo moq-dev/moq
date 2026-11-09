@@ -134,21 +134,15 @@ fn fast_backoff() -> MoqBackoff {
 	}
 }
 
-async fn wait_for_config_error(
-	mut op: impl FnMut() -> Result<(), MoqError>,
-	want: impl Fn(&MoqError) -> bool,
-) -> MoqError {
+/// Wait until an `accept` is parked on `server`'s queue.
+async fn wait_until_accepting(server: &MoqServer) {
 	kio::clock::timeout(TIMEOUT, async {
-		loop {
-			match op() {
-				Err(err) if want(&err) => return err,
-				Ok(()) => tokio::task::yield_now().await,
-				Err(err) => panic!("unexpected configuration error while waiting: {err:?}"),
-			}
+		while !server.accepting() {
+			tokio::task::yield_now().await;
 		}
 	})
 	.await
-	.expect("timed out waiting for the expected configuration error")
+	.expect("timed out waiting for accept to park");
 }
 
 /// Wait until `read_frame` has taken `group` off the ordered cursor.
@@ -6852,14 +6846,10 @@ async fn server_cancel_releases_the_bound_port() {
 	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
-	// Park an accept on the server lock, the state a live server is closed in.
+	// Park an accept on the queue, the state a live server is closed in.
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
-	wait_for_config_error(
-		|| server.cert_fingerprints().map(drop),
-		|err| matches!(err, MoqError::Busy),
-	)
-	.await;
+	wait_until_accepting(&server).await;
 
 	server.cancel();
 
@@ -6909,6 +6899,27 @@ async fn server_cancel_during_listen_releases_the_port() {
 	server.cancel();
 	std::net::UdpSocket::bind(addr).expect("cancel should release the socket before it returns");
 	drop(listen);
+}
+
+/// A listen that fails to bind leaves the server idle, so it can listen again once the
+/// address frees up.
+#[tokio::test]
+async fn server_listen_retries_after_a_failed_bind() {
+	let config = |bind: String| MoqServerConfig {
+		bind: Some(bind),
+		tls: localhost_tls(),
+		..Default::default()
+	};
+	let holder = MoqServer::new(config("127.0.0.1:0".into())).unwrap();
+	let addr = holder.listen().await.expect("listen failed");
+
+	let server = MoqServer::new(config(addr.clone())).unwrap();
+	assert!(matches!(server.listen().await, Err(MoqError::Bind { .. })));
+	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Bind { .. })));
+
+	holder.cancel();
+	assert_eq!(server.listen().await.expect("the retry should bind"), addr);
+	server.cancel();
 }
 
 /// A foreign cancel only stops polling an accept; uniffi drops it later, at `rust_future_free`.
@@ -7788,7 +7799,7 @@ async fn cancelling_a_session_aborts_its_first_dial() {
 }
 
 #[tokio::test]
-async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
+async fn server_cert_fingerprints_during_accept_and_cancelled_after() {
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
@@ -7803,11 +7814,10 @@ async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
 
-	wait_for_config_error(
-		|| server.cert_fingerprints().map(drop),
-		|err| matches!(err, MoqError::Busy),
-	)
-	.await;
+	wait_until_accepting(&server).await;
+	server
+		.cert_fingerprints()
+		.expect("fingerprints available while an accept is parked");
 
 	server.cancel();
 	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Cancelled)));

@@ -4142,6 +4142,31 @@ fn announced_deactivation() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A route whose broadcast closed never names the broadcast that takes over its id once the
+/// counter wraps.
+#[test]
+fn route_broadcast_survives_id_reuse() {
+	let origin = id(moq_origin_create());
+	let (route, broadcast) = create_route(origin, b"stale", None);
+	assert_eq!(moq_publish_close(broadcast), 0);
+
+	// Nextest runs each test in its own process, so nothing else draws from the counter.
+	crate::id::NEXT_ID.store(broadcast, std::sync::atomic::Ordering::Relaxed);
+	let (fresh_route, fresh) = create_route(origin, b"fresh", None);
+	assert_eq!(fresh, broadcast, "the new broadcast reuses the closed one's id");
+
+	assert_eq!(
+		moq_route_broadcast(route),
+		MOQ_ERROR_BROADCAST_NOT_FOUND,
+		"the stale route must not name the new broadcast"
+	);
+	assert_eq!(id(moq_route_broadcast(fresh_route)), fresh);
+	assert_eq!(moq_route_free(route), 0);
+	assert_eq!(moq_route_free(fresh_route), 0);
+	assert_eq!(moq_publish_close(fresh), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// Freeing the route retracts it, though its broadcast handle stays the caller's to close.
 #[test]
 fn freeing_a_route_retracts_it() {
