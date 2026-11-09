@@ -906,9 +906,7 @@ describe("time stretch", () => {
 		settled(peaks, 100);
 		// Every sample written either played or is still buffered, so nothing was skipped.
 		expect(buffer.skips).toBe(0);
-		expect(Math.round((buffer.timestamp * RATE) / 1_000_000) + buffer.length).toBeGreaterThan(
-			written - frames(30),
-		);
+		expect(Math.round((buffer.timestamp * RATE) / 1_000_000) + buffer.length).toBeGreaterThan(written - frames(30));
 		for (let i = 1; i < timestamps.length; i++) {
 			const step = timestamps[i] - timestamps[i - 1];
 			expect(step).toBeGreaterThan(0);
