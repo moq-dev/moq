@@ -61,7 +61,7 @@ native playback against its budgets.
 - [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - `moq play` copies NetEq's accelerate and preemptive expand, sharing the browser's seams and vectors, so its native rows play with no audible glitch once the target settles
 - [Buffered converge](/quest/m1/audio-jitter-target/buffered-converge.md) - a buffered `<moq-watch>` time-stretches its audio back onto the shared clock after a stall or drift, so lip sync returns and no audio group is dropped
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - the AAC browser budgets are re-measured from nightlies after the TS importer groups each PES
-- [Native A/V lag](/quest/m1/audio-jitter-target/native-av-lag.md) - `moq play` reports how far audio trails its presentation clock, and native stops expanding into the gap between arrivals if it settles audio late
+- [Native A/V lag](/quest/m1/audio-jitter-target/native-av-lag.md) - `moq play` reports how far audio trails its presentation clock, and native decides its stretch where audio arrives rather than expanding into the gap between arrivals
 - [Native rendition delay](/quest/m1/audio-jitter-target/native-rendition-delay.md) - `moq play` holds each subscribed rendition's catalog `delay` plus its target, as the browser does
 - [Chromium Opus stalled share](/quest/m1/audio-jitter-target/opus-stalled-share.md) - the Chromium Opus browser rows stay under the 0.01 stalled-share budget every night
 

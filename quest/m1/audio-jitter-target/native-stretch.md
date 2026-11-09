@@ -38,9 +38,11 @@ cooldowns.
 end's tail unstretched, as finishing does. Its browser half decides on the
 ring's depth right after each arrival and never expands, since expanding on
 the depth between arrivals settled audio a burst behind the shared clock
-(decided 2026-11-08). Native playback still decides on `buffered`, so
-whether it settles behind its clock the same way is worth measuring once its
-rows report A/V lag.
+(decided 2026-11-08).
+[moq-dev/moq#8361](https://github.com/moq-dev/moq/pull/8361) measured native
+settling behind its clock the same way (A/V lag p50 up to 88 ms) and moves it
+onto that decision, with an expand only for a publisher clock slower than the
+device's.
 Analysis samples NetEq's 48 kHz FIR on a virtual clock for other
 device rates and uses floating-point peak refinement and fades. Those
 arithmetic adaptations are documented, not claimed bit-identical to int16
@@ -151,8 +153,10 @@ bench waits below remain.
 ## Waiting
 
 - moq-dev/moq: seven scheduled Nightlies on a `main` that includes
-  [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308), whose
-  native rows report `player_skips` and `trimmed_ms`. Find them with `gh run list --workflow
+  [moq-dev/moq#8361](https://github.com/moq-dev/moq/pull/8361), whose
+  native rows decide where audio arrives and report `av_lag_ms` beside
+  [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308)'s
+  `player_skips` and `trimmed_ms`; the calibration budgets `av_lag_ms` too. Find them with `gh run list --workflow
   nightly.yml --event schedule`, download each with `gh run download <id>
   -n audio-quality-run` within its 7 days, keep its native rows in the
   calibration PR's body, and apply the calibration rule once seven exist.
