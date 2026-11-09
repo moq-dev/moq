@@ -351,9 +351,11 @@ fn a_late_poll_past_the_window_gives_up() {
 	assert!(matches!(machine.poll(started, &waiter), Action::Dial(_)));
 	machine.failed(started, TestError::Dial, Verdict::Retry);
 	assert!(matches!(machine.poll(started, &waiter), Action::Retrying(_)));
-	assert!(matches!(machine.poll(started, &waiter), Action::Wait(Some(until)) if until <= started + INITIAL));
+	assert!(
+		matches!(machine.poll(started, &waiter), Action::Wait(Some(until)) if until <= started.saturating_add(INITIAL))
+	);
 
-	let action = machine.poll(started + Duration::from_secs(2), &waiter);
+	let action = machine.poll(started.saturating_add(Duration::from_secs(2)), &waiter);
 	assert!(
 		matches!(action, Action::Done(Err(TestError::Policy(Failure::Exhausted { .. })))),
 		"{action:?}"

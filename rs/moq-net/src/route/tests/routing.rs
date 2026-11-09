@@ -816,12 +816,12 @@ fn a_route_starved_at_the_last_seqno_requests_nothing() {
 	let mut sim = Sim::new(3);
 	sim.join(origin, a, 1);
 	sim.join(a, b, 1);
-	sim.originate(origin, 7, MAX);
+	originate(&mut sim, origin, 7, MAX);
 	assert!(sim.run());
 	assert!(sim.route(b, 7).is_some());
 
 	sim.kill(origin);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	sim.reconnect(origin);
 	let requests = sim.stats.requests;
 	assert!(sim.run());

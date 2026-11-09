@@ -436,7 +436,7 @@ impl Probe {
 	fn new(now: Instant) -> Self {
 		Self {
 			delay: PROBE_INITIAL,
-			state: Probing::Due(now + jitter(PROBE_INITIAL)),
+			state: Probing::Due(now.saturating_add(jitter(PROBE_INITIAL))),
 		}
 	}
 
@@ -456,7 +456,7 @@ impl Probe {
 	/// Schedule the next probe after a failed one, doubling the wait up to the cap.
 	fn failed(&mut self, now: Instant) {
 		self.delay = self.delay.saturating_mul(2).min(PROBE_MAX);
-		self.state = Probing::Due(now + jitter(self.delay));
+		self.state = Probing::Due(now.saturating_add(jitter(self.delay)));
 	}
 }
 
@@ -708,7 +708,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			&mut self.phase,
 			Phase::Dialing(Dialing {
 				index,
-				deadline: connect.map(|connect| (now + connect, Failure::Timeout(connect))),
+				deadline: connect.map(|connect| (now.saturating_add(connect), Failure::Timeout(connect))),
 				presented,
 			}),
 		) else {
@@ -729,7 +729,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			older.retire();
 		}
 		self.predecessor = Some(Predecessor {
-			deadline: now + self.config.goaway.handover,
+			deadline: now.saturating_add(self.config.goaway.handover),
 			session: old.session,
 			closing: false,
 		});
@@ -792,7 +792,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		};
 		let (attempt, presented) = self.attempt(live.index);
 		tracing::debug!(peer = %Shown(attempt.target.url()), "probing the preferred transport");
-		let deadline = self.config.timeout.map(|timeout| now + timeout);
+		let deadline = self.config.timeout.map(|timeout| now.saturating_add(timeout));
 		if let Phase::Live(live) = &mut self.phase
 			&& let Some(probe) = live.probe.as_mut()
 		{
