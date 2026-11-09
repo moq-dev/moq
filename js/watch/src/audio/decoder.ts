@@ -21,13 +21,7 @@ import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feed
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync, Track } from "../sync";
 import { AudioBuffer } from "./buffer";
-import {
-	type DecoderConfig,
-	frameDuration,
-	type PlaybackIdentity,
-	packetDuration,
-	playbackIdentity,
-} from "./config";
+import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
 import { Handover } from "./handover";
 import { AUTO_MAX_DELAY, ringHold, target } from "./latency";
 import { Order } from "./order";
