@@ -875,7 +875,7 @@ type PublisherRendition = {
 type ViewerRendition = {
   frames?: number, bytes?: number, decoded?: number, late?: number,
   errors?: number, stalls?: number, stalled?: number, underruns?: number,
-  arrival?: { timestamp: number, wall: number }, latency?: number,
+  arrival?: { timestamp: number, wall: number },
 }
 type Transport = {
   rtt?: number, rate?: number, lostBytes?: number, lostPackets?: number, age?: number,
@@ -896,7 +896,7 @@ An empty rendition entry is valid and represents zero cumulative counters; its I
 Publisher `keyframes` counts sent keyframes; `skipped` counts frames skipped before sending.
 Viewer `decoded`, `late`, and `errors` count decoded frames, frames too late for playout, and decode errors.
 `stalls` counts playout stalls, `stalled` is cumulative stalled duration, and `underruns` counts audio buffer underruns.
-`bitrate` is the latest target encoder bitrate, `latency` the latest playout latency, and `arrival` pairs the newest received media timestamp with its arrival wall time.
+`bitrate` is the latest target encoder bitrate, and `arrival` pairs the newest received media timestamp with its arrival wall time.
 Durations and media timestamps are milliseconds; `arrival.wall` is milliseconds since the MoQ epoch (2020-01-01T00:00:00Z).
 Sub-millisecond durations and timestamps are floored when encoded.
 Rates are bits per second.
@@ -1126,6 +1126,7 @@ This document has no IANA actions.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
+- Removed the viewer feedback `latency` field.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
 - Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
 - Added an optional `instance` beside every rendition and data track `broadcast` reference ({{field-instance}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `instance` fails a rendition that resolves another stream, and is best effort against an Instance a receiver minted.

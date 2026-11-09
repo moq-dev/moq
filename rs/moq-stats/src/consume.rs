@@ -186,7 +186,9 @@ mod tests {
 
 	use moq_net::{Consume, Path, Timestamp, origin, track};
 
-	use crate::{Producer, Tier, produce};
+	use moq_net::stats::Tier;
+
+	use crate::{Producer, produce};
 
 	use super::*;
 

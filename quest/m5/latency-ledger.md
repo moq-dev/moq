@@ -46,7 +46,7 @@ probes, which was the right trade to get it running. This quest promotes them.
   so the sum-to-end-to-end identity (with its named `unaccounted`
   remainder) can be added once a spanning clock exists.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): hang echo's producer-less `latency` is deleted before the cut ([api-shape/media](/quest/m2/api-shape/media.md)), so this adds its measurement additively.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): hang echo's producer-less `latency` is deleted before the cut ([moq-dev/moq#8298](https://github.com/moq-dev/moq/pull/8298)), so this adds its measurement additively.
 
 ## Required
 

@@ -23,7 +23,7 @@
 
 use std::task::Poll;
 
-use anyhow::Context;
+use super::Error;
 use bytes::{BufMut, Bytes, BytesMut};
 use hang::catalog::{AV1, AudioCodec, Catalog, Container, Reference, VideoCodec};
 
@@ -144,7 +144,7 @@ impl Flavor {
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	delay: std::time::Duration,
+	delay: moq_net::track::Delay,
 	/// Frames as tags, encoded only once released.
 	jitter: crate::jitter::Buffer<(u8, usize), Tag>,
 	/// Emit every rendition as an enhanced-RTMP multitrack track, rather than only
@@ -213,7 +213,7 @@ impl FlvTrack {
 	}
 
 	/// The tag timestamp of a frame presented at `pts` on the tag clock, on the inferred clock.
-	fn tag_timestamp(&self, pts: u32) -> anyhow::Result<u32> {
+	fn tag_timestamp(&self, pts: u32) -> crate::Result<u32> {
 		if self.flavor.has_composition_time() {
 			author_dts(pts, self.dts_reserve, self.last_dts)
 		} else {
@@ -229,7 +229,7 @@ impl FlvTrack {
 		arrived: kio::clock::Instant,
 		shift: u32,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
-	) -> anyhow::Result<()> {
+	) -> crate::Result<()> {
 		self.release(key, Some(arrived), shift, true, jitter)?;
 		let depth = match &self.config {
 			Some(config) if self.flavor.has_composition_time() => crate::container::declared::depth(config)?,
@@ -248,7 +248,7 @@ impl FlvTrack {
 		shift: u32,
 		flush: bool,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
-	) -> anyhow::Result<()> {
+	) -> crate::Result<()> {
 		let Some(mut clock) = self.declared.take() else {
 			return Ok(());
 		};
@@ -257,11 +257,10 @@ impl FlvTrack {
 				if let Some(settled) = settled {
 					arrival.arrived = arrival.arrived.max(settled);
 				}
-				let timestamp = u32::try_from(dts + i128::from(shift))
-					.context("FLV decode time before the stream's origin or past 32 bits")?;
+				let timestamp = u32::try_from(dts + i128::from(shift)).map_err(|_| Error::TimestampRange)?;
 				self.queue(key, arrival, record, timestamp, shift, jitter)?;
 			}
-			anyhow::Ok(())
+			Ok::<_, crate::Error>(())
 		})();
 		self.declared = Some(clock);
 		released
@@ -276,7 +275,7 @@ impl FlvTrack {
 		timestamp: u32,
 		shift: u32,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
-	) -> anyhow::Result<()> {
+	) -> crate::Result<()> {
 		if self.flavor.has_composition_time() {
 			self.last_dts = Some(timestamp);
 		}
@@ -322,7 +321,7 @@ impl FlvTrack {
 
 	/// The out-of-band config record for this track's sequence-header tag, or
 	/// `None` for codecs that carry their config in band.
-	fn config_record(&self) -> anyhow::Result<Option<Bytes>> {
+	fn config_record(&self) -> crate::Result<Option<Bytes>> {
 		if !self.flavor.has_sequence_header() {
 			return Ok(None);
 		}
@@ -330,7 +329,7 @@ impl FlvTrack {
 			.source
 			.description()
 			.or(self.fallback_description.as_ref())
-			.with_context(|| format!("FLV track '{}' missing its codec config record", self.name))?;
+			.ok_or_else(|| Error::MissingConfigRecord(self.name.clone()))?;
 		Ok(Some(record.clone()))
 	}
 }
@@ -346,7 +345,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			delay: std::time::Duration::ZERO,
+			delay: moq_net::track::Delay::default(),
 			jitter: crate::jitter::Buffer::new(std::time::Duration::ZERO),
 			multitrack: false,
 			video: Vec::new(),
@@ -356,15 +355,17 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Release frames a fixed delay after their decode time, dropping late frames.
+	/// Set how far behind the live edge the export plays.
 	///
-	/// A source whose clock runs further off ours than the output's may follow fails the export
-	/// once it has used half the delay. The same delay bounds each source's staleness. Zero (the default) releases each frame as
-	/// soon as it is read and drops none as late, but a stalled group is still skipped once a
-	/// newer one is ready.
-	pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
+	/// [`Delay::min`](moq_net::track::Delay::min) releases each frame that long after its decode
+	/// time, dropping frames that arrive later, and is where each per-track source starts. A source
+	/// whose clock runs further off ours than the output's may follow fails the export once it has
+	/// used half of it. [`Delay::max`](moq_net::track::Delay::max) is how late a source's group may
+	/// fall before it is skipped. Zero for both (the default) releases each frame as soon as it is
+	/// read and drops none as late, but a stalled group is still skipped once a newer one is ready.
+	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
 		self.delay = delay;
-		self.jitter = crate::jitter::Buffer::new(delay);
+		self.jitter = crate::jitter::Buffer::new(delay.min.unwrap_or_default());
 		self
 	}
 
@@ -382,7 +383,7 @@ impl<S: Stream> Export<S> {
 
 	/// Get the next FLV byte chunk, or `None` once the export ends.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<anyhow::Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
 		// 1. Drain catalog updates to discover the track layout.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -459,7 +460,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	/// Read each track within its jitter window, preserving ingress timing before buffering.
-	fn fill(&mut self, waiter: &kio::Waiter) -> anyhow::Result<()> {
+	fn fill(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
 		for kind in [0, 1] {
 			let count = if kind == 0 { self.video.len() } else { self.audio.len() };
 			for index in 0..count {
@@ -551,7 +552,7 @@ impl<S: Stream> Export<S> {
 		Ok(())
 	}
 
-	fn update_catalog(&mut self, mut catalog: Catalog) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, mut catalog: Catalog) -> crate::Result<()> {
 		self.source.retain_selectable(&mut catalog);
 
 		// A single-track FLV stream binds one rendition of each kind; multitrack
@@ -600,7 +601,7 @@ impl<S: Stream> Export<S> {
 
 	/// Move each bound track the catalog moved to another track or broadcast onto it. The tag
 	/// shape is fixed by the header, so the new track must carry the same codec.
-	fn rebind(&mut self, catalog: &Catalog) -> anyhow::Result<()> {
+	fn rebind(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		for track in &mut self.video {
 			let Some(config) = catalog.video.renditions.get(&track.name) else {
 				continue;
@@ -608,11 +609,9 @@ impl<S: Stream> Export<S> {
 			if track.source.reads(&self.source, &track.name, config) {
 				continue;
 			}
-			anyhow::ensure!(
-				video_flavor(config)? == track.flavor,
-				"FLV track '{}' moved to another codec after the stream header",
-				track.name
-			);
+			if video_flavor(config)? != track.flavor {
+				return Err(Error::CodecChanged(track.name.clone()).into());
+			}
 			ensure_legacy(&config.container, "video", &track.name)?;
 			if let Some(source) = ExportSource::for_video(&self.source, &track.name, config, self.delay)? {
 				track.fallback_description = fallback_description(config);
@@ -627,11 +626,9 @@ impl<S: Stream> Export<S> {
 			if track.source.reads(&self.source, &track.name, config) {
 				continue;
 			}
-			anyhow::ensure!(
-				audio_flavor(config)? == track.flavor,
-				"FLV track '{}' moved to another codec after the stream header",
-				track.name
-			);
+			if audio_flavor(config)? != track.flavor {
+				return Err(Error::CodecChanged(track.name.clone()).into());
+			}
 			ensure_legacy(&config.container, "audio", &track.name)?;
 			if let Some(source) = ExportSource::for_audio(&self.source, &track.name, config, self.delay)? {
 				track.rebind(source);
@@ -640,7 +637,7 @@ impl<S: Stream> Export<S> {
 		Ok(())
 	}
 
-	fn bind_video(&mut self, catalog: &Catalog) -> anyhow::Result<()> {
+	fn bind_video(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		let renditions: Vec<_> = if self.multitrack {
 			// Name order (the catalog is a BTreeMap), so each keeps a stable track id.
 			catalog.video.renditions.iter().collect()
@@ -669,7 +666,7 @@ impl<S: Stream> Export<S> {
 			let Some(source) = ExportSource::for_video(&self.source, name, config, self.delay)? else {
 				continue;
 			};
-			let track_id = u8::try_from(self.video.len()).context("too many FLV video tracks")?;
+			let track_id = u8::try_from(self.video.len()).map_err(|_| Error::TooManyTracks("video"))?;
 			self.video.push(FlvTrack {
 				name: name.clone(),
 				track_id,
@@ -689,7 +686,7 @@ impl<S: Stream> Export<S> {
 		Ok(())
 	}
 
-	fn bind_audio(&mut self, catalog: &Catalog) -> anyhow::Result<()> {
+	fn bind_audio(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		let renditions: Vec<_> = if self.multitrack {
 			// Name order (the catalog is a BTreeMap), so each keeps a stable track id.
 			catalog.audio.renditions.iter().collect()
@@ -718,7 +715,7 @@ impl<S: Stream> Export<S> {
 			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.delay)? else {
 				continue;
 			};
-			let track_id = u8::try_from(self.audio.len()).context("too many FLV audio tracks")?;
+			let track_id = u8::try_from(self.audio.len()).map_err(|_| Error::TooManyTracks("audio"))?;
 			self.audio.push(FlvTrack {
 				name: name.clone(),
 				track_id,
@@ -746,7 +743,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	/// Build the FLV file header plus every bound track's sequence-header tag.
-	fn build_header(&mut self) -> anyhow::Result<Bytes> {
+	fn build_header(&mut self) -> crate::Result<Bytes> {
 		let mut out = BytesMut::new();
 
 		// FLV file header: signature, version 1, type flags, data offset = 9.
@@ -788,7 +785,7 @@ impl<S: Stream> Export<S> {
 
 	/// Encode one frame as a single FLV tag, after the sequence-header tag announcing its
 	/// config record when the last one announced another.
-	fn encode_frame(&mut self, is_video: bool, index: usize, tag: Tag) -> anyhow::Result<Bytes> {
+	fn encode_frame(&mut self, is_video: bool, index: usize, tag: Tag) -> crate::Result<Bytes> {
 		let Tag {
 			frame,
 			timestamp: timestamp_ms,
@@ -938,13 +935,13 @@ impl<S: Stream> Export<S> {
 ///
 /// Errors if `body` exceeds FLV's 24-bit `DataSize` field (16 MiB), which would
 /// otherwise be silently truncated into a corrupt header.
-fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -> anyhow::Result<()> {
+fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -> crate::Result<()> {
 	let size: u32 = body
 		.len()
 		.try_into()
 		.ok()
 		.filter(|n| *n <= 0x00FF_FFFF)
-		.context("FLV tag body exceeds the 24-bit DataSize limit")?;
+		.ok_or(Error::TagTooLarge(body.len()))?;
 	out.put_u8(tag_type);
 	out.put_slice(&size.to_be_bytes()[1..]); // 24-bit data size
 	out.put_slice(&timestamp_ms.to_be_bytes()[1..]); // 24-bit timestamp (low)
@@ -955,14 +952,21 @@ fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -
 	Ok(())
 }
 
-fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Result<()> {
+fn ensure_legacy(container: &Container, kind: &'static str, name: &str) -> crate::Result<()> {
 	match container {
 		Container::Legacy | Container::Loc => Ok(()),
-		Container::Cmaf { .. } => anyhow::bail!("FLV export does not support CMAF {kind} track '{name}'"),
-		Container::Unknown(unknown) => anyhow::bail!(
-			"FLV export does not support container '{}' on {kind} track '{name}'",
-			unknown.kind()
-		),
+		Container::Cmaf { .. } => Err(Error::UnsupportedContainer {
+			kind,
+			name: name.to_string(),
+			container: "cmaf".to_string(),
+		}
+		.into()),
+		Container::Unknown(unknown) => Err(Error::UnsupportedContainer {
+			kind,
+			name: name.to_string(),
+			container: unknown.kind().to_string(),
+		}
+		.into()),
 	}
 }
 
@@ -975,58 +979,57 @@ fn fallback_description(config: &hang::catalog::VideoConfig) -> Option<Bytes> {
 	}
 }
 
-fn video_flavor(config: &hang::catalog::VideoConfig) -> anyhow::Result<Flavor> {
+fn video_flavor(config: &hang::catalog::VideoConfig) -> crate::Result<Flavor> {
 	match &config.codec {
 		VideoCodec::H264(_) => Ok(Flavor::Avc),
 		VideoCodec::H265(_) => Ok(Flavor::Hevc),
 		VideoCodec::AV1(_) => Ok(Flavor::Av1),
 		VideoCodec::VP9(_) => Ok(Flavor::Vp9),
-		other => anyhow::bail!("FLV export does not support video codec {other:?}"),
+		other => Err(Error::UnsupportedVideoCodec(other.to_string()).into()),
 	}
 }
 
-fn audio_flavor(config: &hang::catalog::AudioConfig) -> anyhow::Result<Flavor> {
+fn audio_flavor(config: &hang::catalog::AudioConfig) -> crate::Result<Flavor> {
 	match &config.codec {
 		AudioCodec::AAC(_) => Ok(Flavor::Aac),
 		AudioCodec::Mp3 => Ok(Flavor::Mp3),
 		AudioCodec::Opus => Ok(Flavor::Opus),
 		AudioCodec::Ac3 => Ok(Flavor::Ac3),
 		AudioCodec::Ec3 => Ok(Flavor::Eac3),
-		other => anyhow::bail!("FLV export does not support audio codec {other:?}"),
+		other => Err(Error::UnsupportedAudioCodec(other.to_string()).into()),
 	}
 }
 
 /// The frame's presentation time on the tag clock, `shift` milliseconds past its own.
-fn frame_timestamp_ms(frame: &Frame, shift: u32) -> anyhow::Result<u32> {
+fn frame_timestamp_ms(frame: &Frame, shift: u32) -> crate::Result<u32> {
 	u32::try_from(frame.timestamp.as_millis())
 		.ok()
 		.and_then(|pts| pts.checked_add(shift))
-		.context("FLV timestamp exceeds 32 bits")
+		.ok_or_else(|| Error::TimestampRange.into())
 }
 
-fn composition_time(pts: u32, dts: u32) -> anyhow::Result<i32> {
+fn composition_time(pts: u32, dts: u32) -> crate::Result<i32> {
 	let cts = i64::from(pts) - i64::from(dts);
 	i32::try_from(cts)
 		.ok()
 		.filter(|cts| (-0x80_0000..=0x7f_ffff).contains(cts))
-		.context("FLV composition time exceeds signed 24 bits")
+		.ok_or_else(|| Error::CompositionTimeRange.into())
 }
 
-fn write_i24(out: &mut BytesMut, value: i32) -> anyhow::Result<()> {
-	anyhow::ensure!(
-		(-0x80_0000..=0x7f_ffff).contains(&value),
-		"FLV composition time exceeds signed 24 bits"
-	);
+fn write_i24(out: &mut BytesMut, value: i32) -> crate::Result<()> {
+	if !(-0x80_0000..=0x7f_ffff).contains(&value) {
+		return Err(Error::CompositionTimeRange.into());
+	}
 	out.put_slice(&(value as u32).to_be_bytes()[1..]);
 	Ok(())
 }
 
-fn author_dts(pts: u32, reserve: u32, last: Option<u32>) -> anyhow::Result<u32> {
+fn author_dts(pts: u32, reserve: u32, last: Option<u32>) -> crate::Result<u32> {
 	let mut dts = pts.saturating_sub(reserve);
 	if let Some(prev) = last
 		&& dts <= prev
 	{
-		dts = prev.checked_add(1).context("FLV DTS exceeds 32 bits")?;
+		dts = prev.checked_add(1).ok_or(Error::TimestampRange)?;
 	}
 	Ok(dts)
 }

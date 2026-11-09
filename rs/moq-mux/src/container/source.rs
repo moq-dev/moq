@@ -150,7 +150,8 @@ pub(crate) struct ExportSource {
 	source: crate::Source,
 	target: Target,
 	state: SourceState,
-	max_delay: std::time::Duration,
+	/// Where the subscription starts behind the live edge, and how late a group may fall.
+	delay: moq_net::track::Delay,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available - from the catalog
@@ -191,9 +192,9 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		max_delay: std::time::Duration,
+		delay: moq_net::track::Delay,
 	) -> Result<Option<Self>, crate::Error> {
-		Self::video(source, name, config, max_delay, build_video_transform(config))
+		Self::video(source, name, config, delay, build_video_transform(config))
 	}
 
 	/// Subscribe to a video rendition for fMP4 export.
@@ -205,7 +206,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		max_delay: std::time::Duration,
+		delay: moq_net::track::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		let record = annexb_catalog_record(config);
 		let transform = match (&config.codec, record.is_some()) {
@@ -213,7 +214,7 @@ impl ExportSource {
 			(VideoCodec::H265(_), true) => Some(VideoTransform::InBand(InBand::new(InBandCodec::H265))),
 			_ => build_video_transform(config),
 		};
-		let mut source = Self::video(source, name, config, max_delay, transform)?;
+		let mut source = Self::video(source, name, config, delay, transform)?;
 		if let (Some(source), Some(record)) = (source.as_mut(), record) {
 			source.description = Some(record);
 		}
@@ -230,16 +231,16 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		max_delay: std::time::Duration,
+		delay: moq_net::track::Delay,
 	) -> Result<Option<Self>, crate::Error> {
-		Self::video(source, name, config, max_delay, None)
+		Self::video(source, name, config, delay, None)
 	}
 
 	fn video(
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		max_delay: std::time::Duration,
+		delay: moq_net::track::Delay,
 		transform: Option<VideoTransform>,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
@@ -247,7 +248,7 @@ impl ExportSource {
 			return Ok(None);
 		};
 
-		let mut export = Self::new(source, name, target, media, max_delay);
+		let mut export = Self::new(source, name, target, media, delay);
 		export.transform = transform;
 		export.description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 		export.video_codec = Some(config.codec.clone());
@@ -264,14 +265,14 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
-		max_delay: std::time::Duration,
+		delay: moq_net::track::Delay,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
 		let Some(target) = Target::of(source, name, config) else {
 			return Ok(None);
 		};
 
-		let mut export = Self::new(source, name, target, media, max_delay);
+		let mut export = Self::new(source, name, target, media, delay);
 		export.description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 		Ok(Some(export))
 	}
@@ -282,28 +283,30 @@ impl ExportSource {
 	///
 	/// Such a rendition has no catalog `broadcast` field, so it always lives on the
 	/// catalog broadcast and can never carry an escaping reference.
-	pub fn for_stream(
-		source: &crate::Source,
-		name: &str,
-		max_delay: std::time::Duration,
-	) -> Result<Self, crate::Error> {
+	pub fn for_stream(source: &crate::Source, name: &str, delay: moq_net::track::Delay) -> Result<Self, crate::Error> {
 		let target = Target {
 			path: source.path().clone(),
 			instance: None,
 			track: name.to_string(),
 		};
 		let media = HangContainer::Legacy(crate::container::Kind::Data);
-		Ok(Self::new(source, name, target, media, max_delay))
+		Ok(Self::new(source, name, target, media, delay))
 	}
 
 	/// A source of rendition `name` reading `target`, with no codec configuration yet.
-	fn new(source: &crate::Source, name: &str, target: Target, media: HangContainer, max_delay: Duration) -> Self {
+	fn new(
+		source: &crate::Source,
+		name: &str,
+		target: Target,
+		media: HangContainer,
+		delay: moq_net::track::Delay,
+	) -> Self {
 		Self {
 			name: name.to_string(),
 			source: source.clone(),
 			state: target.request(source, media),
 			target,
-			max_delay,
+			delay,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -533,8 +536,7 @@ impl ExportSource {
 		if let SourceState::Requesting { binding, start } = &self.state {
 			let broadcast = ready!(binding.poll_broadcast(waiter))?;
 			let instance = binding.sibling().then(|| broadcast.clone());
-			let mut subscription = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(self.max_delay));
+			let mut subscription = moq_net::track::Subscription::default().with_delay(self.delay);
 			if let Some(after) = start.after {
 				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
@@ -890,7 +892,7 @@ mod tests {
 	async fn escaping_reference_skips_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source().await;
-		let max_delay = std::time::Duration::ZERO;
+		let delay = moq_net::track::Delay::default();
 
 		let escaping = |result: Result<Option<ExportSource>, crate::Error>, what: &str| match result {
 			Ok(None) => {}
@@ -902,13 +904,10 @@ mod tests {
 		// single-segment path, so its parent is the root and any `..` walks above it.
 		for reference in ["..", "../source", "../../elsewhere"] {
 			let config = video(Some(reference));
-			escaping(ExportSource::for_video(&source, "video", &config, max_delay), reference);
+			escaping(ExportSource::for_video(&source, "video", &config, delay), reference);
+			escaping(ExportSource::for_video_raw(&source, "video", &config, delay), reference);
 			escaping(
-				ExportSource::for_video_raw(&source, "video", &config, max_delay),
-				reference,
-			);
-			escaping(
-				ExportSource::for_audio(&source, "audio", &audio(Some(reference)), max_delay),
+				ExportSource::for_audio(&source, "audio", &audio(Some(reference)), delay),
 				reference,
 			);
 		}
@@ -920,13 +919,13 @@ mod tests {
 	async fn legal_reference_keeps_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source().await;
-		let max_delay = std::time::Duration::ZERO;
+		let delay = moq_net::track::Delay::default();
 
 		for reference in [None, Some(""), Some("./source"), Some("sub"), Some(".")] {
-			ExportSource::for_video(&source, "video", &video(reference), max_delay)
+			ExportSource::for_video(&source, "video", &video(reference), delay)
 				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
 				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
-			ExportSource::for_audio(&source, "audio", &audio(reference), max_delay)
+			ExportSource::for_audio(&source, "audio", &audio(reference), delay)
 				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
 				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
 		}
@@ -946,9 +945,14 @@ mod tests {
 		tokio::task::yield_now().await;
 		let source = crate::source::resolved(&origin, "a/pub").await;
 		let config = audio(Some("./source"));
-		let mut export = ExportSource::for_audio(&source, "audio", &config, Duration::from_secs(10))
-			.unwrap()
-			.unwrap();
+		let mut export = ExportSource::for_audio(
+			&source,
+			"audio",
+			&config,
+			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+		)
+		.unwrap()
+		.unwrap();
 		let mut read = async || {
 			kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
@@ -975,9 +979,14 @@ mod tests {
 		assert_eq!(read().await, Some(None), "its end ends the rendition");
 
 		// A rendition still subscribing when its instance goes ends too.
-		let mut late = ExportSource::for_audio(&source, "late", &config, Duration::from_secs(10))
-			.unwrap()
-			.unwrap();
+		let mut late = ExportSource::for_audio(
+			&source,
+			"late",
+			&config,
+			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+		)
+		.unwrap()
+		.unwrap();
 		let ended = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| late.poll_read(waiter))).await;
 		assert!(
 			matches!(ended, Ok(Ok(None))),
@@ -1000,9 +1009,14 @@ mod tests {
 			tokio::task::yield_now().await;
 			let source = crate::source::resolved(&origin, "a/pub").await;
 			let config = audio(Some("./source"));
-			let mut export = ExportSource::for_audio(&source, "audio", &config, Duration::from_secs(10))
-				.unwrap()
-				.unwrap();
+			let mut export = ExportSource::for_audio(
+				&source,
+				"audio",
+				&config,
+				moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+			)
+			.unwrap()
+			.unwrap();
 
 			let sibling = origin.route("a/source", Default::default()).unwrap();
 			let track = sibling
@@ -1070,9 +1084,14 @@ mod tests {
 			HangContainer::Legacy(crate::container::Kind::Audio),
 		);
 		track.write(raw_frame(0, b"x", true)).unwrap();
-		let mut export = ExportSource::for_audio(&source, "audio", &audio(Some("./source")), Duration::from_secs(10))
-			.unwrap()
-			.unwrap();
+		let mut export = ExportSource::for_audio(
+			&source,
+			"audio",
+			&audio(Some("./source")),
+			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
+		)
+		.unwrap()
+		.unwrap();
 		let mut read = async || {
 			kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
 				.await
@@ -1095,7 +1114,8 @@ mod tests {
 		for live_start in [false, true] {
 			let live = Live::avc3();
 			let max_delay = std::time::Duration::from_secs(10);
-			let export = ExportSource::for_video(&live.source().await, live.track.name(), &video(None), max_delay)
+			let delay = moq_net::track::Delay::default().with_max(max_delay);
+			let export = ExportSource::for_video(&live.source().await, live.track.name(), &video(None), delay)
 				.unwrap()
 				.expect("fixture should produce a video rendition");
 			let mut export = match live_start {
@@ -1129,7 +1149,7 @@ mod tests {
 			&live.source().await,
 			live.track.name(),
 			&audio(None),
-			std::time::Duration::from_secs(10),
+			moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap()
@@ -1172,10 +1192,15 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let source = crate::Source::new(consumer, remote);
-		let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_secs(1))
-			.unwrap()
-			.unwrap()
-			.live();
+		let mut export = ExportSource::for_audio(
+			&source,
+			"audio",
+			&audio(None),
+			moq_net::track::Delay::default().with_max(Duration::from_secs(1)),
+		)
+		.unwrap()
+		.unwrap()
+		.live();
 
 		// One 24 ms frame per group, as the TS import publishes MPEG-1 audio.
 		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
@@ -1275,10 +1300,15 @@ mod tests {
 				kio::clock::sleep(Duration::from_millis(120)).await;
 			}
 
-			let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_millis(450))
-				.unwrap()
-				.unwrap()
-				.live();
+			let mut export = ExportSource::for_audio(
+				&source,
+				"audio",
+				&audio(None),
+				moq_net::track::Delay::default().with_max(Duration::from_millis(450)),
+			)
+			.unwrap()
+			.unwrap()
+			.live();
 			let mut read = async || {
 				kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
 					.await
@@ -1320,18 +1350,17 @@ mod tests {
 		for (read, first) in [(900, Some(1_000_000)), (1_500, None)] {
 			let mut moving = Moving::new();
 			let source = moving.source().await;
-			let max_delay = Duration::from_secs(10);
+			let delay = moq_net::track::Delay::default().with_max(Duration::from_secs(10));
 			let mut previous =
-				ExportSource::for_video(&source, Moving::RENDITION, &Moving::config("a", None, SPS), max_delay)
+				ExportSource::for_video(&source, Moving::RENDITION, &Moving::config("a", None, SPS), delay)
 					.unwrap()
 					.unwrap();
 			previous.skips = 2;
 			previous.latest = Some(Duration::from_millis(read));
-			let mut next =
-				ExportSource::for_video(&source, Moving::RENDITION, &Moving::config("b", None, SPS), max_delay)
-					.unwrap()
-					.unwrap()
-					.continuing(&previous);
+			let mut next = ExportSource::for_video(&source, Moving::RENDITION, &Moving::config("b", None, SPS), delay)
+				.unwrap()
+				.unwrap()
+				.continuing(&previous);
 			let mut poll = async || {
 				kio::clock::timeout(Duration::from_millis(100), kio::wait(|waiter| next.poll_read(waiter))).await
 			};
@@ -1370,7 +1399,7 @@ mod tests {
 			&live.source().await,
 			live.track.name(),
 			&audio(None),
-			Duration::from_secs(10),
+			moq_net::track::Delay::default().with_max(Duration::from_secs(10)),
 		)
 		.unwrap()
 		.unwrap();
