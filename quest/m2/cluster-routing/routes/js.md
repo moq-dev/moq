@@ -35,6 +35,7 @@ the cheapest one; fix it with the route-selection rework here.
 ## Required
 
 - [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - the API this feeds
+- [Mixed-version ring](/quest/m1/mixed-version-ring.md) - defines the compatibility chain field this decodes
 
 ## Related
 

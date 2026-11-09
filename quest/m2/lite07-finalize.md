@@ -25,10 +25,12 @@ checks done at that call; the Required list is the work already known to land
 first, not a closed freeze set.
 
 The route layer of [Cluster routing](/quest/m2/cluster-routing/README.md)
-(ROUTE_START/UPDATE/END, path-less ANNOUNCE, the hop list dropped) lands in
+(ROUTE_START/UPDATE/END, path-less ANNOUNCE, the native hop list dropped) lands in
 lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
-has to plan for a lite-07 without hop lists. Only
+has to plan for a lite-07 without native hop lists; only the temporary lite-06
+compatibility chain from [Mixed-version ring](/quest/m1/mixed-version-ring.md)
+rides announcements until the lite-07 to lite-08 migration. Only
 [Routes and announces](/quest/m2/cluster-routing/routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
@@ -117,7 +119,7 @@ whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) c
 
 ## Required
 
-- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
+- [Routes and announces](/quest/m2/cluster-routing/routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [Lite-07 FETCH is single-group only](/quest/m2/subscribe-ranges/lite07-fetch.md) - lite-07 FETCH reads one group or a slice of one, and SUBSCRIBE ranges of whole groups
 - [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
