@@ -92,12 +92,12 @@ func (g *GroupConsumer) Sequence() uint64 {
 
 // ReadFrame returns the next raw frame, or (nil, nil) when the group ends.
 func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	return bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
+	return bridge.Call(ctx, nil, g.inner.ReadFrame)
 }
 
 // All ranges over raw frames until the group ends or the loop breaks.
 func (g *GroupConsumer) All(ctx context.Context) iter.Seq2[*Frame, error] {
-	return bridge.Seq(ctx, g.ReadFrame)
+	return bridge.Seq(ctx, g.inner.Cancel, g.ReadFrame)
 }
 
 // Cancel stops the stream.
@@ -127,7 +127,7 @@ func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 }
 
 func (t *TrackConsumer) group(ctx context.Context, next func(context.Context) (**ffi.MoqGroupConsumer, error)) (*GroupConsumer, error) {
-	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
+	res, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
 		res, err := next(ctx)
 		if err != nil || res == nil {
 			return nil, err
@@ -143,10 +143,8 @@ func (t *TrackConsumer) group(ctx context.Context, next func(context.Context) (*
 // ReadFrame reads the first raw frame of the next group, or (nil, nil)
 // when the track ends. Convenient for one-frame-per-group tracks. Completed
 // empty groups are skipped; a nil frame is track EOF, not an empty group.
-// Cancelling the context cancels this consumer, not just this call: see
-// package docs.
 func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	return bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
+	return bridge.Call(ctx, nil, t.inner.ReadFrame)
 }
 
 // Info returns the publisher-side track properties learned during subscription.
@@ -166,13 +164,13 @@ func (t *TrackConsumer) Update(subscription Subscription) error {
 
 // Groups ranges over groups in sequence order.
 func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
-	return bridge.Seq(ctx, t.NextGroup)
+	return bridge.Seq(ctx, t.inner.Cancel, t.NextGroup)
 }
 
 // GroupsAsArrived ranges over groups in arrival order, including
 // out-of-sequence deliveries.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
-	return bridge.Seq(ctx, t.RecvGroup)
+	return bridge.Seq(ctx, t.inner.Cancel, t.RecvGroup)
 }
 
 // Cancel stops the stream.
@@ -211,10 +209,36 @@ func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
 // memory. Only a video.Consumer with DecoderOutput.Surface set produces one,
 // and it stays valid until Close.
 func (f *VideoDecodedFrame) Surface() VideoSurface {
-	if surface := f.inner.Surface(); surface != nil {
-		return *surface
+	return videoSurface(f.inner.Surface())
+}
+
+// VideoSurface is a decoded frame's platform surface: VideoSurfacePixelBuffer on macOS and iOS.
+// Switch on it with a default case, since new platforms add kinds.
+type VideoSurface interface {
+	isVideoSurface()
+}
+
+// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
+type VideoSurfacePixelBuffer struct {
+	Pointer uint64
+}
+
+// VideoSurfaceUnknown is a surface kind this version of the package does not know yet.
+type VideoSurfaceUnknown struct{}
+
+func (VideoSurfacePixelBuffer) isVideoSurface() {}
+func (VideoSurfaceUnknown) isVideoSurface()     {}
+
+func videoSurface(surface *ffi.MoqVideoSurface) VideoSurface {
+	if surface == nil {
+		return nil
 	}
-	return nil
+	switch surface := (*surface).(type) {
+	case ffi.MoqVideoSurfacePixelBuffer:
+		return VideoSurfacePixelBuffer{Pointer: surface.Pointer}
+	default:
+		return VideoSurfaceUnknown{}
+	}
 }
 
 // Close releases the frame's surface back to the decoder.

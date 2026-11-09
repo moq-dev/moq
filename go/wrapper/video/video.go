@@ -219,7 +219,7 @@ func releaseRead(raw *ffi.MoqVideoRead) {
 // Next returns the next decoded frame, gap, or encoder end, or (nil, nil) when the
 // track ends. Close each frame when done with it.
 func (d *Consumer) Next(ctx context.Context) (Read, error) {
-	raw, err := bridge.CallRelease(ctx, d.inner.Cancel, d.inner.Next, releaseRead)
+	raw, err := bridge.CallRelease(ctx, nil, d.inner.Next, releaseRead)
 	if err != nil || raw == nil {
 		return nil, err
 	}
@@ -236,7 +236,7 @@ func (d *Consumer) Next(ctx context.Context) (Read, error) {
 
 // All ranges over every read until the track ends or the loop breaks.
 func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] {
-	return bridge.Seq(ctx, d.Next)
+	return bridge.Seq(ctx, d.inner.Cancel, d.Next)
 }
 
 // Cancel stops the stream.
