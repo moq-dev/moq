@@ -892,14 +892,22 @@ function sameVerdict(a: DropRun, b: DropRun): boolean {
 	return sameHole({ ...a, received: undefined }, { ...b, received: undefined });
 }
 
-// The runs of `drops` and a reader's `refused` overlapping `[start, end)`, lowest first; a
-// track drop or skip hides the refusals it covers.
-function givenUp(drops: DropSet, refused: readonly DropRun[], start: bigint, end: bigint): DropRun[] {
+// The runs of `drops` and a reader's `refused` overlapping `[start, end)`, lowest first. A drop
+// that `settles` the reader, judged from where it meets `start`, hides the refusals it covers:
+// the track's verdict wins, as in Rust, but a stale one the reader rejects is no verdict for it.
+function givenUp(
+	drops: DropSet,
+	refused: readonly DropRun[],
+	start: bigint,
+	end: bigint,
+	settles: (run: DropRun) => boolean,
+): DropRun[] {
 	const found = drops.overlapping(start, end);
 	if (refused.length === 0) return found;
-	// The track's verdict wins where it covers the reader's own refusal, as in Rust.
 	let own = refused.filter((run) => run.start < end && start < run.end);
-	for (const run of found) own = removeRun(own, run.start, run.end);
+	for (const run of found) {
+		if (settles({ ...run, start: max(run.start, start) })) own = removeRun(own, run.start, run.end);
+	}
 	found.push(...own);
 	return found.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 }
@@ -3080,7 +3088,9 @@ export class Subscriber {
 			}
 			for (const run of spans.flatMap((span) => this.#wants(span.start, span.end))) {
 				const gone = [...accounted];
-				for (const dropped of givenUp(drops, refused.peek(), run.start, run.end)) {
+				for (const dropped of givenUp(drops, refused.peek(), run.start, run.end, (run) =>
+					settles(run, budget, coverage, this.#state.judged),
+				)) {
 					// Judged from where it meets the asked run, as the reader would read it.
 					const clipped = { ...dropped, start: max(dropped.start, run.start) };
 					if (settles(clipped, budget, coverage, this.#state.judged))
@@ -3227,7 +3237,9 @@ export class Subscriber {
 			for (const delivered of taken) gaps = gaps.flatMap((gap) => delivered.gaps(gap.start, gap.end));
 			for (const gap of gaps) {
 				// Each run judged from where it meets the gap, as the reader would read it.
-				const overlapping = givenUp(all, refused.peek(), gap.start, gap.end).map((run) => ({
+				const overlapping = givenUp(all, refused.peek(), gap.start, gap.end, (run) =>
+					settles(run, budget, coverage, this.#state.judged),
+				).map((run) => ({
 					...run,
 					start: max(run.start, gap.start),
 					end: min(run.end, gap.end),
@@ -3931,7 +3943,9 @@ export class Subscriber {
 			if (!full) {
 				this.#pending = this.#pending.flatMap((run) => (run.received ? removeRun([run], from, to) : [run]));
 			}
-			const folded = full ? givenUp(drops, refused.peek(), from, to) : drops.overlapping(from, to);
+			const folded = full
+				? givenUp(drops, refused.peek(), from, to, (run) => settles(run, budget, coverage, judged))
+				: drops.overlapping(from, to);
 			for (const dropped of folded) {
 				// Judged from where it meets this cursor's span, as Rust clips it.
 				const run = { ...dropped, start: max(dropped.start, from), end: min(dropped.end, to) };
@@ -3946,9 +3960,9 @@ export class Subscriber {
 			// only the part it still holds as it was folded in is owed.
 			if (run.received) {
 				const folded = run;
-				const held = givenUp(drops, refused.peek(), run.start, run.end).find((given) =>
-					sameVerdict(given, folded),
-				);
+				const held = givenUp(drops, refused.peek(), run.start, run.end, (run) =>
+					settles(run, budget, coverage, judged),
+				).find((given) => sameVerdict(given, folded));
 				if (!held) continue;
 				if (held.end < run.end) this.#pending.unshift({ ...run, start: held.end });
 				run = { ...run, start: max(run.start, held.start), end: min(run.end, held.end) };

@@ -813,6 +813,27 @@ test("fill: a stale run that does not settle the reader is still asked for", asy
 	broadcast.close();
 });
 
+test("fill: a stale run that does not settle the reader leaves its own refusal reported", async () => {
+	const { broadcast, track } = resumed(2n);
+	const requests = track.requests();
+	hooks.dropTrackGroups(track, 0n, 2n, staleHole(60_000));
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }],
+		delay: { max: Milli(500) },
+	});
+	const first = reader.recvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	const refusal = new StreamError(StreamCode.Cancel, { message: "storage busy" });
+	fill.refuseGroups(0n, 2n, refusal);
+	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 0n, end: 2n, error: refusal });
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+	await first.catch(() => undefined);
+});
+
 // The upstream judged 0..2 and 4..6 under 500ms, and gave up both of them as stale.
 function judgedTwice() {
 	const broadcast = new BroadcastProducer();
