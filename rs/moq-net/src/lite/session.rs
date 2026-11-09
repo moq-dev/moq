@@ -266,13 +266,13 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.map(Hop::from);
 	}
 	// Lite-07 declares the Node ID our routes originate under instead, so a peer that is
-	// this same process recognizes itself.
+	// this same process recognizes itself. Read without creating the route node, which
+	// the session's route layer creates when it starts.
 	if version.has_routes() && our_setup.node.is_none() {
 		our_setup.node = publish
 			.as_ref()
-			.map(|origin| origin.route_node())
-			.or_else(|| subscribe.as_ref().map(|origin| origin.route_node()))
-			.and_then(|node| std::num::NonZeroU64::new(node.declared()));
+			.and_then(|origin| origin.node_id())
+			.or_else(|| subscribe.as_ref().and_then(|origin| origin.consume().node_id()));
 	}
 
 	// Prove our origin's route key, bound to this session, so a peer that scopes us files
