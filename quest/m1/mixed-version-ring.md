@@ -86,7 +86,11 @@ sees it end:
 The js/net lite-07 port in [routes/js.md](/quest/m2/cluster-routing/routes/js.md)
 decodes the field; JS translates nothing, so it keeps no chain.
 
+[moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293) keeps hop chains
+out of the public API, so the chain this carries is a third crate-private
+source of them, and gives an origin one identity on both wires, which folds
+the two receive checks together.
+
 ## Related
 
-- [Route session integration](/quest/m2/cluster-routing/routes/session.md) - makes `Hops` crate-private behind a chain type, which this fills from a third source, and merges the lite-06 and lite-07 identities, which folds the two receive checks together
 - [Routes acceptance](/quest/m2/cluster-routing/routes/acceptance.md) - these tests are its kind of fixture, a stale neighbour unable to revive an ended broadcast
