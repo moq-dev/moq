@@ -139,7 +139,7 @@ import (
 )
 
 route, _ := client.Route("room", moq.RouteOptions{Hidden: true})
-broadcast, _ := route.Broadcast()
+broadcast := route.Broadcast()
 // Every JSON write is stamped, so the track is timed. JSON is small and repetitive, so
 // compress it on the wire.
 scale := uint64(1_000)

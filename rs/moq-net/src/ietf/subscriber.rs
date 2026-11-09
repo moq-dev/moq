@@ -931,7 +931,7 @@ struct BroadcastState {
 	// The served route: dropping it (and the serve task's clone) retracts the
 	// route and rejects its queued requests. `None` while the session's limit holds
 	// it back, though the peer still advertises it.
-	dynamic: Option<crate::origin::Route>,
+	dynamic: Option<crate::origin::Claim>,
 
 	// Bumped each time the route attaches, so a serve task outlived by a limit that
 	// took the route away and gave it back ends rather than serve beside the new one.
@@ -1098,8 +1098,8 @@ pub(super) struct Subscriber {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
-	// Set once the peer sends a GOAWAY; this session's routes then cost
-	// Cost::DRAIN, so a replacement session outranks it. Requests keep opening,
+	// Set once the peer sends a GOAWAY; this session's routes then rank last
+	// (draining), so a replacement session outranks it. Requests keep opening,
 	// deliberately past draft-22 section 9.2's SHOULD NOT: refusing them would
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
@@ -1349,7 +1349,7 @@ impl Subscriber {
 		let mut hops = crate::Hops::new();
 		hops.push(crate::Hop::UNKNOWN)
 			.expect("an empty hop chain has room for one entry");
-		crate::origin::RouteInfo::default()
+		crate::origin::RouteInfo::new()
 			.with_hops(hops)
 			.with_via(self.via(peer))
 			// A peer without Cluster contributes only the arriving link price.
@@ -2865,9 +2865,7 @@ impl Subscriber {
 			return Ok(None);
 		}
 		let mut route = entry.route.clone();
-		if self.going_away.is_set() {
-			route.cost = crate::origin::Cost::DRAIN;
-		}
+		route.draining |= self.going_away.is_set();
 		entry.dynamic = Some(self.origin.forward(path, route)?);
 		entry.generation += 1;
 		tracing::info!(route = %crate::path::Rooted(self.origin.root(), path), "namespace authorized again");
@@ -2909,9 +2907,7 @@ impl Subscriber {
 
 		// A namespace published after the peer's GOAWAY starts out draining, so
 		// a late arrival on a dying connection can't take over as primary.
-		if self.going_away.is_set() {
-			route.cost = crate::origin::Cost::DRAIN;
-		}
+		route.draining = self.going_away.is_set();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
@@ -3046,20 +3042,20 @@ impl Subscriber {
 		tasks.poll(waiter)
 	}
 
-	/// Re-price one attached route to a draining cost (the peer sent a GOAWAY):
-	/// every other candidate outranks it while it stays selectable as the last
-	/// path. Idempotent, since the signal stays set.
+	/// Rank one attached route last (the peer sent a GOAWAY): every other candidate
+	/// outranks it while it stays selectable as the last path, at its real cost.
+	/// Idempotent, since the signal stays set.
 	fn drain_route(&self, path: &Path) {
 		let mut state = self.state.lock();
 		let Some(entry) = state.broadcasts.get_mut(path) else {
 			return;
 		};
-		if entry.route.cost == crate::origin::Cost::DRAIN {
+		if entry.route.draining {
 			return;
 		}
-		entry.route.cost = crate::origin::Cost::DRAIN;
+		entry.route.draining = true;
 		for (_, route) in &mut entry.adverts {
-			route.cost = crate::origin::Cost::DRAIN;
+			route.draining = true;
 		}
 		if let Some(dynamic) = &entry.dynamic {
 			let _ = dynamic.update(entry.route.clone());
@@ -10723,10 +10719,7 @@ mod tests {
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce(
-				"room/host",
-				crate::origin::RouteInfo::default().with_hops(upstream.clone()),
-			)
+			.announce("room/host", crate::origin::RouteInfo::new().with_hops(upstream.clone()))
 			.unwrap();
 		announced.expect_next_active("room/host").await;
 		let _advertised = publishing.expect_next_active("room/host").await;
@@ -11340,7 +11333,7 @@ mod tests {
 		let path = crate::Path::from_static("room/host");
 
 		let first = Advertised {
-			route: crate::origin::RouteInfo::default()
+			route: crate::origin::RouteInfo::new()
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
@@ -11351,7 +11344,7 @@ mod tests {
 
 		// A new chain and cost: the route updates in place.
 		let rerouted = Advertised {
-			route: crate::origin::RouteInfo::default()
+			route: crate::origin::RouteInfo::new()
 				.with_hops(hop_path(&[7, 11]).hops().clone())
 				.with_cost(2),
 		};

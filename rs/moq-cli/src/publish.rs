@@ -157,6 +157,18 @@ pub struct CaptureArgs {
 	/// The released spelling of `--audio off`.
 	#[usage(long = "no-audio", hide = true)]
 	no_audio: bool,
+
+	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
+	/// first that encodes, decodes, and scales.
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	pub vaapi_device: Option<std::path::PathBuf>,
+
+	/// The V4L2 M2M encoder node, such as `/dev/video11`. Defaults to the first
+	/// that encodes H.264.
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	#[usage(long, env = "MOQ_V4L2_ENCODER", value_hint = usage_rs::ValueHint::FilePath)]
+	pub v4l2_encoder: Option<std::path::PathBuf>,
 }
 
 enum PublishDecoder {
@@ -1133,6 +1145,14 @@ impl CaptureArgs {
 		};
 		options.bandwidth = bandwidth;
 		options.on_demand = self.video == Mode::Demand;
+		#[cfg(all(target_os = "linux", feature = "vaapi"))]
+		{
+			options.vaapi = self.vaapi_device.clone();
+		}
+		#[cfg(all(target_os = "linux", feature = "v4l2"))]
+		{
+			options.v4l2 = self.v4l2_encoder.clone();
+		}
 		Ok(options)
 	}
 

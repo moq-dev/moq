@@ -45,8 +45,8 @@ pub(super) struct SubscriberConfig {
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
-	/// Set once the peer sends a GOAWAY; this session's routes then cost
-	/// [`crate::origin::Cost::DRAIN`], so a replacement session outranks it.
+	/// Set once the peer sends a GOAWAY; this session's routes then rank last
+	/// (draining), so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 	/// Our tokens' grants: a subscription the union stops covering is cancelled.
 	pub auth: crate::auth::Link,
@@ -728,17 +728,14 @@ impl Subscriber {
 		announced: &Announced,
 	) -> crate::origin::RouteInfo {
 		let mut route = match announced.instance(path) {
-			Some((instance, epoch)) => crate::origin::RouteInfo::default().with_instance(instance, epoch),
-			None => crate::origin::RouteInfo::default(),
+			Some((instance, epoch)) => crate::origin::RouteInfo::new().with_instance(instance, epoch),
+			None => crate::origin::RouteInfo::new(),
 		}
 		.with_hops(hops)
 		.with_cost(cost.charged(link_cost))
 		.with_via(self.via(responder));
 
-		if self.going_away.is_set() {
-			route.cost = crate::origin::Cost::DRAIN;
-		}
-
+		route.draining = self.going_away.is_set();
 		route
 	}
 
@@ -840,8 +837,9 @@ impl Subscriber {
 			None => hops.contains(&self.self_origin),
 		};
 		// A claim of this node's that a moq-lite-07 relay translated for a lite-06 peer
-		// starts with its route identity's hop instead of this origin's. Filed again as
-		// an own claim, it would keep itself alive once its source left.
+		// starts with its route identity's hop, which is this origin's own until the
+		// identity rotates. Filed again as an own claim, it would keep itself alive once
+		// its source left.
 		let reflected = reflected || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop));
 		if reflected {
 			tracing::debug!(route = %self.log_path(path), "dropping reflected announce");
@@ -9653,7 +9651,7 @@ impl Announced {
 	}
 
 	/// Attach a route, queued for its first serve pass.
-	fn attach(&mut self, path: Path, route: crate::origin::RouteInfo, dynamic: crate::origin::Route) {
+	fn attach(&mut self, path: Path, route: crate::origin::RouteInfo, dynamic: crate::origin::Claim) {
 		let wake = crate::util::QueueWake::new(path.clone(), self.ready.clone());
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
@@ -9791,9 +9789,7 @@ impl Announced {
 				}
 				Some(Held::Withheld(mut route)) => {
 					tracing::info!(route = %subscriber.log_path(&path), "announce authorized again");
-					if subscriber.going_away.is_set() {
-						route.cost = crate::origin::Cost::DRAIN;
-					}
+					route.draining |= subscriber.going_away.is_set();
 					self.offer(subscriber, path, route);
 				}
 				_ => unreachable!("only attached and withheld routes change"),
@@ -9801,7 +9797,7 @@ impl Announced {
 		}
 	}
 
-	/// Re-price every attached route to a draining cost (the peer sent a GOAWAY).
+	/// Rank every attached route last (the peer sent a GOAWAY).
 	fn drain(&mut self) {
 		for held in self.routes.values_mut() {
 			if let Held::Attached(entry) = held {
@@ -9859,15 +9855,13 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(subscriber: &Subscriber, entry
 /// advertisement plus its request queue), which mints a source per requested path
 /// beneath it.
 struct AnnouncedRoute<K = Path> {
-	/// The route as last announced (post-charge), so a drain can re-price it
+	/// The route as last announced (post-charge), so a drain can rank it last
 	/// without recomputing the chain.
 	route: crate::origin::RouteInfo,
 	/// Dropping it retracts the route and rejects its queued requests.
-	dynamic: crate::origin::Route,
+	dynamic: crate::origin::Claim,
 	/// Closes as the route goes, which closes every source it minted.
 	live: kio::Producer<()>,
-	/// Whether the GOAWAY drain already re-priced this route.
-	drained: bool,
 	/// Queues this route on its prefix's ready set when its request queue wakes.
 	wake: Arc<crate::util::QueueWake<K>>,
 	waker: std::task::Waker,
@@ -9878,14 +9872,13 @@ struct AnnouncedRoute<K = Path> {
 impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
 	fn new(
 		route: crate::origin::RouteInfo,
-		dynamic: crate::origin::Route,
+		dynamic: crate::origin::Claim,
 		wake: Arc<crate::util::QueueWake<K>>,
 	) -> Self {
 		Self {
 			route,
 			dynamic,
 			live: Default::default(),
-			drained: false,
 			waker: std::task::Waker::from(wake.clone()),
 			wake,
 			park: kio::Park::default(),
@@ -9895,21 +9888,18 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
 	/// Update the route metadata without changing its content identity.
 	fn update(&mut self, route: crate::origin::RouteInfo) {
 		self.route = route.clone();
-		self.drained = false;
 		let _ = self.dynamic.update(route);
 	}
 
-	/// Re-price the route to [`crate::origin::Cost::DRAIN`] (the peer sent a
-	/// GOAWAY): every other candidate outranks it while it stays selectable as
-	/// the last path. Idempotent, since the signal stays set.
+	/// Rank the route last (the peer sent a GOAWAY): every other candidate outranks
+	/// it while it stays selectable as the last path, at its real cost. Idempotent,
+	/// since the signal stays set.
 	fn drain(&mut self) {
-		if self.drained {
+		if self.route.draining {
 			return;
 		}
-		self.drained = true;
-		let mut route = self.route.clone();
-		route.cost = crate::origin::Cost::DRAIN;
-		let _ = self.dynamic.update(route);
+		self.route.draining = true;
+		let _ = self.dynamic.update(self.route.clone());
 	}
 }
 

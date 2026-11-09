@@ -269,6 +269,14 @@ impl<O: Output> Media<O> {
 						// that imports none.
 						let mut decode = moq_video::decode::Config::new();
 						decode.output = self.output.render().await;
+						#[cfg(all(target_os = "linux", feature = "vaapi"))]
+						{
+							decode.vaapi = self.args.vaapi_device.clone();
+						}
+						#[cfg(all(target_os = "linux", feature = "v4l2"))]
+						{
+							decode.v4l2 = self.args.v4l2_decoder.clone();
+						}
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						let mut subscriber = track
@@ -1763,6 +1771,10 @@ mod tests {
 			args: Args {
 				catalog_format: None,
 				metrics: None,
+				#[cfg(all(target_os = "linux", feature = "vaapi"))]
+				vaapi_device: None,
+				#[cfg(all(target_os = "linux", feature = "v4l2"))]
+				v4l2_decoder: None,
 				delay: Delay::Fixed(delay),
 				select: Default::default(),
 			},
@@ -1987,7 +1999,7 @@ mod tests {
 
 	/// Answer the next request through `claim` with one `audio` rendition, under a fresh instance.
 	async fn answer(
-		claim: &moq_net::origin::Route,
+		claim: &moq_net::origin::Claim,
 	) -> (
 		moq_net::origin::Route,
 		catalog::Producer,
@@ -2073,9 +2085,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_broadcast_ends_the_player() {
 		let origin = moq_tokio::origin::spawn();
-		let handler = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let handler = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let request = handler.requested().await.unwrap();
@@ -2236,9 +2246,7 @@ mod tests {
 		// The broadcast ends while its route stands, so the player goes idle.
 		kio::clock::sleep(Duration::from_secs(60)).await;
 
-		let pool = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let pool = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		drop(exact);
 		let (served, served_catalog, mut new) = answer(&pool).await;
 		write(&mut new, 10, NEW).await;
@@ -2272,9 +2280,7 @@ mod tests {
 		}
 
 		exact.withdraw();
-		let pool = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let pool = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		let (mirror, mirror_catalog, mut copy) = answer(&pool).await;
 		for index in 50..60 {
 			copy.write(packet(index, NEW)).unwrap();

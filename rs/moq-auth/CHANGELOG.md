@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Auth requests carry `host`, the host the client dialed: the `Host` header on HTTP and WebSocket, where `server_name` stays the TLS SNI only. A server that scopes tenants by hostname can now scope plaintext sessions.
 - Token claims and grants carry optional bitrate caps again, as additive `publish_rate` and `subscribe_rate` (`Rate`, bits per second) beside the patterns. A capped role is written as `{"path": [...], "rate": bps}`, which released verifiers refuse rather than drop the cap; key scopes still refuse it.
 
 ### Changed

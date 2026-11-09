@@ -39,7 +39,7 @@ type (
 	// route of one instance together, so restarting the sequences under an old instance splices
 	// unrelated groups into their tracks.
 	RouteOptions = ffi.MoqRouteOptions
-	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
+	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream) and its static production and link cost (lower wins).
 	RouteInfo = ffi.MoqRouteInfo
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the RouteInfo serving it. It carries no broadcast;

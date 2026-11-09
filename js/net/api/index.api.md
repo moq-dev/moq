@@ -142,9 +142,9 @@ export namespace Connection {
 	export type Backoff = {
 		healthy?: Clock.Duration;
 		initial?: Clock.Duration;
-		max?: Clock.Duration;
+		max?: Clock.Duration | null;
 		multiplier?: number;
-		timeout?: Clock.Duration;
+		timeout?: Clock.Duration | null;
 	};
 	export interface CertificateHash {
 		algorithm?: "sha-256";
@@ -245,7 +245,7 @@ export class Connection {
 	static readonly checkVersions: (versions: readonly string[]) => string[];
 	close(abort?: Error): void;
 	get closed(): Signals.GetPromise<Error | null>;
-	static readonly connect: ({ ... }: Connection.ConnectProps) => Promise<Connection.Session>;
+	static readonly connect: (props: Connection.ConnectProps) => Promise<Connection.Session>;
 	enabled: Signals.Signal<boolean>;
 	readonly error: Signals.Getter<Error | undefined>;
 	static readonly isWebTransportSupported: () => boolean;
@@ -437,6 +437,17 @@ export namespace Instance {
 }
 
 export namespace Origin {
+	export class Claim {
+		[Symbol.dispose](): void;
+		announce(): void;
+		get announced(): boolean;
+		close(): void;
+		get instance(): Instance.Valid;
+		requested(): AsyncIterableIterator<Origin.Request>;
+		setAuth(auth?: Auth.Credential): void;
+		setCost(cost: Origin.Cost): void;
+		withdraw(): void;
+	}
 	export class Consumer implements Origin.Reader {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
@@ -457,6 +468,7 @@ export namespace Origin {
 	export class Producer implements Origin.Table {
 		constructor();
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		claim(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Claim;
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Origin.Consumer;
@@ -464,7 +476,6 @@ export namespace Origin {
 		follow(path: Path.Valid, options?: Origin.FollowOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
-		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
 	}
 	export interface Reader {
@@ -493,18 +504,15 @@ export namespace Origin {
 		[Symbol.dispose](): void;
 		announce(): void;
 		get announced(): boolean;
-		get broadcast(): Broadcast.Producer;
+		readonly broadcast: Broadcast.Producer;
 		close(): void;
 		get instance(): Instance.Valid;
-		requested(): AsyncIterableIterator<Origin.Request>;
 		setAuth(auth?: Auth.Credential): void;
 		setCost(cost: Origin.Cost): void;
 		withdraw(): void;
 	}
 	export interface RouteInfo {
-		readonly anonymous: boolean;
 		readonly cost: Origin.Cost;
-		readonly hops: readonly bigint[];
 		readonly instance?: Instance.Valid;
 	}
 	export interface RouteOptions {
@@ -517,8 +525,8 @@ export namespace Origin {
 		};
 	}
 	export interface Table extends Origin.Reader {
+		claim(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Claim;
 		route(path: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
-		routePrefix(prefix: Path.Valid, options?: Origin.RouteOptions): Origin.Route;
 	}
 }
 

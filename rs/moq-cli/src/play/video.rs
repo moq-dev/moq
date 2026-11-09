@@ -718,6 +718,10 @@ mod tests {
 				delay: Delay::Fixed(delay),
 				catalog_format: None,
 				metrics: None,
+				#[cfg(all(target_os = "linux", feature = "vaapi"))]
+				vaapi_device: None,
+				#[cfg(all(target_os = "linux", feature = "v4l2"))]
+				v4l2_decoder: None,
 				select: Default::default(),
 			},
 			video: Default::default(),

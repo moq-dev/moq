@@ -168,7 +168,7 @@ mod tests {
 
 		first
 			.announce_info(
-				RouteInfo::default()
+				RouteInfo::new()
 					.with_instance(Instance::random(), 0)
 					.with_cost(Cost::new(5)),
 			)

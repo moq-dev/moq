@@ -237,9 +237,8 @@ final class SmokeTests: XCTestCase {
     func testOriginProducerIsConstructible() throws {
         let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()
-        let prefix = try origin.routePrefix(prefix: "")
-        XCTAssertThrowsError(try prefix.broadcast, "a prefix route owns no broadcast")
-        prefix.cancel()
+        let claim = try origin.claim(prefix: "")
+        claim.cancel()
     }
 
     func testBroadcastIsReachableOnlyWhileAnnounced() async throws {
@@ -286,8 +285,8 @@ final class SmokeTests: XCTestCase {
         let origin = OriginProducer()
         let consumer = origin.consume()
         let route = try origin.route(path: "live")
-        let broadcast = try route.broadcast
-        XCTAssertTrue(broadcast === (try route.broadcast))
+        let broadcast = route.broadcast
+        XCTAssertTrue(broadcast === route.broadcast)
         _ = try await consumer.request(path: "live")
 
         route.cancel()
@@ -399,7 +398,7 @@ final class SmokeTests: XCTestCase {
 
     func testDynamicServesARequestUnderAPrefix() async throws {
         let origin = OriginProducer()
-        let dynamic = try origin.routePrefix(prefix: "live")
+        let dynamic = try origin.claim(prefix: "live")
         let pending = Task {
             try await origin.consume().request(path: "live/cam")
         }
@@ -408,8 +407,8 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(try request.path, "live/cam")
         let served = try request.route(hidden: true)
         XCTAssertEqual(served.instance, dynamic.instance)
-        let broadcast = try served.broadcast
-        XCTAssertTrue(broadcast === (try served.broadcast))
+        let broadcast = served.broadcast
+        XCTAssertTrue(broadcast === served.broadcast)
         // Only announcing answers the requester.
         try served.announce()
         _ = try await pending.value
@@ -802,7 +801,7 @@ final class SmokeTests: XCTestCase {
         let origin = OriginProducer()
         let route = try origin.route(path: "audio-delay", hidden: true)
         defer { route.cancel() }
-        let broadcast = try route.broadcast
+        let broadcast = route.broadcast
         let audio = try Audio.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1),
@@ -853,7 +852,7 @@ final class SmokeTests: XCTestCase {
         let origin = OriginProducer()
         let route = try origin.route(path: "video-decode-frame", hidden: true)
         defer { route.cancel() }
-        let broadcast = try route.broadcast
+        let broadcast = route.broadcast
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(

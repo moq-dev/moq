@@ -4,6 +4,8 @@
 //! half, which is the only part specific to the relay. Unset (the default) keeps
 //! QUIC on the shared runtime with everything else.
 
+use std::{fmt, num::NonZeroU16, str::FromStr};
+
 use serde::{Deserialize, Serialize};
 
 /// How the relay lays its QUIC work out over threads.
@@ -12,15 +14,20 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
-	/// Serve QUIC from this many single-threaded workers instead of the shared
-	/// runtime, each with its own socket on the listen address.
+	/// Serve QUIC from single-threaded workers instead of the shared runtime, each
+	/// with its own socket on the listen address: `shared` (the default), `auto`
+	/// for one per core, or a count.
 	///
 	/// A connection is handled start to finish by one worker, which trades the
 	/// shared runtime's load balancing for no cross-thread traffic per packet.
 	/// Linux-only; every worker shares the relay's served identity and reloads.
-	/// Unset (the default) keeps QUIC on the shared runtime.
-	#[usage(long = "runtime-workers", env = "MOQ_RUNTIME_WORKERS", setting = "runtime.workers")]
-	pub workers: Option<u16>,
+	#[usage(
+		long = "runtime-workers",
+		env = "MOQ_RUNTIME_WORKERS",
+		default = "shared",
+		setting = "runtime.workers"
+	)]
+	pub workers: Workers,
 
 	/// Pin each worker to a CPU core, defaulting to off.
 	///
@@ -51,15 +58,78 @@ pub struct Config {
 	pub io_uring: bool,
 }
 
+/// Where the relay serves QUIC, as `runtime.workers` spells it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Workers {
+	/// On the shared runtime with everything else.
+	#[default]
+	Shared,
+	/// One worker per core this process may use.
+	Auto,
+	/// This many workers.
+	Count(NonZeroU16),
+}
+
+impl FromStr for Workers {
+	type Err = String;
+
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		match value {
+			"shared" => Ok(Self::Shared),
+			"auto" => Ok(Self::Auto),
+			count => count
+				.parse()
+				.map(Self::Count)
+				.map_err(|_| format!("expected `shared`, `auto`, or a nonzero worker count, got {count:?}")),
+		}
+	}
+}
+
+impl fmt::Display for Workers {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Shared => f.write_str("shared"),
+			Self::Auto => f.write_str("auto"),
+			Self::Count(count) => count.fmt(f),
+		}
+	}
+}
+
+// A count is a TOML integer, so the value is a string or an integer.
+impl Serialize for Workers {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		match self {
+			Self::Count(count) => serializer.serialize_u16(count.get()),
+			named => serializer.collect_str(named),
+		}
+	}
+}
+
+impl<'de> Deserialize<'de> for Workers {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		#[derive(Deserialize)]
+		#[serde(untagged, expecting = "`shared`, `auto`, or a nonzero worker count")]
+		enum Raw {
+			Count(u64),
+			Name(String),
+		}
+		match Raw::deserialize(deserializer)? {
+			Raw::Count(count) => count.to_string().parse(),
+			Raw::Name(name) => name.parse(),
+		}
+		.map_err(serde::de::Error::custom)
+	}
+}
+
 impl Config {
 	/// The worker group this asks for, or `None` to keep QUIC on the shared
 	/// runtime.
-	///
-	/// Zero workers reads as unset rather than as an error: it is the natural way
-	/// to switch the mode off from a config file that already has the section.
 	pub fn workers(&self) -> Option<moq_tokio::worker::Config> {
-		let count = self.workers.filter(|count| *count > 0)?;
-		let mut config = moq_tokio::worker::Config::new(count);
+		let mut config = match self.workers {
+			Workers::Shared => return None,
+			Workers::Auto => moq_tokio::worker::Config::auto(),
+			Workers::Count(count) => moq_tokio::worker::Config::new(count.get()),
+		};
 		config.pin = self.pin;
 		Some(config)
 	}
@@ -67,5 +137,39 @@ impl Config {
 	/// Whether the workers should run on io_uring instead of tokio.
 	pub fn io_uring(&self) -> bool {
 		self.io_uring
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A count is a TOML integer and the modes are strings; zero has no meaning.
+	#[test]
+	fn workers_spellings() {
+		let parse = |body: &str| toml::from_str::<Config>(body).map(|config| config.workers);
+		assert_eq!(parse("").unwrap(), Workers::Shared);
+		assert_eq!(parse("workers = \"shared\"").unwrap(), Workers::Shared);
+		assert_eq!(parse("workers = \"auto\"").unwrap(), Workers::Auto);
+		assert_eq!(
+			parse("workers = 8").unwrap(),
+			Workers::Count(NonZeroU16::new(8).unwrap())
+		);
+		assert!(parse("workers = 0").is_err());
+		assert!(parse("workers = \"eight\"").is_err());
+		for wrong in ["workers = -1", "workers = 1.5"] {
+			let err = parse(wrong).unwrap_err().to_string();
+			assert!(err.contains("`shared`, `auto`, or a nonzero worker count"), "{err}");
+		}
+
+		for workers in [Workers::Shared, Workers::Auto, Workers::Count(NonZeroU16::MIN)] {
+			assert_eq!(workers.to_string().parse(), Ok(workers));
+			let config = Config {
+				workers,
+				..Default::default()
+			};
+			assert_eq!(parse(&toml::to_string(&config).unwrap()).unwrap(), workers);
+		}
+		assert!("0".parse::<Workers>().is_err());
 	}
 }

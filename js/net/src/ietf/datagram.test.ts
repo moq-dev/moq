@@ -191,7 +191,7 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 			accept({ url, transport: upstream.server, publish: source.consume() }),
 		]);
 		const original = wireOf(peers[0]).consume(path);
-		const requests = relay.routePrefix(path);
+		const requests = relay.claim(path);
 		const cursor = requests.requested();
 		const routing = (async () => {
 			for await (const request of cursor) request.serve(original);

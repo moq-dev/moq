@@ -253,7 +253,7 @@ async fn rust_ffi() {
 				},
 			)
 			.unwrap();
-		let broadcast = route.broadcast().unwrap();
+		let broadcast = route.broadcast();
 		let timed = MoqTrackInfo {
 			priority: 0,
 			max_age: None,

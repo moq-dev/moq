@@ -927,7 +927,7 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const instance = Instance.random();
 	const localRoute = origin.route(path, { instance: { id: instance, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
-	const dynamic = origin.routePrefix(path, { instance: { id: instance, epoch: 0n }, cost: 1n });
+	const dynamic = origin.claim(path, { instance: { id: instance, epoch: 0n }, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -2662,7 +2662,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const held = new BroadcastProducer();
 		held.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		const serving = (async () => {
@@ -2697,7 +2697,7 @@ test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const serving = (async () => {
 			const requests = handle.requested();
 			const request = (await requests.next()).value;
@@ -2737,7 +2737,7 @@ test.each(["request", "follow"] as const)(
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
 		const path = Path.from("live/cam");
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const serving = (async () => {
 			const requests = handle.requested();
 			const request = (await requests.next()).value;

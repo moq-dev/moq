@@ -1273,7 +1273,7 @@ mod tests {
 
 		// The better rendition lives in a broadcast whose request is never answered.
 		let _handler = origin
-			.route_prefix("missing", moq_net::origin::RouteOptions::default())
+			.claim("missing", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = hang::catalog::Container::Legacy;

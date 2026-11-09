@@ -1,7 +1,7 @@
-#![cfg(feature = "async")]
-
 //! Hop IDs span 64 bits. A link whose varint stops at 2^62 - 1 carries a larger
 //! one as 0, the reserved unknown hop.
+//!
+//! The hop chain is crate-private, so it is read through the hidden `fuzz` module.
 
 use crate::support;
 
@@ -28,12 +28,10 @@ async fn widest_hop_crosses_each_varint_form() {
 		let upstream: Version = "moq-transport-18".parse().unwrap();
 		let _upstream = peer(upstream, &source, &relay).await;
 		let _downstream = peer(downstream.parse().unwrap(), &relay, &sink).await;
-		let _route = source
-			.route_prefix("room", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let _route = source.claim("room", moq_net::origin::RouteOptions::default()).unwrap();
 		kio::clock::sim::idle().await;
 
-		let ids = |route: origin::RouteInfo| route.hops().collect::<Vec<_>>();
+		let ids = |route: origin::RouteInfo| moq_net::fuzz::route_hops(&route);
 		let at_relay = crate::support::announced(&relay.consume(), "room").await;
 		assert_eq!(ids(at_relay), [u64::MAX], "{downstream}");
 		let at_sink = crate::support::announced(&sink.consume(), "room").await;

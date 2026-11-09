@@ -21,9 +21,6 @@ import { wireOf } from "./wire.ts";
 
 const url = new URL("https://relay.example/room");
 
-// Same ceiling Rust stamps as Cost::DRAIN, and the lite cost varint saturates at.
-const DRAIN = 2n ** 62n - 1n;
-
 async function settle() {
 	await yieldNow();
 }
@@ -164,9 +161,11 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		else await sendLiteGoaway(pair.server);
 		await client.draining;
 
+		// The route ranks last, at its real cost.
 		const update = await announced.next();
 		expect(update?.kind).toBe("update");
-		expect(update?.route.cost).toBe(DRAIN);
+		expect(update?.route.draining).toBe(true);
+		expect(update?.route.cost).toBe(start?.route.cost);
 		// Still the only route, so the subscription already open keeps its front.
 		expect(request.active.peek()).toBe(front);
 
@@ -185,10 +184,10 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(await group.readString()).toBe("one");
 		group.close();
 
-		// A new announce-interest opens too, and sees the route at the drain cost.
+		// A new announce-interest opens too, and sees the route draining.
 		const interest = client.routes();
 		const drained = await interest.next();
-		expect(drained?.route.cost).toBe(DRAIN);
+		expect(drained?.route.draining).toBe(true);
 		interest.close();
 
 		expect(pair.client.sendStreams.bidi.length).toBeGreaterThan(opened);

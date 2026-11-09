@@ -259,7 +259,7 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 			announcement = event;
 		});
 		const prefix = Path.from("on-demand");
-		const route = table.routePrefix(prefix);
+		const route = table.claim(prefix);
 		await advance();
 		expect(announcement).toMatchObject({ kind: "present", prefix });
 		let withdrawal: unknown;
@@ -301,7 +301,7 @@ test("connection-specific options infer a private loop and origin", async () => 
 		const options = [
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
-			{ delay: { timeout: Duration.millis(0) } },
+			{ delay: { timeout: null } },
 			{ timeout: Duration.millis(10_000) },
 			{ publish: origin.consume() },
 			{ consume: origin },
@@ -336,7 +336,7 @@ test("explicit share: true refuses connection-specific options", () => {
 			/share: false/,
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, delay: { timeout: Duration.millis(0) } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, delay: { timeout: null } })).toThrow(/share: false/);
 		expect(() => new Connection({ share: true, timeout: Duration.millis(10_000) })).toThrow(/share: false/);
 	} finally {
 		origin.close();

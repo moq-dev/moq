@@ -39,6 +39,10 @@ pub(crate) const CLUSTER_PATH: &str = "/.cluster";
 /// ticks turn into real conditional GETs.
 const CONNECT_API_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// How long a peer client's reconnect loop retries before the redial loop takes over,
+/// with a fresh socket and a re-read `cluster.token`.
+const PEER_RETRY: Duration = Duration::from_secs(10);
+
 /// One cluster peer to dial, as listed in [`Config::connect`] or returned
 /// by an `api.url` endpoint.
 ///
@@ -2289,8 +2293,8 @@ impl Cluster {
 		// A GOAWAY naming no URI is a relay draining to restart. A peer URL names
 		// that one node, so a redial would only reach the draining process again
 		// and replay both announce tables there for the rest of its window. Its
-		// routes are already re-priced to the maximum, so the session serves on
-		// until the node closes it, and the redial after that finds the replacement.
+		// routes already rank below every other, so the session serves on until
+		// the node closes it, and the redial after that finds the replacement.
 		let reconnect = client
 			.with_reconnect(true)
 			.with_restart(moq_tokio::Restart::Wait)
@@ -2312,7 +2316,7 @@ impl Cluster {
 	/// dropping.
 	///
 	/// Every peer client's reconnect loop gives up eventually: a zero backoff
-	/// timeout, which would retry forever, takes moq-tokio's default instead. The
+	/// timeout, which would retry forever, takes [`PEER_RETRY`] instead. The
 	/// redial loop already retries forever, and only it re-reads `cluster.token`,
 	/// so an unending inner loop could keep presenting a rotated-out token.
 	///
@@ -2330,7 +2334,7 @@ impl Cluster {
 			connect.bind = Some(bind);
 		}
 		if connect.backoff.timeout().is_zero() {
-			connect.backoff.timeout = None;
+			connect.backoff.timeout = Some(PEER_RETRY.into());
 		}
 		if target.is_some_and(|target| target.lan) {
 			connect.version = connect
@@ -2789,9 +2793,9 @@ mod tests {
 					"route {path}, peer={peer}"
 				);
 				assert_eq!(
-					publisher.route_prefix(path, options()).is_ok(),
+					publisher.claim(path, options()).is_ok(),
 					peer,
-					"route_prefix {path}, peer={peer}"
+					"claim {path}, peer={peer}"
 				);
 			}
 			assert!(publisher.route(".statsish", options()).is_ok());
@@ -3499,7 +3503,7 @@ mod tests {
 		.expect("cluster");
 
 		let origin = cluster.origin.clone();
-		assert_eq!(origin.config().cache_duration, duration);
+		assert_eq!(origin.config().cache_duration, Some(duration));
 		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
 		let broadcast = origin
