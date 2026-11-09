@@ -88,7 +88,7 @@ fun GrantConsumer.updates(): Flow<Grant?> =
         .onCompletion { cancel() }
 
 /** Emits [next] until it returns null, checking for cancellation before each pull. */
-private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
+internal fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
