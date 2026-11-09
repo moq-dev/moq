@@ -821,8 +821,8 @@ impl Pipeline {
 struct Encoder {
 	/// The open encoder and the space it signals.
 	open: Option<(moq_video::encode::Sink, moq_video::Color)>,
-	/// Encoders closed by a switch, flushed and holding their tails, oldest first.
-	retired: VecDeque<moq_video::encode::Sink>,
+	/// The tail of encoders closed by a switch, received ahead of the open one's output.
+	tail: VecDeque<moq_video::encode::Encoded>,
 	/// A cut asked for while no encoder was open, applied when one opens.
 	pending_cut: bool,
 }
@@ -858,7 +858,11 @@ impl Encoder {
 			// drains, so a drain that fails still leaves the next encoder owing it.
 			self.pending_cut = true;
 			sink.flush().await?;
-			self.retired.push_back(sink);
+			while let Some(encoded) = sink.receive()? {
+				self.tail.push_back(encoded);
+			}
+			// Closed before its replacement opens, so a switch never needs a second hardware session.
+			drop(sink);
 		}
 		let sink = match &mut self.open {
 			Some((sink, _)) => sink,
@@ -877,13 +881,10 @@ impl Encoder {
 		Ok(())
 	}
 
-	/// Pop the next encoded frame: a retired encoder's tail first, then the open one's.
+	/// Pop the next encoded frame: a closed encoder's tail first, then the open one's.
 	fn receive(&mut self) -> Result<Option<moq_video::encode::Encoded>, Error> {
-		while let Some(retired) = self.retired.front_mut() {
-			if let Some(encoded) = retired.receive()? {
-				return Ok(Some(encoded));
-			}
-			self.retired.pop_front();
+		if let Some(encoded) = self.tail.pop_front() {
+			return Ok(Some(encoded));
 		}
 		match &mut self.open {
 			Some((sink, _)) => Ok(sink.receive()?),
