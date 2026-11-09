@@ -56,7 +56,3 @@ Rejected in planning:
   and #8088 showed that a 100-file audit PR spends weeks rebasing.
 - Folding these items into the larger quests: those wait on decisions or
   prototypes, and these do not.
-
-## Required
-
-- [JS Key.sign takes exactly Claims](/quest/m2/api-shape/auth-sign.md) - `@moq/auth` signs only `Claims`, with no legacy `put`/`get` input, like Rust

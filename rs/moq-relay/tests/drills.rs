@@ -1011,7 +1011,11 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	};
 	let mut config = relay_config();
 	config.quic = relay_quic();
-	let relay_idle = config.quic.resolve().idle_timeout;
+	let relay_idle = config
+		.quic
+		.resolve()
+		.idle_timeout
+		.expect("the relay has an idle timeout");
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
 	let peer = match (link, lane) {

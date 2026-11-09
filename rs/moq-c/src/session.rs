@@ -4,7 +4,10 @@ use moq_tokio::connection::Phase;
 use url::Url;
 
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, State, ffi, moq_connection_phase, moq_connection_state, moq_string};
+use crate::{
+	Error, Id, NonZeroSlab, State, ffi, moq_connection_connected, moq_connection_migrating, moq_connection_offline,
+	moq_connection_phase, moq_connection_phase_data, moq_connection_state, moq_string,
+};
 
 /// A session task and the connection backing its handle.
 struct TaskEntry {
@@ -14,48 +17,118 @@ struct TaskEntry {
 
 /// One lifecycle snapshot, converted to a [`moq_connection_state`] for the callback.
 pub(crate) struct Lifecycle {
-	phase: moq_connection_phase,
 	connects: u64,
-	pub failure: Option<Error>,
-	version: Option<moq_net::Version>,
+	phase: Stage,
+}
+
+/// A [`Lifecycle`]'s phase and its data, mirroring [`Phase`] with moq-c's errors.
+enum Stage {
+	Connecting {
+		failure: Option<Error>,
+	},
+	Connected {
+		version: moq_net::Version,
+	},
+	Disconnected {
+		failure: Option<Error>,
+	},
+	Migrating {
+		version: moq_net::Version,
+		failure: Option<Error>,
+	},
+	Closed {
+		failure: Option<Error>,
+	},
 }
 
 impl Lifecycle {
 	fn observed(state: moq_tokio::connection::Observation) -> Self {
+		let failure = |failure: Option<moq_tokio::Error>| failure.map(map_connect_error);
 		Self {
-			phase: match state.phase {
-				Phase::Connecting => moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTING,
-				Phase::Connected => moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED,
-				Phase::Disconnected => moq_connection_phase::MOQ_CONNECTION_PHASE_DISCONNECTED,
-				Phase::Migrating => moq_connection_phase::MOQ_CONNECTION_PHASE_MIGRATING,
-				Phase::Closed => moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED,
-			},
 			connects: state.connects,
-			failure: state.failure.map(map_connect_error),
-			version: state.version,
+			phase: match state.phase {
+				Phase::Connecting { failure: err } => Stage::Connecting { failure: failure(err) },
+				Phase::Connected { version, .. } => Stage::Connected { version },
+				Phase::Disconnected { failure: err } => Stage::Disconnected { failure: failure(err) },
+				Phase::Migrating {
+					version, failure: err, ..
+				} => Stage::Migrating {
+					version,
+					failure: failure(err),
+				},
+				Phase::Closed { failure: err } => Stage::Closed { failure: failure(err) },
+			},
 		}
 	}
 
 	/// The terminal snapshot: `res` is the session's final result.
 	fn closed(connects: u64, res: Result<(), Error>) -> Self {
 		Self {
-			phase: moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED,
 			connects,
-			failure: res.err(),
-			version: None,
+			phase: Stage::Closed { failure: res.err() },
+		}
+	}
+
+	/// The snapshot's failure, which `moq_error()` describes during the callback.
+	pub fn failure(&self) -> Option<&Error> {
+		match &self.phase {
+			Stage::Connecting { failure }
+			| Stage::Disconnected { failure }
+			| Stage::Migrating { failure, .. }
+			| Stage::Closed { failure } => failure.as_ref(),
+			Stage::Connected { .. } => None,
 		}
 	}
 
 	pub fn to_c(&self) -> moq_connection_state {
-		let protocol = self.version.map_or("", |version| version.as_str());
+		let code = |failure: &Option<Error>| failure.as_ref().map_or(0, ffi::ReturnCode::code);
+		// Each version's name is static, so the pointer outlives the callback.
+		let name = |version: &moq_net::Version| {
+			let name = version.as_str();
+			moq_string {
+				data: name.as_ptr().cast(),
+				len: name.len(),
+			}
+		};
+		let (phase, data) = match &self.phase {
+			Stage::Connecting { failure } => (
+				moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTING,
+				moq_connection_phase_data {
+					connecting: moq_connection_offline { failure: code(failure) },
+				},
+			),
+			Stage::Connected { version } => (
+				moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED,
+				moq_connection_phase_data {
+					connected: moq_connection_connected { version: name(version) },
+				},
+			),
+			Stage::Disconnected { failure } => (
+				moq_connection_phase::MOQ_CONNECTION_PHASE_DISCONNECTED,
+				moq_connection_phase_data {
+					disconnected: moq_connection_offline { failure: code(failure) },
+				},
+			),
+			Stage::Migrating { version, failure } => (
+				moq_connection_phase::MOQ_CONNECTION_PHASE_MIGRATING,
+				moq_connection_phase_data {
+					migrating: moq_connection_migrating {
+						version: name(version),
+						failure: code(failure),
+					},
+				},
+			),
+			Stage::Closed { failure } => (
+				moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED,
+				moq_connection_phase_data {
+					closed: moq_connection_offline { failure: code(failure) },
+				},
+			),
+		};
 		moq_connection_state {
-			phase: self.phase,
+			phase,
 			connects: self.connects,
-			failure: self.failure.as_ref().map_or(0, ffi::ReturnCode::code),
-			protocol: moq_string {
-				data: protocol.as_ptr().cast(),
-				len: protocol.len(),
-			},
+			data,
 		}
 	}
 }
@@ -275,10 +348,10 @@ impl Session {
 
 		// A server-accepted session is a single transport, so it only ever connects once.
 		callback.call(&Lifecycle {
-			phase: moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED,
 			connects: 1,
-			failure: None,
-			version: Some(session.version()),
+			phase: Stage::Connected {
+				version: session.version(),
+			},
 		});
 		Err(session.closed().await.into())
 	}
@@ -373,16 +446,17 @@ impl Session {
 	) -> Result<(), Error> {
 		// The loop may have moved before we got here; the untouched initial state says nothing.
 		let mut state = monitor.state();
-		let initial = state.phase == Phase::Connecting && state.connects == 0 && state.failure.is_none();
-		if !initial && state.phase != Phase::Closed {
+		let initial = matches!(state.phase, Phase::Connecting { failure: None }) && state.connects == 0;
+		let closed = |state: &moq_tokio::connection::Observation| matches!(state.phase, Phase::Closed { .. });
+		if !initial && !closed(&state) {
 			callback.call(&Lifecycle::observed(state.clone()));
 		}
-		while state.phase != Phase::Closed {
+		while !closed(&state) {
 			let Ok(next) = monitor.state_changed(state.revision).await else {
 				break;
 			};
 			state = next;
-			if state.phase != Phase::Closed {
+			if !closed(&state) {
 				callback.call(&Lifecycle::observed(state.clone()));
 			}
 		}
