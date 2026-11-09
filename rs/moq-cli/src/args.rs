@@ -3244,10 +3244,7 @@ mod tests {
 
 		// As a set: a choice list reads ascending, and that ordering is a presentation call.
 		// Every wire code moq-net parses, including the opt-in `-wip` drafts.
-		let mut expected: Vec<&str> = moq_net::Version::ALL
-			.iter()
-			.map(|version| version.as_str())
-			.collect();
+		let mut expected: Vec<&str> = moq_net::Version::ALL.iter().map(|version| version.as_str()).collect();
 		expected.sort_unstable();
 		let mut found = Vec::new();
 		walk(Cli::spec().root, &mut found);
