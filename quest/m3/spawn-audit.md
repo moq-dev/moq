@@ -58,8 +58,8 @@ server entry above):
   real time. Move them to the `kio::clock` sim, or paused tokio where the
   sim cannot run them yet.
 
-Public API: constructors that spawned return a handle to poll instead; an Impact
-migration note per published crate. Wire: none.
+Public API: none; the public spawning entry points are settled and kept, and this
+quest only converts or lists private spawns. Wire: none.
 
 Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the public spawning entry points were settled before the cut; this quest keeps the private spawns.
 
