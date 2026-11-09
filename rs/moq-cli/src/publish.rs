@@ -1146,9 +1146,13 @@ impl CaptureArgs {
 		options.bandwidth = bandwidth;
 		options.on_demand = self.video == Mode::Demand;
 		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		options.vaapi = self.vaapi_device.clone();
+		{
+			options.vaapi = self.vaapi_device.clone();
+		}
 		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		options.v4l2 = self.v4l2_encoder.clone();
+		{
+			options.v4l2 = self.v4l2_encoder.clone();
+		}
 		Ok(options)
 	}
 

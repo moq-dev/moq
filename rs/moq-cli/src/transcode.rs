@@ -123,11 +123,14 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	};
 	config.resize.output = args.frames.0;
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	config.vaapi = args.vaapi_device.clone();
+	{
+		config.vaapi = args.vaapi_device.clone();
+	}
 	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	config.v4l2_encoder = args.v4l2_encoder.clone();
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	config.v4l2_decoder = args.v4l2_decoder.clone();
+	{
+		config.v4l2_encoder = args.v4l2_encoder.clone();
+		config.v4l2_decoder = args.v4l2_decoder.clone();
+	}
 
 	let source_path = moq_net::Path::try_from(
 		moq.broadcast

@@ -329,9 +329,13 @@ impl Capture {
 		config.codec = self.codec;
 		config.kind = self.kind.clone();
 		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		config.vaapi = self.vaapi.clone();
+		{
+			config.vaapi = self.vaapi.clone();
+		}
 		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		config.v4l2 = self.v4l2.clone();
+		{
+			config.v4l2 = self.v4l2.clone();
+		}
 		config
 	}
 }

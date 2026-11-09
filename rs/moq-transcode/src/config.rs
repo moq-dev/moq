@@ -69,9 +69,13 @@ impl Config {
 		decoder.kind = self.decoder.clone();
 		decoder.output = self.resize.output;
 		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		decoder.vaapi = self.vaapi.clone();
+		{
+			decoder.vaapi = self.vaapi.clone();
+		}
 		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		decoder.v4l2 = self.v4l2_decoder.clone();
+		{
+			decoder.v4l2 = self.v4l2_decoder.clone();
+		}
 		decoder
 	}
 
@@ -80,9 +84,13 @@ impl Config {
 		let mut encoder = moq_video::encode::Config::new(size.width, size.height, framerate);
 		encoder.kind = self.encoder.clone();
 		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		encoder.vaapi = self.vaapi.clone();
+		{
+			encoder.vaapi = self.vaapi.clone();
+		}
 		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		encoder.v4l2 = self.v4l2_encoder.clone();
+		{
+			encoder.v4l2 = self.v4l2_encoder.clone();
+		}
 		encoder
 	}
 }
