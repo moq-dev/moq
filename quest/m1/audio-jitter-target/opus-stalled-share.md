@@ -15,15 +15,11 @@ and [42487375545](https://github.com/moq-dev/moq/actions/runs/42487375545)).
 ✅ A child of this epic, m1 (rejected: leaving it to the watch quest's
 grading).
 
-Start after [Watch](/quest/m1/audio-jitter-target/watch.md) lands
-([moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) time-stretches
-the browser's audio ring), then grade the next scheduled nightlies (never
-dispatch one). If the rows pass, delete this quest. Otherwise find what
-stalls Opus that the stretch does not cover and fix it there; do not loosen
-the budget to pass.
+[moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058), which
+time-stretches the browser's audio ring, merged on 2026-11-09 and may already
+remove these stalls. Grade the scheduled nightlies after it (never dispatch
+one). If the rows pass, delete this quest. Otherwise find what stalls Opus
+that the stretch does not cover and fix it there; do not loosen the budget to
+pass.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser time-stretches its audio ring, which may already remove these stalls
