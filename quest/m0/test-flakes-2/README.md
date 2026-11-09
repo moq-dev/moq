@@ -216,8 +216,9 @@ OS picked for TCP and failed a local run while other checks held that UDP port.
 Added 2026-11-08 (maintainer's standing rule that flakes join this epic): moq-ffi's
 raw media warmup test, which failed in the merge queue for
 [moq-dev/moq#8272](https://github.com/moq-dev/moq/pull/8272) when its reader skipped one of three
-buffered groups on the FFI runtime's real clock. It is quarantined with `#[ignore]` until its
-child fixes it.
+buffered groups on the FFI runtime's real clock.
+[moq-dev/moq#8329](https://github.com/moq-dev/moq/pull/8329) moved it to the paused test
+clock, re-enabled it, and deleted its child.
 
 Added 2026-11-09 (maintainer, /quest-complete): `js/net`'s compressed-frame
 cap test and lite-07 re-dropped re-offer test, which failed under load during
