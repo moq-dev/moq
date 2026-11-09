@@ -126,7 +126,6 @@ whose lite-07 encoding [lite-07 by start](/quest/m2/time-addressing/lite07.md) c
 - [Takeover](/quest/m1/stream-credit/takeover.md) - lite-07 lets a group stream take over for another group
 - [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - may add SUBSCRIBE_DROP for a stopped group; leaves this list if it takes the no-wire path
 - [Delete the old start bookkeeping](/quest/m2/subscribe-ranges/start-bookkeeping.md) - may change START per update on lite-07
-- [Minted instances are a typed flag](/quest/m2/instance-provenance.md) - lite-07 carries an explicit minted flag beside each instance instead of the `~` prefix
 - [A withdrawn claim ends across mixed lite-06 and lite-07 relays](/quest/m1/mixed-version-ring.md) - lite-07 announcements carry a temporary lite-06 compatibility chain
 
 ## Related

@@ -53,11 +53,9 @@ Decided 2026-11-08 (maintainer, /quest-plan):
   across islands, and the existing route-hop check becomes one case of it.
 - ✅ It is temporary: the draft and code mark the extension and field as
   lite-06 compatibility, and the lite-07 to lite-08 migration deletes them.
-  No public API carries the chain. Keep it apart from the minted flag that
-  `quest/m2/instance-provenance.md` plans (on
-  [moq-dev/moq#8266](https://github.com/moq-dev/moq/pull/8266)'s branch
-  until it merges), even though a non-empty chain marks exactly the
-  announcements that flag would: the flag also covers moq-transport routes
+  No public API carries the chain. Keep it apart from lite-07's `Minted`
+  flag beside each instance, even though a non-empty chain marks exactly the
+  announcements that flag does: the flag also covers moq-transport routes
   and outlives lite-06.
 - ✅ m1 (rejected: m0, m2). lite-07 is opt-in `-wip`, so nothing published
   breaks, and the field must exist before

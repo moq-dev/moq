@@ -32,12 +32,5 @@ paced flight has to see its riders leave; `tests/integration/flights.rs` and
 `benches/group.rs` use it for that. Its docs say so since
 [moq-dev/moq#8266](https://github.com/moq-dev/moq/pull/8266).
 
-Decided 2026-11-08 (maintainer): whether a route refuses a minted instance
-is replaced by [Minted instances are a typed flag](/quest/m2/instance-provenance.md).
-The `~` prefix is a spoofable in-band sentinel; once only a session can mint
-an instance, the route needs no refusal.
-
-## Related
-
-- [Minted instances are a typed flag](/quest/m2/instance-provenance.md) -
-  replaces this quest's minted-route refusal item
+Decided 2026-11-08 (maintainer): a route needs no refusal of a minted
+instance, since only a session can mint one; the minted flag is typed.
