@@ -8,6 +8,9 @@
 //! - received: a relay hears one batch from the origin and forwards it on, swept over
 //!   the claims the origin holds and the claims the batch changes. The changes axis is
 //!   expected to grow; the claims axis is not.
+//! - lagging: a relay hears the origin on two streams, the second some one-claim
+//!   batches behind the first, and each hears its next batch. Swept over the claims
+//!   the origin holds and how far the second lags: neither axis is expected to grow.
 //!
 //! The route layer is crate-private, so this reaches it through the hidden `fuzz` module.
 //!
@@ -21,6 +24,9 @@ const SHAPES: [(usize, usize); 4] = [(10, 10), (10_000, 10), (10, 1_000), (10_00
 
 /// `(claims, changes)` shapes for a relay hearing a batch.
 const RECEIVED: [(usize, usize); 4] = [(100, 1), (10_000, 1), (100, 100), (10_000, 100)];
+
+/// `(claims, lag)` shapes for a relay hearing a stream that lags another.
+const LAGGING: [(usize, usize); 4] = [(100, 1), (10_000, 1), (100, 100), (10_000, 10_000)];
 
 fn bench(c: &mut Criterion, name: &str, interest: fn(usize) -> String, sent: usize) {
 	let mut group = c.benchmark_group(format!("routes/{name}"));
@@ -60,7 +66,7 @@ fn bench_received(c: &mut Criterion) {
 		let id = BenchmarkId::from_parameter(format!("{claims}c_{changes}d"));
 		let mut fixture = None;
 		group.bench_function(id, |b| {
-			let relay = fixture.get_or_insert_with(|| fuzz::RouteRelay::new(claims));
+			let relay = fixture.get_or_insert_with(|| fuzz::RouteRelay::heard(claims));
 			// One serving change per claim changed, and one forwarded batch.
 			b.iter(|| assert_eq!(relay.change(changes), changes + 1));
 		});
@@ -68,5 +74,20 @@ fn bench_received(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_watched, bench_unwatched, bench_received);
+fn bench_lagging(c: &mut Criterion) {
+	let mut group = c.benchmark_group("routes/lagging");
+	for (claims, lag) in LAGGING {
+		let id = BenchmarkId::from_parameter(format!("{claims}c_{lag}l"));
+		let mut fixture = None;
+		group.bench_function(id, |b| {
+			let relay = fixture.get_or_insert_with(|| fuzz::RouteRelay::lagging(claims, lag));
+			// The first stream's change is served through both streams and forwarded;
+			// the second's older one changes nothing.
+			b.iter(|| assert_eq!(relay.step(), 3));
+		});
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_watched, bench_unwatched, bench_received, bench_lagging);
 criterion_main!(benches);

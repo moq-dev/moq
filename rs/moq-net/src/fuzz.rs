@@ -554,46 +554,75 @@ impl RouteNode {
 	}
 }
 
-/// A relay's lite-07 route node hearing one origin's claims on a stream it asked for,
+/// A relay's lite-07 route node hearing one origin's claims on streams it asked for,
 /// and forwarding them on a stream it answers, for the routes bench.
 pub struct RouteRelay {
 	// Dropped first: a stream disconnects from its node on drop.
-	receive: crate::route::node::Stream,
+	receive: Vec<crate::route::node::Stream>,
 	answer: crate::route::node::Stream,
 	#[allow(dead_code, reason = "held so the streams keep a node to talk to")]
 	node: crate::route::Node,
 	instance: crate::Instance,
+	claims: usize,
+	/// The origin's revision as the first stream last heard it.
 	rev: u64,
+	/// The one-claim batches the first stream heard that the second has yet to: each
+	/// revision and the claim it changed.
+	behind: std::collections::VecDeque<(u64, usize)>,
 }
 
 impl RouteRelay {
 	/// The origin's identity as the relay hears it.
 	const ORIGIN: u64 = 1;
 
-	/// A relay that already heard and forwarded the origin's `claims` claims under `live/`.
-	pub fn new(claims: usize) -> Self {
+	/// A relay that already heard and forwarded the origin's `claims` claims under
+	/// `live/`, on each of `streams` streams.
+	fn new(claims: usize, streams: usize) -> Self {
 		let node = crate::route::Node::new(2, 2);
 		let answer = node.answer(crate::route::Link::default(), Path::empty()).unwrap();
-		let receive = node.receive(crate::route::Link::default(), Path::empty()).unwrap();
+		let instance = crate::Instance::random();
+		let rev = claims as u64;
 		let advert = crate::route::Advert {
 			seqno: 0,
 			metric: 0,
 			down_only: false,
 		};
-		receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert)));
-		let instance = crate::Instance::random();
-		let rev = claims as u64;
-		let snapshot = (0..claims)
-			.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
+		let receive = (0..streams)
+			.map(|_| {
+				let receive = node.receive(crate::route::Link::default(), Path::empty()).unwrap();
+				receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert)));
+				let snapshot = (0..claims)
+					.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
+					.collect();
+				receive.batch(Self::ORIGIN, snapshot, Some(rev));
+				receive
+			})
 			.collect();
-		receive.batch(Self::ORIGIN, snapshot, Some(rev));
 		let relay = Self {
 			receive,
 			answer,
 			node,
 			instance,
+			claims,
 			rev,
+			behind: Default::default(),
 		};
+		relay.drain();
+		relay
+	}
+
+	/// A relay hearing the origin's `claims` claims on one stream.
+	pub fn heard(claims: usize) -> Self {
+		Self::new(claims, 1)
+	}
+
+	/// A relay hearing the origin's `claims` claims on two streams, the second `lag`
+	/// one-claim batches behind the first.
+	pub fn lagging(claims: usize, lag: usize) -> Self {
+		let mut relay = Self::new(claims, 2);
+		for _ in 0..lag {
+			relay.advance();
+		}
 		relay.drain();
 		relay
 	}
@@ -618,13 +647,31 @@ impl RouteRelay {
 		self.rev += 1;
 		let claim = Self::claim(&self.instance, self.rev);
 		let batch = (0..changes).map(|i| (Self::path(i), Some(claim.clone()))).collect();
-		self.receive.batch(Self::ORIGIN, batch, Some(self.rev));
+		self.receive[0].batch(Self::ORIGIN, batch, Some(self.rev));
+		self.drain()
+	}
+
+	/// The first stream hears the origin's next revision, which changes one claim.
+	fn advance(&mut self) {
+		self.rev += 1;
+		let i = self.rev as usize % self.claims;
+		let batch = vec![(Self::path(i), Some(Self::claim(&self.instance, self.rev)))];
+		self.receive[0].batch(Self::ORIGIN, batch, Some(self.rev));
+		self.behind.push_back((self.rev, i));
+	}
+
+	/// Each stream hears its next one-claim batch, the second still lagging, returning
+	/// how many outputs the relay queued.
+	pub fn step(&mut self) -> usize {
+		self.advance();
+		let (rev, i) = self.behind.pop_front().expect("the second stream lags");
+		let batch = vec![(Self::path(i), Some(Self::claim(&self.instance, rev)))];
+		self.receive[1].batch(Self::ORIGIN, batch, Some(rev));
 		self.drain()
 	}
 
 	fn drain(&self) -> usize {
-		[&self.receive, &self.answer]
-			.into_iter()
+		(self.receive.iter().chain([&self.answer]))
 			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
 			.sum()
 	}

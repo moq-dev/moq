@@ -154,6 +154,16 @@ impl<A: Clone + Eq> View<A> {
 	/// claim whose state differs between the two views, since a claim held alike is
 	/// never taken.
 	pub fn merge_claims<'a>(&mut self, other: &Self, claims: impl IntoIterator<Item = &'a Path>) -> Vec<Path> {
+		// Every floor of `other` lies within a newer one here, so it knows no claim at a
+		// newer revision and changes nothing: a lagging view costs nothing to merge,
+		// however far it lags.
+		let stale = other
+			.floors
+			.iter()
+			.all(|(region, &floor)| (self.floors.iter()).any(|(wider, &newer)| newer > floor && within(region, wider)));
+		if stale {
+			return Vec::new();
+		}
 		let mut changed = Vec::new();
 		for claim in claims {
 			let (theirs, ours) = (other.as_of(claim), self.as_of(claim));
