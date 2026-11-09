@@ -7449,7 +7449,10 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	let connect = expected.connect.resolve();
 
 	assert!(config.has_connect_timeout);
-	assert_eq!(config.connect_timeout_us, connect.timeout.as_micros() as u64);
+	assert_eq!(
+		config.connect_timeout_us,
+		connect.timeout.unwrap_or_default().as_micros() as u64
+	);
 	assert!(config.has_failover_delay);
 	assert_eq!(config.failover_delay_us, connect.race.as_micros() as u64);
 	assert!(config.has_resolution_delay);
@@ -7463,10 +7466,13 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(config.backoff_max_us, expected.connect.backoff.max().as_micros() as u64);
+	assert_eq!(
+		config.backoff_max_us,
+		expected.connect.backoff.max().unwrap_or_default().as_micros() as u64
+	);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		expected.connect.backoff.timeout(),
+		expected.connect.backoff.timeout().unwrap_or_default(),
 		std::time::Duration::from_micros(config.backoff_timeout_us)
 	);
 
@@ -7479,7 +7485,10 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_quic_max_streams);
 	assert_eq!(config.quic_max_streams, quic.max_streams);
 	assert!(config.has_quic_idle_timeout);
-	assert_eq!(config.quic_idle_timeout_us, quic.idle_timeout.as_micros() as u64);
+	assert_eq!(
+		config.quic_idle_timeout_us,
+		quic.idle_timeout.unwrap_or_default().as_micros() as u64
+	);
 	assert_eq!(
 		config.has_quic_keep_alive.then_some(config.quic_keep_alive_us),
 		quic.keep_alive.map(|d| d.as_micros() as u64)

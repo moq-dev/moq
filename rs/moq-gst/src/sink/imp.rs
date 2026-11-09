@@ -2629,7 +2629,7 @@ mod tests {
 
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
-		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
+		assert_eq!(quic.idle_timeout, Some(Duration::from_secs(15)));
 		assert_eq!(quic.keep_alive, Some(Duration::from_secs(3)));
 		assert!(!sink.property::<bool>("quic-keylog"));
 		assert!(quic.keylog.is_none());
@@ -2639,8 +2639,8 @@ mod tests {
 		sink.set_property("quic-keylog", true);
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
-		assert_eq!(quic.idle_timeout, Duration::ZERO);
-		assert_eq!(quic.keep_alive, Some(Duration::ZERO));
+		assert_eq!(quic.idle_timeout, None);
+		assert_eq!(quic.keep_alive, None);
 		assert!(quic.keylog.is_some());
 	}
 

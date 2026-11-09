@@ -167,14 +167,14 @@ impl Backoff {
 		self.resolve().initial
 	}
 
-	/// The configured retry-delay cap, or its default; zero leaves the delay uncapped.
-	pub fn max(&self) -> Duration {
-		self.resolve().max.unwrap_or_default()
+	/// The configured retry-delay cap, or its default; `None` leaves the delay uncapped.
+	pub fn max(&self) -> Option<Duration> {
+		self.resolve().max
 	}
 
-	/// The retry deadline window, or its default; zero retries forever.
-	pub fn timeout(&self) -> Duration {
-		self.resolve().timeout.unwrap_or_default()
+	/// The retry deadline window, or its default; `None` retries forever.
+	pub fn timeout(&self) -> Option<Duration> {
+		self.resolve().timeout
 	}
 
 	/// The policy these knobs configure, with each unset one at its default.
@@ -1581,7 +1581,7 @@ mod tests {
 		assert_eq!(parsed.backoff.initial, Some((Duration::from_secs(7)).into()));
 		assert_eq!(parsed.backoff.multiplier, 5);
 		assert_eq!(parsed.backoff.max, Some((Duration::from_secs(11)).into()));
-		assert_eq!(parsed.backoff.timeout(), Duration::ZERO, "0 means retry forever");
+		assert_eq!(parsed.backoff.timeout(), None, "0 means retry forever");
 
 		// With no flags, the parser defaults resolve to the policy's defaults.
 		let parsed = Wrapper::parse_from(&[]).unwrap();
@@ -3063,7 +3063,7 @@ mod duration_tests {
 		max,
 		"--connect-backoff-max",
 		|c: &Backoff| c.max(),
-		|d| d
+		|d: Duration| Some(d).filter(|d| !d.is_zero())
 	);
 	crate::cli::duration::test_config_duration!(
 		timeout_set_in_code_beats_parser_default,
@@ -3071,7 +3071,7 @@ mod duration_tests {
 		timeout,
 		"--connect-backoff-timeout",
 		|c: &Backoff| c.timeout(),
-		|d| d
+		|d: Duration| Some(d).filter(|d| !d.is_zero())
 	);
 	crate::cli::duration::test_config_duration!(
 		handover_set_in_code_beats_parser_default,

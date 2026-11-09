@@ -6571,7 +6571,7 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	let defaults = moq_client_defaults();
 
 	let connect = moq_tokio::connect::Config::default().resolve();
-	assert_eq!(defaults.timeout, Some(connect.timeout));
+	assert_eq!(defaults.timeout, connect.timeout);
 	assert_eq!(defaults.race, Some(connect.race));
 	assert_eq!(defaults.resolution_delay, Some(connect.resolution_delay));
 
@@ -6584,8 +6584,8 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.websocket.enabled, Some(true));
 	let backoff = moq_tokio::connection::Backoff::default();
 	assert_eq!(defaults.backoff.initial, Some(backoff.initial()));
-	assert_eq!(defaults.backoff.max, Some(backoff.max()));
-	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout()));
+	assert_eq!(defaults.backoff.max, Some(backoff.max().unwrap_or_default()));
+	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout().unwrap_or_default()));
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
