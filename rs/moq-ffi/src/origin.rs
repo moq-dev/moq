@@ -5,8 +5,8 @@ use std::task::{Poll, ready};
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::instance::MoqInstance;
 use crate::ffi::{Background, OneShot, Polled};
+use crate::instance::MoqInstance;
 use crate::producer::MoqBroadcastProducer;
 
 /// Config used when creating an origin.
