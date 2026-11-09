@@ -17,6 +17,7 @@ import {
 	sleep,
 	sleepUntil,
 	timeout,
+	timeoutSignal,
 	Wall,
 	wall,
 	yieldNow,
@@ -158,6 +159,20 @@ test("timeouts prefer ready work, propagate rejection, and expire on the manual 
 	await clock.advance(Nano(9));
 	await clock.advance(Nano(1));
 	expect(await pending).toBeInstanceOf(Elapsed);
+});
+
+test("a timeout signal aborts at the manual deadline unless disarmed first", async () => {
+	const clock = manual();
+	const signal = timeoutSignal(Nano(10));
+	await clock.advance(Nano(9));
+	expect(signal.aborted).toBe(false);
+	await clock.advance(Nano(1));
+	expect(signal.reason).toHaveProperty("name", "TimeoutError");
+	const disarm = new AbortController();
+	const disarmed = timeoutSignal(Nano(10), { signal: disarm.signal });
+	disarm.abort();
+	await clock.advance(Nano(10));
+	expect(disarmed.aborted).toBe(false);
 });
 
 test("interval burst delivers every missed scheduled tick", async () => {

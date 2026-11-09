@@ -88,6 +88,16 @@ export function timeout<T>(duration: Nano, operation: PromiseLike<T>): Promise<T
 	});
 }
 
+/** An `AbortSignal` that aborts with a `TimeoutError` after a duration on the installed clock; aborting `signal` disarms it. */
+export function timeoutSignal(duration: Nano, options?: { signal?: AbortSignal; ref?: boolean }): AbortSignal {
+	const expired = new AbortController();
+	void sleep(duration, options).then(
+		() => expired.abort(new DOMException("signal timed out", "TimeoutError")),
+		() => {},
+	);
+	return expired.signal;
+}
+
 /** Choose how an interval catches up after its caller misses ticks. */
 export const MissedTickBehavior = {
 	/** Deliver every missed tick on the original schedule. */
