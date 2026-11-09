@@ -362,10 +362,10 @@ int main(void)
 	moq_track_consumer *consumer = await(&subscribed, "subscribe_track");
 	moq_task_free(task);
 
-	/* Freeing a pending task cancels the read, and its callback never runs. */
+	/* Freeing a pending task cancels the read, and its callback never runs, even while the
+	 * next read below pumps the loop. */
 	result cancelled = {0};
 	task = moq_track_consumer_read_frame(consumer, on_frame, &cancelled);
-	CHECK(!pump(&cancelled.done, 50));
 	moq_task_free(task);
 
 	/* The consumer survives the cancelled read and delivers the next frame. */

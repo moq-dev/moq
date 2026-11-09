@@ -13,9 +13,9 @@
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_archive::object_store::memory::InMemory;
 use moq_archive::{Producer, Store, producer};
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
+use object_store::memory::InMemory;
 
 const FRAMES_PER_GROUP: u64 = 2;
 

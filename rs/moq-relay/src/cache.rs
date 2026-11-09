@@ -289,7 +289,7 @@ mod tests {
 	fn drive(mut driver: crate::cluster::Driver) -> Arc<AtomicUsize> {
 		let running = Arc::new(AtomicUsize::new(driver.len()));
 		let report = running.clone();
-		tokio::spawn(moq_net::kio::wait(move |waiter| {
+		tokio::spawn(kio::wait(move |waiter| {
 			let poll = driver.poll(waiter);
 			report.store(driver.len(), Ordering::SeqCst);
 			poll

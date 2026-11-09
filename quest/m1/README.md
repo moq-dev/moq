@@ -25,7 +25,7 @@ because a downstream iGPU transcode trial needs it now.
 Held here by open claims: a quest's branch is its path, so a claimed quest
 cannot move until its PR merges, and an epic moves with its children. These
 breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: drop-set, rind, and
+`Required`, so the cut still waits on them: drop-set and
 stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
 moves what remains of them once their claims merge.
 
@@ -40,16 +40,14 @@ moves what remains of them once their claims merge.
 - [Stream credit by priority](/quest/m1/stream-credit/README.md) - every stream opens through one priority entry point, and a higher-priority group takes over or resets a lower one when credit runs out
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; time-stretched browser playback without steady-state underruns and a native trace replay remain
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
-- [One assets() for every hosted file](/quest/m1/hosted-assets.md) - `@moq/hang` owns `assets()`, which also points the libav polyfill at the hosted wasm
 - [Push-to-talk's press-to-audible latency fits a budget on the defaults](/quest/m1/push-to-talk-latency.md) - press to audible on the browser defaults, excluding device output, stays under a kixtop-measured budget that `just test push-to-talk` enforces
-- [MoQ on rind](/quest/m1/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [Tests run on a mocked clock](/quest/m1/mock-clock-tests/README.md) - about 300 tests stop proving nothing happened by waiting, sleeping to settle, or asserting on elapsed time
 - [Lifecycles are explicit state](/quest/m1/explicit-state/README.md) - every lifecycle the 2026-11-07 audit found implicit is one enum or union, fixing the bugs in the 11 lifecycles it redesigns, with review and agent rules against new ones
 - [Track drop runs are forgotten below the floor](/quest/m1/drop-runs-prune.md) - a track's dropped-group record stays proportional to its window in Rust and JS
 - [A macOS camera delivers frames the renderer imports](/quest/m1/camera-nv12-macos.md) - AVFoundation capture asks for NV12, so a camera whose native format is `2vuy` reaches the renderer
-- [js/qmux's WebSocket ponyfill ends its writable on close](/quest/m1/qmux-ws-close.md) - writes after close reject, and a reused AbortSignal stops holding closed sockets
 - [@moq/json accepts only what it can reconstruct](/quest/m1/json-decode-limits.md) - nesting past 128 levels and out-of-range numbers are refused at parse like Rust, and schema output shares no decoder state
 - [A WebSocket fallback session returns to QUIC](/quest/m1/websocket-quic-upgrade.md) - a session that fell back to WebSocket re-probes QUIC and migrates back once UDP works, and a post-outage redial prefers QUIC
+- [The video decoder configures with the codec its probe accepted](/quest/m1/video-probe-codec.md) - Safari's `avc3` to `avc1` retry reaches the decoder without rewriting the catalog's codec
 
 ## Related
 

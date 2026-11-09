@@ -555,11 +555,14 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-Firefox's replacement case is quarantined from the default run after intermittent
-audio-tone failures. Investigate the missing tone samples alongside
-[the audio playout work](https://github.com/moq-dev/moq/pull/8058), then restore it.
-Run it explicitly with `just test media --media-engines firefox --media-cases replacement`;
-its content, sync, switch, and fallback assertions remain active.
+The replacement case is quarantined from the default run on every engine until
+[the JS route-layer port](../../quest/m2/cluster-routing/routes/js.md) lands,
+because both publishers use lite-07. Firefox also has a separate quarantine for
+intermittent audio-tone failures; investigate those alongside
+[the audio playout work](https://github.com/moq-dev/moq/pull/8058) before restoring
+Firefox's default case. Run replacement explicitly with
+`just test media --media-cases replacement` (add `--media-engines firefox` for
+Firefox); its content, sync, switch, and fallback assertions remain active.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
