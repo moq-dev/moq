@@ -197,6 +197,12 @@ impl Settings {
 	}
 }
 
+/// A terminal call's answer: the accept loop's panic, or `Cancelled`.
+async fn cancelled<T>(driver: crate::ffi::Background) -> Result<T, MoqError> {
+	driver.finished().await?;
+	Err(MoqError::Cancelled)
+}
+
 fn not_listening() -> MoqError {
 	MoqError::Bind {
 		reason: "not listening; call listen() first".into(),
@@ -212,12 +218,42 @@ pub struct MoqServer {
 }
 
 impl MoqServer {
-	/// The accept loop's completion once cancelled, so a terminal call reports its panic.
-	fn cancelled(&self) -> Option<crate::ffi::Background> {
-		match &*self.phase.lock().unwrap() {
-			Phase::Cancelled(driver) => Some(driver.clone()),
-			Phase::Idle | Phase::Listening(_) => None,
-		}
+	/// Bind, and start the accept loop, moving `phase` from `Idle` to `Listening`.
+	///
+	/// `init` binds the QUIC socket, so it runs under the lock that `cancel` takes to close it.
+	fn start(
+		&self,
+		phase: &mut Phase,
+	) -> Result<
+		(
+			tokio::sync::oneshot::Receiver<Result<String, MoqError>>,
+			crate::ffi::Background,
+		),
+		MoqError,
+	> {
+		let _guard = crate::ffi::enter();
+		let server = self
+			.settings
+			.config
+			.clone()
+			.init(self.settings.quic.clone())
+			.map_err(|err| MoqError::Bind {
+				reason: format!("{err}"),
+			})?;
+		let certificates = server.certificates();
+		let (bound, addr) = tokio::sync::oneshot::channel();
+		let (queue, requests) = tokio::sync::mpsc::channel(1);
+		let (stop, stopped) = tokio::sync::oneshot::channel();
+		let (closed, wait) = std::sync::mpsc::channel();
+		let driver = crate::ffi::spawn(serve(server, bound, queue, stopped, closed));
+		*phase = Phase::Listening(Listening {
+			driver: driver.clone(),
+			stop,
+			closed: wait,
+			queue: Arc::new(tokio::sync::Mutex::new(requests)),
+			certificates,
+		});
+		Ok((addr, driver))
 	}
 
 	/// Whether an `accept` is waiting on the queue.
@@ -247,46 +283,21 @@ impl MoqServer {
 	/// Bind the listening socket. Returns the bound local address as a string,
 	/// which is useful when binding to an ephemeral port (`:0`).
 	pub async fn listen(&self) -> Result<String, MoqError> {
-		if let Some(driver) = self.cancelled() {
-			driver.finished().await?;
-			return Err(MoqError::Cancelled);
-		}
-		let (addr, driver) = {
+		let started = {
 			let mut phase = self.phase.lock().unwrap();
 			match &*phase {
-				Phase::Idle => {}
+				Phase::Idle => Ok(self.start(&mut phase)?),
 				Phase::Listening(_) => {
 					return Err(MoqError::Bind {
 						reason: "already listening".into(),
 					});
 				}
-				Phase::Cancelled(_) => return Err(MoqError::Cancelled),
+				Phase::Cancelled(driver) => Err(driver.clone()),
 			}
-			// `init` binds the QUIC socket, so it runs under the lock that `cancel` takes to
-			// close it.
-			let _guard = crate::ffi::enter();
-			let server = self
-				.settings
-				.config
-				.clone()
-				.init(self.settings.quic.clone())
-				.map_err(|err| MoqError::Bind {
-					reason: format!("{err}"),
-				})?;
-			let certificates = server.certificates();
-			let (bound, addr) = tokio::sync::oneshot::channel();
-			let (queue, requests) = tokio::sync::mpsc::channel(1);
-			let (stop, stopped) = tokio::sync::oneshot::channel();
-			let (closed, wait) = std::sync::mpsc::channel();
-			let driver = crate::ffi::spawn(serve(server, bound, queue, stopped, closed));
-			*phase = Phase::Listening(Listening {
-				driver: driver.clone(),
-				stop,
-				closed: wait,
-				queue: Arc::new(tokio::sync::Mutex::new(requests)),
-				certificates,
-			});
-			(addr, driver)
+		};
+		let (addr, driver) = match started {
+			Ok(started) => started,
+			Err(driver) => return cancelled(driver).await,
 		};
 
 		let result = crate::ffi::run(async {
@@ -294,15 +305,22 @@ impl MoqServer {
 			addr.await.map_err(|_| MoqError::Cancelled)?
 		})
 		.await;
-		if let Some(driver) = self.cancelled() {
-			driver.finished().await?;
-			return Err(MoqError::Cancelled);
+		let after = {
+			let mut phase = self.phase.lock().unwrap();
+			match &*phase {
+				Phase::Cancelled(driver) => Some(driver.clone()),
+				// Only this call leaves `Idle`, so the loop that failed to bind is the one listening.
+				Phase::Listening(_) if result.is_err() => {
+					*phase = Phase::Idle;
+					None
+				}
+				Phase::Idle | Phase::Listening(_) => None,
+			}
+		};
+		if let Some(driver) = after {
+			return cancelled(driver).await;
 		}
 		driver.check()?;
-		if result.is_err() {
-			// Only this call leaves `Idle`, so the loop that failed to bind is the one listening.
-			*self.phase.lock().unwrap() = Phase::Idle;
-		}
 		result
 	}
 
@@ -318,10 +336,7 @@ impl MoqServer {
 		};
 		let (driver, queue) = match listening {
 			Ok(listening) => listening,
-			Err(driver) => {
-				driver.finished().await?;
-				return Err(MoqError::Cancelled);
-			}
+			Err(driver) => return cancelled(driver).await,
 		};
 		// A cancel closes the loop, which ends the queue and wakes this.
 		let request = driver
@@ -329,9 +344,12 @@ impl MoqServer {
 				Ok::<_, MoqError>(queue.lock().await.recv().await)
 			}))
 			.await;
-		if let Some(driver) = self.cancelled() {
-			driver.finished().await?;
-			return Err(MoqError::Cancelled);
+		let after = match &*self.phase.lock().unwrap() {
+			Phase::Cancelled(driver) => Some(driver.clone()),
+			Phase::Idle | Phase::Listening(_) => None,
+		};
+		if let Some(driver) = after {
+			return cancelled(driver).await;
 		}
 		match request? {
 			Some(request) => Ok(Some(MoqRequest::new(
