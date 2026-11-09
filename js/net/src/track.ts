@@ -1078,9 +1078,9 @@ export class Producer {
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The sequences the live feed delivered, as a group or a drop, and the stale runs a reclaim
-	// forgot: what a pending tail is judged by. Eviction never touches it. A gap folds away a subscription's grace after a
-	// later arrival opened it, as the session's tail does, so this holds only the gaps still
-	// worth waiting for.
+	// forgot: what a pending tail is judged by. Eviction never touches it. A gap folds away a
+	// subscription's grace after a later arrival opened it, as the session's tail does, so this
+	// holds only the gaps still worth waiting for.
 	#arrivals = new Ledger();
 	// What this track's own publisher produced since its last append, which skips every
 	// sequence below it that never arrived and was not given up: the producer moved on. The

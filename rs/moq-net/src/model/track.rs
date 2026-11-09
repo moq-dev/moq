@@ -1547,7 +1547,11 @@ impl TrackState {
 		let now = self.cache.pool().now_wall();
 		// Only a first run takes this as the age of the gap below it, which nothing opened yet:
 		// the tail's, so an end already reached stays reached.
-		let since = self.outcome.end().and_then(|end| end.tail).map_or(now, |tail| tail.min(now));
+		let since = self
+			.outcome
+			.end()
+			.and_then(|end| end.tail)
+			.map_or(now, |tail| tail.min(now));
 		self.arrivals.account(start..run.end, since);
 		self.cache.wakes().arrived(start..run.end);
 	}
