@@ -76,9 +76,9 @@ export class Backlog {
 		return first?.end.add(this.#retention);
 	}
 
-	/** The oldest retained frame, left in place. */
-	peek(): AudioFrame | undefined {
-		return this.#frames[this.#head]?.frame;
+	/** The oldest retained frame and where it ends, left in place. */
+	peek(): { readonly frame: AudioFrame; readonly end: Duration } | undefined {
+		return this.#frames[this.#head];
 	}
 
 	/** Remove the oldest retained frame. */

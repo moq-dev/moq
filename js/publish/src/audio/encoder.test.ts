@@ -751,6 +751,25 @@ test("a push completing several frames stays one stream", async () => {
 	]);
 });
 
+// An AAC frame lasts a fractional number of microseconds, so each frame's rounded start must come
+// from the framer's own cumulative timeline: adding an unrounded duration to an already rounded
+// start lands a microsecond off at the third frame and breaks continuous audio.
+test("AAC frames with fractional durations stay one stream", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Order(), "aac");
+	const { feed, written } = env;
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+	try {
+		await feed.push({ timestamp: Duration.micros(1000.833), channels: [new Float32Array(1024 * 4)] });
+		await feed.drain();
+
+		expect(discontinuity).not.toHaveBeenCalled();
+		expect(written.map(([timestamp]) => timestamp)).toEqual([1_001, 22_334, 43_668, 65_001]);
+	} finally {
+		discontinuity.mockRestore();
+	}
+});
+
 // The first frame at the minimum opens the next group. A timeline break closes the group early,
 // so the first frame after it opens a fresh one.
 test("a join packs frames until the minimum and restarts after a break", async () => {

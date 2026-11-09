@@ -813,10 +813,11 @@ export class Encoder {
 					settle();
 				};
 
-				// Encode one frame, breaking the timeline first if it does not continue the last one.
-				// Timestamps round to whole microseconds, so a chunk's timestamp and the marker placed at
-				// the next frame's start agree exactly.
-				const submit = (data: AudioFrame) => {
+				// Encode one frame ending at `end`, breaking the timeline first if it does not continue the
+				// last one. Timestamps round to whole microseconds, so a chunk's timestamp and the marker
+				// placed at the next frame's start agree exactly. `end` is the framer's start for the next
+				// frame, since adding a fractional frame duration to a rounded start can land a microsecond off.
+				const submit = (data: AudioFrame, end: Duration) => {
 					const micros = Math.round(data.timestamp.asMicros());
 					const timestamp = Duration.micros(micros);
 					if (contiguous !== undefined && !timestamp.eq(contiguous)) cut();
@@ -842,11 +843,7 @@ export class Encoder {
 					owed.push({ timestamp });
 					encoder.encode(frame);
 					frame.close();
-					contiguous = Duration.micros(
-						Math.round(
-							data.timestamp.asMicros() + (data.channels[0].length / config.sampleRate) * 1_000_000,
-						),
-					);
+					contiguous = Duration.micros(Math.round(end.asMicros()));
 					this.#next = contiguous;
 				};
 
@@ -858,12 +855,12 @@ export class Encoder {
 						// encoded audio stops, so its last frame isn't stretched across the gap.
 						if (backlog.takeEvicted()) cut();
 						for (;;) {
-							const frame = backlog.peek();
-							if (!frame) break;
+							const entry = backlog.peek();
+							if (!entry) break;
 							// A pause broke the timeline here.
 							if (backlog.takeCut()) cut();
 							backlog.shift();
-							submit(frame);
+							submit(entry.frame, entry.end);
 							this.#history = this.#next;
 						}
 						deadline.set(backlog.deadline);
@@ -883,14 +880,14 @@ export class Encoder {
 							if (!this.#live) continue;
 							const pending = breakPending;
 							breakPending = false;
+							const end = frames[i + 1]?.timestamp ?? framer.next;
 							if (this.#encoding && backlog.empty) {
 								if (pending) cut();
-								submit(data);
+								submit(data, end);
 								continue;
 							}
 							// It waits for a subscriber. Started here rather than from the backlog, which
 							// may not keep the frame: a zero max age retains nothing.
-							const end = frames[i + 1]?.timestamp ?? framer.next;
 							backlog.push(data, end, clock(), pending);
 						}
 						deadline.set(backlog.deadline);
