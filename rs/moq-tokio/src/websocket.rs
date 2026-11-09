@@ -1119,7 +1119,16 @@ mod tests {
 	/// Answer an upgrade offering only `qmux-01.moqt-22` with `response`, followed by
 	/// `trailer`, and return what [`upgrade`] made of it plus the bytes left on the stream.
 	async fn check_upgrade(response: impl Fn(&str) -> String, trailer: &[u8]) -> (Result<String>, Vec<u8>) {
-		let mut request = "ws://relay.example/anon".into_client_request().unwrap();
+		let (result, rest, _) = check_upgrade_request(response, trailer).await;
+		(result, rest)
+	}
+
+	/// [`check_upgrade`], also returning the request head [`upgrade`] wrote.
+	async fn check_upgrade_request(
+		response: impl Fn(&str) -> String,
+		trailer: &[u8],
+	) -> (Result<String>, Vec<u8>, String) {
+		let mut request = "ws://relay.example/room?jwt=token".into_client_request().unwrap();
 		request.headers_mut().insert(
 			http::header::SEC_WEBSOCKET_PROTOCOL,
 			http::HeaderValue::from_static("qmux-01.moqt-22"),
@@ -1133,7 +1142,10 @@ mod tests {
 		let result = upgrade(&mut client, &request).await;
 		let mut rest = vec![0; trailer.len()];
 		client.read_exact(&mut rest).await.unwrap();
-		(result, rest)
+		drop(client);
+		let mut head = String::new();
+		server.read_to_string(&mut head).await.unwrap();
+		(result, rest, head)
 	}
 
 	fn switching(accept: &str, protocol: &str) -> String {
@@ -1147,6 +1159,13 @@ mod tests {
 		let (result, rest) = check_upgrade(|accept| switching(accept, "qmux-01.moqt-22"), b"frames").await;
 		assert_eq!(result.unwrap(), "qmux-01.moqt-22");
 		assert_eq!(rest, b"frames");
+	}
+
+	#[tokio::test]
+	async fn upgrade_requests_the_path_and_query() {
+		let (result, _, head) = check_upgrade_request(|accept| switching(accept, "qmux-01.moqt-22"), b"").await;
+		result.unwrap();
+		assert!(head.starts_with("GET /room?jwt=token HTTP/1.1\r\n"), "{head}");
 	}
 
 	#[tokio::test]
