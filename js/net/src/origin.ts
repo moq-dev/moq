@@ -2524,7 +2524,7 @@ export class Consumer implements Reader {
 				identity: entry.identity,
 				// Draining is this node's selection state: readers, and the peers a relay
 				// forwards to, see the route as it is.
-				route: entry.route.draining ? { ...entry.route, draining: undefined } : entry.route,
+				route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
 				captures: scopeCaptures(scope.pattern, path),
 			});
 		}
