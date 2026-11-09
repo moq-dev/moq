@@ -485,7 +485,7 @@ static void finish(ctx_t *c, const struct timespec *deadline) {
     char *path = malloc(length);
     if (!path) fail("error: cannot allocate health path\n");
     snprintf(path, length, "%s.health", c->finish.path);
-    c->finish.health_wait = moq_origin_follow((uint32_t)c->origin, path, strlen(path), NULL, 0, on_finish_health, c);
+    c->finish.health_wait = moq_origin_follow((uint32_t)c->origin, path, strlen(path), 0, on_finish_health, c);
     free(path);
     if (c->finish.health_wait <= 0) fail("error: health registration failed\n");
 
@@ -661,7 +661,7 @@ int main(int argc, char **argv) {
     // announced. moq_origin_follow resolves via on_broadcast once it's
     // available; we block on the condvar until then (or the deadline).
     c.broadcast_wait =
-        moq_origin_follow((uint32_t)c.origin, broadcast, strlen(broadcast), NULL, 0, on_broadcast, &c);
+        moq_origin_follow((uint32_t)c.origin, broadcast, strlen(broadcast), 0, on_broadcast, &c);
     if (c.broadcast_wait <= 0) {
         fail("error: moq_origin_follow failed: %d\n", c.broadcast_wait);
     }
