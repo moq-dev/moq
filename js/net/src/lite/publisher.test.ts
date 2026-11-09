@@ -1560,14 +1560,11 @@ test("lite draft-07: a re-offer dropped again before it opens stays stale at the
 		// Update 2 widens the budget, so group 1 is re-offered; update 3 restores it. Both arrive in
 		// one chunk, which the decoder reads without leaving the task, so update 3 is decoded
 		// before the task boundary the publisher yields after an update, and so before any pop.
-		const chunks: Uint8Array[] = [];
-		const batch = new Writer(
-			new WritableStream({ write: (chunk) => void chunks.push(chunk.slice()) }),
-			Version.DRAFT_07,
-		);
-		await update(2n, Milli(budget * 100), batch);
-		await update(3n, budget, batch);
-		await sub.client.writer.write(new Uint8Array(chunks.flatMap((chunk) => [...chunk])));
+		const batch = await Writer.collect(Version.DRAFT_07, async (writer) => {
+			await update(2n, Milli(budget * 100), writer);
+			await update(3n, budget, writer);
+		});
+		await sub.client.writer.write(batch);
 		await flush();
 		sub.track.finish();
 		sub.track.close();
