@@ -24121,7 +24121,7 @@ mod test {
 			panic!("the miss below the start is asked");
 		};
 		// Nothing arrives once the feed ends, so a refusal is a verdict on the track.
-		producer.finish().unwrap();
+		producer.finish_shared().unwrap();
 		for run in 0..RUNS {
 			fill.drop_groups(2 * run..2 * run + 1);
 		}
