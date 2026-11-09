@@ -98,6 +98,8 @@ export interface Stats {
 	bytesReceived: number;
 	/** How many times playback ran dry mid-stream; a rising count means the delay is too low. */
 	underruns: number;
+	/** How many times playback skipped ahead, dropping buffered audio rather than playing it faster. */
+	skips: number;
 	/** Frames that arrived after their playout time. */
 	late: number;
 	/** Renditions that failed to decode. */
@@ -111,7 +113,7 @@ export interface Stats {
 }
 
 // The running totals before anything is counted.
-const EMPTY: Stats = { bytesReceived: 0, underruns: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
+const EMPTY: Stats = { bytesReceived: 0, underruns: 0, skips: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
 
 // What a decode attempt reads, and where its counts go.
 type Attempt = { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid; key: Key };
@@ -423,6 +425,14 @@ export class Decoder {
 				const phase = this.#phase.peek();
 				const key = phase.kind === "running" ? phase.key : undefined;
 				this.#count(key, { underruns: added }, (stats) => ({ underruns: stats.underruns + added }));
+			});
+			let skipped = 0;
+			effect.run((inner) => {
+				const skips = inner.get(ring.skips);
+				const added = skips - skipped;
+				skipped = skips;
+				if (added <= 0) return;
+				this.#count(undefined, {}, (stats) => ({ skips: stats.skips + added }));
 			});
 
 			effect.set(this.#out.root, worklet);
