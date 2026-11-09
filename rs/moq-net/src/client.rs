@@ -331,6 +331,8 @@ impl Client {
 				implementation: self.implementation(),
 				// Filled by `lite::start` from the attached origin handles.
 				route_key: None,
+				// Filled by `lite::start` from the version.
+				lite06_chain: false,
 			}
 		} else {
 			lite::Setup::default()

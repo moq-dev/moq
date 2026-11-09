@@ -252,6 +252,8 @@ impl Server {
 				implementation: self.implementation(),
 				// Filled by `lite::start` from the attached origin handles.
 				route_key: None,
+				// Filled by `lite::start` from the version.
+				lite06_chain: false,
 			}
 		} else {
 			lite::Setup::default()
@@ -1719,6 +1721,7 @@ mod tests {
 			ietf: false,
 			implementation: None,
 			route_key: None,
+			lite06_chain: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();

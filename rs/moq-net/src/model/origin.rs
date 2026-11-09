@@ -3710,6 +3710,9 @@ impl OwnClaims {
 			upstream: false,
 			// Only a route published here has crossed no node.
 			learned: !route.hops.is_empty(),
+			// Kept, so the claim that crossed into lite-07 here is still recognized
+			// wherever it leaves for lite-06 again.
+			chain: route.hops,
 		};
 		self.best.insert(announce.prefix.clone(), claim);
 		self.feed(announce.prefix);

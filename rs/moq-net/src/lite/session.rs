@@ -281,6 +281,8 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	if let (Some(transcript), Some(key)) = (&transcript, route_key) {
 		our_setup.route_key = Some(transcript.prove(&key, client));
 	}
+	// Every lite-07 session reads the chain, so a claim learned over lite-06 keeps it.
+	our_setup.lite06_chain = version.has_routes();
 
 	// What the peer's connection credential earns by default: publishing what our
 	// subscribe half accepts, and subscribing to what our publish half serves. A
