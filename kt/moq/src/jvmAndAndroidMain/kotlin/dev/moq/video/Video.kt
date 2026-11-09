@@ -2,6 +2,7 @@ package dev.moq.video
 
 import dev.moq.BroadcastConsumer
 import dev.moq.Timestamp
+import uniffi.moq.MoqException
 import uniffi.moq.MoqVideoRead
 import uniffi.moq.MoqVideoSurface
 
@@ -51,7 +52,11 @@ typealias FrameRate = uniffi.moq.MoqVideoFrameRate
  * [Consumer.subscribe].
  */
 class Consumer private constructor(private val inner: uniffi.moq.MoqVideoConsumer) : AutoCloseable {
-    /** The next frame, gap, or end, or null once the track ends or is cancelled. */
+    /**
+     * The next frame, gap, or end, or null once the track ends.
+     *
+     * @throws MoqException.Cancelled after [cancel], including a read already pending.
+     */
     suspend fun next(): Read? =
         when (val read = inner.next()) {
             null -> null
@@ -60,7 +65,7 @@ class Consumer private constructor(private val inner: uniffi.moq.MoqVideoConsume
             is MoqVideoRead.End -> ReadEnd(read.end)
         }
 
-    /** Cancel all current and future reads. */
+    /** Cancel all current and future reads, which then throw [MoqException.Cancelled]. */
     fun cancel() = inner.cancel()
 
     /** Release the native consumer. */
