@@ -1030,7 +1030,7 @@ Its value MUST NOT be 0 or have the most significant bit set; a receiver MUST cl
 
 A receiver that receives its own Node ID has reached itself, such as a relay dialing an address of its own, and SHOULD close the session.
 A Node ID in SETUP is declared, not proven, and a receiver MUST NOT authorize on it.
-Either endpoint MAY send it, such as a leaf that originates no routes and has no identity to declare. A relay MUST NOT forward it.
+Either endpoint MAY send it, and an endpoint that originates no routes omits it, having no Node ID to declare. A relay MUST NOT forward it.
 
 ### Implementation Parameter {#implementation-parameter}
 The Implementation Parameter names the sender's software, so a peer can attribute a session to its build.
