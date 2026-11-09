@@ -76,7 +76,7 @@ pub struct Tokens {
 	handle: Handle,
 }
 
-/// What one dial presents, from [`Tokens::dial`].
+/// What one dial presents, from [`Tokens::preview`].
 pub(crate) struct Dial {
 	/// The URL to dial, carrying the connection credential in its query when an offered
 	/// version has no SETUP token.
@@ -160,14 +160,6 @@ impl Tokens {
 		Poll::Ready(answer(&state).expect("checked answered"))
 	}
 
-	/// Decide what a dial to `url` offering `versions` presents, and hold every other token in
-	/// band on the session it builds. Call it before each dial.
-	pub(crate) fn dial(&self, url: &Url, versions: &crate::Versions) -> Dial {
-		let dial = self.preview(url, versions);
-		self.commit(&dial);
-		dial
-	}
-
 	/// Decide what a dial to `url` offering `versions` would present, leaving the live
 	/// session's tokens untouched until [`commit`](Self::commit).
 	pub(crate) fn preview(&self, url: &Url, versions: &crate::Versions) -> Dial {
@@ -198,7 +190,7 @@ impl Tokens {
 		state.hold();
 	}
 
-	/// The session the latest [`dial`](Self::dial) built on [`handle`](Self::handle), once it
+	/// The session the latest [`commit`](Self::commit)ted dial built on [`handle`](Self::handle), once it
 	/// connected, whose own answer to the connection credential then counts. A session built
 	/// on another handle answers nothing here.
 	#[cfg(feature = "async")]
@@ -227,7 +219,7 @@ impl Tokens {
 		state.configured.as_mut().expect("built by Tokens::new").session = connected;
 	}
 
-	/// Whether the tokens changed since `dial` read them, so a refusal of its credential earns
+	/// Whether the tokens changed since `dial` was previewed, so a refusal of its credential earns
 	/// another dial.
 	pub(crate) fn changed(&self, dial: &Dial) -> bool {
 		let state = self.handle.state.read();
@@ -574,10 +566,11 @@ mod tests {
 	}
 
 	fn dial(set: &Tokens, supported: bool, requests: bool) -> Session {
-		set.dial(
+		let presented = set.preview(
 			&"moqt://relay.example.com/".parse().unwrap(),
 			&versions(&["moq-lite-07-wip"]),
 		);
+		set.commit(&presented);
 		let link = Link::attach(&set.handle, supported, requests).unwrap();
 		let credential = supported.then(|| link.present(Bytes::new(), true).unwrap());
 		set.connect(credential.as_ref());
@@ -802,10 +795,11 @@ mod tests {
 
 	/// A session without AUTH that awaits the server's SETUP, as a moq-lite-05/06 client does.
 	fn dial_awaiting_setup(set: &Tokens) -> Link {
-		set.dial(
+		let presented = set.preview(
 			&"moqt://relay.example.com/".parse().unwrap(),
 			&versions(&["moq-lite-06"]),
 		);
+		set.commit(&presented);
 		let link = Link::attach(&set.handle, false, false).unwrap();
 		link.await_setup();
 		set.connect(None);
