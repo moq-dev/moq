@@ -2333,7 +2333,7 @@ impl Cluster {
 			bind.set_port(0);
 			connect.bind = Some(bind);
 		}
-		if connect.backoff.timeout().is_zero() {
+		if connect.backoff.timeout().is_none() {
 			connect.backoff.timeout = Some(PEER_RETRY.into());
 		}
 		if target.is_some_and(|target| target.lan) {

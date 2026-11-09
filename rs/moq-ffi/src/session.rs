@@ -248,12 +248,12 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 	let quic = moq_tokio::quic::Config::default().resolve();
 
 	MoqClientConfig {
-		timeout: Some(resolved.timeout),
+		timeout: Some(resolved.timeout.unwrap_or_default()),
 		race: Some(resolved.race),
 		resolution_delay: Some(resolved.resolution_delay),
 		quic: MoqQuicConfig {
 			max_streams: Some(quic.max_streams),
-			idle_timeout: Some(quic.idle_timeout),
+			idle_timeout: Some(quic.idle_timeout.unwrap_or_default()),
 			// Unset: derived from the idle timeout the peers negotiate.
 			keep_alive: quic.keep_alive,
 			..Default::default()
@@ -265,8 +265,8 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 		backoff: MoqBackoff {
 			initial: Some(backoff.initial()),
 			multiplier: Some(backoff.multiplier),
-			max: Some(backoff.max()),
-			timeout: Some(backoff.timeout()),
+			max: Some(backoff.max().unwrap_or_default()),
+			timeout: Some(backoff.timeout().unwrap_or_default()),
 		},
 		..Default::default()
 	}
