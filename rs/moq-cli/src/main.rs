@@ -751,25 +751,27 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = Some(import.max_age.map_or(hang::container::MAX_AGE, Into::into));
-	let linger = import.linger.map_or(moq_mux::Linger::DEFAULT, Into::into);
+	let mut ingest = moq_mux::Ingest::default();
+	if let Some(max_age) = import.max_age {
+		ingest.max_age = Some(max_age.into());
+	}
+	if let Some(linger) = import.linger {
+		ingest.linger = linger.into();
+	}
+	ingest.bandwidth = bandwidth;
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
 		origin: origin.clone(),
 		name,
-		max_age,
-		linger,
-		bandwidth: bandwidth.clone(),
+		ingest: ingest.clone(),
 	};
 
 	let mut local = None;
 
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let config = moq_mux::catalog::Config::default()
-			.with_max_age(max_age)
-			.with_bandwidth(bandwidth.clone());
+		let config = ingest.catalog();
 		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..
@@ -780,7 +782,7 @@ fn spawn_import(
 		} else {
 			Publish::stdin(origin, &name, instance, &format, config)?
 		}
-		.with_linger(linger);
+		.with_linger(ingest.linger);
 		publish.announce()?;
 		local = Some(publish);
 	} else {
@@ -843,7 +845,7 @@ fn spawn_import(
 						moq_net::origin::RouteOptions::hidden().with_instance(instance, 0),
 					)
 					.context("failed to create broadcast")?;
-				let mut publish = Publish::capture(route, &capture, bandwidth.clone(), max_age)?;
+				let mut publish = Publish::capture(route, &capture, ingest.bandwidth.clone(), ingest.max_age)?;
 				publish.announce()?;
 				local = Some(publish);
 			}

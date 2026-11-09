@@ -97,7 +97,7 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, subscriber, moq_net::Path::new(path)?, offer).await
+	accept(server, Request::new(subscriber, moq_net::Path::new(path)?, offer)).await
 }
 
 #[cfg(feature = "server")]
@@ -105,8 +105,31 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 	crate::server::delete(&state.server, &path)
 }
 
-/// Accept a WHEP SDP offer and egress the MoQ broadcast `broadcast` (a path
-/// relative to `subscriber`'s root) to the negotiated WebRTC peer.
+/// A WHEP play for [`accept`]: the raw SDP offer, and the consumer and broadcast its media
+/// comes from.
+#[non_exhaustive]
+pub struct Request<'a> {
+	/// The consumer the broadcast is read from.
+	pub subscriber: &'a moq_net::origin::Consumer,
+	/// The broadcast to play, relative to the consumer's root.
+	pub broadcast: moq_net::Path,
+	/// The raw SDP offer.
+	pub offer: &'a str,
+}
+
+impl<'a> Request<'a> {
+	/// Play `broadcast` (a path relative to `subscriber`'s root) to the peer that sent `offer`.
+	pub fn new(subscriber: &'a moq_net::origin::Consumer, broadcast: impl Into<moq_net::Path>, offer: &'a str) -> Self {
+		Self {
+			subscriber,
+			broadcast: broadcast.into(),
+			offer,
+		}
+	}
+}
+
+/// Accept a WHEP SDP offer and egress the [`Request`]'s broadcast to the negotiated WebRTC
+/// peer.
 ///
 /// This is the negotiation core behind [`Server::subscribe_router`], exposed so an embedder can own
 /// the HTTP route and authentication: verify the request, resolve the authorized
@@ -129,15 +152,15 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
 /// on a malformed offer, and surfaces a broadcast still unannounced after 5s (or one
 /// outside `subscriber`'s scope) as [`Error::Moq`].
-pub async fn accept(
-	server: &Server,
-	subscriber: &moq_net::origin::Consumer,
-	broadcast: impl Into<moq_net::Path>,
-	offer: &str,
-) -> Result<Response> {
+pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
+	let Request {
+		subscriber,
+		broadcast,
+		offer,
+	} = request;
 	let offer = sdp::parse_offer(offer)?;
 
-	let source = resolve(subscriber, broadcast.into()).await?;
+	let source = resolve(subscriber, broadcast).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::NoRenditions);
@@ -175,6 +198,7 @@ pub async fn accept(
 			session: Some(session),
 			registration: Some(registration),
 			cancel: Some(cancel),
+			linger: Duration::ZERO,
 			role: "whep server",
 		},
 	})
