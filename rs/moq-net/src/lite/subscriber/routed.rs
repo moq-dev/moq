@@ -426,7 +426,7 @@ impl Routed {
 			true => crate::origin::Cost::DRAIN,
 			false => crate::origin::Cost::new(served.claim.cost.saturating_add(served.metric)),
 		};
-		let route = crate::origin::RouteInfo::default()
+		let route = crate::origin::RouteInfo::new()
 			.with_instance(served.claim.instance.clone(), served.claim.epoch)
 			.with_hops(hops(id))
 			.with_cost(cost)

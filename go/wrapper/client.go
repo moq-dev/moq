@@ -208,7 +208,7 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 // After Timeout of consecutive failures the connection gives up for good.
 //
 // Every field is optional: the zero value means the native default (1s, x2, 5s,
-// and a 10s window), so a partial Backoff overrides only what it sets. Pass
+// and no give-up), so a partial Backoff overrides only what it sets. Pass
 // RetryForever as Timeout to keep retrying indefinitely.
 type Backoff struct {
 	Initial    time.Duration // delay before the first retry

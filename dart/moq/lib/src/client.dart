@@ -304,12 +304,17 @@ extension GrantConsumerUpdates on GrantConsumer {
 
 /// A route's instance under the name the other bindings use.
 extension RouteInstance on MoqRoute {
-  /// The stream this route serves now. A named instance never changes. Unnamed,
-  /// a prefix route moves to a fresh one each time a job holding its current one
-  /// ends. A job's route takes its prefix route's current one when it first
-  /// announces or when this first reads it, so a hidden job route returns it
-  /// before announcing, and [MoqRoute.announce] fails with `Unroutable` once the
-  /// prefix route has moved past it.
+  /// The stream this route serves now. A named instance never changes. A job's
+  /// route takes its claim's current one when it first announces or when this
+  /// first reads it, so a hidden job route returns it before announcing, and
+  /// [MoqRoute.announce] fails with `Unroutable` once the claim has moved past it.
+  String instance() => instanceId();
+}
+
+/// A claim's instance under the name the other bindings use.
+extension ClaimInstance on MoqClaim {
+  /// The stream this claim serves now. A named instance never changes. Unnamed,
+  /// the claim moves to a fresh one each time a job holding its current one ends.
   String instance() => instanceId();
 }
 

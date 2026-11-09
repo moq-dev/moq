@@ -35,7 +35,12 @@ pub(crate) const AHEAD: u64 = MAX_CACHE_BYTES / 2;
 /// A transport that reports no window never pauses a stream, so its window is moot.
 #[cfg(any(test, feature = "async"))]
 pub(crate) fn window(receive: Option<ReceiveWindow>) -> u64 {
-	receive.map_or(AHEAD, |receive| receive.stream.min(receive.connection).min(AHEAD))
+	receive.map_or(AHEAD, |receive| {
+		let stream = receive.stream.min(AHEAD);
+		receive
+			.connection
+			.map_or(stream, |connection| stream.min(connection.get()))
+	})
 }
 
 /// One group copy's reader progress, shared by its writer and every cursor.
@@ -225,7 +230,10 @@ mod tests {
 		let (_flag, waiter) = flag();
 		let group = written(3);
 		let _reader = group.consume();
-		let credit = window(Some(ReceiveWindow::new(4 * MB as u64, MB as u64)));
+		let credit = window(Some(ReceiveWindow::new(
+			std::num::NonZeroU64::new(4 * MB as u64),
+			MB as u64,
+		)));
 		assert_eq!(credit, MB as u64);
 		assert_eq!(group.poll_paced(&waiter, 0, AHEAD), Poll::Ready(()), "within the cap");
 		assert_eq!(group.poll_paced(&waiter, 0, credit), Poll::Pending, "past the credit");
@@ -237,9 +245,15 @@ mod tests {
 	fn the_window_is_the_stream_credit_capped() {
 		let mb = MB as u64;
 		assert_eq!(window(None), AHEAD, "a transport without windows never pauses");
-		assert_eq!(window(Some(ReceiveWindow::new(4 * mb, mb))), mb);
-		assert_eq!(window(Some(ReceiveWindow::new(mb / 2, mb))), mb / 2);
-		assert_eq!(window(Some(ReceiveWindow::new(u64::MAX, 64 * mb))), AHEAD);
+		assert_eq!(
+			window(Some(ReceiveWindow::new(std::num::NonZeroU64::new(4 * mb), mb))),
+			mb
+		);
+		assert_eq!(
+			window(Some(ReceiveWindow::new(std::num::NonZeroU64::new(mb / 2), mb))),
+			mb / 2
+		);
+		assert_eq!(window(Some(ReceiveWindow::new(None, 64 * mb))), AHEAD);
 	}
 
 	/// A one-byte frame whose properties hold `metadata` bytes.

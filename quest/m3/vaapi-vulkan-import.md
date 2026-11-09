@@ -40,7 +40,7 @@ sync_file import, so an explicit-sync producer races it.
   half-written buffer.
 - Device: VA-API has no device UUID, and today moq-video's
   `frame::vaapi::device()` picks one process-wide render node (the first that
-  probes, or `MOQ_VAAPI_DEVICE`) in a `OnceLock`. The encoder, decoder, and
+  probes) in a `OnceLock`, unless `Config::vaapi` names one. The encoder, decoder, and
   resize share it so a DMA-BUF moves between them without a copy. Choosing a
   node per surface makes `device()` per-node, so keep decode, resize, and
   encode on one node per DMA-BUF. Decided 2026-10-05: the producer puts the
@@ -61,7 +61,7 @@ Test: an ignored hardware test in `just rs gpu`'s Intel branch renders on the
 iGPU with Vulkan, exports a DMA-BUF image and an explicit-sync timeline, and
 encodes H.264 at two sizes; the output decodes, and the slots recycle. On
 the two-node host, also check that a surface carrying `renderD129`'s
-`dev_t`, or `MOQ_VAAPI_DEVICE` naming it, opens that node rather than the
+`dev_t`, or `Config::vaapi` naming it, opens that node rather than the
 first render node: the second-node check moved here from
 [Video hardware validation](/quest/m5/video-hardware.md) (2026-10-06 audit).
 

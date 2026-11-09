@@ -681,6 +681,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
 	auth: ZodMiniOptional<ZodMiniString<string>>;
 	event: ZodMiniLiteral<"connect">;
+	host: ZodMiniOptional<ZodMiniString<string>>;
 	id: ZodMiniString<string>;
 	implementation: ZodMiniOptional<ZodMiniString<string>>;
 	local: ZodMiniOptional<ZodMiniString<string>>;
@@ -720,6 +721,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
 	auth: ZodMiniString<string>;
 	event: ZodMiniLiteral<"attach">;
+	host: ZodMiniOptional<ZodMiniString<string>>;
 	id: ZodMiniString<string>;
 	implementation: ZodMiniOptional<ZodMiniString<string>>;
 	local: ZodMiniOptional<ZodMiniString<string>>;
@@ -759,6 +761,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	alpn: ZodMiniOptional<ZodMiniString<string>>;
 	auth: ZodMiniOptional<ZodMiniString<string>>;
 	event: ZodMiniLiteral<"revalidate">;
+	host: ZodMiniOptional<ZodMiniString<string>>;
 	id: ZodMiniString<string>;
 	implementation: ZodMiniOptional<ZodMiniString<string>>;
 	local: ZodMiniOptional<ZodMiniString<string>>;
@@ -803,6 +806,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	}, $strip>;
 	duration: ZodMiniNumber<number>;
 	event: ZodMiniLiteral<"end">;
+	host: ZodMiniOptional<ZodMiniString<string>>;
 	id: ZodMiniString<string>;
 	implementation: ZodMiniOptional<ZodMiniString<string>>;
 	local: ZodMiniOptional<ZodMiniString<string>>;

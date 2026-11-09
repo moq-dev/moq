@@ -198,7 +198,11 @@ impl Release {
 		};
 		match &self.track {
 			None => {
-				let source = ExportSource::for_stream(&self.source, &m2ts.track, self.delay / 2)?;
+				let source = ExportSource::for_stream(
+					&self.source,
+					&m2ts.track,
+					moq_net::track::Delay::default().with_max(self.delay / 2),
+				)?;
 				let source = match self.replay {
 					true => source,
 					false => source.live(),

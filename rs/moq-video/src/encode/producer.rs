@@ -312,6 +312,32 @@ pub struct Capture {
 	/// the recent past in the track's cache. On demand saves the capture and encode while nobody
 	/// watches, and leaves nothing to fetch from before the first viewer arrived.
 	pub on_demand: bool,
+	/// The VA-API render node the encoder opens; see [`Config::vaapi`](encoder::Config::vaapi).
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	pub vaapi: Option<std::path::PathBuf>,
+	/// The V4L2 M2M node the encoder opens; see [`Config::v4l2`](encoder::Config::v4l2).
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	pub v4l2: Option<std::path::PathBuf>,
+}
+
+#[cfg(feature = "capture")]
+impl Capture {
+	/// The encoder for a `width` x `height` source at `framerate`, with these options.
+	fn encoder(&self, width: u32, height: u32, framerate: FrameRate) -> encoder::Config {
+		let mut config = encoder::Config::new(width, height, framerate);
+		config.bitrate = self.bitrate;
+		config.codec = self.codec;
+		config.kind = self.kind.clone();
+		#[cfg(all(target_os = "linux", feature = "vaapi"))]
+		{
+			config.vaapi = self.vaapi.clone();
+		}
+		#[cfg(all(target_os = "linux", feature = "v4l2"))]
+		{
+			config.v4l2 = self.v4l2.clone();
+		}
+		config
+	}
 }
 
 /// The capture publication's current lifecycle state.
@@ -583,7 +609,7 @@ impl<E: CatalogExt> Driver<E> {
 		// waiting for an encoder that may not run yet.
 		let (rendition, join, camera) = async {
 			let camera = source.open(&options.capture).await?;
-			let mut probe_config = encoder::Config::new(
+			let mut probe_config = options.encoder(
 				camera.width(),
 				camera.height(),
 				options
@@ -592,9 +618,6 @@ impl<E: CatalogExt> Driver<E> {
 					.or_else(|| camera.framerate())
 					.unwrap_or(DEFAULT_FRAMERATE),
 			);
-			probe_config.bitrate = options.bitrate;
-			probe_config.codec = options.codec;
-			probe_config.kind = options.kind.clone();
 			probe_config.color = camera.color();
 			let rendition = probe_config.probe().await?;
 			// The encoder is built from the same defaults, so the probe's join is the one it emits.
@@ -693,11 +716,11 @@ impl CaptureSource for DeviceSource {
 /// with nothing to divide grants `None` rather than being absent. Retiring stops
 /// the `select!` arm from spinning on a channel that is permanently ready.
 #[cfg(feature = "capture")]
-type RateControl = Option<rate::Follower>;
+type RateControl = Option<rate::Grant>;
 
 /// Wait for the next target bitrate, or forever when rate control is off or finished.
 ///
-/// Cancel-safe: [`Follower::poll_next`](rate::Follower::poll_next) keeps its state in
+/// Cancel-safe: [`Grant::poll_next`](rate::Grant::poll_next) keeps its state in
 /// the follower, so losing this race to a frame drops no target.
 #[cfg(feature = "capture")]
 async fn next_target(rate: &mut RateControl) -> Result<rate::Target, moq_net::Error> {
@@ -815,7 +838,7 @@ async fn rest(
 	rate.as_ref()?;
 	match encoder.set_bitrate(ceiling).await {
 		Ok(()) => {
-			*rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
+			*rate = Some(rate::Grant::new(claim.consume(), rate::Policy::new(ceiling)));
 			Some(ceiling)
 		}
 		Err(Error::BitrateUnsupported(name)) => {
@@ -889,10 +912,7 @@ async fn capture_loop<S: CaptureSource>(
 			.framerate
 			.or_else(|| camera.framerate())
 			.unwrap_or(DEFAULT_FRAMERATE);
-		let mut encoder_config = encoder::Config::new(camera.width(), camera.height(), framerate);
-		encoder_config.bitrate = options.bitrate;
-		encoder_config.codec = options.codec;
-		encoder_config.kind = options.kind.clone();
+		let mut encoder_config = options.encoder(camera.width(), camera.height(), framerate);
 		encoder_config.color = camera.color();
 		// Off macOS and iOS this opens the encoder on a dedicated thread; see `sink`.
 		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,
@@ -918,7 +938,7 @@ async fn capture_loop<S: CaptureSource>(
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = Some(rate::Follower::new(claim.consume(), rate::Policy::new(ceiling)));
+		let mut rate = Some(rate::Grant::new(claim.consume(), rate::Policy::new(ceiling)));
 		// The encoder's current target, reported again on any track the capture moves to.
 		let mut bitrate = ceiling;
 		producer.report_bitrate(bitrate);
@@ -2326,7 +2346,7 @@ mod tests {
 			let mut sink = Sink::open(&config).await.unwrap();
 
 			let estimate = moq_net::bandwidth::Producer::new();
-			let mut rate = Some(rate::Follower::new(estimate.consume(), rate::Policy::new(ceiling)));
+			let mut rate = Some(rate::Grant::new(estimate.consume(), rate::Policy::new(ceiling)));
 
 			estimate.set(Some(Rate::from_mbps(1))).unwrap();
 			let next = next_target(&mut rate).await;

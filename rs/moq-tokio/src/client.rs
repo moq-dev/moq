@@ -154,7 +154,7 @@ impl Client {
 		let mut policy = moq_net::reconnect::Config::default();
 		policy.backoff = config.backoff.resolve();
 		policy.goaway = config.goaway.resolve();
-		policy.timeout = resolved.timeout;
+		policy.timeout = Some(resolved.timeout).filter(|timeout| !timeout.is_zero());
 		policy.pinned = !config.tls.fingerprint.is_empty();
 
 		let mut moq = moq_net::Client::new()
@@ -349,9 +349,9 @@ impl Client {
 		let timeout = self.policy.timeout;
 		let connect = connect_session(&self.moq, session);
 		crate::runtime::scope(async move {
-			match timeout.is_zero() {
-				true => Ok(connect.await?),
-				false => Ok(kio::clock::timeout(timeout, connect)
+			match timeout {
+				None => Ok(connect.await?),
+				Some(timeout) => Ok(kio::clock::timeout(timeout, connect)
 					.await
 					.map_err(|_| Error::ConnectTimeout(timeout))??),
 			}

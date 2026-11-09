@@ -38,8 +38,13 @@ typedef CongestionControl = MoqCongestionControl;
 /// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
 typedef ClientTls = MoqClientTls;
 
-/// The publish side of an origin: create routes so subscribers can discover their broadcasts.
+/// The publish side of an origin: create routes and claims so subscribers can discover their broadcasts.
 typedef OriginProducer = MoqOriginProducer;
+
+/// A prefix route from `OriginProducer.claim`: a claim that every path beneath a prefix can be
+/// served, yielding each request from `requested()`. Cancelling or disposing it retracts it and
+/// rejects the requests still waiting.
+typedef Claim = MoqClaim;
 
 /// Config for creating an origin, such as its total cache budget.
 typedef OriginConfig = MoqOriginConfig;

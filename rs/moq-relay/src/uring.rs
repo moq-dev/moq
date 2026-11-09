@@ -815,6 +815,12 @@ impl crate::incoming::Sealed for Request {
 		request.local = Some(self.local);
 		// Only the SNI, like the tokio listener: the CONNECT host selected no certificate.
 		request.server_name = self.sni.clone();
+		request.host = self
+			.url
+			.as_ref()
+			.and_then(|url| url.host_str())
+			.map(str::to_owned)
+			.or_else(|| self.sni.clone());
 		request.alpn = self.alpn.clone();
 		request.tls = self.identity.as_ref().and_then(auth::peer);
 		request
@@ -1150,7 +1156,7 @@ mod tests {
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.cert = vec![cert_path];
 		config.listen.tls.key = vec![key_path];
-		config.runtime.workers = Some(1);
+		config.runtime.workers = crate::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
 		config.drain_timeout = Some(window.into());
@@ -1218,7 +1224,7 @@ mod tests {
 		config.listen.tls.cert = vec![cert_path];
 		config.listen.tls.key = vec![key_path];
 		config.listen.timeout = Some(timeout.into());
-		config.runtime.workers = Some(1);
+		config.runtime.workers = crate::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
 		config.drain_timeout = Some(std::time::Duration::from_millis(100).into());

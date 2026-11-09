@@ -159,12 +159,6 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// The `MOQ_*` variables read outside the command-line spec.
-#[cfg(any(feature = "capture", feature = "transcode", feature = "play"))]
-const DIRECT_ENV: &[&str] = moq_video::ENV;
-#[cfg(not(any(feature = "capture", feature = "transcode", feature = "play")))]
-const DIRECT_ENV: &[&str] = &[];
-
 /// Whether `flag` is one of the flags `T` declares.
 fn owns<T: usage_rs::spec::CommandArgs>(flag: &usage_rs::Flag<'_>) -> bool {
 	T::COMMAND.flags.iter().any(|own| own.key == flag.key)
@@ -188,7 +182,7 @@ impl Invocation {
 		match Self::try_parse_from(args).and_then(|parsed| {
 			// Here rather than in `try_parse_from`, which tests drive under whatever
 			// environment the test runner has.
-			moq_tokio::cli::check_env(&[Cli::spec(), Stage::spec()], DIRECT_ENV)
+			moq_tokio::cli::check_env(&[Cli::spec(), Stage::spec()], &[])
 				.map_err(|err| ParseError::new(ParseErrorKind::ValueValidation, format!("error: {err}\n")))?;
 			Ok(parsed)
 		}) {
