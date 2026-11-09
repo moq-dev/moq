@@ -119,6 +119,13 @@ export interface Position {
 }
 
 /**
+ * How a track's frames are compressed, mirroring the Rust `track::Compression`: `"deflate"` makes
+ * each group one DEFLATE stream (draft-lcurley-moq-flate), which suits small, repetitive frames
+ * like JSON.
+ */
+export type Compression = "none" | "deflate";
+
+/**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
  *
  * A producer declares these once from an {@link InfoInit} (via {@link Request.accept} or
@@ -126,8 +133,8 @@ export interface Position {
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
 export interface Info {
-	/** Whether frame payloads are compressed per group on lite-07; other sessions receive plain frames. */
-	compress: boolean;
+	/** How frame payloads are compressed per group on lite-07; other sessions receive plain frames. */
+	compression: Compression;
 	/**
 	 * Units per second for this track's frame timestamps, or `null` for an untimed track, whose
 	 * frames carry no timestamp.
@@ -171,8 +178,8 @@ export interface Info {
 }
 
 /**
- * What an author supplies to create a track: any {@link Info} field. `compress` defaults to
- * false, `timescale` and `refresh` to `null`, `priority` to `0`, and `maxAge` to zero. A
+ * What an author supplies to create a track: any {@link Info} field. `compression` defaults to
+ * `"none"`, `timescale` and `refresh` to `null`, `priority` to `0`, and `maxAge` to zero. A
  * received {@link Info} serves onward unchanged.
  */
 export interface InfoInit extends Partial<Info> {
@@ -190,11 +197,11 @@ export interface InfoInit extends Partial<Info> {
  * @internal
  */
 export function authoredInfo(init: InfoInit = {}): Info {
-	if (init.compress !== undefined && typeof init.compress !== "boolean")
-		throw new TypeError("compress must be a boolean");
+	if (init.compression !== undefined && init.compression !== "none" && init.compression !== "deflate")
+		throw new TypeError(`unknown compression: ${init.compression}`);
 	const maxAge = init.maxAge === undefined ? Duration.ZERO : init.maxAge;
 	return {
-		compress: init.compress ?? false,
+		compression: init.compression ?? "none",
 		timescale: init.timescale == null ? null : Timescale(init.timescale),
 		maxAge: maxAge === null ? null : wireMillis("maxAge", maxAge),
 		priority: priorityValue(init.priority ?? DEFAULT_PRIORITY),
@@ -1352,7 +1359,7 @@ export class Producer {
 		try {
 			for (const { group } of this.#cache) {
 				hooks.bindGroupTimed(group, resolved);
-				hooks.bindGroupCompression(group, resolved.compress);
+				hooks.bindGroupCompression(group, resolved.compression === "deflate");
 			}
 		} catch (err) {
 			this.abort(err instanceof Error ? err : new Error(String(err)));
@@ -1772,7 +1779,7 @@ export class Producer {
 		const info = this.#state.info.peek();
 		if (info) {
 			hooks.bindGroupTimed(group, info);
-			hooks.bindGroupCompression(group, info.compress);
+			hooks.bindGroupCompression(group, info.compression === "deflate");
 		}
 	}
 

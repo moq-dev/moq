@@ -30,7 +30,7 @@ fn produce(hop: u64, hold: Duration) -> origin::Producer {
 	config.update_hold = hold;
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// `n` relays meshed over `edges`, watched from the last one.
@@ -291,7 +291,7 @@ impl Cluster {
 				config.hop = std::num::NonZeroU64::new(id).unwrap();
 				let (origin, driver) = origin::Producer::new(config);
 				support::harness::spawn(driver);
-				origin
+				origin.with_proxy(true)
 			})
 			.collect();
 		let mut pairs = Vec::new();
@@ -727,7 +727,7 @@ async fn a_node_that_does_not_proxy_keeps_what_it_learned_over_lite06() {
 	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
 	let lite06: Version = "moq-lite-06".parse().unwrap();
 	let first = produce_origin(1);
-	let app = produce_origin(2);
+	let app = produce_origin(2).with_proxy(false);
 	let second = produce_origin(3);
 	let mut pairs = Vec::new();
 	for (version, relay) in [(lite06, &first), (lite07, &second)] {
@@ -736,7 +736,6 @@ async fn a_node_that_does_not_proxy_keeps_what_it_learned_over_lite06() {
 		options.client_subscribe = Some(app.clone());
 		options.server_publish = Some(relay.consume().with_hidden(true));
 		options.server_subscribe = Some(relay.clone().with_link(origin::Link::Peer));
-		options.proxy = false;
 		pairs.push(connect_mock(options).await);
 	}
 

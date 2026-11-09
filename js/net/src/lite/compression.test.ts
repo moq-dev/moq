@@ -16,7 +16,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		const broadcastRoute = source.route(Path.from("compressed"), { hidden: true });
 		const broadcast = broadcastRoute.broadcast;
 		const datagrams = broadcast.createDatagrams("data");
-		const track = broadcast.createTrack("data", { compress: true });
+		const track = broadcast.createTrack("data", { compression: "deflate" });
 		broadcastRoute.announce();
 		const peers: { abort(): void }[] = [];
 		async function link(publish: Producer, consume: Producer, alpn: string) {
@@ -42,7 +42,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			const active = request.active.peek();
 			if (!active) throw new Error("broadcast did not resolve");
 			const remote = active.track("data");
-			expect((await remote.info()).compress).toBe(downstream === ALPN_07_WIP);
+			expect((await remote.info()).compression).toBe(downstream === ALPN_07_WIP ? "deflate" : "none");
 			const reader = remote.subscribe({ delay: { max: Duration.millis(1000) } });
 			const group = track.appendGroup();
 			const payloads = [new Uint8Array(4096).fill(7), new Uint8Array(), new Uint8Array(4096).fill(7)];

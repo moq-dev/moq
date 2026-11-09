@@ -6,7 +6,7 @@ long as they live, while the catalog has no window mode. A consumer takes over a
 :class:`~moq.TrackConsumer` that has not read a group yet. Either track can come from a request
 as well as by name. Values are any JSON-serializable Python object.
 
-Compression is the track's: publish it with ``TrackInfo(compress=True)``, which JSON benefits from,
+Compression is the track's: publish it with ``TrackInfo(compression=Compression.DEFLATE)``, which JSON benefits from,
 and a consumer reads it with no option of its own.
 
 Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the

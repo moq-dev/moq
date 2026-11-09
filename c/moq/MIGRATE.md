@@ -145,9 +145,9 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 To answer with a broadcast you already hold, `moq_broadcast_request_serve(request, consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to free.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
-### `moq_track_info` gains `compress` (#5928)
+### `moq_track_info` gains `compression` (#5928)
 
-The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
+The new trailing field changes its ABI. A zero-initialized struct leaves it `MOQ_COMPRESSION_NONE`, as before.
 
 ### Anchors can name a time (#6074)
 

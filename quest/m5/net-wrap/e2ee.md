@@ -27,7 +27,7 @@ the reverse (decided 2026-10-20, maintainer):
   event stays on moq-crypto's own consumer, outside the trait, for callers
   that hold the concrete type. A trait read can't carry it without
   breaking the exact mirror.
-- `track::Info.compress` is logical. Ciphertext doesn't compress, so the
+- `track::Info.compression` is logical. Ciphertext doesn't compress, so the
   wrapper compresses each group, and each datagram alone with a fresh
   window, with moq-net's
   [track compression](/doc/concept/compression.md) before AEAD, creates the
@@ -47,7 +47,7 @@ the reverse (decided 2026-10-20, maintainer):
   [JS](/quest/m5/net-wrap/js.md).
 - The subscriber's wrapper learns the logical flag from authenticated E2EE
   metadata, never from the physical track (decided 2026-10-20, maintainer):
-  the physical track's `compress` is always false, so it can't signal it.
+  the physical track's `compression` is always `Compression::None`, so it can't signal it.
   The metadata lives in the E2EE track mapping, and a flag that fails
   authentication fails the track loudly. Not the encrypted catalog: the
   catalog track is itself compressed, so a subscriber would need the flag

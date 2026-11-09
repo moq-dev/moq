@@ -35,7 +35,7 @@ The re-exported `moq_stats::Refusal` follows moq-net's rename: use `moq_stats::R
 
 ### One compressed track per stats name
 
-The `.z` siblings are gone: `totals.json`, `<label>/presence.json`, and `<path>/prefix.json` are each one track with `compress: true`, carrying merge-patch deltas, and moq-net hands every reader plain frames.
+The `.z` siblings are gone: `totals.json`, `<label>/presence.json`, and `<path>/prefix.json` are each one track with `Compression::Deflate`, carrying merge-patch deltas, and moq-net hands every reader plain frames.
 `totals_track`, `presence_track`, and `prefix_track` drop their `compressed: bool` argument, and `consume::Config` and `aggregate::Config` drop `compression` and `with_compression`; `consume::Config` is now empty.
 `COMPRESSED_SUFFIX` is removed. Read the plain name whichever flavor you read before.
 A frame whose uncompressed JSON passes the 32 MB group budget ends the track with `FrameTooLarge`.

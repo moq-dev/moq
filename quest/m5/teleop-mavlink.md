@@ -77,7 +77,7 @@ on their own retransmission across a link drop.
 
 The [compression migration](https://github.com/moq-dev/moq/pull/7046) deleted the
 moq-flate snapshot and stream helpers. Keep these framing rules on plain
-tracks, setting `compress` when useful, rather than depending on those helpers.
+tracks, setting `compression` when useful, rather than depending on those helpers.
 
 ### Deliberately out of scope
 

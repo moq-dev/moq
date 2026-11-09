@@ -4888,7 +4888,7 @@ for (const endObject of [BigInt(Number.MAX_SAFE_INTEGER), (1n << 60n) + 1n]) {
 
 test("a fractional max age reaches MAX_CACHE_DURATION as whole milliseconds rounded up", () => {
 	const properties = trackProperties(
-		{ compress: false, timescale: null, maxAge: Duration.micros(1500), priority: 0, refresh: null },
+		{ compression: "none", timescale: null, maxAge: Duration.micros(1500), priority: 0, refresh: null },
 		true,
 	);
 	expect(properties.maxCacheDuration).toBe(2n);

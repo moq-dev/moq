@@ -468,14 +468,20 @@ test("a listing over a session carries each track's info, end to end", async () 
 		maxAge: Duration.millis(3000),
 		priority: 9,
 		refresh: 4,
-		compress: true,
+		compression: "deflate",
 	});
 
 	const tracks = wireOf(client).consume(Path.from("room")).tracks();
 	expect(await tracks.next()).toEqual({
 		kind: "added",
 		name: "a",
-		info: { timescale: Timescale.MILLI, maxAge: Duration.millis(3000), priority: 9, refresh: 4, compress: true },
+		info: {
+			timescale: Timescale.MILLI,
+			maxAge: Duration.millis(3000),
+			priority: 9,
+			refresh: 4,
+			compression: "deflate",
+		},
 	});
 	expect(await next(tracks)).toBe("synced");
 	broadcast.createTrack("b");

@@ -18,6 +18,7 @@ from moq_ffi import (
     MoqAnchor,
     MoqBackoff,
     MoqClientTls,
+    MoqCompression,
     MoqCongestionControl,
     MoqConnectionStats,
     MoqDatagram,
@@ -299,15 +300,15 @@ class TrackInfo:
     how many times its first frame a group's later bytes may grow before a joining
     subscriber asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
-    ``compress`` DEFLATEs each group on the wire to peers that support it; readers
-    always see the original frames.
+    ``compression`` compresses each group on the wire to peers that support it, ``None``
+    sending frames as written; readers always see the original frames.
     """
 
     priority: int = 0
     max_age: timedelta | None = timedelta(0)
     refresh: int | None = None
     timescale: int | None = None
-    compress: bool = False
+    compression: MoqCompression | None = None
 
     def _ffi(self) -> MoqTrackInfo:
         return MoqTrackInfo(
@@ -316,7 +317,7 @@ class TrackInfo:
             max_age_unlimited=self.max_age is None,
             refresh=self.refresh,
             timescale=self.timescale,
-            compress=self.compress,
+            compression=self.compression,
         )
 
     @staticmethod
@@ -326,7 +327,7 @@ class TrackInfo:
             max_age=None if info.max_age_unlimited else (info.max_age or timedelta(0)),
             refresh=info.refresh,
             timescale=info.timescale,
-            compress=info.compress,
+            compression=info.compression,
         )
 
 

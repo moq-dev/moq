@@ -19,9 +19,9 @@ class Live {
 	events: Event<Rec>[] = [];
 	#next?: Promise<Timed<Event<Rec>> | undefined>;
 
-	constructor(config: { ops?: boolean; compress?: boolean; checkpointRecords?: number } = {}) {
-		const { compress, ...producer } = config;
-		const track = new Track.Producer("test").accept({ compress });
+	constructor(config: { ops?: boolean; compression?: Track.Compression; checkpointRecords?: number } = {}) {
+		const { compression, ...producer } = config;
+		const track = new Track.Producer("test").accept({ compression });
 		this.producer = new Producer<Rec>({ track, ...producer });
 		this.consumer = new Consumer<Rec>({ track: track.subscribe() });
 	}
@@ -199,7 +199,7 @@ test("rolling is invisible to the consumer", async () => {
 });
 
 test("compressed round-trip across rolls", async () => {
-	const live = new Live({ compress: true });
+	const live = new Live({ compression: "deflate" });
 	for (let n = 0; n < 40; n++) {
 		await live.push(n);
 		if (n >= 10) await live.pop(1);

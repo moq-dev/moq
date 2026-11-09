@@ -72,7 +72,7 @@ export class CatalogProducer {
 	/**
 	 * Serve a track: seed it with the current catalog, then forward updates.
 	 *
-	 * Create the track with `compress: true`: catalog JSON is small and repetitive.
+	 * Create the track with `compression: "deflate"`: catalog JSON is small and repetitive.
 	 */
 	serve(track: Moq.Track.Producer, effect: Effect): void {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });

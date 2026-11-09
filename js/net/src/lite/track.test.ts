@@ -57,7 +57,7 @@ test("TrackInfo for Rust's default Info matches cross-language wire bytes", asyn
 		maxAge: model.maxAge?.asMillis(),
 		timescale: model.timescale ?? undefined,
 		refresh: model.refresh ?? undefined,
-		compress: model.compress,
+		compress: model.compression === "deflate",
 	});
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
 		new Uint8Array([0x05, 0x80, 0x00, 0x00, 0x43, 0xe8]),

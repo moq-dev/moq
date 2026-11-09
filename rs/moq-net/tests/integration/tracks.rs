@@ -18,7 +18,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
 		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn lite07() -> Version {
@@ -103,7 +103,7 @@ async fn a_listing_carries_track_info() {
 		.with_max_age(Duration::from_secs(3))
 		.with_priority(9)
 		.with_refresh(4)
-		.with_compress(true);
+		.with_compression(moq_net::track::Compression::Deflate);
 	let _a = broadcast.broadcast().create_track("a", info).unwrap();
 	broadcast.announce().unwrap();
 
@@ -121,7 +121,7 @@ async fn a_listing_carries_track_info() {
 	assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	assert_eq!(info.priority, 9);
 	assert_eq!(info.refresh, Some(4));
-	assert!(info.compress);
+	assert_eq!(info.compression, moq_net::track::Compression::Deflate);
 }
 
 /// A listed track is a track like any other: a SUBSCRIBE from the listing reads the

@@ -216,6 +216,11 @@ typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 
+/**
+ * How a track's frames are compressed on the wire: `DEFLATE`, or `null` in [TrackInfo] for none.
+ */
+typealias Compression = uniffi.moq.MoqCompression
+
 /** One audio frame: PCM payload bytes plus a presentation timestamp. */
 typealias AudioFrame = uniffi.moq.MoqAudioFrame
 

@@ -163,7 +163,7 @@ mod test {
 			priority: 3,
 			max_age: Some(Duration::from_secs(2)),
 			timescale: Some(Timescale::MICRO),
-			compress: true,
+			compression: crate::track::Compression::Deflate,
 		};
 		let TracksEvent::Added { name, info: got } = roundtrip(&TracksEvent::Added {
 			name: "video".into(),
@@ -176,7 +176,7 @@ mod test {
 		assert_eq!(got.priority, 3);
 		assert_eq!(got.max_age, Some(Duration::from_secs(2)));
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
-		assert!(got.compress);
+		assert_eq!(got.compression, crate::track::Compression::Deflate);
 
 		let TracksEvent::Finished { name } = roundtrip(&TracksEvent::Finished { name: "audio".into() }) else {
 			panic!("expected TRACKS_FINISH");

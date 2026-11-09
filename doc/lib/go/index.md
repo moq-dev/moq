@@ -21,7 +21,7 @@ catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamp
 `TimestampFromDuration` converts exactly; `TimestampToDuration` rounds down to a whole nanosecond.
 A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
-`TrackInfo.Compress` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+`TrackInfo.Compression` set to `CompressionDeflate` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `Update`, `Append`, `Push`, and `Pop` take a final `moq.Timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
 skips to the newest state where `Next` yields each one. A read timestamp is at the track's timescale.
