@@ -526,7 +526,11 @@ impl Demand {
 	/// Hold the rendition's newest catalog `delay`, unless the delay is fixed.
 	/// It only grows, so a stale snapshot never lowers it.
 	fn hold(&self, args: &Args, delay: Option<Duration>) {
-		let delay = delay.filter(|_| args.fixed_delay().is_none());
+		// Capped at the deepest delay a sink holds, so a hostile catalog cannot make
+		// playback retain media without bound.
+		let delay = delay
+			.filter(|_| args.fixed_delay().is_none())
+			.map(|delay| delay.min(moq_audio::playback::Input::LATENCY_MAX));
 		self.delay.send_if_modified(|held| {
 			let raised = delay > *held;
 			if raised {
@@ -635,6 +639,21 @@ async fn play_audio<O: Output>(
 	// subtracting the incoming frame before it reaches the sink.
 	let lead = |delay: Duration| latency.max(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
 
+	// The most the sink holds. A shared delay past it, such as a slow video
+	// encoder's, holds decoded media here until it is due instead.
+	let cap = max_delay.max(AUDIO_BUFFER_MIN);
+	let schedule = presentation.consume();
+	// The depth that makes media ending at `end` sound when the shared clock says it is due.
+	let hold = |end: Duration| {
+		moq_net::Timestamp::try_from(end)
+			.ok()
+			.and_then(|end| presentation.due(end))
+			.map(|due| {
+				due.saturating_duration_since(Instant::now())
+					.clamp(AUDIO_BUFFER_MIN, cap)
+			})
+	};
+
 	// Tracks whether the last read failed, so a stream the decoder can't read at
 	// all logs once rather than once per packet.
 	let mut dropping = false;
@@ -667,7 +686,7 @@ async fn play_audio<O: Output>(
 				.lock()
 				.unwrap()
 				.front()
-				.is_some_and(|(.., queued): &(_, _, _, Instant)| queued.elapsed() > max_delay)
+				.is_some_and(|(.., queued): &(_, _, _, Instant)| queued.elapsed() > max_delay + schedule.delay())
 			{
 				tokio::select! {
 					() = popped.notified() => {}
@@ -749,13 +768,24 @@ async fn play_audio<O: Output>(
 		let mut utterance = false;
 		// The last frame written was trimmed, so a trim of this one continues that skip.
 		let mut trimming = false;
+		// Where the media written so far ends.
+		let mut wrote = None;
 		loop {
 			let (event, delay, crossing, arrived_at) = loop {
 				if let Some(event) = received.lock().unwrap().pop_front() {
 					popped.notify_one();
 					break event;
 				}
-				arrived.notified().await;
+				let seen = schedule.delay();
+				tokio::select! {
+					() = arrived.notified() => {}
+					// No write may come to carry a delay change, so the speaker follows it now.
+					_ = role.delay_changed(seen) => {
+						if let Some(held) = wrote.and_then(hold) {
+							sink.set_latency(held)?;
+						}
+					}
+				}
 			};
 			// A replacement sink must open with the current cushion, not the
 			// old floor and a target update after its initial silence was fixed.
@@ -876,7 +906,6 @@ async fn play_audio<O: Output>(
 			// which leaves it running ahead of media time until the clock below
 			// re-anchors, taking the video with it. So the hole goes in as silence ahead
 			// of the frame, and the pair is fitted to the target as one write.
-			let buffered = samples(sink.buffered());
 			// The arrival, not the write: how far the speaker trails is what the clock
 			// steers, never what moves it. The target is this track's own jitter
 			// target, which playback holds unless another track asks for more.
@@ -885,18 +914,30 @@ async fn play_audio<O: Output>(
 			// clock holds both while the sink keeps sizing for jitter alone.
 			*jitter.lock().unwrap() = Some(input.latency);
 			moved |= role.set_target(input.latency + stated.borrow().unwrap_or_default());
+			// Media due further out than the sink holds waits here, following any
+			// delay change meanwhile.
+			loop {
+				let seen = schedule.delay();
+				// The frame's start, so a delay the sink can hold never waits here.
+				let Some(at) = presentation
+					.due(mapped)
+					.and_then(|due| due.checked_sub(cap))
+					.filter(|at| *at > Instant::now())
+				else {
+					break;
+				};
+				tokio::select! {
+					() = kio::clock::sleep_until(at) => {}
+					_ = role.delay_changed(seen) => {}
+				}
+			}
 			// The depth that makes this frame's end sound when the shared clock says
 			// it is due, so the callback stretches the speaker onto the clock: behind
 			// it after a stall, it plays faster until it catches up. Floored at what
-			// the device needs, and capped at the age budget: audio older than it is
-			// skipped rather than held, so a deeper target could never fill. The
-			// budget is also what the sink's ring was sized to hold.
-			let now = Instant::now();
-			let held = moq_net::Timestamp::try_from(timing.end)
-				.ok()
-				.and_then(|end| presentation.due(end))
-				.map_or(input.latency, |due| due.saturating_duration_since(now))
-				.clamp(AUDIO_BUFFER_MIN, max_delay.max(AUDIO_BUFFER_MIN));
+			// the device needs, and capped at the age budget the sink was sized for;
+			// the wait above holds anything due later.
+			let buffered = samples(sink.buffered());
+			let held = hold(timing.end).unwrap_or(input.latency.clamp(AUDIO_BUFFER_MIN, cap));
 			let target = samples(held);
 			sink.set_latency(held)?;
 			// Leave normal convergence to the callback. Only an excess at NetEq's
@@ -940,6 +981,7 @@ async fn play_audio<O: Output>(
 				silent = true;
 			}
 
+			wrote = Some(timing.end);
 			playhead.wrote(timing.end, sink.buffered(), Instant::now());
 			// A move has to wake the window: it is asleep on a deadline computed from
 			// the old schedule, and every queued frame is due earlier now.
@@ -1067,6 +1109,71 @@ mod tests {
 			PACKET_DURATION
 		);
 		assert!(old.last().unwrap().to <= new.first().unwrap().from);
+	}
+
+	/// A video encoder delay past audio's own budget still plays audio in sync:
+	/// the media waits here until it is due rather than sounding early.
+	#[tokio::test]
+	async fn audio_holds_a_shared_delay_past_its_budget() {
+		tokio::time::pause();
+		let budget = Duration::from_millis(200);
+		let encoder = Duration::from_secs(1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
+		let mut options = moq_audio::decode::Options::new();
+		options.delay = moq_audio::decode::Delay {
+			min: Some(budget),
+			max: Some(budget),
+		};
+		options.estimate = false;
+		options.output.format = moq_audio::Format::F32;
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1),
+			"audio",
+			options,
+		)
+		.await
+		.unwrap();
+		let presentation = Presentation::new(budget);
+		let video = presentation.track(moq_mux::container::Kind::Video);
+		video.set_target(encoder);
+		let recorder = Recorder::default();
+		let playback = AudioPlayback {
+			delay: tokio::sync::watch::channel(None).1,
+			changed: Default::default(),
+			speaker: recorder.clone(),
+			presentation: presentation.clone(),
+			playhead: Default::default(),
+			// The fake's opening silence stands in for the padding a real ring adds
+			// once it runs dry, which tops it up to its target before the held write.
+			latency: budget,
+			output: recorder.clone(),
+		};
+		let task = tokio::spawn(async move {
+			play_audio(consumer, playback, std::future::pending())
+				.await
+				.unwrap()
+				.finish()
+				.await;
+		});
+		let start = Instant::now();
+		for index in 0..5 {
+			producer.write(packet(index, 0.25)).unwrap();
+		}
+		producer.finish().unwrap();
+		task.await.unwrap();
+		let first = recorder.played().first().copied().expect("played audio");
+		let due = start + encoder;
+		assert!(
+			first.from.max(due) - first.from.min(due) <= 2 * PACKET_DURATION,
+			"audio sounded at {:?}, due {:?}",
+			first.from - start,
+			encoder
+		);
 	}
 
 	/// A push-to-talk mute declares its silence and sends nothing until the next

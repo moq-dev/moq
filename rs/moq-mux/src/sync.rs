@@ -364,6 +364,17 @@ impl Track {
 		moved
 	}
 
+	/// Wait until playback trails the reference by something other than `seen`, returning the new delay.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_delay_changed(&self, waiter: &kio::Waiter, seen: Duration) -> Poll<Duration> {
+		let mut delay = seen;
+		let _ = std::task::ready!(self.clock.changed.poll(waiter, |_| {
+			delay = self.clock.state.lock().unwrap().delay();
+			if delay == seen { Poll::Pending } else { Poll::Ready(()) }
+		}));
+		Poll::Ready(delay)
+	}
+
 	/// Stop while a tail still plays until `drained`, holding a declared end until
 	/// then. Dropping instead discards the tail with the end.
 	pub fn retire(self, drained: Option<Instant>) {
