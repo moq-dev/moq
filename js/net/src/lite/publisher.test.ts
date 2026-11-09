@@ -15,7 +15,6 @@ import { Front } from "../resume.ts";
 import { Reader, Stream, Writer, writeBudget } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
-import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
@@ -1523,29 +1522,25 @@ test("lite draft-07: a final drop replaces an expired stream", async () => {
 // A queued re-offer that a later update drops again as stale counts as given up: the track's end
 // leaves that stale drop standing, rather than replacing it with a final one. Mirrors the Rust
 // `a_redropped_reoffer_stays_stale_at_the_end_on_lite07`.
-// Quarantined: flaky under load, see /quest/m0/test-flakes-2/redropped-reoffer.md
-test.skip("lite draft-07: a re-offer dropped again before it opens stays stale at the end", async () => {
+test("lite draft-07: a re-offer dropped again before it opens stays stale at the end", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
-	// A write's budget yields on host CPU time, which could run the publisher's post-update task
-	// before the test writes update 3.
-	const poll = spyOn(Budget.prototype, "poll").mockReturnValue(undefined);
 	// Well inside the cache window, so the expired group is still cached to re-offer.
 	const budget = Milli(1_000);
-	const update = (update: bigint, maxDelay: Milli) =>
+	const update = (update: bigint, maxDelay: Milli, writer: Writer) =>
 		new SubscribeUpdate({
 			priority: 1,
 			startGroup: 0n,
 			update,
 			maxDelay,
 			...restate(Version.DRAFT_07, update - 1n),
-		}).encode(sub.client.writer, Version.DRAFT_07);
+		}).encode(writer, Version.DRAFT_07);
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		sub.serve(0n);
 		expect(await sub.servedSequence()).toBe(0n);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
-		await update(1n, budget);
+		await update(1n, budget, sub.client.writer);
 		// The restated range resolves at once.
 		expect("started" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
 
@@ -1562,11 +1557,17 @@ test.skip("lite draft-07: a re-offer dropped again before it opens stays stale a
 		if (!("drop" in first)) throw new Error("expected SUBSCRIBE_DROP");
 		expect([first.drop.start, first.drop.end, first.drop.update]).toEqual([1n, 1n, 1n]);
 
-		// Update 2 widens the budget, so group 1 is re-offered. Update 3 restores it within the
-		// task the publisher yields after an update, before that re-offer opens.
-		await update(2n, Milli(budget * 100));
-		await flush();
-		await update(3n, budget);
+		// Update 2 widens the budget, so group 1 is re-offered; update 3 restores it. Both arrive in
+		// one chunk, which the decoder reads without leaving the task, so update 3 is decoded
+		// before the task boundary the publisher yields after an update, and so before any pop.
+		const chunks: Uint8Array[] = [];
+		const batch = new Writer(
+			new WritableStream({ write: (chunk) => void chunks.push(chunk.slice()) }),
+			Version.DRAFT_07,
+		);
+		await update(2n, Milli(budget * 100), batch);
+		await update(3n, budget, batch);
+		await sub.client.writer.write(new Uint8Array(chunks.flatMap((chunk) => [...chunk])));
 		await flush();
 		sub.track.finish();
 		sub.track.close();
@@ -1574,7 +1575,6 @@ test.skip("lite draft-07: a re-offer dropped again before it opens stays stale a
 	} finally {
 		await sub.close();
 		installed.close();
-		poll.mockRestore();
 	}
 });
 
