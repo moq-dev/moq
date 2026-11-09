@@ -14,8 +14,10 @@ Docker; see [Install](/setup/install).
 Its cryptography comes from [rind](https://github.com/moq-dev/rind), which
 runs on any x86\_64 CPU and on any aarch64 CPU with NEON, including a Raspberry
 Pi 4, CM4, or Zero 2 W on a 64-bit OS. On a CPU missing a feature rind needs,
-`moq` exits at startup naming it. The Rust library also supports armv7;
-prebuilt CLI artifacts for 32-bit boards are not yet available.
+`moq` exits at startup naming it. A board running a 32-bit OS, such as a
+Raspberry Pi 2 or later on 32-bit Raspberry Pi OS, takes the
+`armv7-unknown-linux-gnueabihf` release, which `moq.sh` and apt (`armhf`)
+install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 
 ## What it does
 
@@ -383,8 +385,8 @@ The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
 rtsp` one per RTSP session, and `import ts --program all` one per program.
 No importer continues its group sequences across a restart, so `moq` has no
 flag to set a stable instance and refuses one. A publisher that does continue
-them sets it on its route in a library, such as `Route::with_instance` in Rust
-or `announce({ instance, epoch })` in JavaScript; see
+them sets it on its route in a library, such as `RouteOptions::with_instance` in Rust
+or `origin.route(path, { instance: { id, epoch } })` in JavaScript; see
 [identity and recovery](/concept/identity).
 
 A restarted process takes the name at once: viewers see the broadcast restart,

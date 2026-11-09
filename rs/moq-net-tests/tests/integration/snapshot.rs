@@ -1,6 +1,6 @@
 //! A snapshot reader on a received track never waits on a hole the subscription still owes.
 use moq_json::snapshot;
-use moq_net::{fuzz, group, kio, track};
+use moq_net::{fuzz, group, track};
 use serde_json::{Value, json};
 use std::{task::Poll, time::Duration};
 

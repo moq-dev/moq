@@ -56,12 +56,12 @@ export class Decoder<T> {
 	/**
 	 * Materialize the reconstructed value, or `undefined` before the first snapshot.
 	 *
-	 * The result is the caller's own copy, for the same reason as {@link value}. (A schema already
-	 * produces a fresh object, so it only needs cloning without one. The Rust decoder deserializes a
-	 * fresh `T` every call and never exposes its internal state at all.)
+	 * The result is the caller's own copy, for the same reason as {@link value}. The state is cloned
+	 * even with a schema, since `z.unknown()` fields and loose-object extras pass references through.
 	 */
 	decode(): T | undefined {
 		if (this.#current === undefined) return undefined;
-		return this.#schema ? this.#schema.parse(this.#current) : (structuredClone(this.#current) as T);
+		const value = structuredClone(this.#current);
+		return this.#schema ? this.#schema.parse(value) : (value as T);
 	}
 }

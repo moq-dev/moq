@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
-use hang::moq_net;
 use moq_mux::catalog::{self, Stream};
 // The ambient clock, which follows tokio's paused clock when a test drives the
 // playout clock itself.

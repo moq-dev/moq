@@ -185,6 +185,20 @@ pub(crate) mod test {
 		}
 	}
 
+	/// Nesting past serde_json's limit and numbers outside the double range, shared with the TypeScript suite.
+	#[test]
+	fn limits() {
+		let scratch = RefCell::new(Scratch::default());
+		let vectors: Vectors = serde_json::from_str(include_str!("../tests/limits.json")).unwrap();
+		for payload in &vectors.refused {
+			let err = check(payload.as_bytes(), &scratch).unwrap_err();
+			assert!(matches!(err, Error::Json(_)), "{payload}: {err}");
+		}
+		for payload in &vectors.accepted {
+			check(payload.as_bytes(), &scratch).unwrap_or_else(|err| panic!("{payload}: {err}"));
+		}
+	}
+
 	/// A malformed frame stays a syntax error, and a refusal does not leak into the next check.
 	#[test]
 	fn malformed_json_is_not_a_duplicate() {

@@ -121,6 +121,7 @@ hyper-util = { version = "0.1.21", features = ["tokio"] }
 if-addrs = "0.15"
 indexmap = "2.14.2"
 io-uring = "0.7.15"
+jni = "0.22"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
 kio-macros = { version = "0.1.0", path = "rs/kio/macros" }
@@ -234,6 +235,7 @@ thiserror = "2"
 time = "0.3"
 tokio = "1.48"
 tokio-rustls = { version = "0.26", default-features = false }
+tokio-tungstenite = { version = "0.30", default-features = false }
 tokio-util = "0.7"
 toml = "1.1"
 tower-http = { version = "0.7", features = ["cors"] }
@@ -248,17 +250,11 @@ usage-rs = "7.3.0"
 uuid = { version = "1.26", features = ["v7"] }
 web-transport-proto = "0.6.4"
 web-transport-trait = "0.5"
+wgpu = "30"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
 x509-cert = { version = "0.3", default-features = false }
 x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
-
-[patch.crates-io]
-# The published moq-auth 0.2.1 compatibility fixture depends on kio from
-# crates.io. Without this, the lock carries a second kio whose pin drifts behind
-# the member, and the next publish that reaches both fails to resolve a single
-# version (#3551).
-kio = { path = "rs/kio" }
 
 [profile.dev]
 # Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`
@@ -270,24 +266,8 @@ kio = { path = "rs/kio" }
 # in lldb. `profile.test` inherits this.
 debug = "line-tables-only"
 
-# Optimize the bignum crates even in dev/test builds. RSA keygen is bignum
-# arithmetic in a loop, and unoptimized it is orders of magnitude slower: the
-# moq-auth key tests spend ~16s generating 2048-bit keys, versus well under a
-# second here. These are dependencies we never step through in a debugger, so
-# optimizing them costs nothing an unoptimized build was buying us, and the
-# tests keep exercising production key sizes rather than being weakened to
-# stay fast. `profile.test` inherits these overrides.
-[profile.dev.package.num-bigint-dig]
-opt-level = 3
-
-[profile.dev.package.crypto-bigint]
-opt-level = 3
-
-[profile.dev.package.rsa]
-opt-level = 3
-
-# Same for the sonora echo canceller. Its hot loops are `core::arch` NEON/SSE
-# intrinsics, which at opt-level 0 compile to out-of-line calls carrying the
+# Optimize the sonora echo canceller even in dev/test builds. Its hot loops
+# are `core::arch` NEON/SSE intrinsics, which at opt-level 0 compile to out-of-line calls carrying the
 # debug UB preconditions of `read_unaligned` and `copy_nonoverlapping`: a
 # profile of `aec::tests::survives_a_moving_echo_delay` spends 65% of its
 # samples in those checks and intrinsic shims and only 20% in sonora's own

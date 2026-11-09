@@ -1,5 +1,4 @@
 use anyhow::Context;
-use hang::moq_net;
 use moq_mux::container::{flv, fmp4, ts};
 
 /// Container format read from stdin on the import (source) side.
@@ -389,7 +388,7 @@ impl Pending {
 	/// Announce the broadcast if its catalog has gone out, returning whether it has.
 	fn announce(&mut self) -> anyhow::Result<bool> {
 		if !matches!(
-			self.catalog.poll_largest(&moq_net::kio::Waiter::noop()),
+			self.catalog.poll_largest(&kio::Waiter::noop()),
 			std::task::Poll::Ready(Some(_))
 		) {
 			return Ok(false);
@@ -1924,7 +1923,7 @@ pub(crate) mod tests {
 		let mut track = consumer.track(Catalog::DEFAULT_NAME).unwrap();
 		let mut published = || {
 			matches!(
-				track.poll_largest(&moq_net::kio::Waiter::noop()),
+				track.poll_largest(&kio::Waiter::noop()),
 				std::task::Poll::Ready(Some(_))
 			)
 		};

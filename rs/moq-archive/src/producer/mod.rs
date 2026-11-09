@@ -13,7 +13,7 @@
 //!
 //! ```no_run
 //! # async fn example(broadcast: moq_net::broadcast::Consumer) -> moq_archive::Result<()> {
-//! use moq_archive::object_store::memory::InMemory;
+//! use object_store::memory::InMemory;
 //!
 //! let store = moq_archive::Store::new(InMemory::new(), "recordings/demo");
 //! moq_archive::Producer::new(store, broadcast, Default::default()).run().await?;

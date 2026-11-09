@@ -1,6 +1,5 @@
 /** WebTransport over WebSockets with QMux framing: a browser polyfill and a server for an accepted socket. @module */
-import type { Version } from "./session.ts";
-import Session from "./session.ts";
+import { Session, type Version } from "./session.ts";
 
 export { SessionError, StreamError } from "./error.ts";
 export type {
@@ -13,7 +12,7 @@ export type {
 	SessionOptions,
 	Version,
 } from "./session.ts";
-export { selectSubprotocol } from "./session.ts";
+export { Session, selectSubprotocol } from "./session.ts";
 export type {
 	WebSocketLike,
 	WebSocketStreamCloseEvent,
@@ -52,5 +51,3 @@ export function install(options?: InstallOptions): boolean {
 	};
 	return true;
 }
-
-export default Session;
