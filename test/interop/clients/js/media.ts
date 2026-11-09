@@ -168,7 +168,8 @@ if (!native && values.cases === undefined && playerEngine === "firefox") {
 }
 // Every replacement publisher pins lite-07, including the lite-06 and IETF reader legs.
 // An explicit --cases replacement remains available while porting the route wire.
-if (values.cases === undefined && selected.delete("replacement")) {
+if (!native && values.cases === undefined) {
+	selected.delete("replacement");
 	console.error("QUARANTINE\treplacement\tJS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md");
 }
 

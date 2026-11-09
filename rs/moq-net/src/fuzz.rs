@@ -561,7 +561,9 @@ impl Meter {
 
 /// Build a session-local payload meter without exposing the model's private stats carriers.
 pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, label: &str, path: &str) -> Meter {
-	let session = registry.tier(tier).session(Path::new(label).expect("label fits"));
+	let session = registry
+		.tier(tier)
+		.session(crate::stats::SessionInfo::new(Path::new(label).expect("label fits")));
 	Meter(session.egress(Path::new(path).expect("path fits")).meter())
 }
 
@@ -933,7 +935,7 @@ impl Default for Messages {
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
-				compress: false,
+				compression: crate::track::Compression::None,
 			},
 			lite_group: lite::Group {
 				subscribe: 7,
@@ -1952,15 +1954,17 @@ mod tests {
 		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::default());
 		let _driver = driver;
 		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
-		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
+		let session = registry
+			.tier(tier.clone())
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("root")));
 		let _broadcast = origin.route("room/1", crate::origin::RouteOptions::default()).unwrap();
 		let mut cursor = origin.consume().with_stats(session).routes();
 		while cursor.next().now_or_never().flatten().is_some() {}
 
 		bump_publisher_bytes(&registry, crate::Path::from_static("room/1"), &tier, 5);
 		let mut report = crate::stats::Report::default();
-		registry.report(&mut report);
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
+		registry.report(&mut report, crate::time::Instant::now());
 		let entry = report
 			.traffic
 			.iter()

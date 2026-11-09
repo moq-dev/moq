@@ -149,8 +149,8 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 // bytes may grow before a joining subscriber asks for a new group (nil never
 // asks), and the timescale in ticks per second (nil means untimed on both publish
 // and receive). Priority is higher first; the zero Priority is the midpoint a nil
-// TrackInfo uses. Compress DEFLATEs each group on the wire to peers that support
-// it; readers always see the original frames.
+// TrackInfo uses. Compression compresses each group on the wire to peers that
+// support it, nil sending frames as written; readers always see the original frames.
 type TrackInfo struct {
 	Priority int8
 	// MaxAge is how long a superseded group stays fresh. Zero, the default, serves
@@ -161,7 +161,7 @@ type TrackInfo struct {
 	MaxAgeUnlimited bool
 	Refresh         *uint32
 	Timescale       *uint64
-	Compress        bool
+	Compression     *Compression
 }
 
 func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
@@ -173,7 +173,7 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		MaxAgeUnlimited: info.MaxAgeUnlimited,
 		Refresh:         info.Refresh,
 		Timescale:       info.Timescale,
-		Compress:        info.Compress,
+		Compression:     info.Compression,
 	}
 	if !info.MaxAgeUnlimited {
 		out.MaxAge = &info.MaxAge
@@ -187,7 +187,7 @@ func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 		MaxAgeUnlimited: info.MaxAgeUnlimited,
 		Refresh:         info.Refresh,
 		Timescale:       info.Timescale,
-		Compress:        info.Compress,
+		Compression:     info.Compression,
 	}
 	if info.MaxAge != nil && !info.MaxAgeUnlimited {
 		out.MaxAge = *info.MaxAge

@@ -8,8 +8,8 @@
 
 use std::ffi::c_void;
 
-use moq_tokio::jni::sys::{self, JNI_VERSION_1_6, jint};
-use moq_tokio::jni::{Env, JavaVM, jni_sig, jni_str};
+use jni::sys::{self, JNI_VERSION_1_6, jint};
+use jni::{Env, JavaVM, jni_sig, jni_str};
 
 /// Called by the JVM on `System.loadLibrary("moq_ffi")`. The name is fixed by
 /// the JNI spec, so it can't follow Rust's snake_case convention.
@@ -36,13 +36,11 @@ fn init_platform_tls(vm: &JavaVM) -> Result<(), Box<dyn std::error::Error>> {
 fn discover_context_and_init(env: &mut Env) -> Result<(), Box<dyn std::error::Error>> {
 	// The app Context isn't passed to native code, so fetch it from
 	// android.app.ActivityThread.currentApplication() (a long-stable internal API).
-	// The `jni = ...` override points the compile-time encoders at moq-tokio's
-	// re-export, since moq-ffi has no direct `jni` dependency of its own.
 	let app = env
 		.call_static_method(
-			jni_str!(jni = moq_tokio::jni, "android/app/ActivityThread"),
-			jni_str!(jni = moq_tokio::jni, "currentApplication"),
-			jni_sig!(jni = moq_tokio::jni, "()Landroid/app/Application;"),
+			jni_str!("android/app/ActivityThread"),
+			jni_str!("currentApplication"),
+			jni_sig!("()Landroid/app/Application;"),
 			&[],
 		)?
 		.l()?;

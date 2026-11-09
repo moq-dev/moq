@@ -41,13 +41,13 @@ try {
 			priority: Catalog.PRIORITY.catalog,
 		});
 		try {
-			const { compress } = await track.info();
-			assert.equal(compress, version === "moq-lite-07-wip", "wrong compression metadata");
+			const { compression } = await track.info();
+			assert.equal(compression, version === "moq-lite-07-wip" ? "deflate" : "none", "wrong compression metadata");
 			const root = (await consumer.latest())?.value;
 			assert(root, "catalog ended before a snapshot");
 			const video = Object.keys(root.video?.renditions ?? {}).sort();
 			const audio = Object.keys(root.audio?.renditions ?? {}).sort();
-			console.error(`catalog compress=${compress} video=${video.join(",")} audio=${audio.join(",")}`);
+			console.error(`catalog compression=${compression} video=${video.join(",")} audio=${audio.join(",")}`);
 		} finally {
 			consumer.close();
 		}

@@ -842,7 +842,7 @@ mod tests {
 	fn aac_avg_bitrate(init: &bytes::Bytes) -> u32 {
 		let wire = moq_mux::container::fmp4::Wire::from_init(init).unwrap();
 		let codec = &wire.trak().mdia.minf.stbl.stsd.codecs[0];
-		let moq_mux::container::fmp4::mp4_atom::Codec::Mp4a(mp4a) = codec else {
+		let mp4_atom::Codec::Mp4a(mp4a) = codec else {
 			panic!("expected mp4a, got {codec:?}");
 		};
 		mp4a.esds.es_desc.dec_config.avg_bitrate
@@ -850,7 +850,7 @@ mod tests {
 
 	/// The `trun` sample durations of a fragment.
 	fn sample_durations(fragment: &bytes::Bytes) -> Vec<Option<u32>> {
-		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+		use mp4_atom::DecodeMaybe;
 
 		let mut cursor = std::io::Cursor::new(fragment.as_ref());
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
@@ -2170,7 +2170,7 @@ mod tests {
 		let consumer = origin.consume().with_stats(
 			registry
 				.tier(moq_net::stats::Tier::default())
-				.session(moq_net::Path::from_static("viewer")),
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer"))),
 		);
 		let bytes = || -> u64 {
 			registry
@@ -2542,7 +2542,7 @@ mod tests {
 	}
 
 	async fn live_fmp4_segments(version: Option<&str>, late: bool) {
-		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe, Encode};
+		use mp4_atom::{DecodeMaybe, Encode};
 		// Reuse the A/V descriptors; opaque samples exercise segment discovery and FETCH,
 		// without involving a codec decoder.
 		let mut fixture =

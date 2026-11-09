@@ -13,7 +13,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use kio::clock::Instant;
-use moq_net::kio::{self, Pending, Waiter};
+use kio::{Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
 use moq_net::track::Resolving;
 use moq_net::{Instance, Path, broadcast, origin};
@@ -1271,7 +1271,7 @@ mod tests {
 		let ctx = producer
 			.registry()
 			.tier(tier)
-			.session(moq_net::Path::new(label).unwrap());
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::new(label).unwrap()));
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
@@ -1797,11 +1797,11 @@ mod tests {
 		let _sa = node_a
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		let _sb = node_b
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new());
@@ -1830,11 +1830,11 @@ mod tests {
 		let _sa = node_a
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		let sb = node_b
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("acme")));
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new());
@@ -1934,7 +1934,9 @@ mod tests {
 		let session = node
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme/live"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static(
+				"acme/live",
+			)));
 		drive_tick().await;
 		let mut started = 0;
 		let mut read_until = async |want: u64, active: u64| loop {
@@ -1956,7 +1958,9 @@ mod tests {
 		let _session = node
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::from_static("acme/live"));
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static(
+				"acme/live",
+			)));
 		drive_tick().await;
 		read_until(2, 1).await;
 	}

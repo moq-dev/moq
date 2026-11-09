@@ -23,7 +23,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
 		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// The payloads the server read, then how the track ended.
@@ -462,7 +462,7 @@ async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net:
 	let mut options = MockConnectOptions::new(version.parse().unwrap());
 	options.server_stats = registry
 		.tier(Default::default())
-		.session(moq_net::Path::from_static("room"));
+		.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("room")));
 	let pair = connect_mock(options).await;
 	close(&pair);
 	let err = kio::clock::timeout(TIMEOUT, pair.server.closed())

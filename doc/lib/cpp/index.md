@@ -233,7 +233,7 @@ screen.reset();              // stopped watching: its share returns to camera
 
 ## Compressed tracks
 
-`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`moq::TrackInfo::compression` set to DEFLATE on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 
 ## Subscription defaults
 

@@ -110,7 +110,7 @@ impl axum::extract::connect_info::Connected<Peer> for SocketAddr {
 pub(crate) struct Listener {
 	inner: TcpListener,
 	health: Health,
-	activity: Option<moq_net::server::Activity>,
+	admission: Option<moq_net::server::Admission>,
 }
 
 impl Listener {
@@ -119,12 +119,12 @@ impl Listener {
 	pub(crate) fn new(
 		listener: std::net::TcpListener,
 		health: Health,
-		activity: Option<moq_net::server::Activity>,
+		admission: Option<moq_net::server::Admission>,
 	) -> io::Result<Self> {
 		Ok(Self {
 			inner: TcpListener::from_std(listener)?,
 			health,
-			activity,
+			admission,
 		})
 	}
 }
@@ -133,7 +133,7 @@ impl Listener {
 pub(crate) struct Config {
 	pub health: Health,
 	/// Count public web sockets from TCP accept through their first request.
-	pub activity: Option<moq_net::server::Activity>,
+	pub admission: Option<moq_net::server::Admission>,
 	pub timeout: Option<std::time::Duration>,
 }
 
@@ -154,10 +154,10 @@ pub(crate) fn server<A>(
 	let Config {
 		health,
 		timeout,
-		activity,
+		admission,
 	} = config;
 	let mut server =
-		axum_server::Server::from_listener(Listener::new(listener, health, activity)?).acceptor(idle::Acceptor {
+		axum_server::Server::from_listener(Listener::new(listener, health, admission)?).acceptor(idle::Acceptor {
 			inner: acceptor,
 			timeout,
 		});
@@ -183,7 +183,7 @@ impl AddrListener<Accepted, Peer> for Listener {
 		Ok(Self {
 			inner: TcpListener::bind(addr.0).await?,
 			health: Health::new("tcp"),
-			activity: None,
+			admission: None,
 		})
 	}
 
@@ -206,9 +206,9 @@ impl AddrListener<Accepted, Peer> for Listener {
 					// Enter before returning the socket: axum_server spawns the TLS
 					// acceptor, and waiting for that task would leave an uncounted gap.
 					let admission = self
-						.activity
+						.admission
 						.as_ref()
-						.and_then(|activity| activity.enter())
+						.and_then(|admission| admission.enter())
 						.map(Admission::new);
 					self.health.accepted();
 					return Ok((Accepted { stream, admission }, Peer(peer)));

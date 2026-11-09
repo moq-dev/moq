@@ -36,7 +36,7 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
-	/// A [`compress`](moq_net::track::Info::compress)ed track reads the same: moq-net inflates it.
+	/// A [compressed](moq_net::track::Info::compression) track reads the same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
 			track,
@@ -104,11 +104,11 @@ mod timestamps {
 
 	#[test]
 	fn exact_timestamps_survive_reads() {
-		for compress in [false, true] {
+		for compression in [moq_net::track::Compression::None, moq_net::track::Compression::Deflate] {
 			let scale = moq_net::Timescale::new(90_000).unwrap();
 			let info = moq_net::track::Info::default()
 				.with_timescale(scale)
-				.with_compress(compress);
+				.with_compression(compression);
 			let track = moq_net::broadcast::Info::new()
 				.produce()
 				.create_track("data", info)

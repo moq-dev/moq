@@ -1,6 +1,5 @@
 //! Real Rust server for a JS TRACK_STATUS requester.
 use anyhow::{Context, ensure};
-use moq_tokio::moq_net;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {

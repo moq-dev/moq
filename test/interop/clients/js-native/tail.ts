@@ -145,7 +145,11 @@ try {
 		} else {
 			// `cached` and `late` read groups a newer one supersedes, which the default zero max age
 			// would leave stale.
-			const track = broadcast.createTrack("tail", { compress, maxAge: null, ...(status ? { priority: 2 } : {}) });
+			const track = broadcast.createTrack("tail", {
+				compression: compress ? "deflate" : "none",
+				maxAge: null,
+				...(status ? { priority: 2 } : {}),
+			});
 			if (cached) write(track);
 			if (history) serveHistory(track);
 			let head: Moq.Group.Producer | undefined;
@@ -236,7 +240,8 @@ try {
 					delay: { max: Milli(drop ? 60_000 : 5000) },
 					...(late ? {} : { ranges: [{ start: { absolute: 0n } }] }),
 				});
-				if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
+				if (compress)
+					assert.equal((await track.info()).compression, version === "moq-lite-07-wip" ? "deflate" : "none");
 				const seen: number[] = [];
 				try {
 					if (late) {

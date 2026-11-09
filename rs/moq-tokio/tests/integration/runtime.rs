@@ -8,7 +8,6 @@
 #![cfg(all(unix, feature = "quic", feature = "websocket", feature = "uds"))]
 
 use futures::executor::block_on;
-use moq_tokio::moq_net;
 
 /// Serve one broadcast over every default transport and read it back over each.
 #[test]

@@ -357,7 +357,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	///
 	/// Media samples stream into their frames as bytes arrive. What must be held whole is
 	/// bounded: a `moov` or `moof` body larger than 2 MiB, or a text sample larger than the
-	/// transport's per-group bound ([`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES)), is
+	/// transport's 32 MiB frame bound, is
 	/// refused before it is held. A `moof` declaring more than 131,072 samples, or more than its
 	/// size accepts, is refused before they are planned, and a `moov` declaring more than 256
 	/// tracks before any is created.

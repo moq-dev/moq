@@ -58,16 +58,14 @@ WHEP enforcement needs it and nobody owned it.
 
 Public API: a rate handle on moq-webrtc's WHEP server. Decided 2026-10-30
 (maintainer): `whep::accept` takes the same shape as `whip::accept`, a
-`whep::Request` struct, rather than a fifth argument. That struct lands
-first in [gateway-ingest](/quest/m2/gateway-ingest.md), `#[non_exhaustive]`,
-so this quest adds a `rate: Option<bandwidth::Limit>` field to it, never a
+`whep::Request` struct, rather than a fifth argument. That struct exists,
+`#[non_exhaustive]`, so this quest adds a `rate: Option<bandwidth::Limit>`
+field to it, as `whip::Request` has, never a
 `with_rate` setter (2026-11-07, maintainer, /quest-plan from the API sweep
 of open PRs and remaining quests). The handle
-is `moq_net::bandwidth::Limit`, which replaces moq-webrtc's
-`rate::{Cap, Limit}` in [gateway-ingest](/quest/m2/gateway-ingest.md)
-(2026-11-07, maintainer, /quest-plan from the API shape audit). Wire: none.
-
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): `whep::Request` itself lands before the cut in [gateway-ingest](/quest/m2/gateway-ingest.md); this quest adds its rate field.
+is `moq_net::bandwidth::Limit`, which replaced moq-webrtc's own
+`rate::{Cap, Limit}` (2026-11-07, maintainer, /quest-plan from the API shape
+audit). Wire: none.
 
 ## Related
 

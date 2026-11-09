@@ -14,7 +14,7 @@ export function populatePreview(add: (path: Moq.Path.Valid) => Truck) {
 		const truck = add(Moq.Path.from(`carla/truck${index + 1}/front.hang`));
 		const origin = new Moq.Broadcast.Producer();
 		const producer = new Json.Snapshot.Producer<TruckStatus>({
-			track: origin.createTrack("status", { compress: true }),
+			track: origin.createTrack("status", { compression: "deflate" }),
 		});
 		(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(origin.consume());
 		producer.update({

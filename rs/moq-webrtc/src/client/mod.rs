@@ -9,40 +9,16 @@ mod whep;
 mod whip;
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use url::Url;
 
 /// Configuration shared by both `client publish` and `client subscribe`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Config {
 	/// Public UDP socket addresses to advertise as ICE host candidates in
 	/// our outbound offer. Same semantics as [`crate::server::Config::ice_candidates`].
 	pub ice_candidates: Vec<SocketAddr>,
-
-	/// How long a superseded group of an ingested media track stays fresh, or `None` for
-	/// no publisher limit. Same semantics as [`crate::server::Config::max_age`].
-	///
-	/// Ingest only ([`subscribe`](Client::subscribe) / WHEP): a WHIP
-	/// [`publish`](Client::publish) reads a broadcast someone else declared, so it
-	/// ignores this.
-	pub max_age: Option<Duration>,
-
-	/// Connection allocator each ingested track claims its peak-hold bitrate on.
-	/// Ingest only ([`subscribe`](Client::subscribe) / WHEP); a WHIP
-	/// [`publish`](Client::publish) ignores this.
-	pub bandwidth: moq_net::bandwidth::Allocator,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			ice_candidates: Vec::new(),
-			max_age: Some(hang::container::MAX_AGE),
-			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-		}
-	}
 }
 
 /// Outbound WHIP/WHEP dialer.
@@ -81,10 +57,18 @@ impl Client {
 		&self.http
 	}
 
-	/// `client subscribe`: pull a remote WHEP feed and publish it as
-	/// `broadcast` on the local origin, until the session ends.
-	pub async fn subscribe(&self, url: Url, broadcast: moq_net::broadcast::Producer) -> crate::Result<()> {
-		whep::dial(self, url, broadcast).await
+	/// `client subscribe`: pull a remote WHEP feed and publish it as `broadcast`, its tracks
+	/// minted under `catalog`, until the session ends.
+	///
+	/// The caller owns the broadcast, so its announcement and any linger after the end are
+	/// the caller's too.
+	pub async fn subscribe(
+		&self,
+		url: Url,
+		broadcast: moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Config,
+	) -> crate::Result<()> {
+		whep::dial(self, url, broadcast, catalog).await
 	}
 
 	/// `client publish`: push the broadcast `source` resolved to a remote WHIP endpoint,
@@ -118,7 +102,7 @@ mod tests {
 			.expect("WHEP URL");
 		let err = Client::new(Config::default())
 			.unwrap()
-			.subscribe(url, broadcast.broadcast().clone())
+			.subscribe(url, broadcast.broadcast().clone(), Default::default())
 			.await
 			.expect_err("dial a closed port");
 

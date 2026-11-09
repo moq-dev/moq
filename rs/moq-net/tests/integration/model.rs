@@ -1,6 +1,6 @@
 //! The explicit-time model works without async helpers or a runtime.
 
-use moq_net::{Error, Timestamp, broadcast, frame, group, kio, origin, track};
+use moq_net::{Error, Timestamp, broadcast, frame, group, origin, track};
 use std::task::Poll;
 
 fn ready<T>(value: Poll<T>) -> T {

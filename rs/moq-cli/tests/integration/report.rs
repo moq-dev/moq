@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::time::Duration;
 
-use hang::moq_net;
 use moq_mux::container::ts;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout};
