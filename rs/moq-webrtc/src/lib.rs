@@ -31,8 +31,9 @@
 //!
 //! ## Runtime
 //!
-//! The crate is a tokio edge, built on `moq-tokio`, axum, and tokio sockets: its entry
-//! points spawn their session drivers on the current tokio runtime.
+//! The crate is a tokio edge, built on `moq-tokio`, axum, and tokio sockets. The bundled
+//! routers spawn session drivers on the current tokio runtime; `accept` callers run
+//! [`Response::run`] themselves.
 //!
 //! ## Bitstream gotcha
 //!
