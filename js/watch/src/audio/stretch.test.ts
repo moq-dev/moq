@@ -9,8 +9,8 @@ interface Vector {
 	rate: number;
 	channels: number;
 	input: number[];
-	buffered: number;
-	target: number;
+	/** Frames the ring sits above its target right after an arrival; negative is short of it. */
+	excess: number;
 	cooldown: number;
 	/** As native playback decides: it also expands, which this player never does. */
 	decision: Decision | "Expand";
@@ -29,16 +29,9 @@ const vectors = JSON.parse(readFileSync(corpus, "utf8")) as Vector[];
 const planar = (samples: number[], channels: number) =>
 	Array.from({ length: channels }, (_, channel) => samples.filter((_, i) => i % channels === channel));
 
-// The corpus decides as NetEq does, on the buffered depth against a band around the target. This
-// player decides on the excess above the target alone and never expands, so the corpus grades its
-// seams: an excess past the 20 ms band fast-accelerates, one inside it accelerates, and a ring at or
-// short of its target, where NetEq holds or expands, plays its window unchanged.
-const excess = (vector: Vector) => {
-	const band = Math.floor((vector.rate * 20) / 1000);
-	if (vector.decision === "Fast") return vector.buffered - vector.target;
-	if (vector.decision === "Accelerate") return band - 1;
-	return Math.min(0, vector.buffered - vector.target);
-};
+// This player never expands, so a ring short of its target, where native playback expands, plays
+// its window unchanged.
+const excess = (vector: Vector) => Math.max(0, vector.excess);
 
 for (const vector of vectors) {
 	it(`stretches the corpus PCM: ${vector.name}`, () => {
