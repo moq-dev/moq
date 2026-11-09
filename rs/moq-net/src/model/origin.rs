@@ -9996,16 +9996,13 @@ mod tests {
 			.with_preference(Preference::new(1))
 			.forward(
 				"room",
-				RouteInfo::default()
-					.with_hops(hops(&[10]))
-					.with_cost(1)
-					.with_draining(true),
+				RouteInfo::new().with_hops(hops(&[10])).with_cost(1).with_draining(true),
 			)
 			.unwrap();
 		let demoted = producer
 			.clone()
 			.with_preference(Preference::new(-1))
-			.forward("room", RouteInfo::default().with_hops(hops(&[11])).with_cost(5))
+			.forward("room", RouteInfo::new().with_hops(hops(&[11])).with_cost(5))
 			.unwrap();
 		let _bob = consumer.request("room/bob", None);
 		let request = queued(&demoted).await;
@@ -10024,7 +10021,7 @@ mod tests {
 		let mut announced = producer.consume().routes();
 
 		let dynamic = producer
-			.forward("room", RouteInfo::default().with_hops(hops(&[10])).with_cost(3))
+			.forward("room", RouteInfo::new().with_hops(hops(&[10])).with_cost(3))
 			.unwrap();
 		announced.expect_next_active("room").await;
 		dynamic.update(dynamic.route().unwrap().with_draining(true)).unwrap();

@@ -3750,7 +3750,7 @@ mod announce_test {
 		}
 
 		let origin = Hop::new(1).unwrap().produce();
-		let stats = origin.announce(".stats/node", origin::RouteInfo::default()).unwrap();
+		let stats = origin.announce(".stats/node", origin::RouteInfo::new()).unwrap();
 		let consumer = origin.consume();
 		let node = consumer.route_node();
 		let mut answer =
@@ -3781,7 +3781,7 @@ mod announce_test {
 			"nothing shown"
 		);
 
-		let shown = origin.announce("x", origin::RouteInfo::default()).unwrap();
+		let shown = origin.announce("x", origin::RouteInfo::new()).unwrap();
 		// The origin feeds its node from a task.
 		kio::clock::sim::yield_now().await;
 		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
@@ -3821,7 +3821,7 @@ mod announce_test {
 		wire.assert_quiet();
 		assert_eq!(node.retained().echoes, 1, "the node's end waits on the peer");
 
-		let _again = origin.announce("y", origin::RouteInfo::default()).unwrap();
+		let _again = origin.announce("y", origin::RouteInfo::new()).unwrap();
 		kio::clock::sim::yield_now().await;
 		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
 		wire.assert_quiet();
