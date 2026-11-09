@@ -438,13 +438,14 @@ test("drive fires each deadline its work waits on and stops when the work settle
 
 test("drive settles with its work's rejection at the deadline that caused it", async () => {
 	const clock = manual();
-	await expect(
-		clock.drive(
+	const err = await clock
+		.drive(
 			sleep(Duration.nanos(10)).then(() => {
 				throw new Error("boom");
 			}),
-		),
-	).rejects.toThrow("boom");
+		)
+		.catch((e: unknown) => e);
+	expect(err).toEqual(new Error("boom"));
 	expect(ns(clock.now())).toBe(10);
 });
 
@@ -481,7 +482,9 @@ for (const driver of ["advance", "fire", "drive"] as const) {
 			await expect(clock.advance(Duration.nanos(100))).rejects.toThrow("already pending");
 			expect(() => clock.jump(Duration.nanos(100))).toThrow("already pending");
 			await expect(clock.fire()).rejects.toThrow("already pending");
-			await expect(clock.drive(Promise.resolve())).rejects.toThrow("already pending");
+			expect(await clock.drive(Promise.resolve()).catch((e: unknown) => e)).toEqual(
+				new Error("time driver already pending"),
+			);
 			expect(ns(clock.now())).toBe(0);
 		} finally {
 			// Let fire and drive finish even if an assertion fails before they have a timer.

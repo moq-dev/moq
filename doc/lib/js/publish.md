@@ -199,7 +199,9 @@ new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: 
 Standalone components start enabled unless you pass `enabled: false` (or a
 signal). An enabled camera or microphone prompts for permission on
 construction, and a screen source must be built inside the user gesture that
-authorizes it. Audio waits for the page's first click or keypress, since
+authorizes it. A screen source's `out.state` is `off`, `prompting`, `live`, or
+`ended` with a reason (`stopped`, `dismissed`, or `error`); an ended share stays
+ended until the next enable, which prompts again. Audio waits for the page's first click or keypress, since
 browsers suspend Web Audio until then. Every input and output is a signal from
 [`@moq/signals`](/lib/js/signals). A failed encoder exposes the cause through
 `out.error` and disables only its rendition; siblings and the broadcast keep

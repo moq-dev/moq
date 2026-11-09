@@ -197,9 +197,9 @@ quests that require them.
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [moq-quic drops inherited surfaces with no consumer](/quest/m2/moq-quic-unused-surface.md) - unused accept, connection, and stream-id surfaces leave moq-quic's public API before the cut
 - [No sentinel values in public API](/quest/m2/no-sentinels.md) - receive windows, cache durations, reconnect timeouts, and the FFI test clock use `Option` instead of a huge value or zero
+- [Connection state carries each phase's data](/quest/m2/connection-state-phases.md) - moq-tokio's `Observation`, moq-ffi's `MoqConnectionState`, and moq-c's `moq_connection_state` each hold one phase per value, so no field is readable in a phase where it means nothing
 - [moq-video takes devices, not environment variables](/quest/m2/video-devices.md) - VA-API and V4L2 device paths are config fields, and `moq_video::ENV` never ships
 - [Gateways share one ingest config and one rate cap](/quest/m2/gateway-ingest.md) - `moq_mux::Ingest` replaces 18 per-gateway setters, and the live rate cap moves to `moq_net::bandwidth`
-- [Native playout sync keeps tracks decoupled](/quest/m2/mux-sync.md) - `moq_mux::timeline` becomes `moq_mux::sync`, and one slow track no longer stalls or moves another
 - [Small API fixes before the cut](/quest/m2/api-shape/README.md) - one path and one spelling per item, names by role, and no dead or wrong-role public surface across net, transport, media, native, apps, JS, and bindings
 - [Public constructors spawn nothing, or say why](/quest/m2/spawn-constructors.md) - each public library entry point that spawns returns a driver its caller polls, or is listed as kept
 - [moq-audio codecs return zero or more outputs](/quest/m2/audio-codec-seam.md) - `encode` and `decode` return any number of outputs and gain `flush`, as moq-video's do

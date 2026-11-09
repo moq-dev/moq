@@ -4,6 +4,7 @@ import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_TRANSPORT_PARAMS, usesRecords } from "./frame.ts";
+import { Queue } from "./queue.ts";
 import { RecvStream } from "./recv.ts";
 import { RecvOpen } from "./recv-open.ts";
 import { BacklogSink, DEFAULT_SEND_ORDER, SendScheduler, type SendSink, WritableStreamSink } from "./scheduler.ts";
@@ -278,7 +279,7 @@ class IncomingStreamQueue<T> {
 	readonly readable: ReadableStream<T>;
 
 	#controller!: ReadableStreamDefaultController<T>;
-	#pending: PendingIncomingStream<T>[] = [];
+	#pending = new Queue<PendingIncomingStream<T>>();
 	#pullResolve?: () => void;
 	#cancelled = false;
 	#closed = false;
@@ -340,7 +341,7 @@ class IncomingStreamQueue<T> {
 
 	#dropPending(err: Error): void {
 		const pending = this.#pending;
-		this.#pending = [];
+		this.#pending = new Queue();
 		for (const item of pending) item.onDrop(err);
 	}
 

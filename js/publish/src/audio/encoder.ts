@@ -268,13 +268,10 @@ export class Encoder {
 	#slot = new Signal<Slot<Catalog.AudioConfig> | undefined>(undefined);
 	// The slot while no network broadcast is serving the rendition.
 	#local = new Slot<Catalog.AudioConfig>();
-	// Whether the rendition was disabled since a config last resolved, so it keeps advertising its last
-	// config as disabled until the re-enabled capture resolves a new one. A capture that never reopens
-	// leaves it disabled, which is accurate: no frames are coming.
-	#paused = false;
-	// Whether it was muted since a config last resolved, so it keeps advertising its last config,
-	// enabled, while a released capture is closed and until the reopened one resolves.
-	#muted = false;
+	// Whether the rendition was disabled or muted since a config last resolved, so it keeps advertising
+	// its last config until a new one resolves. Whether that config reads as enabled follows the
+	// current knobs alone, never how the gap began.
+	#held = false;
 
 	constructor(name: string, props?: EncoderProps) {
 		// `source` moved to Audio.Capture, which renditions share. TypeScript catches this, but a
@@ -629,23 +626,24 @@ export class Encoder {
 		effect.cleanup(() => this.#failures.update((n) => n - 1));
 	}
 
-	// Publish the probed config before the first frame reaches the track. A disabled rendition keeps its
-	// last config, since a disable may also release the capture, and stays disabled after re-enabling
-	// until the reopened capture reports its format. A muted one keeps it enabled throughout.
+	// Publish the probed config before the first frame reaches the track. A disabled or muted rendition
+	// keeps its last config, since either may also release the capture. It reads as enabled only while
+	// muted, which keeps subscribers attached for the next word; otherwise nothing is coming until the
+	// reopened capture reports its format, so a capture that never reopens leaves it disabled.
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
 		const enabled = effect.get(this.in.enabled) && !effect.get(this.#out.error);
+		const muted = effect.get(this.muted);
 		const slot = this.#current(effect);
-		if (!enabled) this.#paused = true;
-		if (effect.get(this.muted)) this.#muted = true;
+		if (!enabled || muted) this.#held = true;
 		const config = enabled ? effect.get(this.#config)?.catalog : undefined;
 		if (!config) {
-			const last = this.#paused || this.#muted ? slot.last : undefined;
-			effect.set(this.#out.catalog, last && { ...last, ...estimate, ...(this.#paused && { enabled: false }) });
+			const last = this.#held ? slot.last : undefined;
+			const stillEnabled = enabled && muted;
+			effect.set(this.#out.catalog, last && { ...last, ...estimate, ...(!stillEnabled && { enabled: false }) });
 			return;
 		}
-		this.#paused = false;
-		this.#muted = false;
+		this.#held = false;
 
 		// The catalog bitrate is the most this track has been configured for, so lowering the knob
 		// retunes the encoder without lowering what the catalog advertises.

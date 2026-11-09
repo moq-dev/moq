@@ -58,8 +58,11 @@ impl VideoEncoder {
 		// viewer can discover (and unpause) a moq-boy that has published nothing.
 		let rendition = config.probe().await.expect("failed to probe the H.264 encoder");
 		let reserved = catalog.reserve().with_interval(config.effective_join());
+		let track = broadcast
+			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
+			.expect("failed to create the avc3 track");
 		let producer =
-			moq_video::encode::Producer::new(broadcast, reserved, rendition).expect("failed to create avc3 producer");
+			moq_video::encode::Producer::new(track, reserved, rendition).expect("failed to create avc3 producer");
 		let demand = producer.demand();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));
