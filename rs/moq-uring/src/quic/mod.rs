@@ -42,82 +42,14 @@ pub use moq_quic::{Limits, LimitsError, Rate};
 /// Stream identity, and the varint every QUIC code is.
 pub use moq_quic::{VarInt, stream};
 
-/// A TLS certificate chain and the private key that signs for it, as PEM.
-/// One value, so neither half can be configured alone.
-///
-/// The bytes are read once and held, not re-read per connection: a worker
-/// group builds one of these before it spawns, so replacing the files on disk
-/// afterwards cannot leave two workers serving different identities.
-#[derive(Clone)]
-pub struct Identity {
-	cert: Vec<u8>,
-	key: Vec<u8>,
-}
-
-impl Identity {
-	/// Read the PEM chain at `cert` and the PEM key at `key`.
-	pub fn open(cert: impl AsRef<std::path::Path>, key: impl AsRef<std::path::Path>) -> Result<Self, Error> {
-		let read = |path: &std::path::Path| {
-			std::fs::read(path).map_err(|err| Error::Tls(format!("{}: {err}", path.display())))
-		};
-		Ok(Self {
-			cert: read(cert.as_ref())?,
-			key: read(key.as_ref())?,
-		})
-	}
-
-	/// The same, from PEM already in hand.
-	pub fn from_pem(cert: impl Into<Vec<u8>>, key: impl Into<Vec<u8>>) -> Self {
-		Self {
-			cert: cert.into(),
-			key: key.into(),
-		}
-	}
-
-	/// A TLS 1.3 server policy presenting this identity, speaking `alpn` in
-	/// preference order, and checking clients as `client_auth` says.
-	pub fn server(
-		&self,
-		alpn: &[impl AsRef<str>],
-		client_auth: server::ClientAuth,
-	) -> Result<std::sync::Arc<rustls::ServerConfig>, Error> {
-		let alpn = alpn.iter().map(|proto| proto.as_ref().as_bytes().to_vec()).collect();
-		driver::identity_server_config(self, alpn, &client_auth)
-	}
-
-	/// The PEM certificate chain being presented, for a caller that publishes
-	/// its fingerprint. The key is deliberately not readable back out.
-	pub fn cert(&self) -> &[u8] {
-		&self.cert
-	}
-
-	/// The PEM private key, for the backend loading it into its TLS stack.
-	pub(crate) fn key(&self) -> &[u8] {
-		&self.key
-	}
-}
-
-impl std::fmt::Debug for Identity {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		// Whatever else gets logged, the private key does not.
-		f.debug_struct("Identity")
-			.field("cert", &format_args!("{} PEM bytes", self.cert.len()))
-			.finish_non_exhaustive()
-	}
-}
-
-/// The congestion control family a connection runs.
+/// A built-in congestion control family, which converts into the factory
+/// [`transport::Config::congestion`] holds.
 ///
 /// CUBIC is used for loss-based control and BBRv3 for delay-based control.
-///
-/// The default is [`Loss`](Self::Loss), which is what moq-quic runs
-/// unasked. An application carrying live media wants [`Delay`](Self::Delay)
-/// and should say so; the relay does.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Congestion {
 	/// Loss-based: grows until it drops packets, so the send rate sawtooths.
-	#[default]
 	Loss,
 	/// Delay-based: tracks the measured delivery rate and RTT instead of
 	/// waiting for loss, which keeps queues short and the send rate steady
@@ -125,6 +57,16 @@ pub enum Congestion {
 	Delay,
 	/// No congestion control and no pacing, for tests and controlled links.
 	None,
+}
+
+impl From<Congestion> for std::sync::Arc<dyn moq_congestion::Factory + Send + Sync> {
+	fn from(family: Congestion) -> Self {
+		match family {
+			Congestion::Loss => std::sync::Arc::new(moq_congestion::cubic::Config::default()),
+			Congestion::Delay => std::sync::Arc::new(moq_congestion::bbr3::Config::default()),
+			Congestion::None => std::sync::Arc::new(moq_congestion::Unlimited),
+		}
+	}
 }
 
 /// Why a connection could not be set up or has ended.
@@ -168,9 +110,6 @@ pub enum Error {
 	/// A lease wanted more than the connection receive window can hold.
 	#[error("want exceeds the receive window")]
 	TooLarge,
-	/// The TLS material a connection needs could not be loaded.
-	#[error("tls error: {0}")]
-	Tls(String),
 	/// This CPU lacks a feature that rind, MoQ's cryptography, requires.
 	#[error(transparent)]
 	UnsupportedCpu(#[from] moq_crypto::cpu::UnsupportedCpu),

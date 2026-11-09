@@ -295,9 +295,8 @@ impl Connection {
 	/// The certificate chain the peer presented, end entity first, or `None`
 	/// if it presented none.
 	///
-	/// A server only sees one when it asked
-	/// ([`ClientAuth`](crate::quic::server::ClientAuth)), and TLS already
-	/// validated it against the configured roots by the time this connection
+	/// A server only sees one when its TLS policy asked, and TLS already
+	/// validated it against that policy's roots by the time this connection
 	/// exists: an invalid chain fails the handshake instead. So a `Some` here
 	/// is an authenticated peer, and the chain is what names it.
 	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
