@@ -49,7 +49,6 @@ moves what remains of them once their claims merge.
 - [A macOS camera delivers frames the renderer imports](/quest/m1/camera-nv12-macos.md) - AVFoundation capture asks for NV12, so a camera whose native format is `2vuy` reaches the renderer
 - [js/qmux's WebSocket ponyfill ends its writable on close](/quest/m1/qmux-ws-close.md) - writes after close reject, and a reused AbortSignal stops holding closed sockets
 - [@moq/json accepts only what it can reconstruct](/quest/m1/json-decode-limits.md) - nesting past 128 levels and out-of-range numbers are refused at parse like Rust, and schema output shares no decoder state
-- [@moq/publish file sources and Fanout end cleanly](/quest/m1/publish-stream-end.md) - empty file tracks end, samples never leak on failure or cancel, and readers drain their tail at EOF
 - [A WebSocket fallback session returns to QUIC](/quest/m1/websocket-quic-upgrade.md) - a session that fell back to WebSocket re-probes QUIC and migrates back once UDP works, and a post-outage redial prefers QUIC
 
 ## Related
