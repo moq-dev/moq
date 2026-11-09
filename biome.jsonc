@@ -78,7 +78,7 @@
 			// Code and tests read time through @moq/clock, so a Manual clock drives them and the
 			// test preload sees every host timer.
 			"includes": ["js/*/src/**", "demo/web/src/**", "**/*.test.ts", "!js/clock/src/host.ts"],
-			"plugins": ["./js/common/no-bun-sleep.grit"],
+			"plugins": ["./js/common/no-bun-sleep.grit", "./js/common/no-drive-expect.grit"],
 			"linter": {
 				"rules": {
 					"style": {

@@ -23,9 +23,6 @@ re-export it:
 - moq-video: `ndk`, `objc2_core_foundation`, `objc2_core_video`, and
   `windows` (`rs/moq-video/src/lib.rs`), and `render::wgpu`
   (`rs/moq-video/src/render/mod.rs`)
-- moq-mux: `container::fmp4::mp4_atom`, unless
-  [media](/quest/m2/api-shape/media.md) has already dropped it, as
-  [moq-dev/moq#8214](https://github.com/moq-dev/moq/pull/8214) plans
 - qmux: `ws`'s `tokio_tungstenite` and `tungstenite`, unless
   [transport](/quest/m2/api-shape/transport.md) has already dropped them, as
   #8214 plans

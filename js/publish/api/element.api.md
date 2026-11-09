@@ -17,7 +17,7 @@ export type SourceType = "camera" | "screen" | "file";
 
 export default class extends HTMLElement {
 	constructor();
-	get announce(): AnnounceMode | undefined;
+	get announce(): AnnounceMode;
 	set announce(value: AnnounceMode);
 	attributeChangedCallback(name: "source" | "url" | "stats" | "announce" | "name" | "capture" | "backend" | "versions" | "muted" | "invisible" | "preview" | "echo-path", oldValue: string | null, newValue: string | null): void;
 	readonly audio: Audio.Encoder;
@@ -29,7 +29,7 @@ export default class extends HTMLElement {
 	connectedCallback(): void;
 	readonly connection: Net.Connection;
 	readonly controls: {
-		announce: Signals.Signal<AnnounceMode | undefined>;
+		announce: Signals.Signal<AnnounceMode>;
 		backend: Signals.Signal<Preview.Backend>;
 		capture: Signals.Signal<CaptureMode>;
 		echoPath: Signals.Signal<Net.Path.Relative | undefined>;

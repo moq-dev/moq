@@ -167,7 +167,7 @@ impl Input {
 	/// Fails once the codec can take no more input.
 	fn check(self) -> Result<(), Error> {
 		match self {
-			Input::Ended => Err(Error::Codec(anyhow::anyhow!(
+			Input::Ended => Err(Error::codec(anyhow::anyhow!(
 				"the MediaCodec encoder has ended its stream and takes no more input"
 			))),
 			Input::Open => Ok(()),
@@ -185,7 +185,7 @@ impl MediaCodec {
 		};
 
 		let codec = media_codec::MediaCodec::from_encoder_type(mime)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("no MediaCodec encoder for {mime}")))?;
+			.ok_or_else(|| Error::codec(anyhow::anyhow!("no MediaCodec encoder for {mime}")))?;
 		let format = encoder_format(config, mime)?;
 		codec
 			.configure(&format, None, MediaCodecDirection::Encoder)
@@ -348,7 +348,7 @@ impl MediaCodec {
 			}
 		}
 
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec did not reach end of stream within {:?}",
 			DRAIN_TIMEOUT * DRAIN_ROUNDS
 		)))
@@ -382,7 +382,7 @@ impl MediaCodec {
 			self.drain(OUTPUT_TIMEOUT, out)?;
 		}
 
-		Err(Error::Codec(anyhow::anyhow!(
+		Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec never freed an input buffer for the end of stream"
 		)))
 	}
@@ -535,7 +535,7 @@ fn fill_nv12(buffer: &mut [MaybeUninit<u8>], i420: &I420, width: usize, height: 
 	let luma_len = width * height;
 	let needed = luma_len + luma_len / 2;
 	if buffer.len() < needed {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"MediaCodec input buffer is {} bytes, needs {needed} for {width}x{height} NV12",
 			buffer.len()
 		)));
@@ -650,7 +650,7 @@ fn opens_with_parameter_set(unit: &[u8], codec: Codec) -> bool {
 
 /// Wrap an NDK media error, naming the call that produced it.
 fn codec_err(what: &str, error: MediaError) -> Error {
-	Error::Codec(anyhow::anyhow!("failed to {what} on the MediaCodec encoder: {error}"))
+	Error::codec(anyhow::anyhow!("failed to {what} on the MediaCodec encoder: {error}"))
 }
 
 fn clamp_i32(value: u64) -> i32 {

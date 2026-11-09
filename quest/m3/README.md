@@ -188,3 +188,7 @@ federation) land.
 - [An audio encoder flushes without ending its track](/quest/m3/audio-encode-flush.md) - a clip's last partial frame is heard while the source stays live
 - [Padding probes from the browser](/quest/m3/probe-padding.md) - parked: the maintainer doubts padding is the right way for a browser to probe
 - [JS rung disable](/quest/m3/probe-rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding; parked with it
+- [Layered broadcasts](/quest/m3/layers/README.md) - hang specifies a layer layout track, and `moq play` and `@moq/watch` composite layers over the main picture
+- [A room keeps a participant while one of its aliases is announced](/quest/m3/room-alias-withdraw.md) - withdrawing `camera` while `camera.hang` stays announced keeps the participant
+- [@moq/auth key derivation and key sets validate like single keys](/quest/m3/auth-key-validation.md) - `Key.public` shares no scope and never yields an invalid key, and key sets and Rust refuse mismatched keys at parse
+- [Binding server helpers observe session errors and describe close truthfully](/quest/m3/serve-session-errors.md) - Python retrieves session task errors, and the Kotlin, Go, and Dart docs say close ends every connection
