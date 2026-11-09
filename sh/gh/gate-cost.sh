@@ -50,8 +50,9 @@ mkdir -p "$out/raw"
     uname -sr
 } >"$out/raw/toolchains.txt"
 
-# The gate's nextest runs share one JUnit path; its last run is the workspace test.
-junit=$target/nextest/ci/junit.xml
+# The gate's nextest runs share one JUnit path, under the workspace's target/
+# whatever CARGO_TARGET_DIR says; its last run is the workspace test.
+junit=$root/target/nextest/ci/junit.xml
 
 scenario() {
     local name=$1 base=$2 raw=$out/raw/$1

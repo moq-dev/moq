@@ -280,9 +280,8 @@ class ReportTest(unittest.TestCase):
             '<testsuites><testsuite name="src/a.test.ts" file="src/a.test.ts" time="0.75">'
             '<testsuite name="nested" file="src/a.test.ts" time="0.5"/></testsuite></testsuites>'
         )
-        (raw / "cold" / "js" / "junit.xml").write_text(
-            '<testsuites><testsuite name="js/common/api.test.ts" file="js/common/api.test.ts" time="0.125"/></testsuites>'
-        )
+        common = '<testsuite name="js/common/api.test.ts" file="js/common/api.test.ts" time="0.125"/>'
+        (raw / "cold" / "js" / "junit.xml").write_text(f"<testsuites>{common}</testsuites>")
         return report.cost(self.root)
 
     def test_gate_cost_records_modules_crates_and_tests(self):
