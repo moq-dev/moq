@@ -37,17 +37,17 @@ int main()
 		MoQDockStopBridge bridge;
 		CHECK(bridge.begin());
 		// Ends only once the close began, so the close returning with nothing active
-		// means it waited for this end. The deadlines only bound a hang: a lost notify
-		// delays either wait to its deadline, where its condition still holds.
-		const auto deadline = std::chrono::seconds(10);
+		// means it waited for this end. The worker's deadline only bounds a lost close
+		// notify, after which it ends anyway, so it can never fail the test. The close's
+		// deadline is one the test never reaches, so only the end releases it.
 		std::thread worker([&] {
 			{
 				std::unique_lock<std::mutex> lock(bridge.mutex);
-				bridge.cv.wait_for(lock, deadline, [&] { return bridge.closing; });
+				bridge.cv.wait_for(lock, std::chrono::seconds(10), [&] { return bridge.closing; });
 			}
 			bridge.end();
 		});
-		bridge.closeAndWait(deadline);
+		bridge.closeAndWait(std::chrono::hours(1));
 		bool idle;
 		{
 			std::lock_guard<std::mutex> lock(bridge.mutex);
