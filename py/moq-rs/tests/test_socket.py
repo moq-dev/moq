@@ -254,6 +254,6 @@ async def test_tcp_ready_paces_a_writer_behind_a_slow_reader():
 
 
 if __name__ == "__main__":
-    from moq.testing import Clock
+    from clock import Clock
 
     asyncio.run(late_peer(Clock()))

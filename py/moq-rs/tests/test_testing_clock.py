@@ -3,12 +3,13 @@
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 
 def _run(script: str) -> None:
     # The native runtime is process-global and never leaves the test clock, so
-    # each case gets a process of its own.
-    subprocess.run([sys.executable, "-c", textwrap.dedent(script)], check=True)
+    # each case gets a process of its own. It runs beside `clock.py` to import it.
+    subprocess.run([sys.executable, "-c", textwrap.dedent(script)], check=True, cwd=Path(__file__).parent)
 
 
 def test_a_pending_timer_waits_for_advance() -> None:
@@ -18,7 +19,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
         from datetime import timedelta
 
         import moq
-        from moq.testing import Clock
+        from clock import Clock
 
         clock = Clock()
 
@@ -64,7 +65,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
 def test_clock_refuses_invalid_advances() -> None:
     _run(
         """
-        from moq.testing import Clock
+        from clock import Clock
 
         clock = Clock()
         for seconds in (-1, float("nan"), float("inf")):
@@ -92,7 +93,7 @@ def test_clock_refuses_a_started_runtime() -> None:
     _run(
         """
         import moq
-        from moq.testing import Clock
+        from clock import Clock
 
         moq.BroadcastProducer()
         try:
