@@ -132,7 +132,8 @@ const selectedNode = new Signals.Signal<string | undefined>(undefined);
 
 // The relay URL, editable at runtime (see the input binding below).
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
-const connection = new Net.Connection({ url: relayUrl });
+// Stats tracks are found through the broadcast's track listing, which only moq-lite-07 carries.
+const connection = new Net.Connection({ url: relayUrl, versions: ["moq-lite-07-wip"] });
 
 // ---- Discover nodes + subscribe to each -----------------------------------
 
@@ -207,21 +208,40 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 		const tracks = consumer.tracks();
 		instance.cleanup(() => tracks.close());
 		let bucket: Json.Snapshot.Consumer<BucketFrame> | undefined;
-		instance.cleanup(() => bucket?.close());
+		instance.cleanup(() => {
+			bucket?.close();
+			bucket = undefined;
+		});
+
 		instance.spawn(async () => {
 			for (;;) {
 				const event = await instance.race(tracks.next());
 				if (!event) break;
 				if (event.kind !== "added" || !BUCKET_TRACK.test(event.name)) continue;
-				bucket?.close();
+				if (bucket) {
+					// A new run counts from zero, so its series must not splice onto the old run's.
+					bucket.close();
+					history.delete(node);
+					clusterMembership = "";
+				}
 				const reader = new Json.Snapshot.Consumer<BucketFrame>({ track: consumer.track(event.name) });
 				bucket = reader;
 				instance.spawn(async () => {
-					for (;;) {
-						const state = await instance.race(reader.latest());
-						if (state === undefined || bucket !== reader) break;
+					try {
+						for (;;) {
+							const state = await instance.race(reader.latest());
+							if (state === undefined || bucket !== reader) break;
+							nodeStats.mutate((s) => {
+								if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+							});
+						}
+					} catch (err) {
+						console.warn("stats: bucket track failed", node, err);
+					}
+					// The run ended (unlisted, or aborted as too large): its counts are no longer live.
+					if (bucket === reader) {
 						nodeStats.mutate((s) => {
-							if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+							if (s[node]) s[node] = nodeStatsOf({});
 						});
 					}
 				});
