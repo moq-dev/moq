@@ -966,18 +966,18 @@ async fn admit_http(
 }
 
 /// The host an HTTP request dialed, without its port: the HTTP/2 `:authority`, else
-/// the `Host` header.
+/// the `Host` header. Lowercased to match the URL-derived transports, whose
+/// `Url::host_str` lowercases a domain.
 fn dialed_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
-	uri.authority()
-		.map(|authority| authority.host().to_owned())
-		.or_else(|| {
-			headers
-				.get(http::header::HOST)
-				.and_then(|host| host.to_str().ok())
-				.and_then(|host| host.parse::<http::uri::Authority>().ok())
-				.map(|authority| authority.host().to_owned())
-		})
-		.filter(|host| !host.is_empty())
+	let header = || {
+		headers
+			.get(http::header::HOST)
+			.and_then(|host| host.to_str().ok())
+			.and_then(|host| host.parse::<http::uri::Authority>().ok())
+	};
+	let authority = uri.authority().cloned().or_else(header)?;
+	let host = authority.host();
+	(!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 /// Serve the announced broadcasts for a given prefix.
@@ -2018,7 +2018,8 @@ mod tests {
 
 	/// `server_name` is the SNI that selected the certificate, on an HTTP read and a
 	/// WebSocket alike, never the `Host` the client wrote; plain HTTP has no SNI, so it
-	/// reports none rather than the header. `host` carries the header on both. Real sockets, so this runs on the wall clock.
+	/// reports none rather than the header. `host` carries the header on both, lowercased and
+	/// without its port. Real sockets, so this runs on the wall clock.
 	#[cfg(all(unix, feature = "websocket"))]
 	#[tokio::test]
 	async fn server_name_is_the_sni_never_the_host() {
@@ -2065,7 +2066,7 @@ mod tests {
 
 			let mut stream = connect(tls).await;
 			stream
-				.write_all(b"GET /announced HTTP/1.1\r\nHost: tenant.example\r\nConnection: close\r\n\r\n")
+				.write_all(b"GET /announced HTTP/1.1\r\nHost: Tenant.Example:8443\r\nConnection: close\r\n\r\n")
 				.await
 				.unwrap();
 			let admission = admissions.next().await.expect("an HTTP admission");
@@ -2082,7 +2083,7 @@ mod tests {
 
 			let mut stream = connect(tls).await;
 			stream
-				.write_all(b"GET /room HTTP/1.1\r\nHost: tenant.example\r\n")
+				.write_all(b"GET /room HTTP/1.1\r\nHost: Tenant.Example:8443\r\n")
 				.await
 				.unwrap();
 			let client = tokio::spawn(drain::upgrade_while_draining(stream, true));

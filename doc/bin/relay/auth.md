@@ -502,7 +502,7 @@ patterns: `--auth-public 'PREFIX/**'`.
 | `--auth-mtls-tier LABEL` | `--tier LABEL` (one tier per server) |
 | `listen.tls.root` alone admitting a peer unscoped | `--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` |
 | `--auth-api` (token or proxy mode), `Cache-Control` | `--auth-url` pointed at any server answering the contract; `revalidate` and `expires` in the grant |
-| `--auth-domain` | your server reads `server_name` and decides |
+| `--auth-domain` | your server reads `host` (present over plaintext too) and decides |
 
 Both on one host:
 
