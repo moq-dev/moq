@@ -525,7 +525,7 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, request: &ht
 		response.push(stream.read_u8().await?);
 	}
 
-	let mut headers = [httparse::EMPTY_HEADER; 64];
+	let mut headers = [httparse::EMPTY_HEADER; tungstenite::handshake::headers::MAX_HEADERS];
 	let mut parsed = httparse::Response::new(&mut headers);
 	parsed
 		.parse(&response)
