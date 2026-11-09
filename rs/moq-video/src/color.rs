@@ -55,7 +55,7 @@ pub enum Matrix {
 }
 
 /// The numeric range of the samples, the same type the catalog's colour carries.
-pub use hang::catalog::Range;
+pub use hang::catalog::ColorRange as Range;
 
 /// The chromaticities of the RGB primaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -1944,7 +1944,10 @@ mod tests {
 			.expect("accept");
 
 		let window = request.qmux_window();
-		assert_eq!(window.connection, moq_net::transport::MIN_RECEIVE_WINDOW * 2);
+		assert_eq!(
+			window.connection,
+			std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW * 2)
+		);
 		assert_eq!(window.stream, 256 * 1024);
 	}
 
@@ -2936,7 +2939,7 @@ mod tests {
 			let quic = quic.clone();
 			assert_eq!(
 				quic.receive_window().connection,
-				moq_net::transport::SETUP_RECEIVE_WINDOW
+				std::num::NonZeroU64::new(moq_net::transport::SETUP_RECEIVE_WINDOW)
 			);
 			if let Some(window) = named {
 				let mut limits = moq_quic::Limits::default();
@@ -2944,7 +2947,7 @@ mod tests {
 				request = request.with_quic_limits(limits).expect("valid limits");
 			}
 			let _session = request.ok().await.expect("server handshake");
-			let expected = named.map_or(moq_net::transport::MIN_RECEIVE_WINDOW * 2, |window| window.get());
+			let expected = named.or(std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW * 2));
 			assert_eq!(quic.receive_window().connection, expected, "{named:?}");
 		}
 	}

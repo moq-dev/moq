@@ -213,7 +213,7 @@ threads. `pin = true` also keeps that thread on one core, and needs `workers`.
 
 ```toml
 [runtime]
-workers = 8                          # Single-threaded QUIC workers. Omit for the shared runtime.
+workers = 8                          # Single-threaded QUIC workers: "shared" (default), "auto" (one per core), or a count.
 pin = false                          # Pin each worker to a core. Off by default.
 io_uring = false                     # Drive them with io_uring instead of tokio.
 ```

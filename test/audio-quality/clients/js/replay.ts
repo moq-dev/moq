@@ -93,6 +93,8 @@ interface Reading {
 	delay: number;
 	underruns: number;
 	skips: number;
+	trimmed: number;
+	accelerated: number;
 }
 
 for (const { row, trace } of rows) {
@@ -125,6 +127,8 @@ for (const { row, trace } of rows) {
 			delay: quantum.delay,
 			playerUnderruns: quantum.underruns,
 			playerSkips: quantum.skips,
+			trimmed: quantum.trimmed,
+			accelerated: quantum.accelerated,
 			quanta: ledger.counts.quanta,
 			quiet: ledger.counts.quiet,
 			gaps: gaps.length > 0 ? gaps : undefined,
@@ -156,6 +160,8 @@ for (const { row, trace } of rows) {
 			delay: quantum.delay,
 			underruns: quantum.underruns,
 			skips: quantum.skips,
+			trimmed: quantum.trimmed,
+			accelerated: quantum.accelerated,
 		};
 
 		if (quantum.at >= next) {

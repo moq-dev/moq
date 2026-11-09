@@ -40,7 +40,8 @@ pub struct Info {
 	pub pool: cache::Pool,
 
 	/// Local ceiling on each track's max age: how long a superseded group stays fresh here.
-	pub cache_duration: std::time::Duration,
+	/// `None` imposes no ceiling.
+	pub cache_duration: Option<std::time::Duration>,
 
 	/// The path this broadcast is named by, which relative references in a catalog it
 	/// serves (hang's `broadcast` field) resolve against.
@@ -73,7 +74,7 @@ impl Default for Info {
 	fn default() -> Self {
 		Self {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
-			cache_duration: std::time::Duration::MAX,
+			cache_duration: None,
 			path: crate::Path::default(),
 			instance: None,
 			frames: Default::default(),
@@ -629,7 +630,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn for_source(route: &crate::origin::Route, path: &crate::Path) -> Self {
+	pub(crate) fn for_source(route: &crate::origin::Claim, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
 			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))

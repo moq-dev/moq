@@ -2507,8 +2507,13 @@ where
 				.filter(|track| track.source.reads(&self.program.source, name, config));
 			let mut track = match reused {
 				Some(track) => track,
-				None => match ExportSource::for_video(&self.program.source, name, config, self.budget())?
-					.map(|s| at_edge(s, self.program.replay))
+				None => match ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(self.budget()),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 				{
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
@@ -2528,8 +2533,13 @@ where
 				.filter(|track| track.source.reads(&self.program.source, name, config));
 			let mut track = match reused {
 				Some(track) => track,
-				None => match ExportSource::for_audio(&self.program.source, name, config, self.budget())?
-					.map(|s| at_edge(s, self.program.replay))
+				None => match ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(self.budget()),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 				{
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
@@ -2556,7 +2566,11 @@ where
 				Some(track) => track,
 				None => Track::new(
 					stream_edge(
-						ExportSource::for_stream(&self.program.source, name, self.budget())?,
+						ExportSource::for_stream(
+							&self.program.source,
+							name,
+							moq_net::track::Delay::default().with_max(self.budget()),
+						)?,
 						&kind,
 						self.program.replay,
 					),
@@ -2604,17 +2618,31 @@ where
 				continue;
 			}
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
-				ExportSource::for_video(&self.program.source, name, config, budget)?
-					.map(|s| at_edge(s, self.program.replay))
+				ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
-				ExportSource::for_audio(&self.program.source, name, config, budget)?
-					.map(|s| at_edge(s, self.program.replay))
+				ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?
+				.map(|s| at_edge(s, self.program.replay))
 			} else if mpegts
 				.tracks
 				.get(name)
 				.is_some_and(|t| t.verbatim.is_some() || t.pes_packet.is_some())
 			{
-				let source = ExportSource::for_stream(&self.program.source, name, budget)?;
+				let source = ExportSource::for_stream(
+					&self.program.source,
+					name,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				Some(stream_edge(source, &track.kind, self.program.replay))
 			} else {
 				None
@@ -2648,13 +2676,23 @@ where
 				if track.source.reads(&self.program.source, name, config) {
 					continue;
 				}
-				let source = ExportSource::for_video(&self.program.source, name, config, budget)?;
+				let source = ExportSource::for_video(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				(source, video_kind(config, name)?)
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
 				if track.source.reads(&self.program.source, name, config) {
 					continue;
 				}
-				let source = ExportSource::for_audio(&self.program.source, name, config, budget)?;
+				let source = ExportSource::for_audio(
+					&self.program.source,
+					name,
+					config,
+					moq_net::track::Delay::default().with_max(budget),
+				)?;
 				(source, audio_kind(config, name)?)
 			} else {
 				continue;
@@ -5113,7 +5151,12 @@ mod tests {
 		let publisher = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
 		let _publisher = Producer::new(publisher, Container::Legacy(MediaKind::Video));
 		let source = crate::source::announced(&broadcast.consume()).await;
-		let source = super::ExportSource::for_stream(&source, "video", Duration::from_secs(2)).unwrap();
+		let source = super::ExportSource::for_stream(
+			&source,
+			"video",
+			moq_net::track::Delay::default().with_max(Duration::from_secs(2)),
+		)
+		.unwrap();
 		let mut track = super::Track::new(source, Kind::Video(mpeg2ts::es::StreamType::H264));
 		let arrived = kio::clock::now();
 		for &(at, keyframe) in frames {
@@ -5228,7 +5271,12 @@ mod tests {
 				(1, "video", Kind::Video(mpeg2ts::es::StreamType::H264)),
 				(2, "audio", Kind::Mp2 { sample_rate: 48_000 }),
 			] {
-				let source = super::ExportSource::for_stream(&source, name, Duration::from_secs(2)).unwrap();
+				let source = super::ExportSource::for_stream(
+					&source,
+					name,
+					moq_net::track::Delay::default().with_max(Duration::from_secs(2)),
+				)
+				.unwrap();
 				let mut track = super::Track::new(source, kind);
 				track.pid = pid;
 				tracks.push(track);

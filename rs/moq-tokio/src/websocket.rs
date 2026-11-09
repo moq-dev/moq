@@ -1104,7 +1104,10 @@ mod tests {
 			.expect("accept task")
 			.expect("accept");
 		let window = request.qmux_window();
-		assert_eq!(window.connection, moq_net::transport::MIN_RECEIVE_WINDOW * 2);
+		assert_eq!(
+			window.connection,
+			std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW * 2)
+		);
 		assert_eq!(window.stream, 256 * 1024);
 		client.abort();
 	}

@@ -60,5 +60,4 @@ Rejected in planning:
 ## Required
 
 - [moq-net's route stream goes public](/quest/m2/api-shape/net.md) - un-hide `origin::Consumer::routes` and reshape `RouteEvent`, now that #8063 merged
-- [Media crates' small surface fixes](/quest/m2/api-shape/media.md) - exporters, the container consumer, catalog color range, rate grant, moq-stats, JSON, and MSF each have one path and one name
 - [JS Key.sign takes exactly Claims](/quest/m2/api-shape/auth-sign.md) - `@moq/auth` signs only `Claims`, with no legacy `put`/`get` input, like Rust

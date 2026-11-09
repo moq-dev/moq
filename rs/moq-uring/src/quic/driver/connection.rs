@@ -348,7 +348,7 @@ impl Connection {
 	/// The receive windows now in force: the connection's, and the most one stream holds.
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let conn = self.shared.conn.borrow();
-		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
+		moq_net::transport::ReceiveWindow::new(Some(conn.receive_window()), conn.stream_receive_window())
 	}
 }
 

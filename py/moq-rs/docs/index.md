@@ -195,6 +195,7 @@ broadcast, and producers advertise it in the catalog.
    OriginProducer
    OriginConsumer
    Route
+   Claim
    AnnounceConsumer
    Following
    Announce

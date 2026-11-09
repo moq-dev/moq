@@ -90,13 +90,14 @@ reports each instance as `MOQ_FOLLOW_EVENT_ONLINE` with its handle,
 `MOQ_FOLLOW_EVENT_OFFLINE` when the path goes offline, and one `MOQ_FOLLOW_EVENT_END`. Set `instance` only for a publisher that continues its group sequences
 across restarts, and raise `epoch` on each: readers stitch every route of one instance
 together, so restarting the sequences under an old instance splices unrelated groups into
-their tracks. To serve paths on demand, `moq_origin_route_prefix()` delivers each request to
+their tracks. To serve paths on demand, `moq_origin_claim()` returns a claim handle and delivers each request to
 answer with `moq_broadcast_request_serve()`, `moq_broadcast_request_route()`, or
-`moq_broadcast_request_reject()`. Unless one is named, a prefix route moves to a fresh
-instance each time a job holding its current one ends, and a job from
-`moq_broadcast_request_route()` takes the prefix route's, so on moq-lite 07 a reader resolved through the
-prefix route does not restart; older wires mint another instance for the job's route, restarting it. The string `moq_route_instance()` writes is borrowed until the
-next `moq_route_instance()` on that route or `moq_route_free()`.
+`moq_broadcast_request_reject()`; `moq_claim_announce()`, `moq_claim_withdraw()`,
+`moq_claim_set_cost()`, and `moq_claim_free()` control the claim. Unless one is named, a claim moves to a fresh
+instance (`moq_claim_instance()`) each time a job holding its current one ends, and a job from
+`moq_broadcast_request_route()` takes the claim's, so on moq-lite 07 a reader resolved through the
+claim does not restart; older wires mint another instance for the job's route, restarting it. The string `moq_route_instance()` or `moq_claim_instance()` writes is
+borrowed until the next such call on that handle, or until it is freed.
 
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. For pre-encoded video, publish from the lowest rendition up and set `moq_video_init.lower` to the next lower media handle. Reserve each track with `moq_allocator_reserve_media`, then bind its reservation with `moq_rate_control_create` and call `moq_rate_control_update` on every frame. Apply changed targets to your encoder and `moq_publish_media_set_enabled`, resuming video on a keyframe; close the control and reservation separately when done.
 

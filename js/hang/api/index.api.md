@@ -43,7 +43,6 @@ export namespace Echo {
 		errors: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 		frames: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 		late: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		latency: ZodMiniOptional<ZodMiniPipe<ZodMiniNullable<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53"> | null>>>;
 		stalled: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 		stalls: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
 		underruns: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
@@ -62,7 +61,6 @@ export namespace Echo {
 			errors?: number & $brand<"u53"> | undefined;
 			frames?: number & $brand<"u53"> | undefined;
 			late?: number & $brand<"u53"> | undefined;
-			latency?: number & $brand<"u53"> | undefined;
 			stalled?: number & $brand<"u53"> | undefined;
 			stalls?: number & $brand<"u53"> | undefined;
 			underruns?: number & $brand<"u53"> | undefined;

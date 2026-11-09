@@ -43,7 +43,7 @@ func TestRouteKeepsTheOrigin(t *testing.T) {
 	defer cancel()
 
 	origin := NewOriginProducer()
-	dynamic, err := origin.RoutePrefix("", RouteOptions{})
+	dynamic, err := origin.Claim("", RouteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,11 +95,8 @@ func TestReleasingARouteRetractsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broadcast, err := route.Broadcast()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again, _ := route.Broadcast(); again != broadcast {
+	broadcast := route.Broadcast()
+	if route.Broadcast() != broadcast {
 		t.Fatal("Broadcast must return the same producer on every call")
 	}
 	if _, err := consumer.Request(ctx, "live", nil); err != nil {

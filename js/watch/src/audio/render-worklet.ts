@@ -101,6 +101,8 @@ class Render extends AudioWorkletProcessor {
 					anchored: ring.anchored,
 					underruns: ring.underruns,
 					skips: ring.skips,
+					trimmed: ring.trimmed,
+					accelerated: ring.accelerated,
 					silent: ring.silent,
 					epoch: this.#epoch,
 				};

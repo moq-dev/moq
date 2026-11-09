@@ -1033,7 +1033,7 @@ mod tests {
 	#[tokio::test]
 	async fn workers_require_a_quic_backend() {
 		let mut config = crate::Config::default();
-		config.runtime.workers = Some(1);
+		config.runtime.workers = crate::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		let error = match super::Relay::load(config).await {
 			Ok(_) => panic!("workers accepted without a QUIC backend"),
 			Err(error) => error,

@@ -688,12 +688,12 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.routePrefix(prefix: 'live', options: RouteOptions());
+    final dynamic = origin.claim(prefix: 'live', options: RouteOptions());
     final pending = origin.consume().request(path: 'live/cam');
     final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
     // A hidden job route answers nobody until it announces, under the instance its
-    // prefix route lends.
+    // claim lends.
     final served = request.route(options: RouteOptions(hidden: true));
     expect(served.instance(), dynamic.instance());
     served.announce();
@@ -701,7 +701,6 @@ void main() {
     // Closing the job's broadcast ends its route.
     served.broadcast().close();
     expect(() => served.announce(), throwsA(isA<ClosedMoqException>()));
-    expect(() => dynamic.broadcast(), throwsA(isA<InternalMoqException>()));
     dynamic.cancel();
     await expectLater(
       dynamic.requested(),

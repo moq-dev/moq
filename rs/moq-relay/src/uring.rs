@@ -1147,7 +1147,7 @@ mod tests {
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.cert = vec![cert_path];
 		config.listen.tls.key = vec![key_path];
-		config.runtime.workers = Some(1);
+		config.runtime.workers = crate::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
 		config.drain_timeout = Some(window.into());
@@ -1215,7 +1215,7 @@ mod tests {
 		config.listen.tls.cert = vec![cert_path];
 		config.listen.tls.key = vec![key_path];
 		config.listen.timeout = Some(timeout.into());
-		config.runtime.workers = Some(1);
+		config.runtime.workers = crate::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
 		config.drain_timeout = Some(std::time::Duration::from_millis(100).into());

@@ -1491,7 +1491,9 @@ mod tests {
 		};
 		assert_eq!(
 			first.media.clock.unwrap().wall.as_micros(),
-			((1_735_689_600 - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128,
+			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
+				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+				.as_micros(),
 		);
 	}
 
@@ -1532,7 +1534,9 @@ mod tests {
 			};
 			assert_eq!(
 				clock.wall.as_micros(),
-				((zero - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128
+				(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(zero))
+					.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
+					.as_micros()
 			);
 			for (name, kind, expected) in [
 				("video", moq_mux::container::Kind::Video, 3),

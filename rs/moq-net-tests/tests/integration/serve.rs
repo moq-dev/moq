@@ -16,7 +16,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 	let version: Version = version.parse().unwrap();
 	let server = origin(1);
 	let client = origin(2);
-	let requests = server.route_prefix("", origin::RouteOptions::default()).unwrap();
+	let requests = server.claim("", origin::RouteOptions::default()).unwrap();
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(server.consume());
 	options.client_subscribe = Some(client.clone());
