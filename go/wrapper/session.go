@@ -78,9 +78,9 @@ func (ConnectionPhaseDisconnected) isConnectionPhase() {}
 func (ConnectionPhaseMigrating) isConnectionPhase()    {}
 func (ConnectionPhaseClosed) isConnectionPhase()       {}
 
-// failure keeps a nil *Error a nil error.
-func failure(err *ffi.MoqError) error {
-	if err == nil {
+// failure keeps an absent error a nil error.
+func failure(err **ffi.MoqError) error {
+	if err == nil || *err == nil {
 		return nil
 	}
 	return *err

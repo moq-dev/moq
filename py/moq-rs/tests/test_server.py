@@ -147,6 +147,7 @@ async def test_client_reconnects_and_resumes_announcements():
                 # is still the current status when we ask for it.
                 state = await wait_phase(session, moq.ConnectionPhase.DISCONNECTED)
                 # The drop's reason is recorded before the status moves.
+                assert isinstance(state.phase, moq.ConnectionPhase.DISCONNECTED)
                 assert state.phase.failure is not None
                 assert session.stats().version is None
 
