@@ -19,10 +19,17 @@ if ! perf stat -x, -e instructions:u -o /dev/null -- true; then
     echo "gate-cost: perf cannot count user-space instructions; set kernel.perf_event_paranoid=2" >&2
     exit 1
 fi
-# A compiler cache such as mbx, through RUSTC_WRAPPER, RUSTC_WORKSPACE_WRAPPER, or a Cargo shim on PATH,
-# would replay compilations rather than measure them.
-if [[ -n "${RUSTC_WRAPPER:-}${RUSTC_WORKSPACE_WRAPPER:-}" || "$(dirname "$(command -v cargo)")" != "$(dirname "$(command -v rustc)")" ]]; then
-    echo "gate-cost: cargo runs through a wrapper or shim ($(command -v cargo)); measure without the Rust cache" >&2
+# A compiler cache such as mbx, through a rustc wrapper in the environment or a
+# Cargo config, or a Cargo shim on PATH, would replay compilations rather than
+# measure them. The gate sets its own clippy-driver workspace wrapper later.
+configs=(/dev/null)
+for config in "$root"/.cargo/config{,.toml} "${CARGO_HOME:-$HOME/.cargo}"/config{,.toml}; do
+    [[ -f "$config" ]] && configs+=("$config")
+done
+if [[ -n "${RUSTC_WRAPPER:-}${RUSTC_WORKSPACE_WRAPPER:-}${CARGO_BUILD_RUSTC_WRAPPER:-}${CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER:-}" ]] ||
+    grep -qE '^\s*rustc-(workspace-)?wrapper\s*=' "${configs[@]}" ||
+    [[ "$(dirname "$(command -v cargo)")" != "$(dirname "$(command -v rustc)")" ]]; then
+    echo "gate-cost: cargo runs through a rustc wrapper or shim ($(command -v cargo)); measure without the Rust cache" >&2
     exit 1
 fi
 # The moq-net scenario's diff must be its edit alone.
