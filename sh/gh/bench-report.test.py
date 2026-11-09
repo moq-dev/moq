@@ -279,10 +279,14 @@ class ReportTest(unittest.TestCase):
             '<testcase classname="moq-net::integration" name="c" time="2"/></testsuite></testsuites>'
         )
         (raw / "cold" / "js" / "js" / "net" / "junit.xml").write_text(
-            '<testsuites><testsuite name="src/a.test.ts" file="src/a.test.ts" time="0.75">'
-            '<testsuite name="nested" file="src/a.test.ts" time="0.5"/></testsuite></testsuites>'
+            '<testsuites><testsuite name="src/a.test.ts" file="src/a.test.ts" time="0.5">'
+            '<testcase name="x" time="0.25"/><testsuite name="nested" file="src/a.test.ts" time="0.5">'
+            '<testcase name="y" time="0.5"/></testsuite></testsuite></testsuites>'
         )
-        common = '<testsuite name="js/common/api.test.ts" file="js/common/api.test.ts" time="0.125"/>'
+        common = (
+            '<testsuite name="js/common/api.test.ts" file="js/common/api.test.ts" time="0.125">'
+            '<testcase name="z" time="0.125"/></testsuite>'
+        )
         (raw / "cold" / "js" / "junit.xml").write_text(f"<testsuites>{common}</testsuites>")
         return report.cost(self.root)
 
@@ -307,7 +311,7 @@ class ReportTest(unittest.TestCase):
                 "cold/crate/aws-lc-sys/instructions": ("instructions", 120),
                 "cold/rust-test/moq-net": ("s", 1.75),
                 "cold/rust-test/moq-net::integration": ("s", 2),
-                # Only a file's own suite counts, not the nested describe blocks inside it.
+                # A file sums its tests, nested describe blocks included, rather than its elapsed time.
                 "cold/js-test/js/net/src/a.test.ts": ("s", 0.75),
                 "cold/js-test/js/common/api.test.ts": ("s", 0.125),
             },

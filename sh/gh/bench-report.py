@@ -281,7 +281,9 @@ def cost(directory):
         for report in sorted((scenario / "js").glob("**/junit.xml")):
             package = report.parent.relative_to(scenario / "js")
             for suite in ElementTree.parse(report).getroot().findall("testsuite"):
-                tests[f"js-test/{(package / suite.get('file')).as_posix()}"] = float(suite.get("time"))
+                # Bun's suite time is elapsed, which shrinks when tests overlap.
+                seconds = sum(float(case.get("time")) for case in suite.iter("testcase"))
+                tests[f"js-test/{(package / suite.get('file')).as_posix()}"] = seconds
         entries += [
             {"name": f"{name}/{key}", "unit": "s", "value": value(seconds)} for key, seconds in sorted(tests.items())
         ]
