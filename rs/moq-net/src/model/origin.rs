@@ -2585,11 +2585,7 @@ impl Producer {
 	///
 	/// The prefix must overlap this producer's pattern scope. Individual requests
 	/// remain authoritative and are refused when they do not match the scope.
-	pub fn claim(
-		&self,
-		prefix: impl TryInto<Path, Error: Into<Error>>,
-		options: RouteOptions,
-	) -> Result<Claim, Error> {
+	pub fn claim(&self, prefix: impl TryInto<Path, Error: Into<Error>>, options: RouteOptions) -> Result<Claim, Error> {
 		// A minted instance lives in the table, which moves it on as its jobs end; see
 		// [`OriginState::advance`].
 		let info = RouteInfo {

@@ -1913,9 +1913,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_broadcast_ends_the_player() {
 		let origin = moq_tokio::origin::spawn();
-		let handler = origin
-			.claim("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let handler = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let request = handler.requested().await.unwrap();
@@ -2076,9 +2074,7 @@ mod tests {
 		// The broadcast ends while its route stands, so the player goes idle.
 		kio::clock::sleep(Duration::from_secs(60)).await;
 
-		let pool = origin
-			.claim("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let pool = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		drop(exact);
 		let (served, served_catalog, mut new) = answer(&pool).await;
 		write(&mut new, 10, NEW).await;
@@ -2112,9 +2108,7 @@ mod tests {
 		}
 
 		exact.withdraw();
-		let pool = origin
-			.claim("", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let pool = origin.claim("", moq_net::origin::RouteOptions::default()).unwrap();
 		let (mirror, mirror_catalog, mut copy) = answer(&pool).await;
 		for index in 50..60 {
 			copy.write(packet(index, NEW)).unwrap();

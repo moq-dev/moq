@@ -156,9 +156,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 					}
 					b.iter(|| {
 						for (name, delivered) in [("room/live.chat", true), ("room/mic.hang", covering)] {
-							let route = producer
-								.claim(name, moq_net::origin::RouteOptions::default())
-								.unwrap();
+							let route = producer.claim(name, moq_net::origin::RouteOptions::default()).unwrap();
 							for cursor in &mut cursors {
 								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
 							}

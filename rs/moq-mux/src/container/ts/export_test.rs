@@ -10543,14 +10543,10 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let mut follower = super::Follower::new(open_export(source, std::time::Duration::ZERO).await.unwrap()).unwrap();
 	let quiet = Duration::from_secs(1);
 
-	let pool = origin
-		.claim("pool", moq_net::origin::RouteOptions::default())
-		.unwrap();
+	let pool = origin.claim("pool", moq_net::origin::RouteOptions::default()).unwrap();
 	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "a start");
 	drop(pool);
-	let pool = origin
-		.claim("pool", moq_net::origin::RouteOptions::default())
-		.unwrap();
+	let pool = origin.claim("pool", moq_net::origin::RouteOptions::default()).unwrap();
 	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "a restart");
 	drop(pool);
 	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "an end");

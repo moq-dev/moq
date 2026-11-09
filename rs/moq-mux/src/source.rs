@@ -674,9 +674,7 @@ mod tests {
 		let _catalog = origin.route("pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "pub").await;
-		let dynamic = origin
-			.claim("media", moq_net::origin::RouteOptions::default())
-			.unwrap();
+		let dynamic = origin.claim("media", moq_net::origin::RouteOptions::default()).unwrap();
 		let binding = source.bind(Some(&Relative::new("media").unwrap()), None).unwrap();
 		let request = dynamic.requested().await.unwrap();
 

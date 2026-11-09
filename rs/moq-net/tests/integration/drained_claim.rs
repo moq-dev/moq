@@ -55,11 +55,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(
-			origin
-				.claim("pool", moq_net::origin::RouteOptions::default())
-				.unwrap(),
-		);
+		let claim = Rc::new(origin.claim("pool", moq_net::origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {

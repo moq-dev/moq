@@ -24,10 +24,7 @@ fn retirement(c: &mut Criterion) {
 								let routes: Vec<_> = (0..routes)
 									.map(|i| {
 										origin
-											.claim(
-												format!("route/{i}"),
-												moq_net::origin::RouteOptions::default(),
-											)
+											.claim(format!("route/{i}"), moq_net::origin::RouteOptions::default())
 											.unwrap()
 									})
 									.collect();
