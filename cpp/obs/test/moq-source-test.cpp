@@ -1925,7 +1925,8 @@ int main()
 				offline.set_value();
 			});
 		}
-		offline.get_future().wait();
+		CHECK(offline.get_future().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+		// On a lost re-arm, the destroy runs the replacement, so `offline` outlives it.
 		destroySource(source);
 	}
 	report("broadcast ends");

@@ -32,6 +32,8 @@ fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
+/// Bounds a wait on the host clock. Under `crate::manual()` it never fires, and nextest's
+/// `terminate-after` bounds the test instead.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the scripted server answers next, per event.

@@ -17,6 +17,8 @@ use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::session::{Filter, List, Nudged};
 use moq_relay::{Connection, auth, cluster, internal, web};
 
+/// Bounds a wait on the host clock. Under `crate::manual()` it never fires, and nextest's
+/// `terminate-after` bounds the test instead.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
