@@ -12,7 +12,7 @@
 //! target, and what they present is named under the mount point on the same routes.
 
 use std::{
-	collections::{BTreeMap, HashMap, HashSet},
+	collections::{BTreeMap, HashMap},
 	task::{Poll, ready},
 };
 
@@ -94,11 +94,13 @@ pub(super) struct Answer {
 	routes: HashMap<route::Id, Sent>,
 	next_route: u64,
 	/// Route IDs ended and not yet echoed, the origin node each reached, and the
-	/// source that ended it, or `None` when the stream ended it for showing nothing.
-	echoes: HashMap<u64, (route::Id, Option<usize>)>,
-	/// The origin nodes in `echoes`: a route starts again only once its last end is
-	/// echoed, so a peer that withholds echoes holds at most one end per node.
-	ending: HashSet<route::Id>,
+	/// sources whose own end of it waits on that echo: none when the stream ended it
+	/// for showing nothing.
+	echoes: HashMap<u64, (route::Id, Vec<usize>)>,
+	/// The Route ID of each origin node's end in `echoes`: a route starts again only
+	/// once its last end is echoed, so a peer that withholds echoes holds at most one
+	/// end per node.
+	ending: HashMap<route::Id, u64>,
 	/// The claims the peer holds: their Announce ID and attributes.
 	live: HashMap<(route::Id, Path), (u64, node::Claim)>,
 	gate: crate::auth::Gate,
@@ -133,7 +135,7 @@ impl Answer {
 			routes: HashMap::new(),
 			next_route: 0,
 			echoes: HashMap::new(),
-			ending: HashSet::new(),
+			ending: HashMap::new(),
 			live: HashMap::new(),
 			epoch: 0,
 			permit: Default::default(),
@@ -277,10 +279,12 @@ impl Answer {
 			}
 			lite::AnnounceReply::RouteEnd { id } => {
 				// The echo names the Route ID; the node knows the route by its origin node.
-				let (node, index) = self.echoes.remove(&id).ok_or(Error::ProtocolViolation)?;
+				let (node, waiting) = self.echoes.remove(&id).ok_or(Error::ProtocolViolation)?;
 				self.ending.remove(&node);
-				if let Some(source) = index.and_then(|index| self.sources.get(index)) {
-					source.stream.echo(node);
+				for index in waiting {
+					if let Some(source) = self.sources.get(index) {
+						source.stream.echo(node);
+					}
 				}
 				self.resume(stream, node)?;
 			}
@@ -335,8 +339,7 @@ impl Answer {
 			None if sent.reach.is_empty() => {
 				let sent = self.routes.remove(&id).expect("matched above");
 				let Some(wire) = sent.wire else {
-					// The peer never held it, so no echo is coming.
-					self.sources[source].stream.echo(id);
+					self.echo(id, source);
 					return Ok(());
 				};
 				stream.writer.buffer(&Msg::RouteEnd { id: wire })?;
@@ -346,16 +349,16 @@ impl Answer {
 						self.encoder.end(announce);
 					}
 				}
-				self.ending.insert(id);
-				self.echoes.insert(wire, (id, Some(source)));
+				self.ending.insert(id, wire);
+				self.echoes.insert(wire, (id, vec![source]));
 				return Ok(());
 			}
 			None => {
 				// Another source still carries the route, so the peer keeps it: the claims
-				// this one presented end, and its end is acked at once.
+				// this one presented end, and its end is acked as the peer's copy allows.
 				let paths: Vec<Path> = sent.claims.keys().cloned().collect();
 				let paths: Vec<Path> = (paths.into_iter()).filter(|path| self.source(path) == source).collect();
-				self.sources[source].stream.echo(id);
+				self.echo(id, source);
 				let sent = self.routes.get_mut(&id).expect("matched above");
 				for path in &paths {
 					sent.claims.remove(path);
@@ -396,7 +399,7 @@ impl Answer {
 		if let Some(wire) = sent.wire {
 			return Ok(Some(wire));
 		}
-		if self.ending.contains(&id) {
+		if self.ending.contains_key(&id) {
 			return Ok(None);
 		}
 		let wire = self.next_route;
@@ -424,9 +427,19 @@ impl Answer {
 		sent.wire = None;
 		sent.floored = false;
 		stream.writer.buffer(&Msg::RouteEnd { id: wire })?;
-		self.ending.insert(id);
-		self.echoes.insert(wire, (id, None));
+		self.ending.insert(id, wire);
+		self.echoes.insert(wire, (id, Vec::new()));
 		Ok(())
+	}
+
+	/// Echo `source`'s end of the route to `id` once the peer holds no copy of it: at
+	/// once, or with the echo of the route's outstanding end, since until then the
+	/// peer may still hold and forward the advertisement.
+	fn echo(&mut self, id: route::Id, source: usize) {
+		match self.ending.get(&id).and_then(|wire| self.echoes.get_mut(wire)) {
+			Some((_, waiting)) => waiting.push(source),
+			None => self.sources[source].stream.echo(id),
+		}
 	}
 
 	/// Show the peer the route's claims again once it echoed the route's last end.

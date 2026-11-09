@@ -3728,8 +3728,9 @@ mod announce_test {
 
 	/// A lite-07 stream holds a route on the wire only while it shows one of the
 	/// route's claims: an origin whose only claim is hidden from the peer starts no
-	/// route, and the route ends after the floor once its last shown claim goes. It
-	/// starts again only once the peer echoes that end.
+	/// route, and the route ends after the floor once its last shown claim goes. The
+	/// node's own end of the route waits on the peer's echo of that end, and the route
+	/// starts again only after it.
 	#[kio::test]
 	async fn a_lite07_route_goes_only_with_a_shown_claim() {
 		/// The peer's replies, queued by the test.
@@ -3751,8 +3752,9 @@ mod announce_test {
 		}
 
 		let origin = Hop::new(1).unwrap().produce();
-		let _stats = origin.announce(".stats/node", origin::RouteInfo::default()).unwrap();
+		let stats = origin.announce(".stats/node", origin::RouteInfo::default()).unwrap();
 		let consumer = origin.consume();
+		let node = consumer.route_node();
 		let mut answer =
 			super::routed::Answer::new(consumer, crate::Path::empty(), false, crate::auth::Link::new(false));
 		let replies = Replies::default();
@@ -3814,6 +3816,13 @@ mod announce_test {
 			"{announces:?}"
 		);
 
+		// The node ends the route too, while the peer may still hold its copy.
+		drop(stats);
+		kio::clock::sim::yield_now().await;
+		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
+		wire.assert_quiet();
+		assert_eq!(node.retained().echoes, 1, "the node's end waits on the peer");
+
 		let _again = origin.announce("y", origin::RouteInfo::default()).unwrap();
 		kio::clock::sim::yield_now().await;
 		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
@@ -3834,6 +3843,7 @@ mod announce_test {
 			),
 			"{announces:?}"
 		);
+		assert_eq!(node.retained().echoes, 0);
 	}
 
 	#[test]
