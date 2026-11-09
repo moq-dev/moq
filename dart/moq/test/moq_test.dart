@@ -6,6 +6,7 @@ import 'package:moq/audio.dart' as moq_audio;
 import 'package:moq/media.dart' as moq_media;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
+import 'package:moq/src/surface.dart' show surfaceFrom;
 import 'package:moq/video.dart' as moq_video;
 import 'package:test/test.dart';
 
@@ -547,7 +548,7 @@ void main() {
     final first = await nextRoute(announced);
     expect(first, isA<AnnounceEventPresent>());
     expect((first as AnnounceEventPresent).announce.prefix, 'live');
-    expect(first.announce.route.instance, route.instanceId());
+    expect(first.announce.route.instance, route.instance());
 
     route.withdraw();
     final retracted = await nextRoute(announced);
@@ -561,7 +562,7 @@ void main() {
     // Announcing again continues the same stream.
     route.announce();
     final again = await nextRoute(announced) as AnnounceEventPresent;
-    expect(again.announce.route.instance, route.instanceId());
+    expect(again.announce.route.instance, route.instance());
     await consumer.request(path: 'live').timeout(timeout);
 
     // Disposing the broadcast handle keeps the route; cancelling the route retracts it,
@@ -615,14 +616,14 @@ void main() {
     final first = origin.route(path: 'instance', options: RouteOptions());
 
     final present = await nextRoute(announced) as AnnounceEventPresent;
-    expect(present.announce.route.instance, first.instanceId());
+    expect(present.announce.route.instance, first.instance());
     (await following.available().timeout(timeout))!.dispose();
 
     final second = origin.route(
       path: 'instance',
       options: RouteOptions(instance: 'camera', epoch: 1),
     );
-    expect(second.instanceId(), 'camera');
+    expect(second.instance(), 'camera');
     (await following.available().timeout(timeout))!.dispose();
 
     // The takeover was not listed, so the next event is the path going absent.
@@ -687,20 +688,19 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.routePrefix(prefix: 'live', options: RouteOptions());
+    final dynamic = origin.claim(prefix: 'live', options: RouteOptions());
     final pending = origin.consume().request(path: 'live/cam');
     final request = (await dynamic.requested().timeout(timeout))!;
     expect(request.path(), 'live/cam');
     // A hidden job route answers nobody until it announces, under the instance its
-    // prefix route lends.
+    // claim lends.
     final served = request.route(options: RouteOptions(hidden: true));
-    expect(served.instanceId(), dynamic.instanceId());
+    expect(served.instance(), dynamic.instance());
     served.announce();
     await pending.timeout(timeout);
     // Closing the job's broadcast ends its route.
     served.broadcast().close();
     expect(() => served.announce(), throwsA(isA<ClosedMoqException>()));
-    expect(() => dynamic.broadcast(), throwsA(isA<InternalMoqException>()));
     dynamic.cancel();
     await expectLater(
       dynamic.requested(),
@@ -716,7 +716,10 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'status',
-        info: MoqTrackInfo(timescale: 1000000, compress: true),
+        info: MoqTrackInfo(
+          timescale: 1000000,
+          compression: MoqCompression.deflate,
+        ),
       ),
       config: moq_json.SnapshotConfig(),
     );
@@ -752,7 +755,10 @@ void main() {
     final producer = moq_json.WindowProducer(
       track: broadcast.publishTrack(
         name: 'log',
-        info: MoqTrackInfo(timescale: 1000000, compress: true),
+        info: MoqTrackInfo(
+          timescale: 1000000,
+          compression: MoqCompression.deflate,
+        ),
       ),
       config: moq_json.WindowConfig(),
     );
@@ -877,6 +883,14 @@ void main() {
     broadcast.close();
   });
 
+  // A surface kind the package predates maps to the fallback arm instead of failing.
+  test('video surface maps an unknown kind', () {
+    expect(surfaceFrom(null), isNull);
+    final pixels = surfaceFrom(PixelBufferMoqVideoSurface(7));
+    expect((pixels as moq_video.PixelBuffer).pointer, 7);
+    expect(surfaceFrom(_FutureSurface()), isA<moq_video.UnknownSurface>());
+  });
+
   // A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
   test('audio consumer reports its playout delay', () async {
     final broadcast = BroadcastProducer();
@@ -968,4 +982,16 @@ void main() {
     producer.finish();
     broadcast.close();
   });
+}
+
+/// Stands in for a generated surface variant this package predates.
+final class _FutureSurface extends MoqVideoSurface {
+  @override
+  RustBuffer lower() => throw UnimplementedError();
+
+  @override
+  int allocationSize() => throw UnimplementedError();
+
+  @override
+  int write(Uint8List buf) => throw UnimplementedError();
 }

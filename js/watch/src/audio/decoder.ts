@@ -93,6 +93,10 @@ export interface Stats {
 	underruns: number;
 	/** How many times playback skipped ahead, dropping buffered audio rather than playing it faster. */
 	skips: number;
+	/** Media those skips dropped unplayed, less declared silence. */
+	trimmed: Milli;
+	/** Media the time stretch removed by playing faster. */
+	accelerated: Milli;
 	/** Frames that arrived after their playout time. */
 	late: number;
 	/** Renditions that failed to decode. */
@@ -106,7 +110,17 @@ export interface Stats {
 }
 
 // The running totals before anything is counted.
-const EMPTY: Stats = { bytesReceived: 0, underruns: 0, skips: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
+const EMPTY: Stats = {
+	bytesReceived: 0,
+	underruns: 0,
+	skips: 0,
+	trimmed: Milli.zero,
+	accelerated: Milli.zero,
+	late: 0,
+	errors: 0,
+	stalls: 0,
+	stalled: Milli.zero,
+};
 
 // What a decode attempt reads, and where its counts go.
 type Attempt = { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid; key: Key };
@@ -426,6 +440,23 @@ export class Decoder {
 				skipped = skips;
 				if (added <= 0) return;
 				this.#count(undefined, {}, (stats) => ({ skips: stats.skips + added }));
+			});
+			// Each ring's totals start at zero too, so carry each forward by its rise.
+			let trimmed = Milli.zero;
+			let accelerated = Milli.zero;
+			effect.run((inner) => {
+				const total = inner.get(ring.trimmed);
+				const added = total - trimmed;
+				trimmed = total;
+				if (added > 0) this.#count(undefined, {}, (stats) => ({ trimmed: Milli(stats.trimmed + added) }));
+			});
+			effect.run((inner) => {
+				const total = inner.get(ring.accelerated);
+				const added = total - accelerated;
+				accelerated = total;
+				if (added > 0) {
+					this.#count(undefined, {}, (stats) => ({ accelerated: Milli(stats.accelerated + added) }));
+				}
 			});
 
 			effect.set(this.#out.root, worklet);

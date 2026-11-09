@@ -107,6 +107,12 @@ name = "interests"
 harness = false
 required-features = ["fuzz"]
 
+# Reaches the crate-private route layer through the hidden `fuzz` module.
+[[bench]]
+name = "routes"
+harness = false
+required-features = ["fuzz"]
+
 # Reaches the private message codecs through the hidden `fuzz` module.
 [[bench]]
 name = "codec"

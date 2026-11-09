@@ -290,16 +290,27 @@ player's own count, which its stats panel shows, is read alongside:
   run-dry as stalled time, so `underruns` leaves those out and this counts them. Unset natively.
 - `player_skips`: `audio.out.stats.skips`, each jump that dropped buffered audio rather than playing
   it faster. `skip_aheads` below infers the same events from the playhead, and also reads a time
-  stretch that sustains 40 ms of acceleration as one, so this is the exact count. Unset natively.
+  stretch that sustains 40 ms of acceleration as one, so this is the exact count. Natively, each
+  trim of the ring, and each run of consecutive frames `moq play` skipped at the stretch's fast
+  threshold or a full ring refused.
 - `underruns`: quanta the ring filled only partly, or not at all, while playing.
 - `short_quanta`: the underruns that were partly filled: the ring ran dry part-way through.
 - `underrun_episodes`: maximal runs of consecutive underruns, one audible gap each.
 - `underrun_ms`: the missing audio, summed, and the longest episode as `max`.
 - `skip_aheads`: re-anchors that discarded buffered audio, seen as a forward step of more than 40 ms
   in the lag between the viewer clock and the playhead (judged on the median of four samples either
-  side, after removing the media clock's drift).
+  side, after removing the media clock's drift). A time stretch that accelerates onto a lower target
+  by more than 40 ms across those nine samples counts too, though it re-anchors nothing: `moq play`
+  accelerates about 8%, so shedding more than about 40 ms reads as one skip or more.
 - `discarded_ms`: the media those skip-aheads jumped over. Audio dropped before it reached the ring
   moves no playhead, so it is not counted.
+- `trimmed_ms`: `audio.out.stats.trimmed`, the media those `player_skips` dropped unplayed,
+  including the zeros filling a network gap; neither player counts its opening silence, declared
+  silence, or comfort noise. Unlike `discarded_ms`, it never counts an accelerate. Media the
+  subscription skipped before decoding, a group past its age budget, is a gap in the timeline, not
+  a trim, in either player.
+- `accelerated_ms`: `audio.out.stats.accelerated`, the media the time stretch removed by
+  playing faster. Inaudible by design, so it is reported rather than budgeted.
 - `stalled`: the share of the window the ring spent stalled, refilling rather than playing. A gap
   that starts within 60 ms of a stall is that stall, and is not an underrun.
 - `silence`: the share of rendered quanta under -60 dBFS at the output, whatever the cause.

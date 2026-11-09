@@ -91,6 +91,11 @@ pub(crate) async fn run(
 						metrics.utterance(timestamp);
 					}
 				}
+				Some(Event::Trimmed { audio, skip }) => {
+					if let Some(metrics) = &mut metrics {
+						metrics.trimmed(audio, skip);
+					}
+				}
 				None => break Err(anyhow::anyhow!("audio playback event channel closed")),
 			},
 			result = &mut media, if !completed => {
@@ -139,6 +144,10 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: None,
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
+			vaapi_device: None,
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
+			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),
@@ -162,6 +171,10 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: Some(path.clone()),
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
+			vaapi_device: None,
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
+			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),
@@ -188,6 +201,10 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: None,
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
+			vaapi_device: None,
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
+			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),

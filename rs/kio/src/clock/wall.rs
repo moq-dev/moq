@@ -18,6 +18,9 @@ impl Wall {
 	/// 1970-01-01T00:00:00Z.
 	pub const UNIX_EPOCH: Self = Self(0);
 
+	/// 2020-01-01T00:00:00Z, the origin MoQ media timestamps and wall-clock fields count from.
+	pub const MOQ_EPOCH: Self = Self::from_unix_secs(1_577_836_800);
+
 	/// `secs` whole seconds after the Unix epoch, for constants.
 	pub(crate) const fn from_unix_secs(secs: u64) -> Self {
 		Self(secs * 1_000_000_000)

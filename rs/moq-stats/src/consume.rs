@@ -186,7 +186,9 @@ mod tests {
 
 	use moq_net::{Consume, Path, Timestamp, origin, track};
 
-	use crate::{Producer, Tier, produce};
+	use moq_net::stats::Tier;
+
+	use crate::{Producer, produce};
 
 	use super::*;
 
@@ -226,7 +228,7 @@ mod tests {
 		let ctx = producer
 			.registry()
 			.tier(tier)
-			.session(moq_net::Path::new(label).unwrap());
+			.session(moq_net::stats::SessionInfo::new(moq_net::Path::new(label).unwrap()));
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 

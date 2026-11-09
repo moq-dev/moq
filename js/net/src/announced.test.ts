@@ -43,7 +43,7 @@ test("a listing reports only a path becoming present or absent", async () => {
 	expect((await listing.next())?.kind).toBe("absent");
 });
 
-test("a listing shows a route's facts, never its epoch or credential", async () => {
+test("a listing shows a route's facts, never its epoch, hops, credential, or drain state", async () => {
 	const producer = new Announce.Producer();
 	const listing = Announce.list(producer.consume());
 
@@ -54,6 +54,7 @@ test("a listing shows a route's facts, never its epoch or credential", async () 
 		hops: [HopSchema.parse(7n), UNKNOWN_HOP],
 		cost: 5n,
 		auth: {} as Credential,
+		draining: true,
 	});
 	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
 
@@ -62,9 +63,9 @@ test("a listing shows a route's facts, never its epoch or credential", async () 
 		kind: "present",
 		prefix: p("a"),
 		captures: undefined,
-		route: { instance, hops: [7n, 0n], cost: 5n, anonymous: true },
+		route: { instance, cost: 5n },
 	});
-	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["anonymous", "cost", "hops", "instance"]);
+	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["cost", "instance"]);
 });
 
 test("the consumer is an async iterable of the same events", async () => {

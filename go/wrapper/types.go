@@ -11,8 +11,6 @@ type (
 	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec or AacAudioCodec;
 	// adding a codec later adds a constructor, not a breaking enum change.
 	AudioCodec = ffi.MoqAudioCodec
-	// AudioDecoderOutput configures the PCM format, sample rate, and channels an audio.Consumer delivers.
-	AudioDecoderOutput = ffi.MoqAudioDecoderOutput
 	// AudioEncoderInput declares the PCM sample format, sample rate, and channel count of frames written to an audio producer.
 	AudioEncoderInput = ffi.MoqAudioEncoderInput
 	// AudioEncoderOutput configures the encoder: codec, optional sample rate, channels, bitrate, and frame duration.
@@ -41,7 +39,7 @@ type (
 	// route of one instance together, so restarting the sequences under an old instance splices
 	// unrelated groups into their tracks.
 	RouteOptions = ffi.MoqRouteOptions
-	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
+	// RouteInfo is the read-only facts on a received route: the Instance of the stream it serves (routes with one instance are one continuous stream) and its static production and link cost (lower wins).
 	RouteInfo = ffi.MoqRouteInfo
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the RouteInfo serving it. It carries no broadcast;
@@ -71,14 +69,10 @@ type (
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
+	// Compression is how a track's frames are compressed on the wire: CompressionDeflate.
+	Compression = ffi.MoqCompression
 	// Position is a location within a track: a group sequence and a frame index in it.
 	Position = ffi.MoqPosition
-	// VideoDecoderOutput configures what a video.Consumer delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
-	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
-	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
-	VideoSurface = ffi.MoqVideoSurface
-	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
-	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
 	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to video.Producer, or read from a VideoDecodedFrame.
@@ -160,6 +154,12 @@ const (
 	OrderAscending = ffi.MoqOrderAscending
 	// OrderDescending sends the newest first, so congestion sheds the backlog rather than the live edge.
 	OrderDescending = ffi.MoqOrderDescending
+)
+
+// Compression values: how a track's frames are compressed on the wire.
+const (
+	// CompressionDeflate makes each group one DEFLATE stream, which suits small, repetitive frames like JSON.
+	CompressionDeflate = ffi.MoqCompressionDeflate
 )
 
 // ConnectionPhase values: the lifecycle of a client session's connection.

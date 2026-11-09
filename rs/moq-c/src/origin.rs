@@ -25,17 +25,20 @@ pub struct Origin {
 	/// Pending requests. Close signals shutdown; the task delivers a final callback, then removes itself.
 	consume_task: NonZeroSlab<Task>,
 
-	/// Routes created on an origin, retracted when freed.
+	/// Exact routes created on an origin, retracted when freed.
 	routes: NonZeroSlab<RouteEntry>,
+
+	/// Claims created on an origin, retracted when freed.
+	claims: NonZeroSlab<ClaimEntry>,
 
 	/// Follows. Close signals shutdown; the task delivers its end event, then removes itself.
 	follow_task: NonZeroSlab<Task<OnFollow>>,
 
-	/// Request deliveries of prefix routes. Freeing the route signals shutdown; the task
-	/// delivers a final callback, then removes itself.
-	route_requests: NonZeroSlab<Task>,
+	/// Request deliveries of claims. Freeing the claim signals shutdown; the task delivers a
+	/// final callback, then removes itself.
+	claim_requests: NonZeroSlab<Task>,
 
-	/// Broadcast requests delivered to a prefix route's callback, freed after serve/route/reject.
+	/// Broadcast requests delivered to a claim's callback, freed after serve/route/reject.
 	broadcast_request: NonZeroSlab<(moq_net::origin::Request, crate::ffi::Background)>,
 }
 
@@ -81,7 +84,6 @@ struct AnnouncedRecord {
 	_captures: Vec<String>,
 	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
-	hops: Vec<u64>,
 	cost: u64,
 	/// The route's instance.
 	instance: String,
@@ -117,7 +119,6 @@ impl AnnouncedRecord {
 			_captures: captures,
 			capture_views,
 			kind,
-			hops: update.route.hops().collect(),
 			cost: update.route.cost().value(),
 			instance: update.route.instance().to_string(),
 		}
@@ -152,13 +153,17 @@ struct RouteEntry {
 	driver: crate::ffi::Background,
 	/// The instance last read, borrowed by [Origin::route_instance].
 	instance: String,
-	/// An exact route's broadcast fill handle, or a prefix route's request delivery task.
-	kind: RouteKind,
+	/// The fill handle of the route's broadcast.
+	broadcast: Id,
 }
 
-enum RouteKind {
-	Exact { broadcast: Id },
-	Prefix { requests: Id },
+struct ClaimEntry {
+	inner: moq_net::origin::Claim,
+	driver: crate::ffi::Background,
+	/// The instance last read, borrowed by [Origin::claim_instance].
+	instance: String,
+	/// The claim's request delivery task.
+	requests: Id,
 }
 
 impl Origin {
@@ -232,8 +237,6 @@ impl Origin {
 			captures_len: announced.capture_views.len(),
 			kind: announced.kind,
 			route: moq_route_info {
-				hops: announced.hops.as_ptr(),
-				hops_len: announced.hops.len(),
 				cost: announced.cost,
 				instance: moq_string {
 					data: announced.instance.as_ptr().cast::<c_char>(),
@@ -411,16 +414,16 @@ impl Origin {
 	) -> Result<Id, Error> {
 		// Read only on request: reading a hidden job's instance binds it.
 		self.routes.insert(RouteEntry {
-			instance: String::new(),
 			inner: route,
+			instance: String::new(),
 			driver,
-			kind: RouteKind::Exact { broadcast },
+			broadcast,
 		})
 	}
 
-	/// Create a prefix route, delivering each request beneath it as a broadcast-request handle
-	/// via `on_request`.
-	pub fn route_prefix(
+	/// Claim a prefix, delivering each request beneath it as a broadcast-request handle via
+	/// `on_request`.
+	pub fn claim(
 		&mut self,
 		origin: Id,
 		prefix: &str,
@@ -429,31 +432,31 @@ impl Origin {
 	) -> Result<Id, Error> {
 		let origin = self.get(origin)?;
 		let driver = origin.driver.clone();
-		let result = origin.producer.route_prefix(prefix, options);
+		let result = origin.producer.claim(prefix, options);
 		driver.check()?;
-		let route = result?;
-		let instance = route.instance().to_string();
+		let claim = result?;
+		let instance = claim.instance().to_string();
 
-		// The route first, so the delivery task finds it once it runs; it cannot lock the
+		// The claim first, so the delivery task finds it once it runs; it cannot lock the
 		// state before this call returns.
 		let (task, close) = Task::new(on_request);
-		let requests = self.route_requests.insert(task)?;
-		let id = match self.routes.insert(RouteEntry {
-			inner: route,
+		let requests = self.claim_requests.insert(task)?;
+		let id = match self.claims.insert(ClaimEntry {
+			inner: claim,
 			driver: driver.clone(),
 			instance,
-			kind: RouteKind::Prefix { requests },
+			requests,
 		}) {
 			Ok(id) => id,
 			Err(err) => {
-				self.route_requests.remove(requests);
+				self.claim_requests.remove(requests);
 				return Err(err);
 			}
 		};
 
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(Self::run_requests(id, on_request, close, driver.clone()))).await;
-			let entry = State::lock().origin.route_requests.remove(requests);
+			let entry = State::lock().origin.claim_requests.remove(requests);
 			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
@@ -463,7 +466,7 @@ impl Origin {
 	}
 
 	async fn run_requests(
-		route: Id,
+		claim: Id,
 		callback: OnStatus,
 		mut close: oneshot::Receiver<()>,
 		driver: crate::ffi::Background,
@@ -474,7 +477,7 @@ impl Origin {
 				_ = &mut close => return Ok(()),
 				request = kio::wait(|waiter| {
 					let state = State::lock();
-					match state.origin.routes.get(route) {
+					match state.origin.claims.get(claim) {
 						Some(entry) => entry.inner.poll_requested(waiter),
 						None => std::task::Poll::Ready(None),
 					}
@@ -512,12 +515,9 @@ impl Origin {
 		Ok(result?)
 	}
 
-	/// An exact route's broadcast fill handle, or [`Error::BroadcastNotFound`] on a prefix route.
+	/// The route's broadcast fill handle.
 	pub fn route_broadcast(&self, route: Id) -> Result<Id, Error> {
-		match self.route_entry(route)?.kind {
-			RouteKind::Exact { broadcast } => Ok(broadcast),
-			RouteKind::Prefix { .. } => Err(Error::BroadcastNotFound),
-		}
+		Ok(self.route_entry(route)?.broadcast)
 	}
 
 	pub fn route_instance(&mut self, route: Id, dst: &mut moq_string) -> Result<(), Error> {
@@ -531,14 +531,41 @@ impl Origin {
 		Ok(())
 	}
 
-	/// Release a route handle and stop a prefix route's request delivery, returning the route
-	/// for the caller to retract by dropping it.
+	/// Release a route handle, returning the route for the caller to retract by dropping it.
 	pub fn route_take(&mut self, route: Id) -> Result<moq_net::origin::Route, Error> {
-		let entry = self.routes.remove(route).ok_or(Error::NotFound)?;
-		if let RouteKind::Prefix { requests } = entry.kind {
-			// Already gone once the origin closed and the task delivered its terminal callback.
-			let _ = self.route_requests.close(requests, Error::NotFound);
-		}
+		Ok(self.routes.remove(route).ok_or(Error::NotFound)?.inner)
+	}
+
+	/// Run `f` against the claim, then check its origin is still healthy.
+	pub fn claim_with<R>(
+		&self,
+		claim: Id,
+		f: impl FnOnce(&moq_net::origin::Claim) -> Result<R, moq_net::Error>,
+	) -> Result<R, Error> {
+		let entry = self.claims.get(claim).ok_or(Error::NotFound)?;
+		entry.driver.check()?;
+		let result = f(&entry.inner);
+		entry.driver.check()?;
+		Ok(result?)
+	}
+
+	pub fn claim_instance(&mut self, claim: Id, dst: &mut moq_string) -> Result<(), Error> {
+		let entry = self.claims.get_mut(claim).ok_or(Error::NotFound)?;
+		entry.driver.check()?;
+		entry.instance = entry.inner.instance().to_string();
+		*dst = moq_string {
+			data: entry.instance.as_ptr().cast::<c_char>(),
+			len: entry.instance.len(),
+		};
+		Ok(())
+	}
+
+	/// Release a claim handle and stop its request delivery, returning the claim for the
+	/// caller to retract by dropping it.
+	pub fn claim_take(&mut self, claim: Id) -> Result<moq_net::origin::Claim, Error> {
+		let entry = self.claims.remove(claim).ok_or(Error::NotFound)?;
+		// Already gone once the origin closed and the task delivered its terminal callback.
+		let _ = self.claim_requests.close(entry.requests, Error::NotFound);
 		Ok(entry.inner)
 	}
 

@@ -48,7 +48,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 		// once they outweigh eight snapshots.
 		let info = moq_net::track::Info::default()
 			.with_priority(PRIORITY)
-			.with_compress(true)
+			.with_compression(moq_net::track::Compression::Deflate)
 			.with_refresh(8);
 		let track = broadcast.create_track(name, info)?;
 		Ok(Self {
@@ -688,7 +688,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), String::new(), out));
 
 		let claim = origin
-			.route_prefix("viewer.echo", moq_net::origin::RouteOptions::default())
+			.claim("viewer.echo", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		kio::clock::timeout(Duration::from_secs(1), claim.requested())
 			.await

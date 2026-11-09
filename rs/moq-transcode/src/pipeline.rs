@@ -89,7 +89,7 @@ impl Pipeline {
 			source.clone(),
 			rendition.track(&name).to_string(),
 			rendition.clone(),
-			config.feed_decoder(),
+			config.decoder(),
 		);
 
 		let mut ladder = Self {
@@ -167,7 +167,7 @@ impl Pipeline {
 		let mut entry = match self.probed.iter().find(|probed| probed.rung.same_shape(rung)) {
 			Some(probed) => probed.entry.clone(),
 			None => {
-				let entry = catalog::rung_entry(rung, source, &self.config.encoder).await?;
+				let entry = catalog::rung_entry(rung, source, &self.config).await?;
 				let capacity = (self.config.ladder.rungs().len() * PROBED_PICTURES).max(1);
 				while self.probed.len() >= capacity {
 					self.probed.pop_front();
@@ -201,9 +201,7 @@ impl Pipeline {
 			feed: self.feed.clone(),
 			broadcast: self.source.clone(),
 			config: self.rendition.clone(),
-			encoder: self.config.encoder.clone(),
-			decoder: self.config.decoder.clone(),
-			resize: self.config.resize,
+			transcode: self.config.clone(),
 			active: self.active.clone(),
 			rendition: self.active.rendition(&published.rung),
 			info: published.rung.clone(),
@@ -260,7 +258,7 @@ impl Pipeline {
 				self.source.clone(),
 				rendition.track(&name).to_string(),
 				rendition.clone(),
-				self.config.feed_decoder(),
+				self.config.decoder(),
 			);
 		}
 		self.name = name;
@@ -320,7 +318,7 @@ mod tests {
 			..Default::default()
 		};
 		let active = active::Producer::default();
-		let decoders = catalog::Decoders::new(config.feed_decoder());
+		let decoders = catalog::Decoders::new(config.decoder());
 		let mut pipeline = Pipeline::new(
 			source.consume(),
 			config,

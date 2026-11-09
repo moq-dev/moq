@@ -44,6 +44,12 @@ it, as is an `av_lag_ms` p50 above zero, which is audio settling behind the
 clock. Rewrite the note's browser sentences to the new nights and say the stretch
 is in them.
 
+[moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308) adds the
+player's own `trimmed_ms` and `accelerated_ms` to every row. The native
+calibration budgets `trimmed_ms_per_min` beside `player_skips_per_min`, as the
+maintainer decided there; budgeting it here too keeps the two runtimes graded
+alike.
+
 ## Related
 
 - [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - re-measures the AAC browser rows from nightlies too; the same seven nights can serve both

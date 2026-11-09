@@ -48,7 +48,6 @@ pub(crate) const NAME: &str = "v4l2";
 
 /// Which node decodes: one that takes H.264 in and gives raw 4:2:0 back.
 const ROLE: Role = Role {
-	env: "MOQ_V4L2_DECODER",
 	input: &[v4l2::H264],
 	output: v4l2::RAW,
 };
@@ -139,13 +138,13 @@ struct Pictures {
 }
 
 impl V4l2 {
-	pub(crate) fn open(stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+	pub(crate) fn open(stream: &Stream, config: &Config) -> Result<Box<dyn Backend>, Error> {
 		let codec = stream.codec;
 		if codec != Codec::H264 {
 			return Err(Error::UnsupportedCodec(format!("{NAME} decodes H.264 only")));
 		}
 
-		let device = v4l2::open(&ROLE)?;
+		let device = v4l2::open(&ROLE, config.v4l2.as_deref())?;
 		// Before the first access unit, so the announcement of the stream's size
 		// cannot be missed.
 		device.subscribe_source_change()?;

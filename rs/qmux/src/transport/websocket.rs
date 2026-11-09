@@ -126,7 +126,7 @@ impl<T: WsStream> Transport for WsTransport<T> {
 			let message = match message {
 				Some(Ok(message)) => message,
 				// Keep the WebSocket error, so callers can still tell a protocol fault apart.
-				Some(Err(err)) => return Poll::Ready(Err(err.into())),
+				Some(Err(err)) => return Poll::Ready(Err(Error::websocket(err))),
 				None => return Poll::Ready(Err(Error::Closed)),
 			};
 			match message {

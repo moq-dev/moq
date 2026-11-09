@@ -20,7 +20,7 @@ The `poll_*` methods work by default. Enable the `async` Cargo feature to await
 - **stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
 - **window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
-Compression is the track's: create it with `Info::default().with_compress(true)`,
+Compression is the track's: create it with `Info::default().with_compression(Compression::Deflate)`,
 which JSON benefits from, and readers see plain frames either way. A bare value stays untimed; publish
 `moq_net::Timed::from(&value).at(captured)` to retain a capture timestamp.
 The timestamp must match the track: an untimed track has no timescale, and a

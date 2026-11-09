@@ -300,7 +300,7 @@ int main()
 	hidden.hidden = true;
 	auto route = ok(origin->route("probe", hidden), "route");
 	CHECK(!route->instance_id().empty());
-	auto broadcast = ok(route->broadcast(), "route broadcast");
+	auto broadcast = route->broadcast();
 	moq::TrackInfo info;
 	info.timescale = 1000000;
 	auto track = ok(broadcast->publish_track("data", info), "publish_track");
@@ -308,7 +308,7 @@ int main()
 
 	// A route whose broadcast closed can no longer announce.
 	auto stale = ok(origin->route("stale", {}), "route");
-	ok(ok(stale->broadcast(), "stale broadcast")->close(), "close stale broadcast");
+	ok(stale->broadcast()->close(), "close stale broadcast");
 	auto reannounced = stale->announce();
 	CHECK(!reannounced);
 	CHECK(std::holds_alternative<moq::Error::kClosed>(reannounced.error().get_variant()));

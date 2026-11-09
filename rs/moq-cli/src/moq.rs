@@ -4,9 +4,8 @@
 //! and `Server::serve_publish`/`serve_consume`); this module carries the systemd
 //! readiness notification used by every endpoint plus the MoQ side of an import.
 
-/// The MoQ side of an import: where a gateway publishes, under what name, the
-/// max age it declares on the media tracks it mints, how long a clean end stays
-/// up, and the connection allocator those tracks claim on.
+/// The MoQ side of an import: where a gateway publishes, under what name, and how
+/// (`--max-age`, `--linger`, and the uplink's allocator).
 ///
 /// They travel together rather than as loose arguments per entry point.
 #[derive(Clone)]
@@ -17,17 +16,8 @@ pub struct ImportTarget {
 	/// The broadcast name to publish under.
 	pub name: String,
 
-	/// How long a superseded group of the published media tracks stays fresh
-	/// (`--max-age`, else hang's 30 s media max age), or `None` for no publisher limit.
-	pub max_age: Option<std::time::Duration>,
-
-	/// How long a cleanly ended broadcast stays up (`--linger`).
-	pub linger: std::time::Duration,
-
-	/// Connection allocator each passthrough track claims its peak-hold bitrate on,
-	/// so a co-resident encoder targets what is left. Unlimited when there is no
-	/// uplink estimate.
-	pub bandwidth: moq_net::bandwidth::Allocator,
+	/// How the gateway publishes the broadcast.
+	pub ingest: moq_mux::Ingest,
 }
 
 /// Set once the process takes a shutdown signal: it is draining from then on, not starting.

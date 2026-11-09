@@ -661,7 +661,13 @@ impl<B: Backend> Cluster<B> {
 				this.tracks.push(
 					broadcast
 						.broadcast()
-						.create_track(TRACK, timed().with_compress(shape.compress))
+						.create_track(
+							TRACK,
+							timed().with_compression(match shape.compress {
+								true => moq_net::track::Compression::Deflate,
+								false => moq_net::track::Compression::None,
+							}),
+						)
 						.unwrap(),
 				);
 				if shape.datagrams {

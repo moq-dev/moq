@@ -8,6 +8,13 @@ const LOCAL: Grant = Grant {
 	scope: "local/",
 };
 
+/// Originate `id` at `node` with a root claim, which meets every interest: a
+/// route goes to a stream only while a claim meets the stream's interest.
+fn originate(sim: &mut Sim, node: Node, id: Id, seqno: Seqno) {
+	sim.originate(node, id, seqno);
+	sim.announce(node, "", 0, None);
+}
+
 fn next(sim: &Sim, node: Node, id: Id) -> Option<Node> {
 	sim.route(node, id).and_then(|route| route.next)
 }
@@ -22,7 +29,7 @@ fn restart_reusing_identity_starves_until_requested() {
 	let mut sim = Sim::new(3);
 	sim.join(origin, a, 1);
 	sim.join(a, b, 1);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	for _ in 0..3 {
 		sim.bump(origin);
 	}
@@ -30,7 +37,7 @@ fn restart_reusing_identity_starves_until_requested() {
 	assert!(sim.route(b, 7).is_some());
 
 	sim.kill(origin);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	sim.reconnect(origin);
 	sim.hold(a, origin);
 	assert!(sim.run());
@@ -42,7 +49,7 @@ fn restart_reusing_identity_starves_until_requested() {
 	assert!(sim.route(b, 7).is_some());
 
 	sim.kill(origin);
-	sim.originate(origin, 8, 0);
+	originate(&mut sim, origin, 8, 0);
 	sim.reconnect(origin);
 	let requests = sim.stats.requests;
 	assert!(sim.run());
@@ -63,7 +70,7 @@ fn reconnect_without_restart_needs_a_seqno_advance() {
 	sim.join(origin, a, 1);
 	sim.join(origin, c, 1);
 	sim.disconnect(origin, c);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 
 	sim.hold(a, b);
@@ -91,7 +98,7 @@ fn collected_incarnation_returns_only_while_its_retraction_is_in_flight() {
 	sim.join(c, b, 1);
 	// Everything a sends b waits: first the route, then its retraction.
 	sim.hold(a, b);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 	assert_eq!(next(&sim, b, 7), Some(c));
 
@@ -127,7 +134,7 @@ fn collection_keeps_the_feasibility_distance_against_a_queued_echo() {
 	sim.join(b, c, 1);
 	sim.join(b, leaf, 1);
 	sim.hold(c, b);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 	assert_eq!(next(&sim, c, 7), Some(b));
 	assert!(sim.queued(c, b) > 0, "c's echo waits");
@@ -172,7 +179,7 @@ fn restart_drops_the_feasibility_distance_with_every_session() {
 	sim.join(b, c, 1);
 	sim.join(c, d, 1);
 	sim.join(d, b, 10);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 	assert_eq!(next(&sim, d, 7), Some(c));
 
@@ -233,7 +240,7 @@ fn sweep_forgetting_distances() {
 			let relay = rng.next(RELAYS as u64) as usize;
 			sim.join(origin, relay, 1);
 			links.push((relay, origin));
-			sim.originate(origin, origin as u64, 0);
+			originate(&mut sim, origin, origin as u64, 0);
 		}
 		assert!(sim.run());
 
@@ -302,7 +309,7 @@ fn overflow_is_unreachable() {
 	let mut sim = Sim::new(3);
 	sim.join(origin, a, MAX - 1);
 	sim.join(a, b, 5);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 	assert_eq!(sim.route(a, 7).map(|route| route.metric), Some(MAX - 1));
 	assert!(sim.route(b, 7).is_none());
@@ -320,7 +327,7 @@ fn redundant_cores_fail_over_without_a_seqno_request() {
 	sim.join(core_a, core_b, 1);
 	sim.link(edge, core_a, SimLink::cost(1).upstream(), SimLink::cost(1));
 	sim.link(edge, core_b, SimLink::cost(1).upstream(), SimLink::cost(1));
-	sim.originate(ingest, 7, 0);
+	originate(&mut sim, ingest, 7, 0);
 	assert!(sim.run());
 	let primary = next(&sim, edge, 7).unwrap();
 
@@ -350,7 +357,7 @@ fn p2p_fallback_is_immediate_for_leaves_and_needs_a_seqno_for_transit() {
 		sim.join(publisher, edge, 1);
 		sim.link(subscriber, edge, SimLink::cost(1).upstream(), SimLink::cost(1));
 		sim.link(subscriber, publisher, SimLink::cost(1).priority(1), SimLink::cost(1));
-		sim.originate(publisher, 9, 0);
+		originate(&mut sim, publisher, 9, 0);
 		assert!(sim.run());
 		assert_eq!(next(&sim, subscriber, 9), Some(publisher));
 
@@ -374,7 +381,7 @@ fn feasibility_tracks_only_updates_actually_sent() {
 	sim.leaf(origin);
 	sim.join(origin, c1, 1);
 	sim.join(origin, c2, 5);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 	assert_eq!(next(&sim, relay, 7), Some(c1));
 	assert!(!sim.remembers(relay, 7));
@@ -396,7 +403,7 @@ fn goaway_fails_over_and_keeps_the_draining_peer_last() {
 	sim.join(ingest, core_b, 1);
 	sim.link(edge, core_a, SimLink::cost(1).upstream().priority(1), SimLink::cost(1));
 	sim.link(edge, core_b, SimLink::cost(1).upstream(), SimLink::cost(1));
-	sim.originate(ingest, 7, 0);
+	originate(&mut sim, ingest, 7, 0);
 	assert!(sim.run());
 	assert_eq!(next(&sim, edge, 7), Some(core_a));
 
@@ -432,7 +439,7 @@ fn goaway_keeps_serving_until_a_refresh_makes_the_alternative_feasible() {
 		sim.link(edge, a, SimLink::cost(1).upstream(), SimLink::cost(1));
 		sim.link(edge, b, SimLink::cost(1).upstream(), SimLink::cost(1));
 		sim.join(edge, client, 1);
-		sim.originate(origin, 7, 0);
+		originate(&mut sim, origin, 7, 0);
 		assert!(sim.run());
 		sim
 	};
@@ -490,7 +497,7 @@ fn two_uplinks(l2_marks_upstream: bool, grant: Option<Grant>) -> Sim {
 	sim.link(l2, c2, up, admit);
 	sim.leaf(origin);
 	sim.join(origin, c1, 1);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	sim
 }
 
@@ -520,7 +527,7 @@ fn preferred_down_only_route_hides_the_exportable_alternative() {
 		sim.join(c1, c2, 10);
 		sim.leaf(origin);
 		sim.join(origin, l1, 1);
-		sim.originate(origin, 7, 0);
+		originate(&mut sim, origin, 7, 0);
 		let (uplink, lan) = if prefer_uplink { (1, 0) } else { (0, 1) };
 		let join_lan = |sim: &mut Sim| sim.link(l2, l1, SimLink::cost(1).priority(lan), SimLink::cost(1));
 		if lan_first {
@@ -573,8 +580,8 @@ fn forged_identity_is_filed_apart_under_a_scoped_grant() {
 			SimLink::cost(1)
 		};
 		sim.link(edge, forger, admission, SimLink::cost(1));
-		sim.originate(victim, 7, 0);
-		sim.originate(forger, 3, 0);
+		originate(&mut sim, victim, 7, 0);
+		originate(&mut sim, forger, 3, 0);
 		assert!(sim.run());
 
 		sim.forge(forger, 7, 1000);
@@ -618,8 +625,8 @@ fn scoped_delivery_through_two_uplinks_reaches_one_key() {
 	sim.link(l2, c2, SimLink::cost(1).upstream(), admit);
 	sim.leaf(origin);
 	sim.join(origin, l1, 1);
-	sim.originate(origin, 9, 0);
-	sim.originate(l1, 20, 0);
+	originate(&mut sim, origin, 9, 0);
+	originate(&mut sim, l1, 20, 0);
 	assert!(sim.run());
 
 	let key = qualified(LOCAL.subject, 9);
@@ -695,7 +702,7 @@ fn partitioned_local_mesh_reaches_itself_through_the_cdn() {
 	sim.link(l2, c2, SimLink::cost(1).upstream(), SimLink::cost(1));
 	sim.leaf(origin);
 	sim.join(origin, l2, 1);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 	assert_eq!(next(&sim, l1, 7), Some(l2));
 
@@ -724,7 +731,7 @@ fn a_ring_recovers_its_longer_backup_through_one_request() {
 	sim.leaf(origin);
 	sim.join(origin, 0, 1);
 	sim.join(origin, 2, 10);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 	assert_eq!(next(&sim, 2, 7), Some(1));
 
@@ -751,7 +758,7 @@ fn an_unanswerable_request_stops() {
 	}
 	sim.leaf(origin);
 	sim.join(origin, 0, 1);
-	sim.originate(origin, 7, 0);
+	originate(&mut sim, origin, 7, 0);
 	assert!(sim.run());
 	sim.disconnect(origin, 0);
 	assert!(sim.run());

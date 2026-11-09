@@ -108,6 +108,12 @@ const BaseRequestSchema = z.object({
 	 * server binds the tenant to the credential, not to this alone.
 	 */
 	server_name: z.optional(z.string()),
+	/**
+	 * The host the client dialed, without its port: the `Host` header or URL authority on
+	 * HTTP, WebSocket, and WebTransport, the SNI on raw QUIC and `tls://`. Client-chosen
+	 * even over plaintext, so bind the tenant to the credential, not to this alone.
+	 */
+	host: z.optional(z.string()),
 	/** The negotiated application protocol, including the moq version. */
 	alpn: z.optional(z.string()),
 	/** The path exactly as dialed. */

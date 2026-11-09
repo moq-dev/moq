@@ -59,7 +59,7 @@ impl<T> Encoder<T> {
 	/// Create an encoder.
 	pub fn new(_config: Config) -> Self {
 		Self {
-			max_frame_bytes: moq_net::group::MAX_CACHE_BYTES,
+			max_frame_bytes: crate::MAX_GROUP_BYTES,
 			_marker: PhantomData,
 		}
 	}
@@ -72,7 +72,7 @@ impl<T: Serialize> Encoder<T> {
 	/// [`commit`](Pending::commit)s.
 	///
 	/// Errors with [`moq_net::Error::FrameTooLarge`] if the record is larger than one frame may be
-	/// ([`moq_net::group::MAX_CACHE_BYTES`]). The refused record leaves the encoder untouched.
+	/// (32 MiB, what moq-net's group cache holds). The refused record leaves the encoder untouched.
 	pub fn encode(&mut self, value: &T) -> Result<Pending<'_, T>> {
 		let payload = Bytes::from(serde_json::to_vec(value)?);
 		if payload.len() as u64 > self.max_frame_bytes {

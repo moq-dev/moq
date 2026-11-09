@@ -14,7 +14,7 @@ const NAMESPACE: &str = "moq-test-00/0/0/0/1/2/2/1024/100/50/1/1/1/-1/-1/0";
 fn origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 async fn routing(version: &str, cluster: bool) {
@@ -23,7 +23,12 @@ async fn routing(version: &str, cluster: bool) {
 	let relay = origin(2);
 	let reader = origin(4);
 	let prefix = Arc::new(
-		moq_net::fuzz::requests_route(&publisher, moq_net::Path::new(PREFIX).unwrap(), Default::default()).unwrap(),
+		moq_net::fuzz::requests_route(
+			&publisher,
+			moq_net::Path::new(PREFIX).unwrap(),
+			moq_net::fuzz::route_info([], 0, None),
+		)
+		.unwrap(),
 	);
 	let broadcast = broadcast::Info::new().produce();
 	let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();

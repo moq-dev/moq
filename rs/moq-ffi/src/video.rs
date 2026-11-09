@@ -969,7 +969,7 @@ async fn follow_reservation(followed: Followed) {
 		target,
 	} = followed;
 	let noop = kio::Waiter::noop();
-	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
+	let mut follower = moq_mux::rate::Grant::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
 	follower.assume(target);
 	loop {
 		// Both ceilings are read on every wake, before the follower filters a grant against
@@ -1014,7 +1014,7 @@ async fn follow_reservation(followed: Followed) {
 /// `MoqVideoProducer::set_bitrate` already applied, instead. Returns the target applied,
 /// or `Err` with the name of an encoder that cannot follow at all.
 fn retune(
-	follower: &mut moq_mux::rate::Follower,
+	follower: &mut moq_mux::rate::Grant,
 	policy: moq_mux::rate::Policy,
 	target: moq_mux::rate::Target,
 	apply: impl FnOnce(moq_mux::rate::Target) -> Result<(), moq_video::Error>,
@@ -1086,6 +1086,7 @@ pub struct MoqVideoDecoderOutput {
 /// the surface belongs to the decoder's pool, and releasing the frame is what
 /// lets the decoder reuse it.
 #[derive(Clone, Copy, uniffi::Enum)]
+#[non_exhaustive]
 pub enum MoqVideoSurface {
 	/// An Apple `CVPixelBufferRef` from VideoToolbox, IOSurface-backed NV12.
 	PixelBuffer {
@@ -1689,7 +1690,7 @@ mod finish_tests {
 mod follow_tests {
 	use std::time::Duration;
 
-	use moq_mux::rate::{Follower, Policy, Target};
+	use moq_mux::rate::{Grant, Policy, Target};
 	use moq_net::bandwidth::Rate;
 
 	use super::*;
@@ -1697,7 +1698,7 @@ mod follow_tests {
 	/// Retune through `set`, which only ever sees an enabled target: these policies set no
 	/// lower rendition, so nothing disables.
 	fn rate(
-		follower: &mut Follower,
+		follower: &mut Grant,
 		ceiling: Rate,
 		target: Target,
 		set: impl FnOnce(Rate) -> Result<(), moq_video::Error>,
@@ -1718,7 +1719,7 @@ mod follow_tests {
 			policy
 		};
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), policy(Rate::from_mbps(1)));
+		let mut follower = Grant::new(grant.consume(), policy(Rate::from_mbps(1)));
 		grant.set(Some(Rate::from_mbps(2))).unwrap();
 		let dropped = follower.next().await.unwrap();
 		let moved = retune(&mut follower, policy(Rate::from_kbps(900)), dropped, |_| {
@@ -1740,7 +1741,7 @@ mod follow_tests {
 	}
 
 	/// Retune at every target until the follower goes a minute without one.
-	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
+	async fn quiet(follower: &mut Grant, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
 		while let Ok(bitrate) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
@@ -1752,7 +1753,7 @@ mod follow_tests {
 	async fn a_quiet_grant_retries_a_failed_raise() {
 		let ceiling = Rate::from_mbps(4);
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(ceiling));
+		let mut follower = Grant::new(grant.consume(), Policy::new(ceiling));
 		let mut applied = Vec::new();
 		let mut refuse = Some(ceiling);
 		let mut set = |bitrate| {
@@ -1782,7 +1783,7 @@ mod follow_tests {
 		let old = Rate::from_mbps(4);
 		let lowered = Rate::from_mbps(2);
 		let grant = moq_net::bandwidth::Producer::new();
-		let mut follower = Follower::new(grant.consume(), Policy::new(old));
+		let mut follower = Grant::new(grant.consume(), Policy::new(old));
 		let applied = std::cell::RefCell::new(Vec::new());
 		let set = |bitrate| {
 			applied.borrow_mut().push(bitrate);

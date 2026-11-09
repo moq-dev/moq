@@ -73,7 +73,7 @@ use super::hang::{Catalog, CatalogExt};
 /// # ) -> moq_mux::Result<()> {
 /// let info = moq_net::track::Info::default()
 ///     .with_timescale(moq_net::Timescale::MILLI)
-///     .with_compress(true);
+///     .with_compression(moq_net::track::Compression::Deflate);
 /// let track = broadcast.create_track("telemetry", info)?;
 /// // The producer fixes the mode, so the one passed here is only a placeholder.
 /// let entry = Mavlink { config: JsonConfig::new(Mode::Stream), sysid: 1 };
@@ -286,7 +286,7 @@ impl VideoHint {
 
 	/// Build a config from these fields alone, or `None` if the codec is missing. Used to publish
 	/// the catalog before the stream is parsed.
-	pub fn to_config(&self) -> Option<hang::catalog::VideoConfig> {
+	pub(crate) fn to_config(&self) -> Option<hang::catalog::VideoConfig> {
 		let codec = self.codec.clone()?;
 		let mut config = hang::catalog::VideoConfig::new(codec);
 		self.apply(&mut config);

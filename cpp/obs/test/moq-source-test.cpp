@@ -588,7 +588,7 @@ public:
 		moq::RouteOptions hidden;
 		hidden.hidden = true;
 		route = TestOk(relay.origin->route(path, hidden), "route");
-		broadcast = TestOk(route->broadcast(), "route broadcast");
+		broadcast = route->broadcast();
 		if (video) {
 			moq::VideoInit init{};
 			init.format = moq::VideoFormat::kAvc3;

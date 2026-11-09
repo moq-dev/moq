@@ -198,7 +198,7 @@ impl Relay {
 				server.listen = listen.clone();
 				server.tls = served.clone();
 				server.quic = config.quic.clone();
-				server.activity = shutdown.activity.clone();
+				server.admission = shutdown.admission.clone();
 				server.demux = demux.clone();
 				Some(moq_tokio::worker::Workers::bind(server, worker).context("failed to start the QUIC workers")?)
 			}
@@ -237,7 +237,7 @@ impl Relay {
 		server_config.listen = listen;
 		server_config.tls = served;
 		server_config.quic = config.quic.clone();
-		server_config.activity = shutdown.activity.clone();
+		server_config.admission = shutdown.admission.clone();
 		#[cfg(feature = "_quic")]
 		{
 			server_config.demux = demux.clone();
@@ -913,7 +913,7 @@ mod tests {
 		use futures::FutureExt;
 		let window = std::time::Duration::from_secs(10);
 		let (trigger, shutdown) = crate::shutdown::Observer::new(window);
-		let _pending = shutdown.activity.enter();
+		let _pending = shutdown.admission.enter();
 		trigger.start();
 		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
@@ -934,7 +934,7 @@ mod tests {
 		// Either arm is ready, so an unbiased wait would pass some runs.
 		for _ in 0..32 {
 			let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
-			let _active = shutdown.activity.enter();
+			let _active = shutdown.admission.enter();
 			trigger.start();
 			let mut signals = crate::shutdown::Signals::new().unwrap();
 			crate::shutdown::raise(libc::SIGTERM).await;
@@ -977,15 +977,15 @@ mod tests {
 	async fn arrival_as_the_drain_empties_is_counted_or_refused() {
 		use futures::FutureExt;
 		let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
-		let activity = shutdown.activity.clone();
-		let last = activity.enter().expect("admission open before the drain");
+		let admission = shutdown.admission.clone();
+		let last = admission.enter().expect("admission open before the drain");
 		trigger.start();
 		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
 		// Arrives before the last connection leaves: it is counted.
-		let arrival = activity.enter().expect("admitted before the drain committed");
+		let arrival = admission.enter().expect("admitted before the drain committed");
 		drop(last);
 		assert!(
 			draining.as_mut().now_or_never().is_none(),
@@ -996,7 +996,7 @@ mod tests {
 		drop(arrival);
 		assert!(draining.as_mut().now_or_never().is_some());
 		assert!(
-			activity.enter().is_none(),
+			admission.enter().is_none(),
 			"admitted a connection after the drain committed to exit"
 		);
 	}
@@ -1033,7 +1033,7 @@ mod tests {
 	#[tokio::test]
 	async fn workers_require_a_quic_backend() {
 		let mut config = crate::Config::default();
-		config.runtime.workers = Some(1);
+		config.runtime.workers = crate::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		let error = match super::Relay::load(config).await {
 			Ok(_) => panic!("workers accepted without a QUIC backend"),
 			Err(error) => error,

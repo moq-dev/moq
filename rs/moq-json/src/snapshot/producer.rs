@@ -34,7 +34,7 @@ fn take<T>(inner: &Mutex<Inner<T>>) -> MutexGuard<'_, Inner<T>> {
 /// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
 /// when creating it, or joins never ask.
 ///
-/// Set [`compress`](moq_net::track::Info::compress) on that track's info too: JSON is small and
+/// Set [`compression`](moq_net::track::Info::compression) on that track's info too: JSON is small and
 /// repetitive, and moq-net compresses each delta against the snapshot earlier in its group.
 ///
 /// Cheaply clonable: clones share one underlying track and publishing state, like other MoQ
@@ -452,7 +452,7 @@ impl Track {
 		// new one before the frame is written, so discovering the limit inside `write_frame` would
 		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the previous
 		// value would be lost even though this update reported an error.
-		if encoded.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+		if encoded.payload.len() as u64 > crate::MAX_GROUP_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
 		}
 

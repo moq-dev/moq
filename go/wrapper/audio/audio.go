@@ -240,7 +240,7 @@ func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, id string,
 
 // Next returns the next decoded frame, gap, or encoder end, or (nil, nil) when the track ends.
 func (d *Consumer) Next(ctx context.Context) (Read, error) {
-	raw, err := bridge.Call(ctx, d.inner.Cancel, d.inner.Next)
+	raw, err := bridge.Call(ctx, nil, d.inner.Next)
 	if err != nil || raw == nil {
 		return nil, err
 	}
@@ -248,7 +248,9 @@ func (d *Consumer) Next(ctx context.Context) (Read, error) {
 }
 
 // All ranges over every read until the track ends or the loop breaks.
-func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] { return bridge.Seq(ctx, d.Next) }
+func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] {
+	return bridge.Seq(ctx, d.inner.Cancel, d.Next)
+}
 
 // Delay is the playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
 // The estimate measures when Next returns, so call it again as soon as the previous frame is handled.

@@ -21,7 +21,7 @@ const GROUPS: u64 = 5;
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 /// The groups a reader subscribed with `budget` receives once it resumes from a stall

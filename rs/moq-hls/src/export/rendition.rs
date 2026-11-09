@@ -2871,7 +2871,7 @@ mod tests {
 			.route("room/live", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
 		let dynamic = origin
-			.route_prefix("room/secret", moq_net::origin::RouteOptions::default())
+			.claim("room/secret", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let source = moq_mux::Source::new(origin.consume(), broadcast.broadcast().consume());
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);

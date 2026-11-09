@@ -7,6 +7,11 @@
 //! watches each live session for its close and GOAWAY itself, keeps a drained
 //! predecessor serving through its handover, and drops neither on the caller's behalf
 //! until it reports [`Action::Done`].
+//!
+//! A caller whose session landed on a fallback transport says so with
+//! [`Reconnect::fallback`]. The machine then asks for [`Action::Probe`]s of the preferred
+//! transport on a slow backoff and, once one gets through, moves to it through the same
+//! handover a GOAWAY uses, so nothing the old session carries drops.
 
 mod redirect;
 #[cfg(test)]
@@ -29,6 +34,16 @@ use redirect::{Redirects, Shown, endpoint};
 /// attempt with a later address to fall back on is worth bounding: cutting the last one
 /// short just turns a slow connect into a failed one, on every reconnect cycle.
 const ATTEMPT: Duration = Duration::from_secs(5);
+
+/// The wait before the first probe of the preferred transport, before jitter.
+///
+/// Each failed probe doubles it, up to [`PROBE_MAX`]. A brief outage thus ends within
+/// seconds to minutes of the preferred transport returning, while a target that never
+/// reaches it pays for one handshake attempt every five minutes.
+const PROBE_INITIAL: Duration = Duration::from_secs(10);
+
+/// The longest wait between probes of the preferred transport, before jitter.
+const PROBE_MAX: Duration = Duration::from_secs(300);
 
 /// When to redial after a failure, and when to give up.
 ///
@@ -53,22 +68,24 @@ pub struct Backoff {
 	pub initial: Duration,
 	/// Growth of the delay after each failure. 0 or 1 keeps it constant. Defaults to 2.
 	pub multiplier: u32,
-	/// Cap on the delay, which caps `initial` too. Zero leaves it uncapped. Defaults to 5 s.
-	pub max: Duration,
+	/// Cap on the delay, which caps `initial` too. `None` leaves it uncapped. Defaults to 5 s.
+	pub max: Option<Duration>,
 	/// How long a session must stay up to count as healthy. Must be nonzero. Defaults to 1 s.
 	///
 	/// A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	/// failed attempt, so a peer that accepts and then drops every session still escalates
 	/// the delay and exhausts the timeout.
 	pub healthy: Duration,
-	/// How long to keep retrying before giving up. Zero retries forever. Defaults to 10 s.
+	/// How long to keep retrying before giving up. `None` (the default) retries forever, so
+	/// an outage of any length recovers on its own; a caller that can react to a persistent
+	/// failure sets one. Zero still makes the first walk, and gives up when it fails.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way
 	/// finishes: each address but the last gets up to 5 s, and the last runs to
 	/// [`Config::timeout`], so a handshake slower than this still lands. Giving up can
 	/// therefore take up to one whole walk longer. Resets after a healthy session outside a
 	/// redirect loop.
-	pub timeout: Duration,
+	pub timeout: Option<Duration>,
 }
 
 impl Default for Backoff {
@@ -76,9 +93,9 @@ impl Default for Backoff {
 		Self {
 			initial: Duration::from_secs(1),
 			multiplier: 2,
-			max: Duration::from_secs(5),
+			max: Some(Duration::from_secs(5)),
 			healthy: Duration::from_secs(1),
-			timeout: Duration::from_secs(10),
+			timeout: None,
 		}
 	}
 }
@@ -139,8 +156,8 @@ pub struct Config {
 	pub goaway: Goaway,
 	/// What a GOAWAY naming no URI does.
 	pub restart: Restart,
-	/// The deadline for one dial and its handshake. Zero waits forever. Defaults to 30 s.
-	pub timeout: Duration,
+	/// The deadline for one dial and its handshake. `None` waits forever. Defaults to 30 s.
+	pub timeout: Option<Duration>,
 	/// End when the first session ends instead of redialing. Defaults to false.
 	///
 	/// A GOAWAY then ends it cleanly: with no replacement to dial, leaving is the answer.
@@ -156,7 +173,7 @@ impl Default for Config {
 			backoff: Backoff::default(),
 			goaway: Goaway::default(),
 			restart: Restart::default(),
-			timeout: Duration::from_secs(30),
+			timeout: Some(Duration::from_secs(30)),
 			once: false,
 			pinned: false,
 		}
@@ -260,28 +277,47 @@ pub enum ConfigError {
 }
 
 /// One dial the caller runs for [`Reconnect`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Attempt<A> {
 	target: A,
-	url: Url,
-	token: Option<crate::setup::Token>,
+	/// The connection credential, from [`Reconnect::with_tokens`].
+	token: Option<String>,
+	auth: Option<auth::Handle>,
 }
 
-impl<A> Attempt<A> {
+impl<A: std::fmt::Debug> std::fmt::Debug for Attempt<A> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// The credential stays out of logs.
+		f.debug_struct("Attempt")
+			.field("target", &self.target)
+			.field("token", &self.token.as_ref().map(|token| token.len()))
+			.finish_non_exhaustive()
+	}
+}
+
+impl<A: Target> Attempt<A> {
 	/// The address to dial.
 	pub fn target(&self) -> &A {
 		&self.target
 	}
 
-	/// The URL to dial, carrying the connection credential in its query when an offered
-	/// version has no SETUP token.
-	pub fn url(&self) -> &Url {
-		&self.url
-	}
-
-	/// The connection credential for [`Client::with_token`](crate::Client::with_token), if any.
-	pub fn token(&self) -> Option<&crate::setup::Token> {
-		self.token.as_ref()
+	/// `client` set up for this dial: the target's URL, the connection credential in SETUP
+	/// and, when one of `client`'s versions cannot carry it there, the URL's query, and the
+	/// session built on the tokens' handle.
+	pub fn client(&self, client: &crate::Client) -> crate::Client {
+		let mut client = client.clone();
+		let mut url = self.target.url().clone();
+		if let Some(token) = &self.token {
+			url = auth::locate(&url, token, &client.versions);
+			client = client.with_token(crate::setup::Token {
+				kind: crate::setup::Token::OUT_OF_BAND,
+				value: token.clone().into_bytes(),
+			});
+		}
+		if let Some(auth) = &self.auth {
+			client = client.with_auth(auth.clone());
+		}
+		client.with_url(url)
 	}
 }
 
@@ -291,10 +327,11 @@ impl<A> Attempt<A> {
 #[derive(Debug)]
 pub enum Action<A, E> {
 	/// Dial this attempt and report it with [`Reconnect::connected`] or
-	/// [`Reconnect::failed`], polling meanwhile. Building each session on the tokens'
-	/// handle, from [`Reconnect::with_tokens`], is the caller's.
+	/// [`Reconnect::failed`], polling meanwhile. Build each session's client with
+	/// [`Attempt::client`].
 	Dial(Attempt<A>),
-	/// Drop the dial in flight: it ran out its deadline, which already counted as its failure.
+	/// Drop the dial or probe in flight: it ran out its deadline, which already counted as
+	/// its failure.
 	Abandon,
 	/// The live session got a GOAWAY and now drains as the [`predecessor`](Reconnect::predecessor)
 	/// while a replacement is dialed.
@@ -308,6 +345,11 @@ pub enum Action<A, E> {
 	Retrying(E),
 	/// Poll again by this instant, or on a wake.
 	Wait(Option<Instant>),
+	/// The live session runs on a fallback, set by [`Reconnect::fallback`]. Reach this
+	/// attempt's peer over the preferred transport alone, without the MoQ handshake, and
+	/// report it with [`Reconnect::probed`]. Drop it if the live session ends first: on
+	/// [`Action::Migrating`], [`Action::Offline`], or [`Action::Done`].
+	Probe(Attempt<A>),
 	/// The policy gave up with an error, or ended cleanly. Every later poll waits forever.
 	Done(Result<(), E>),
 }
@@ -319,7 +361,7 @@ pub enum Action<A, E> {
 pub struct Reconnect<A, E> {
 	config: Config,
 	targets: Vec<A>,
-	tokens: Option<(auth::Tokens, crate::Versions)>,
+	tokens: Option<auth::Tokens>,
 	retry: Retry<E>,
 	redirects: Redirects,
 	phase: Phase,
@@ -331,7 +373,7 @@ pub struct Reconnect<A, E> {
 }
 
 enum Phase {
-	/// Check the retry window, then walk the targets.
+	/// Walk the targets, unless the tokens ended.
 	Start,
 	/// Ask the caller to dial the target at `index`.
 	Next {
@@ -361,6 +403,61 @@ struct Live {
 	/// Dropped once a restart is waited out: it is a latch, so it would keep firing.
 	goaway: Option<goaway::Consumer>,
 	presented: Option<auth::Dial>,
+	/// Set while the session runs on a fallback transport.
+	probe: Option<Probe>,
+}
+
+/// Probing the preferred transport while the live session runs on a fallback.
+struct Probe {
+	/// The wait before the next probe, before jitter.
+	delay: Duration,
+	state: Probing,
+}
+
+enum Probing {
+	/// The next probe is due at this instant.
+	Due(Instant),
+	/// A probe is in flight, abandoned at its deadline.
+	Dialing {
+		deadline: Option<Instant>,
+		presented: Option<auth::Dial>,
+	},
+}
+
+/// What a [`Probe`] asks for at an instant.
+enum ProbePoll {
+	Wait(Option<Instant>),
+	Due,
+	/// The probe in flight ran out its deadline and was scored as a failure.
+	Abandon,
+}
+
+impl Probe {
+	fn new(now: Instant) -> Self {
+		Self {
+			delay: PROBE_INITIAL,
+			state: Probing::Due(now + jitter(PROBE_INITIAL)),
+		}
+	}
+
+	fn poll(&mut self, now: Instant) -> ProbePoll {
+		match &self.state {
+			Probing::Due(at) if now >= *at => ProbePoll::Due,
+			Probing::Due(at) => ProbePoll::Wait(Some(*at)),
+			Probing::Dialing { deadline: Some(at), .. } if now >= *at => {
+				tracing::debug!("probe of the preferred transport timed out");
+				self.failed(now);
+				ProbePoll::Abandon
+			}
+			Probing::Dialing { deadline, .. } => ProbePoll::Wait(*deadline),
+		}
+	}
+
+	/// Schedule the next probe after a failed one, doubling the wait up to the cap.
+	fn failed(&mut self, now: Instant) {
+		self.delay = self.delay.saturating_mul(2).min(PROBE_MAX);
+		self.state = Probing::Due(now + jitter(self.delay));
+	}
 }
 
 struct Walk<E> {
@@ -408,12 +505,12 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		})
 	}
 
-	/// Present `tokens` on every dial offering `versions`.
+	/// Present `tokens` on every dial, through [`Attempt::client`].
 	///
 	/// A refused credential then earns another dial once the tokens change, and an ended
 	/// tokens handle ends the policy at its next walk.
-	pub fn with_tokens(mut self, tokens: auth::Tokens, versions: crate::Versions) -> Self {
-		self.tokens = Some((tokens, versions));
+	pub fn with_tokens(mut self, tokens: auth::Tokens) -> Self {
+		self.tokens = Some(tokens);
 		self
 	}
 
@@ -465,7 +562,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			let handover = self.predecessor.as_ref().map(|predecessor| predecessor.deadline);
 
 			match &mut self.phase {
-				Phase::Start => self.start(now),
+				Phase::Start => self.start(),
 				Phase::Next { index } => {
 					let index = *index;
 					return self.dial(now, index);
@@ -495,22 +592,34 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					{
 						ended = Some(Ended::Closed(err));
 					}
-					match ended {
-						Some(ended) => self.end(now, ended),
+					if let Some(ended) = ended {
+						self.end(now, ended);
+						continue;
+					}
+					match live.probe.as_mut().map(|probe| probe.poll(now)) {
 						None => return Action::Wait(handover),
+						Some(ProbePoll::Wait(at)) => return Action::Wait(earliest(at, handover)),
+						Some(ProbePoll::Abandon) => return Action::Abandon,
+						Some(ProbePoll::Due) => return self.probe(now),
 					}
 				}
 				Phase::Backoff { until, restart } => {
 					if now < *until {
 						return Action::Wait(earliest(Some(*until), handover));
 					}
-					let restart = *restart;
-					self.retry.delay = Pacing::new(&self.config.backoff).next(self.retry.delay);
-					if restart {
+					if *restart {
 						// After the wait, so the window counts only the time after the peer
 						// stops answering.
 						self.retry.start = now;
+					} else if let Some(window) = self.config.backoff.timeout
+						&& now.saturating_duration_since(self.retry.start) >= window
+					{
+						// Checked when the wait ends, not when it began, so a late poll (a
+						// stalled runtime, a sleeping device) never dials past the window.
+						self.done(Err(self.exhausted(window)));
+						continue;
 					}
+					self.retry.delay = Pacing::new(&self.config.backoff).next(self.retry.delay);
 					self.phase = Phase::Start;
 				}
 				Phase::Done => return Action::Wait(None),
@@ -528,7 +637,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		let Phase::Dialing(dialing) = std::mem::replace(&mut self.phase, Phase::Start) else {
 			unreachable!("checked above");
 		};
-		if let Some((tokens, _)) = &self.tokens {
+		if let Some(tokens) = &self.tokens {
 			tokens.connected(&session);
 		}
 		// A predecessor that retired mid-dial queued an offline this session now contradicts.
@@ -541,7 +650,97 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			since: now,
 			index: dialing.index,
 			presented: dialing.presented,
+			probe: None,
 		}));
+	}
+
+	/// Report that the live session runs on a fallback transport, at `now`.
+	///
+	/// The policy then asks for [`Action::Probe`] dials of the preferred transport, the
+	/// first 5 to 10 s from now and the rest on a doubling backoff capped at one every 5
+	/// minutes, until one connects. Ignored unless a session is live, or when connecting once.
+	pub fn fallback(&mut self, now: Instant) {
+		if self.config.once {
+			return;
+		}
+		if let Phase::Live(live) = &mut self.phase {
+			live.probe = Some(Probe::new(now));
+		}
+	}
+
+	/// Report whether the probe asked for reached the preferred transport, at `now`.
+	///
+	/// On `Ok`, the fallback session sends its own GOAWAY and drains as the
+	/// [`predecessor`](Self::predecessor), queuing [`Action::Migrating`], and the probe becomes
+	/// the dial in flight: finish the MoQ handshake over the transport it reached and report it
+	/// with [`connected`](Self::connected) or [`failed`](Self::failed). The fallback drains
+	/// first because the tokens back one session at a time, and keeps serving until the
+	/// replacement does. Returns whether the probe became that dial: one reported with none in
+	/// flight, as after [`Action::Abandon`], is ignored, and one reported once the peer's GOAWAY
+	/// arrived yields to it.
+	pub fn probed(&mut self, now: Instant, result: Result<(), E>) -> bool {
+		let Phase::Live(live) = &mut self.phase else {
+			return false;
+		};
+		let Some(probe) = live.probe.as_mut() else {
+			return false;
+		};
+		let Probing::Dialing { presented, .. } = &mut probe.state else {
+			return false;
+		};
+		if let Err(err) = result {
+			tracing::debug!(%err, "preferred transport still unreachable");
+			probe.failed(now);
+			return false;
+		}
+		// The peer's GOAWAY wins over a probe that got through with it, so its redirect is
+		// never lost: the next poll acts on it.
+		if let Some(Poll::Ready(_)) = live.goaway.as_ref().map(|goaway| goaway.poll(&kio::Waiter::noop())) {
+			probe.failed(now);
+			return false;
+		}
+		let presented = presented.take();
+		let index = live.index;
+		tracing::info!(peer = %Shown(self.targets[index].url()), "preferred transport reachable; leaving the fallback");
+
+		let connect = self.config.timeout;
+		let Phase::Live(old) = std::mem::replace(
+			&mut self.phase,
+			Phase::Dialing(Dialing {
+				index,
+				deadline: connect.map(|connect| (now + connect, Failure::Timeout(connect))),
+				presented,
+			}),
+		) else {
+			unreachable!("matched above");
+		};
+		// A GOAWAY naming no URI: the peer learns we are moving, and the session stops
+		// taking new work, which frees the tokens for its replacement.
+		if old.session.drain().send(goaway::Goaway::new()).is_err() {
+			tracing::debug!("the fallback session was already draining");
+		}
+		// The fallback session served all along, so a long one still earns the healthy reset.
+		self.retry.settle(
+			now,
+			now.saturating_duration_since(old.since),
+			&Pacing::new(&self.config.backoff),
+		);
+		if let Some(older) = self.predecessor.take() {
+			older.retire();
+		}
+		self.predecessor = Some(Predecessor {
+			deadline: now + self.config.goaway.handover,
+			session: old.session,
+			closing: false,
+		});
+		// Only now, once the fallback stops taking new work: a probe that never gets through
+		// leaves the serving session's tokens and their grants alone.
+		let Phase::Dialing(dialing) = &self.phase else {
+			unreachable!("set above");
+		};
+		self.commit(dialing.presented.as_ref());
+		self.queue.push_back(Action::Migrating);
+		true
 	}
 
 	/// Report that the dial asked for failed with `err`, judged as `verdict`.
@@ -553,15 +752,13 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 	}
 
-	/// Start a walk, unless the retry window is spent or the tokens ended.
-	fn start(&mut self, now: Instant) {
-		let timeout = self.config.backoff.timeout;
-		if !timeout.is_zero() && now.saturating_duration_since(self.retry.start) >= timeout {
-			return self.done(Err(self.exhausted()));
-		}
+	/// Start a walk, unless the tokens ended. Only a retry's backoff checks the window, so
+	/// the first dial of a run, a healthy migration, and a restart's redial always happen,
+	/// even under a zero window.
+	fn start(&mut self) {
 		// An ended auth handle refuses every later session, so no dial can recover. A fresh
 		// watch only reports an error once its handle has ended.
-		if let Some((tokens, _)) = &self.tokens
+		if let Some(tokens) = &self.tokens
 			&& let Poll::Ready(Err(err)) = tokens.handle().grant().poll_changed(&kio::Waiter::noop())
 		{
 			return self.done(Err(err.into()));
@@ -569,25 +766,50 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		self.phase = Phase::Next { index: 0 };
 	}
 
-	fn dial(&mut self, now: Instant, index: usize) -> Action<A, E> {
+	/// The attempt dialing the target at `index`, and the tokens it presents, read without
+	/// touching the live session's tokens.
+	fn attempt(&self, index: usize) -> (Attempt<A>, Option<auth::Dial>) {
 		let target = self.targets[index].clone();
-		tracing::info!(peer = %Shown(target.url()), "connecting");
+		let presented = self.tokens.as_ref().map(|tokens| tokens.preview(target.url()));
+		let token = presented.as_ref().and_then(|presented| presented.token.clone());
+		let auth = self.tokens.as_ref().map(auth::Tokens::handle);
+		(Attempt { target, token, auth }, presented)
+	}
 
-		// Read before the dial starts its session's driver, so a request the session sends
-		// early waits on the held tokens' answers rather than being refused outside the
-		// connection credential's grant.
-		let presented = self
-			.tokens
-			.as_ref()
-			.map(|(tokens, versions)| tokens.dial(target.url(), versions));
-		let (url, token) = match &presented {
-			Some(presented) => (presented.url.clone(), presented.token.clone()),
-			None => (target.url().clone(), None),
+	/// Make `presented` the tokens' latest dial. Called before the dial's session driver
+	/// starts, so a request the session sends early waits on the held tokens' answers rather
+	/// than being refused outside the connection credential's grant.
+	fn commit(&self, presented: Option<&auth::Dial>) {
+		if let (Some(tokens), Some(presented)) = (&self.tokens, presented) {
+			tokens.commit(presented);
+		}
+	}
+
+	/// Ask for a probe of the live session's target over the preferred transport.
+	fn probe(&mut self, now: Instant) -> Action<A, E> {
+		let Phase::Live(live) = &self.phase else {
+			unreachable!("only a live session probes");
 		};
+		let (attempt, presented) = self.attempt(live.index);
+		tracing::debug!(peer = %Shown(attempt.target.url()), "probing the preferred transport");
+		let deadline = self.config.timeout.map(|timeout| now + timeout);
+		if let Phase::Live(live) = &mut self.phase
+			&& let Some(probe) = live.probe.as_mut()
+		{
+			probe.state = Probing::Dialing { deadline, presented };
+		}
+		Action::Probe(attempt)
+	}
+
+	fn dial(&mut self, now: Instant, index: usize) -> Action<A, E> {
+		let (dial, presented) = self.attempt(index);
+		self.commit(presented.as_ref());
+		let target = &dial.target;
+		tracing::info!(peer = %Shown(target.url()), "connecting");
 
 		// The connect deadline covers the dial and the handshake, for every transport: it is
 		// the only bound some of them have. The fixed bound applies only with a fallback.
-		let connect = Some(self.config.timeout).filter(|timeout| !timeout.is_zero());
+		let connect = self.config.timeout;
 		let attempt = (index + 1 < self.targets.len()).then_some(ATTEMPT);
 		let deadline = match (attempt, connect) {
 			(Some(attempt), Some(connect)) if connect <= attempt => {
@@ -606,7 +828,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			deadline,
 			presented,
 		});
-		Action::Dial(Attempt { target, url, token })
+		Action::Dial(dial)
 	}
 
 	/// The dial in flight failed: move on to the next target, or end the walk.
@@ -762,11 +984,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 		// A restart's pacing is not capped by the window: a delay longer than the window
 		// would otherwise spend it all and end the loop without a redial.
-		let window = if restarting {
-			Duration::ZERO
-		} else {
-			self.config.backoff.timeout
-		};
+		let window = if restarting { None } else { self.config.backoff.timeout };
 		let reason = if looped {
 			"peer redirected back in a loop; retrying after backoff"
 		} else {
@@ -804,10 +1022,15 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		self.back_off(now, self.config.backoff.timeout, false, "reconnecting after backoff");
 	}
 
-	/// Wait out the next jittered delay, capped by what remains of `window`.
-	fn back_off(&mut self, now: Instant, window: Duration, restart: bool, reason: &'static str) {
-		let Some(wait) = self.retry.wait(now, window) else {
-			return self.done(Err(self.exhausted()));
+	/// Wait out the next jittered delay, capped by what remains of `window`, if any.
+	fn back_off(&mut self, now: Instant, window: Option<Duration>, restart: bool, reason: &'static str) {
+		let wait = self.retry.wait();
+		let wait = match window {
+			None => wait,
+			Some(window) => match window.checked_sub(now.saturating_duration_since(self.retry.start)) {
+				Some(left) => wait.min(left),
+				None => return self.done(Err(self.exhausted(window))),
+			},
 		};
 		tracing::warn!(?wait, "{reason}");
 		self.phase = Phase::Backoff {
@@ -819,14 +1042,15 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 	/// Whether the tokens changed since `presented` read them, so a refusal earns another dial.
 	fn changed(&self, presented: Option<&auth::Dial>) -> bool {
 		match (&self.tokens, presented) {
-			(Some((tokens, _)), Some(presented)) => tokens.changed(presented),
+			(Some(tokens), Some(presented)) => tokens.changed(presented),
 			_ => false,
 		}
 	}
 
-	fn exhausted(&self) -> E {
+	/// Giving up once the retry `window` ran out.
+	fn exhausted(&self, window: Duration) -> E {
 		Failure::Exhausted {
-			after: self.config.backoff.timeout,
+			after: window,
 			last: self.retry.last.as_ref().map(ToString::to_string),
 		}
 		.into()
@@ -837,6 +1061,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		self.phase = Phase::Done;
 		self.queue.push_back(Action::Done(result));
 	}
+}
+
+/// Between half of `delay` and all of it, so a fleet knocked offline together spreads out.
+fn jitter(delay: Duration) -> Duration {
+	delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0)
 }
 
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -860,7 +1089,7 @@ struct Pacing {
 
 impl Pacing {
 	fn new(backoff: &Backoff) -> Self {
-		let max = Some(backoff.max).filter(|max| !max.is_zero());
+		let max = backoff.max;
 		Self {
 			initial: max.map_or(backoff.initial, |max| backoff.initial.min(max)),
 			max,
@@ -912,14 +1141,9 @@ impl<E> Retry<E> {
 		healthy
 	}
 
-	/// Jitter the next delay and cap it at what remains of `window`. `None` means the
-	/// window is spent; a zero window never is.
-	fn wait(&self, now: Instant, window: Duration) -> Option<Duration> {
-		let wait = self.delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
-		if window.is_zero() {
-			return Some(wait);
-		}
-		Some(wait.min(window.checked_sub(now.saturating_duration_since(self.start))?))
+	/// The next delay, jittered.
+	fn wait(&self) -> Duration {
+		jitter(self.delay)
 	}
 }
 

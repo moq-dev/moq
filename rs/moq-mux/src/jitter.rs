@@ -12,7 +12,7 @@ use moq_net::Timestamp;
 
 /// What each track may hold before its reader is held back, as the container consumer's max
 /// buffer: the most one group may cache.
-pub(crate) const MAX_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 /// One active publisher and at most one independently acquiring replacement.
 /// Ordinary timeline jumps stay entirely inside each existing clock engine.

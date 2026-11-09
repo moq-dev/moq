@@ -141,7 +141,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 					let _routes: Vec<_> = (0..routes)
 						.map(|i| {
 							producer
-								.route_prefix(format!("room/{i}/mic.hang"), moq_net::origin::RouteOptions::default())
+								.claim(format!("room/{i}/mic.hang"), moq_net::origin::RouteOptions::default())
 								.unwrap()
 						})
 						.collect();
@@ -156,9 +156,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 					}
 					b.iter(|| {
 						for (name, delivered) in [("room/live.chat", true), ("room/mic.hang", covering)] {
-							let route = producer
-								.route_prefix(name, moq_net::origin::RouteOptions::default())
-								.unwrap();
+							let route = producer.claim(name, moq_net::origin::RouteOptions::default()).unwrap();
 							for cursor in &mut cursors {
 								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
 							}
@@ -534,7 +532,7 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 /// honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
-	for incumbent_cost in [INCUMBENT_COST, origin::Cost::MAX.value() - 1] {
+	for incumbent_cost in [INCUMBENT_COST, MAX_COST - 1] {
 		for (duplicates, subscribers) in CONTENDED {
 			let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s_cost{incumbent_cost}"));
 			group.bench_function(id, |b| {
@@ -611,6 +609,10 @@ const PATH: &str = ".stats/p0/node/edge0";
 /// What every incumbent route costs, leaving room for a cheaper challenger.
 const INCUMBENT_COST: u64 = 2;
 
+/// The wire ceiling a route cost saturates at: an incumbent just below it leaves room
+/// for a costlier challenger.
+const MAX_COST: u64 = (1 << 62) - 1;
+
 /// A route as `peer` would have announced it: one hop, at `cost`.
 fn peer_route(peer: u64, cost: u64) -> origin::RouteInfo {
 	peer_instance(peer, cost, None)
@@ -633,7 +635,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			let consumer = producer.consume();
 			// Served but never answered: every request under it parks a front.
 			let _served = producer
-				.route_prefix("room", moq_net::origin::RouteOptions::default())
+				.claim("room", moq_net::origin::RouteOptions::default())
 				.unwrap();
 			let _requests: Vec<_> = (0..fronts)
 				.map(|i| consumer.request(format!("room/{i}"), None))
@@ -655,7 +657,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 }
 
 /// Answer the claim's request for `path`, dropping any other it queued.
-fn answer(claim: &origin::Route, path: &str) -> origin::Route {
+fn answer(claim: &origin::Claim, path: &str) -> origin::Route {
 	loop {
 		let request = claim
 			.requested()
@@ -681,7 +683,7 @@ fn bench_lend(c: &mut Criterion) {
 				let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 				let consumer = producer.consume();
 				let claim = producer
-					.route_prefix("room", moq_net::origin::RouteOptions::default())
+					.claim("room", moq_net::origin::RouteOptions::default())
 					.unwrap();
 				let waiter = kio::Waiter::noop();
 				let mut ask = |path: &str| {
@@ -743,7 +745,7 @@ fn bench_serve_idle(c: &mut Criterion) {
 			let dynamics: Vec<_> = (0..routes)
 				.map(|i| {
 					producer
-						.route_prefix(
+						.claim(
 							format!(".stats/p{}/node/edge{i}", i % 8),
 							moq_net::origin::RouteOptions::default(),
 						)
@@ -886,7 +888,7 @@ const POOL_HOP: u64 = 1_000;
 struct Pool {
 	producer: origin::Producer,
 	driver: origin::Driver,
-	_members: Vec<origin::Route>,
+	_members: Vec<origin::Claim>,
 	_producers: Vec<broadcast::Producer>,
 	_consumers: Vec<broadcast::Consumer>,
 	cursors: Vec<origin::Routes>,
@@ -1226,10 +1228,9 @@ fn runtime() -> tokio::runtime::Runtime {
 
 /// Everything under `room/`, which leaves out only the `muted` subscription.
 fn room() -> auth::Grant {
-	auth::Grant {
-		subscribe: Pattern::subtree("room").unwrap().into(),
-		..auth::Grant::all()
-	}
+	let mut grant = auth::Grant::all();
+	grant.subscribe = Pattern::subtree("room").unwrap().into();
+	grant
 }
 
 /// Steady-state delivery through a session's gates: one round across every

@@ -236,7 +236,7 @@ pub(crate) struct Protocol {
 	trigger: kio::Consumer<Option<Goaway>>,
 	/// Written by the driver's receive path when a GOAWAY is decoded.
 	received: kio::Producer<Option<Goaway>>,
-	/// Set alongside `received`; reprices this session's routes to the drain cost.
+	/// Set alongside `received`; ranks this session's routes last.
 	pub going_away: GoingAway,
 }
 

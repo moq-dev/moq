@@ -103,7 +103,7 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
-	config.runtime.workers = Some(WORKERS);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(WORKERS).unwrap());
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
 	config.auth.public = vec![moq_auth::Pattern::all()];
@@ -611,7 +611,7 @@ async fn workers_share_a_generated_identity() {
 		let mut config = Config::default();
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.generate = vec!["localhost".into()];
-		config.runtime.workers = Some(WORKERS);
+		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(WORKERS).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = io_uring;
 		config.auth.public = vec![moq_auth::Pattern::all()];

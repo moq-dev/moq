@@ -167,7 +167,7 @@ function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage 
 		// `#serveGroup` emits each frame converted to it.
 		timescale: info.timescale ?? undefined,
 		// An older peer is served the frames inflated.
-		compress: hasCompression(version) && info.compress,
+		compress: hasCompression(version) && info.compression === "deflate",
 	});
 }
 
@@ -1096,7 +1096,7 @@ export class Publisher {
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
 				// they always agree.
 				stamp = stamping(this.version, info);
-				compress = hasCompression(this.version) && info.compress;
+				compress = hasCompression(this.version) && info.compression === "deflate";
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({

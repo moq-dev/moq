@@ -43,6 +43,13 @@ pub(super) enum Event {
 	Failed(String),
 	/// Audio resumed after a declared silence, starting at this media timestamp.
 	Utterance(Duration),
+	/// Received audio the player discarded rather than played to bound its
+	/// delay: skipped at the fast threshold, or refused by a full sink. `skip`
+	/// marks the first frame of a spell, one jump however many frames it spans.
+	Trimmed {
+		audio: Duration,
+		skip: bool,
+	},
 }
 
 /// Run native playback on the calling thread until the window closes.
@@ -285,7 +292,7 @@ impl ApplicationHandler<Event> for App {
 				}
 			}
 			Event::Failed(err) => self.fail(event_loop, err),
-			Event::Utterance(_) => {}
+			Event::Utterance(_) | Event::Trimmed { .. } => {}
 		}
 	}
 
