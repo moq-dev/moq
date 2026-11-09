@@ -723,7 +723,7 @@ export class Reload {
 	}
 
 	/** Serve `connection`, or nothing. */
-	#serve(connection: Established | undefined): void {
+	#serve(connection: Session | undefined): void {
 		this.established.set(connection);
 		this.#report();
 	}
