@@ -3,11 +3,14 @@
 ## Goal
 
 Native playback (`moq_audio::decode::Consumer` feeding `moq play`'s sink)
-decodes an audio frame only when the ring has room below its floor. The rest
-of the target delay stays encoded upstream, as in the browser, so native
-memory follows the bytes actually received and the ring never grows with the
-delay. Once this lands, Rust splits the target between decoded PCM and encoded
-media the way JS does, and `moq play` holds no decoded PCM outside the ring.
+decodes an audio frame when the browser's `Backpressure` would: while playing,
+once the playhead is within the ring's floor of it, and, live, once the media
+queued behind it covers the part of the target held encoded, so a backlog past
+the target still reaches the ring to be caught up. The rest of the target
+delay stays encoded upstream, so native memory follows the bytes actually
+received and the ring never grows with the delay. Once this lands, Rust splits
+the target between decoded PCM and encoded media the way JS does, and
+`moq play` holds no decoded PCM outside the ring.
 
 ## Plan
 
@@ -27,12 +30,30 @@ with the gate, so the hold stays encoded.
 
 Mirror the browser's rules, including the stalled refill that starts playback
 with the whole target ahead of the playhead, rather than inventing new ones.
-Share names and tests with the JS side where the two can match. The gate's
-input is the playhead the JS worklet reports. Native can derive it from
-`Sink::buffered()` (`rs/moq-audio/src/playback/sink.rs`) and the last write's
-timestamp, but `play_audio` owns that sink, not the consumer, so the consumer
-needs it passed in. Keep the gate inside moq-audio's consumer if that stays
-additive; if it needs a public API change, it moves to m2.
+Share names and tests with the JS side where the two can match.
+
+The gate waits before decoding, never before reading. `Consumer::read` stamps
+each packet's arrival for the jitter estimate (`target.observe` in
+`rs/moq-audio/src/decode/consumer.rs`), and `Consumer::delay()` documents that
+reads paced to the speaker make the estimate measure the pacing. Keep reading
+and observing encoded packets as they arrive and hold them encoded, as
+`js/watch` reads a frame and only then awaits `ring.wait()`.
+
+The gate has two inputs, and `play_audio` owns both, so the consumer needs
+them passed in:
+
+- The playhead the JS worklet reports. Native can derive it from
+  `Sink::buffered()` (`rs/moq-audio/src/playback/sink.rs`) and the last
+  write's timestamp.
+- The shared playout delay: the catalog `delay` plus the target, the largest
+  among the subscribed renditions, which the browser passes as
+  `sync.out.delay` and `play_audio` already holds the sink to through
+  `presentation.due`. `Consumer::delay()` is this track's jitter target alone;
+  a gate on it would decode at a depth the sink has already outrun and could
+  not replace #8362's hold.
+
+Keep the gate inside moq-audio's consumer if that stays additive; if it needs
+a public API change, it moves to m2.
 
 Public API: additive if the gate stays inside `moq_audio::decode::Consumer`.
 Wire: none.
