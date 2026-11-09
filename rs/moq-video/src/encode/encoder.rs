@@ -334,7 +334,7 @@ impl Config {
 	}
 
 	/// The resize options, scaling on this encoder's VA-API node unless they name one.
-	fn resize(&self) -> Option<crate::resize::Config> {
+	fn resolved_resize(&self) -> Option<crate::resize::Config> {
 		#[allow(unused_mut)]
 		let mut resize = self.resize.clone()?;
 		#[cfg(target_os = "linux")]
@@ -413,7 +413,7 @@ impl Encoder {
 			color: config.resolved_color(),
 			pending_cut: false,
 			join: Join::new(config),
-			resize: config.resize(),
+			resize: config.resolved_resize(),
 			#[cfg(target_os = "linux")]
 			input: config.input,
 			_thread_bound: PhantomData,
@@ -1266,7 +1266,7 @@ mod tests {
 			color: config.resolved_color(),
 			pending_cut: false,
 			join: Join::new(config),
-			resize: config.resize(),
+			resize: config.resolved_resize(),
 			#[cfg(target_os = "linux")]
 			input: None,
 			_thread_bound: PhantomData,
