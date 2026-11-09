@@ -350,10 +350,76 @@ impl WaiterList {
 		self.entries.clear();
 	}
 
-	/// Wake all live waiters, draining the list.
+	/// Wake all live waiters, draining the list. Under a [`Hold`], the wakes wait for it.
 	pub fn wake(&mut self) {
 		self.drained();
+		let held = HELD
+			.try_with(|held| {
+				let mut held = held.borrow_mut();
+				if held.depth > 0 {
+					held.wakers.extend(self.entries.drain(..));
+				}
+				held.depth > 0
+			})
+			.unwrap_or(false);
+		if held {
+			return;
+		}
 		for waker in self.entries.drain(..).filter_map(|w| w.upgrade()) {
+			waker.wake_by_ref();
+		}
+	}
+}
+
+/// The wakes this thread holds back, and how many [`Hold`]s are open.
+struct Held {
+	depth: usize,
+	wakers: Vec<Weak<Waker>>,
+}
+
+thread_local! {
+	static HELD: std::cell::RefCell<Held> = const {
+		std::cell::RefCell::new(Held {
+			depth: 0,
+			wakers: Vec::new(),
+		})
+	};
+}
+
+/// Holds back every wake this thread makes through a [`WaiterList`] until it drops.
+///
+/// A waker may poll its task inline, and that task may take a lock its waker is still
+/// holding. Open a hold before taking the locks, so their guards drop first and the
+/// held wakes go out once nothing is locked. Holds nest: the outermost delivers.
+#[must_use = "wakes are held back only while the hold lives"]
+pub struct Hold {
+	// Thread-bound: it counts on this thread's held wakes.
+	_thread: std::marker::PhantomData<*const ()>,
+}
+
+/// Hold back this thread's wakes until the returned [`Hold`] drops.
+pub fn hold() -> Hold {
+	// Outside a thread-local's destructor at least, where nothing is held.
+	let _ = HELD.try_with(|held| held.borrow_mut().depth += 1);
+	Hold {
+		_thread: std::marker::PhantomData,
+	}
+}
+
+impl Drop for Hold {
+	fn drop(&mut self) {
+		let wakers = HELD
+			.try_with(|held| {
+				let mut held = held.borrow_mut();
+				held.depth = held.depth.saturating_sub(1);
+				match held.depth {
+					0 => std::mem::take(&mut held.wakers),
+					_ => Vec::new(),
+				}
+			})
+			.unwrap_or_default();
+		// Outside the borrow: a waker may poll inline and open a hold of its own.
+		for waker in wakers.into_iter().filter_map(|w| w.upgrade()) {
 			waker.wake_by_ref();
 		}
 	}
@@ -519,6 +585,34 @@ mod tests {
 		// smaller one (2 B on Windows) leaves room.
 		let mutexes = 2 * std::mem::size_of::<std::sync::Mutex<()>>().saturating_sub(8);
 		assert!(state <= 200 + mutexes, "Channel<()> grew to {state} B");
+	}
+
+	/// Wakes made under a hold go out when the outermost hold drops, never before.
+	#[test]
+	fn a_hold_delivers_its_wakes_when_the_outermost_drops() {
+		struct Count(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+		let count = Arc::new(Count(Default::default()));
+		let woken = || count.0.load(Ordering::SeqCst);
+		let waiter = Waiter::new(Waker::from(count.clone()));
+		let mut list = WaiterList::new();
+
+		let outer = hold();
+		let inner = hold();
+		waiter.register(&mut list);
+		list.wake();
+		drop(inner);
+		assert_eq!(woken(), 0, "an inner hold delivered");
+		drop(outer);
+		assert_eq!(woken(), 1, "the outermost hold lost the wake");
+
+		waiter.register(&mut list);
+		list.wake();
+		assert_eq!(woken(), 2, "a wake with no hold open waited");
 	}
 
 	#[test]

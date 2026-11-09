@@ -28,19 +28,11 @@ fn worker() -> Option<Worker> {
 const ALPN: &str = "moq-uring-identity";
 
 fn server_config(certs: &support::Certs) -> quic::server::Config {
-	quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	)
+	quic::server::Config::new(certs.server(&[ALPN]))
 }
 
 fn dial_config() -> quic::client::Config {
-	let mut config = quic::client::Config::default();
-	config.alpn = vec![ALPN.to_string()];
-	config.verify = false;
-	config
+	quic::client::Config::new(support::client_tls(&[ALPN]))
 }
 
 fn socket(handle: &moq_uring::Handle) -> udp::Socket {

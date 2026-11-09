@@ -3726,6 +3726,126 @@ mod announce_test {
 		);
 	}
 
+	/// A lite-07 stream holds a route on the wire only while it shows one of the
+	/// route's claims: an origin whose only claim is hidden from the peer starts no
+	/// route, and the route ends after the floor once its last shown claim goes. The
+	/// node's own end of the route waits on the peer's echo of that end, and the route
+	/// starts again only after it.
+	#[kio::test]
+	async fn a_lite07_route_goes_only_with_a_shown_claim() {
+		/// The peer's replies, queued by the test.
+		#[derive(Clone, Default)]
+		struct Replies(Arc<Mutex<std::collections::VecDeque<bytes::Bytes>>>);
+		impl crate::transport::poll::Chunks for Replies {
+			type Error = SinkError;
+			fn poll_read_chunk(
+				&mut self,
+				_: &kio::Waiter,
+				_: usize,
+			) -> std::task::Poll<Result<Option<bytes::Bytes>, SinkError>> {
+				match self.0.lock().unwrap().pop_front() {
+					Some(chunk) => std::task::Poll::Ready(Ok(Some(chunk))),
+					None => std::task::Poll::Pending,
+				}
+			}
+			fn stop(&mut self, _: u32) {}
+		}
+
+		let origin = Hop::new(1).unwrap().produce();
+		let stats = origin.announce(".stats/node", origin::RouteInfo::new()).unwrap();
+		let consumer = origin.consume();
+		let node = consumer.route_node();
+		let mut answer =
+			super::routed::Answer::new(consumer, crate::Path::empty(), false, crate::auth::Link::new(false));
+		let replies = Replies::default();
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut stream = Stream::<Transport, Version> {
+			writer: Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+				Version::Lite07,
+			),
+			reader: Reader::new(
+				crate::transport::boxed::RecvStream::new(crate::transport::poll::Buffered::new(replies.clone())),
+				Version::Lite07,
+			),
+		};
+		let waiter = kio::Waiter::noop();
+		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
+		wire.take_ok();
+		assert_eq!(
+			wire.take_announces(),
+			[lite::AnnounceBroadcast::Synced],
+			"nothing shown"
+		);
+
+		let shown = origin.announce("x", origin::RouteInfo::new()).unwrap();
+		// The origin feeds its node from a task.
+		kio::clock::sim::yield_now().await;
+		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
+		let announces = wire.take_announces();
+		assert!(
+			matches!(
+				announces.as_slice(),
+				[
+					lite::AnnounceBroadcast::RouteStart { .. },
+					lite::AnnounceBroadcast::Active { route: 0, .. },
+					lite::AnnounceBroadcast::Floor { id: 0, .. },
+				]
+			),
+			"{announces:?}"
+		);
+
+		drop(shown);
+		kio::clock::sim::yield_now().await;
+		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
+		let announces = wire.take_announces();
+		assert!(
+			matches!(
+				announces.as_slice(),
+				[
+					lite::AnnounceBroadcast::EndedId { .. },
+					lite::AnnounceBroadcast::Floor { id: 0, .. },
+					lite::AnnounceBroadcast::RouteEnd { id: 0 },
+				]
+			),
+			"{announces:?}"
+		);
+
+		// The node ends the route too, while the peer may still hold its copy.
+		drop(stats);
+		kio::clock::sim::yield_now().await;
+		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
+		wire.assert_quiet();
+		assert_eq!(node.retained().echoes, 1, "the node's end waits on the peer");
+
+		let _again = origin.announce("y", origin::RouteInfo::new()).unwrap();
+		kio::clock::sim::yield_now().await;
+		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
+		wire.assert_quiet();
+
+		let echo = lite::AnnounceReply::RouteEnd { id: 0 };
+		(replies.0.lock().unwrap()).push_back(crate::coding::Encode::encode_bytes(&echo, Version::Lite07).unwrap());
+		assert!(answer.poll(&mut stream, false, &waiter).is_pending());
+		let announces = wire.take_announces();
+		assert!(
+			matches!(
+				announces.as_slice(),
+				[
+					lite::AnnounceBroadcast::RouteStart { .. },
+					lite::AnnounceBroadcast::Active { route: 1, .. },
+					lite::AnnounceBroadcast::Floor { id: 1, .. },
+				]
+			),
+			"{announces:?}"
+		);
+		assert_eq!(node.retained().echoes, 0);
+	}
+
 	#[test]
 	fn synced_survives_a_removed_initial_route_and_live_churn() {
 		let origin = Hop::new(1).unwrap().produce();

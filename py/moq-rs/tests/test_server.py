@@ -444,7 +444,7 @@ async def test_serve_helper_accepts_clients():
 
 
 async def test_broadcast_route_over_wire():
-    """A route received over the wire exposes its hop chain and cost."""
+    """A route received over the wire exposes its cost and instance."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         published = server.route("with-route")
         broadcast = published.broadcast
@@ -459,9 +459,9 @@ async def test_broadcast_route_over_wire():
                 async for announcement in routes(client.announced()):
                     assert announcement.prefix == "with-route"
                     route = announcement.route
-                    assert all(isinstance(h, int) for h in route.hops)
-                    # A route crossing at least one session carries a non-empty hop chain.
-                    assert len(route.hops) >= 1
+                    assert isinstance(route.cost, int)
+                    # Every delivered route names the stream it serves.
+                    assert route.instance
                     break
         finally:
             serve_task.cancel()

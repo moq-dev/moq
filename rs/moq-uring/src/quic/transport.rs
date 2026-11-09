@@ -10,7 +10,7 @@ use crate::quic::Limits;
 /// Separate from the role configs so a caller that already has these
 /// settings (a relay applying its `--quic-*` section, say) sets them once and
 /// hands the same value to a dial and a listener.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Config {
 	/// Close the connection after this long without activity. Must fit a QUIC
@@ -30,8 +30,9 @@ pub struct Config {
 	///   stream.
 	/// - 4 MiB of unacknowledged outgoing data, whatever the peer allows.
 	pub limits: Limits,
-	/// Which congestion controller to run.
-	pub congestion: Congestion,
+	/// The congestion controller each connection runs, BBRv3 by default. A
+	/// [`Congestion`] family converts into one with `.into()`.
+	pub congestion: std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>,
 	/// How often to send an ack-eliciting packet on an otherwise idle
 	/// connection, `None` (the default) to derive it from the negotiated idle
 	/// timeout, or zero to send none and let the idle timeout decide. See
@@ -58,11 +59,27 @@ impl Default for Config {
 		Self {
 			idle_timeout: std::time::Duration::from_secs(10),
 			limits: Limits::default(),
-			congestion: Congestion::default(),
+			congestion: Congestion::Delay.into(),
 			keep_alive: None,
 			mtu_discovery: false,
 			#[cfg(feature = "qlog")]
 			qlog: None,
 		}
+	}
+}
+
+// By hand, since a congestion factory carries no description of its own.
+impl std::fmt::Debug for Config {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let mut debug = f.debug_struct("Config");
+		debug
+			.field("idle_timeout", &self.idle_timeout)
+			.field("limits", &self.limits)
+			.field("congestion", &format_args!(".."))
+			.field("keep_alive", &self.keep_alive)
+			.field("mtu_discovery", &self.mtu_discovery);
+		#[cfg(feature = "qlog")]
+		debug.field("qlog", &self.qlog);
+		debug.finish()
 	}
 }

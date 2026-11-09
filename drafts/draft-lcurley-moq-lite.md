@@ -497,7 +497,7 @@ It MUST NOT select an infeasible route, and a distance only ever falls within a 
 A node MAY mark a session upstream.
 A route is down-only when it arrived on an upstream session or with its Down Only bit set; a node sends a down-only route with the bit set, and never on an upstream session.
 
-A node sends its selected route to every origin node it knows on each Announce Stream it answers, and MAY omit routes with no claim matching the stream's request.
+A node sends its selected route to an origin node on an Announce Stream it answers only while the route has a claim the stream's request presents (see [Announce](#announce)): it sends ROUTE_START before the first such claim, and once the last one is withdrawn, the batch carrying that withdrawal, closed by its floor (which certifies the withdrawal where the node can certify the request), then ROUTE_END. It starts that route on the stream again only once the subscriber echoed the ROUTE_END. A subscriber therefore holds no route for an origin node its request does not meet.
 A node that does not forward, such as a client, sends only its own route, and holds no feasibility distance for any other.
 An origin advances its Seqno whenever its own set of sessions changes.
 It never advertises a Seqno or Revision of 2^64-1: a change that would reach it instead rotates its Node ID, ending the old route everywhere and announcing its claims again under the new one.
@@ -2210,6 +2210,7 @@ The `Message Length` describes the payload size on the wire.
 - Added ROUTE_REQUEST (0xA), sent by the subscriber on the Announce Stream to ask for a route with a newer seqno when every route it has is infeasible.
 - Added ANNOUNCE_FLOOR (0x9), closing each batch of a route's claims with the origin Revision at which the stream's claims across the requested prefix are certified plus one, or 0 to certify nothing, so a stale copy never revives a claim whose withdrawal a newer one delivered. A floor certifies only the claims its own request shows.
 - A route presents only its most specific claim covering the requested prefix, moved to the next covering claim when it is withdrawn rather than ended.
+- A route goes on a stream only while it has a claim the request presents, and ends after the batch withdrawing its last claim. It starts on that stream again only once the subscriber echoed the ROUTE_END.
 - Added `Node ID` to TRACK, TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS: the origin node the first hop selected, followed by every later hop.
 - Replaced Warm and Cold Route Cost with the origin's Announce Cost, unchanged in transit. ANNOUNCE_UPDATE carries only the Announce Cost.
 - The Cost parameter must be at least 1.
