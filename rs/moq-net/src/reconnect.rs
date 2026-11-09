@@ -703,7 +703,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		let index = live.index;
 		tracing::info!(peer = %Shown(self.targets[index].url()), "preferred transport reachable; leaving the fallback");
 
-		let connect = Some(self.config.timeout).filter(|timeout| !timeout.is_zero());
+		let connect = self.config.timeout;
 		let Phase::Live(old) = std::mem::replace(
 			&mut self.phase,
 			Phase::Dialing(Dialing {
@@ -792,9 +792,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		};
 		let (attempt, presented) = self.attempt(live.index);
 		tracing::debug!(peer = %Shown(attempt.target.url()), "probing the preferred transport");
-		let deadline = Some(self.config.timeout)
-			.filter(|timeout| !timeout.is_zero())
-			.map(|timeout| now + timeout);
+		let deadline = self.config.timeout.map(|timeout| now + timeout);
 		if let Phase::Live(live) = &mut self.phase
 			&& let Some(probe) = live.probe.as_mut()
 		{
