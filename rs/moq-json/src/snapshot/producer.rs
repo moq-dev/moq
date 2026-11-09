@@ -199,9 +199,17 @@ impl<T: Serialize> Producer<T> {
 		take(&self.inner).cut()
 	}
 
-	/// Finish the track, closing any open group.
-	pub fn finish(&mut self) -> Result<()> {
-		take(&self.inner).finish()
+	/// Finish the track, closing any open group, and return the [`Finished`] value.
+	///
+	/// Clones sharing the track see it ended: their next [`modify`](Self::modify) or
+	/// [`update`](Self::update) fails. A finish that fails aborts the track with the cause, which
+	/// those clones then report.
+	pub fn finish(self) -> Result<Finished<T>> {
+		take(&self.inner).finish()?;
+		Ok(Finished {
+			inner: self.inner,
+			_marker: PhantomData,
+		})
 	}
 
 	/// Abort the track with the given error, which consumers see in place of any further value.
@@ -211,6 +219,40 @@ impl<T: Serialize> Producer<T> {
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		let mut inner = take(&self.inner);
 		inner.abort(err.into());
+		Ok(())
+	}
+}
+
+/// A value whose producer [finished](Producer::finish) it: it can still be read or aborted, but
+/// not published to.
+///
+/// Dropping the last handle sharing the track releases it, so new readers can no longer find it.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_update(value: moq_json::snapshot::Finished<u32>) {
+/// value.update(&1).unwrap();
+/// # }
+/// ```
+#[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
+pub struct Finished<T> {
+	inner: Arc<Mutex<Inner<T>>>,
+	_marker: PhantomData<fn(T)>,
+}
+
+impl<T> Finished<T> {
+	/// Create a subscriber for the underlying track.
+	pub fn consume(&self) -> moq_net::track::Subscriber {
+		take(&self.inner).track.inner.subscribe(None)
+	}
+
+	/// A watch-only handle to the underlying track's subscriber demand.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		take(&self.inner).track.inner.demand()
+	}
+
+	/// Release the track's cache, reporting `err` to readers that have not drained it.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		take(&self.inner).abort(err.into());
 		Ok(())
 	}
 }
