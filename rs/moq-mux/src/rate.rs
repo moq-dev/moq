@@ -974,7 +974,7 @@ mod tests {
 		let grant = bandwidth::Producer::new();
 		grant.set(Some(bps(4_000_000))).unwrap();
 
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 		follower.assume(on(bps(1_000_000)));
 		let mut applied = Vec::new();
 		while let Ok(target) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
@@ -983,7 +983,7 @@ mod tests {
 		assert_eq!(applied.last(), Some(&on(bps(4_000_000))));
 		assert!(applied.len() > 1, "the climb ramps rather than jumping: {applied:?}");
 
-		let mut follower = Follower::new(grant.consume(), Policy::new(bps(4_000_000)));
+		let mut follower = Grant::new(grant.consume(), Policy::new(bps(4_000_000)));
 		follower.assume(Target::Disabled);
 		assert!(matches!(follower.next().await.unwrap(), Target::Enabled(_)));
 	}
@@ -995,7 +995,7 @@ mod tests {
 		let grant = bandwidth::Producer::new();
 		grant.set(Some(bps(2_000_000))).unwrap();
 		for above in [4_000_000, 2_050_000] {
-			let mut follower = Follower::new(grant.consume(), Policy::new(bps(2_000_000)));
+			let mut follower = Grant::new(grant.consume(), Policy::new(bps(2_000_000)));
 			follower.assume(on(bps(above)));
 			assert_eq!(follower.next().await.unwrap(), on(bps(2_000_000)), "from {above}");
 		}
