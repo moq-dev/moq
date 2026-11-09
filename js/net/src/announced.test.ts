@@ -63,9 +63,39 @@ test("a listing shows a route's facts, never its epoch, hops, credential, or dra
 		kind: "present",
 		prefix: p("a"),
 		captures: undefined,
-		route: { instance, cost: 5n },
+		route: { instance, cost: 5n, available: true },
 	});
-	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["cost", "instance"]);
+	expect(Object.keys(event?.route ?? {}).sort()).toEqual(["available", "cost", "instance"]);
+});
+
+test("a listing reports availability flips and tells an offline path from an absent one", async () => {
+	const producer = new Announce.Producer();
+	const listing = Announce.list(producer.consume());
+	const route = WireRoute.normalize({ instance: Instance.random() });
+	const held = { ...route, available: false };
+
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route: held });
+	// A re-price that leaves availability as it was is not reported.
+	producer.append({ prefix: p("a"), captures: undefined, kind: "update", route: { ...held, cost: 3n } });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "update", route });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "restart", route: held });
+	producer.append({ prefix: p("a"), captures: undefined, kind: "offline", route: held });
+	producer.append({ prefix: p("b"), captures: undefined, kind: "start", route });
+	producer.append({ prefix: p("b"), captures: undefined, kind: "end", route });
+
+	const seen = [];
+	for (let i = 0; i < 6; i++) {
+		const event = await listing.next();
+		seen.push(`${event?.kind} ${event?.prefix} ${event?.route.available}`);
+	}
+	expect(seen).toEqual([
+		"present a false",
+		"available a true",
+		"unavailable a false",
+		"offline a false",
+		"present b true",
+		"absent b true",
+	]);
 });
 
 test("the consumer is an async iterable of the same events", async () => {

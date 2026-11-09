@@ -31,8 +31,8 @@ function announced(origin: Origin.Producer): Set<string> {
 		for (;;) {
 			const entry = await listing.next();
 			if (!entry) break;
-			if (entry.kind === "absent") paths.delete(entry.prefix);
-			else paths.add(entry.prefix);
+			if (entry.kind === "absent" || entry.kind === "offline") paths.delete(entry.prefix);
+			else if (entry.kind === "present") paths.add(entry.prefix);
 		}
 	})();
 	return paths;

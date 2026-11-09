@@ -6110,7 +6110,7 @@ mod session_tests {
 		let mut announced = announced(&relay.origin);
 		session.abort(moq_net::Error::App(1));
 		await_event(&mut announced, |event| {
-			matches!(event, moq_net::origin::RouteEvent::End(_))
+			matches!(event, moq_net::origin::RouteEvent::Offline(_))
 		});
 
 		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());

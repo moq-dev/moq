@@ -87,6 +87,12 @@ export interface Route {
 	 * Announces a hidden route.
 	 */
 	update(info: Partial<WireRoute>): void;
+	/**
+	 * Close the route as its announcer withdrawing it, so readers see it end. Closing the handle
+	 * of a route a session received instead means the session lost it, and readers see it go
+	 * offline.
+	 */
+	end(): void;
 }
 
 /** The protocol-facing operations behind an origin consumer. */
