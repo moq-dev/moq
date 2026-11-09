@@ -43,10 +43,15 @@ fn id(raw: i32) -> u32 {
 	raw as u32
 }
 
-/// Create a route at `path` on `origin`, returning its route and broadcast fill handles.
+/// Create a route at `path` on `origin`, returning its route and broadcast fill handles. Frees
+/// the instance handle `options` names, which the call only borrows.
 fn create_route(origin: u32, path: &[u8], options: Option<&moq_route_options>) -> (u32, u32) {
+	let instance = options.map_or(0, |options| options.instance);
 	let options = options.map_or(std::ptr::null(), |options| options as *const _);
 	let route = id(unsafe { moq_origin_route(origin, path.as_ptr() as *const c_char, path.len(), options) });
+	if instance != 0 {
+		assert_eq!(moq_instance_free(instance), 0);
+	}
 	(route, id(moq_route_broadcast(route)))
 }
 
@@ -5751,7 +5756,7 @@ type Resolve =
 fn resolve_pinned(call: Resolve, origin: u32, instance: &str, cb: &Callback) -> i32 {
 	let path = b"live";
 	let instance = parse_instance(instance);
-	unsafe {
+	let code = unsafe {
 		call(
 			origin,
 			path.as_ptr() as *const c_char,
@@ -5760,7 +5765,9 @@ fn resolve_pinned(call: Resolve, origin: u32, instance: &str, cb: &Callback) -> 
 			Some(channel_callback),
 			cb.ptr,
 		)
-	}
+	};
+	assert_eq!(moq_instance_free(instance), 0);
+	code
 }
 
 /// An instance pins both resolutions to one stream: a request for another one fails, and a
@@ -5794,16 +5801,18 @@ fn an_instance_pins_request_and_follow() {
 	let second = publish_run(origin, "live");
 	let cb = Callback::new();
 	let path = b"live";
+	let pin = parse_instance(&instance);
 	let task = id(unsafe {
 		moq_origin_follow(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			parse_instance(&instance),
+			pin,
 			Some(follow_channel_callback),
 			cb.ptr,
 		)
 	});
+	assert_eq!(moq_instance_free(pin), 0);
 	let delivered = id(cb.recv());
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);

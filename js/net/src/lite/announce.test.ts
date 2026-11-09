@@ -341,8 +341,9 @@ const GOLDEN_RESOLVED = [
 	{ start: { suffix: Path.from("room/b"), hops: [hop(0x5555n), relay] } },
 ];
 
-// Pinned from the Rust encoder (`lite::compress::tests::golden_stream_is_pinned`), so the
-// JS decoder is checked against real compressed output.
+// Rust's compressed output (`lite::compress::tests::golden_stream_is_pinned`) before lite-07's
+// route layer, which js/net does not speak yet; quest/m2/cluster-routing/routes/js.md realigns
+// both streams with Rust's.
 const GOLDEN =
 	"001900000a726f6f6d2f612f63616d0161000000029111a222000000100102036d6963016100000101b33301000208000101c044440100010101000f02010162016100000201c055550100";
 
@@ -350,7 +351,7 @@ test("AnnounceHistory resolves the Rust encoder's compressed stream", async () =
 	expect(await resolveStream(unhex(GOLDEN))).toEqual(GOLDEN_RESOLVED);
 });
 
-// JS always encodes literally; Rust decodes these bytes too (`js_literal_stream_decodes`).
+// JS always encodes literally. Rust's `js_literal_stream_decodes` pins the route-layer form.
 const JS_LITERAL =
 	"001900000a726f6f6d2f612f63616d0161000000029111a2220000001900000a726f6f6d2f612f6d6963016100000002b333a2220000020a000002c04444a22200000101010016000006726f6f6d2f62016100000002c05555a2220000";
 
