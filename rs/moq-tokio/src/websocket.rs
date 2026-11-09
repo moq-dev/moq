@@ -482,7 +482,7 @@ async fn connect_tls_override(
 		.map_err(|err| Error::WebSocketConnect(crate::error::message(err)))?;
 	let negotiated = upgrade(&mut stream, &request).await?;
 
-	qmux::ws::Upgraded::new(stream, negotiated.as_deref().unwrap_or_default())
+	qmux::ws::Upgraded::new(stream, &negotiated)
 		.with_keep_alive(qmux::ws::KeepAlive::default())
 		.with_session_config(session.clone())
 		.connect()
@@ -495,14 +495,11 @@ async fn connect_tls_override(
 const MAX_RESPONSE: usize = 16 * 1024;
 
 /// Send the WebSocket upgrade `request` on `stream` and read the 101 that answers it,
-/// returning the subprotocol the server chose.
+/// returning the subprotocol the server chose from those the request offered.
 ///
 /// The response is read a byte at a time so nothing past it is consumed: the server may
 /// send QMux frames right behind its 101, and those belong to the session.
-async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(
-	stream: &mut S,
-	request: &http::Request<()>,
-) -> Result<Option<String>> {
+async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, request: &http::Request<()>) -> Result<String> {
 	let key = request
 		.headers()
 		.get(http::header::SEC_WEBSOCKET_KEY)
@@ -540,22 +537,44 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(
 			status: Some(status),
 		});
 	}
+	let invalid = |reason: &str| Err(Error::WebSocketConnect(format!("invalid upgrade response: {reason}")));
+	if parsed.version != Some(1) {
+		return invalid("not HTTP/1.1");
+	}
 	let header = |name: http::header::HeaderName| {
 		parsed
 			.headers
 			.iter()
 			.find(|header| header.name.eq_ignore_ascii_case(name.as_str()))
-			.map(|header| header.value)
+			.and_then(|header| std::str::from_utf8(header.value).ok())
 	};
-	let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
-	if header(http::header::SEC_WEBSOCKET_ACCEPT) != Some(accept.as_bytes()) {
-		return Err(Error::WebSocketConnect(
-			"upgrade response has the wrong accept key".into(),
-		));
+	if !header(http::header::UPGRADE).is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket")) {
+		return invalid("no Upgrade: websocket");
 	}
-	let protocol =
-		header(http::header::SEC_WEBSOCKET_PROTOCOL).map(|value| String::from_utf8_lossy(value).trim().to_string());
-	Ok(protocol)
+	let connection = header(http::header::CONNECTION).unwrap_or_default();
+	if !connection
+		.split(',')
+		.any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+	{
+		return invalid("no Connection: upgrade");
+	}
+	let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+	if header(http::header::SEC_WEBSOCKET_ACCEPT) != Some(accept.as_str()) {
+		return invalid("wrong accept key");
+	}
+
+	// The subprotocol pairs the QMux draft with the moq version, so one the request never
+	// offered could pair them in a way we refuse, such as moqt-22 over qmux-00.
+	let offered = request
+		.headers()
+		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
+		.and_then(|value| value.to_str().ok())
+		.unwrap_or_default();
+	match header(http::header::SEC_WEBSOCKET_PROTOCOL).map(str::trim) {
+		Some(protocol) if offered.split(',').any(|offer| offer.trim() == protocol) => Ok(protocol.to_string()),
+		Some(_) => invalid("subprotocol was not offered"),
+		None => invalid("no subprotocol"),
+	}
 }
 
 /// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::ws::Client::with_protocols`.
@@ -1088,6 +1107,67 @@ mod tests {
 		assert_eq!(window.connection, moq_net::transport::MIN_RECEIVE_WINDOW * 2);
 		assert_eq!(window.stream, 256 * 1024);
 		client.abort();
+	}
+
+	/// Answer an upgrade offering only `qmux-01.moqt-22` with `response`, followed by
+	/// `trailer`, and return what [`upgrade`] made of it plus the bytes left on the stream.
+	async fn check_upgrade(response: impl Fn(&str) -> String, trailer: &[u8]) -> (Result<String>, Vec<u8>) {
+		let mut request = "ws://relay.example/anon".into_client_request().unwrap();
+		request.headers_mut().insert(
+			http::header::SEC_WEBSOCKET_PROTOCOL,
+			http::HeaderValue::from_static("qmux-01.moqt-22"),
+		);
+		let key = request.headers()[http::header::SEC_WEBSOCKET_KEY].clone();
+		let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+
+		let (mut client, mut server) = tokio::io::duplex(1 << 16);
+		server.write_all(response(&accept).as_bytes()).await.unwrap();
+		server.write_all(trailer).await.unwrap();
+		let result = upgrade(&mut client, &request).await;
+		let mut rest = vec![0; trailer.len()];
+		client.read_exact(&mut rest).await.unwrap();
+		(result, rest)
+	}
+
+	fn switching(accept: &str, protocol: &str) -> String {
+		format!(
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
+		)
+	}
+
+	#[tokio::test]
+	async fn upgrade_leaves_frames_behind_the_101() {
+		let (result, rest) = check_upgrade(|accept| switching(accept, "qmux-01.moqt-22"), b"frames").await;
+		assert_eq!(result.unwrap(), "qmux-01.moqt-22");
+		assert_eq!(rest, b"frames");
+	}
+
+	#[tokio::test]
+	async fn upgrade_refuses_an_unoffered_subprotocol() {
+		let (result, _) = check_upgrade(|accept| switching(accept, "qmux-00.moqt-22"), b"").await;
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn upgrade_refuses_a_missing_subprotocol() {
+		let (result, _) = check_upgrade(
+			|accept| {
+				format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n")
+			},
+			b"",
+		)
+		.await;
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn upgrade_refuses_a_101_that_is_not_a_websocket() {
+		let (result, _) = check_upgrade(
+			|accept| switching(accept, "qmux-01.moqt-22").replace("Upgrade: websocket", "Upgrade: h2c"),
+			b"",
+		)
+		.await;
+		assert!(result.is_err());
 	}
 
 	#[test]
