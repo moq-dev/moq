@@ -16,7 +16,7 @@ Decided 2026-10-27 (maintainer), from
 [moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
 `origin.ts` a detached request stays on its own route instead of following
 the cheapest one; fix it with the route-selection rework here.
-- Feed the availability API from the wire: set `WireRoute.available` from ROUTE_HOLD, and close a route the route layer lets go of with `close()` so readers see it offline, keeping `end()` for a certified withdrawal.
+- Feed the availability API from [Announcement availability](/quest/m2/cluster-routing/routes/availability.md).
 - Rust/JS interop covers the route messages, the floor marker, and the echo.
 - Decode the temporary lite-06 compatibility chain that lite-07 announcements carry ([mixed-version ring](/quest/m1/mixed-version-ring.md)). JS translates nothing, so it keeps no chain.
 - Restore the native JS lite-07 lanes. Decided 2026-11-06 (maintainer,
@@ -42,6 +42,7 @@ the cheapest one; fix it with the route-selection rework here.
 
 ## Required
 
+- [Announcement availability](/quest/m2/cluster-routing/routes/availability.md) - the API this feeds
 - [Mixed-version ring](/quest/m1/mixed-version-ring.md) - defines the compatibility chain field this decodes
 
 ## Related
