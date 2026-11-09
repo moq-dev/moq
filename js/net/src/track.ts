@@ -2132,7 +2132,8 @@ export class Producer {
 	/**
 	 * Declare the track's end after the highest sequence written, returning it as {@link Finished}.
 	 * A no-op once an end is declared or the track closed, so a cleanup path can finish whatever
-	 * the track's state.
+	 * the track's state. A track that closed first keeps its outcome and declares no end, so its
+	 * readers' `finished()` rejects.
 	 *
 	 * Not terminal: groups below the end may still be written. Readers end once the live edge
 	 * reaches it.
@@ -2252,8 +2253,8 @@ type Superseded = { successor?: Successor };
 type Successor = { sequence: bigint; arrived: Instant; fate: () => Error | undefined };
 
 /**
- * A track its producer finished: its end is declared, and it can still take an older group below
- * that end, be read, or be aborted or closed, but not append. {@link Producer.finish} returns it,
+ * A track its producer finished: its end is declared unless it closed first, and it can still
+ * take an older group below that end, be read, or be aborted or closed, but not append. {@link Producer.finish} returns it,
  * mirroring the Rust `track::Finished`; the producer itself still refuses a group at or past the
  * end.
  *
@@ -2268,6 +2269,8 @@ export interface Finished {
 	info(): Promise<Info>;
 	/** Create an older group below the end, which arrived late; see {@link Producer.createGroup}. */
 	createGroup(sequence: bigint): GroupProducer;
+	/** Serve the groups readers miss below the end; see {@link Producer.requests}. */
+	requests(): Requests;
 	/** Subscribe to this in-process track; see {@link Producer.subscribe}. */
 	subscribe(options?: Subscription): Subscriber;
 	/** Abort the track; see {@link Producer.abort}. */

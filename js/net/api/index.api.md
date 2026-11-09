@@ -737,6 +737,7 @@ export namespace Track {
 		createGroup(sequence: bigint): Group.Producer;
 		info(): Promise<Track.Info>;
 		readonly name: string;
+		requests(): Track.Requests;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
 	export interface Groups {

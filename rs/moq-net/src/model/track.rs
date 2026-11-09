@@ -3959,14 +3959,7 @@ impl Producer {
 	/// end, or with the abort error. A track whose highest group is `u64::MAX` has no end to
 	/// declare: it is aborted with [`Error::BoundsExceeded`], which the call also returns.
 	pub fn finish(self) -> Result<Finished> {
-		if let Err(err) = self.finish_shared() {
-			// Every other failure finds the track already ended. This one leaves it open, and
-			// the caller can no longer abort it, so readers get the cause rather than `Dropped`.
-			if matches!(err, Error::BoundsExceeded(_)) {
-				let _ = self.abort(err.clone());
-			}
-			return Err(err);
-		}
+		self.finish_shared()?;
 		Ok(Finished { producer: self })
 	}
 
@@ -3975,8 +3968,18 @@ impl Producer {
 	pub(crate) fn finish_shared(&self) -> Result<()> {
 		let mut state = self.modify()?;
 		let final_sequence = match state.max_sequence {
-			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
+			Some(max) => match max.checked_add(1) {
+				Some(end) => end,
+				None => {
+					// Left open, readers would wait for an end that never comes and then see
+					// `Dropped`; abort so they get the cause.
+					drop(state);
+					let err = Error::from(coding::BoundsExceeded);
+					let _ = self.clone().abort(err.clone());
+					return Err(err);
+				}
+			},
 		};
 		state.set_end(Position::group(final_sequence), None)
 	}
@@ -4668,7 +4671,7 @@ impl Producer {
 }
 
 /// A track whose producer [finished](Producer::finish) it: its end is declared, and it can
-/// still take an older group below that end, be read, or be aborted, but not append.
+/// still take or serve an older group below that end, be read, or be aborted, but not append.
 ///
 /// Dropping it releases this handle like dropping a [`Producer`]: once no clone is left, the
 /// track leaves its broadcast's listing as finished, so a new reader can no longer find it.
@@ -4697,6 +4700,11 @@ impl Finished {
 	/// The properties this track was created with.
 	pub fn info(&self) -> &Info {
 		&self.producer.info
+	}
+
+	/// Serve on-demand fetches of uncached groups below the end; see [`Producer::requests`].
+	pub fn requests(&self) -> Requests {
+		self.producer.requests()
 	}
 
 	/// Create an older group below the end, which arrived late; see [`Producer::create_group`].
