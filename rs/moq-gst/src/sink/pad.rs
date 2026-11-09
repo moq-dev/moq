@@ -1933,9 +1933,11 @@ mod tests {
 		assert_eq!(decoder.layout().channels(), 6);
 		let mut decoded_samples = false;
 		for packet in &packets {
-			let decoded = decoder.decode(packet).expect("decode the published opus packet");
-			assert_eq!(decoded.samples.len() % 6, 0);
-			decoded_samples |= !decoded.samples.is_empty();
+			decoder.decode(packet).expect("decode the published opus packet");
+			while let Some(decoded) = decoder.receive().expect("receive the decoded opus packet") {
+				assert_eq!(decoded.samples.len() % 6, 0);
+				decoded_samples |= !decoded.samples.is_empty();
+			}
 		}
 		assert!(decoded_samples, "the 5.1 packets decoded to silence");
 	}

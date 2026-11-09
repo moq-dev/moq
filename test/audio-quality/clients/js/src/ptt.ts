@@ -135,15 +135,15 @@ watch.muted = false;
 watch.paused = false;
 document.body.append(watch);
 
-const audio = watch.player.audio;
+const audio = watch.audio;
 const capture = new Capture({
 	broadcast: audio.source.in.broadcast,
 	track: audio.source.out.track,
 	config: audio.source.out.config,
-	delay: watch.player.sync.in.delay,
+	delay: watch.sync.in.delay,
 	// Decoder subscriptions include codec warmup beyond Sync's budget. The observer must
 	// request the same age so its own subscription cannot discard an otherwise visible frame.
-	maxDelay: new Derived([watch.player.sync.out.maxDelay, audio.source.out.config], (max, config) =>
+	maxDelay: new Derived([watch.sync.out.maxDelay, audio.source.out.config], (max, config) =>
 		Milli(max + (config?.warmup ?? 0)),
 	),
 });
@@ -210,7 +210,7 @@ publish.audio.out.catalog.subscribe((config) => {
 	if (now !== selectable) records.catalog.push({ at: performance.now(), selectable: now });
 	selectable = now;
 });
-watch.player.sync.out.delay.subscribe((delay) => records.delays.push({ at: performance.now(), delay }));
+watch.sync.out.delay.subscribe((delay) => records.delays.push({ at: performance.now(), delay }));
 // Playback counts from the measurement's start, so the warmup's tune-in is not charged to it.
 let baseline = { underruns: 0, stalls: 0 };
 const playback = () => {
@@ -238,13 +238,13 @@ export const measurement = {
 			context: audio.out.context.peek()?.state,
 			stalled: audio.out.stalled.peek(),
 			timestamp: audio.out.timestamp.peek(),
-			delay: watch.player.sync.out.delay.peek(),
+			delay: watch.sync.out.delay.peek(),
 			error: String(publish.audio.out.error.peek() ?? audio.out.error.peek() ?? ""),
 		};
 	},
 	reset() {
 		for (const list of Object.values(records)) list.length = 0;
-		records.delays.push({ at: performance.now(), delay: watch.player.sync.out.delay.peek() });
+		records.delays.push({ at: performance.now(), delay: watch.sync.out.delay.peek() });
 		capture.drain();
 		arrivals.length = 0;
 		const stats = audio.out.stats.peek();

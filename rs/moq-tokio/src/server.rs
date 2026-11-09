@@ -297,6 +297,7 @@ impl Server {
 		// gets the released spellings folded in too.
 		config.validate()?;
 
+		#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 		let versions = config.versions();
 
 		// Build a QUIC backend when `--listen` is set, or when nothing else
@@ -2715,7 +2716,7 @@ mod tests {
 	#[cfg(all(feature = "uds", unix))]
 	#[tokio::test]
 	async fn unix_listener_serves_the_configured_publisher() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // a real Unix socket
 		use rand::RngExt;
 
 		// macOS caps AF_UNIX paths near 104 bytes and the system temp dir is long,

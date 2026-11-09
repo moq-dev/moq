@@ -125,7 +125,7 @@ const broadcast = new Publish.Broadcast({
 
 // Each encoder registers its rendition on the broadcast and encodes while enabled,
 // subscribed or not, so a late viewer can reach back into the cache. Pass
-// `onDemand: true` to the broadcast to encode only while someone is subscribed.
+// `onDemand: "all"` to the broadcast to encode only while someone is subscribed.
 
 const hd = new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 const sd = new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });

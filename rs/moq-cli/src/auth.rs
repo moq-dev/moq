@@ -1178,6 +1178,8 @@ mod tests {
 	/// Drive the same Usage grammar the binary exposes, rather than building
 	/// `Command` directly, so the flags stay part of what's under test.
 	async fn run(args: &[&str]) -> anyhow::Result<()> {
+		// `main` installs rind's provider before any subcommand, and reqwest reads it.
+		moq_tokio::crypto::install_default().unwrap();
 		let mut cli =
 			crate::args::Invocation::try_parse_from(args.iter().copied()).map_err(|err| anyhow::anyhow!("{err}"))?;
 		match cli.stages.remove(0) {

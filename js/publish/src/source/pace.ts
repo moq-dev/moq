@@ -22,6 +22,7 @@ export interface Sink<S extends Sample> {
 
 /**
  * Reads decoded samples out of a sink in real time, restarting the file when it ends.
+ * A track with no samples ends instead, since restarting it would spin without ever yielding.
  *
  * Decoding runs far faster than realtime, so holding each sample until its presentation time is
  * what makes this publish at 1x instead of blasting the whole file out at once. It also applies
@@ -30,7 +31,7 @@ export interface Sink<S extends Sample> {
  * A reader that returns after a long gap resumes at the present on the shared timeline, not at
  * the old cursor, so the file's other track stays in sync and the gap is never replayed.
  */
-export function pace<S extends Sample, T>(
+export function pace<S extends Sample, T extends { close(): void }>(
 	sink: Sink<S>,
 	timeline: Timeline,
 	convert: (sample: S) => T,
@@ -39,6 +40,14 @@ export function pace<S extends Sample, T>(
 	let samples = sink.samples();
 	let loop = 0;
 
+	// Whether this pass from the start of the file has yielded anything yet. A seek only follows a
+	// sample, so it never makes a populated track look empty.
+	let yielded = false;
+
+	// Cancelling the stream stops a pending wait too, not only the effect's teardown.
+	const cancelled = new AbortController();
+	const stop = AbortSignal.any([signal, cancelled.signal]);
+
 	return new ReadableStream<T>(
 		{
 			async pull(controller) {
@@ -46,6 +55,7 @@ export function pace<S extends Sample, T>(
 				let sought = false;
 
 				for (;;) {
+					if (cancelled.signal.aborted) return;
 					if (signal.aborted) {
 						controller.close();
 						return;
@@ -56,24 +66,26 @@ export function pace<S extends Sample, T>(
 						next = await samples.next();
 					} catch (err) {
 						// Teardown disposes the Input, which makes any decode still in flight throw.
-						if (!signal.aborted) throw err;
-						controller.close();
+						if (!stop.aborted) throw err;
+						if (!cancelled.signal.aborted) controller.close();
 						return;
 					}
 
 					if (next.done) {
-						if (!timeline.loops) {
+						if (!timeline.loops || !yielded) {
 							controller.close();
 							return;
 						}
 
 						// A fresh generator seeks back to the start; the offset keeps timestamps rising.
 						loop++;
+						yielded = false;
 						samples = sink.samples();
 						continue;
 					}
 
 					const sample = next.value;
+					yielded = true;
 					const timestamp = timeline.at(sample.microsecondTimestamp as Micro, loop);
 
 					const present = now();
@@ -90,23 +102,35 @@ export function pace<S extends Sample, T>(
 					}
 
 					// A sample that's slightly late goes out immediately, letting a slow reader catch up.
-					await sleepUntil(timestamp, signal);
-					if (signal.aborted) {
+					await sleepUntil(timestamp, stop);
+					if (stop.aborted) {
 						sample.close();
-						controller.close();
+						if (!cancelled.signal.aborted) controller.close();
 						return;
 					}
 
 					// Restamp onto our wall clock, the same epoch live capture uses, so a publish that
 					// mixes sources keeps one timeline.
-					sample.setTimestamp(Second.fromMicro(timestamp));
-					controller.enqueue(convert(sample));
-					sample.close();
+					let value: T;
+					try {
+						sample.setTimestamp(Second.fromMicro(timestamp));
+						value = convert(sample);
+					} finally {
+						sample.close();
+					}
+
+					try {
+						controller.enqueue(value);
+					} catch (err) {
+						value.close();
+						throw err;
+					}
 					return;
 				}
 			},
 
 			async cancel() {
+				cancelled.abort();
 				await samples.return();
 			},
 		},

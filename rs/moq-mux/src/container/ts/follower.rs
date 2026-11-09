@@ -19,6 +19,9 @@ enum Serving {
 	Return(moq_net::broadcast::Consumer),
 	/// Another stream: a broadcast of another instance.
 	Other(moq_net::broadcast::Consumer),
+	/// A return or another stream that refused its catalog: nothing is followed until the
+	/// next change.
+	Refused,
 }
 
 /// Subscribing to an instance's catalog, to carry the export on into it.
@@ -86,8 +89,6 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	closed: bool,
 	/// Why the last return refused its catalog, reported instead of the end if the follow runs out.
 	failed: Option<crate::Error>,
-	/// The instance serving now refused its catalog: nothing is followed until the next change.
-	refused: bool,
 	follow: Duration,
 	stitch: bool,
 	timer: Option<Pin<Box<kio::clock::Sleep>>>,
@@ -112,7 +113,6 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			priming: true,
 			closed: false,
 			failed: None,
-			refused: false,
 			follow: Duration::ZERO,
 			stitch: false,
 			timer: None,
@@ -206,11 +206,10 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				State::Settling { end, deadline } => {
 					self.poll_instances(waiter)?;
 					let target = match &self.serving {
-						_ if self.refused => None,
 						Serving::Return(target) => Some(target.clone()),
 						Serving::Other(target) if self.stitch => Some(target.clone()),
 						Serving::Other(_) => return Poll::Ready(Err(crate::Error::Replaced(self.path.to_string()))),
-						Serving::Ours | Serving::Gone => None,
+						Serving::Ours | Serving::Gone | Serving::Refused => None,
 					};
 					if let Some(target) = target {
 						self.state = State::Resuming {
@@ -253,7 +252,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							if !left(&err) {
 								self.failed = Some(err);
 							}
-							self.refused = true;
+							self.serving = Serving::Refused;
 							self.state = State::Settling { end, deadline };
 						}
 						Poll::Pending => {
@@ -278,7 +277,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	/// subscriptions yield priority while acquiring the replacement.
 	fn poll_switch(&mut self, waiter: &kio::Waiter, switching: &mut Option<Subscription<E>>) -> crate::Result<bool> {
 		let target = match &self.serving {
-			Serving::Other(target) if self.stitch && !self.refused => target,
+			Serving::Other(target) if self.stitch => target,
 			_ => {
 				if switching.take().is_some() {
 					self.export.source().priority(0)?;
@@ -305,7 +304,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			Poll::Ready(Err(err)) if left(&err) => {
 				tracing::warn!(path = %self.path, %err, "replacement went before its catalog subscribed");
 				*switching = None;
-				self.refused = true;
+				self.serving = Serving::Refused;
 				self.export.source().priority(0)?;
 				Ok(false)
 			}
@@ -358,7 +357,6 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			}
 			any = true;
 		}
-		self.refused &= !any;
 		Ok(any)
 	}
 

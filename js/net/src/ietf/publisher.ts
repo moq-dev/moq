@@ -22,7 +22,15 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, WireRoute } from "../hop.ts";
-import { finalSequence, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
+import {
+	datagramTrackInfo,
+	finalSequence,
+	firstEligible,
+	hiddenBelow,
+	hooks,
+	presented,
+	type ReadGroupFrame,
+} from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
@@ -582,6 +590,7 @@ export class Publisher {
 				track.close();
 				datagramTrack = new TrackProducer(msg.trackName).accept(selected.info);
 				track = hooks.parked(datagramTrack.subscribe({ priority: fromWire(msg.subscriberPriority) }));
+				return datagramTrackInfo(selected.info);
 			}
 			return selected.info;
 		};
@@ -3011,7 +3020,7 @@ function trackProperties(info: Info, wanted: boolean): Properties.Properties {
 		priority: toWire(info.priority),
 		// The publisher's default, newest first.
 		groupOrder: Properties.DESCENDING,
-		maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+		maxCacheDuration: info.maxAge === null ? undefined : BigInt(info.maxAge),
 	};
 }
 

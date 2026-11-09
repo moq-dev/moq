@@ -5,5 +5,5 @@
  */
 export { type AcceptProps, accept } from "./accept.ts";
 export { type ConnectProps, connect } from "./connect.ts";
-export type { Established } from "./established.ts";
 export { Connection } from "./pool.ts";
+export type { Session } from "./session.ts";

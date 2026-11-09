@@ -1558,7 +1558,6 @@ mod tests {
 		/// acquisition: not zero, and not the later instant the loop dequeued it.
 		#[tokio::test]
 		async fn a_late_first_frame_publishes_its_acquisition() {
-			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall()).await;
@@ -1637,7 +1636,6 @@ mod tests {
 		/// broadcast forward with the device's spacing instead of rewinding it.
 		#[tokio::test]
 		async fn a_device_clock_restart_continues_forward() {
-			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
@@ -1681,7 +1679,6 @@ mod tests {
 		/// frame after a resume lands after the idle gap, at its own acquisition.
 		#[tokio::test]
 		async fn a_restart_after_idle_keeps_the_gap() {
-			kio::clock::host_time();
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let idle = Duration::from_millis(300);

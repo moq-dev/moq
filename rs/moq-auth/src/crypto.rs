@@ -29,8 +29,8 @@ pub(crate) fn tls() -> crate::Result<rustls::ClientConfig> {
 
 #[cfg(test)]
 mod tests {
-	/// The dev-dependencies turn on jsonwebtoken's aws-lc backend, so signing alone can't show
-	/// that rind is the provider.
+	/// Another crate may turn on a jsonwebtoken backend, so signing alone can't show that rind is
+	/// the provider.
 	#[test]
 	fn installs_rind_when_none_is_installed() {
 		super::init().unwrap();

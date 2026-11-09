@@ -1571,6 +1571,7 @@ mod tests {
 	/// and forking both the socket options and the disabled-listener contract.
 	#[tokio::test]
 	async fn serve_hosts_merged_routes_alongside_the_defaults() {
+		moq_tokio::crypto::install_default().unwrap();
 		let listen = Some("127.0.0.1:0".parse().unwrap());
 		let internal = Internal::new(Config { listen }, moq_net::stats::Registry::disabled())
 			.bind()

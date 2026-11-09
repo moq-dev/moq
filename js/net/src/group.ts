@@ -1467,15 +1467,6 @@ export class Consumer {
 		return frame !== undefined ? JSON.parse(frame) : undefined;
 	}
 
-	/** Reads the next frame and decodes its payload as a one-byte boolean. */
-	async readBool(): Promise<boolean | undefined> {
-		const frame = await this.readFrame();
-		if (!frame) return undefined;
-		const payload = frame.payload;
-		if (payload.byteLength !== 1 || !(payload[0] === 0 || payload[0] === 1)) throw new Error("invalid bool frame");
-		return payload[0] === 1;
-	}
-
 	/**
 	 * Release this handle, like dropping a Rust consumer. Never changes the group for other
 	 * readers or the producer. It drains what it buffered and then ends. Idempotent.

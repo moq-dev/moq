@@ -140,8 +140,7 @@ const INFO_FIELDS = Object.keys({
 
 /** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {
-	const [x, y] = [track.infoDefaults(a), track.infoDefaults(b)];
-	return INFO_FIELDS.every((field) => x[field] === y[field]);
+	return INFO_FIELDS.every((field) => a[field] === b[field]);
 }
 
 /**

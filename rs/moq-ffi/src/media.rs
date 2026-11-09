@@ -1619,11 +1619,15 @@ mod read_tests {
 	}
 
 	/// The warmup starts the reader that much further back than the min delay.
-	#[tokio::test]
-	#[ignore = "flaky: the 4.7 s group is sometimes skipped under load; quest/m0/test-flakes-2/ffi-warmup-wall-clock.md"]
+	///
+	/// Reads on the paused test clock, not through `next()` on the FFI runtime's host clock: a
+	/// group is stale once its successor arrived a full max delay ago, so a stall between the
+	/// writes and the read would rightly skip the groups this checks.
+	#[tokio::test(start_paused = true)]
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
 		for video in [false, true] {
 			let (_broadcast, track, reader, kind) = subscribe_warmup(video).await;
+			let mut media = reader.reads.take(|_| Ok(())).unwrap();
 			let write = |sequence: u64, micros| {
 				let mut group = track.create_group(sequence.into()).unwrap();
 				moq_mux::catalog::hang::Container::Legacy(kind)
@@ -1646,9 +1650,9 @@ mod read_tests {
 			write(3, 4_400_000);
 			let _track = track.finish().unwrap();
 			let mut micros = Vec::new();
-			while let Some(read) = reader.next().await.unwrap() {
-				if let MoqMediaRead::Frame { frame } = read {
-					micros.push(frame.timestamp.value);
+			while let Some(read) = media.read().await.unwrap() {
+				if let moq_mux::container::Read::Frame { frame, .. } = read {
+					micros.push(frame.timestamp.as_micros());
 				}
 			}
 			assert_eq!(micros, [4_400_000, 4_700_000, 5_000_000], "video={video}");

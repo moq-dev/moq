@@ -104,6 +104,24 @@ describe("analyze", () => {
 		expect(analyze(input(clean())).metrics.player_underruns_total).toBeNull();
 	});
 
+	test("the player's own skips are its counter's rise across the window", () => {
+		const samples = clean().map((s, i) => ({ ...s, playerSkips: i < 100 ? 1 : 3 }));
+		expect(analyze(input(samples)).metrics).toMatchObject({ player_skips_total: 2 });
+		expect(analyze(input(clean())).metrics.player_skips_total).toBeNull();
+	});
+
+	test("the A/V lag is how far the playhead trails the shared clock while playing", () => {
+		// Three in four samples 20 ms ahead of the clock, the rest 10 ms; a stalled sample's playhead is
+		// frozen, so it is left out however far the clock has run.
+		const samples = clean().map((s, i) => {
+			const timestamp = s.timestamp ?? 0;
+			if (i === 50) return { ...s, stalled: true, clock: timestamp + 500 };
+			return { ...s, clock: timestamp - 20 + (i % 4 === 3 ? 10 : 0) };
+		});
+		expect(analyze(input(samples)).metrics).toMatchObject({ av_lag_ms_p50: -20, av_lag_ms_p95: -10 });
+		expect(analyze(input(clean())).metrics.av_lag_ms_p50).toBeNull();
+	});
+
 	test("a gap that is the ring stalling is not an underrun", () => {
 		const samples = clean();
 		samples[100] = {
