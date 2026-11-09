@@ -446,8 +446,7 @@ struct MoQOutputStatsTest {
 		}
 		output.connect_time_ms = 0;
 		auto state = current->session->state();
-		state.phase = moq::ConnectionPhase::kDisconnected;
-		state.version.reset();
+		state.phase = moq::ConnectionPhase::kDisconnected{};
 		output.OnState(current, std::move(state));
 		std::lock_guard<std::mutex> lock(output.mutex);
 		return output.link == MoQOutput::Link::kLost && output.GetConnectTime() > 0;

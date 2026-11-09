@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -4011,16 +4013,12 @@ class FfiConverterMoqClientTls {
 
 class MoqConnectionState {
   final int revision;
-  final MoqConnectionPhase phase;
   final int connects;
-  final MoqException? failure;
-  final String? version;
+  final MoqConnectionPhase phase;
   MoqConnectionState({
     required this.revision,
-    required this.phase,
     required this.connects,
-    this.failure,
-    this.version,
+    required this.phase,
   });
 }
 
@@ -4036,34 +4034,18 @@ class FfiConverterMoqConnectionState {
     );
     final revision = revision_lifted.value;
     new_offset += revision_lifted.bytesRead;
-    final phase_lifted = FfiConverterMoqConnectionPhase.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final phase = phase_lifted.value;
-    new_offset += phase_lifted.bytesRead;
     final connects_lifted = FfiConverterUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final connects = connects_lifted.value;
     new_offset += connects_lifted.bytesRead;
-    final failure_lifted = FfiConverterOptionalMoqException.read(
+    final phase_lifted = FfiConverterMoqConnectionPhase.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final failure = failure_lifted.value;
-    new_offset += failure_lifted.bytesRead;
-    final version_lifted = FfiConverterOptionalString.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final version = version_lifted.value;
-    new_offset += version_lifted.bytesRead;
+    final phase = phase_lifted.value;
+    new_offset += phase_lifted.bytesRead;
     return LiftRetVal(
-      MoqConnectionState(
-        revision: revision,
-        phase: phase,
-        connects: connects,
-        failure: failure,
-        version: version,
-      ),
+      MoqConnectionState(revision: revision, connects: connects, phase: phase),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -4071,10 +4053,8 @@ class FfiConverterMoqConnectionState {
   static RustBuffer lower(MoqConnectionState value) {
     final total_length =
         FfiConverterUInt64.allocationSize(value.revision) +
-        FfiConverterMoqConnectionPhase.allocationSize(value.phase) +
         FfiConverterUInt64.allocationSize(value.connects) +
-        FfiConverterOptionalMoqException.allocationSize(value.failure) +
-        FfiConverterOptionalString.allocationSize(value.version) +
+        FfiConverterMoqConnectionPhase.allocationSize(value.phase) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -4087,20 +4067,12 @@ class FfiConverterMoqConnectionState {
       value.revision,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterMoqConnectionPhase.write(
-      value.phase,
-      Uint8List.view(buf.buffer, new_offset),
-    );
     new_offset += FfiConverterUInt64.write(
       value.connects,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalMoqException.write(
-      value.failure,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    new_offset += FfiConverterOptionalString.write(
-      value.version,
+    new_offset += FfiConverterMoqConnectionPhase.write(
+      value.phase,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset - buf.offsetInBytes;
@@ -4108,10 +4080,8 @@ class FfiConverterMoqConnectionState {
 
   static int allocationSize(MoqConnectionState value) {
     return FfiConverterUInt64.allocationSize(value.revision) +
-        FfiConverterMoqConnectionPhase.allocationSize(value.phase) +
         FfiConverterUInt64.allocationSize(value.connects) +
-        FfiConverterOptionalMoqException.allocationSize(value.failure) +
-        FfiConverterOptionalString.allocationSize(value.version) +
+        FfiConverterMoqConnectionPhase.allocationSize(value.phase) +
         0;
   }
 }
@@ -8656,28 +8626,51 @@ class FfiConverterMoqCongestionControl {
   }
 }
 
-enum MoqConnectionPhase {
-  connecting,
-  connected,
-  disconnected,
-  migrating,
-  closed,
+abstract class MoqConnectionPhase {
+  RustBuffer lower();
+  int allocationSize();
+  int write(Uint8List buf);
 }
 
 class FfiConverterMoqConnectionPhase {
+  static MoqConnectionPhase lift(RustBuffer buffer) {
+    return FfiConverterMoqConnectionPhase.read(buffer.asUint8List()).value;
+  }
+
   static LiftRetVal<MoqConnectionPhase> read(Uint8List buf) {
     final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
+    final subview = Uint8List.view(buf.buffer, buf.offsetInBytes + 4);
     switch (index) {
       case 1:
-        return LiftRetVal(MoqConnectionPhase.connecting, 4);
+        final lifted = ConnectingMoqConnectionPhase.read(subview);
+        return LiftRetVal<MoqConnectionPhase>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       case 2:
-        return LiftRetVal(MoqConnectionPhase.connected, 4);
+        final lifted = ConnectedMoqConnectionPhase.read(subview);
+        return LiftRetVal<MoqConnectionPhase>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       case 3:
-        return LiftRetVal(MoqConnectionPhase.disconnected, 4);
+        final lifted = DisconnectedMoqConnectionPhase.read(subview);
+        return LiftRetVal<MoqConnectionPhase>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       case 4:
-        return LiftRetVal(MoqConnectionPhase.migrating, 4);
+        final lifted = MigratingMoqConnectionPhase.read(subview);
+        return LiftRetVal<MoqConnectionPhase>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       case 5:
-        return LiftRetVal(MoqConnectionPhase.closed, 4);
+        final lifted = ClosedMoqConnectionPhase.read(subview);
+        return LiftRetVal<MoqConnectionPhase>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
@@ -8686,21 +8679,227 @@ class FfiConverterMoqConnectionPhase {
     }
   }
 
-  static MoqConnectionPhase lift(RustBuffer buffer) {
-    return FfiConverterMoqConnectionPhase.read(buffer.asUint8List()).value;
+  static RustBuffer lower(MoqConnectionPhase value) {
+    return value.lower();
   }
 
-  static RustBuffer lower(MoqConnectionPhase input) {
-    return toRustBuffer(createUint8ListFromInt(input.index + 1));
-  }
-
-  static int allocationSize(MoqConnectionPhase _value) {
-    return 4;
+  static int allocationSize(MoqConnectionPhase value) {
+    return value.allocationSize();
   }
 
   static int write(MoqConnectionPhase value, Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
-    return 4;
+    return value.write(buf) - buf.offsetInBytes;
+  }
+}
+
+class ConnectingMoqConnectionPhase extends MoqConnectionPhase {
+  final MoqException? failure;
+  ConnectingMoqConnectionPhase(MoqException? this.failure);
+  ConnectingMoqConnectionPhase._(MoqException? this.failure);
+  static LiftRetVal<ConnectingMoqConnectionPhase> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final failure_lifted = FfiConverterOptionalMoqException.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final failure = failure_lifted.value;
+    new_offset += failure_lifted.bytesRead;
+    return LiftRetVal(ConnectingMoqConnectionPhase._(failure), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterOptionalMoqException.allocationSize(failure) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 1);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterOptionalMoqException.write(
+      failure,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class ConnectedMoqConnectionPhase extends MoqConnectionPhase {
+  final String version;
+  ConnectedMoqConnectionPhase(String this.version);
+  ConnectedMoqConnectionPhase._(String this.version);
+  static LiftRetVal<ConnectedMoqConnectionPhase> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final version_lifted = FfiConverterString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final version = version_lifted.value;
+    new_offset += version_lifted.bytesRead;
+    return LiftRetVal(ConnectedMoqConnectionPhase._(version), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterString.allocationSize(version) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 2);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterString.write(
+      version,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class DisconnectedMoqConnectionPhase extends MoqConnectionPhase {
+  final MoqException? failure;
+  DisconnectedMoqConnectionPhase(MoqException? this.failure);
+  DisconnectedMoqConnectionPhase._(MoqException? this.failure);
+  static LiftRetVal<DisconnectedMoqConnectionPhase> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final failure_lifted = FfiConverterOptionalMoqException.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final failure = failure_lifted.value;
+    new_offset += failure_lifted.bytesRead;
+    return LiftRetVal(DisconnectedMoqConnectionPhase._(failure), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterOptionalMoqException.allocationSize(failure) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 3);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterOptionalMoqException.write(
+      failure,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class MigratingMoqConnectionPhase extends MoqConnectionPhase {
+  final String version;
+  final MoqException? failure;
+  MigratingMoqConnectionPhase({
+    required String this.version,
+    required MoqException? this.failure,
+  });
+  MigratingMoqConnectionPhase._(
+    String this.version,
+    MoqException? this.failure,
+  );
+  static LiftRetVal<MigratingMoqConnectionPhase> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final version_lifted = FfiConverterString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final version = version_lifted.value;
+    new_offset += version_lifted.bytesRead;
+    final failure_lifted = FfiConverterOptionalMoqException.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final failure = failure_lifted.value;
+    new_offset += failure_lifted.bytesRead;
+    return LiftRetVal(
+      MigratingMoqConnectionPhase._(version, failure),
+      new_offset,
+    );
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterString.allocationSize(version) +
+        FfiConverterOptionalMoqException.allocationSize(failure) +
+        4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 4);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterString.write(
+      version,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalMoqException.write(
+      failure,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class ClosedMoqConnectionPhase extends MoqConnectionPhase {
+  final MoqException? failure;
+  ClosedMoqConnectionPhase(MoqException? this.failure);
+  ClosedMoqConnectionPhase._(MoqException? this.failure);
+  static LiftRetVal<ClosedMoqConnectionPhase> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final failure_lifted = FfiConverterOptionalMoqException.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final failure = failure_lifted.value;
+    new_offset += failure_lifted.bytesRead;
+    return LiftRetVal(ClosedMoqConnectionPhase._(failure), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterOptionalMoqException.allocationSize(failure) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 5);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterOptionalMoqException.write(
+      failure,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
   }
 }
 

@@ -513,6 +513,7 @@ fn channel(input: &Input, rate: u32, bus: Layout) -> (Channel, ring::Consumer) {
 			// pays for emergency silence or trimming.
 			pad: true,
 			trim: true,
+			comfort: true,
 		},
 	);
 	cons.stretch(rate);
