@@ -1,7 +1,7 @@
 //! A sans-IO client/server harness for the benchmarks, built from the public API so the suite
 //! compiles on both sides of a rewrite.
 //!
-//! Both sides run the hidden `fuzz` module's plaintext crypto, which skips TLS and leaves packets
+//! Both sides run the `fuzz` module's plaintext crypto, which skips TLS and leaves packets
 //! unprotected, and the congestion window is unlimited, so a benchmark measures protocol CPU
 //! rather than AES or a controller's model. Time is virtual: it only advances to
 //! the next timer once no datagram is in flight. Cases are timed in thread CPU time, so a busy

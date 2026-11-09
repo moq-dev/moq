@@ -1,9 +1,8 @@
-//! A seeded, impaired network path: a rate-limited bottleneck queue, then random loss,
-//! duplication, jitter, and reordering
+//! Test support, enabled by the `sim` feature: a seeded, impaired network path, a
+//! rate-limited bottleneck queue, then random loss, duplication, jitter, and reordering
 //!
-//! Not part of the public API. The crate's own tests drive two endpoints across a [`Link`]
-//! each way, and the `sim` feature exposes it for drivers that run QUIC on kio's
-//! simulator with no sockets.
+//! The crate's own tests drive two endpoints across a [`Link`] each way, and drivers that
+//! run QUIC on kio's simulator with no sockets use it too. It tracks the crate's internals, so it can change in any release.
 
 use rand::{RngExt, rngs::StdRng};
 
@@ -24,6 +23,7 @@ pub struct Bottleneck {
 	timed: bool,
 	/// When the link finishes serving everything queued so far
 	busy_until: Option<Instant>,
+	/// What the queue has dropped, marked, and delayed so far
 	pub stats: QueueStats,
 	/// Each queued packet's arrival and queueing delay, once set to `Some`
 	pub trace: Option<Vec<(Instant, Duration)>>,

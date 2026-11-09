@@ -19,8 +19,8 @@ features = ["async"]
 default = []
 # Generated async wrappers for the poll methods. Enable where you `.await` them.
 async = ["kio/async"]
-# Exposes the merge-patch diff to the codec bench, through the hidden `bench` module. Off by
-# default and hidden from the docs. Not a supported API.
+# Exposes the merge-patch diff to the codec bench, through the `bench` module. Off by
+# default.
 bench = []
 
 [dependencies]

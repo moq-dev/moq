@@ -1,4 +1,4 @@
-//! Tests that need JSON consumers or moq-net's hidden fuzz hooks.
+//! Tests that need JSON consumers or moq-net's `fuzz` module.
 
 mod hop_limit;
 mod ietf_conformance;

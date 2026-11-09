@@ -1,4 +1,5 @@
-//! A network inside the process, for tests on `kio::clock::sim`.
+//! Test support, enabled by the `sim` and `net` features: a network inside the process, for
+//! tests on `kio::clock::sim`.
 //!
 //! A [`Client`](crate::Client) given a [`Network`] opens no sockets: each dial becomes a
 //! [`Dial`] on its [`Dials`], and whoever routes those answers it with an in-memory link.

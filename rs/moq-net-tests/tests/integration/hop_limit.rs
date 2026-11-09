@@ -2,7 +2,7 @@
 //! forwards one it has no room to stamp.
 //!
 //! Only a peer's route arrives with hops, so the routes under test land through the
-//! hidden `fuzz` module as a session lands them.
+//! `fuzz` module as a session lands them.
 
 use crate::support::{
 	Kind, drain,
