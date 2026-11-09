@@ -935,7 +935,8 @@ async fn play_audio<O: Output>(
 			moved |= role.set_target(input.latency + stated.borrow().unwrap_or_default());
 			// Media due further out than the sink holds waits here. The sink then
 			// holds only what was already written, its opening silence included, so
-			// the rest of the lead goes in as silence ahead of the frame.
+			// the rest of the lead goes in as silence ahead of the frame, which already
+			// covers any hole before it.
 			let held_back = wait(&mut catalog, &|| {
 				presentation.due(mapped).and_then(|due| due.checked_sub(cap))
 			})
@@ -960,7 +961,7 @@ async fn play_audio<O: Output>(
 			// Leave normal convergence to the callback. Only an excess at NetEq's
 			// fast threshold (four times target + granularity) is an emergency
 			// re-anchor; a 20 ms trim would compete with every pitch correction.
-			let fit = fit(buffered, target, slack, timing.silence + short, length as u64);
+			let fit = fit(buffered, target, slack, timing.silence.max(short), length as u64);
 
 			// The packet pays for the channel count; the catalog cannot allocate
 			// a duration's worth of silence before any samples arrive.
