@@ -1718,6 +1718,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			node: None,
 			token: None,
 			ietf: false,
 			implementation: None,

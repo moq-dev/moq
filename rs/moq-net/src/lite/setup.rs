@@ -357,12 +357,12 @@ impl<'a> Message<'a> for ReceivedSetup {
 			true => match declared {
 				None => (None, None),
 				Some(id) if id & crate::route::QUALIFIED != 0 => return Err(DecodeError::InvalidValue),
-				Some(id) => (None, Some(std::num::NonZeroU64::new(id).ok_or(DecodeError::InvalidValue)?)),
+				Some(id) => (
+					None,
+					Some(std::num::NonZeroU64::new(id).ok_or(DecodeError::InvalidValue)?),
+				),
 			},
-			false => (
-				declared.and_then(std::num::NonZeroU64::new).map(crate::Hop::from),
-				None,
-			),
+			false => (declared.and_then(std::num::NonZeroU64::new).map(crate::Hop::from), None),
 		};
 		let implementation = if version.has_implementation() {
 			crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?
@@ -1020,10 +1020,15 @@ mod tests {
 			node: std::num::NonZeroU64::new(7),
 			..Default::default()
 		};
-		let got = Setup::decode_slice(&msg.encode_bytes(version).unwrap(), version).unwrap().0;
+		let got = Setup::decode_slice(&msg.encode_bytes(version).unwrap(), version)
+			.unwrap()
+			.0;
 		assert_eq!(got.hop, None);
 		assert_eq!(got.node, msg.node);
-		assert!(msg.encode_bytes(Version::Lite06).is_err(), "only lite-07 carries a Node ID");
+		assert!(
+			msg.encode_bytes(Version::Lite06).is_err(),
+			"only lite-07 carries a Node ID"
+		);
 
 		for id in [0, crate::route::QUALIFIED | 7] {
 			let mut params = Parameters::default();
