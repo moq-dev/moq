@@ -39,7 +39,7 @@ effect.close();    // permanent
 The rules that differ from other signal libraries:
 
 - **Nothing is tracked implicitly.** `effect.get(signal)` subscribes; `signal.peek()` doesn't.
-- **Writes coalesce per microtask** and only notify on a real change (deep for plain objects, identity for class instances).
+- **Writes coalesce per microtask** and only notify on a real change (deep for plain objects, identity for class instances except clock values, which compare by value).
 - **Effects own their resources.** `effect.timer`, `interval`, `animate`, `event`, `spawn`, and `run` (a nested effect) all clean up on rerun or close, so never call `setTimeout` or `addEventListener` inside one directly. Timers take a `Duration` and run on the [`@moq/clock`](./clock) clock, so a `Manual` clock drives them in tests.
 - **Teardown runs last-in, first-out**, like `DisposableStack`.
 - **Race with `race`, not `Promise.race`.** `Promise.race` leaves a listener on every loser, so racing a long-lived promise once per frame grows the heap. `race([...])` and `effect.race(promise)` drop their listeners when they settle.

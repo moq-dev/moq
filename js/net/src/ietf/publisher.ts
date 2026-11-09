@@ -2995,8 +2995,11 @@ function untilGivenUp(group: group.Consumer, signal: AbortSignal): { signal: Abo
 	};
 }
 
-/** The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with. */
-/** @internal Exported for tests. */
+/**
+ * The Track Properties a SUBSCRIBE_OK, TRACK_STATUS, or FETCH_OK answers with.
+ *
+ * @internal Exported for tests.
+ */
 export function trackProperties(info: Info, wanted: boolean): Properties.Properties {
 	// INCLUDE_PROPERTIES=0. The block stays present but empty, which also means the track opts
 	// out of timestamps for this requester.

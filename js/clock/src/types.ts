@@ -365,12 +365,12 @@ export class Wall {
 		wallMillis = (at) => at[VALUE];
 	}
 
-	/** The time `millis` Unix milliseconds after the epoch; throws a `RangeError` before it or past the safe range. */
+	/** The time `millis` Unix milliseconds after the epoch; throws a `RangeError` unless finite and nonnegative. */
 	static unixMillis(millis: number): Wall {
 		return new Wall(checked(millis, "wall time"));
 	}
 
-	/** Unix milliseconds, exact: `since(Wall.UNIX_EPOCH)` goes through nanoseconds, which pass 2^53. */
+	/** The time in Unix milliseconds, possibly fractional, as stored rather than rounded to a nanosecond. */
 	asUnixMillis(): number {
 		return this[VALUE];
 	}
