@@ -506,8 +506,8 @@ mod tests {
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
 			for encoded in encoder.encode_all(&frame).unwrap() {
-			producer.publish(&encoded).unwrap();
-		}
+				producer.publish(&encoded).unwrap();
+			}
 		}
 
 		let origin = produce_origin();

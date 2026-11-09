@@ -711,7 +711,10 @@ mod tests {
 			let mut timestamps = Vec::new();
 			encoder.cut().unwrap();
 			for i in 0..10u64 {
-				for encoded in encoder.encode_all(&gradient_frame(&rgba, w, h, group * 10 + i)).unwrap() {
+				for encoded in encoder
+					.encode_all(&gradient_frame(&rgba, w, h, group * 10 + i))
+					.unwrap()
+				{
 					let frames = decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap();
 					timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros() as u64));
 				}

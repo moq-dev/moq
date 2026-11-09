@@ -366,7 +366,8 @@ impl MediaCodec {
 					let timestamp = Timestamp::from_nanos(nanos.max(0) as u64)?;
 					let (left, top, width, height) = image_size(&image)?;
 					let buffer = HardwareBuffer::new(self.reader.clone(), image, left, top, width, height);
-					self.ready.push_back(Frame::new(Surface::HardwareBuffer(buffer), timestamp));
+					self.ready
+						.push_back(Frame::new(Surface::HardwareBuffer(buffer), timestamp));
 				}
 				// The picture is on its way but not queued yet, so it comes out on the
 				// next round rather than being lost.

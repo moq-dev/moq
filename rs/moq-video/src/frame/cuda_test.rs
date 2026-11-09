@@ -258,7 +258,10 @@ async fn vulkan_cuda_convert_resize_encode() {
 		if idr {
 			assert!(types.contains(&7) && types.contains(&8), "IDR at {i} lacks SPS/PPS");
 		}
-		for out in decoder.decode_all(packets[0].payload.clone(), timestamp, i == 0).unwrap() {
+		for out in decoder
+			.decode_all(packets[0].payload.clone(), timestamp, i == 0)
+			.unwrap()
+		{
 			decoded = Some(out.surface.to_i420().unwrap().into_owned());
 			expected = Some(reference(&gradient(size, Format::Rgba8, i as usize * 4), size, color));
 		}

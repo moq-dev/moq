@@ -836,7 +836,10 @@ mod tests {
 		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())) else {
 			return;
 		};
-		assert!(matches!(encoder.encode_all(&gray_frame(640, 480, 0)), Err(Error::Codec(_))));
+		assert!(matches!(
+			encoder.encode_all(&gray_frame(640, 480, 0)),
+			Err(Error::Codec(_))
+		));
 	}
 
 	/// An encoder told to resize scales a frame at another size itself, so a
@@ -2013,7 +2016,11 @@ mod tests {
 			let mut decoder = crate::decode::Decoder::new(&catalog, &decode).unwrap();
 			let mut decoded = Vec::new();
 			for unit in &encoded {
-				decoded.extend(decoder.decode_all(&unit.payload, unit.timestamp, unit.keyframe).unwrap());
+				decoded.extend(
+					decoder
+						.decode_all(&unit.payload, unit.timestamp, unit.keyframe)
+						.unwrap(),
+				);
 			}
 			decoded.extend(decoder.flush_all().unwrap());
 			let picture = decoded.first().expect("a decoded picture");

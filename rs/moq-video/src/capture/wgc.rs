@@ -330,8 +330,8 @@ mod tests {
 			let (surface, timestamp) = delivery.next(now).unwrap().unwrap();
 			let frame = crate::Frame::new(crate::Surface::I420(surface.clone()), timestamp);
 			for encoded in encoder.encode_all(&frame).unwrap() {
-			producer.publish(&encoded).unwrap();
-		}
+				producer.publish(&encoded).unwrap();
+			}
 			let received = loop {
 				if let moq_mux::container::Read::Frame { frame, .. } = subscriber.read().await.unwrap().unwrap() {
 					break frame;

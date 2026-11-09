@@ -675,7 +675,11 @@ fn video_encoder_without_a_broadcast() {
 	}
 	assert_eq!(moq_video_encoder_flush(encoder), 0);
 	receive(&mut keyframes);
-	assert_eq!(keyframes, [true, false, false, true, false], "keyframes at the start and the cut");
+	assert_eq!(
+		keyframes,
+		[true, false, false, true, false],
+		"keyframes at the start and the cut"
+	);
 	assert_eq!(moq_video_encoder_free(encoder), 0);
 	assert!(moq_video_encoder_free(encoder) < 0);
 }

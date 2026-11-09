@@ -361,7 +361,12 @@ impl Decoder {
 
 	/// Submit one container frame and collect everything it readied.
 	#[cfg(test)]
-	pub(crate) fn decode_all(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
+	pub(crate) fn decode_all(
+		&mut self,
+		payload: &Bytes,
+		timestamp: Timestamp,
+		keyframe: bool,
+	) -> Result<Vec<Frame>, Error> {
 		self.decode(payload, timestamp, keyframe)?;
 		self.receive_all()
 	}
@@ -530,7 +535,11 @@ mod tests {
 			}
 			// Distinct, spread-apart timestamps so a round-tripped value is unambiguous.
 			for encoded in encoder.encode_all(&gray_frame(i)).unwrap() {
-				decoded.extend(decoder.decode_all(encoded.payload, encoded.timestamp, keyframe).unwrap());
+				decoded.extend(
+					decoder
+						.decode_all(encoded.payload, encoded.timestamp, keyframe)
+						.unwrap(),
+				);
 			}
 		}
 		decoded.extend(decoder.flush_all().unwrap());
@@ -623,7 +632,11 @@ mod tests {
 					encoded.payload.starts_with(&[0, 0, 0, 1]) || encoded.payload.starts_with(&[0, 0, 1]),
 					"the test feeds Annex-B, not length-prefixed NALs"
 				);
-				decoded.extend(decoder.decode_all(&encoded.payload, encoded.timestamp, keyframe).unwrap());
+				decoded.extend(
+					decoder
+						.decode_all(&encoded.payload, encoded.timestamp, keyframe)
+						.unwrap(),
+				);
 			}
 		}
 
@@ -850,7 +863,12 @@ mod tests {
 
 		let kind = super::Kind::Named(probe::BUFFERED_NAME.into());
 		let mut decoder = super::Decoder::new(&probe_catalog(), &decode_config(kind)).unwrap();
-		assert!(decoder.decode_all(&keyframe(Color::BT709), first, true).unwrap().is_empty());
+		assert!(
+			decoder
+				.decode_all(&keyframe(Color::BT709), first, true)
+				.unwrap()
+				.is_empty()
+		);
 		let held = decoder.decode_all(&keyframe(Color::BT601), second, true).unwrap();
 		assert_eq!(held.len(), 1);
 		assert_eq!(held[0].timestamp, first);
@@ -1112,7 +1130,11 @@ mod tests {
 				encoder.cut().unwrap();
 			}
 			for encoded in encoder.encode_all(&gray_frame(i)).unwrap() {
-				decoded.extend(decoder.decode_all(encoded.payload, encoded.timestamp, keyframe).unwrap());
+				decoded.extend(
+					decoder
+						.decode_all(encoded.payload, encoded.timestamp, keyframe)
+						.unwrap(),
+				);
 			}
 		}
 
@@ -1278,7 +1300,11 @@ mod tests {
 				encoder.cut().unwrap();
 			}
 			for encoded in encoder.encode_all(&flat_frame(i, level(i), size)).unwrap() {
-				decoded.extend(decoder.decode_all(encoded.payload, encoded.timestamp, keyframe).unwrap());
+				decoded.extend(
+					decoder
+						.decode_all(encoded.payload, encoded.timestamp, keyframe)
+						.unwrap(),
+				);
 			}
 		}
 

@@ -720,7 +720,11 @@ async fn transcode_group_inner(
 }
 
 /// Write everything the encoder has ready to the output group.
-fn drain(output: &mut moq_net::group::Producer, active: &crate::active::Guard, encoder: &mut Encoder) -> Result<(), Error> {
+fn drain(
+	output: &mut moq_net::group::Producer,
+	active: &crate::active::Guard,
+	encoder: &mut Encoder,
+) -> Result<(), Error> {
 	while let Some(encoded) = encoder.receive()? {
 		write(output, active, encoded)?;
 	}
@@ -1152,7 +1156,11 @@ mod tests {
 		}
 
 		let timestamps: Vec<u64> = encoded.iter().map(|e| e.timestamp.as_micros() as u64).collect();
-		assert_eq!(timestamps, [0, 33_333, 66_666], "the old tail comes out ahead of the switch");
+		assert_eq!(
+			timestamps,
+			[0, 33_333, 66_666],
+			"the old tail comes out ahead of the switch"
+		);
 		assert!(encoded[0].keyframe);
 		assert!(encoded[2].keyframe, "the switched frame");
 	}

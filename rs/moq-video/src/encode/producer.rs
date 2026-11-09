@@ -1117,8 +1117,8 @@ mod tests {
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
 			for encoded in encoder.encode_all(&frame).unwrap() {
-			producer.publish(&encoded).unwrap();
-		}
+				producer.publish(&encoded).unwrap();
+			}
 		}
 		for encoded in encoder.flush_all().unwrap() {
 			producer.publish(&encoded).unwrap();
@@ -1195,8 +1195,8 @@ mod tests {
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
 			for encoded in encoder.encode_all(&frame).unwrap() {
-			producer.publish(&encoded).unwrap();
-		}
+				producer.publish(&encoded).unwrap();
+			}
 		}
 		producer.finish().unwrap();
 
@@ -1231,8 +1231,8 @@ mod tests {
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(config.width, config.height)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
 			for encoded in encoder.encode_all(&frame).unwrap() {
-			producer.publish(&encoded).unwrap();
-		}
+				producer.publish(&encoded).unwrap();
+			}
 			capture_stopped(&mut producer).unwrap();
 		}
 

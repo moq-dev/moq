@@ -301,7 +301,8 @@ impl VideoToolbox {
 		let mut frames = std::mem::take(&mut self.sink.frames);
 		let queued = frames.drain(..).try_for_each(|(surface, sample_time)| {
 			let timestamp = self.take_timestamp(sample_time)?;
-			self.ready.push_back(Frame::new(Surface::PixelBuffer(surface), timestamp));
+			self.ready
+				.push_back(Frame::new(Surface::PixelBuffer(surface), timestamp));
 			Ok(())
 		});
 		frames.clear();

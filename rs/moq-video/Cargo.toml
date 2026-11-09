@@ -273,9 +273,9 @@ windows = { version = "0.62", features = [
 cfg_aliases = "0.2.2"
 
 [dev-dependencies]
-criterion = { package = "bench-harness", path = "../bench-harness" }
 # Native Vulkan producer for the opt-in Vulkan/CUDA interop hardware exercise.
 ash = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = { workspace = true }
 # `Manual::install`, a clock the capture-loop tests move while the encoder thread works.
@@ -291,7 +291,7 @@ tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
-name = "codec"
+name = "openh264"
 harness = false
 required-features = ["openh264"]
 

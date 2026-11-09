@@ -6,7 +6,7 @@
 //! Every case submits each frame and receives what it readied before the next, then
 //! flushes and receives the tail, the way a live caller drives a codec.
 //!
-//! Run with `cargo bench -p moq-video --features openh264 --bench codec`. A table comes
+//! Run with `cargo bench -p moq-video --features openh264 --bench openh264`. A table comes
 //! first: allocations and allocated bytes per frame from an untimed pass, counting the
 //! codec's own and every frame's output. Criterion then times each case.
 use std::alloc::{GlobalAlloc, Layout as AllocLayout, System};
