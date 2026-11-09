@@ -134,6 +134,11 @@ export function sleepUntil(at: Instant, options?: {
 
 export function timeout<T>(duration: Nano, operation: PromiseLike<T>): Promise<T>;
 
+export function timeoutSignal(duration: Nano, options?: {
+	ref?: boolean;
+	signal?: AbortSignal;
+}): AbortSignal;
+
 export function wall(): Wall;
 
 export function yieldNow(): Promise<void>;
