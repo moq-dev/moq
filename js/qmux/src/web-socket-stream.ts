@@ -264,7 +264,8 @@ export class WebSocketStream implements WebSocketStreamLike {
 		// Settle every half at once. `error` errors the readable; a clean close ends it.
 		// `closed` resolves only from a close event, which follows any error.
 		const finish = (error: Error, clean: boolean, close?: WebSocketStreamCloseEvent) => {
-			if (state.kind === "live") {
+			const first = state.kind === "live";
+			if (first) {
 				state = { kind: "closed", error };
 				cleanup.abort();
 				opened.reject(error);
@@ -272,9 +273,11 @@ export class WebSocketStream implements WebSocketStreamLike {
 					if (clean) controller?.close();
 					else controller?.error(error);
 				} catch {}
-				writer?.error(error);
 			}
+			// `closed` settles before the writable errors, so a consumer racing both
+			// sees the close code and reason first.
 			if (close) closed.resolve(close);
+			if (first) writer?.error(error);
 		};
 
 		ws.onerror = () => finish(new Error("WebSocket connection error"), false);
