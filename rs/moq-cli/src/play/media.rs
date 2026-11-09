@@ -753,6 +753,26 @@ async fn play_audio<O: Output>(
 		}
 	};
 	let play = async {
+		let mut catalog = stated.clone();
+		// Sleep until `deadline`, recomputing it whenever the shared or the catalog delay
+		// changes, so a change while asleep never leaves audio on a stale deadline.
+		// Reports whether it slept at all.
+		let wait = async |catalog: &mut tokio::sync::watch::Receiver<Option<Duration>>,
+		                  deadline: &(dyn Fn() -> Option<Instant> + Sync)| {
+			let mut slept = false;
+			loop {
+				let seen = schedule.delay();
+				let Some(at) = deadline().filter(|at| *at > Instant::now()) else {
+					return slept;
+				};
+				slept = true;
+				tokio::select! {
+					() = kio::clock::sleep_until(at) => {}
+					_ = role.delay_changed(seen) => {}
+					Ok(()) = catalog.changed() => retarget(*catalog.borrow_and_update()),
+				}
+			}
+		};
 		// Whether a timeline is playing and its end is already declared, and an end
 		// declared past that one, for a later timeline that can only be mapped once it
 		// resumes.
@@ -813,12 +833,11 @@ async fn play_audio<O: Output>(
 							let first = lead(delay);
 							let mapping = role.resume(transition, frame.timestamp, Some(first)).ready().await?;
 							role.apply(transition, mapping);
-							let at = presentation
-								.due(role.map(frame.timestamp)?)
-								.and_then(|at| at.checked_sub(first));
-							if let Some(at) = at {
-								kio::clock::sleep_until(at).await;
-							}
+							let start = role.map(frame.timestamp)?;
+							wait(&mut catalog, &|| {
+								presentation.due(start).and_then(|at| at.checked_sub(first))
+							})
+							.await;
 							ended = false;
 							// An end this frame did not cross ends the timeline it resumes.
 							if let Some(end) = deferred.take()
@@ -895,10 +914,10 @@ async fn play_audio<O: Output>(
 			// spacing instead of fitting that queued burst as if it arrived live.
 			// The lead follows the current target so jitter can still deepen the sink.
 			if sequential {
-				let at = presentation.due(mapped).and_then(|at| at.checked_sub(lead(delay)));
-				if let Some(at) = at {
-					kio::clock::sleep_until(at).await;
-				}
+				wait(&mut catalog, &|| {
+					presentation.due(mapped).and_then(|at| at.checked_sub(lead(delay)))
+				})
+				.await;
 			}
 
 			// A hole in the media is a hole in the audio, not a splice. Handing the next
@@ -914,23 +933,21 @@ async fn play_audio<O: Output>(
 			// clock holds both while the sink keeps sizing for jitter alone.
 			*jitter.lock().unwrap() = Some(input.latency);
 			moved |= role.set_target(input.latency + stated.borrow().unwrap_or_default());
-			// Media due further out than the sink holds waits here, following any
-			// delay change meanwhile.
-			loop {
-				let seen = schedule.delay();
-				// The frame's start, so a delay the sink can hold never waits here.
-				let Some(at) = presentation
-					.due(mapped)
-					.and_then(|due| due.checked_sub(cap))
-					.filter(|at| *at > Instant::now())
-				else {
-					break;
-				};
-				tokio::select! {
-					() = kio::clock::sleep_until(at) => {}
-					_ = role.delay_changed(seen) => {}
-				}
-			}
+			// Media due further out than the sink holds waits here. The sink then
+			// holds only what was already written, its opening silence included, so
+			// the rest of the lead goes in as silence ahead of the frame.
+			let held_back = wait(&mut catalog, &|| {
+				presentation.due(mapped).and_then(|due| due.checked_sub(cap))
+			})
+			.await;
+			let short = presentation
+				.due(mapped)
+				.filter(|_| held_back)
+				.map(|due| {
+					due.saturating_duration_since(Instant::now())
+						.saturating_sub(sink.buffered())
+				})
+				.map_or(0, samples);
 			// The depth that makes this frame's end sound when the shared clock says
 			// it is due, so the callback stretches the speaker onto the clock: behind
 			// it after a stall, it plays faster until it catches up. Floored at what
@@ -943,7 +960,7 @@ async fn play_audio<O: Output>(
 			// Leave normal convergence to the callback. Only an excess at NetEq's
 			// fast threshold (four times target + granularity) is an emergency
 			// re-anchor; a 20 ms trim would compete with every pitch correction.
-			let fit = fit(buffered, target, slack, timing.silence, length as u64);
+			let fit = fit(buffered, target, slack, timing.silence + short, length as u64);
 
 			// The packet pays for the channel count; the catalog cannot allocate
 			// a duration's worth of silence before any samples arrive.
@@ -1148,9 +1165,8 @@ mod tests {
 			speaker: recorder.clone(),
 			presentation: presentation.clone(),
 			playhead: Default::default(),
-			// The fake's opening silence stands in for the padding a real ring adds
-			// once it runs dry, which tops it up to its target before the held write.
-			latency: budget,
+			// What `--delay auto` opens on, well short of the lead the held media needs.
+			latency: AUDIO_BUFFER_MIN,
 			output: recorder.clone(),
 		};
 		let task = tokio::spawn(async move {
@@ -1166,10 +1182,14 @@ mod tests {
 		}
 		producer.finish().unwrap();
 		task.await.unwrap();
-		let first = recorder.played().first().copied().expect("played audio");
+		let first = recorder
+			.played()
+			.into_iter()
+			.find(|part| part.sample == 0.25)
+			.expect("played audio");
 		let due = start + encoder;
 		assert!(
-			first.from.max(due) - first.from.min(due) <= 2 * PACKET_DURATION,
+			first.from.max(due) - first.from.min(due) <= Duration::from_millis(1),
 			"audio sounded at {:?}, due {:?}",
 			first.from - start,
 			encoder
