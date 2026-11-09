@@ -134,14 +134,13 @@ class Client:
         self._state = inner
         try:
             session = Session(await inner.connect(self._url))
+            # The session always exposes both sides, wired from the origins above or
+            # auto-created, so publishing and discovery always have somewhere to go.
+            self._state = _Connected(inner, session, session.publish(), session.consume())
         except BaseException:
             self._state = None
             inner.cancel()
             raise
-
-        # The session always exposes both sides, wired from the origins above or
-        # auto-created, so publishing and discovery always have somewhere to go.
-        self._state = _Connected(inner, session, session.publish(), session.consume())
         return self
 
     async def __aexit__(self, *exc) -> None:
