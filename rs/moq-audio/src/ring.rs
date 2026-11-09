@@ -158,6 +158,8 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		cushioned: 0,
 		comfort: crate::comfort::Comfort::new(output_rate, channels),
 		trim: config.trim,
+		trimmed: 0,
+		accelerated: 0,
 		shared,
 	};
 	(producer, consumer)
@@ -494,6 +496,10 @@ pub(crate) struct Consumer {
 	comfort: crate::comfort::Comfort,
 	/// Trim only after filling three quarters of the current target's headroom.
 	trim: bool,
+	/// Frames [`Read::Trimmed`] discarded, ever.
+	trimmed: u64,
+	/// Frames the stretch removed by accelerating, ever.
+	accelerated: u64,
 	shared: Arc<Shared>,
 }
 
@@ -542,6 +548,7 @@ impl Consumer {
 			if queued >= trim && queued > latency {
 				let frames = queued - latency;
 				self.discard(frames);
+				self.trimmed += frames as u64;
 				return Read::Trimmed { frames };
 			}
 		}
@@ -648,6 +655,7 @@ impl Consumer {
 			debug_assert_eq!(read, frames * channels);
 			self.position = self.position.wrapping_add(frames);
 			stretch.process(frames, buffered, self.shared.target.load(Ordering::Relaxed), enabled);
+			self.accelerated += frames.saturating_sub(stretch.available()) as u64;
 			// The writer still counts the input while it is being analysed.
 			// Publish only the resulting duration change, then the rendered
 			// frames. Moving PCM into staging never makes it disappear.
@@ -660,6 +668,16 @@ impl Consumer {
 	/// Frames of comfort noise read so far, ever.
 	pub(crate) fn comfort(&self) -> u64 {
 		self.comfort.filled()
+	}
+
+	/// Frames discarded to trim the queue back to its latency, ever.
+	pub(crate) fn trimmed(&self) -> u64 {
+		self.trimmed
+	}
+
+	/// Frames of received audio the stretch removed by accelerating, ever.
+	pub(crate) fn accelerated(&self) -> u64 {
+		self.accelerated
 	}
 
 	/// Accept pushes without reading first, as a read would.
@@ -867,6 +885,7 @@ mod tests {
 
 		assert_eq!(prod.push(&vec![0.5; 3800 * STEREO]), Push::Ok);
 		assert_eq!(cons.read(&mut out), Read::Trimmed { frames: 3880 - 480 });
+		assert_eq!(cons.trimmed(), 3880 - 480);
 		assert_eq!(cons.available(), 480);
 	}
 
@@ -1059,6 +1078,8 @@ mod tests {
 			(120..=720).contains(&removed),
 			"accelerate removes one pitch period, removed {removed}"
 		);
+		assert_eq!(cons.accelerated(), removed as u64, "the shed is counted");
+		assert_eq!(cons.trimmed(), 0, "and is no trim");
 		assert_eq!(
 			prod.buffered(),
 			Duration::from_secs_f64(cons.available() as f64 / 48_000.0)

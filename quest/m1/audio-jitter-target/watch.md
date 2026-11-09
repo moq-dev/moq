@@ -140,6 +140,13 @@ the replay numbers that justify it.
 - Accelerate replaces the skip-ahead when the ring sits above the high
   limit. A re-stall remains for a ring that empties despite the stretch, and a
   skip-ahead remains only above what fast accelerate can close.
+- Report what the stretch sheds as `audio.out.stats.accelerated`, beside the
+  `trimmed` the ring already reports, and emit it as the harness `Sample`'s
+  `accelerated`, as `moq play --metrics` does. The analyzer's `skip_aheads`
+  counts an accelerate past 40 ms, so the browser rows then budget
+  `trimmed_ms_per_min` in place of `skip_aheads_per_min` and
+  `discarded_ms_per_min`, as the native rows will (decided 2026-11-09 on
+  [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308#issuecomment-6730322286)).
 - Verification: `relay-mic-rtt40` reaches 0 `player_underruns_per_min` and its
   budget is tightened to the new measurement. No other replay row regresses,
   and the nightly browser rows are re-measured by the budgets note's rule. A

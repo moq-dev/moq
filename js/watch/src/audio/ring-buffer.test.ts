@@ -293,6 +293,7 @@ describe("ring buffer wrapping", () => {
 		// Past the band: drop back to the target, wrapping abs 200-249 onto slots 0-49.
 		write(buffer, 200 as Milli, 50, { channels: 1, value: 4.0 });
 		expect(buffer.length).toBe(100);
+		expect(buffer.trimmed).toBe(100);
 
 		// Read all 100 samples: abs 150-199 = 3.0, abs 200-249 = 4.0.
 		const output2 = read(buffer, 100, 1);

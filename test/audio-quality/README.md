@@ -293,6 +293,14 @@ player's own count, which its stats panel shows, is read alongside:
   accelerates about 8%, so shedding more than about 40 ms reads as one skip or more.
 - `discarded_ms`: the media those skip-aheads jumped over. Audio dropped before it reached the ring
   moves no playhead, so it is not counted.
+- `trimmed_ms`: the player's own count of received audio it discarded unplayed to bound its delay
+  (`audio.out.stats.trimmed`): the browser ring dropping its oldest past the target band, and
+  natively the ring's capacity trim, the incoming excess skipped at the stretch's fast threshold,
+  and writes a full ring refused. Unlike `discarded_ms`, it never counts an accelerate. Media the
+  subscription skipped before decoding, a group past its age budget, is a gap in the timeline, not
+  a trim, in either player.
+- `accelerated_ms`: native only, the received audio `moq play`'s time stretch removed by playing
+  faster. Inaudible by design, so it is reported rather than budgeted.
 - `stalled`: the share of the window the ring spent stalled, refilling rather than playing. A gap
   that starts within 60 ms of a stall is that stall, and is not an underrun.
 - `silence`: the share of rendered quanta under -60 dBFS at the output, whatever the cause.

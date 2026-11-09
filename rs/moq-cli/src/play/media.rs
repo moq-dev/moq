@@ -830,6 +830,10 @@ async fn play_audio<O: Output>(
 			}
 			let skip = fit.skip as usize * stride;
 			let written = sink.write(&frame.data[skip.min(frame.data.len())..])?;
+			let trimmed = fit.skip + written.dropped_sample_frames as u64;
+			if trimmed > 0 {
+				output.send(Event::Trimmed(Duration::from_secs_f64(trimmed as f64 / sample_rate as f64)));
+			}
 			// A dropped write leaves the utterance to start on the next frame the sink accepts.
 			if utterance && written.accepted_sample_frames > 0 {
 				utterance = false;
@@ -1870,7 +1874,7 @@ mod tests {
 			match event {
 				Event::Failed(err) => panic!("playback failed: {err}"),
 				Event::Ended | Event::Finished => panic!("the player stopped following the path"),
-				Event::Wake | Event::Utterance(_) => {}
+				Event::Wake | Event::Utterance(_) | Event::Trimmed(_) => {}
 			}
 		}
 		assert!(!player.is_finished(), "the player stopped following the path");

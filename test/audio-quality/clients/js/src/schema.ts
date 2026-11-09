@@ -109,7 +109,7 @@ export const METRICS = {
 		clock: "viewer",
 		aggregations: ["total", "per_min"],
 		description:
-			"Re-anchors that discarded buffered audio: a forward step in the lag between the viewer clock and the playhead.",
+			"Re-anchors that discarded buffered audio: a forward step in the lag between the viewer clock and the playhead. A time stretch that accelerates far enough counts too.",
 	},
 	discarded_ms: {
 		unit: "ms",
@@ -117,6 +117,19 @@ export const METRICS = {
 		aggregations: ["total", "per_min"],
 		description:
 			"Media time the skip-aheads jumped over without playing. Audio dropped before it reached the ring moves no playhead and is not counted.",
+	},
+	trimmed_ms: {
+		unit: "ms",
+		clock: "media",
+		aggregations: ["total", "per_min"],
+		description:
+			"The player's own count of received audio it discarded unplayed to bound its delay. Unlike `discarded_ms`, a time stretch's accelerate is not in it.",
+	},
+	accelerated_ms: {
+		unit: "ms",
+		clock: "media",
+		aggregations: ["total", "per_min"],
+		description: "The player's own count of received audio its time stretch removed by playing faster. Native only.",
 	},
 	stalled: {
 		unit: "share",
@@ -390,6 +403,14 @@ export type Sample = {
 	 * Unset natively.
 	 */
 	playerUnderruns?: number;
+	/**
+	 * `audio.out.stats.trimmed`, cumulative: buffered audio the player dropped unplayed to bound its
+	 * delay. Natively, the ring's trims, the incoming excess skipped at the stretch's fast threshold,
+	 * and writes a full ring refused.
+	 */
+	trimmed?: Ms;
+	/** Native only: cumulative received audio the time stretch removed by playing faster. */
+	accelerated?: Ms;
 	/** The current connection PROBE round trip. */
 	rtt?: Ms;
 	/** The selected rendition's advertised jitter at this sample. */

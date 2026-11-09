@@ -1,4 +1,4 @@
-import { Micro, type Milli, Second } from "@moq/clock";
+import { Micro, Milli, Second } from "@moq/clock";
 import { ringCapacity } from "./latency";
 
 export class AudioRingBuffer {
@@ -12,6 +12,8 @@ export class AudioRingBuffer {
 	// Held stalled for the part of the target above the floor, until the next floor update.
 	#parked = false;
 	#underruns = 0;
+	// Samples of buffered audio dropped to bound the ring, cumulative.
+	#trimmed = 0;
 
 	// Where the publisher declared its audio ends, as a sample index, until the next reset.
 	#end?: number;
@@ -83,6 +85,11 @@ export class AudioRingBuffer {
 	/** How many times the reader has run dry mid-playback. */
 	get underruns(): number {
 		return this.#underruns;
+	}
+
+	/** Buffered audio the ring dropped unplayed to stay within its bound, cumulative. */
+	get trimmed(): Milli {
+		return Milli.fromSecond((this.#trimmed / this.rate) as Second);
 	}
 
 	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
@@ -198,7 +205,15 @@ export class AudioRingBuffer {
 		const band = playing && (this.#tail === undefined || this.#readIndex >= this.#tail);
 		const limit = band ? Math.min(this.#latencySamples + this.#chunk, this.capacity) : this.capacity;
 		if (end - this.#readIndex > limit) {
-			this.#readIndex = end - (band ? Math.min(this.#latencySamples, this.capacity) : this.capacity);
+			const readIndex = end - (band ? Math.min(this.#latencySamples, this.capacity) : this.capacity);
+			// Only written audio counts: not a discontinuity's gap, nor a declared silence's zeros.
+			const dropped = Math.min(readIndex, this.#writeIndex);
+			let trimmed = Math.max(0, dropped - this.#readIndex);
+			for (const pause of this.#pauses) {
+				trimmed -= Math.max(0, Math.min(pause.end, dropped) - Math.max(pause.start, this.#readIndex));
+			}
+			this.#trimmed += trimmed;
+			this.#readIndex = readIndex;
 			this.#prune();
 		}
 

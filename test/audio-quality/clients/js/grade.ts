@@ -71,6 +71,8 @@ const COLUMNS: [string, string][] = [
 	["gap ms/min", "underrun_ms_per_min"],
 	["skips/min", "skip_aheads_per_min"],
 	["discarded ms/min", "discarded_ms_per_min"],
+	["trimmed ms/min", "trimmed_ms_per_min"],
+	["accelerated ms/min", "accelerated_ms_per_min"],
 	["stalled", "stalled_share"],
 	["silence", "silence_share"],
 	["target p95", "target_ms_p95"],

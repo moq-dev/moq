@@ -203,9 +203,16 @@ export function analyze(input: Input): Summary {
 	if (!lastTap) notes.push("tap: never reported, so underruns and silence are unmeasured");
 
 	// The player's own counter is cumulative, so the window's count is its rise across the window.
-	const counted = window.filter((s) => s.playerUnderruns !== undefined);
-	const playerUnderruns =
-		counted.length > 0 ? (counted.at(-1)?.playerUnderruns ?? 0) - (counted[0]?.playerUnderruns ?? 0) : null;
+	const rise = (read: (s: Sample) => number | undefined) => {
+		const counted = window.flatMap((s) => {
+			const value = read(s);
+			return value === undefined ? [] : [value];
+		});
+		return counted.length > 0 ? (counted.at(-1) ?? 0) - (counted[0] ?? 0) : null;
+	};
+	const playerUnderruns = rise((s) => s.playerUnderruns);
+	const trimmed = rise((s) => s.trimmed);
+	const accelerated = rise((s) => s.accelerated);
 
 	// ── the playhead ────────────────────────────────────────────────────────
 	// The lag drifts when the media timeline does not run at wall rate, a property of the source
@@ -262,6 +269,10 @@ export function analyze(input: Input): Summary {
 		skip_aheads_per_min: perMin(skips.count),
 		discarded_ms_total: round(skips.ms),
 		discarded_ms_per_min: perMin(skips.ms),
+		trimmed_ms_total: round(trimmed),
+		trimmed_ms_per_min: trimmed === null ? null : perMin(trimmed),
+		accelerated_ms_total: round(accelerated),
+		accelerated_ms_per_min: accelerated === null ? null : perMin(accelerated),
 		stalled_share: round(stalledShare, 3),
 		silence_share: round(silence, 3),
 		target_ms_p50: round(percentile(targets, 50)),

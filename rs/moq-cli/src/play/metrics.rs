@@ -8,6 +8,7 @@
 //! `timestamp` the media clock; fields this player cannot read are left out
 //! rather than written as zero. `comfort` and `utterances` have no browser
 //! counterpart: they show how a declared silence played, for push-to-talk.
+//! `accelerated` has none until the browser stretches its audio too.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -48,6 +49,9 @@ struct Sample {
 	quiet: Option<u64>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	comfort: Option<f64>,
+	trimmed: f64,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	accelerated: Option<f64>,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	gaps: Vec<Gap>,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
@@ -90,6 +94,8 @@ struct Totals {
 	quanta: u64,
 	quiet: u64,
 	comfort: Duration,
+	trimmed: Duration,
+	accelerated: Duration,
 }
 
 impl Totals {
@@ -99,6 +105,19 @@ impl Totals {
 			quanta: observation.quanta,
 			quiet: observation.quiet,
 			comfort: observation.comfort,
+			trimmed: observation.trimmed,
+			accelerated: observation.accelerated,
+		}
+	}
+
+	fn add(self, other: Self) -> Self {
+		Self {
+			clock: self.clock + other.clock,
+			quanta: self.quanta + other.quanta,
+			quiet: self.quiet + other.quiet,
+			comfort: self.comfort + other.comfort,
+			trimmed: self.trimmed + other.trimmed,
+			accelerated: self.accelerated + other.accelerated,
 		}
 	}
 }
@@ -113,6 +132,8 @@ pub(super) struct Metrics {
 	base: Totals,
 	/// Utterances since the last sample.
 	utterances: Vec<Utterance>,
+	/// Received audio the player discarded before it reached a speaker's queue.
+	trimmed: Duration,
 	start: Instant,
 	interval: kio::clock::Interval,
 }
@@ -134,6 +155,7 @@ impl Metrics {
 			current: None,
 			base: Totals::default(),
 			utterances: Vec::new(),
+			trimmed: Duration::ZERO,
 			start: Instant::now(),
 			interval,
 		};
@@ -152,6 +174,11 @@ impl Metrics {
 			at: ms(Instant::now().duration_since(self.start)),
 			timestamp: ms(timestamp),
 		});
+	}
+
+	/// Count received audio the player discarded rather than handed to the speaker.
+	pub(super) fn trimmed(&mut self, trimmed: Duration) {
+		self.trimmed += trimmed;
 	}
 
 	/// End the measurement: close any gap still open and write one last sample.
@@ -182,13 +209,7 @@ impl Metrics {
 			if let Some((mut observer, base)) = self.current.take() {
 				let last = observer.read().context("speaker metrics")?;
 				collect(&last, base, &mut gaps, &mut stalls);
-				let totals = Totals::of(&last);
-				self.base = Totals {
-					clock: base.clock + totals.clock,
-					quanta: base.quanta + totals.quanta,
-					quiet: base.quiet + totals.quiet,
-					comfort: base.comfort + totals.comfort,
-				};
+				self.base = base.add(Totals::of(&last));
 			}
 			self.current = Some((next, self.base));
 		}
@@ -201,6 +222,9 @@ impl Metrics {
 			}
 			None => None,
 		};
+		let totals = observation
+			.as_ref()
+			.map_or(self.base, |(o, base)| base.add(Totals::of(o)));
 		// Read straight after the device clock, so the two pair up.
 		let now = Instant::now();
 		let (playhead, target) = {
@@ -210,14 +234,16 @@ impl Metrics {
 
 		let sample = Sample {
 			at: ms(now.duration_since(self.start)),
-			render: observation.as_ref().map(|(o, base)| ms(base.clock + o.clock)),
+			render: observation.as_ref().map(|_| ms(totals.clock)),
 			timestamp: playhead.map(ms),
 			stalled: observation.as_ref().map(|(o, _)| o.stalled),
 			delay: target.map(ms),
 			output_latency: observation.as_ref().and_then(|(o, _)| o.latency).map(ms),
-			quanta: observation.as_ref().map(|(o, base)| base.quanta + o.quanta),
-			quiet: observation.as_ref().map(|(o, base)| base.quiet + o.quiet),
-			comfort: observation.as_ref().map(|(o, base)| ms(base.comfort + o.comfort)),
+			quanta: observation.as_ref().map(|_| totals.quanta),
+			quiet: observation.as_ref().map(|_| totals.quiet),
+			comfort: observation.as_ref().map(|_| ms(totals.comfort)),
+			trimmed: ms(self.trimmed + totals.trimmed),
+			accelerated: observation.as_ref().map(|_| ms(totals.accelerated)),
 			gaps,
 			stalls,
 			utterances: std::mem::take(&mut self.utterances),

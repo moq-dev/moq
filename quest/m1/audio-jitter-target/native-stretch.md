@@ -48,14 +48,14 @@ Remaining verification:
   once their targets settle on the remaining nights too. Keep a failed or
   void row explicit and fix any implementation cause.
 - Re-measure the provisional native budgets from seven scheduled nightly
-  artifacts using `budgets.json`'s rule: worst clean run times 1.25, plus
+  artifacts that carry `moq play`'s own `trimmed` and `accelerated`
+  counters, using `budgets.json`'s rule: worst clean run times 1.25, plus
   its documented native hiccup, rounded to two significant figures. A
-  developer run is not that calibration. The first four nights are graded
-  below; the claim PR's body keeps every native row's metrics, so an
-  expired artifact loses nothing.
-- Settle whether the nightly runner's `just rs bench-playback` is the
-  quiet-host timing run (Waiting). A loaded-host smoke run is not a timing
-  acceptance claim.
+  developer run is not that calibration. Native rows then budget
+  `trimmed_ms_per_min` in place of `skip_aheads_per_min` and
+  `discarded_ms_per_min`, which count the accelerate too; the browser rows
+  keep theirs until [Watch](/quest/m1/audio-jitter-target/watch.md)
+  stretches too.
 
 Graded 2026-11-08: the scheduled Nightlies of 2026-11-05 to 11-08 on
 `main` (42050683248, 42236107954, 42377867523, 42487375545) are the first
@@ -84,6 +84,19 @@ The nightly `rust-test` benchmark job ran `just rs bench-playback` and
 passed on all four nights, alone on a GitHub `ubuntu-24.04-arm` runner. The
 stretch costs 16 to 43% per callback, stable across nights; its worst cell,
 64 sinks at 2048 frames, is 1.02 ms of a 42.7 ms period.
+[moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308)'s body keeps
+every graded native row's metrics.
+
+Decided 2026-11-09 (maintainer, on
+[moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308#issuecomment-6730322286)):
+
+- ✅ `moq play --metrics` reports its own trimmed and accelerated audio,
+  and the calibration budgets trims alone (rejected: keep budgeting
+  accelerates as `discarded_ms`). An accelerate is inaudible, so it is not
+  the discarded audio these rows guard. #8308 adds the counters, and the
+  browser player's `audio.out.stats.trimmed` for parity.
+- ✅ The nightly runner's `bench-playback` counts as the quiet-host run
+  (rejected: naming another host). That settles the timing check.
 
 Decided 2026-11-04 (maintainer, on
 [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856)): accept the
@@ -127,23 +140,13 @@ bench waits below remain.
 
 ## Waiting
 
-- moq-dev/moq: three more scheduled Nightlies with this implementation, due
-  2026-11-09 to 11-11. Find them with `gh run list --workflow nightly.yml
-  --event schedule`, download each with `gh run download <id> -n
-  audio-quality-run` within its 7 days, add its native rows to the claim PR,
-  and apply the calibration rule once seven exist. Never dispatch the
-  nightly by hand.
-- Maintainer: should the calibration budget the accelerate's skip-aheads?
-  Only a maintainer can say whether an inaudible accelerate is the
-  discarded audio these rows guard. Options: keep the metric and let the
-  seven nights size it (recommended: it is literal discarded media, and the
-  ceiling still catches a regression that sheds more); or have `moq play`
-  report its own trimmed and accelerated audio and budget trims alone, a
-  new metric needing seven more nights.
-- Maintainer: is the nightly runner's `bench-playback` (above) the
-  quiet-host run? Only a maintainer can judge that host. Recommended yes: it
-  is the same command, run alone on a dedicated runner, stable across four
-  nights. Otherwise name a quiet host to run it on.
+- moq-dev/moq: seven scheduled Nightlies on a `main` that includes
+  [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308), whose
+  native rows report `trimmed_ms`. Find them with `gh run list --workflow
+  nightly.yml --event schedule`, download each with `gh run download <id>
+  -n audio-quality-run` within its 7 days, keep its native rows in the
+  calibration PR's body, and apply the calibration rule once seven exist.
+  Never dispatch the nightly by hand.
 
 ## Related
 

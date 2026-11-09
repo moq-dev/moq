@@ -270,6 +270,10 @@ export class AudioBuffer {
 	/** How many times the ring has run dry mid-playback, cumulative. */
 	readonly underruns: Getter<number> = this.#underruns;
 
+	readonly #trimmed = new Signal<Milli>(Milli.zero);
+	/** Buffered audio the ring dropped unplayed to stay within its bound, cumulative. */
+	readonly trimmed: Getter<Milli> = this.#trimmed;
+
 	readonly #silent = new Signal<boolean>(false);
 	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
 	readonly silent: Getter<boolean> = this.#silent;
@@ -326,6 +330,7 @@ export class AudioBuffer {
 				this.#timestamp.set(data.timestamp);
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
+				this.#trimmed.set(data.trimmed);
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);

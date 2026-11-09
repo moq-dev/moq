@@ -103,7 +103,14 @@ for (const { row, trace } of rows) {
 	};
 
 	const arrivals = trace.arrivals.map(([at, timestamp, group, duration]) => ({ at, timestamp, group, duration }));
-	const sample = (quantum: { at: number; timestamp: number; stalled: boolean; delay: number; underruns: number }) => {
+	const sample = (quantum: {
+		at: number;
+		timestamp: number;
+		stalled: boolean;
+		delay: number;
+		underruns: number;
+		trimmed: number;
+	}) => {
 		const gaps = ledger.take();
 		samples.push({
 			at: quantum.at,
@@ -112,6 +119,7 @@ for (const { row, trace } of rows) {
 			stalled: quantum.stalled,
 			delay: quantum.delay,
 			playerUnderruns: quantum.underruns,
+			trimmed: quantum.trimmed,
 			quanta: ledger.counts.quanta,
 			quiet: ledger.counts.quiet,
 			gaps: gaps.length > 0 ? gaps : undefined,

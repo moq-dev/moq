@@ -88,6 +88,11 @@ pub(crate) async fn run(
 						metrics.utterance(timestamp);
 					}
 				}
+				Some(Event::Trimmed(trimmed)) => {
+					if let Some(metrics) = &mut metrics {
+						metrics.trimmed(trimmed);
+					}
+				}
 				None => break Err(anyhow::anyhow!("audio playback event channel closed")),
 			},
 			result = &mut media, if !completed => {
