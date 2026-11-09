@@ -21,10 +21,6 @@ pub use fragmenter::*;
 pub use import::*;
 pub use muxer::*;
 
-/// Re-export of the [`mp4_atom`] crate, whose types appear in this module's public API.
-/// A major version bump of `mp4_atom` is a breaking change for moq-mux.
-pub use mp4_atom;
-
 /// The largest text sample [`Import`] holds whole.
 ///
 /// A text sample is rewritten only once its last byte arrives, so a larger one is refused before

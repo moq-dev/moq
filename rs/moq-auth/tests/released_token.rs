@@ -1,105 +1,105 @@
-//! Tokens we sign against the verifier moq-relay 0.14 shipped (`moq-token` 0.7).
+//! The token and grant encodings released verifiers depend on.
 //!
-//! A grant of subtrees is written as legacy `put`/`get` prefixes, which 0.14 reads
-//! with the same scope. Anything a prefix can't say is written as
-//! `publish`/`subscribe`, which 0.14 reads as granting nothing and refuses, rather
-//! than misreading an exact grant as a prefix.
+//! moq-relay 0.14 verifies with `moq-token` 0.7, which reads `put`/`get` prefixes and
+//! refuses `publish`/`subscribe`. Published moq-auth 0.2.1 reads pattern arrays and
+//! refuses a role written as an object. Both are frozen, so each test pins the exact
+//! JSON we write: a subtree grant one they read with the same scope, and anything else
+//! a shape they refuse in full rather than misread. The shapes were checked against
+//! both releases when the crates were dropped as dev-dependencies, since each pulls in
+//! a C crypto library.
 
 use moq_auth::{Algorithm, Claims, Key};
+use serde_json::{Value, json};
 
 fn patterns(texts: &[&str]) -> moq_auth::Patterns {
 	texts.iter().map(|text| text.parse().unwrap()).collect()
 }
 
-/// A key pair both crates hold: ours signs, the released one verifies.
-fn keys() -> (Key, moq_token::Key) {
+/// Sign and verify `claims` with our own key, returning the JSON written on the wire.
+fn wire(claims: &Claims) -> Value {
 	let key = Key::generate(Algorithm::HS256, None).unwrap();
-	let released = moq_token::Key::from_str(&key.to_str().unwrap()).unwrap();
-	(key, released)
+	let verified = key.verify(&key.sign(claims).unwrap()).unwrap();
+	let wire = serde_json::to_value(claims).unwrap();
+	assert_eq!(serde_json::to_value(verified).unwrap(), wire);
+	wire
+}
+
+/// The grant a relay hands an auth callback for `claims`, as JSON.
+fn grant(claims: &Claims) -> Value {
+	let mut grant = moq_auth::Grant::new(claims.publish.clone(), claims.subscribe.clone());
+	(grant.publish_rate, grant.subscribe_rate) = (claims.publish_rate, claims.subscribe_rate);
+	let wire = serde_json::to_value(&grant).unwrap();
+	assert_eq!(serde_json::from_value::<moq_auth::Grant>(wire.clone()).unwrap(), grant);
+	wire
 }
 
 #[test]
-fn subtree_grants_verify_on_0_14_with_the_same_scope() {
-	let (key, released) = keys();
+fn subtree_grants_are_written_as_legacy_prefixes() {
 	let claims = Claims::default()
 		.with_root("room")
 		.with_publish(patterns(&["alice/**"]))
 		.with_subscribe(patterns(&["**"]));
-	let verified = released.verify(&key.sign(&claims).unwrap()).unwrap();
-	assert_eq!(verified.root, "room");
-	assert_eq!(verified.publish, ["alice"]);
-	assert_eq!(verified.subscribe, [""]);
+	assert_eq!(wire(&claims), json!({"root": "room", "put": ["alice"], "get": [""]}));
+
+	let claims = Claims::default()
+		.with_root("room")
+		.with_publish(patterns(&["alice/**", "bob/**"]));
+	assert_eq!(wire(&claims), json!({"root": "room", "put": ["alice", "bob"]}));
+	assert_eq!(grant(&claims), json!({"publish": ["alice/**", "bob/**"]}));
 }
 
 #[test]
-fn exact_grants_are_refused_by_0_14() {
-	let (key, released) = keys();
-	for claims in [
-		Claims::default().with_root("room").with_publish(patterns(&["alice"])),
-		Claims::default().with_subscribe(patterns(&["*/chat"])),
+fn exact_grants_are_written_as_patterns() {
+	for (claims, expected) in [
+		(
+			Claims::default().with_root("room").with_publish(patterns(&["alice"])),
+			json!({"root": "room", "publish": ["alice"]}),
+		),
+		(
+			Claims::default().with_subscribe(patterns(&["*/chat"])),
+			json!({"subscribe": ["*/chat"]}),
+		),
 		// One exact grant moves the whole document to patterns.
-		Claims::default()
-			.with_publish(patterns(&["alice/**"]))
-			.with_subscribe(patterns(&["bob"])),
+		(
+			Claims::default()
+				.with_publish(patterns(&["alice/**"]))
+				.with_subscribe(patterns(&["bob"])),
+			json!({"publish": ["alice/**"], "subscribe": ["bob"]}),
+		),
+		(
+			Claims::default()
+				.with_root("room")
+				.with_publish(patterns(&["alice", "*/chat"])),
+			json!({"root": "room", "publish": ["*/chat", "alice"]}),
+		),
 	] {
-		assert!(released.verify(&key.sign(&claims).unwrap()).is_err(), "{claims:?}");
-	}
-}
-
-#[test]
-fn patterns_keep_the_published_auth_wire_shape() {
-	let key = Key::generate(Algorithm::HS256, None).unwrap();
-	let released = moq_auth_published::Key::from_str(&key.to_str().unwrap()).unwrap();
-	for publish in [["alice/**", "bob/**"], ["alice", "*/chat"]] {
-		let claims = Claims::default().with_root("room").with_publish(patterns(&publish));
-		let ours = key.sign(&claims).unwrap();
-		let verified = released.verify(&ours).unwrap();
-		assert_eq!(
-			serde_json::to_value(&verified).unwrap(),
-			serde_json::to_value(&claims).unwrap()
-		);
-		let theirs = released.sign(&verified).unwrap();
-		assert_eq!(
-			serde_json::to_value(key.verify(&theirs).unwrap()).unwrap(),
-			serde_json::to_value(&claims).unwrap()
-		);
-		let grant = moq_auth::Grant::new(claims.publish, claims.subscribe);
-		let wire = serde_json::to_value(&grant).unwrap();
-		let published: moq_auth_published::Grant = serde_json::from_value(wire.clone()).unwrap();
-		assert_eq!(serde_json::to_value(published).unwrap(), wire);
+		assert_eq!(wire(&claims), expected, "{claims:?}");
+		let mut grant_json = expected;
+		grant_json.as_object_mut().unwrap().remove("root");
+		assert_eq!(grant(&claims), grant_json, "{claims:?}");
 	}
 }
 
 /// A capped role is an object every published verifier refuses in full, so an old
 /// relay never admits the paths while dropping the cap.
 #[test]
-fn capped_roles_are_refused_in_full_by_published_auth() {
-	let key = Key::generate(Algorithm::HS256, None).unwrap();
-	let published = moq_auth_published::Key::from_str(&key.to_str().unwrap()).unwrap();
-	let legacy = moq_token::Key::from_str(&key.to_str().unwrap()).unwrap();
+fn capped_roles_are_written_as_objects() {
 	let rate = moq_auth::Rate::from_bps(8_000_000).unwrap();
-	for publish in [true, false] {
-		// Subtrees alone would be written as legacy prefixes, which a cap must not be.
-		let mut claims = Claims::default()
-			.with_publish(patterns(&["alice/**"]))
-			.with_subscribe(patterns(&["**"]));
-		claims = match publish {
-			true => claims.with_publish_rate(rate),
-			false => claims.with_subscribe_rate(rate),
-		};
-		let token = key.sign(&claims).unwrap();
-		let verified = key.verify(&token).unwrap();
-		assert_eq!(
-			(verified.publish_rate, verified.subscribe_rate),
-			(claims.publish_rate, claims.subscribe_rate)
-		);
-		assert!(published.verify(&token).is_err(), "{claims:?}");
-		assert!(legacy.verify(&token).is_err(), "{claims:?}");
-
-		let mut grant = moq_auth::Grant::new(claims.publish.clone(), claims.subscribe.clone());
-		(grant.publish_rate, grant.subscribe_rate) = (claims.publish_rate, claims.subscribe_rate);
-		let wire = serde_json::to_value(&grant).unwrap();
-		assert_eq!(serde_json::from_value::<moq_auth::Grant>(wire.clone()).unwrap(), grant);
-		assert!(serde_json::from_value::<moq_auth_published::Grant>(wire).is_err());
+	// Subtrees alone would be written as legacy prefixes, which a cap must not be.
+	let claims = Claims::default()
+		.with_publish(patterns(&["alice/**"]))
+		.with_subscribe(patterns(&["**"]));
+	for (claims, expected) in [
+		(
+			claims.clone().with_publish_rate(rate),
+			json!({"publish": {"path": ["alice/**"], "rate": 8_000_000}, "subscribe": ["**"]}),
+		),
+		(
+			claims.with_subscribe_rate(rate),
+			json!({"publish": ["alice/**"], "subscribe": {"path": ["**"], "rate": 8_000_000}}),
+		),
+	] {
+		assert_eq!(wire(&claims), expected, "{claims:?}");
+		assert_eq!(grant(&claims), expected, "{claims:?}");
 	}
 }

@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use moq_net::Version;
 use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthProducer};
-use moq_net::kio;
 use moq_net::reconnect::{Action, Verdict};
 
 use crate::abort::Detached;

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use moq_net::track::{Delay, Info, Range, Subscription};
-use moq_net::{Timescale, Timestamp, Version, cache, kio};
+use moq_net::{Timescale, Timestamp, Version, cache};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);

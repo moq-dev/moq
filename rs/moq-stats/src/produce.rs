@@ -8,7 +8,7 @@ use std::task::{Poll, ready};
 
 use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
-use moq_net::{Path, broadcast, kio, origin, track};
+use moq_net::{Path, broadcast, origin, track};
 use serde::Serialize;
 
 use crate::{

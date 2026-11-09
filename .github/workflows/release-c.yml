@@ -49,7 +49,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
+      # openh264 assembles its x86_64 kernels with NASM, or falls back to slower C.
       - uses: ./.github/actions/nasm
         if: runner.os == 'Windows'
 

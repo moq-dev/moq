@@ -103,7 +103,7 @@ impl Lazy {
 /// Read until the stream syncs, returning the prefixes it then holds.
 async fn synced(announced: &mut origin::Routes) -> Vec<String> {
 	let mut seen = Vec::new();
-	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
+	while !announced.poll_synced(&kio::Waiter::noop()).is_ready() {
 		let event = kio::clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("synced in time")

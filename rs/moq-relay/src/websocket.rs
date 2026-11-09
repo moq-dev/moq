@@ -1,9 +1,9 @@
 use bytes::Bytes;
 use hyper_util::rt::TokioIo;
-use qmux::ws::tokio_tungstenite::WebSocketStream;
-use qmux::ws::tungstenite::{self, protocol::Role};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::{self, protocol::Role};
 
 use axum::{
 	extract::{ConnectInfo, Extension, OriginalUri, Request, State},

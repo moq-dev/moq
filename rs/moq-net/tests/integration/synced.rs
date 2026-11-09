@@ -24,7 +24,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 /// Read events until the consumer syncs, returning the prefixes then announced.
 async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 	let mut seen = BTreeSet::new();
-	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
+	while !announced.poll_synced(&kio::Waiter::noop()).is_ready() {
 		let event = kio::clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("synced in time")
@@ -127,7 +127,7 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	downstream.client_subscribe = Some(subscriber.clone());
 	let _downstream = connect_mock(downstream).await;
 	let mut announced = subscriber.consume().routes();
-	moq_net::kio::wait(|waiter| announced.poll_synced(waiter)).await;
+	kio::wait(|waiter| announced.poll_synced(waiter)).await;
 	assert!(announced.try_next().is_none());
 
 	let upstream = produce_origin(1);
@@ -141,5 +141,5 @@ async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	let _upstream = connect_mock(options).await;
 	let event = announced.next().await.unwrap();
 	assert!(matches!(event, origin::RouteEvent::Start(route) if route.prefix.as_str() == "room/cam"));
-	assert!(announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready());
+	assert!(announced.poll_synced(&kio::Waiter::noop()).is_ready());
 }

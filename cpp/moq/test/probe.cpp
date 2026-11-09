@@ -347,7 +347,7 @@ int main()
 
 	// Cancel a read that has nothing to deliver yet.
 	auto pending = consumer->read_frame();
-	CHECK(pending.wait_for(50ms) == std::future_status::timeout);
+	CHECK(pending.wait_for(0ms) == std::future_status::timeout);
 	CHECK(pending.valid());
 	pending.cancel();
 	CHECK(!pending.valid());
@@ -396,7 +396,7 @@ int main()
 		Latch done;
 		std::optional<moq::Frame> received;
 		auto abandoned = read_one(consumer, received, done);
-		CHECK(!done.wait_for(50ms));
+		CHECK(!done.wait_for(0ms));
 		abandoned.handle.destroy();
 	}
 

@@ -4,7 +4,6 @@
 //! moq-lite-07 alone so the relay receives and stores the DEFLATE slices. Prints the catalog
 //! group's inflated size, which is what a relay serving plain readers must inflate exactly once.
 use anyhow::{Context, ensure};
-use moq_tokio::moq_net;
 use tokio::io::AsyncBufReadExt;
 
 /// Renditions enough for the catalog to compress, and for readers to check what they decoded.

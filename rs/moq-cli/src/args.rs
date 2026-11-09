@@ -347,19 +347,19 @@ impl Invocation {
 				}
 				// A reader refuses the whole catalog over a path it cannot resolve.
 				let broadcast = command.broadcast(&self.moq);
-				let rel = hang::moq_net::path::Relative::new(path)
-					.map_err(|err| anyhow::anyhow!("invalid --echo-path: {err}"))?;
-				let broadcast = hang::moq_net::Path::new(&broadcast)
-					.map_err(|err| anyhow::anyhow!("invalid --broadcast: {err}"))?;
+				let rel =
+					moq_net::path::Relative::new(path).map_err(|err| anyhow::anyhow!("invalid --echo-path: {err}"))?;
+				let broadcast =
+					moq_net::Path::new(&broadcast).map_err(|err| anyhow::anyhow!("invalid --broadcast: {err}"))?;
 				let Some(prefix) = broadcast.try_resolve(&rel) else {
 					anyhow::bail!("--echo-path `{path}` walks above the connection root from broadcast `{broadcast}`");
 				};
 				// An origin refuses a broadcast a pattern could not name, so no viewer could
 				// publish its `<NAME>.echo` beneath this.
-				let feedback = prefix.join(&hang::moq_net::Path::from_static("viewer.echo"));
+				let feedback = prefix.join(&moq_net::Path::from_static("viewer.echo"));
 				let literal = feedback
 					.map_err(anyhow::Error::from)
-					.and_then(|feedback| Ok(hang::moq_net::Pattern::literal(feedback.as_str())?));
+					.and_then(|feedback| Ok(moq_net::Pattern::literal(feedback.as_str())?));
 				if let Err(err) = literal {
 					anyhow::bail!(
 						"--echo-path `{path}` resolves to `{prefix}`, where no viewer can publish its feedback: {err}"
@@ -1868,10 +1868,7 @@ mod tests {
 		};
 		// `viewers` from `<n parts>` resolves to n parts, and the feedback sits one beneath.
 		let deep = |parts: usize| (0..parts).map(|i| format!("p{i}")).collect::<Vec<_>>().join("/");
-		let (fits, too_deep) = (
-			deep(hang::moq_net::Path::MAX_PARTS - 1),
-			deep(hang::moq_net::Path::MAX_PARTS),
-		);
+		let (fits, too_deep) = (deep(moq_net::Path::MAX_PARTS - 1), deep(moq_net::Path::MAX_PARTS));
 		for (broadcast, path) in [
 			("room", "viewers"),
 			("room/live", "../viewers"),
@@ -2084,7 +2081,7 @@ mod tests {
 
 	#[test]
 	fn independent_importers_cannot_select_a_shared_instance() {
-		let instance = hang::moq_net::Instance::random().to_string();
+		let instance = moq_net::Instance::random().to_string();
 		let refused = Invocation::try_parse_from([
 			"moq",
 			"--connect",
@@ -3247,7 +3244,7 @@ mod tests {
 
 		// As a set: a choice list reads ascending, and that ordering is a presentation call.
 		// Every wire code moq-net parses, including the opt-in `-wip` drafts.
-		let mut expected: Vec<&str> = hang::moq_net::Version::ALL
+		let mut expected: Vec<&str> = moq_net::Version::ALL
 			.iter()
 			.map(|version| version.as_str())
 			.collect();

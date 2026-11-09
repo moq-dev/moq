@@ -255,6 +255,11 @@ pub enum Error {
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
 
+	/// [`crate::watch::Files`] could not watch a file's directory. The string has the details.
+	#[cfg(feature = "watch")]
+	#[error("failed to watch files: {0}")]
+	Watch(String),
+
 	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
 	/// such as a rate cap, which qmux cannot pace.
 	#[cfg(feature = "qmux")]

@@ -1036,6 +1036,7 @@ pub struct Forward {
 
 impl Forward {
 	/// Whether any forwarding setting is present.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn configured(&self) -> bool {
 		self.bind.is_some() || self.key.is_some() || self.peers.is_some()
 	}

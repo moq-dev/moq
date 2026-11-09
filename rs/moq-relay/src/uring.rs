@@ -711,7 +711,7 @@ async fn accept(
 				.iter()
 				.find(|offered| serve.alpns.iter().any(|alpn| alpn == *offered))
 				.cloned();
-			let mut response = moq_uring::quic::web::proto::ConnectResponse::OK;
+			let mut response = web_transport_proto::ConnectResponse::OK;
 			if let Some(protocol) = &protocol {
 				response = response.with_protocol(protocol);
 			}
@@ -780,7 +780,7 @@ pub(crate) struct Request {
 	identity: Option<moq_tokio::tls::PeerIdentity>,
 	alpn: Option<String>,
 	/// The request URL, on WebTransport only.
-	url: Option<moq_uring::url::Url>,
+	url: Option<url::Url>,
 	/// The latest caps the lease paced, `None` until it paces any. The lease lives on the
 	/// shared runtime, so a task on this worker applies them to the connection.
 	caps: kio::Producer<Option<auth::Caps>>,

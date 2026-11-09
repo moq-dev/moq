@@ -15,8 +15,8 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use moq_tokio::moq_net::{
-	self, Timestamp, frame,
+use moq_net::{
+	Timestamp, frame,
 	track::{Delay, Subscription},
 };
 use moq_tokio::quic::{driver, web};
@@ -843,7 +843,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	.expect("connect timeout")
 	.expect("request");
 	let session = request
-		.respond(web::proto::ConnectResponse::OK.with_protocol(version.alpn()))
+		.respond(web_transport_proto::ConnectResponse::OK.with_protocol(version.alpn()))
 		.await
 		.expect("respond");
 	let origin = moq_tokio::origin::spawn();
