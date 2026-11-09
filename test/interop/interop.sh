@@ -2360,9 +2360,9 @@ run_matrix() {
     fi
 
     # Each browser's lite-07 session proves its route key when that build can, and the relay
-    # verifies it. A build that cannot prove yet skips, except under CI_STRICT (release PRs), so
-    # the lite-07 cut waits for both browsers. The relay reads no version from the tab beyond
-    # lite-07's, so one pass covers it.
+    # verifies it. A build the lite-07 cut waits on skips, except under CI_STRICT (release PRs);
+    # route-key.ts passes one that connects unproven by design. The relay reads no version from
+    # the tab beyond lite-07's, so one pass covers it.
     if [[ "$VERSION" == auto ]] && needs js; then
         echo "=== browser route key ==="
         local engine status
