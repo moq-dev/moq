@@ -417,6 +417,8 @@ impl Instructions {
 	}
 }
 
+/// A current-thread runtime for one benchmark cell: the sessions a cell leaves behind stop
+/// with its runtime instead of running inside the next cell's setup and samples.
 fn runtime() -> tokio::runtime::Runtime {
 	tokio::runtime::Builder::new_current_thread()
 		.enable_time()
@@ -531,7 +533,10 @@ impl Backend for Model {
 	const PREFIX: &'static str = "";
 
 	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
-		make_origin(id, capacity)
+		// A relay forwards the routes it learns, as moq-relay's cluster does; off, a
+		// moq-lite-07 viewer never learns the publisher's broadcasts.
+		let (origin, pool) = make_origin(id, capacity);
+		(origin.with_proxy(true), pool)
 	}
 
 	fn origin(relay: &Self::Relay) -> &origin::Producer {
@@ -1190,7 +1195,6 @@ impl<B: Backend> Room<B> {
 }
 
 fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
-	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
 	let cpu = if std::env::var_os("SESSION_CPU").is_some() {
 		"_cpu"
@@ -1200,6 +1204,7 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 	let mut group = c.benchmark_group(format!("{}session_delivery_{name}{cpu}", B::PREFIX));
 	for version in VERSIONS {
 		for shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
+			let rt = runtime();
 			// Built on first call: Criterion only calls a routine its filter
 			// selects, and calls it again for every sample.
 			let mut room = None;
@@ -1309,11 +1314,11 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
 		return;
 	}
-	let rt = runtime();
 	let mut group = c.benchmark_group(format!("{}session_range_updates", B::PREFIX));
 	group.sample_size(10);
 	for span in [2u64, 16] {
 		for requests in [1usize, 16] {
+			let rt = runtime();
 			group.throughput(Throughput::Elements(requests as u64));
 			group.bench_function(BenchmarkId::new(format!("groups_{span}"), requests), |b| {
 				let (mut cluster, mut viewers) = rt.block_on(async {
@@ -1407,11 +1412,11 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 }
 
 fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
-	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
 	let mut group = c.benchmark_group(format!("{}session_join_{name}", B::PREFIX));
 	for version in VERSIONS {
 		for shape in &shapes {
+			let rt = runtime();
 			let mut cluster = None;
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
 				let cluster = cluster.get_or_insert_with(|| {
@@ -1573,12 +1578,12 @@ impl<B: Backend> DashRoom<B> {
 }
 
 fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Dash>) {
-	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
 	let mut group = c.benchmark_group(format!("{}session_dash_{name}", B::PREFIX));
 	group.sample_size(10);
 	for version in DASH_VERSIONS {
 		for shape in &shapes {
+			let rt = runtime();
 			let mut room = None;
 			group.throughput(Throughput::Elements(shape.total() as u64));
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
@@ -1597,7 +1602,6 @@ fn allocations<B: Backend>() {
 
 	println!("group::Consumer: {} bytes", size_of::<moq_net::group::Consumer>());
 
-	let rt = runtime();
 	let fanout = Shape {
 		publishers: 1,
 		viewers: 256,
@@ -1609,6 +1613,7 @@ fn allocations<B: Backend>() {
 	let shapes: Vec<_> = groups.chain(datagram_shapes()).collect();
 	for version in VERSIONS {
 		for &shape in shapes.iter().filter(|shape| shape.runs_on(version)) {
+			let rt = runtime();
 			let mut room = rt.block_on(Room::<B>::new(version, shape));
 			room.instructions = Instructions::open();
 			ALLOCATIONS.store(0, Ordering::Relaxed);
@@ -1752,12 +1757,12 @@ impl<B: Backend> ChurnRoom<B> {
 }
 
 fn churn<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Churn>) {
-	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
 	let mut group = c.benchmark_group(format!("{}session_churn_{name}", B::PREFIX));
 	group.throughput(Throughput::Elements(1));
 	for version in CHURN_VERSIONS {
 		for shape in &shapes {
+			let rt = runtime();
 			let mut room = None;
 			group.bench_function(BenchmarkId::from_parameter(shape.id(version)), |b| {
 				let room = room.get_or_insert_with(|| rt.block_on(ChurnRoom::<B>::new(version, *shape)));
