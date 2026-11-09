@@ -932,9 +932,11 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 			};
 			let (sequence, frames) = &groups[t][g];
 			let Some(f) = step else {
-				let mut group = open[t].take().unwrap();
+				let group = open[t].take().unwrap();
 				match kept[t] == frames.len() {
-					true => group.finish().unwrap(),
+					true => {
+						group.finish().unwrap();
+					}
 					false => group.abort(moq_net::Error::Old).unwrap(),
 				}
 				continue;
@@ -952,7 +954,7 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		}
 		assert!(open.iter().all(Option::is_none), "every group ends");
 		for producer in &producers {
-			producer.finish().unwrap();
+			drop(producer.clone().finish().unwrap());
 		}
 		let _keep = catalog;
 		std::future::pending::<()>().await;

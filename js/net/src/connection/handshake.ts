@@ -1,4 +1,4 @@
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -8,7 +8,7 @@ import { acceptBudget, Reader, Stream, UnexpectedEnd, Writer } from "../stream.t
 import * as Extensions from "./extensions.ts";
 
 /** Default bound on a connection attempt, including its SETUP exchange. @internal */
-export const DEFAULT_TIMEOUT = Milli(30_000);
+export const DEFAULT_TIMEOUT = Duration.millis(30_000);
 
 /**
  * Draft-18+ SETUP exchange. Each side opens a uni stream, writes its Setup

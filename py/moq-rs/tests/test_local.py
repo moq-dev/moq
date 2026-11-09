@@ -1559,6 +1559,35 @@ def test_audio_encoder_returns_namespaced_records():
     assert isinstance(finish, moq.audio.EncoderFinish)
 
 
+def test_video_encoder_submits_and_receives():
+    """The codec-only video encoder takes pictures and hands back access units one at a time."""
+    encoder = moq.video.Encoder(
+        moq.video.EncoderInput(
+            format=moq.video.PixelFormat.I420,
+            width=64,
+            height=48,
+            framerate=moq.video.FrameRate(numerator=30, denominator=1),
+        ),
+        moq.video.EncoderOutput(
+            codec=moq.video.Codec.H264,
+            kind=cast(moq.video.EncoderKind, moq.video.EncoderKind.SOFTWARE()),
+        ),
+    )
+    packets: list[moq.video.Packet] = []
+    picture = bytes([0x80]) * (64 * 48 * 3 // 2)
+    for i in range(3):
+        if i == 2:
+            encoder.cut()
+        encoder.encode(moq.video.Frame(timestamp=moq.Timestamp(i * 33_333, 1_000_000), data=picture))
+        while (packet := encoder.receive()) is not None:
+            packets.append(packet)
+    encoder.flush()
+    while (packet := encoder.receive()) is not None:
+        packets.append(packet)
+    assert [packet.keyframe for packet in packets] == [True, False, True]
+    assert all(packet.data for packet in packets)
+
+
 def test_audio_encoder_frame_init_and_bitrate():
     """A frame duration sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
     output = moq.audio.EncoderOutput(

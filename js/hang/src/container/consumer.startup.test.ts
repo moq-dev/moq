@@ -1,5 +1,5 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
-import { Manual, Micro, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
@@ -8,11 +8,11 @@ function setup(maxDelay = 100) {
 	const clock = new Manual();
 	const installed = clock.install();
 	// Drain the in-memory readers and their continuations without moving time.
-	const flush = () => clock.advance(Nano.zero);
+	const flush = () => clock.advance(Duration.ZERO);
 	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("video"),
-		delay: { max: Milli(maxDelay) },
+		delay: { max: Duration.millis(maxDelay) },
 	});
 	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -40,9 +40,9 @@ function setup(maxDelay = 100) {
 // Each item as "gap <µs>+<µs>", "<group>@<µs>" for a frame, or "end <group>@<µs>".
 function items(results: Read[]): string[] {
 	return results.map((read) => {
-		if (read.kind === "gap") return `gap ${read.timestamp}+${read.duration}`;
-		if (read.kind === "end") return `end ${read.group}@${read.end}`;
-		return `${read.group}@${read.frame.timestamp}`;
+		if (read.kind === "gap") return `gap ${read.timestamp.asMicros()}+${read.duration.asMicros()}`;
+		if (read.kind === "end") return `end ${read.group}@${read.end.asMicros()}`;
+		return `${read.group}@${read.frame.timestamp.asMicros()}`;
 	});
 }
 
@@ -52,7 +52,7 @@ function frames(results: Read[]) {
 
 function write(group: Group.Producer, timestamp: number, marker = false) {
 	group.writeFrame({
-		payload: encodeFrame(marker ? new Uint8Array() : new Uint8Array([1]), Micro(timestamp)),
+		payload: encodeFrame(marker ? new Uint8Array() : new Uint8Array([1]), Duration.micros(timestamp)),
 		timestamp: Time.Timestamp.now(),
 	});
 }

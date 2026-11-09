@@ -158,7 +158,7 @@ mod tests {
 				Surface::I420(i420.with_color(color)),
 				moq_net::Timestamp::from_micros(0).unwrap(),
 			);
-			encoder.encode(&frame).unwrap().remove(0).payload
+			encoder.encode_all(&frame).unwrap().remove(0).payload
 		};
 		let both = |first: Color, second: Color| {
 			let mut unit = keyframe(first).to_vec();

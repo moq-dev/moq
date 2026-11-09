@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -43,7 +43,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			if (!active) throw new Error("broadcast did not resolve");
 			const remote = active.track("data");
 			expect((await remote.info()).compression).toBe(downstream === ALPN_07_WIP ? "deflate" : "none");
-			const reader = remote.subscribe({ delay: { max: Milli(1000) } });
+			const reader = remote.subscribe({ delay: { max: Duration.millis(1000) } });
 			const group = track.appendGroup();
 			const payloads = [new Uint8Array(4096).fill(7), new Uint8Array(), new Uint8Array(4096).fill(7)];
 			for (const payload of payloads) group.writeFrame({ payload });
@@ -72,7 +72,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		} finally {
 			for (const origin of [source, destination]) origin.close();
 			for (const peer of peers) peer.abort();
-			await clock.advance(Nano.zero);
+			await clock.advance(Duration.ZERO);
 			installed.close();
 		}
 	});

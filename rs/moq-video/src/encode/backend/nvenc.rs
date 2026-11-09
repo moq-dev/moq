@@ -32,6 +32,7 @@
 //! rung of a rendition ladder can be too small for NVENC even though the GPU
 //! conversion and resize handle it.
 
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -85,6 +86,7 @@ pub(crate) struct Nvenc {
 	codec: Codec,
 	size: crate::Size,
 	converter: Option<cuda::Converter>,
+	ready: VecDeque<Encoded>,
 }
 
 impl Nvenc {
@@ -235,6 +237,7 @@ impl Nvenc {
 				.map(|_| cuda::Converter::new(cuda.ordinal(), config.resolved_color(), NonZeroUsize::new(8).unwrap()))
 				.transpose()?,
 			size: config.size(),
+			ready: VecDeque::new(),
 			_cuda: cuda,
 			timestamp: 0,
 			codec: config.codec,
@@ -243,7 +246,7 @@ impl Nvenc {
 }
 
 impl Backend for Nvenc {
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		// The published image shares its full-size conversion across renditions.
 		// Smaller encoders resize that NV12 buffer, so capture converts only once
 		// for each declared color space and never downloads its pixels.
@@ -355,23 +358,22 @@ impl Backend for Nvenc {
 		};
 
 		// The bitstream lock above is synchronous, so this is that frame's output.
-		Ok(if data.is_empty() {
-			Vec::new()
-		} else {
+		if !data.is_empty() {
 			// moq-nvenc hands back only the bytes, not the picture type it locked them with.
 			let keyframe = keyframe_annexb(self.codec, &data);
-			vec![Encoded::new(Bytes::from(data), frame.timestamp, keyframe)]
-		})
+			self.ready
+				.push_back(Encoded::new(Bytes::from(data), frame.timestamp, keyframe));
+		}
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-		// Each encode locks its own output synchronously, so nothing is buffered.
-		Ok(Vec::new())
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
 	}
 
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn flush(&mut self) -> Result<(), Error> {
 		// Each encode locks its own output synchronously, so nothing is buffered.
-		Ok(Vec::new())
+		Ok(())
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
@@ -585,7 +587,7 @@ mod tests {
 			if i == 0 || i == 5 {
 				encoder.cut().unwrap();
 			}
-			let encoded = encoder.encode(&gray_frame(&frame, i.into())).unwrap();
+			let encoded = encoder.encode_all(&gray_frame(&frame, i.into())).unwrap();
 			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
 			if i == 0 {
 				first = joined;
@@ -634,7 +636,7 @@ mod tests {
 
 				let frame = gray_rgba(320, 240);
 				for i in 0..5 {
-					let encoded = encoder.encode(&gray_frame(&frame, i)).unwrap();
+					let encoded = encoder.encode_all(&gray_frame(&frame, i)).unwrap();
 					assert_eq!(encoded.len(), 1, "{codec:?} {preset:?} held frame {i}");
 				}
 			}
@@ -657,7 +659,7 @@ mod tests {
 		};
 
 		let frame = gray_rgba(320, 240);
-		assert!(!encoder.encode(&gray_frame(&frame, 0)).unwrap().is_empty());
+		assert!(!encoder.encode_all(&gray_frame(&frame, 0)).unwrap().is_empty());
 		encoder
 			.set_bitrate(moq_net::bandwidth::Rate::ZERO)
 			.expect_err("a zero rate must be refused");
@@ -666,7 +668,7 @@ mod tests {
 			.set_bitrate(moq_net::bandwidth::Rate::from_bps(500_000))
 			.unwrap();
 		for i in 1..5 {
-			assert!(!encoder.encode(&gray_frame(&frame, i)).unwrap().is_empty());
+			assert!(!encoder.encode_all(&gray_frame(&frame, i)).unwrap().is_empty());
 		}
 	}
 
@@ -697,7 +699,7 @@ mod tests {
 			if i == 0 || i == 5 {
 				encoder.cut().unwrap();
 			}
-			let encoded = encoder.encode(&gray_frame(&frame, i.into())).unwrap();
+			let encoded = encoder.encode_all(&gray_frame(&frame, i.into())).unwrap();
 			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
 			if i == 0 {
 				first = joined;
@@ -741,7 +743,7 @@ mod tests {
 		// Never force a keyframe (only frame 0 would be); the backend must insert
 		// IDRs at frames 3 and 6 on its own.
 		for i in 0..7u32 {
-			let encoded = encoder.encode(&gray_frame(&frame, i.into())).unwrap();
+			let encoded = encoder.encode_all(&gray_frame(&frame, i.into())).unwrap();
 			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
 			let types = h264_nal_types(&joined);
 			if types.contains(&5) {
@@ -809,8 +811,8 @@ mod tests {
 			}
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
-				for out in decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap() {
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				for out in decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap() {
 					decoded = Some(out.surface.to_i420().unwrap().into_owned());
 				}
 			}
@@ -864,7 +866,7 @@ mod tests {
 			let rgba = textured_rgba(w, h, (i * 4) as usize);
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
+			for encoded in encoder.encode_all(&frame).unwrap() {
 				// Skip the first GOP: rate control is still converging there.
 				if i < 30 {
 					continue;

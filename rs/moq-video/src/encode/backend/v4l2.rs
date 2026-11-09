@@ -119,6 +119,8 @@ pub(crate) struct V4l2 {
 	size: Size,
 	/// Frames the driver has taken and not yet answered with an access unit.
 	pending: Pending,
+	/// Access units dequeued and not yet received.
+	ready: VecDeque<Encoded>,
 	phase: Phase,
 	/// Whether the driver takes `VIDIOC_ENCODER_CMD`. Cleared the first time it
 	/// refuses one, after which a flush can only take what the codec has already
@@ -275,6 +277,7 @@ impl V4l2 {
 			planes,
 			size,
 			pending: Pending::default(),
+			ready: VecDeque::new(),
 			phase: Phase::Stopped,
 			drainable: true,
 			cuts,
@@ -365,12 +368,12 @@ impl V4l2 {
 		Ok(())
 	}
 
-	/// Collect every access unit the driver has finished, re-queueing each coded
+	/// Queue every access unit the driver has finished, re-queueing each coded
 	/// buffer as it is emptied.
 	///
 	/// Returns whether the driver marked the end of a sequence, which is how a
 	/// drain knows it is over.
-	fn drain(&mut self, out: &mut Vec<Encoded>) -> Result<bool, Error> {
+	fn drain(&mut self) -> Result<bool, Error> {
 		self.reclaim()?;
 
 		loop {
@@ -406,7 +409,7 @@ impl V4l2 {
 				// whatever went in last, and the timestamp is that frame's own.
 				// Read from the bitstream: drivers set `V4L2_BUF_FLAG_KEYFRAME` unevenly.
 				let keyframe = keyframe_annexb(Codec::H264, &payload);
-				out.push(Encoded::new(payload, timestamp, keyframe));
+				self.ready.push_back(Encoded::new(payload, timestamp, keyframe));
 			}
 
 			if buffer.last() {
@@ -428,13 +431,13 @@ impl V4l2 {
 	/// the stream stopped, and a flush falls on every group boundary, so the first
 	/// boundary would time out and take the broadcast with it. bcm2835-codec
 	/// happens to be one-in-one-out, so a Pi would not have shown this.
-	fn drain_tail(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn drain_tail(&mut self) -> Result<(), Error> {
 		match self.phase {
 			Phase::Failed => return Err(failed()),
 			// The sequence needs both queues streaming. `VIDIOC_ENCODER_CMD`
 			// succeeds without starting one otherwise, and nothing is held
 			// before a frame goes in anyway.
-			Phase::Stopped => return Ok(Vec::new()),
+			Phase::Stopped => return Ok(()),
 			Phase::Streaming => {}
 		}
 
@@ -460,7 +463,7 @@ impl V4l2 {
 
 	/// Run the rest of the drain sequence, up to and including the restart, or
 	/// stop both queues when it fails.
-	fn drain_to_last(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn drain_to_last(&mut self) -> Result<(), Error> {
 		let drained = self.resume_after_last();
 		if drained.is_err() {
 			self.stop()?;
@@ -468,17 +471,16 @@ impl V4l2 {
 		drained
 	}
 
-	fn resume_after_last(&mut self) -> Result<Vec<Encoded>, Error> {
-		let mut out = Vec::new();
+	fn resume_after_last(&mut self) -> Result<(), Error> {
 		let mut deadline = Instant::now() + FLUSH_TIMEOUT;
 		loop {
-			let before = out.len();
-			if self.drain(&mut out)? {
+			let before = self.ready.len();
+			if self.drain()? {
 				break;
 			}
 			// Progress earns more time, so a slow encoder finishes a long tail while
 			// a stalled one still gives up after `FLUSH_TIMEOUT` of silence.
-			if out.len() > before {
+			if self.ready.len() > before {
 				deadline = Instant::now() + FLUSH_TIMEOUT;
 			} else if Instant::now() >= deadline {
 				return Err(Error::codec(anyhow::anyhow!(
@@ -504,7 +506,7 @@ impl V4l2 {
 		// A stopped encoder accepts OUTPUT buffers but does not process them, so
 		// without this the frames after the boundary would sit in the driver.
 		self.device.encoder_cmd(V4L2_ENC_CMD_START)?;
-		Ok(out)
+		Ok(())
 	}
 
 	/// Take what the codec has already finished, for a driver that cannot be told
@@ -512,16 +514,15 @@ impl V4l2 {
 	///
 	/// Only a drain where the encoder holds nothing it has not been asked for,
 	/// which is what an empty [`Pending`] says here.
-	fn wait_out(&mut self) -> Result<Vec<Encoded>, Error> {
-		let mut out = Vec::new();
+	fn wait_out(&mut self) -> Result<(), Error> {
 		let mut deadline = Instant::now() + FLUSH_TIMEOUT;
 		loop {
-			let before = out.len();
-			self.drain(&mut out)?;
+			let before = self.ready.len();
+			self.drain()?;
 			if self.pending.is_empty() {
-				return Ok(out);
+				return Ok(());
 			}
-			if out.len() > before {
+			if self.ready.len() > before {
 				deadline = Instant::now() + FLUSH_TIMEOUT;
 			} else if Instant::now() >= deadline {
 				return Err(Error::codec(anyhow::anyhow!(
@@ -535,7 +536,7 @@ impl V4l2 {
 }
 
 impl Backend for V4l2 {
-	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
 		if self.phase == Phase::Failed {
 			return Err(failed());
 		}
@@ -578,16 +579,15 @@ impl Backend for V4l2 {
 			self.start()?;
 		}
 
-		let mut out = Vec::new();
-		self.drain(&mut out)?;
-		Ok(out)
+		self.drain()?;
+		Ok(())
 	}
 
-	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-		self.drain_tail()
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
 	}
 
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+	fn flush(&mut self) -> Result<(), Error> {
 		self.drain_tail()
 	}
 

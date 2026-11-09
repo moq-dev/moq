@@ -102,10 +102,17 @@ async fn next_active(announced: &mut moq_net::origin::Routes) -> String {
 			.expect("announcement timeout")
 			.expect("origin closed")
 		{
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route) => return route.prefix.to_string(),
-			moq_net::origin::RouteEvent::End(_) => {}
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => return route.prefix.to_string(),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End,
+				..
+			} => {}
 		}
 	}
 }

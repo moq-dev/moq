@@ -18,10 +18,10 @@
  *
  * @module
  */
-import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
+import { Duration, type Instant, now, sleepUntil } from "@moq/clock";
 
 /** How long a group nobody reads or writes stays cached by default, matching Rust `cache::DEFAULT_EXPIRY`. */
-export const DEFAULT_EXPIRY = Milli(30_000);
+export const DEFAULT_EXPIRY = Duration.millis(30_000);
 
 // Bun 1.4's heap (bun:jsc `heapStats`) grows about 2.9 KB per cached single-frame group with no
 // subscriber, and 3.9 KB more per subscriber, whose sink holds its own mirror of every cached
@@ -32,7 +32,7 @@ export const ENTRY_OVERHEAD = 3 * 1024;
 export const MIRROR_OVERHEAD = 4 * 1024;
 
 // The coarse clock behind access stamps, as Rust's: the expiry window rounds up to it.
-const TICK = Nano.fromMilli(Milli(100));
+const TICK = Duration.millis(100);
 
 // Sub-tick boosts break ties within one tick: a write outranks a merely inserted group, and a
 // read outranks both, so a same-tick access still reads as newer than the mean of weaker ones.
@@ -59,7 +59,7 @@ export interface Config {
 	/** The byte target usage converges toward; unbounded when omitted. */
 	capacity?: number;
 	/** How long a group nobody reads or writes stays cached; never reclaimed for idleness when omitted. */
-	expiry?: Milli;
+	expiry?: Duration;
 }
 
 /**
@@ -85,7 +85,7 @@ export class Pool {
 
 	constructor(config: Config = {}) {
 		this.#capacity = config.capacity ?? Number.POSITIVE_INFINITY;
-		if (config.expiry !== undefined) this.#expiry = Math.max(1, Math.ceil(Nano.fromMilli(config.expiry) / TICK));
+		if (config.expiry !== undefined) this.#expiry = Math.max(1, Math.ceil(config.expiry.divDuration(TICK)));
 	}
 
 	/** The byte target, or undefined when unbounded. */
@@ -99,8 +99,8 @@ export class Pool {
 	}
 
 	/** The idle window, rounded up to the pool's 100 ms tick, or undefined when idle groups stay. */
-	get expiry(): Milli | undefined {
-		return this.#expiry === undefined ? undefined : Nano.toMilli(Nano(this.#expiry * TICK));
+	get expiry(): Duration | undefined {
+		return this.#expiry === undefined ? undefined : TICK.mul(this.#expiry);
 	}
 
 	/** Change the byte target; undefined makes it unbounded. Writes pay a shrink down as they go. */
@@ -112,7 +112,7 @@ export class Pool {
 	now(): number {
 		const at = now();
 		this.#epoch ??= at;
-		this.#tick = Math.max(this.#tick, Math.floor((at - this.#epoch) / TICK));
+		this.#tick = Math.max(this.#tick, Math.floor(at.since(this.#epoch).divDuration(TICK)));
 		return this.#tick;
 	}
 
@@ -191,7 +191,7 @@ export class Pool {
 		if (this.#sweep !== undefined || this.#expiry === undefined || this.#tracks.size === 0) return;
 		const sweep = new AbortController();
 		this.#sweep = sweep;
-		const at = Instant.add(now(), Nano((this.#expiry * TICK) / 2));
+		const at = now().add(TICK.mul(this.#expiry / 2));
 		void sleepUntil(at, { signal: sweep.signal, ref: false }).then(
 			() => {
 				if (this.#sweep !== sweep) return;

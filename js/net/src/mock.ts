@@ -4,7 +4,7 @@
  * Creates paired client/server transports connected by in-memory streams.
  */
 
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";
@@ -28,14 +28,14 @@ export function manual(): Manual & Disposable {
 export async function settlesWithin(
 	work: PromiseLike<unknown>,
 	clock: Manual,
-	duration = Milli.zero,
+	duration = Duration.ZERO,
 ): Promise<boolean> {
 	let settled = false;
 	const done = () => {
 		settled = true;
 	};
 	Promise.resolve(work).then(done, done);
-	await clock.advance(Nano.fromMilli(duration));
+	await clock.advance(duration);
 	return settled;
 }
 

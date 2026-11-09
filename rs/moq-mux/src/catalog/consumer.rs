@@ -146,7 +146,7 @@ mod tests {
 				.unwrap();
 			let mut consumer = Consumer::<()>::new(&broadcast.consume(), format).await.unwrap();
 			assert!(track.subscription().is_some(), "{format:?}: subscribed");
-			track.finish().unwrap();
+			drop(track.clone().finish().unwrap());
 			assert!(consumer.next().await.unwrap().is_none());
 			assert!(
 				track.subscription().is_none(),
