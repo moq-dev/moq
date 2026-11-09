@@ -273,6 +273,7 @@ windows = { version = "0.62", features = [
 cfg_aliases = "0.2.2"
 
 [dev-dependencies]
+criterion = { package = "bench-harness", path = "../bench-harness" }
 # Native Vulkan producer for the opt-in Vulkan/CUDA interop hardware exercise.
 ash = { workspace = true }
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
@@ -288,6 +289,11 @@ pollster = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
+
+[[bench]]
+name = "codec"
+harness = false
+required-features = ["openh264"]
 
 [lints]
 workspace = true

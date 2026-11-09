@@ -56,6 +56,7 @@
 //! `moq-vaapi` keeps the surface alongside the descriptor and reads it back
 //! through `vaDeriveImage` rather than trying to read a tiled buffer as rows.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -72,6 +73,7 @@ pub(crate) const NAME: &str = "vaapi";
 pub(crate) struct Vaapi {
 	decoder: Decoder,
 	export: Export,
+	ready: VecDeque<Frame>,
 }
 
 /// Whether pictures are handed out as DMA-BUFs rather than downloaded.
@@ -148,12 +150,16 @@ impl Vaapi {
 			exporting,
 			"opened decoder"
 		);
-		Ok(Box::new(Self { decoder, export }))
+		Ok(Box::new(Self {
+			decoder,
+			export,
+			ready: VecDeque::new(),
+		}))
 	}
 
 	/// Decodes one access unit into GPU-resident frames, or `None` once the
 	/// driver has shown it will not export.
-	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Result<Vec<Frame>, Error>> {
+	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Result<(), Error>> {
 		if self.export == Export::Downloading {
 			return None;
 		}
@@ -164,7 +170,7 @@ impl Vaapi {
 
 	/// The same for the stream's tail, so a track that ends does not switch to
 	/// downloading for its last few pictures.
-	fn flush_shared(&mut self) -> Option<Result<Vec<Frame>, Error>> {
+	fn flush_shared(&mut self) -> Option<Result<(), Error>> {
 		if self.export == Export::Downloading {
 			return None;
 		}
@@ -173,8 +179,8 @@ impl Vaapi {
 		Some(self.exported(exported))
 	}
 
-	/// Hands back the pictures a shared decode produced, and decides what a
-	/// failure to produce any means.
+	/// Queues the pictures a shared decode produced, and decides what a failure
+	/// to produce any means.
 	///
 	/// A driver can decode without being able to share what it decoded, and
 	/// native output permits CPU pictures, so until one picture
@@ -187,7 +193,7 @@ impl Vaapi {
 	/// is a decode error rather than a verdict on the driver. Reporting it as
 	/// one keeps a corrupt access unit from silently costing the rest of the
 	/// session its fast path.
-	fn exported(&mut self, exported: anyhow::Result<Vec<Frame>>) -> Result<Vec<Frame>, Error> {
+	fn exported(&mut self, exported: anyhow::Result<Vec<Frame>>) -> Result<(), Error> {
 		match exported {
 			Ok(frames) => {
 				// An access unit whose pictures are all still in the DPB proves
@@ -195,7 +201,8 @@ impl Vaapi {
 				if !frames.is_empty() {
 					self.export = Export::Exporting;
 				}
-				Ok(frames)
+				self.ready.extend(frames);
+				Ok(())
 			}
 			Err(err) if self.export == Export::Exporting => {
 				Err(Error::codec(err.context("VAAPI decode to a shared surface")))
@@ -203,14 +210,14 @@ impl Vaapi {
 			Err(err) => {
 				tracing::warn!(%err, "VAAPI cannot hand out decoded surfaces; downloading them instead");
 				self.export = Export::Downloading;
-				Ok(Vec::new())
+				Ok(())
 			}
 		}
 	}
 }
 
 impl Backend for Vaapi {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		// The timestamp rides through the decoder with the picture, so it
 		// survives the DPB reordering a stream with B-frames goes through.
 		let timestamp = timestamp.as_micros() as u64;
@@ -223,11 +230,15 @@ impl Backend for Vaapi {
 			.decode(&access_unit, timestamp)
 			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
 
-		convert(decoded)
+		self.convert(decoded)
 	}
 
-	/// Return the tail held by the DPB at the end of the stream.
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	/// Queue the tail held by the DPB at the end of the stream.
+	fn flush(&mut self) -> Result<(), Error> {
 		if let Some(frames) = self.flush_shared() {
 			return frames;
 		}
@@ -237,7 +248,7 @@ impl Backend for Vaapi {
 			.flush()
 			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
 
-		convert(decoded)
+		self.convert(decoded)
 	}
 
 	fn name(&self) -> &str {
@@ -285,17 +296,17 @@ fn offered(codec: moq_vaapi::Codec, named: Option<&Path>, profile: VAProfile::Ty
 	Some(false)
 }
 
-/// Deinterleave each decoded picture's NV12 into the CPU I420 the rest of the
-/// crate speaks, keeping the timestamp the picture was coded with.
-fn convert(decoded: Vec<moq_vaapi::decode::Frame>) -> Result<Vec<Frame>, Error> {
-	decoded
-		.into_iter()
-		.map(|frame| {
+impl Vaapi {
+	/// Deinterleave each decoded picture's NV12 into the CPU I420 the rest of the
+	/// crate speaks, keeping the timestamp the picture was coded with.
+	fn convert(&mut self, decoded: Vec<moq_vaapi::decode::Frame>) -> Result<(), Error> {
+		for frame in decoded {
 			let i420 = I420::from_nv12(&frame.data, crate::Size::new(frame.width, frame.height))?;
 			let timestamp = Timestamp::from_micros(frame.timestamp).unwrap_or(Timestamp::ZERO);
-			Ok(Frame::new(Surface::I420(i420), timestamp))
-		})
-		.collect()
+			self.ready.push_back(Frame::new(Surface::I420(i420), timestamp));
+		}
+		Ok(())
+	}
 }
 
 /// Wrap each exported picture as the DMA-BUF surface a renderer imports, keeping
@@ -415,8 +426,8 @@ mod tests {
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
-				decoded.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				decoded.extend(decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap());
 			}
 		}
 
@@ -470,10 +481,10 @@ mod tests {
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
+			for encoded in encoder.encode_all(&frame).unwrap() {
 				let (payload, timestamp) = (encoded.payload, encoded.timestamp);
-				exported.extend(exporting.decode(payload.clone(), timestamp, i == 0).unwrap());
-				downloaded.extend(downloading.decode(payload, timestamp, i == 0).unwrap());
+				exported.extend(exporting.decode_all(payload.clone(), timestamp, i == 0).unwrap());
+				downloaded.extend(downloading.decode_all(payload, timestamp, i == 0).unwrap());
 			}
 		}
 		assert!(!exported.is_empty(), "VAAPI produced no frames");
@@ -558,8 +569,8 @@ mod tests {
 			}
 			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode(&frame).unwrap() {
-				streamed.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				streamed.extend(decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap());
 			}
 		}
 		assert!(
@@ -567,7 +578,7 @@ mod tests {
 			"the DPB held nothing back, so this test proves nothing"
 		);
 
-		let flushed = decoder.flush().unwrap();
+		let flushed = decoder.flush_all().unwrap();
 		let timestamps: Vec<u128> = streamed
 			.iter()
 			.chain(&flushed)
@@ -578,6 +589,6 @@ mod tests {
 
 		// A second flush has nothing left to hand back, so the drain is idempotent
 		// and a caller that flushes twice does not see a picture twice.
-		assert!(decoder.flush().unwrap().is_empty());
+		assert!(decoder.flush_all().unwrap().is_empty());
 	}
 }

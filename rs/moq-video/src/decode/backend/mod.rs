@@ -130,24 +130,54 @@ impl From<Codec> for Stream {
 	}
 }
 
-/// An opened decoder. Feed it prepared access units in decode order; get back
-/// zero or more decoded frames (zero while the decoder is still buffering, e.g.
-/// before the first keyframe's parameter sets).
+/// An opened decoder. Submit prepared access units in decode order, then
+/// receive zero or more decoded frames (zero while the decoder is still
+/// buffering, e.g. before the first keyframe's parameter sets).
+///
+/// A backend that readies pictures synchronously holds them in a reused queue,
+/// so no call allocates to hand them back.
 pub(crate) trait Backend {
-	/// Decode one access unit stamped with its presentation `timestamp`.
+	/// Submit one access unit stamped with its presentation `timestamp`.
 	/// `keyframe` marks a random-access frame. Takes an owned [`Bytes`] so a
 	/// backend can split codec units without copying.
 	/// Backends that decode one-in one-out echo the input timestamp; NVDEC and
 	/// MediaCodec thread timestamps through the codec, so they survive decoder
 	/// delay and frame reordering.
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error>;
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<(), Error>;
 
-	/// Return the pictures the codec still holds once the stream has ended.
+	/// Pop the oldest ready picture, or `None` while the codec holds the rest.
+	fn receive(&mut self) -> Result<Option<Frame>, Error>;
+
+	/// Mark the end of input, so [`receive`](Self::receive) returns every picture
+	/// the codec still holds. The next access unit submitted starts new input.
 	///
-	/// Backends configured for zero delay return no frames. A backend that
-	/// reorders pictures overrides this so the end of a track does not drop its
-	/// buffered tail.
-	fn flush(&mut self) -> Result<Vec<Frame>, Error>;
+	/// Backends configured for zero delay hold nothing. A backend that reorders
+	/// pictures queues its tail here so the end of a track does not drop it.
+	fn flush(&mut self) -> Result<(), Error>;
+
+	/// Submit one access unit and collect everything it readied.
+	#[cfg(test)]
+	fn decode_all(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error> {
+		self.decode(access_unit, timestamp, keyframe)?;
+		self.receive_all()
+	}
+
+	/// Flush and collect the tail.
+	#[cfg(test)]
+	fn flush_all(&mut self) -> Result<Vec<Frame>, Error> {
+		self.flush()?;
+		self.receive_all()
+	}
+
+	/// Collect everything ready.
+	#[cfg(test)]
+	fn receive_all(&mut self) -> Result<Vec<Frame>, Error> {
+		let mut frames = Vec::new();
+		while let Some(frame) = self.receive()? {
+			frames.push(frame);
+		}
+		Ok(frames)
+	}
 
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
 	fn name(&self) -> &str;
@@ -446,12 +476,16 @@ mod tests {
 	}
 
 	impl Backend for Stub {
-		fn decode(&mut self, _access_unit: Bytes, _timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
-			Ok(Vec::new())
+		fn decode(&mut self, _access_unit: Bytes, _timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
+			Ok(())
 		}
 
-		fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-			Ok(Vec::new())
+		fn receive(&mut self) -> Result<Option<Frame>, Error> {
+			Ok(None)
+		}
+
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
 		}
 
 		fn name(&self) -> &str {

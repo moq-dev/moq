@@ -23,6 +23,7 @@
 //! correct presentation times even across reordering.
 
 use core::ffi::{c_int, c_uint, c_ulong, c_ulonglong, c_void};
+use std::collections::VecDeque;
 use std::ptr;
 use std::sync::Arc;
 
@@ -55,6 +56,8 @@ pub(crate) struct Nvdec {
 	/// Boxed so its address is stable: the parser holds a raw pointer to it for
 	/// the lifetime of the parser (callbacks dereference it during parse).
 	state: Box<State>,
+	/// Pictures mapped and copied out, waiting for `receive`.
+	ready: VecDeque<Frame>,
 }
 
 /// State shared with the parser's C callbacks via the user-data pointer.
@@ -152,12 +155,13 @@ impl Nvdec {
 			parser: Some(parser),
 			codec: cuda_codec,
 			state,
+			ready: VecDeque::new(),
 		}))
 	}
 
-	/// Submit one parser packet and copy every picture its display callback made
-	/// ready before returning.
-	fn parse(&mut self, packet: &mut CUVIDSOURCEDATAPACKET) -> Result<Vec<Frame>, Error> {
+	/// Submit one parser packet and queue a copy of every picture its display
+	/// callback made ready before returning.
+	fn parse(&mut self, packet: &mut CUVIDSOURCEDATAPACKET) -> Result<(), Error> {
 		// Parser callbacks and the map/copy below all need the CUDA context current
 		// on this thread.
 		self.state
@@ -180,13 +184,20 @@ impl Nvdec {
 			return Err(codec_err(format!("cuvidParseVideoData: {result:?}")));
 		}
 
-		let ready = std::mem::take(&mut self.state.ready);
-		ready.iter().map(|disp| self.state.map_frame(disp)).collect()
+		// Taken out and put back so the callback's buffer keeps its capacity.
+		let mut displayed = std::mem::take(&mut self.state.ready);
+		let mapped = displayed.iter().try_for_each(|disp| {
+			self.ready.push_back(self.state.map_frame(disp)?);
+			Ok(())
+		});
+		displayed.clear();
+		self.state.ready = displayed;
+		mapped
 	}
 }
 
 impl Backend for Nvdec {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		let mut packet = CUVIDSOURCEDATAPACKET {
 			// ENDOFPICTURE: each payload is one complete access unit, so the
 			// parser sees the picture boundary without waiting for the next AU.
@@ -201,7 +212,11 @@ impl Backend for Nvdec {
 		self.parse(&mut packet)
 	}
 
-	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+	fn receive(&mut self) -> Result<Option<Frame>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
 		if self.parser.is_none() {
 			// A failed replacement ended the session; never install another parser.
 			return Err(Error::CodecGone("NVDEC parser replacement failed after a drain".into()));
@@ -214,7 +229,7 @@ impl Backend for Nvdec {
 			payload: ptr::null(),
 			timestamp: 0,
 		};
-		let frames = self.parse(&mut packet);
+		let parsed = self.parse(&mut packet);
 		// Past end-of-stream the parser accepts data but never decodes it again
 		// (CUVID_PKT_DISCONTINUITY does not reopen it), so whatever the drain did,
 		// the next access unit goes to a new parser. The cuvid decoder is kept: the
@@ -223,7 +238,7 @@ impl Backend for Nvdec {
 		let parser = create_parser(self.codec, &mut self.state)
 			.map_err(|err| Error::CodecGone(format!("NVDEC parser replacement: {err}")))?;
 		self.parser = Some(parser);
-		frames
+		parsed
 	}
 
 	fn name(&self) -> &str {
@@ -660,14 +675,14 @@ mod tests {
 			if i == 0 {
 				encoder.cut().unwrap();
 			}
-			for encoded in encoder.encode(&gradient_frame(&rgba, w, h, i)).unwrap() {
-				for decoded in decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap() {
+			for encoded in encoder.encode_all(&gradient_frame(&rgba, w, h, i)).unwrap() {
+				for decoded in decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap() {
 					let i420 = decoded.surface.to_i420().unwrap().into_owned();
 					out.push((decoded.timestamp.as_micros() as u64, i420));
 				}
 			}
 		}
-		for decoded in decoder.flush().unwrap() {
+		for decoded in decoder.flush_all().unwrap() {
 			let i420 = decoded.surface.to_i420().unwrap().into_owned();
 			out.push((decoded.timestamp.as_micros() as u64, i420));
 		}
@@ -696,16 +711,16 @@ mod tests {
 			let mut timestamps = Vec::new();
 			encoder.cut().unwrap();
 			for i in 0..10u64 {
-				for encoded in encoder.encode(&gradient_frame(&rgba, w, h, group * 10 + i)).unwrap() {
-					let frames = decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap();
+				for encoded in encoder.encode_all(&gradient_frame(&rgba, w, h, group * 10 + i)).unwrap() {
+					let frames = decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap();
 					timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros() as u64));
 				}
 			}
-			let frames = decoder.flush().unwrap();
+			let frames = decoder.flush_all().unwrap();
 			timestamps.extend(frames.iter().map(|frame| frame.timestamp.as_micros() as u64));
 			// A second flush lands on a parser that has seen no packet yet.
 			assert!(
-				decoder.flush().unwrap().is_empty(),
+				decoder.flush_all().unwrap().is_empty(),
 				"a repeated flush hands back nothing"
 			);
 			decoded.push(timestamps);
@@ -845,8 +860,8 @@ mod tests {
 				if i == 0 {
 					source.cut().unwrap();
 				}
-				for encoded in source.encode(&gradient_frame(&rgba, w, h, i)).unwrap() {
-					frames.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
+				for encoded in source.encode_all(&gradient_frame(&rgba, w, h, i)).unwrap() {
+					frames.extend(decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap());
 				}
 			}
 			frames
@@ -862,9 +877,9 @@ mod tests {
 			if i == 0 {
 				nvenc.cut().unwrap();
 			}
-			packets.extend(nvenc.encode(&out).unwrap());
+			packets.extend(nvenc.encode_all(&out).unwrap());
 		}
-		packets.extend(nvenc.finish().unwrap());
+		packets.extend(nvenc.flush_all().unwrap());
 		assert!(!packets.is_empty(), "NVENC produced no packets from CUDA frames");
 
 		// Decode the re-encoded stream in software and compare to the source.
@@ -888,7 +903,7 @@ mod tests {
 		.unwrap();
 		let mut last = None;
 		for (i, encoded) in packets.into_iter().enumerate() {
-			for out in check.decode(encoded.payload, encoded.timestamp, i == 0).unwrap() {
+			for out in check.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap() {
 				last = Some(out.surface.to_i420().unwrap().into_owned());
 			}
 		}

@@ -144,15 +144,18 @@ fn run(config: &Config, pictures: &[&[u8]], paced: bool) -> anyhow::Result<Run> 
 	let mut returned = Vec::with_capacity(pictures.len());
 	let mut stream = Vec::new();
 
-	let mut collect =
-		|packets: Vec<moq_video::encode::Encoded>, submitted: &[Instant], emitted: &mut [Option<Duration>]| {
-			let now = Instant::now();
-			for packet in packets {
-				let index = (packet.timestamp.as_micros() / frame_time.as_micros()) as usize;
-				emitted[index] = Some(now - submitted[index]);
-				stream.extend_from_slice(&packet.payload);
-			}
-		};
+	let mut collect = |encoder: &mut Encoder,
+	                   submitted: &[Instant],
+	                   emitted: &mut [Option<Duration>]|
+	 -> anyhow::Result<()> {
+		let now = Instant::now();
+		while let Some(packet) = encoder.receive()? {
+			let index = (packet.timestamp.as_micros() / frame_time.as_micros()) as usize;
+			emitted[index] = Some(now - submitted[index]);
+			stream.extend_from_slice(&packet.payload);
+		}
+		Ok(())
+	};
 
 	let start = Instant::now();
 	let cpu = cpu_time();
@@ -166,11 +169,12 @@ fn run(config: &Config, pictures: &[&[u8]], paced: bool) -> anyhow::Result<Run> 
 		let i420 = I420::new(config.size(), picture.to_vec())?;
 		let timestamp = moq_net::Timestamp::from_micros((frame_time * index as u32).as_micros() as u64)?;
 		submitted.push(Instant::now());
-		let packets = encoder.encode(&Frame::new(Surface::I420(i420), timestamp))?;
-		collect(packets, &submitted, &mut emitted);
+		encoder.encode(&Frame::new(Surface::I420(i420), timestamp))?;
+		collect(&mut encoder, &submitted, &mut emitted)?;
 		returned.push(emitted.iter().filter(|e| e.is_some()).count());
 	}
-	collect(encoder.finish()?, &submitted, &mut emitted);
+	encoder.flush()?;
+	collect(&mut encoder, &submitted, &mut emitted)?;
 	let (wall, cpu) = (start.elapsed(), cpu_time() - cpu);
 
 	// Only knowable at the end: a frame that never came back was skipped, not held.

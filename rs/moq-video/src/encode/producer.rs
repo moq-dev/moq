@@ -158,23 +158,21 @@ impl Producer {
 		largest.is_none_or(|largest| wanted > largest).then_some(wanted)
 	}
 
-	/// Publish already-encoded frames, each at its own timestamp. Each frame is one
-	/// whole access unit in the producer's codec framing.
-	pub fn publish(&mut self, encoded: &[Encoded]) -> Result<(), Error> {
-		for frame in encoded {
-			let timestamp = Some(frame.timestamp);
-			// The encoder emits one whole access unit per frame, so flush to emit it.
-			match &mut self.codecs {
-				Codecs::H264 { split, import } => {
-					let mut frames = split.decode(&frame.payload, timestamp)?;
-					frames.extend(split.flush(timestamp)?);
-					import.decode(frames)?;
-				}
-				Codecs::H265 { split, import } => {
-					let mut frames = split.decode(&frame.payload, timestamp)?;
-					frames.extend(split.flush(timestamp)?);
-					import.decode(frames)?;
-				}
+	/// Publish one already-encoded frame at its own timestamp: one whole access unit
+	/// in the producer's codec framing.
+	pub fn publish(&mut self, encoded: &Encoded) -> Result<(), Error> {
+		let timestamp = Some(encoded.timestamp);
+		// The encoder emits one whole access unit per frame, so flush to emit it.
+		match &mut self.codecs {
+			Codecs::H264 { split, import } => {
+				let mut frames = split.decode(&encoded.payload, timestamp)?;
+				frames.extend(split.flush(timestamp)?);
+				import.decode(frames)?;
+			}
+			Codecs::H265 { split, import } => {
+				let mut frames = split.decode(&encoded.payload, timestamp)?;
+				frames.extend(split.flush(timestamp)?);
+				import.decode(frames)?;
 			}
 		}
 		Ok(())
@@ -1017,10 +1015,12 @@ async fn capture_loop<S: CaptureSource>(
 			if forced.due(wanted) {
 				encoder.cut().await?;
 			}
-			let Some(encoded) = wait_capture(&demand, on_demand, encoder.encode(frame)).await? else {
+			if wait_capture(&demand, on_demand, encoder.encode(frame)).await?.is_none() {
 				break;
-			};
-			producer.publish(&encoded)?;
+			}
+			while let Some(encoded) = encoder.receive()? {
+				producer.publish(&encoded)?;
+			}
 			// A frame whose decoder identity differs from the probed one (a reopen onto another
 			// mode or backend) publishes under a new name and ends this track. Capture follows it
 			// there with a claim against the new track, which nobody watches yet: its viewers find
@@ -1116,9 +1116,13 @@ mod tests {
 		for i in 0..10u64 {
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+			producer.publish(&encoded).unwrap();
 		}
-		producer.publish(&encoder.finish().unwrap()).unwrap();
+		}
+		for encoded in encoder.flush_all().unwrap() {
+			producer.publish(&encoded).unwrap();
+		}
 
 		let (_, resolved) = rendition(&catalog).expect("the importer should have registered a video rendition");
 		// Jitter and delay aside, which are measured from the frames rather than declared by either.
@@ -1190,7 +1194,9 @@ mod tests {
 			encoder.cut().unwrap();
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+			producer.publish(&encoded).unwrap();
+		}
 		}
 		producer.finish().unwrap();
 
@@ -1224,7 +1230,9 @@ mod tests {
 			let rgba = vec![0x80u8; usize::try_from(config.width * config.height * 4).unwrap()];
 			let surface = crate::Surface::rgba(&rgba, crate::Size::new(config.width, config.height)).unwrap();
 			let frame = Frame::new(surface, Timestamp::from_micros(timestamp).unwrap());
-			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+			producer.publish(&encoded).unwrap();
+		}
 			capture_stopped(&mut producer).unwrap();
 		}
 
@@ -1339,7 +1347,9 @@ mod tests {
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
 		let frame = Frame::new(surface, Timestamp::from_micros(0).unwrap());
-		producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+		for encoded in encoder.encode_all(&frame).unwrap() {
+			producer.publish(&encoded).unwrap();
+		}
 
 		producer.finish().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
@@ -2472,7 +2482,7 @@ mod finished {
 					let mut producer = Producer::new(track, catalog.reserve(), rendition.clone()).unwrap();
 					for pts in [0, 33_333] {
 						let pts = moq_net::Timestamp::from_micros(pts).unwrap();
-						producer.publish(&[Encoded::new(keyframe(), pts, true)]).unwrap();
+						producer.publish(&Encoded::new(keyframe(), pts, true)).unwrap();
 					}
 					producer.finish().unwrap();
 					producer

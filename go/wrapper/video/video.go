@@ -140,10 +140,11 @@ func NewEncoder(input EncoderInput, output EncoderOutput) (*Encoder, error) {
 	return &Encoder{inner}, nil
 }
 
-// Encode encodes one picture, returning any access units now available.
-func (e *Encoder) Encode(value Frame) ([]Packet, error) {
-	return e.inner.Encode(value)
-}
+// Encode submits one picture, whose access units Receive returns.
+func (e *Encoder) Encode(value Frame) error { return e.inner.Encode(value) }
+
+// Receive pops the oldest ready access unit, or nil while the codec holds the rest; call it until nil.
+func (e *Encoder) Receive() (*Packet, error) { return e.inner.Receive() }
 
 // Cut forces the next encoded picture to start a new group.
 func (e *Encoder) Cut() error { return e.inner.Cut() }
@@ -151,11 +152,11 @@ func (e *Encoder) Cut() error { return e.inner.Cut() }
 // SetBitrate retunes the live encoder in bits per second.
 func (e *Encoder) SetBitrate(value uint64) error { return e.inner.SetBitrate(value) }
 
-// Flush drains buffered access units and keeps the encoder open.
-func (e *Encoder) Flush() ([]Packet, error) { return e.inner.Flush() }
+// Flush marks the end of input, so Receive returns every access unit the codec still holds, without closing the encoder.
+func (e *Encoder) Flush() error { return e.inner.Flush() }
 
-// Finish drains and closes the encoder.
-func (e *Encoder) Finish() ([]Packet, error) { return e.inner.Finish() }
+// Close releases the encoder, dropping any access unit not yet received.
+func (e *Encoder) Close() { e.inner.Destroy() }
 
 // Consumer subscribes to a video rendition and yields decoded frames.
 type Consumer struct{ inner *ffi.MoqVideoConsumer }
