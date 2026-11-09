@@ -284,7 +284,9 @@ impl Agent {
 	/// When [`ESTABLISH_TIMEOUT`] expires, or `None` while it is held, gathering, or over.
 	fn establish(&self) -> Option<Instant> {
 		match (&self.phase, self.gathered) {
-			(Phase::Establishing { started }, Some(gathered)) => Some((*started).max(gathered).saturating_add(ESTABLISH_TIMEOUT)),
+			(Phase::Establishing { started }, Some(gathered)) => {
+				Some((*started).max(gathered).saturating_add(ESTABLISH_TIMEOUT))
+			}
 			_ => None,
 		}
 	}

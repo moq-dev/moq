@@ -24,8 +24,10 @@ fn presentation(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new(readers.to_string(), frames), |b| {
 				b.iter(|| {
 					for consumer in &consumers {
-						let selected =
-							consumer.present(black_box(timestamps.iter().copied()), now.saturating_add(Duration::from_secs(1)));
+						let selected = consumer.present(
+							black_box(timestamps.iter().copied()),
+							now.saturating_add(Duration::from_secs(1)),
+						);
 						assert_eq!(selected, Some(frames as usize - 1));
 					}
 				});

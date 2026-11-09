@@ -4716,24 +4716,16 @@ test("reopening stale drops reports again what is stale at the max age bound", (
 	expect(drain()).toEqual([[1n, 3n, 1500]]);
 });
 
-test("group sequences stop at 2^64-1, as a u64 does", () => {
-	const producer = new TrackProducer("test").accept({});
-	expect(() => producer.createGroup(1n << 64n)).toThrow(RangeError);
-	producer.createGroup((1n << 64n) - 1n).finish();
-	expect(() => producer.appendGroup()).toThrow(RangeError);
-	// A run's exclusive end may sit just past the last group.
-	producer.skipGroups(1n << 63n, 1n << 64n);
-	expect(() => producer.skipGroups(0n, (1n << 64n) + 1n)).toThrow(RangeError);
-});
-
 // Mirrors moq-net's `the_reserved_sequence_is_refused` and `a_group_at_the_reserved_sequence_is_refused`.
 test("the reserved sequence is refused", () => {
 	const reserved = (1n << 64n) - 1n;
-	const producer = new TrackProducer("test");
+	const producer = new TrackProducer("test").accept({});
+	expect(() => producer.createGroup(1n << 64n)).toThrow(RangeError);
 	expect(() => producer.createGroup(reserved)).toThrow(RangeError);
 	expect(() => hooks.receiveGroup(producer, { sequence: reserved, start: 0 })).toThrow(RangeError);
 	producer.createGroup(reserved - 1n).finish();
 	expect(() => producer.appendGroup()).toThrow(RangeError);
-	producer.finish();
-	producer.close();
+	// A run's exclusive end may sit just past the last group.
+	producer.skipGroups(1n << 63n, 1n << 64n);
+	expect(() => producer.skipGroups(0n, (1n << 64n) + 1n)).toThrow(RangeError);
 });

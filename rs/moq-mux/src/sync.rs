@@ -783,7 +783,10 @@ mod tests {
 		audio.received(ms(0), start);
 		video.received(ms(0), start);
 		let steady = clock.due(ms(1_000));
-		assert_eq!(steady, Some(start.saturating_add(DELAY).saturating_add(Duration::from_secs(1))));
+		assert_eq!(
+			steady,
+			Some(start.saturating_add(DELAY).saturating_add(Duration::from_secs(1)))
+		);
 
 		// Video keeps arriving on time while audio stalls for 500ms, then audio
 		// lands in a late burst and resets its timeline on a fresh sink.
@@ -827,7 +830,10 @@ mod tests {
 		assert_eq!(clock.due(ms(30)), Some(start.saturating_add(DELAY)));
 
 		audio.reset();
-		assert_eq!(clock.due(ms(30)), Some(start.saturating_add(DELAY).saturating_add(Duration::from_millis(30))));
+		assert_eq!(
+			clock.due(ms(30)),
+			Some(start.saturating_add(DELAY).saturating_add(Duration::from_millis(30)))
+		);
 
 		video.reset();
 		assert_eq!(clock.due(ms(30)), None);
@@ -882,15 +888,27 @@ mod tests {
 		video.received(ms(0), now);
 		let frames = [ms(0), ms(20), ms(40)];
 		assert_eq!(reader.present(frames, now), None);
-		assert_eq!(reader.present(frames, now.saturating_add(Duration::from_millis(60))), Some(1));
+		assert_eq!(
+			reader.present(frames, now.saturating_add(Duration::from_millis(60))),
+			Some(1)
+		);
 		// Audio arrives 40ms ahead; stale video deadlines no longer apply.
 		audio.received(ms(40), now);
 		assert_eq!(reader.present(frames, now), Some(0));
-		assert_eq!(reader.present(frames, now.saturating_add(Duration::from_millis(39))), Some(1));
-		assert_eq!(reader.present(frames, now.saturating_add(Duration::from_millis(40))), Some(2));
+		assert_eq!(
+			reader.present(frames, now.saturating_add(Duration::from_millis(39))),
+			Some(1)
+		);
+		assert_eq!(
+			reader.present(frames, now.saturating_add(Duration::from_millis(40))),
+			Some(2)
+		);
 		// Neither a stall nor a future-only queue invents a new picture.
 		assert_eq!(reader.present([], now.saturating_add(Duration::from_secs(1))), None);
-		assert_eq!(reader.present([ms(200)], now.saturating_add(Duration::from_millis(100))), None);
+		assert_eq!(
+			reader.present([ms(200)], now.saturating_add(Duration::from_millis(100))),
+			None
+		);
 	}
 
 	#[tokio::test]
