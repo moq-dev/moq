@@ -60,4 +60,4 @@ Wire: none.
 
 ## Related
 
-- [Native stretch](/quest/m1/audio-jitter-target/native-stretch.md) - the native time stretch this gate feeds
+- [Stretch model](/quest/m1/audio-jitter-target/stretch.md) - requires this gate, then changes the stalled refill mirrored here to a small cushion in both players
