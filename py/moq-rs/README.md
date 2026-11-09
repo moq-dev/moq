@@ -30,7 +30,7 @@ async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
             if not isinstance(event, moq.AnnounceEventPresent):
-                continue  # AnnounceEventAbsent
+                continue  # absent, offline, or a change in availability
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
@@ -295,7 +295,7 @@ moq-transport on every relay hop; this API does not add pre-07 capability detect
   - `.announce()`, `.withdraw()`, `.set_cost(cost)`. Show, hide, or re-price it in place.
   - `await .requested() → BroadcastRequest | None`, or async iteration. Call `.serve(consumer)` to answer with held content under the claim's continuous sequence space, `.route(hidden=..., ...)` for the path's own route, which continues the claim's instance until the job ends and then moves the claim to a fresh one (unless either names an instance: a named claim lends none, and a named job keeps its own), or `.reject(code)` to fail the requester.
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent` or `AnnounceEventAbsent`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent`, `AnnounceEventUnavailable`, `AnnounceEventAvailable`, `AnnounceEventAbsent`, or `AnnounceEventOffline`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
   - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then returns each stream that takes over, or `None` once the path goes offline; an `instance` follows only that stream)
   - `.request(path, instance=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one stream, or raises once synced without a route; an `instance` refuses any other stream)
 

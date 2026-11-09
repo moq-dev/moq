@@ -73,18 +73,31 @@ typedef RouteInfo = MoqRouteInfo;
 /// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
-/// What an [AnnounceConsumer] yields: [AnnounceEventPresent] or
-/// [AnnounceEventAbsent].
+/// What an [AnnounceConsumer] yields: [AnnounceEventPresent],
+/// [AnnounceEventUnavailable], [AnnounceEventAvailable], [AnnounceEventAbsent],
+/// or [AnnounceEventOffline].
 ///
 /// Another publisher instance taking a path over keeps it present: hold a
 /// [Following] to see the broadcast change.
 typedef AnnounceEvent = MoqAnnounceEvent;
 
-/// A route now covers the path, which was absent.
+/// A route now covers the path, which was absent; it may arrive unavailable.
 typedef AnnounceEventPresent = PresentMoqAnnounceEvent;
 
-/// No route covers the path any more; carries its last route.
+/// The present path lost every usable path to its origin but may recover one:
+/// it stays present while requests for it may fail.
+typedef AnnounceEventUnavailable = UnavailableMoqAnnounceEvent;
+
+/// The present path recovered a usable path: request it again.
+typedef AnnounceEventAvailable = AvailableMoqAnnounceEvent;
+
+/// The origin withdrew the path; carries its last route.
 typedef AnnounceEventAbsent = AbsentMoqAnnounceEvent;
+
+/// This side let go of the path, which its origin may still serve: the session
+/// it arrived on closed, or the network lost every path to it. Carries its last
+/// route.
+typedef AnnounceEventOffline = OfflineMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;

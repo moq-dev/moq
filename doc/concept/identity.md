@@ -134,9 +134,12 @@ goes offline; JavaScript `origin.follow(path)`, whose `active` is undefined
 between instances; the moq-ffi bindings `follow(path)`, whose `available()`
 returns null once the path goes offline; and C `moq_origin_follow`, whose
 callback reports `MOQ_FOLLOW_EVENT_OFFLINE`.
-An announcement listing (`announced()`) only reports a path becoming present or
-absent: an instance change keeps it present, so a reader that needs one holds a
-follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, and
+An announcement listing (`announced()`) reports a path becoming present,
+unavailable while the network holds its route without a path to it, available
+again once it recovers one, and finally absent once the origin withdraws it or
+offline once this side lets go of it, which says nothing of whether the origin
+still serves it. An instance change keeps it present, so a reader that needs
+one holds a follower. `@moq/watch`, `moq play`, and `moqsrc` follow this way, and
 `moq export ts --stitch` can splice a replacement as a marked program switch. A
 request failing is never the signal to restart; the follower handing out a new
 broadcast is. Nor is a track's error kind: a track withdrawn

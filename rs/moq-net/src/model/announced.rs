@@ -230,4 +230,36 @@ mod tests {
 		drop(second);
 		assert_eq!(listed(&mut announced).await, "absent live");
 	}
+
+	/// A held route keeps its path present, reported unavailable and available as it flips; a
+	/// session losing a route takes its path offline, while a peer's withdrawal ends it.
+	#[kio::test]
+	async fn availability_flips_and_offline_is_not_absent() {
+		let origin = Hop::new(1).unwrap().produce();
+		let mut announced = origin.consume().announced();
+		let instance = Instance::random();
+		let held = RouteInfo::new().with_instance(instance.clone(), 0).with_available(false);
+
+		let lost = origin.forward("lost", held.clone()).unwrap();
+		assert_eq!(listed(&mut announced).await, "present lost");
+		lost.update(held.clone().with_cost(Cost::new(3))).unwrap();
+		quiet(&mut announced).await;
+		lost.update(held.clone().with_available(true)).unwrap();
+		assert_eq!(listed(&mut announced).await, "available lost");
+		lost.update(held.clone()).unwrap();
+		assert_eq!(listed(&mut announced).await, "unavailable lost");
+		drop(lost);
+		assert_eq!(listed(&mut announced).await, "offline lost");
+
+		let ended = origin.forward("ended", held.with_available(true)).unwrap();
+		assert_eq!(listed(&mut announced).await, "present ended");
+		ended.withdrawn();
+		assert_eq!(listed(&mut announced).await, "absent ended");
+
+		// A route published here ends with its handle.
+		let local = origin.route("local", route(&instance)).unwrap();
+		assert_eq!(listed(&mut announced).await, "present local");
+		drop(local);
+		assert_eq!(listed(&mut announced).await, "absent local");
+	}
 }

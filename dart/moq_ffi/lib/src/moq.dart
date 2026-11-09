@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -3009,7 +3011,12 @@ class FfiConverterMoqOriginConfig {
 class MoqRouteInfo {
   final int cost;
   final String instance;
-  MoqRouteInfo({required this.cost, required this.instance});
+  final bool available;
+  MoqRouteInfo({
+    required this.cost,
+    required this.instance,
+    required this.available,
+  });
 }
 
 class FfiConverterMoqRouteInfo {
@@ -3029,8 +3036,13 @@ class FfiConverterMoqRouteInfo {
     );
     final instance = instance_lifted.value;
     new_offset += instance_lifted.bytesRead;
+    final available_lifted = FfiConverterBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final available = available_lifted.value;
+    new_offset += available_lifted.bytesRead;
     return LiftRetVal(
-      MoqRouteInfo(cost: cost, instance: instance),
+      MoqRouteInfo(cost: cost, instance: instance, available: available),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -3039,6 +3051,7 @@ class FfiConverterMoqRouteInfo {
     final total_length =
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterString.allocationSize(value.instance) +
+        FfiConverterBool.allocationSize(value.available) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -3055,12 +3068,17 @@ class FfiConverterMoqRouteInfo {
       value.instance,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterBool.write(
+      value.available,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
   static int allocationSize(MoqRouteInfo value) {
     return FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterString.allocationSize(value.instance) +
+        FfiConverterBool.allocationSize(value.available) +
         0;
   }
 }
@@ -8440,7 +8458,25 @@ class FfiConverterMoqAnnounceEvent {
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 2:
+        final lifted = UnavailableMoqAnnounceEvent.read(subview);
+        return LiftRetVal<MoqAnnounceEvent>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 3:
+        final lifted = AvailableMoqAnnounceEvent.read(subview);
+        return LiftRetVal<MoqAnnounceEvent>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 4:
         final lifted = AbsentMoqAnnounceEvent.read(subview);
+        return LiftRetVal<MoqAnnounceEvent>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 5:
+        final lifted = OfflineMoqAnnounceEvent.read(subview);
         return LiftRetVal<MoqAnnounceEvent>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
@@ -8504,6 +8540,82 @@ class PresentMoqAnnounceEvent extends MoqAnnounceEvent {
   }
 }
 
+class UnavailableMoqAnnounceEvent extends MoqAnnounceEvent {
+  final MoqAnnounce announce;
+  UnavailableMoqAnnounceEvent(MoqAnnounce this.announce);
+  UnavailableMoqAnnounceEvent._(MoqAnnounce this.announce);
+  static LiftRetVal<UnavailableMoqAnnounceEvent> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final announce_lifted = FfiConverterMoqAnnounce.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final announce = announce_lifted.value;
+    new_offset += announce_lifted.bytesRead;
+    return LiftRetVal(UnavailableMoqAnnounceEvent._(announce), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterMoqAnnounce.allocationSize(announce) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 2);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterMoqAnnounce.write(
+      announce,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class AvailableMoqAnnounceEvent extends MoqAnnounceEvent {
+  final MoqAnnounce announce;
+  AvailableMoqAnnounceEvent(MoqAnnounce this.announce);
+  AvailableMoqAnnounceEvent._(MoqAnnounce this.announce);
+  static LiftRetVal<AvailableMoqAnnounceEvent> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final announce_lifted = FfiConverterMoqAnnounce.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final announce = announce_lifted.value;
+    new_offset += announce_lifted.bytesRead;
+    return LiftRetVal(AvailableMoqAnnounceEvent._(announce), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterMoqAnnounce.allocationSize(announce) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 3);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterMoqAnnounce.write(
+      announce,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
 class AbsentMoqAnnounceEvent extends MoqAnnounceEvent {
   final MoqAnnounce announce;
   AbsentMoqAnnounceEvent(MoqAnnounce this.announce);
@@ -8532,7 +8644,45 @@ class AbsentMoqAnnounceEvent extends MoqAnnounceEvent {
 
   @override
   int write(Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 2);
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 4);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterMoqAnnounce.write(
+      announce,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class OfflineMoqAnnounceEvent extends MoqAnnounceEvent {
+  final MoqAnnounce announce;
+  OfflineMoqAnnounceEvent(MoqAnnounce this.announce);
+  OfflineMoqAnnounceEvent._(MoqAnnounce this.announce);
+  static LiftRetVal<OfflineMoqAnnounceEvent> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final announce_lifted = FfiConverterMoqAnnounce.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final announce = announce_lifted.value;
+    new_offset += announce_lifted.bytesRead;
+    return LiftRetVal(OfflineMoqAnnounceEvent._(announce), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterMoqAnnounce.allocationSize(announce) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 5);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterMoqAnnounce.write(
       announce,
