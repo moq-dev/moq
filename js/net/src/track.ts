@@ -4,7 +4,7 @@
  * @module
  */
 
-import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
+import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as cache from "./cache.ts";
 import { Delivered } from "./delivered.ts";
@@ -156,7 +156,7 @@ export interface Info {
 	 * This clamps each subscriber budget. A freshness bound, not retention: a hop's cache bounds
 	 * the bytes it keeps with its own window.
 	 */
-	maxAge: Milli | null;
+	maxAge: Duration | null;
 	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). */
 	priority: number;
 	/**
@@ -189,7 +189,7 @@ export interface InfoInit extends Partial<Info> {
 	 * back for superseded groups sets it explicitly. Rounded up to a whole millisecond; a
 	 * negative or non-finite value, or one past `Number.MAX_SAFE_INTEGER`, is refused.
 	 */
-	maxAge?: Milli | null;
+	maxAge?: Duration | null;
 }
 
 /**
@@ -199,7 +199,7 @@ export interface InfoInit extends Partial<Info> {
 export function authoredInfo(init: InfoInit = {}): Info {
 	if (init.compression !== undefined && init.compression !== "none" && init.compression !== "deflate")
 		throw new TypeError(`unknown compression: ${init.compression}`);
-	const maxAge = init.maxAge === undefined ? Milli.zero : init.maxAge;
+	const maxAge = init.maxAge === undefined ? Duration.ZERO : init.maxAge;
 	return {
 		compression: init.compression ?? "none",
 		timescale: init.timescale == null ? null : Timescale(init.timescale),
@@ -217,15 +217,12 @@ export function authoredInfo(init: InfoInit = {}): Info {
 // millisecond is expected; ceil rather than round, because a budget shortened by rounding
 // skips a group the subscriber still wants. Anything that is not a duration is refused
 // here, where the field is named, rather than deep in the encoder.
-function wireMillis(field: string, value: Milli): Milli {
-	if (!Number.isFinite(value) || value < 0) {
-		throw new RangeError(`${field} must be a non-negative number of milliseconds: ${value}`);
-	}
-	const millis = Math.ceil(value);
+function wireMillis(field: string, value: Duration): Duration {
+	const millis = Math.ceil(value.asMillis());
 	if (!Number.isSafeInteger(millis)) {
 		throw new RangeError(`${field} exceeds the safe integer millisecond range: ${value}`);
 	}
-	return Milli(millis);
+	return Duration.millis(millis);
 }
 
 function priorityValue(value: number): number {
@@ -312,7 +309,7 @@ export interface Delay {
 	 * pulls it to zero, and it is forwarded upstream as is. A publisher may use it, such as to
 	 * start a cold join that far back; nothing reads it there yet.
 	 */
-	min?: Milli | null;
+	min?: Duration | null;
 	/**
 	 * How long a non-latest group stays worth delivering, by the same two clocks as
 	 * {@link Info.maxAge}: it is skipped once its successor arrived this long ago or starts this
@@ -321,7 +318,7 @@ export interface Delay {
 	 * publisher's {@link Info.maxAge} alone bounds it, which is what a reader reaching back for
 	 * history wants; read in order, see {@link Ordered} for where that can block.
 	 */
-	max?: Milli | null;
+	max?: Duration | null;
 }
 
 /**
@@ -385,7 +382,7 @@ export const Subscription: {
 } = {
 	default: () => ({
 		priority: DEFAULT_PRIORITY,
-		delay: { min: Milli.zero, max: Milli.zero },
+		delay: { min: Duration.ZERO, max: Duration.ZERO },
 		order: "descending",
 	}),
 };
@@ -401,8 +398,11 @@ function subscriptionDefaults(subscription: Subscription = Subscription.default(
 	return {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
 		delay: {
-			min: delay.min === null ? null : wireMillis("delay.min", delay.min ?? Milli.zero),
-			max: delay.max === null ? NO_MAX_DELAY : wireMillis("delay.max", delay.max ?? Milli.zero),
+			min: delay.min === null ? null : wireMillis("delay.min", delay.min ?? Duration.ZERO),
+			max:
+				delay.max === null
+					? Duration.millis(NO_MAX_DELAY)
+					: wireMillis("delay.max", delay.max ?? Duration.ZERO),
 		},
 		order: orderOf(subscription.order),
 		ranges: subscription.ranges === undefined ? [{}] : rangesOf(subscription.ranges),
@@ -417,10 +417,10 @@ function orderOf(order: Order | undefined): Order {
 }
 
 // The smaller of two minimums, ignoring one that went unstated (`null`).
-function smallest(a: Milli | null | undefined, b: Milli | null | undefined): Milli | null {
+function smallest(a: Duration | null | undefined, b: Duration | null | undefined): Duration | null {
 	if (a === null || a === undefined) return b ?? null;
 	if (b === null || b === undefined) return a;
-	return Milli(Math.min(a, b));
+	return a.min(b);
 }
 
 // Aggregate the preferences of `states`, matching Rust's Subscription::poll_combined.
@@ -436,7 +436,7 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.delay = {
-			max: Milli(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
+			max: Duration.millis(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
 			// Only stated minimums count, so one that went unstated never pulls the smallest to zero.
 			min: smallest(combined.delay?.min, subscription.delay?.min),
 		};
@@ -553,7 +553,7 @@ export interface FetchGroupOptions {
 	priority?: number;
 
 	/** Maximum age behind the live edge this caller accepts. Omission leaves the publisher's {@link Info.maxAge} as the only bound. */
-	maxDelay?: Milli;
+	maxDelay?: Duration;
 
 	/**
 	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
@@ -840,8 +840,8 @@ let mayLand: (producer: Producer, land: Land) => boolean;
 // Recompute the producer's aggregates now, for a sink that just became a fetch; assigned in its
 // static block.
 let resubscribe: (producer: Producer) => void;
-let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: number }>;
-let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: number } | undefined;
+let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
+let owedGroup: (producer: Producer, start: bigint, end: bigint) => { sequence: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
@@ -1232,14 +1232,14 @@ export class Producer {
 
 	// The first group that may still land from the live feed, by the rule a pending tail is judged
 	// by; see {@link Land}. Mirrors the Rust `TrackState::may_land`.
-	#landable(land: Land): { sequence: bigint; folds?: number } | undefined {
+	#landable(land: Land): { sequence: bigint; folds?: Instant } | undefined {
 		for (const run of this.#landing(land)) {
 			if (!land.delivered?.covers(run.start, run.end)) return { sequence: run.start, folds: run.folds };
 		}
 		return undefined;
 	}
 
-	*#landing(land: Land): Generator<Run & { folds?: number }> {
+	*#landing(land: Land): Generator<Run & { folds?: Instant }> {
 		if (this.#state.closed.peek() !== undefined) return;
 		let start = land.start;
 		if (!land.floor) {
@@ -1251,11 +1251,11 @@ export class Producer {
 		const declared = this.#state.end.peek()?.at;
 		const end = declared === undefined ? land.end : min(land.end, finalSequence(declared));
 		const at = now();
-		const limit = Nano.fromMilli(land.grace);
+		const limit = land.grace;
 		const drops = this.#state.drops.peek();
 		for (const gap of this.#arrivals.gaps(start, end)) {
-			const folds = gap.since === undefined ? undefined : gap.since + limit;
-			if (folds !== undefined && at >= folds) continue;
+			const folds = gap.since?.add(limit);
+			if (folds !== undefined && at.ge(folds)) continue;
 			for (const open of runGaps(drops, gap.start, gap.end)) {
 				yield { ...open, folds };
 			}
@@ -2006,11 +2006,11 @@ export class Producer {
 
 	// The grace the session's tail uses, from the max delay the track's subscribers ask for,
 	// bounded by how long the publisher keeps a superseded group fresh. The demand asked upstream is not.
-	#grace(): Milli {
+	#grace(): Duration {
 		const update = this.#state.update.peek();
-		const maxDelay = update ? maxDelayOf(update) : Milli.zero;
+		const maxDelay = Duration.millis(update ? maxDelayOf(update) : 0);
 		const maxAge = this.#state.info.peek()?.maxAge;
-		return grace(maxAge == null ? maxDelay : Milli(Math.min(maxDelay, maxAge)));
+		return grace(maxAge == null ? maxDelay : maxDelay.min(maxAge));
 	}
 
 	// Tell every reader whether the pending tail still owes a group below the end.
@@ -2393,7 +2393,7 @@ export class Subscriber {
 
 		const update = this.#state.update.peek();
 		const requested = this.#fetchBudget ?? (update ? maxDelayOf(update) : 0);
-		const fresh = info?.maxAge ?? undefined;
+		const fresh = info?.maxAge?.asMillis();
 		return {
 			budget: fresh === undefined ? requested : Math.min(requested, fresh),
 			bounded: fresh !== undefined && requested >= fresh,
@@ -2476,8 +2476,8 @@ export class Subscriber {
 			: this.#supersededAt(this.#arrival(sequence, drift.end), drift, held);
 		if (arrived === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
-		const deadline = arrived + drift.budget * 1_000_000;
-		if (now() >= deadline) return true;
+		const deadline = arrived.since(Instant.ZERO).asNanos() + drift.budget * 1_000_000;
+		if (now().since(Instant.ZERO).asNanos() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
 		// A closed subscriber keeps no timeline to bound the reach with.
 		if (this.#arrivals) return false;
@@ -2513,7 +2513,7 @@ export class Subscriber {
 		}
 		if (!arrival || arrived === undefined) {
 			held.successor = undefined;
-		} else if (recorded?.sequence !== arrival.sequence || recorded.arrived !== arrived || failed(recorded)) {
+		} else if (recorded?.sequence !== arrival.sequence || !recorded.arrived.eq(arrived) || failed(recorded)) {
 			// Re-recorded only on a change, so judging the same successor again allocates nothing.
 			held.successor = { sequence: arrival.sequence, arrived, fate: hooks.groupFate(arrival) };
 		}
@@ -2545,7 +2545,7 @@ export class Subscriber {
 		wall.timer?.abort();
 		const timer = new AbortController();
 		// A staleness wakeup is never a reason to hold a Node/Bun process open.
-		void sleepUntil(Instant(at), { signal: timer.signal, ref: false }).then(
+		void sleepUntil(Instant.ZERO.add(Duration.nanos(at)), { signal: timer.signal, ref: false }).then(
 			() => {
 				if (timer.signal.aborted) return;
 				wall.timer = undefined;
@@ -2957,7 +2957,7 @@ export class Subscriber {
 			// Reordered streams still owed by the live feed are not cache misses.
 			for (const run of owedRuns(producer, start, end)) {
 				insertRun(accounted, run.start, run.end);
-				if (run.folds !== undefined) this.#wakeAt(run.folds);
+				if (run.folds !== undefined) this.#wakeAt(run.folds.since(Instant.ZERO).asNanos());
 			}
 			// Below where the feed starts, only the history the copy's start rule leaves fillable.
 			const floor = fillFloor(producer, this.#window.start());
@@ -3139,7 +3139,7 @@ export class Subscriber {
 					if (held[index] && held[index].sequence < open.end) return false;
 					const owed = producer && owedGroup(producer, open.start, open.end);
 					if (owed) {
-						if (owed.folds !== undefined) this.#wakeAt(owed.folds);
+						if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 						return false;
 					}
 				}
@@ -3337,7 +3337,7 @@ export class Subscriber {
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.askFetch = (subscriber, sequence) => subscriber.#askFetch(sequence);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
-			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
+			subscriber.#fetchBudget = maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY;
 			subscriber.#state.fetch = true;
 			// The sink joined as a live subscriber; leave the live aggregate before anyone sees it.
 			if (subscriber.#state.producer) resubscribe(subscriber.#state.producer);
@@ -3937,7 +3937,7 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		if (start >= end || !producer) return false;
 		// Only a hole in this reader's ranges is owed to it.
-		let owed: { sequence: bigint; folds?: number } | undefined;
+		let owed: { sequence: bigint; folds?: Instant } | undefined;
 		for (const run of this.#window.runs(start, end)) {
 			owed = owedGroup(producer, run.start, run.end);
 			if (owed) break;
@@ -3950,7 +3950,7 @@ export class Subscriber {
 			return true;
 		}
 		if (this.#staleAt(owed.sequence, drift, true)) return false;
-		if (owed.folds !== undefined) this.#wakeAt(owed.folds);
+		if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 		this.#state.waitingOrdered = true;
 		return true;
 	}

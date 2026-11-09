@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer, type Tracks } from "../broadcast.ts";
@@ -465,7 +465,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 	const broadcast = broadcastRoute.broadcast;
 	broadcast.createTrack("a", {
 		timescale: Timescale.MILLI,
-		maxAge: Milli(3000),
+		maxAge: Duration.millis(3000),
 		priority: 9,
 		refresh: 4,
 		compression: "deflate",
@@ -475,7 +475,13 @@ test("a listing over a session carries each track's info, end to end", async () 
 	expect(await tracks.next()).toEqual({
 		kind: "added",
 		name: "a",
-		info: { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4, compression: "deflate" },
+		info: {
+			timescale: Timescale.MILLI,
+			maxAge: Duration.millis(3000),
+			priority: 9,
+			refresh: 4,
+			compression: "deflate",
+		},
 	});
 	expect(await next(tracks)).toBe("synced");
 	broadcast.createTrack("b");

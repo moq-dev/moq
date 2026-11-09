@@ -12,7 +12,7 @@
  */
 import { strict as assert } from "node:assert";
 import { createInterface } from "node:readline";
-import { Micro } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -60,7 +60,7 @@ try {
 		const producer = new Container.Legacy.Producer(media, new Container.Legacy.Format(kind));
 		for (const [index, part] of parts.entries()) {
 			if (index > 0) producer.discontinuity();
-			for (const { ms, key } of part) producer.encode(new Uint8Array([1]), Micro(ms * 1000), key);
+			for (const { ms, key } of part) producer.encode(new Uint8Array([1]), Duration.micros(ms * 1000), key);
 		}
 		producer.close();
 		if (kind === "video") renditions.video[kind] = { codec: "avc1.64001f", container: { kind: "legacy" } };

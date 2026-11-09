@@ -1,4 +1,3 @@
-import type { Milli } from "@moq/clock";
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -24,8 +23,8 @@ export class Fetch {
 	instance?: Instance.Valid;
 	track: string;
 	priority: number;
-	/** Reader freshness budget. Lite-07+ only; omission leaves the publisher's max age as the only bound. */
-	maxDelay?: Milli;
+	/** Reader freshness budget in whole milliseconds. Lite-07+ only; omission leaves the publisher's max age as the only bound. */
+	maxDelay?: number;
 	group: bigint;
 
 	/** Index of the first frame to return; 0 is the start of the group. Lite-06+. */
@@ -51,7 +50,7 @@ export class Fetch {
 		instance?: Instance.Valid;
 		track: string;
 		priority: number;
-		maxDelay?: Milli;
+		maxDelay?: number;
 		group: bigint;
 		startFrame?: number;
 		endFrame?: number;
@@ -89,9 +88,7 @@ export class Fetch {
 		const instance = await decodePin(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
-		const maxDelay = hasFetchMaxDelay(version)
-			? ((await Duration.decodeOptional(r)) as Milli | undefined)
-			: undefined;
+		const maxDelay = hasFetchMaxDelay(version) ? await Duration.decodeOptional(r) : undefined;
 		const group = await r.u62();
 
 		if (!hasFrameBounds(version)) {
