@@ -8210,8 +8210,8 @@ async fn data_track_names_cannot_collide() {
 	first.finish().unwrap();
 }
 
-/// In-memory sessions whose protocol and origin drivers use the paused test clock.
-async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
+/// In-memory sessions on `version` whose protocol and origin drivers use the paused test clock.
+async fn memory_pair(version: &str) -> (Arc<MoqSession>, Arc<MoqSession>) {
 	fn origin() -> crate::origin::Origin {
 		let mut config = moq_net::origin::Config::default();
 		config.pool = moq_net::cache::Pool::unbounded();
@@ -8224,7 +8224,7 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 	}
 	let a = origin();
 	let b = origin();
-	let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let version: moq_net::Version = version.parse().unwrap();
 	let mut transport = moq_net::transport::memory::Config::default();
 	transport.protocol = Some(version.alpn().into());
 	transport.stream_buffer = 1024;
@@ -8256,7 +8256,7 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_without_waiter_survives_session_disposal() {
-	let (publisher, subscriber) = memory_shutdown_pair().await;
+	let (publisher, subscriber) = memory_pair("moq-lite-07-wip").await;
 	let broadcast = create_announced(&publisher.publish(), "tail");
 	let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
 	let remote = await_announced(&subscriber.consume(), "tail").await;
@@ -8282,7 +8282,7 @@ async fn shutdown_without_waiter_survives_session_disposal() {
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_failure_survives_a_discarded_waiter() {
-	let (publisher, subscriber) = memory_shutdown_pair().await;
+	let (publisher, subscriber) = memory_pair("moq-lite-07-wip").await;
 	let broadcast = create_announced(&publisher.publish(), "live");
 	let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
 	let remote = await_announced(&subscriber.consume(), "live").await;
@@ -8303,6 +8303,32 @@ async fn shutdown_failure_survives_a_discarded_waiter() {
 		assert!(matches!(error, MoqError::Protocol { details } if details.kind == MoqProtocolKind::DeliveryTimeout));
 	}
 	subscriber.cancel(0);
+}
+
+/// A track's reader sees `Closed` when the session under it closes, whichever side closed it.
+#[tokio::test(start_paused = true)]
+async fn a_closed_session_ends_its_tracks_as_closed() {
+	for version in ["moq-lite-07-wip", "moq-transport-18"] {
+		for publisher_closes in [false, true] {
+			let (publisher, subscriber) = memory_pair(version).await;
+			let broadcast = create_announced(&publisher.publish(), "live");
+			let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
+			let remote = await_announced(&subscriber.consume(), "live").await;
+			let reader = remote.subscribe_track("data".into(), None).await.unwrap();
+			shutdown_ready(&track, &reader).await;
+			match publisher_closes {
+				true => publisher.cancel(0),
+				false => subscriber.cancel(0),
+			}
+			let Err(error) = reader.read_frame().await else {
+				panic!("{version}: the track outlived its session");
+			};
+			assert!(
+				matches!(error, MoqError::Closed),
+				"{version}, publisher_closes={publisher_closes}: {error:?}"
+			);
+		}
+	}
 }
 
 /// Real sockets exercise the FFI runtime and both accepted/client session handles.
