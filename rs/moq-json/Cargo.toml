@@ -25,7 +25,7 @@ bytes = { workspace = true }
 kio = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
