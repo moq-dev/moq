@@ -97,6 +97,9 @@ class FakeWorklet {
 	get length(): number {
 		return this.ring?.length ?? 0;
 	}
+	get skips(): number {
+		return this.ring?.skips ?? 0;
+	}
 	// Render one quantum and report the ring's state back to the main thread.
 	read(output: Float32Array[]): number {
 		const ring = this.ring;
@@ -108,6 +111,7 @@ class FakeWorklet {
 			stalled: ring.stalled,
 			anchored: ring.anchored,
 			underruns: ring.underruns,
+			skips: ring.skips,
 			silent: ring.silent,
 			epoch: this.#epoch,
 		};
@@ -1357,7 +1361,7 @@ describe("Decoder across a rename", () => {
 			const delay = playback.sync.out.delay.peek();
 			expect(delay).toBeGreaterThan(Milli(200));
 			const ring = playback.ring();
-			const before = { ...playback.counts, buffered: ring?.length ?? 0 };
+			const before = { silent: playback.counts.silent, skips: ring?.skips ?? 0 };
 			let lowest = delay;
 			const watch = new Effect();
 			watch.subscribe(playback.sync.out.delay, (value) => {
@@ -1368,10 +1372,8 @@ describe("Decoder across a rename", () => {
 			await playback.run(26_000);
 			watch.close();
 
-			const { inserted, played, silent } = playback.counts;
-			const buffered = playback.ring()?.length ?? 0;
-			const skipped = inserted - before.inserted - (played - before.played) - (buffered - before.buffered);
-			expect({ skipped, silent: silent - before.silent }).toEqual({ skipped: 0, silent: 0 });
+			const skips = (playback.ring()?.skips ?? 0) - before.skips;
+			expect({ skips, silent: playback.counts.silent - before.silent }).toEqual({ skips: 0, silent: 0 });
 			expect(playback.ring()).toBe(ring);
 			expect(lowest).toBeGreaterThanOrEqual(delay);
 		} finally {
@@ -1715,13 +1717,17 @@ for (const cmaf of [false, true]) {
 					(buffered ? [0, 20, 40, 60, 80] : [140, 160]).map((ms) => start + ms * 1000),
 				);
 
-				// A running live ring sheds old audio when it gets ahead; a buffered ring plays it all.
+				// A running live ring sheds old audio and lands on its floor once it reaches the fast
+				// accelerate threshold, four times a 100 ms floor plus its 20 ms band; a buffered ring
+				// plays it all.
 				const ring = worklets.at(-1)?.ring;
 				if (!ring) throw new Error("no running audio ring");
 				ring.reset();
 				const samples = [new Float32Array(4800), new Float32Array(4800)];
-				for (const timestamp of [0, 100_000, 200_000]) ring.write(Micro(timestamp), samples);
-				expect(ring.length).toBe(samples[0].length * (buffered ? 3 : 1));
+				for (let timestamp = 0; timestamp < 500_000; timestamp += 100_000)
+					ring.write(Micro(timestamp), samples);
+				expect(ring.length).toBe(samples[0].length * (buffered ? 5 : 1));
+				expect(ring.skips).toBe(buffered ? 0 : 1);
 			} finally {
 				playback.close();
 				await microtasks();

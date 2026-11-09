@@ -58,7 +58,16 @@ server entry above):
   real time. Move them to the `kio::clock` sim, or paused tokio where the
   sim cannot run them yet.
 
-Public API: constructors that spawned return a handle to poll instead; an Impact
-migration note per published crate. Wire: none.
+Public API: none; the public spawning entry points are settled and kept, and this
+quest only converts or lists private spawns. Wire: none.
 
-Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [spawn-constructors](/quest/m2/spawn-constructors.md) settles public spawning entry points before the cut; this quest keeps the private spawns.
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): the public spawning entry points were settled before the cut; this quest keeps the private spawns.
+
+Settled 2026-11-08: the public entry points that leave a task running past their call
+are kept, each on a dependency that already needs a tokio runtime, with the reason at
+the site: moq-hls `Server::broadcaster` (axum), moq-auth `Client::connect` and
+`attach` (reqwest), and moq-webrtc as a whole (moq-tokio, axum, tokio sockets; see its
+crate docs). Every other non-test spawn in a library sits inside a future its
+caller awaits (moq-transcode's rungs) or behind private API (moq-transcode's
+`Feed` and moq-video's PipeWire `SessionGuard`), so converting it changes no
+public signature.
