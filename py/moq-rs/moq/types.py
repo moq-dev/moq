@@ -75,6 +75,9 @@ from ._records import (
     Timestamp,
     TrackInfo,
     VideoDecodedFrame,
+    VideoSurface,
+    VideoSurfacePixelBuffer,
+    VideoSurfaceUnknown,
     WebSocketConfig,
 )
 
@@ -111,6 +114,9 @@ __all__ = [
     "VideoEncoderKind",
     "VideoEncoderOutput",
     "VideoDecodedFrame",
+    "VideoSurface",
+    "VideoSurfacePixelBuffer",
+    "VideoSurfaceUnknown",
     "VideoPixelFormat",
     "WebSocketConfig",
 ]

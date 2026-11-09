@@ -31,7 +31,7 @@
 
 #![warn(missing_docs)]
 
-mod dial;
+pub mod dial;
 mod error;
 mod server;
 mod ts;
