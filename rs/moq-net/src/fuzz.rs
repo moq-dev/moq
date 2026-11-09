@@ -638,6 +638,7 @@ impl RouteRelay {
 			cost,
 			upstream: false,
 			learned: false,
+			chain: crate::Hops::new(),
 		}
 	}
 
