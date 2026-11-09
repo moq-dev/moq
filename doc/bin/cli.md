@@ -14,8 +14,10 @@ Docker; see [Install](/setup/install).
 Its cryptography comes from [rind](https://github.com/moq-dev/rind), which
 runs on any x86\_64 CPU and on any aarch64 CPU with NEON, including a Raspberry
 Pi 4, CM4, or Zero 2 W on a 64-bit OS. On a CPU missing a feature rind needs,
-`moq` exits at startup naming it. The Rust library also supports armv7;
-prebuilt CLI artifacts for 32-bit boards are not yet available.
+`moq` exits at startup naming it. A board running a 32-bit OS, such as a
+Raspberry Pi 2 or later on 32-bit Raspberry Pi OS, takes the
+`armv7-unknown-linux-gnueabihf` release, which `moq.sh` and apt (`armhf`)
+install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 
 ## What it does
 
