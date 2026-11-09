@@ -131,8 +131,8 @@ export interface WebSocketStreamOptions {
 	highWaterMark?: number;
 }
 
-const CONNECTING = 0;
 const OPEN = 1;
+const CLOSED = 3;
 const DEFAULT_HIGH_WATER_MARK = 64 * 1024;
 
 /** WebSocket close codes outside 1000 / 3000–4999 are rejected by `close()`. */
@@ -287,12 +287,11 @@ export class WebSocketStream implements WebSocketStreamLike {
 
 		// An adopted socket may already have finished (or missed) its handshake, in
 		// which case `onopen`/`onclose` will never fire - settle from readyState.
-		if (ws.readyState !== CONNECTING) {
-			if (ws.readyState === OPEN) {
-				opened.resolve({ readable, writable, extensions: ws.extensions, protocol: ws.protocol });
-			} else {
-				finish(new Error("WebSocket is already closed"), true, { closeCode: 1006, reason: "" });
-			}
+		// A CLOSING socket still fires `onclose`, which carries the real code and reason.
+		if (ws.readyState === OPEN) {
+			opened.resolve({ readable, writable, extensions: ws.extensions, protocol: ws.protocol });
+		} else if (ws.readyState === CLOSED) {
+			finish(new Error("WebSocket is already closed"), true, { closeCode: 1006, reason: "" });
 		}
 
 		const { signal } = options;

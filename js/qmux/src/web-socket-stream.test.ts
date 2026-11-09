@@ -321,6 +321,14 @@ describe("WebSocketStream.adopt", () => {
 		expect(await wss.closed).toEqual({ closeCode: 1006, reason: "" });
 	});
 
+	test("adopting a closing socket reports the close event's code and reason", async () => {
+		const ws = new FakeWebSocket("wss://x/y", "p1");
+		ws.readyState = 2; // CLOSING
+		const wss = WebSocketStream.adopt(ws);
+		ws.fireClose(4000, "bye");
+		expect(await wss.closed).toEqual({ closeCode: 4000, reason: "bye" });
+	});
+
 	test("backpressure applies to an adopted socket", async () => {
 		const clock = manual();
 		const ws = accepted();
