@@ -618,9 +618,18 @@ export class Reload {
 					// torn down. Anything else is the peer's GOAWAY, or WebTransport reachable
 					// again under a session on the WebSocket fallback.
 					const probing = new AbortController();
-					const raced = await effect
-						.race(connection.closed, connection.draining, this.#probe(connection, dialing, probing.signal))
+					const probe = this.#probe(connection, dialing, probing.signal);
+					const first = await effect
+						.race(connection.closed, connection.draining, probe)
 						.finally(() => probing.abort());
+					// The peer's GOAWAY wins over a probe that got through in the same turn, so its
+					// redirect is never lost.
+					const drain = connection.draining.peek();
+					const raced = first instanceof Reached && drain !== undefined ? drain : first;
+					// A probe the race did not take still holds an open WebTransport session.
+					void probe.then((left) => {
+						if (left !== raced) left.transport.close();
+					});
 					if (raced === undefined) return;
 					// Leaving the fallback is a GOAWAY of our own: the session drains as the
 					// predecessor while the replacement finishes its handshake over the probe.
@@ -650,8 +659,15 @@ export class Reload {
 						return;
 					}
 					// Moving off the fallback is no peer's redirect or restart, and the probe
-					// backoff already paces it, so its replacement dials at once.
-					if (reached) continue;
+					// backoff already paces it, so its replacement dials at once. A fallback that
+					// served past the healthy bar still earns the healthy reset.
+					if (reached) {
+						if (Instant.durationSince(now(), connected) >= Nano.fromMilli(this.#pacing().healthy)) {
+							this.#delay = undefined;
+							this.#deadline = undefined;
+						}
+						continue;
+					}
 					const after = this.#redirect.peek();
 
 					// Two peers that each hold a session past the healthy bar can still bounce us between
@@ -723,9 +739,7 @@ export class Reload {
 					timeout: this.timeout,
 				};
 				const reached = await reachable(dialing, props, signal);
-				// A session that ended meanwhile has no replacement to hand it to.
-				if (reached && signal.aborted) reached.transport.close();
-				else if (reached) return reached;
+				if (reached) return reached;
 			}
 		} catch {
 			// The sleep rejects once the session ends.

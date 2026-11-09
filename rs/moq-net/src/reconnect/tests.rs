@@ -762,6 +762,27 @@ async fn a_fallback_session_moves_to_the_preferred_transport() {
 	));
 }
 
+/// A peer GOAWAY that arrives with a successful probe wins: the probe is dropped, and the
+/// policy follows the peer's redirect rather than a move of its own.
+#[kio::test]
+async fn a_peer_goaway_wins_over_a_probe() {
+	let (mut machine, fallback_server) = on_fallback(Config::default()).await;
+	probe(&mut machine).await;
+	fallback_server
+		.drain()
+		.send(goaway::Goaway::new())
+		.expect("the fallback peer sends a GOAWAY");
+	kio::clock::sim::idle().await;
+	assert!(
+		!machine.probed(kio::clock::now(), Ok(())),
+		"the probe hid the peer's GOAWAY"
+	);
+	assert!(
+		!matches!(next(&mut machine).await, Action::Probe(_)),
+		"the GOAWAY was never acted on"
+	);
+}
+
 /// A target that never reaches the preferred transport keeps its fallback session and
 /// probes no faster than the doubling backoff allows, capped at one every five minutes.
 #[kio::test]

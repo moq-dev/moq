@@ -649,7 +649,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 	/// with [`connected`](Self::connected) or [`failed`](Self::failed). The fallback drains
 	/// first because the tokens back one session at a time, and keeps serving until the
 	/// replacement does. Returns whether the probe became that dial: one reported with none in
-	/// flight, as after [`Action::Abandon`], is ignored.
+	/// flight, as after [`Action::Abandon`], is ignored, and one reported once the peer's GOAWAY
+	/// arrived yields to it.
 	pub fn probed(&mut self, now: Instant, result: Result<(), E>) -> bool {
 		let Phase::Live(live) = &mut self.phase else {
 			return false;
@@ -662,6 +663,12 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		};
 		if let Err(err) = result {
 			tracing::debug!(%err, "preferred transport still unreachable");
+			probe.failed(now);
+			return false;
+		}
+		// The peer's GOAWAY wins over a probe that got through with it, so its redirect is
+		// never lost: the next poll acts on it.
+		if let Some(Poll::Ready(_)) = live.goaway.as_ref().map(|goaway| goaway.poll(&kio::Waiter::noop())) {
 			probe.failed(now);
 			return false;
 		}
