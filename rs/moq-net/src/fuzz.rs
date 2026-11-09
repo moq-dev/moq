@@ -554,6 +554,82 @@ impl RouteNode {
 	}
 }
 
+/// A relay's lite-07 route node hearing one origin's claims on a stream it asked for,
+/// and forwarding them on a stream it answers, for the routes bench.
+pub struct RouteRelay {
+	// Dropped first: a stream disconnects from its node on drop.
+	receive: crate::route::node::Stream,
+	answer: crate::route::node::Stream,
+	#[allow(dead_code, reason = "held so the streams keep a node to talk to")]
+	node: crate::route::Node,
+	instance: crate::Instance,
+	rev: u64,
+}
+
+impl RouteRelay {
+	/// The origin's identity as the relay hears it.
+	const ORIGIN: u64 = 1;
+
+	/// A relay that already heard and forwarded the origin's `claims` claims under `live/`.
+	pub fn new(claims: usize) -> Self {
+		let node = crate::route::Node::new(2, 2);
+		let answer = node.answer(crate::route::Link::default(), Path::empty()).unwrap();
+		let receive = node.receive(crate::route::Link::default(), Path::empty()).unwrap();
+		let advert = crate::route::Advert {
+			seqno: 0,
+			metric: 0,
+			down_only: false,
+		};
+		receive.route(Self::ORIGIN, Some(crate::route::Reach::Finite(advert)));
+		let instance = crate::Instance::random();
+		let rev = claims as u64;
+		let snapshot = (0..claims)
+			.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
+			.collect();
+		receive.batch(Self::ORIGIN, snapshot, Some(rev));
+		let relay = Self {
+			receive,
+			answer,
+			node,
+			instance,
+			rev,
+		};
+		relay.drain();
+		relay
+	}
+
+	fn path(i: usize) -> Path {
+		Path::new(&format!("live/{i}")).unwrap()
+	}
+
+	fn claim(instance: &crate::Instance, cost: u64) -> crate::route::node::Claim {
+		crate::route::node::Claim {
+			instance: instance.clone(),
+			epoch: 0,
+			cost,
+			upstream: false,
+			learned: false,
+		}
+	}
+
+	/// Hear one batch updating the first `changes` claims, returning how many outputs
+	/// the relay queued: what it serves into its origin, and what it forwards.
+	pub fn change(&mut self, changes: usize) -> usize {
+		self.rev += 1;
+		let claim = Self::claim(&self.instance, self.rev);
+		let batch = (0..changes).map(|i| (Self::path(i), Some(claim.clone()))).collect();
+		self.receive.batch(Self::ORIGIN, batch, Some(self.rev));
+		self.drain()
+	}
+
+	fn drain(&self) -> usize {
+		[&self.receive, &self.answer]
+			.into_iter()
+			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
+			.sum()
+	}
+}
+
 /// What a client session fed into an origin hears it should ask its peer about, for
 /// the interests bench.
 pub struct Interests(crate::model::Interests);
