@@ -612,14 +612,16 @@ impl Surface {
 			// encoder to import. If VA-API is missing or refuses the buffer,
 			// download and resize on the CPU.
 			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			Surface::DmaBuf(buffer) if output == crate::Output::Native => match vaapi::resize(buffer, size, config.vaapi.as_deref()) {
-				Ok(scaled) => Surface::DmaBuf(scaled),
-				Err(err) => {
-					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-					WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
-					Surface::I420(buffer.inner.download_i420()?.resize(size)?)
+			Surface::DmaBuf(buffer) if output == crate::Output::Native => {
+				match vaapi::resize(buffer, size, config.vaapi.as_deref()) {
+					Ok(scaled) => Surface::DmaBuf(scaled),
+					Err(err) => {
+						static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+						WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
+						Surface::I420(buffer.inner.download_i420()?.resize(size)?)
+					}
 				}
-			},
+			}
 			#[allow(
 				unreachable_patterns,
 				reason = "the other surfaces exist only on some platforms and features"
