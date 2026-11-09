@@ -59,8 +59,7 @@ Rejected in planning:
 
 ## Required
 
-- [moq-net's small surface fixes](/quest/m2/api-shape/net.md) - one spelling per session, admission, compression, proxy, and priority surface, and no public wire codes
+- [moq-net's route stream goes public](/quest/m2/api-shape/net.md) - un-hide `origin::Consumer::routes` and reshape `RouteEvent`, now that #8063 merged
 - [Transports take shared types](/quest/m2/api-shape/transport.md) - moq-uring takes a congestion factory and rustls configs, and the tokio server request stops exposing its QUIC internals
 - [Media crates' small surface fixes](/quest/m2/api-shape/media.md) - exporters, the container consumer, catalog color range, rate grant, moq-stats, JSON, and MSF each have one path and one name
 - [JS Key.sign takes exactly Claims](/quest/m2/api-shape/auth-sign.md) - `@moq/auth` signs only `Claims`, with no legacy `put`/`get` input, like Rust
-- [Bindings' small surface fixes](/quest/m2/api-shape/bindings.md) - Go's read cancel, JSON producer construction, and the Python wheel's test module

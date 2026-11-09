@@ -130,7 +130,9 @@ impl Relay {
 		let tier_labels: Vec<_> = (0..tiers)
 			.map(|tier| {
 				let tier = stats::Tier::new(moq_net::Path::new(&format!("t{tier}")).unwrap());
-				let session = registry.tier(tier.clone()).session(moq_net::Path::from_static("root"));
+				let session = registry
+					.tier(tier.clone())
+					.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root")));
 				let mut cursor = origin.consume().with_stats(session.clone()).routes();
 				while cursor.next().now_or_never().flatten().is_some() {}
 				cursors.push(cursor);
@@ -140,7 +142,7 @@ impl Relay {
 			.collect();
 
 		let mut report = stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::now());
 		assert_eq!(report.traffic.len(), paths * tiers, "one held entry per path and tier");
 
 		let depth = if groups.is_some() { 1 } else { 0 };
@@ -215,8 +217,11 @@ fn sample(relay: &mut Relay) -> Row {
 	}
 }
 
+/// The most moq-net's group cache holds, which a snapshot frame must fit.
+const CAP: u64 = 32 * 1024 * 1024;
+
 fn check_row(paths: usize, changed: usize, row: &Row) {
-	let cap = moq_net::group::MAX_CACHE_BYTES;
+	let cap = CAP;
 	assert!(row.bytes.held > 0, "group snapshot missing");
 	assert!(
 		row.bytes.held as u64 <= cap,
@@ -231,7 +236,7 @@ fn check_row(paths: usize, changed: usize, row: &Row) {
 }
 
 fn bench(c: &mut Criterion) {
-	let cap = moq_net::group::MAX_CACHE_BYTES;
+	let cap = CAP;
 	println!("plain frame cap: {cap} bytes");
 	println!("paths tiers changed% allocs/tick us/tick heldB cap% wroteB");
 
@@ -309,7 +314,9 @@ impl Presence {
 			.map(|label| {
 				registry
 					.tier(stats::Tier::default())
-					.session(moq_net::Path::new(label.as_str()).unwrap())
+					.session(moq_net::stats::SessionInfo::new(
+						moq_net::Path::new(label.as_str()).unwrap(),
+					))
 			})
 			.collect();
 		// One set of wire counters per connection, independently of held presence tracks.

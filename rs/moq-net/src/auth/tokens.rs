@@ -68,7 +68,8 @@ pub struct EmptyToken;
 /// every new one has its answer, so the grant never narrows in between.
 ///
 /// [`Reconnect::with_tokens`](crate::Reconnect::with_tokens) presents them on every dial,
-/// whose sessions are built on [`handle`](Self::handle); aborting the handle ends the policy.
+/// whose [`Attempt::client`](crate::reconnect::Attempt::client) builds each session on
+/// [`handle`](Self::handle); aborting the handle ends the policy.
 ///
 /// Cheap to clone; every clone shares one set.
 #[derive(Clone)]
@@ -78,12 +79,9 @@ pub struct Tokens {
 
 /// What one dial presents, from [`Tokens::preview`].
 pub(crate) struct Dial {
-	/// The URL to dial, carrying the connection credential in its query when an offered
-	/// version has no SETUP token.
-	pub(crate) url: Url,
-	/// The connection credential for [`Client::with_token`](crate::Client::with_token), unless
-	/// the URL brought its own.
-	pub(crate) token: Option<crate::setup::Token>,
+	/// The connection credential to present in SETUP and, where an offered version cannot
+	/// carry it there, the URL's query ([`locate`]), unless the URL brought its own.
+	pub(crate) token: Option<String>,
 	/// The connection credential, held out of band rather than in an AUTH stream.
 	connection: Option<String>,
 	generation: u64,
@@ -101,7 +99,7 @@ impl Tokens {
 		Self { handle }
 	}
 
-	/// The handle to build each session on, with [`Client::with_auth`](crate::Client::with_auth).
+	/// The handle each session is built on, with [`Client::with_auth`](crate::Client::with_auth).
 	pub fn handle(&self) -> Handle {
 		self.handle.clone()
 	}
@@ -160,18 +158,13 @@ impl Tokens {
 		Poll::Ready(answer(&state).expect("checked answered"))
 	}
 
-	/// Decide what a dial to `url` offering `versions` would present, leaving the live
-	/// session's tokens untouched until [`commit`](Self::commit).
-	pub(crate) fn preview(&self, url: &Url, versions: &crate::Versions) -> Dial {
+	/// Decide what a dial to `url` would present, leaving the live session's tokens untouched
+	/// until [`commit`](Self::commit).
+	pub(crate) fn preview(&self, url: &Url) -> Dial {
 		let state = self.handle.state.read();
 		let configured = state.configured.as_ref().expect("built by Tokens::new");
-		let (url, setup, connection) = credential(url, versions, &configured.tokens);
-		let token = setup.map(|token| crate::setup::Token {
-			kind: crate::setup::Token::OUT_OF_BAND,
-			value: token.into_bytes(),
-		});
+		let (token, connection) = credential(url, &configured.tokens);
 		Dial {
-			url,
 			token,
 			connection,
 			generation: configured.generation,
@@ -466,22 +459,25 @@ fn dedup(tokens: &[Token]) -> Vec<Token> {
 
 /// What a dial to `url` presents: the URL to dial, the token SETUP carries, and the
 /// connection credential, which is never also held in band.
-fn credential(url: &Url, versions: &crate::Versions, tokens: &[Token]) -> (Url, Option<String>, Option<String>) {
+fn credential(url: &Url, tokens: &[Token]) -> (Option<String>, Option<String>) {
 	if let Some(jwt) = jwt(url) {
 		// The URL's own credential (a cluster's per-peer `?jwt=`) wins, so the tokens all
 		// ride AUTH and no second credential reaches SETUP or the query.
-		return (url.clone(), None, Some(jwt));
+		return (None, Some(jwt));
 	}
-	let Some(first) = tokens.first() else {
-		return (url.clone(), None, None);
-	};
-	// The URL is fixed before the version is negotiated, so it carries the credential
-	// whenever a version that may be picked could not carry it in SETUP.
-	let url = match versions.iter().all(|version| version.has_setup_token()) {
+	let first = tokens.first().map(|first| first.as_str().to_string());
+	(first.clone(), first)
+}
+
+/// `url` for a dial offering `versions` that presents `credential`. The URL is fixed before
+/// the version is negotiated, so it carries the credential whenever a version that may be
+/// picked could not carry it in SETUP.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+pub(crate) fn locate(url: &Url, credential: &str, versions: &crate::Versions) -> Url {
+	match versions.iter().all(|version| version.has_setup_token()) {
 		true => url.clone(),
-		false => with_jwt(url, first.as_str()),
-	};
-	(url, Some(first.as_str().to_string()), Some(first.as_str().to_string()))
+		false => with_jwt(url, credential),
+	}
 }
 
 /// The request target's query: the URL's own, or for `unix:` the one inside `?path=`.
@@ -504,6 +500,7 @@ fn jwt(url: &Url) -> Option<String> {
 }
 
 /// `url` with `jwt` appended to its request target's query.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 fn with_jwt(url: &Url, jwt: &str) -> Url {
 	let mut url = url.clone();
 	if url.scheme() != "unix" {
@@ -566,10 +563,7 @@ mod tests {
 	}
 
 	fn dial(set: &Tokens, supported: bool, requests: bool) -> Session {
-		let presented = set.preview(
-			&"moqt://relay.example.com/".parse().unwrap(),
-			&versions(&["moq-lite-07-wip"]),
-		);
+		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, supported, requests).unwrap();
 		let credential = supported.then(|| link.present(Bytes::new(), true).unwrap());
@@ -677,7 +671,7 @@ mod tests {
 		session.link.granted(second, Grant::all());
 
 		let url = "moqt://relay.example.com/".parse().unwrap();
-		let preview = set.preview(&url, &versions(&["moq-lite-07-wip"]));
+		let preview = set.preview(&url);
 		assert!(presented(&set, second), "a preview withdrew a granted token");
 		assert_eq!(held(&set), ["second", "extra"]);
 
@@ -795,10 +789,7 @@ mod tests {
 
 	/// A session without AUTH that awaits the server's SETUP, as a moq-lite-05/06 client does.
 	fn dial_awaiting_setup(set: &Tokens) -> Link {
-		let presented = set.preview(
-			&"moqt://relay.example.com/".parse().unwrap(),
-			&versions(&["moq-lite-06"]),
-		);
+		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, false, false).unwrap();
 		link.await_setup();
@@ -956,38 +947,36 @@ mod tests {
 	#[test]
 	fn only_a_change_outdates_a_dial() {
 		let set = Tokens::new(tokens(&["a"]));
-		let dial = set.preview(
-			&"moqt://relay.example.com/".parse().unwrap(),
-			&versions(&["moq-lite-07-wip"]),
-		);
+		let dial = set.preview(&"moqt://relay.example.com/".parse().unwrap());
 		set.set(tokens(&["a"]));
 		assert!(!set.changed(&dial));
 		set.set(tokens(&["b"]));
 		assert!(set.changed(&dial));
 	}
 
-	/// Only lite-07 and moq-transport carry the credential in SETUP, so the URL stays clean.
+	/// The first token is the connection credential, presented in SETUP.
 	#[test]
-	fn setup_versions_keep_the_credential_out_of_the_url() {
+	fn the_first_token_is_the_connection_credential() {
 		let url: Url = "https://relay.example.com/room".parse().unwrap();
-		let (dialed, setup, connection) = credential(
-			&url,
-			&versions(&["moq-lite-07-wip", "moq-transport-18"]),
-			&tokens(&["a", "b"]),
-		);
-		assert_eq!(dialed, url);
+		let (setup, connection) = credential(&url, &tokens(&["a", "b"]));
 		assert_eq!(setup.as_deref(), Some("a"));
 		assert_eq!(connection.as_deref(), Some("a"));
 	}
 
-	/// An offered version without a SETUP token needs the credential in the query, and the
-	/// same value rides SETUP too.
+	/// Only lite-07 and moq-transport carry the credential in SETUP, so the URL stays clean.
+	#[test]
+	fn setup_versions_keep_the_credential_out_of_the_url() {
+		let url: Url = "https://relay.example.com/room".parse().unwrap();
+		let dialed = locate(&url, "a", &versions(&["moq-lite-07-wip", "moq-transport-18"]));
+		assert_eq!(dialed, url);
+	}
+
+	/// An offered version without a SETUP token needs the credential in the query.
 	#[test]
 	fn an_older_version_puts_the_credential_in_the_url() {
 		let url: Url = "https://relay.example.com/room?x=1".parse().unwrap();
-		let (dialed, setup, _) = credential(&url, &crate::Versions::all(), &tokens(&["a b"]));
+		let dialed = locate(&url, "a b", &crate::Versions::all());
 		assert_eq!(dialed.as_str(), "https://relay.example.com/room?x=1&jwt=a+b");
-		assert_eq!(setup.as_deref(), Some("a b"));
 	}
 
 	/// A URL credential stays the connection credential, so every token rides AUTH, except
@@ -996,9 +985,8 @@ mod tests {
 	fn a_url_credential_sends_every_token_on_auth() {
 		let url: Url = "moqt://relay.example.com/room?jwt=peer".parse().unwrap();
 		let set = Tokens::new(tokens(&["a", "peer", "a"]));
-		let dial = set.preview(&url, &crate::Versions::all());
+		let dial = set.preview(&url);
 		set.commit(&dial);
-		assert_eq!(dial.url, url);
 		assert_eq!(dial.token, None);
 		assert_eq!(held(&set), ["a"]);
 	}
@@ -1006,7 +994,7 @@ mod tests {
 	#[test]
 	fn no_tokens_present_nothing() {
 		let url: Url = "https://relay.example.com/room".parse().unwrap();
-		assert_eq!(credential(&url, &crate::Versions::all(), &[]), (url, None, None));
+		assert_eq!(credential(&url, &[]), (None, None));
 	}
 
 	/// A unix socket's request target lives in `?path=`, so the credential goes inside it.
@@ -1018,7 +1006,7 @@ mod tests {
 			("unix:///tmp/moq.sock", "?jwt=a"),
 		] {
 			let url: Url = url.parse().unwrap();
-			let (dialed, _, _) = credential(&url, &crate::Versions::all(), &tokens(&["a"]));
+			let dialed = locate(&url, "a", &crate::Versions::all());
 			let path = dialed
 				.query_pairs()
 				.find(|(k, _)| k == "path")

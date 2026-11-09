@@ -89,10 +89,12 @@ fn track_properties(
 	version: Version,
 	negotiated: bool,
 ) -> Result<ietf::Properties, Error> {
-	let compressed = info.compress && negotiated;
+	let compressed = info.compressed() && negotiated;
 	super::flate::egress(info, compressed)?;
 	let mut plain = info.clone();
-	plain.compress = compressed;
+	if !compressed {
+		plain.compression = crate::track::Compression::None;
+	}
 	let info = &plain;
 	if !wanted {
 		return Ok(ietf::Properties::default());
@@ -6524,7 +6526,7 @@ impl TrackServe {
 	}
 
 	fn compression(mut self, negotiated: bool) -> Self {
-		self.compression = negotiated && self.track.info().compress;
+		self.compression = negotiated && self.track.info().compressed();
 		self
 	}
 
@@ -21502,7 +21504,7 @@ mod compression_tests {
 			encoder.varint(super::super::flate::COMPRESSION).unwrap();
 			encoder.varint(1).unwrap();
 			let info = track::Info {
-				compress: true,
+				compression: crate::track::Compression::Deflate,
 				properties: Some(Arc::new(crate::model::object::TrackProperties {
 					version,
 					values: vec![crate::model::object::Property {
@@ -21523,7 +21525,7 @@ mod compression_tests {
 			assert!(decoded.compress);
 			assert_eq!(decoded.unknown, outgoing.unknown);
 			let mut contradiction = info.clone();
-			contradiction.compress = false;
+			contradiction.compression = crate::track::Compression::None;
 			assert!(
 				contradiction
 					.properties
@@ -21538,7 +21540,7 @@ mod compression_tests {
 					Err(Error::Unsupported)
 				));
 			}
-			let plain = track::Info::default().with_compress(true);
+			let plain = track::Info::default().with_compression(crate::track::Compression::Deflate);
 			assert!(!track_properties(&plain, true, version, false).unwrap().compress);
 		}
 	}
@@ -21560,7 +21562,7 @@ mod compression_tests {
 			let track = track::Producer::new(
 				Arc::new(crate::broadcast::Info::default()),
 				"data",
-				track::Info::timed().with_compress(true),
+				track::Info::timed().with_compression(crate::track::Compression::Deflate),
 			);
 			let subscriber = track.subscribe(None);
 			let frames = [vec![b'a'; 1024], vec![b'b'; 1024], Vec::new()];

@@ -41,7 +41,7 @@ export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
 
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
 export function datagramTrackInfo(info: datagram.Info): Info {
-	return { compress: false, timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
+	return { compression: "none", timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
 }
 
 /** A subscription's {@link Delay.max} as the wire carries it: null for no limit, omitted for zero. */

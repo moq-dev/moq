@@ -12,11 +12,11 @@ Applications still write and read plain frames. A reader whose session cannot
 carry compression gets an inflated copy from the relay.
 
 ```rust
-let info = moq_net::track::Info::default().with_compress(true);
+let info = moq_net::track::Info::default().with_compression(moq_net::track::Compression::Deflate);
 ```
 
 ```ts
-const track = broadcast.createTrack("state.json", { compress: true });
+const track = broadcast.createTrack("state.json", { compression: "deflate" });
 ```
 
 ## When to set it
@@ -42,7 +42,7 @@ moq-lite 07 is still opt-in, so compressed bytes cross a hop only where both
 ends list `moq-lite-07-wip`. Sessions on the default versions, and relay links
 among them, carry the inflated frames. Only Rust offers the moq-transport
 extension, so a JavaScript or third-party moq-transport peer reads the
-inflated copy. A received track's `compress` flag says which form arrived. A
+inflated copy. A received track's `compression` says which form arrived. A
 datagram track is never compressed.
 
 ## Cost on the relay

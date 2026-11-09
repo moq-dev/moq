@@ -102,7 +102,7 @@ A fixed audio playout delay `d` is `delay: MoqDelay { min: d, max }` with `estim
 ### Compression moves to the track
 
 The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes on a `MoqTrackProducer`.
-`MoqJsonSnapshotConfig` and `MoqJsonWindowConfig` lose `compression`, and `MoqJsonStreamConfig` is removed: set `compress` on the `MoqTrackInfo` you publish the track with instead.
+`MoqJsonSnapshotConfig` and `MoqJsonWindowConfig` lose `compression`, and `MoqJsonStreamConfig` is removed: set `compression` on the `MoqTrackInfo` you publish the track with instead.
 `MoqJsonStreamProducer::new` drops its config argument, and `MoqJsonSnapshotConsumer::new`, `MoqJsonStreamConsumer::new`, and `MoqJsonWindowConsumer::new` take only the track, reading a compressed track like a plain one.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
@@ -239,9 +239,9 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 `MoqBroadcastRequest::accept` is replaced by `prepare()`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
 Dropping a prepared answer unpublished refuses the request.
 
-### `MoqTrackInfo` gains `compress` (#5928)
+### `MoqTrackInfo` gains `compression` (#5928)
 
-It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
+It defaults to none (`null`/`nil`/`None`) in every generated binding; a Rust struct literal adds `compression: None`.
 
 ### Anchors can name a time (#6074)
 

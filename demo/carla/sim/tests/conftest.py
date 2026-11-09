@@ -29,6 +29,7 @@ moq.Error = MoqError
 moq.Subscription = lambda **kwargs: SimpleNamespace(**kwargs)
 moq.Delay = lambda **kwargs: SimpleNamespace(**kwargs)
 moq.Order = SimpleNamespace(ASCENDING="ascending")
+moq.Compression = SimpleNamespace(DEFLATE="deflate")
 # Tests that run a truck's endpoint script it in place of this.
 moq.socket = ModuleType("moq.socket")
 moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)

@@ -74,17 +74,17 @@ func (c *DatagramConsumer) Name() (string, error) { return c.inner.Name() }
 
 // Info waits for the publisher to accept the track and returns its properties.
 func (c *DatagramConsumer) Info(ctx context.Context) (DatagramInfo, error) {
-	return bridge.Call(ctx, c.inner.Cancel, c.inner.Info)
+	return bridge.Call(ctx, nil, c.inner.Info)
 }
 
 // Recv returns the next datagram, or (nil, nil) after the track finishes.
 func (c *DatagramConsumer) Recv(ctx context.Context) (*Datagram, error) {
-	return bridge.Call(ctx, c.inner.Cancel, c.inner.Recv)
+	return bridge.Call(ctx, nil, c.inner.Recv)
 }
 
 // All ranges over datagrams in arrival order.
 func (c *DatagramConsumer) All(ctx context.Context) iter.Seq2[*Datagram, error] {
-	return bridge.Seq(ctx, c.Recv)
+	return bridge.Seq(ctx, c.inner.Cancel, c.Recv)
 }
 
 // Priority is this consumer's subscriber priority.
@@ -110,7 +110,7 @@ type DatagramRequests struct{ inner *ffi.MoqDatagramRequests }
 
 // Requested waits for the next datagram track requested by a consumer.
 func (r *DatagramRequests) Requested(ctx context.Context) (*DatagramRequest, error) {
-	inner, err := bridge.CallHandle(ctx, r.inner.Cancel, r.inner.Requested)
+	inner, err := bridge.CallHandle(ctx, nil, r.inner.Requested)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (r *DatagramRequests) Requested(ctx context.Context) (*DatagramRequest, err
 
 // All ranges over on-demand datagram requests.
 func (r *DatagramRequests) All(ctx context.Context) iter.Seq2[*DatagramRequest, error] {
-	return bridge.Seq(ctx, r.Requested)
+	return bridge.Seq(ctx, r.inner.Cancel, r.Requested)
 }
 
 // Cancel stops the handler and rejects requests it has not handed out.

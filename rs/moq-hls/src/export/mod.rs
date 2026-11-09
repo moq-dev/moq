@@ -2170,7 +2170,7 @@ mod tests {
 		let consumer = origin.consume().with_stats(
 			registry
 				.tier(moq_net::stats::Tier::default())
-				.session(moq_net::Path::from_static("viewer")),
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer"))),
 		);
 		let bytes = || -> u64 {
 			registry

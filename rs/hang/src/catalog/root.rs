@@ -256,12 +256,12 @@ impl Catalog<()> {
 	/// Keeps moq-net's default zero max age rather than the media one: the catalog is
 	/// snapshot mode, so a join reads the newest snapshot, which never goes stale.
 	/// Timed in milliseconds, so snapshots share the broadcast clock with media, and
-	/// [`compress`](moq_net::track::Info::compress)ed, since catalog JSON is small and repetitive.
+	/// [compressed](moq_net::track::Info::compression), since catalog JSON is small and repetitive.
 	pub fn default_track_info() -> moq_net::track::Info {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_priority(PRIORITY.catalog)
-			.with_compress(true)
+			.with_compression(moq_net::track::Compression::Deflate)
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so

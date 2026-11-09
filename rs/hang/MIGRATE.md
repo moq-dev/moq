@@ -26,8 +26,8 @@ A refused subscription now surfaces from the first read.
 ### Compression moves to the track
 
 `catalog::Compression`, the `compression` field on `JsonConfig` and `BinaryConfig`, `Catalog::COMPRESSED_NAME`, and `catalog::Consumer::compressed` are gone.
-A compressed track is one name with `compress: true` on its `moq_net::track::Info`, and moq-net hands every reader plain frames, so read `catalog.json` with `Consumer::new` whether or not it is compressed.
-`Catalog::default_track_info()` sets `compress`, so a publisher using it compresses `catalog.json`; stop publishing `catalog.json.z`.
+A compressed track is one name with `with_compression(Compression::Deflate)` on its `moq_net::track::Info`, and moq-net hands every reader plain frames, so read `catalog.json` with `Consumer::new` whether or not it is compressed.
+`Catalog::default_track_info()` sets `Compression::Deflate`, so a publisher using it compresses `catalog.json`; stop publishing `catalog.json.z`.
 An old catalog's `"compression"` key on a data track lands in the entry's `extra`, and its frames are still app-level DEFLATE nothing here inflates.
 
 ### `moq_net::Path` has no lifetime

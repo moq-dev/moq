@@ -96,7 +96,7 @@ zero `delay.max`. You opt into one of three distinct modes: `Json.SnapshotProduc
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with
 `JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Publish the
-track with `TrackInfo(compress: true)`; consumers read it the same either way. Every JSON write
+track with `TrackInfo(compression: .deflate)`; consumers read it the same either way. Every JSON write
 (snapshot update, stream append, window push or pop) takes a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), so the
 track needs a timescale.
 

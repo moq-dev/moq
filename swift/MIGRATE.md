@@ -102,7 +102,7 @@ A fixed audio playout delay `d` is `delay: Delay(min: d, max: ...)` with `estima
 ### Compression moves to the track
 
 `Flate` is removed: publish opaque bytes on a `TrackProducer`.
-The `Json` producers and consumers drop their `compression` argument. Publish the track with `TrackInfo(compress: true)` instead; a consumer reads a compressed track with no option of its own.
+The `Json` producers and consumers drop their `compression` argument. Publish the track with `TrackInfo(compression: .deflate)` instead; a consumer reads a compressed track with no option of its own.
 
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 

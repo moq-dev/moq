@@ -53,7 +53,7 @@ pub(crate) struct Inner {
 }
 
 pub(crate) struct State {
-	pub(crate) active: Option<moq_net::server::Active>,
+	pub(crate) active: Option<moq_net::server::Admitted>,
 	/// Wakes the driver when the endpoint fed the connection (a received
 	/// datagram, an unreachable peer) so it answers and re-arms its timers, or
 	/// failed it from outside. Handles need no wake of their own: whatever

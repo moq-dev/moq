@@ -201,12 +201,6 @@ impl Client {
 		self
 	}
 
-	/// Publish and subscribe through one shared origin.
-	pub fn with_origin(mut self, origin: moq_net::origin::Producer) -> Self {
-		self.moq = self.moq.with_origin(origin);
-		self
-	}
-
 	/// Subscribe to the peer's broadcasts, ingesting them into the given origin.
 	pub fn with_subscriber(mut self, subscribe: moq_net::origin::Producer) -> Self {
 		self.moq = self.moq.with_subscriber(subscribe);
@@ -416,20 +410,11 @@ impl Client {
 
 	/// The address an attempt dials, and this client presenting the attempt's credential.
 	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
-	fn attempt(
-		&self,
-		attempt: &moq_net::reconnect::Attempt<crate::connect::Addr>,
-	) -> (crate::connect::Addr, std::borrow::Cow<'_, Self>) {
-		let addr = attempt.target().with_url(attempt.url().clone());
-		let client = match attempt.token() {
-			Some(token) => {
-				let mut client = self.clone();
-				client.moq = client.moq.with_token(token.clone());
-				std::borrow::Cow::Owned(client)
-			}
-			None => std::borrow::Cow::Borrowed(self),
-		};
-		(addr, client)
+	fn attempt(&self, attempt: &moq_net::reconnect::Attempt<crate::connect::Addr>) -> (crate::connect::Addr, Self) {
+		let mut client = self.clone();
+		client.moq = attempt.client(&self.moq);
+		let url = client.moq.url().expect("an attempt sets the URL").clone();
+		(attempt.target().with_url(url), client)
 	}
 
 	/// Whether a session dialed at `url` over `transport` sits on the WebSocket fallback of
@@ -973,11 +958,7 @@ mod tests {
 	fn test_cli_version_help_lists_every_parseable_name() {
 		let help = Cli::render_help(Cli::command(), true).expect("long help");
 		// Every wire code this crate parses, including the opt-in `-wip` drafts.
-		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
-		for name in codes
-			.filter_map(moq_net::Version::from_code)
-			.map(|version| version.as_str())
-		{
+		for name in moq_net::Version::ALL.iter().map(|version| version.as_str()) {
 			assert!(help.contains(name), "missing {name} from --connect-version help");
 		}
 	}

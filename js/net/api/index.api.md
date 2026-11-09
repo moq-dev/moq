@@ -686,6 +686,7 @@ export namespace Track {
 		excluded: bigint;
 		included?: never;
 	};
+	export type Compression = "none" | "deflate";
 	export class Consumer {
 		fetchGroup(sequence: bigint, options?: Track.FetchGroupOptions): Promise<Group.Consumer>;
 		info(options?: Track.InfoOptions): Promise<Track.Info>;
@@ -727,7 +728,7 @@ export namespace Track {
 		start?: Track.Bound;
 	}
 	export interface Info {
-		compress: boolean;
+		compression: Track.Compression;
 		maxAge: Milli | null;
 		priority: number;
 		refresh: number | null;
