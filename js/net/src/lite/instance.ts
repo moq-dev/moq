@@ -58,5 +58,5 @@ async function encode(w: Writer, instance: Instance.Valid): Promise<void> {
 
 function decode(bytes: Uint8Array, minted: boolean): Instance.Valid {
 	const named = Instance.parse(decoder.decode(bytes));
-	return minted ? Mint.mark(named) : named;
+	return minted ? Mint.mint(named) : named;
 }

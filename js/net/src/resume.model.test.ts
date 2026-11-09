@@ -32,7 +32,7 @@ const GROUPS = 12;
 /** Routes per instance, cheaper the higher the slot. */
 const SLOTS = 3;
 /** The first instance, then one whose routes all undercut it. */
-const INSTANCES = [Instance.parse("first"), Instance.parse("second")];
+const INSTANCES: readonly Instance.Valid[] = [Instance.parse("first"), Instance.parse("second")];
 const READERS = 4;
 const PATH = Path.from("room/alice");
 /** A budget nothing in a case outlives. */

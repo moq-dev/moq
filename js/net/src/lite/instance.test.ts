@@ -46,7 +46,15 @@ test("a minted instance keeps its flag, and text never builds one", async () => 
 		expect(Instance.isMinted(astral)).toBe(false);
 		expect(Instance.text(astral)).toBe(text);
 	}
-	expect(() => Instance.parse(minted)).toThrow();
+	// A lone surrogate is ill-formed text, which UTF-8 cannot carry.
+	expect(() => Instance.parse("\uDC00x")).toThrow();
+	// Minting interns by text, so equal minted instances are the same object.
+	expect(Mint.mint(Instance.text(minted))).toBe(minted);
+	expect(`${minted}`).toBe(Instance.text(minted));
+	// Nothing outside the session can build one, even holding its class.
+	const Class = Object.getPrototypeOf(minted).constructor;
+	expect(() => new Class(Symbol("mint"), "forged")).toThrow();
+	expect(Instance.isMinted(Object.create(Class.prototype))).toBe(false);
 	for (const instance of [minted, named]) {
 		const pin = await encoded((w) => encodePin(w, Version.DRAFT_07, instance));
 		expect(await decodePin(new Reader(undefined, pin, Version.DRAFT_07), Version.DRAFT_07)).toBe(instance);

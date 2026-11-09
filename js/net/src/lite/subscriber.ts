@@ -23,7 +23,7 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
-import type * as Instance from "../instance.ts";
+import * as Instance from "../instance.ts";
 import {
 	type DropRun,
 	hiddenBelow,
@@ -1747,7 +1747,9 @@ export class Subscriber {
 		// Different freshness budgets use independent streams: once a FETCH is on the
 		// wire its limit cannot be widened for a later, more tolerant caller. Equal
 		// budgets still coalesce and each caller keeps an independent mirror.
-		const key = JSON.stringify([consumed.id, broadcast, instance, track, String(sequence), options.maxDelay]);
+		// A minted instance is an object, which JSON prints as {}, so key on its text and flag.
+		const pin = instance === undefined ? null : [Instance.text(instance), Instance.isMinted(instance)];
+		const key = JSON.stringify([consumed.id, broadcast, pin, track, String(sequence), options.maxDelay]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {

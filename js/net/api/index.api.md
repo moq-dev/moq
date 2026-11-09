@@ -429,12 +429,17 @@ export namespace Group {
 }
 
 export namespace Instance {
-	export type Valid = string & {
+	export interface Minted {
+		get text(): string;
+		toString(): string;
+	}
+	export type Named = string & {
 		readonly _brand: "instance";
 	};
-	export function isMinted(instance: Instance.Valid): boolean;
-	export function parse(text: string): Instance.Valid;
-	export function random(): Instance.Valid;
+	export type Valid = Instance.Named | Instance.Minted;
+	export function isMinted(instance: Instance.Valid): instance is Instance.Minted;
+	export function parse(text: string): Instance.Named;
+	export function random(): Instance.Named;
 	export function text(instance: Instance.Valid): string;
 }
 
