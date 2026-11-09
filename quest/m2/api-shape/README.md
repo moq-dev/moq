@@ -61,3 +61,4 @@ Rejected in planning:
 
 - [moq-net's route stream goes public](/quest/m2/api-shape/net.md) - un-hide `origin::Consumer::routes` and reshape `RouteEvent`, now that #8063 merged
 - [Ban doc(hidden) in Rust](/quest/m2/api-shape/doc-hidden.md) - `just check` bans it; each use becomes private or documented, test-support modules documented behind their feature
+- [A peer's closed session reads as Closed in the bindings](/quest/m2/api-shape/session-closed.md) - a remote SESSION_CLOSED maps to `MoqError::Closed`, as a local close does
