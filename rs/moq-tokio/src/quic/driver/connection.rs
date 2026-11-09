@@ -25,9 +25,9 @@ pub use moq_quic::connection::{Error, Stats};
 use moq_quic::{
 	EndpointEvent, TransportError, TransportErrorCode, crypto,
 	endpoint::ConnectionHandle,
-	rustls::pki_types::CertificateDer,
 	stream::{Dir, Id as StreamId},
 };
+use rustls::pki_types::CertificateDer;
 
 /// In-progress connection attempt future
 ///
@@ -492,7 +492,7 @@ impl Connection {
 	#[cfg(feature = "net")]
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let state = self.0.state.lock();
-		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
+		moq_net::transport::ReceiveWindow::new(Some(state.inner.receive_window()), state.inner.stream_receive_window())
 	}
 
 	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,

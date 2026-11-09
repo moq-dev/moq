@@ -65,7 +65,7 @@ describe("Truck status", () => {
 
 	function statusBroadcast() {
 		const broadcast = new Moq.Broadcast.Producer();
-		const track = broadcast.createTrack("status", { compress: true });
+		const track = broadcast.createTrack("status", { compression: "deflate" });
 		const producer = new Json.Snapshot.Producer<TruckStatus>({ track });
 		return { broadcast, producer };
 	}
@@ -525,7 +525,7 @@ describe("Truck sessions", () => {
 			// The truck's status echoing the latch is what lets the session go.
 			const broadcast = new Moq.Broadcast.Producer();
 			const producer = new Json.Snapshot.Producer<TruckStatus>({
-				track: broadcast.createTrack("status", { compress: true }),
+				track: broadcast.createTrack("status", { compression: "deflate" }),
 			});
 			try {
 				(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(

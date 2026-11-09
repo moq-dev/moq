@@ -21,7 +21,6 @@ use axum::routing::post;
 use axum::{Json, Router};
 use moq_auth::{Event, Grant, Pattern, Patterns, Request};
 use moq_relay::Relay;
-use moq_tokio::moq_net;
 use moq_tokio::quic::driver;
 
 use crate::refusals::{client, config};
@@ -135,7 +134,7 @@ async fn start(io_uring: bool) -> Running {
 	let mut config = config(dir.path(), false);
 	config.auth.url = Some(tenants.spawn().await);
 	if io_uring {
-		config.runtime.workers = Some(1);
+		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = true;
 	}
@@ -345,7 +344,7 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			// Synced counts only once every event queued before it was read.
-			let next = moq_net::kio::wait(|waiter| match routes.poll_next(waiter) {
+			let next = kio::wait(|waiter| match routes.poll_next(waiter) {
 				Poll::Ready(event) => Poll::Ready(event),
 				Poll::Pending => routes.poll_synced(waiter).map(|()| None),
 			})

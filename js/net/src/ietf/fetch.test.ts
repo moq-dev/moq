@@ -505,7 +505,7 @@ test("a FETCH preserves relayed metadata and cached groups without upstream FETC
 					while (await group?.readFrame()) {}
 					group?.close();
 				}
-				const requests = fx.origin.routePrefix(Path.from("relayed"));
+				const requests = fx.origin.claim(Path.from("relayed"));
 				const cursor = requests.requested();
 				const requested = cursor.next();
 				const type = { ...range(version, at(3, 0), at(3, 0)), trackNamespace: Path.from("relayed") };

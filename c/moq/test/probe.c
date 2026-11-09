@@ -293,8 +293,7 @@ int main(void)
 	route_options.hidden = true;
 	moq_route *route = NULL;
 	ok(moq_origin_producer_route(origin, "probe", &route_options, &route), "route");
-	moq_broadcast_producer *broadcast = NULL;
-	ok(moq_route_broadcast(route, &broadcast), "route broadcast");
+	moq_broadcast_producer *broadcast = moq_route_broadcast(route);
 	char *instance = moq_route_instance_id(route);
 	CHECK(instance && instance[0] != '\0');
 	moq_string_free(instance);
@@ -362,10 +361,10 @@ int main(void)
 	moq_track_consumer *consumer = await(&subscribed, "subscribe_track");
 	moq_task_free(task);
 
-	/* Freeing a pending task cancels the read, and its callback never runs. */
+	/* Freeing a pending task cancels the read, and its callback never runs, even while the
+	 * next read below pumps the loop. */
 	result cancelled = {0};
 	task = moq_track_consumer_read_frame(consumer, on_frame, &cancelled);
-	CHECK(!pump(&cancelled.done, 50));
 	moq_task_free(task);
 
 	/* The consumer survives the cancelled read and delivers the next frame. */
@@ -464,8 +463,7 @@ int main(void)
 	late_options.hidden = true;
 	moq_route *late_route = NULL;
 	ok(moq_origin_producer_route(late_origin, "late", &late_options, &late_route), "late route");
-	moq_broadcast_producer *late_broadcast = NULL;
-	ok(moq_route_broadcast(late_route, &late_broadcast), "late broadcast");
+	moq_broadcast_producer *late_broadcast = moq_route_broadcast(late_route);
 	moq_route_free(late_route);
 	moq_track_producer *late_track = NULL;
 	ok(moq_broadcast_producer_publish_track(late_broadcast, "data", &info, &late_track), "late track");

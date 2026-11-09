@@ -197,22 +197,37 @@ pub struct Following {
 	unseen: bool,
 	/// The resolution in flight, kept across a dropped wait so a retry picks it up.
 	resolving: Option<Requesting>,
-	/// The broadcast handed out last, until the path goes offline or the broadcast ends. Weak,
-	/// so it never keeps one the caller let go of from retiring.
-	last: Option<broadcast::WeakConsumer>,
-	/// Once the broadcast handed out last closed, waits for its instance to stop serving the
-	/// path.
-	moved: Option<Moved>,
-	/// A change resolved to the broadcast handed out last while it was still open, so it counts
-	/// as delivered only until that broadcast closes.
-	absorbed: bool,
-	/// A broadcast was handed out and its end not reported yet.
-	live: bool,
-	/// The broadcast handed out last stopped serving the path, and its end is owed.
-	ended: bool,
+	/// The broadcast handed out last, until the path goes offline, the broadcast ends, or a
+	/// resolution is refused.
+	last: Option<Last>,
+	/// Whether the end of what was handed out is still to be reported.
+	handed: Handed,
 	/// The last resolution was refused: any change to the serving route, even the same
 	/// instance over another route, is worth asking again.
 	refused: bool,
+}
+
+/// The broadcast a [`Following`] handed out last, and what it waits on once that closes.
+struct Last {
+	/// Weak, so it never keeps one the caller let go of from retiring.
+	broadcast: broadcast::WeakConsumer,
+	/// Once the broadcast closed, waits for its instance to stop serving the path.
+	moved: Option<Moved>,
+	/// A change resolved to this broadcast while it was still open, so it counts as delivered
+	/// only until the broadcast closes.
+	absorbed: bool,
+}
+
+/// Whether a [`Following`] owes the end of the broadcast it handed out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Handed {
+	/// Nothing handed out, or its end already reported.
+	Nothing,
+	/// A broadcast was handed out and its end is not yet due, even if a refused takeover means
+	/// it no longer serves the path.
+	Live,
+	/// The broadcast handed out stopped serving the path, and its end is owed.
+	Ended,
 }
 
 impl Following {
@@ -225,10 +240,7 @@ impl Following {
 			unseen: false,
 			resolving: None,
 			last: None,
-			moved: None,
-			absorbed: false,
-			live: false,
-			ended: false,
+			handed: Handed::Nothing,
 			refused: false,
 		}
 	}
@@ -253,9 +265,8 @@ impl Following {
 				self.resolving = None;
 			}
 			// Report an end before whatever serves next, so a reader drops the old broadcast first.
-			if self.ended {
-				self.ended = false;
-				self.live = false;
+			if self.handed == Handed::Ended {
+				self.handed = Handed::Nothing;
 				return Poll::Ready(Ok(None));
 			}
 			// The broadcast handed out ended while the path is still served: its instance's
@@ -265,12 +276,13 @@ impl Following {
 			// change it absorbed is owed. A refusal forgets it, so only a route change asks again.
 			if !self.unseen
 				&& self.follow.serving().is_some()
-				&& let Some(last) = self.last.as_ref().map(broadcast::WeakConsumer::consume)
-				&& last.poll_closed(waiter).is_ready()
+				&& let Some(last) = &mut self.last
+				&& let broadcast = last.broadcast.consume()
+				&& broadcast.poll_closed(waiter).is_ready()
 			{
-				let moved = match &last.info().instance {
-					_ if self.absorbed => true,
-					Some(instance) => self
+				let moved = match &broadcast.info().instance {
+					_ if last.absorbed => true,
+					Some(instance) => last
 						.moved
 						.get_or_insert_with(|| {
 							self.consumer
@@ -281,7 +293,7 @@ impl Following {
 					None => true,
 				};
 				if moved {
-					self.moved = None;
+					last.moved = None;
 					self.unseen = true;
 				}
 			}
@@ -301,12 +313,10 @@ impl Following {
 			self.refused = resolved.is_err();
 			let broadcast = match resolved {
 				Ok(broadcast) => broadcast,
-				// `live` stays: the end of what was handed out is still owed once the path goes
+				// `handed` stays: the end of what was handed out is still owed once the path goes
 				// offline.
 				Err(err) => {
 					self.last = None;
-					self.moved = None;
-					self.absorbed = false;
 					return Poll::Ready(Err(err));
 				}
 			};
@@ -315,14 +325,18 @@ impl Following {
 			// the origin holds its restart, and that restart then names the instance handed
 			// out. The caller freeing it before reading the restart is owed it again.
 			let weak = broadcast.weak();
-			if self.last.as_ref().is_some_and(|last| last.same_channel(&weak)) {
-				self.absorbed = true;
+			if let Some(last) = &mut self.last
+				&& last.broadcast.same_channel(&weak)
+			{
+				last.absorbed = true;
 				continue;
 			}
-			self.last = Some(weak);
-			self.moved = None;
-			self.absorbed = false;
-			self.live = true;
+			self.last = Some(Last {
+				broadcast: weak,
+				moved: None,
+				absorbed: false,
+			});
+			self.handed = Handed::Live;
 			return Poll::Ready(Ok(Some(broadcast)));
 		}
 	}
@@ -339,10 +353,10 @@ impl Following {
 	/// The broadcast handed out last stopped serving the path: owe its end, and hand out
 	/// whatever serves next, even the same instance coming back.
 	fn end(&mut self) {
-		self.ended |= self.live;
+		if self.handed == Handed::Live {
+			self.handed = Handed::Ended;
+		}
 		self.last = None;
-		self.moved = None;
-		self.absorbed = false;
 	}
 
 	/// Apply one change to the path, returning whether it is one.
@@ -409,7 +423,7 @@ mod tests {
 	}
 
 	fn route(instance: &Instance) -> RouteInfo {
-		RouteInfo::default().with_instance(instance.clone(), 0)
+		RouteInfo::new().with_instance(instance.clone(), 0)
 	}
 
 	fn options(instance: &Instance) -> RouteOptions {
@@ -458,7 +472,7 @@ mod tests {
 	#[kio::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.forward("pool", RouteInfo::default()).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::new()).unwrap();
 		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
 
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
@@ -514,7 +528,7 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 
-		let _pool = origin.forward("pool", RouteInfo::default()).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::new()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
@@ -530,7 +544,7 @@ mod tests {
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
-			.forward("room/alice", RouteInfo::default())
+			.forward("room/alice", RouteInfo::new())
 			.unwrap();
 		let mut follow = origin.consume().path_routes("room/alice").unwrap();
 
@@ -593,7 +607,7 @@ mod tests {
 	}
 
 	/// The next request a dynamic route receives for its path.
-	async fn requested(dynamic: &crate::origin::Route) -> crate::origin::Request {
+	async fn requested(dynamic: &crate::origin::Claim) -> crate::origin::Request {
 		kio::clock::timeout(Duration::from_secs(1), dynamic.requested())
 			.await
 			.expect("never asked")
@@ -606,7 +620,7 @@ mod tests {
 	/// it, the takeover's restart lands while resolving; at it, the origin holds that restart.
 	async fn hands_out_a_takeover_once(dynamic_at: &str) {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix(dynamic_at, RouteOptions::default()).unwrap();
+		let dynamic = origin.claim(dynamic_at, RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over under another instance.
@@ -633,7 +647,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_waits_for_another_instance_after_a_dropped_takeover() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let dynamic = origin.claim("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		let (takeover, _publish) = futures::join!(available(&mut announced), async {
@@ -653,7 +667,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("", RouteOptions::default()).unwrap();
+		let dynamic = origin.claim("", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
@@ -756,7 +770,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_reports_a_dropped_prepared_answer() {
 		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -789,7 +803,7 @@ mod tests {
 	async fn announced_retries_a_refusal_on_another_route_of_the_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
-		let claim = origin.route_prefix("", options(&instance)).unwrap();
+		let claim = origin.claim("", options(&instance)).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -813,7 +827,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_waits_for_a_route_change_after_a_refusal() {
 		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -835,7 +849,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_does_not_retry_a_refusal_after_a_takeover() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("", options(&Instance::random())).unwrap();
+		let dynamic = origin.claim("", options(&Instance::random())).unwrap();
 		let exact = origin.route("live", options(&Instance::random())).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let _first = available(&mut announced).await;

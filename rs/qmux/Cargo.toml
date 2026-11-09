@@ -34,7 +34,7 @@ rustls-native-certs = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true, optional = true }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"], optional = true }
+tokio-tungstenite = { workspace = true, features = ["connect", "handshake"], optional = true }
 # `poll_read_buf`, which reads into a `BytesMut` without zeroing it first.
 tokio-util = { workspace = true, features = ["io"] }
 tracing = { workspace = true }

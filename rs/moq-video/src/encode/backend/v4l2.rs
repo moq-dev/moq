@@ -73,7 +73,6 @@ pub(crate) const NAME: &str = "v4l2";
 
 /// Which node encodes: one that takes raw 4:2:0 in and gives H.264 back.
 const ROLE: Role = Role {
-	env: "MOQ_V4L2_ENCODER",
 	input: v4l2::RAW,
 	output: &[v4l2::H264],
 };
@@ -156,7 +155,7 @@ impl V4l2 {
 		let size = config.size();
 		size.validate("V4L2 encode of")?;
 
-		let device = v4l2::open(&ROLE)?;
+		let device = v4l2::open(&ROLE, config.v4l2.as_deref())?;
 
 		// Before `VIDIOC_S_FMT`: bcm2835-codec picks its encoder configuration
 		// from the profile and level at format time, and a level set afterwards

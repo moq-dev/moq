@@ -23,6 +23,7 @@ import type * as group from "../group.ts";
 import { Cost, type Hop, routesEqual, type WireRoute } from "../hop.ts";
 import {
 	type DropRun,
+	datagramTrackInfo,
 	finalSequence,
 	type Hole,
 	hiddenBelow,
@@ -130,11 +131,11 @@ interface Stamp {
 	 * equals. Lite-05/06 cannot encode an untimed track, so an untimed one carries its send time
 	 * instead.
 	 */
-	timed?: Pick<track.Info, "timescale">;
+	timed?: { timescale?: Timescale | null };
 }
 
 /** How `version` stamps a track with `info`, or undefined when it carries no timestamps. */
-function stamping(version: Version, info: Pick<track.Info, "timescale">): Stamp | undefined {
+function stamping(version: Version, info: { timescale?: Timescale | null }): Stamp | undefined {
 	const timescale = info.timescale ?? undefined;
 	const wire = wireTimescale(version, timescale);
 	if (wire === undefined) return undefined;
@@ -159,14 +160,14 @@ function acknowledged(writer: Writer): Promise<void> {
 function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage {
 	return new TrackInfoMessage({
 		priority: info.priority,
-		refresh: info.refresh,
+		refresh: info.refresh ?? undefined,
 		// Publisher Max Age: the publisher's staleness bound, advertised so relays re-serve
 		// with the same bound.
-		maxAge: info.maxAge,
+		maxAge: info.maxAge ?? undefined,
 		// `#serveGroup` emits each frame converted to it.
 		timescale: info.timescale ?? undefined,
 		// An older peer is served the frames inflated.
-		compress: hasCompression(version) && !!info.compress,
+		compress: hasCompression(version) && info.compression === "deflate",
 	});
 }
 
@@ -1095,7 +1096,7 @@ export class Publisher {
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
 				// they always agree.
 				stamp = stamping(this.version, info);
-				compress = hasCompression(this.version) && !!info.compress;
+				compress = hasCompression(this.version) && info.compression === "deflate";
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
@@ -1995,7 +1996,10 @@ export class Publisher {
 					throw err;
 				const asked = front.datagrams(msg.track);
 				try {
-					info = trackInfoMessage(await untilAborted(asked.info(), hold.signal), this.version);
+					info = trackInfoMessage(
+						datagramTrackInfo(await untilAborted(asked.info(), hold.signal)),
+						this.version,
+					);
 				} catch (err) {
 					asked.close();
 					throw err;

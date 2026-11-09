@@ -1,12 +1,12 @@
 //! Refresh joins traverse real protocol hops, judged independently from each cache.
 use crate::support::harness::{MockConnectOptions, connect_mock, peer, spawn, subscribed};
-use moq_net::{Version, kio, origin, track};
+use moq_net::{Version, origin, track};
 use std::time::Duration;
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	spawn(driver);
-	origin
+	origin.with_proxy(true)
 }
 
 /// The JSON owner answers demand across a publisher link, a cluster peer, and a reader link.

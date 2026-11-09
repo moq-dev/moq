@@ -1,0 +1,122 @@
+[
+	{
+		"url": "https://127.0.0.1/",
+		"local": true
+	},
+	{
+		"url": "https://localhost/",
+		"local": true
+	},
+	{
+		"url": "https://localhost./",
+		"local": true
+	},
+	{
+		"url": "https://a.localhost/",
+		"local": true
+	},
+	{
+		"url": "https://[::1]/",
+		"local": true
+	},
+	{
+		"url": "https://[::]/",
+		"local": true
+	},
+	{
+		"url": "https://10.0.0.1/",
+		"local": true
+	},
+	{
+		"url": "https://172.16.0.1/",
+		"local": true
+	},
+	{
+		"url": "https://192.168.1.1/",
+		"local": true
+	},
+	{
+		"url": "https://169.254.1.1/",
+		"local": true
+	},
+	{
+		"url": "https://0.0.0.0/",
+		"local": true
+	},
+	{
+		"url": "https://[::ffff:127.0.0.1]/",
+		"local": true
+	},
+	{
+		"url": "https://[::ffff:10.0.0.1]/",
+		"local": true
+	},
+	{
+		"url": "https://[fe80::1]/",
+		"local": true
+	},
+	{
+		"url": "https://[fc00::1]/",
+		"local": true
+	},
+	{
+		"url": "moqt://127.0.0.1/",
+		"local": true
+	},
+	{
+		"url": "moqt://[::ffff:127.0.0.1]/",
+		"local": true
+	},
+	{
+		"url": "moqt://localhost./",
+		"local": true
+	},
+	{
+		"url": "moql://127.1/",
+		"local": true
+	},
+	{
+		"url": "moql://0x7f000001/",
+		"local": true
+	},
+	{
+		"url": "moql://2130706433/",
+		"local": true
+	},
+	{
+		"url": "moql://0177.0.0.1/",
+		"local": true
+	},
+	{
+		"url": "moql://LOCALHOST/",
+		"local": true
+	},
+	{
+		"url": "moql://0/",
+		"local": true
+	},
+	{
+		"url": "https://example.com/",
+		"local": false
+	},
+	{
+		"url": "https://8.8.8.8/",
+		"local": false
+	},
+	{
+		"url": "https://172.32.0.1/",
+		"local": false
+	},
+	{
+		"url": "https://[2606:4700::1]/",
+		"local": false
+	},
+	{
+		"url": "moql://8.8.8.8/",
+		"local": false
+	},
+	{
+		"url": "moqt://relay.example/",
+		"local": false
+	}
+]

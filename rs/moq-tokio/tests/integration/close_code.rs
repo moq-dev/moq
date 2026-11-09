@@ -7,8 +7,6 @@
 
 use std::time::Duration;
 
-use moq_tokio::moq_net;
-
 const CODE: u16 = 4011;
 const RUNS: usize = 5;
 

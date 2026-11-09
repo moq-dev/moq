@@ -345,7 +345,7 @@ async fn tokio_worker_peer_session_widens_quic_limits() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path());
-	config.runtime.workers = Some(1);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 	config.runtime.pin = false;
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
@@ -366,7 +366,7 @@ async fn uring_peer_session_widens_quic_limits() {
 	}
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path());
-	config.runtime.workers = Some(1);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(1).unwrap());
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);

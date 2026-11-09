@@ -123,9 +123,9 @@ impl Sealed for moq_tokio::server::Request {
 
 	#[cfg(feature = "quic")]
 	fn pacer(&self) -> Option<auth::Pacer> {
-		let quic = moq_tokio::server::Request::quic(self)?.clone();
+		let quic = moq_tokio::server::Request::quic_limits(self)?;
 		Some(auth::Pacer::new(move |caps| {
-			if let Err(err) = quic.set_limits(caps.limits()) {
+			if let Err(err) = quic.set(caps.limits()) {
 				tracing::warn!(%err, "failed to apply bitrate caps");
 			}
 		}))

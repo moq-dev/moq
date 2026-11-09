@@ -183,7 +183,7 @@ impl<T> Encoder<T> {
 			start: 0,
 			group_bytes: 0,
 			group_frames: 0,
-			max_group_bytes: moq_net::group::MAX_CACHE_BYTES,
+			max_group_bytes: crate::MAX_GROUP_BYTES,
 			resync: true,
 			_marker: PhantomData,
 		}

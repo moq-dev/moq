@@ -43,25 +43,8 @@ pub struct Client {
 	/// for loss recovery. It doubles as [`publish`]'s egress skip threshold.
 	latency: Duration,
 
-	/// How long a superseded group of an ingested media track stays fresh, or `None` for
-	/// no publisher limit. Defaults to [`MAX_AGE`](hang::container::MAX_AGE).
-	///
-	/// A freshness bound, not a delivery one: it never makes a subscriber play further
-	/// behind live, it caps how far back a FETCH can still reach. The default suits a
-	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history. [`pull`] only; [`publish`] reads a broadcast someone else
-	/// declared.
-	max_age: Option<Duration>,
-
-	/// Connection allocator each ingested track claims its peak-hold bitrate on.
-	/// [`pull`] only; [`publish`] reads a broadcast someone else declared.
-	bandwidth: moq_net::bandwidth::Allocator,
-
 	/// The programs of a multi-program remote [`pull`] publishes, or `None` to refuse one.
 	program: Option<Program>,
-
-	/// How long a broadcast [`pull`] finished stays up. [`pull`] only.
-	linger: Duration,
 
 	/// How long [`publish`] waits for the same publisher instance to come back once its
 	/// broadcast ends. [`publish`] only.
@@ -73,17 +56,13 @@ pub struct Client {
 }
 
 impl Client {
-	/// Dial `addr` for `resource`, with the default SRT latency (500ms) and the
-	/// authored media max age.
+	/// Dial `addr` for `resource`, with the default SRT latency (500ms).
 	pub fn new(addr: SocketAddr, resource: impl Into<String>) -> Self {
 		Self {
 			addr,
 			resource: resource.into(),
 			latency: DEFAULT_LATENCY,
-			max_age: Some(hang::container::MAX_AGE),
-			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			program: None,
-			linger: moq_mux::Linger::DEFAULT,
 			follow: Duration::ZERO,
 			stitch: false,
 		}
@@ -99,37 +78,10 @@ impl Client {
 		self
 	}
 
-	/// Set how long non-latest groups created by [`pull`](Self::pull) remain fetchable.
-	///
-	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
-	/// someone else declared.
-	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
-		self.max_age = max_age.into();
-		self
-	}
-
-	/// Claim each track ingested by [`pull`](Self::pull) on `bandwidth`.
-	///
-	/// The pull (ingest) direction only.
-	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
-		self.bandwidth = bandwidth;
-		self
-	}
-
 	/// Publish one program of a multi-program stream [`pull`](Self::pull) receives, or each as
 	/// its own broadcast under the pulled path. `None` (the default) refuses a multiplex.
 	pub fn with_program(mut self, program: impl Into<Option<Program>>) -> Self {
 		self.program = program.into();
-		self
-	}
-
-	/// Keep the broadcast [`pull`](Self::pull) publishes up for `linger` after the remote
-	/// stream ends, so a subscriber that arrives after the end still gets the tail. Defaults to
-	/// [`moq_mux::Linger::DEFAULT`]; zero closes it at once.
-	///
-	/// The pull (ingest) direction only.
-	pub fn with_linger(mut self, linger: Duration) -> Self {
-		self.linger = linger;
 		self
 	}
 
@@ -149,9 +101,10 @@ impl Client {
 		self
 	}
 
-	/// Push a MoQ broadcast out to the remote as MPEG-TS until the broadcast ends.
-	pub async fn publish(&self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	/// Push the broadcast `request` names in `origin` out to the remote as MPEG-TS until the
+	/// broadcast ends.
+	pub async fn publish(&self, origin: &origin::Consumer, request: Publish) -> Result<()> {
+		let Publish { path } = request;
 		let socket = self.call(Mode::Publish).await?;
 		let options = crate::ts::Options {
 			latency: self.latency,
@@ -161,21 +114,20 @@ impl Client {
 		serve_subscribe(origin, path.as_str(), socket, options).await
 	}
 
-	/// Pull a remote MPEG-TS stream into `origin` at `path` until the remote ends.
+	/// Pull a remote MPEG-TS stream into `origin` at `path`, published as `ingest` says, until
+	/// the remote ends.
 	///
-	/// The finished broadcast then stays up for the [linger](Self::with_linger), as
-	/// [`Publish::accept`](crate::Publish::accept) describes, and the future resolves after that.
-	pub async fn pull(&self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+	/// The finished broadcast then stays up for the ingest's [linger](moq_mux::Ingest::linger),
+	/// as [`Publish::accept`](crate::Publish::accept) describes, and the future resolves after that.
+	pub async fn pull(
+		&self,
+		origin: &origin::Producer,
+		path: impl Into<moq_net::Path>,
+		ingest: &moq_mux::Ingest,
+	) -> Result<()> {
 		let path: moq_net::Path = path.into();
 		let socket = self.call(Mode::Request).await?;
-		let ingest = crate::server::Ingest {
-			config: moq_mux::catalog::Config::default()
-				.with_max_age(self.max_age)
-				.with_bandwidth(self.bandwidth.clone()),
-			program: self.program,
-			linger: self.linger,
-		};
-		serve_publish(origin, path.as_str(), socket, ingest).await
+		serve_publish(origin, path.as_str(), socket, ingest, self.program).await
 	}
 
 	async fn call(&self, mode: Mode) -> Result<SrtSocket> {
@@ -190,6 +142,21 @@ impl Client {
 			.await?;
 		tracing::info!(addr = %self.addr, resource = %self.resource, mode = mode.as_str(), "SRT caller connected");
 		Ok(socket)
+	}
+}
+
+/// What [`Client::publish`] pushes: the broadcast to read.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Publish {
+	/// The broadcast to push, relative to the origin's root.
+	pub path: moq_net::Path,
+}
+
+impl Publish {
+	/// Push the broadcast at `path`.
+	pub fn new(path: impl Into<moq_net::Path>) -> Self {
+		Self { path: path.into() }
 	}
 }
 
@@ -261,9 +228,10 @@ mod tests {
 			let is_publish = matches!(request, Request::Publish(_));
 			if let Request::Publish(publish) = request {
 				// Runs until the caller disconnects, then closes at once.
+				let mut ingest = moq_mux::Ingest::default();
+				ingest.linger = Duration::ZERO;
 				publish
-					.with_linger(Duration::ZERO)
-					.accept(&origin, moq_net::Path::from_static("ingested/cam0"))
+					.accept(&origin, moq_net::Path::from_static("ingested/cam0"), &ingest)
 					.await
 					.ok();
 			}

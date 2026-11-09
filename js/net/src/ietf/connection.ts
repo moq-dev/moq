@@ -3,8 +3,8 @@ import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
+import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
@@ -42,14 +42,15 @@ function handed(task: Promise<void>): Promise<void> {
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
-type Phase = { kind: "open" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
+/** `leaving` is open but draining at this side's own request; see the wire view's `leave`. */
+type Phase = { kind: "open" } | { kind: "leaving" } | { kind: "closing"; done: Promise<void> } | { kind: "closed" };
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
  *
  * @internal
  */
-export class Connection implements Established {
+export class Connection implements Session {
 	#phase: Phase = { kind: "open" };
 	// The URL of the connection.
 	readonly url: URL;
@@ -60,10 +61,10 @@ export class Connection implements Established {
 	// The wire transport this session runs over.
 	readonly transport: Transport;
 
-	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
+	/** moq-transport has no PROBE, so this stays empty; see {@link Session.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
-	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
+	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Session.auth}. */
 	get auth(): Auth.Handle {
 		return this.#auth.handle;
 	}
@@ -98,7 +99,7 @@ export class Connection implements Established {
 	// The peer's GOAWAY, read off its SETUP stream.
 	#goaway = new Once<Drain>();
 
-	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
 
 	/**
@@ -232,13 +233,17 @@ export class Connection implements Established {
 			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
 			// declared MoQ Solicit is ours and holds both; any other may enforce it.
 			exclusive: solicit === undefined,
+			// Drained locally only: this compatibility layer sends no client GOAWAY.
+			leave: () => {
+				if (this.#phase.kind === "open") this.#phase = { kind: "leaving" };
+			},
 			auth: this.#auth,
 		});
 
 		void this.#run(early);
 	}
 
-	/** Snapshot the transport's counters; see {@link Established.stats}. */
+	/** Snapshot the transport's counters; see {@link Session.stats}. */
 	async stats(): Promise<Stats> {
 		return transportStats(this.#quic);
 	}
@@ -246,7 +251,8 @@ export class Connection implements Established {
 	/** Withdraw announcements and wait up to one second for delivery before closing. */
 	close(): Promise<void> {
 		switch (this.#phase.kind) {
-			case "open": {
+			case "open":
+			case "leaving": {
 				const done = withTimeout(
 					this.#publisher.withdraw(),
 					Nano.fromSecond(Second(1)),
@@ -320,7 +326,7 @@ export class Connection implements Established {
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Established.announced}. */
+	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
 		return announce.list(this.#subscriber.routes(scope, options));
 	}
@@ -600,12 +606,12 @@ export class Connection implements Established {
 		return GoAway.decode(controlStream.reader, version);
 	}
 
-	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
 	get draining(): GetPromise<Drain> {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */
+	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
 	get closed(): Promise<Error | null> {
 		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
 	}

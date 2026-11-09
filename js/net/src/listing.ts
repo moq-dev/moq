@@ -420,15 +420,18 @@ export let makeLister: (listing: Listing) => Lister;
  *
  * While it exists, readers wait for it to {@link synced} before reporting `synced`. Answer
  * while {@link wanted}: list what the publisher behind it holds and keep it current, then
- * {@link clear} once unwanted. {@link close} withdraws what it listed.
+ * {@link clear} once unwanted. {@link close} withdraws what it listed; a closed lister answers
+ * nothing more.
  */
 export class Lister {
-	#listing: Listing;
-	#closed = false;
+	readonly #listing: Listing;
+	// The listing this lister answers into, until it closes.
+	#answering?: Listing;
 
 	private constructor(listing: Listing) {
 		listing.attach();
 		this.#listing = listing;
+		this.#answering = listing;
 	}
 
 	static {
@@ -447,45 +450,46 @@ export class Lister {
 
 	/** List a track. Throws if this answer already lists it. */
 	add(name: string, info: track.Info): void {
-		this.#listing.answerAdd(name, info);
+		this.#answering?.answerAdd(name, info);
 	}
 
 	/** Stop listing a track that left unfinished, reported as `removed`. Throws if this answer does not list it. */
 	remove(name: string): void {
-		this.#listing.answerRemove(name, false);
+		this.#answering?.answerRemove(name, false);
 	}
 
 	/** Stop listing a track that finished, reported as `finished`. Throws if this answer does not list it. */
 	finish(name: string): void {
-		this.#listing.answerRemove(name, true);
+		this.#answering?.answerRemove(name, true);
 	}
 
 	/** The answer holds everything this hop knows now; later changes are live. */
 	synced(): void {
-		this.#listing.answerSynced();
+		this.#answering?.answerSynced();
 	}
 
 	/** Withdraw the answer: every track it listed, and its sync. */
 	clear(): void {
-		this.#listing.answerClear();
+		this.#answering?.answerClear();
 	}
 
 	/** End every current reader as if the broadcast ended, and withdraw the answer. A later reader asks again. */
 	end(): void {
-		this.#listing.detach(null);
-		this.#listing.answerClear();
+		const listing = this.#answering;
+		listing?.detach(null);
+		listing?.answerClear();
 	}
 
 	/** Fail every current reader with `err`, and withdraw the answer. A later reader asks again. */
 	abort(err: Error): void {
-		this.#listing.detach(err);
-		this.#listing.answerClear();
+		const listing = this.#answering;
+		listing?.detach(err);
+		listing?.answerClear();
 	}
 
 	/** Stop answering: the broadcast lists only its producer's tracks from here on. Idempotent. */
 	close(): void {
-		if (this.#closed) return;
-		this.#closed = true;
-		this.#listing.detachLister();
+		this.#answering?.detachLister();
+		this.#answering = undefined;
 	}
 }

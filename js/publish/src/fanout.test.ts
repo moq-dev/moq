@@ -275,6 +275,44 @@ describe("Fanout", () => {
 		expect(cancelled).toBe(1);
 	});
 
+	test("a reader that wasn't waiting drains its queue before the source's end", async () => {
+		const source = pushable<number>();
+		const fanout = new Fanout(source.stream);
+		const effect = new Effect();
+
+		const stream = fanout.subscribe(effect);
+		source.push(1);
+		source.push(2);
+		source.close();
+		await flush();
+
+		const reader = stream.getReader();
+		expect((await reader.read()).value).toBe(1);
+		expect((await reader.read()).value).toBe(2);
+		expect((await reader.read()).done).toBe(true);
+
+		effect.close();
+		fanout.close();
+	});
+
+	test("the owner's close after a clean end still discards what readers queued", async () => {
+		const source = pushable<number>();
+		const released: number[] = [];
+		const fanout = new Fanout(source.stream, { release: (value) => released.push(value) });
+		const effect = new Effect();
+
+		const stream = fanout.subscribe(effect);
+		source.push(1);
+		source.close();
+		await flush();
+
+		fanout.close();
+		expect(released).toEqual([1]);
+		expect((await stream.getReader().read()).done).toBe(true);
+
+		effect.close();
+	});
+
 	test("closes its readers when the source ends", async () => {
 		const source = pushable<number>();
 		const fanout = new Fanout(source.stream);

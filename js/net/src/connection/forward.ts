@@ -9,11 +9,11 @@ import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { routesEqual, type WireRoute } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
-import type { Producer as OriginProducer, Route } from "../origin.ts";
+import type { Claim, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
 import { type RequestSlot, wireOf } from "../wire.ts";
-import type { Established } from "./established.ts";
+import type { Session } from "./session.ts";
 
 /** Why a connection refuses the removed `discovery` option rather than ignoring it. */
 export const DISCOVERY_REMOVED =
@@ -39,7 +39,7 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
-	handle: Route;
+	handle: Claim;
 	/** Each request's latest route for the prefix. */
 	readonly reporters: Map<Interest, WireRoute>;
 }
@@ -75,7 +75,7 @@ interface Reported {
  *
  * @internal
  */
-export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
+export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
 	const exclusive = wireOf(conn).exclusive;
 	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
@@ -290,7 +290,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 }
 
 /** Answer the requests under a received route by consuming them from the session. */
-async function drive(handle: Route, conn: Established): Promise<void> {
+async function drive(handle: Claim, conn: Session): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {
@@ -312,7 +312,7 @@ async function drive(handle: Route, conn: Established): Promise<void> {
  * A path the table already routes is left alone. A request resolves to the table's route over
  * any blind answer, so answering one would only park a handle nothing reads.
  */
-async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
+async function serveRequests(conn: Session, origin: OriginProducer): Promise<void> {
 	const table = wireOf(origin);
 	const session = wireOf(conn);
 	// The withdraws for the answers this session provided, so a dead session only takes

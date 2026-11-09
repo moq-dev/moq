@@ -54,7 +54,9 @@ impl Refusals {
 		}
 	}
 	pub(crate) fn record(&self, reason: RefusalKind) {
-		self.registry.tier(Tier::default()).refuse(Path::empty(), reason);
+		self.registry
+			.tier(Tier::default())
+			.refuse(moq_net::stats::Refusal::new(Path::empty(), reason));
 	}
 	pub(crate) fn record_auth(&self, err: &auth::Error) {
 		if let auth::Error::Refused(refusal) = err
@@ -68,7 +70,9 @@ impl Refusals {
 				.as_deref()
 				.and_then(|root| Path::new(root).ok())
 				.unwrap_or_default();
-			self.registry.tier(tier).refuse(root, err.into());
+			self.registry
+				.tier(tier)
+				.refuse(moq_net::stats::Refusal::new(root, err.into()));
 		} else {
 			self.record(err.into());
 		}
@@ -111,7 +115,7 @@ mod tests {
 			}
 		}
 		let mut report = moq_net::stats::Report::default();
-		registry.report(&mut report);
+		registry.report(&mut report, moq_net::time::Instant::now());
 		assert_eq!(report.sessions.len(), 4);
 		for entry in report.sessions {
 			assert!(["", "tenant"].contains(&entry.label.as_str()));

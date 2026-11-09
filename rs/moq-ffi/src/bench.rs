@@ -253,14 +253,14 @@ async fn rust_ffi() {
 				},
 			)
 			.unwrap();
-		let broadcast = route.broadcast().unwrap();
+		let broadcast = route.broadcast();
 		let timed = MoqTrackInfo {
 			priority: 0,
 			max_age: None,
 			max_age_unlimited: false,
 			refresh: None,
 			timescale: Some(1_000_000),
-			compress: false,
+			compression: None,
 		};
 		let tracks: Vec<_> = (0..case.publishers)
 			.map(|p| broadcast.publish_track(p.to_string(), Some(timed.clone())).unwrap())

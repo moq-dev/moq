@@ -202,10 +202,15 @@ export function analyze(input: Input): Summary {
 	const silence = quanta > 0 ? ((lastTap?.quiet ?? 0) - (firstTap?.quiet ?? 0)) / quanta : null;
 	if (!lastTap) notes.push("tap: never reported, so underruns and silence are unmeasured");
 
-	// The player's own counter is cumulative, so the window's count is its rise across the window.
-	const counted = window.filter((s) => s.playerUnderruns !== undefined);
-	const playerUnderruns =
-		counted.length > 0 ? (counted.at(-1)?.playerUnderruns ?? 0) - (counted[0]?.playerUnderruns ?? 0) : null;
+	// The player's own counters are cumulative, so the window's count is each one's rise across it.
+	const rise = (counter: (s: Sample) => number | undefined) => {
+		const counted = window.map(counter).filter((n) => n !== undefined);
+		return counted.length > 0 ? (counted.at(-1) ?? 0) - (counted[0] ?? 0) : null;
+	};
+	const playerUnderruns = rise((s) => s.playerUnderruns);
+	const playerSkips = rise((s) => s.playerSkips);
+	const trimmed = rise((s) => s.trimmed);
+	const accelerated = rise((s) => s.accelerated);
 
 	// ── the playhead ────────────────────────────────────────────────────────
 	// The lag drifts when the media timeline does not run at wall rate, a property of the source
@@ -226,6 +231,8 @@ export function analyze(input: Input): Summary {
 		s.timestamp === undefined || s.stalled ? undefined : s.at - s.timestamp - (mediaRate ?? 0) * (s.at - base),
 	);
 	const skips = skipAheads(lags);
+	// Both on the media clock, read at one instant, so no reduction to the viewer's is needed.
+	const behind = playing.flatMap((s) => (s.clock === undefined ? [] : [s.clock - (s.timestamp as Ms)]));
 	const stalledShare = window.length > 0 ? window.filter((s) => s.stalled).length / window.length : null;
 
 	// ── the target ──────────────────────────────────────────────────────────
@@ -258,12 +265,20 @@ export function analyze(input: Input): Summary {
 		underrun_ms_max: lastTap ? round(Math.max(0, ...gaps.map((g) => g.ms))) : null,
 		player_underruns_total: playerUnderruns,
 		player_underruns_per_min: playerUnderruns === null ? null : perMin(playerUnderruns),
+		player_skips_total: playerSkips,
+		player_skips_per_min: playerSkips === null ? null : perMin(playerSkips),
 		skip_aheads_total: skips.count,
 		skip_aheads_per_min: perMin(skips.count),
 		discarded_ms_total: round(skips.ms),
 		discarded_ms_per_min: perMin(skips.ms),
+		trimmed_ms_total: round(trimmed),
+		trimmed_ms_per_min: trimmed === null ? null : perMin(trimmed),
+		accelerated_ms_total: round(accelerated),
+		accelerated_ms_per_min: accelerated === null ? null : perMin(accelerated),
 		stalled_share: round(stalledShare, 3),
 		silence_share: round(silence, 3),
+		av_lag_ms_p50: round(percentile(behind, 50)),
+		av_lag_ms_p95: round(percentile(behind, 95)),
 		target_ms_p50: round(percentile(targets, 50)),
 		target_ms_p95: round(percentile(targets, 95)),
 		target_ms_max: round(percentile(targets, 100)),

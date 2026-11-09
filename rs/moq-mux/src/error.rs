@@ -52,6 +52,10 @@ pub enum Error {
 	#[error("mkv: {0}")]
 	Mkv(#[from] crate::container::mkv::Error),
 
+	/// An FLV export error.
+	#[error("flv: {0}")]
+	Flv(#[from] crate::container::flv::Error),
+
 	/// Error decoding the MSF catalog.
 	#[error("msf: {0}")]
 	Msf(#[from] crate::catalog::msf::Error),
@@ -110,7 +114,7 @@ pub enum Error {
 
 	/// Error decoding or encoding an mp4 atom.
 	#[error("mp4: {0}")]
-	Mp4(std::sync::Arc<mp4_atom::Error>),
+	Mp4(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
 
 	/// I/O error.
 	#[error("io: {0}")]
@@ -323,8 +327,9 @@ impl From<anyhow::Error> for Error {
 	}
 }
 
-impl From<mp4_atom::Error> for Error {
-	fn from(err: mp4_atom::Error) -> Self {
+impl Error {
+	/// An mp4 atom error, kept opaque so an mp4-atom bump is no moq-mux break.
+	pub(crate) fn mp4(err: mp4_atom::Error) -> Self {
 		Error::Mp4(std::sync::Arc::new(err))
 	}
 }

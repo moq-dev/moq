@@ -26,7 +26,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -176,7 +176,7 @@ relay_chain_tests! {
 /// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
-	_claim: Rc<origin::Route>,
+	_claim: Rc<origin::Claim>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
@@ -290,7 +290,7 @@ async fn prefix_pool_lite07() {
 /// claim moves to another instance or re-prices in place, so it lands through the hidden
 /// `fuzz` module as a session lands it.
 struct Claim {
-	dynamic: Rc<origin::Route>,
+	dynamic: Rc<origin::Claim>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 	/// The price the claim advertises, kept across an instance move.
 	cost: std::cell::Cell<u64>,
@@ -642,14 +642,14 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 /// exact route, which carries the claim's instance until it ends, and `outputs[path]`
 /// holds the latest.
 struct Pool {
-	_claim: Rc<origin::Route>,
+	_claim: Rc<origin::Claim>,
 	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Route, track::Producer)>>>,
 	answered: Rc<RefCell<usize>>,
 }
 
 impl Pool {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = Rc::new(origin.route_prefix("pool", origin::RouteOptions::default()).unwrap());
+		let claim = Rc::new(origin.claim("pool", origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
 		let answered = Rc::new(RefCell::new(0));
 		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());

@@ -62,6 +62,12 @@ export interface State {
 	anchored: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
+	// How many times the ring skipped ahead, dropping queued audio, cumulative.
+	skips: number;
+	// Media those skips dropped unplayed, less declared silence, cumulative.
+	trimmed: Milli;
+	// Media the stretch removed by playing faster, cumulative.
+	accelerated: Milli;
 	// Whether playback is at a declared end, reached or announced before any audio, and nothing has played since.
 	silent: boolean;
 	// The epoch of the last reset or park the worklet applied.

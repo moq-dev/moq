@@ -26,7 +26,9 @@ replace are retired.
   one prefix holds routes only to the origins whose claims meet it, a
   request for a path outside its interest still resolves through the relay
   (Node ID 0), and an origin leaving the interest ends its route after the
-  floor certifying the last withdrawal.
+  batch withdrawing its last claim there, closed by its floor: one that
+  certifies the withdrawal where the relay certifies the request, and one
+  certifying nothing where it knows only part of it.
 
 The counterexamples from #4349 (closed; this epic still owns the fix) are the `residual_*` tests in
 `rs/moq-net/tests/integration/mesh_withdraw.rs`. They pin today's hunting on lite-06:

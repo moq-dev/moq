@@ -88,7 +88,7 @@ Set `delay.max_us` to the old `max_delay_us`, `delay.max_unlimited` for no limit
 
 `moq_json_snapshot_config.compression`, `moq_json_stream_config`, `moq_binary_config`, and the `moq_publish_binary_snapshot*` and `moq_publish_binary_stream*` functions are removed.
 `moq_publish_json_stream`, `moq_consume_json_snapshot`, and `moq_consume_json_stream` drop their `config` argument.
-JSON tracks are created with `compress` set, and a consumer reads one like a plain track. Publish opaque bytes on a raw track with `moq_publish_track`.
+JSON tracks are created with `compression` set to `MOQ_COMPRESSION_DEFLATE`, and a consumer reads one like a plain track. Publish opaque bytes on a raw track with `moq_publish_track`.
 
 ### Authored configs keep their identity ([#7110](https://github.com/moq-dev/moq/pull/7110))
 
@@ -194,9 +194,9 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 To answer with a broadcast you already hold, `moq_broadcast_request_serve(request, consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to free.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
-### `moq_track_info` gains `compress` (#5928)
+### `moq_track_info` gains `compression` (#5928)
 
-The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
+The new trailing field changes its ABI. A zero-initialized struct leaves it `MOQ_COMPRESSION_NONE`, as before.
 
 ### Anchors can name a time (#6074)
 

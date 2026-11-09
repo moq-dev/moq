@@ -24,7 +24,7 @@ use crate::{Instance, Path};
 
 use rand::RngExt;
 
-use super::{Error, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
+use super::{Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
 
 /// One announce stream in one direction.
 pub(crate) type Key = u64;
@@ -316,6 +316,28 @@ fn ordered(changes: Changes) -> Vec<(Path, Option<Claim>)> {
 	starts.into_iter().chain(ends).collect()
 }
 
+/// The node's state, locked. A stream's wakes wait until the lock is released: a waker
+/// may poll the stream's session inline, and the session calls back into the node.
+struct Locked<'a> {
+	// Dropped first, being declared first, so the held wakes go out unlocked.
+	state: MutexGuard<'a, State>,
+	_hold: kio::Hold,
+}
+
+impl std::ops::Deref for Locked<'_> {
+	type Target = State;
+
+	fn deref(&self) -> &State {
+		&self.state
+	}
+}
+
+impl std::ops::DerefMut for Locked<'_> {
+	fn deref_mut(&mut self) -> &mut State {
+		&mut self.state
+	}
+}
+
 struct State {
 	router: Router<Key, Claim>,
 	next_key: Key,
@@ -386,12 +408,15 @@ impl Node {
 	/// loses it, or is replaced by a random one if nothing is left.
 	pub fn origin(hop: std::num::NonZeroU64) -> Self {
 		let mut rng = kio::clock::rng();
-		let id = declared_for(hop).unwrap_or_else(|| rng.random_range(1..QUALIFIED));
+		let id = declared_for(hop).unwrap_or_else(|| rng.random_range(1..=GENERATED));
 		Self::new(id, rng.random())
 	}
 
-	fn lock(&self) -> MutexGuard<'_, State> {
-		self.state.lock().unwrap_or_else(|poison| poison.into_inner())
+	fn lock(&self) -> Locked<'_> {
+		Locked {
+			_hold: kio::hold(),
+			state: self.state.lock().unwrap_or_else(|poison| poison.into_inner()),
+		}
 	}
 
 	/// The identity this node declares, which a rotation replaces.
@@ -743,7 +768,7 @@ pub(crate) fn hop(id: Id) -> crate::Hop {
 		hash ^= u64::from(byte);
 		hash = hash.wrapping_mul(0x0100_0000_01b3);
 	}
-	let id = (hash & ((1 << 53) - 1)).max(1);
+	let id = (hash & GENERATED).max(1);
 	crate::Hop::from(std::num::NonZeroU64::new(id).expect("a non-zero hop id"))
 }
 

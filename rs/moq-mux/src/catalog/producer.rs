@@ -501,7 +501,7 @@ impl<E: CatalogExt> Producer<E> {
 		// priority. Leaving it at the default would rank a subscriber reading MSF
 		// below every media track on a relay's upstream leg. It stays uncompressed: MSF is
 		// read by other implementations, which hang's compression decisions don't cover.
-		let msf_info = hang::Catalog::default_track_info().with_compress(false);
+		let msf_info = hang::Catalog::default_track_info().with_compression(moq_net::track::Compression::None);
 		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
@@ -1004,7 +1004,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// catalog entry and removes the entry when the returned handle drops. The catalog key is
 	/// [`track.name()`](moq_net::track::Producer::name) verbatim. Create `track` with a
 	/// [`timescale`](moq_net::track::Info::timescale), since every write is stamped on the
-	/// broadcast clock, and with [`compress`](moq_net::track::Info::compress) set: JSON is small and
+	/// broadcast clock, and with [`compression`](moq_net::track::Info::compression) set: JSON is small and
 	/// repetitive.
 	///
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
@@ -1832,8 +1832,16 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 
 		let track = catalog.outputs.hang_track.consume();
-		assert!(catalog.outputs.hang_track.info().compress, "catalog.json is compressed");
-		assert!(!catalog.outputs.msf_track.info().compress, "the MSF catalog is not");
+		assert_eq!(
+			catalog.outputs.hang_track.info().compression,
+			moq_net::track::Compression::Deflate,
+			"catalog.json is compressed"
+		);
+		assert_eq!(
+			catalog.outputs.msf_track.info().compression,
+			moq_net::track::Compression::None,
+			"the MSF catalog is not"
+		);
 		let mut consumer = Consumer::new(track);
 
 		{
@@ -1921,7 +1929,7 @@ mod test {
 		catalog
 			.modify()
 			.unwrap()
-			.set_section("big", "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1).into())
+			.set_section("big", "x".repeat(crate::jitter::MAX_BYTES + 1).into())
 			.unwrap();
 
 		assert!(matches!(
@@ -1950,7 +1958,7 @@ mod test {
 
 		let mut guard = catalog.modify().unwrap();
 		guard
-			.set_section("big", "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1).into())
+			.set_section("big", "x".repeat(crate::jitter::MAX_BYTES + 1).into())
 			.unwrap();
 		assert!(matches!(
 			guard.commit(),
@@ -2168,7 +2176,7 @@ mod test {
 		use std::time::Duration;
 
 		let captured = kio::clock::now();
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 		let front = origin
@@ -2338,7 +2346,7 @@ mod test {
 
 		kio::clock::sleep(Duration::from_secs(5)).await;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(60_000);
 		let start = kio::clock::now() - Duration::from_secs(5);
 		let config = Config::default().with_clock(crate::Clock::at(start, wall).expect("a representable wall"));
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
@@ -2507,9 +2515,7 @@ mod test {
 		use std::time::Duration;
 
 		let now = Duration::from_secs(86_400);
-		crate::clock::fake_host_wall(
-			kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS) + now,
-		);
+		crate::clock::fake_host_wall(kio::clock::Wall::MOQ_EPOCH + now);
 		let zero = moq_net::Timestamp::from_secs(now.as_secs() - 3600).unwrap();
 		hang::catalog::Clock::new(zero.convert(scale).unwrap()).unwrap()
 	}
@@ -2561,9 +2567,7 @@ mod test {
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
 		// clock, which may be unset.
-		let zero = kio::clock::Wall::UNIX_EPOCH
-			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
-			+ Duration::from_micros(input.wall.as_micros() as u64);
+		let zero = kio::clock::Wall::MOQ_EPOCH + Duration::from_micros(input.wall.as_micros() as u64);
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
 		seed.media.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
@@ -2650,7 +2654,7 @@ mod test {
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(catalog.snapshot().media.clock, None);
 
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = kio::clock::Wall::MOQ_EPOCH;
 		let pts = moq_net::Timestamp::from_micros(1_000_000).unwrap();
 		assert!(matches!(
 			catalog.timebase().place(pts, wall),

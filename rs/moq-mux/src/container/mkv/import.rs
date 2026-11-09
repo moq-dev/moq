@@ -1439,7 +1439,7 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(|_| Error::InvalidHvcc)?;
 
 	let mut description = BytesMut::new();
-	hvcc.encode_body(&mut description)?;
+	hvcc.encode_body(&mut description).map_err(crate::Error::mp4)?;
 
 	let mut config = VideoConfig::new(H265 {
 		in_band: false,
@@ -1467,7 +1467,7 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	}
 
 	let mut description = BytesMut::new();
-	av1c.encode_body(&mut description)?;
+	av1c.encode_body(&mut description).map_err(crate::Error::mp4)?;
 
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
 	config.color = crate::codec::av1::color(&av1c.config_obus);

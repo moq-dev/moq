@@ -209,13 +209,47 @@ Added 2026-11-08 (maintainer, /quest-complete): `js/net`'s widened max-age
 re-drop test, which failed on [moq-dev/moq#8230](https://github.com/moq-dev/moq/pull/8230)
 with the `Cancel` reset [moq-dev/moq#8195](https://github.com/moq-dev/moq/pull/8195) intends for a reply still pending at the stream's end; the test races its finish against that reply.
 
+Added 2026-11-08 (maintainer's standing rule that flakes join this epic):
+`bench/relay.test.py`'s stream-transport test, which binds UDP on the number the
+OS picked for TCP and failed a local run while other checks held that UDP port.
+
+Added 2026-11-08 (maintainer's standing rule that flakes join this epic): moq-ffi's
+raw media warmup test, which failed in the merge queue for
+[moq-dev/moq#8272](https://github.com/moq-dev/moq/pull/8272) when its reader skipped one of three
+buffered groups on the FFI runtime's real clock.
+[moq-dev/moq#8329](https://github.com/moq-dev/moq/pull/8329) moved it to the paused test
+clock, re-enabled it, and deleted its child.
+
+Added 2026-11-09 (maintainer, /quest-complete): `js/net`'s compressed-frame
+cap test and lite-07 re-dropped re-offer test, which failed under load during
+the datagram-queues runs and were quarantined with `test.skip` by
+[moq-dev/moq#8333](https://github.com/moq-dev/moq/pull/8333); and moq-net's
+two random-mesh withdrawal tests, which hit nextest's 60 s kill in
+[moq-dev/moq#8247](https://github.com/moq-dev/moq/pull/8247)'s local
+`just check` and are quarantined with `#[ignore]` by
+[moq-dev/moq#8336](https://github.com/moq-dev/moq/pull/8336).
+
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
+`js/net`'s datagram session-close-after-end test again, whose lite-05 case
+failed the merge queue for [moq-dev/moq#8276](https://github.com/moq-dev/moq/pull/8276)
+after [moq-dev/moq#8321](https://github.com/moq-dev/moq/pull/8321) re-enabled it.
+It is quarantined with `test.skip` for every version until its child fixes it.
+
+Added 2026-11-09 (maintainer's standing rule that flakes join this epic):
+moq-rs's Python socket test `test_tcp_rst_and_endpoint_close_are_errors`, whose
+reader got `Unroutable` after the endpoint closed during
+[moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
+It is quarantined with `pytest.mark.skip` until its child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Fallback playback](/quest/m0/test-flakes-2/ietf22-fallback.md) - a browser viewer follows a fallback within the media lane's bound without dropping its session
-- [moq-uring's qlog accounting test waits on the accounting](/quest/m0/test-flakes-2/qlog-staging-spin.md) - `an_open_trace_accounts_for_staging_and_close` waits for the accounting, not 10,000 spins
 - [js/net's bandwidth sampling test holds up under load](/quest/m0/test-flakes-2/bandwidth-sampling.md) - the sampling test counts ticks without racing the mocked clock, and its `test.skip` is removed
-- [js/net's lite-07 datagram queue test holds up under load](/quest/m0/test-flakes-2/datagram-queues.md) - the createWritable queue test waits on the writes it asserts, and its `test.skip` is removed
-- [js/net's lite-06 session-close test keeps the end under load](/quest/m0/test-flakes-2/session-close-end.md) - a session close right after a datagram track's end returns the end, not a `remote error: 0`, and its lite-06 skip is removed
-- [js/net's widened max-age re-drop test ends cleanly, not with a reset](/quest/m0/test-flakes-2/widened-max-age-reset.md) - the test finishes the track only after the re-drop reply arrives, so the end is a FIN, and drops its wall-clock assert
+- [bench/relay.test.py's stream-transport test gets a port free for TCP and UDP](/quest/m0/test-flakes-2/relay-port-pair.md) - the test binds TCP and UDP to one number free in both, so parallel checks can't collide with it
+- [js/net's compressed-frame cap test holds up under load](/quest/m0/test-flakes-2/compressed-frame-cap.md) - the cap is proven without a 32 MiB payload, and its `test.skip` is removed
+- [js/net's lite-07 re-dropped re-offer test holds up under load](/quest/m0/test-flakes-2/redropped-reoffer.md) - update 3 is ordered before the re-offer opens by an event, not a yield count, and its `test.skip` is removed
+- [moq-net's random-mesh withdrawal tests fit the gate](/quest/m0/test-flakes-2/mesh-withdraw-runtime.md) - the 200-seed mesh tests cost seconds of CPU, and their `#[ignore]` is removed
+- [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
+- [moq-rs's Python TCP close test settles on a promised error](/quest/m0/test-flakes-2/tcp-close-unroutable.md) - the reader's error after an endpoint close is one the socket contract promises, and its `pytest.mark.skip` is removed

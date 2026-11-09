@@ -339,7 +339,7 @@ async function setup(order = new Order(), codec?: Codec, join?: Milli) {
 		broadcast: {
 			audio: () => rendition,
 			order,
-			in: { maxAge: new Signal(undefined), onDemand: new Signal(false) },
+			in: { maxAge: new Signal(undefined), onDemand: new Signal("off") },
 		} as never,
 		capture: capture as never,
 		enabled,
@@ -627,7 +627,8 @@ test("muting sends nothing and marks where the audio ends, keeping the rendition
 });
 
 // With `capture="release"` a mute closes the microphone, taking its format away. The rendition stays
-// advertised, still enabled, through the mute and while the reopened microphone resolves.
+// advertised, still enabled, through the mute. Once unmuted it is disabled until the microphone
+// reopens, so one that never does isn't advertised as sending.
 test("a muted rendition keeps its config enabled while its capture is released", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
@@ -642,7 +643,15 @@ test("a muted rendition keeps its config enabled while its capture is released",
 
 	encoder.muted.set(false);
 	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+
+	// Muting again while the reopen is pending is muted, not disabled.
+	encoder.muted.set(true);
+	await settle();
 	expect(encoder.out.catalog.peek()).toEqual(before);
+	encoder.muted.set(false);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
 
 	capture.out.format.set(format);
 	await settle(10);
@@ -1012,7 +1021,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 	const broadcast = new Broadcast({
 		origin: new Moq.Origin.Producer(),
 		name: Moq.Path.from("failure.hang"),
-		onDemand: false,
+		onDemand: "off",
 	});
 	const feed = new Feed();
 	const capture = fakeCapture(feed);
@@ -1158,7 +1167,7 @@ test.each(["failure first", "config first"])(
 		using _now = manualAt(0);
 		const broadcast = new Broadcast({
 			origin: new Moq.Origin.Producer(),
-			onDemand: false,
+			onDemand: "off",
 			name: Moq.Path.from("coalesced.hang"),
 		});
 		const configuring = configured();
@@ -1194,7 +1203,7 @@ test.each(["failure first", "config first"])(
 );
 
 // Both policies preserve the past; only always-on spends encode work while idle.
-test.each([undefined, false, true])(
+test.each([undefined, "off", "all"] as const)(
 	"a late subscriber reaches captured audio with either encoding policy (%p)",
 	async (onDemand) => {
 		using _webcodecs = installFakeWebCodecs();
@@ -1213,7 +1222,7 @@ test.each([undefined, false, true])(
 			await settle();
 			const net = broadcast.net.peek();
 			if (!net) throw new Error("expected network broadcast");
-			expect(encoder.out.active.peek()).toBe(onDemand === false);
+			expect(encoder.out.active.peek()).toBe(onDemand === "off");
 
 			// One 20ms Opus frame per push, each its own group.
 			let index = 0;
@@ -1225,7 +1234,7 @@ test.each([undefined, false, true])(
 			};
 
 			await push(4);
-			expect(encoder.out.stats.peek().frames).toBe(onDemand === false ? 4 : 0);
+			expect(encoder.out.stats.peek().frames).toBe(onDemand === "off" ? 4 : 0);
 			late = net.track("audio").subscribe({ delay: { max: Milli(10_000) } });
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
@@ -1245,7 +1254,7 @@ test.each([undefined, false, true])(
 			late = undefined;
 			await settle();
 			expect(discontinuity).not.toHaveBeenCalled();
-			expect(encoder.out.active.peek()).toBe(onDemand === false);
+			expect(encoder.out.active.peek()).toBe(onDemand === "off");
 		} finally {
 			discontinuity.mockRestore();
 			late?.close();

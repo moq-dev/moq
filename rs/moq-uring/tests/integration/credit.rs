@@ -91,12 +91,7 @@ fn endpoints(
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket")
 	};
-	let mut server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let mut server_config = quic::server::Config::new(certs.server(&[ALPN]));
 	server_config.transport.limits.receive_window = std::num::NonZeroU64::new(window as u64);
 	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(stream_window as u64);
 	let server = quic::Endpoint::new(
@@ -105,9 +100,7 @@ fn endpoints(
 	)
 	.expect("server endpoint");
 	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket(handle)).expect("dial-only endpoint");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
+	let dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 	(server, client, dial)
 }
 
@@ -236,12 +229,7 @@ fn chunked_writes_stop_at_the_window() {
 			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 			.expect("socket")
 	};
-	let mut server_config = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let mut server_config = quic::server::Config::new(certs.server(&[ALPN]));
 	server_config.transport.limits.stream_receive_window = std::num::NonZeroU64::new(STREAM_WINDOW as u64);
 	let server = quic::Endpoint::new(
 		quic::endpoint::Config::default().with_server(server_config),
@@ -249,9 +237,7 @@ fn chunked_writes_stop_at_the_window() {
 	)
 	.expect("server endpoint");
 	let client = quic::Endpoint::new(quic::endpoint::Config::default(), socket(&handle)).expect("dial-only endpoint");
-	let mut dial = quic::client::Config::default();
-	dial.alpn = vec![ALPN.to_string()];
-	dial.verify = false;
+	let dial = quic::client::Config::new(support::client_tls(&[ALPN]));
 
 	let payload: Bytes = (0..3 * STREAM_WINDOW).map(|i| (i * 31 % 251) as u8).collect();
 

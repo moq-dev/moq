@@ -52,9 +52,6 @@ pub mod stream;
 pub use connection::mux;
 pub(crate) use stream::{Dir, Id as StreamId};
 
-// The configs take and report rustls types, so callers name the same version.
-pub use rustls;
-
 mod config;
 mod limits;
 pub use config::{ConfigError, client, server, transport};

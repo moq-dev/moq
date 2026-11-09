@@ -185,7 +185,7 @@ class StatusPublisher:
     """
 
     def __init__(self, broadcast: moq.BroadcastProducer) -> None:
-        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
+        track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE))
         self._catalog = moq.media.CatalogProducer(broadcast)
         self._producer = moq.json.SnapshotProducer(broadcast, track)
         # Weak: watching demand neither keeps the track open nor locks it.

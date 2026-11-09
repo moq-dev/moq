@@ -91,10 +91,7 @@ func ExampleClient_Route() {
 		log.Fatal(err)
 	}
 	defer route.Cancel()
-	broadcast, err := route.Broadcast()
-	if err != nil {
-		log.Fatal(err)
-	}
+	broadcast := route.Broadcast()
 
 	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {

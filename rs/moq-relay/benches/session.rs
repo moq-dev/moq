@@ -77,7 +77,7 @@ impl Backend for Relay {
 		let pool = cache.pool.clone();
 		let mut options = cluster::Options::default();
 		// The shared sweeps include more announcements than a default ordinary client.
-		options.session.announces = options.peer.announces;
+		options.client.announces = options.peer.announces;
 		let mut stats = stats::Config::default();
 		stats.enabled = true;
 		stats.node = Some(id.to_string());

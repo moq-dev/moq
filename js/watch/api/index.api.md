@@ -81,10 +81,10 @@ export namespace Audio {
 		catalog: Signals.Signal<Hang.Catalog.Audio | undefined>;
 		config: Signals.Signal<Hang.Catalog.AudioConfig | undefined>;
 		error: Signals.Signal<Error | undefined>;
-		jitter: Signals.Signal<Clock.Milli | undefined>;
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
+		accelerated: Clock.Milli;
 		arrival?: {
 			timestamp: Clock.Milli;
 			wall: Clock.Wall;
@@ -92,8 +92,10 @@ export namespace Audio {
 		bytesReceived: number;
 		errors: number;
 		late: number;
+		skips: number;
 		stalled: Clock.Milli;
 		stalls: number;
+		trimmed: Clock.Milli;
 		underruns: number;
 	}
 	export type Supported = (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
@@ -271,9 +273,6 @@ export namespace Video {
 			width: number;
 		} | undefined>;
 		error: Signals.Signal<Error | undefined>;
-		frame: Signals.Signal<VideoFrame | undefined>;
-		interlaced: Signals.Signal<boolean>;
-		jitter: Signals.Signal<Clock.Milli | undefined>;
 		stalled: Signals.Signal<boolean>;
 		stats: Signals.Signal<Video.Stats | undefined>;
 		timestamp: Signals.Signal<Clock.Milli | undefined>;
@@ -287,17 +286,17 @@ export namespace Video {
 		close(): void;
 		readonly decoder: Video.Decoder;
 		readonly in: Signals.Readonlys<Video.RendererInput>;
-		readonly out: Signals.Readonlys<{
-			error: Signals.Getter<Error | undefined>;
-			frame: Signals.Getter<VideoFrame | undefined>;
-			timestamp: Signals.Getter<Clock.Milli | undefined>;
-			visible: Signals.Getter<boolean>;
-		}>;
+		readonly out: Signals.Readonlys<Video.RendererOutput>;
 	}
 	export type RendererInput = {
 		backend: Signals.Getter<Video.Backend>;
 		canvas: Signals.Getter<HTMLCanvasElement | undefined>;
 		visible: Signals.Getter<Video.Visible>;
+	};
+	export type RendererOutput = {
+		error: Signals.Getter<Error | undefined>;
+		timestamp: Signals.Getter<Clock.Milli | undefined>;
+		visible: Signals.Getter<boolean>;
 	};
 	export type RendererProps = Signals.Inputs<Video.RendererInput> & {
 		decoder: Video.Decoder;
@@ -317,7 +316,6 @@ export namespace Video {
 	export type SourceOutput = {
 		available: Signals.Signal<Record<string, Hang.Catalog.VideoConfig>>;
 		catalog: Signals.Signal<Hang.Catalog.Video | undefined>;
-		ceiling: Signals.Signal<number | undefined>;
 		config: Signals.Signal<Hang.Catalog.VideoConfig | undefined>;
 		error: Signals.Signal<Error | undefined>;
 		track: Signals.Signal<string | undefined>;

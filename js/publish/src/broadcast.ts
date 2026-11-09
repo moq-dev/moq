@@ -85,14 +85,22 @@ export type BroadcastInput = {
 	 */
 	echo: Getter<Moq.Path.Relative | undefined>;
 
-	/**
-	 * Override when renditions encode. Omitted: audio retains raw PCM until subscribed, while
-	 * video encodes continuously. False encodes both continuously; true gates video too, losing
-	 * its past. Unless false, audio keeps raw history up to `maxAge`, or 30 seconds when it is
-	 * `null`. Capture stays open.
-	 */
-	onDemand: Getter<boolean | undefined>;
+	/** Which renditions wait for a subscriber before encoding. Defaults to `"retain"`. */
+	onDemand: Getter<OnDemand>;
 };
+
+/**
+ * Which renditions wait for a subscriber before encoding. Capture stays open in every mode.
+ *
+ * - `"off"`: every rendition encodes continuously.
+ * - `"retain"`: audio retains raw PCM until subscribed, then encodes from it; video and text
+ *   encode continuously.
+ * - `"all"`: audio retains, and video and text also wait for a subscriber, losing their
+ *   unsubscribed past.
+ *
+ * Retained audio keeps raw history up to the broadcast's `maxAge`, or 30 seconds when it is `null`.
+ */
+export type OnDemand = "off" | "retain" | "all";
 
 // The longest group among the video and audio renditions, the catalog's `media.join.interval`: the
 // promise that every one starts a group at least that often. Undefined while none declares one, so a
@@ -164,12 +172,14 @@ export class Broadcast {
 	// The renditions of the current network broadcast, undefined while there is none.
 	readonly #publication = new Signal<Publication | undefined>(undefined);
 
+	readonly #join = new Signal<Milli | undefined>(undefined);
+
 	/**
 	 * The catalog's `media.join.interval` the current network broadcast declared, in milliseconds:
 	 * the longest group any video or audio rendition promised when media was first listed. Fixed
 	 * for the network broadcast, so an encoder holds its groups within it. Undefined until declared.
 	 */
-	readonly join = new Signal<Milli | undefined>(undefined);
+	readonly join: Getter<Milli | undefined> = this.#join;
 
 	// Each catalog ID in the latest catalog fold, which seeds a new network broadcast's publication.
 	#listed = new Map<string, Listing>();
@@ -189,7 +199,7 @@ export class Broadcast {
 			stats: getter(props?.stats ?? false),
 			probe: getter(props?.probe),
 			echo: getter(props?.echo),
-			onDemand: getter(props?.onDemand),
+			onDemand: getter(props?.onDemand ?? "retain"),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -312,7 +322,7 @@ export class Broadcast {
 			publication.join = longestGroup(effect, renditions);
 		}
 		const join = publication?.join;
-		this.join.set(join === undefined ? undefined : Milli(join));
+		this.#join.set(join === undefined ? undefined : Milli(join));
 
 		this.catalog.mutate((catalog) => {
 			if (join !== undefined) {
@@ -501,7 +511,7 @@ export class Broadcast {
 					timescale: Moq.Time.Timescale.MILLI,
 					priority: Catalog.PRIORITY.catalog,
 					// Catalog JSON is small and repetitive.
-					compress: true,
+					compression: "deflate",
 				});
 				effect.cleanup(() => {
 					track.finish();
@@ -569,7 +579,7 @@ export class Broadcast {
 					}
 					const idle =
 						rendition.kind !== "audio" &&
-						gate.get(this.in.onDemand) &&
+						gate.get(this.in.onDemand) === "all" &&
 						gate.get(served.demand().wanted) === undefined;
 					handle.track.set(idle ? undefined : served);
 				});

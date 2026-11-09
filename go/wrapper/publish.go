@@ -76,7 +76,7 @@ type BroadcastRequests struct {
 
 // RequestedTrack waits for the next subscriber-requested track.
 func (d *BroadcastRequests) RequestedTrack(ctx context.Context) (*TrackRequest, error) {
-	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedTrack)
+	inner, err := bridge.CallHandle(ctx, nil, d.inner.RequestedTrack)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func (d *BroadcastRequests) RequestedTrack(ctx context.Context) (*TrackRequest, 
 
 // All ranges over subscriber-requested tracks until the dynamic source ends.
 func (d *BroadcastRequests) All(ctx context.Context) iter.Seq2[*TrackRequest, error] {
-	return bridge.Seq(ctx, d.RequestedTrack)
+	return bridge.Seq(ctx, d.inner.Cancel, d.RequestedTrack)
 }
 
 // Cancel stops the dynamic request stream.
@@ -304,7 +304,7 @@ type TrackRequests struct {
 
 // RequestedFill waits for the next fill.
 func (d *TrackRequests) RequestedFill(ctx context.Context) (*Fill, error) {
-	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedFill)
+	inner, err := bridge.CallHandle(ctx, nil, d.inner.RequestedFill)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +313,7 @@ func (d *TrackRequests) RequestedFill(ctx context.Context) (*Fill, error) {
 
 // All ranges over fills until the dynamic source ends.
 func (d *TrackRequests) All(ctx context.Context) iter.Seq2[*Fill, error] {
-	return bridge.Seq(ctx, d.RequestedFill)
+	return bridge.Seq(ctx, d.inner.Cancel, d.RequestedFill)
 }
 
 // Cancel stops current and future requested-fill waits.

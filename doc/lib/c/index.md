@@ -90,13 +90,14 @@ reports each instance as `MOQ_FOLLOW_EVENT_ONLINE` with its handle,
 `MOQ_FOLLOW_EVENT_OFFLINE` when the path goes offline, and one `MOQ_FOLLOW_EVENT_END`. Set `instance` only for a publisher that continues its group sequences
 across restarts, and raise `epoch` on each: readers stitch every route of one instance
 together, so restarting the sequences under an old instance splices unrelated groups into
-their tracks. To serve paths on demand, `moq_origin_route_prefix()` delivers each request to
+their tracks. To serve paths on demand, `moq_origin_claim()` returns a claim handle and delivers each request to
 answer with `moq_broadcast_request_serve()`, `moq_broadcast_request_route()`, or
-`moq_broadcast_request_reject()`. Unless one is named, a prefix route moves to a fresh
-instance each time a job holding its current one ends, and a job from
-`moq_broadcast_request_route()` takes the prefix route's, so on moq-lite 07 a reader resolved through the
-prefix route does not restart; older wires mint another instance for the job's route, restarting it. The string `moq_route_instance()` writes is borrowed until the
-next `moq_route_instance()` on that route or `moq_route_free()`.
+`moq_broadcast_request_reject()`; `moq_claim_announce()`, `moq_claim_withdraw()`,
+`moq_claim_set_cost()`, and `moq_claim_free()` control the claim. Unless one is named, a claim moves to a fresh
+instance (`moq_claim_instance()`) each time a job holding its current one ends, and a job from
+`moq_broadcast_request_route()` takes the claim's, so on moq-lite 07 a reader resolved through the
+claim does not restart; older wires mint another instance for the job's route, restarting it. The string `moq_route_instance()` or `moq_claim_instance()` writes is
+borrowed until the next such call on that handle, or until it is freed.
 
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. For pre-encoded video, publish from the lowest rendition up and set `moq_video_init.lower` to the next lower media handle. Reserve each track with `moq_allocator_reserve_media`, then bind its reservation with `moq_rate_control_create` and call `moq_rate_control_update` on every frame. Apply changed targets to your encoder and `moq_publish_media_set_enabled`, resuming video on a keyframe; close the control and reservation separately when done.
 
@@ -113,7 +114,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Threading.** Call any function from any thread. Callbacks run on moq-c's runtime thread; the callback and its `user_data` must be safe to use there. Synchronize access to data shared with other threads, and dispatch UI work to your UI thread. Raw publish calls block until the codec takes the frame, which paces a publisher.
 - **Zeroed config is the default.** A zeroed `moq_client_config` means the default for every field, so new fields don't break callers. A field whose default isn't zero has a `has_*` flag: `backoff_timeout_us = 0` means "retry forever" only with `has_backoff_timeout = true`.
 - **Subscription defaults.** A zeroed `moq_subscription`, a NULL pointer, and `moq_subscription_defaults()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. Set `delay.max_unlimited` for no subscriber limit, and `delay.min_unstated` to leave the target latency unstated.
-- **Compressed tracks.** `moq_track_info.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+- **Compressed tracks.** `moq_track_info.compression` set to `MOQ_COMPRESSION_DEFLATE` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 - **fMP4 import.** `MOQ_CONTAINER_FORMAT_FMP4` splits each fragment into one frame per sample.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `moq_publish_media_cut`: after every frame, or less often to batch frames into fewer groups. Pass that cadence as `moq_audio_init.hint.join_us`.
 - **Catalog hints.** Give the catalog what the encoder knows instead of having it estimated: `moq_video_init.hint` (coded size, bitrate, frame rate, join) and `moq_audio_init.hint` (bitrate, join). A supplied bitrate is never re-estimated. `join_us` is the time between join points, the longest span between two group starts: the GOP, or your cut cadence. Leave a field's `has_*` flag false to have it measured. A bitrate or `join_us` flag set with a 0 value returns `MOQ_ERROR_INVALID_CONFIG`.

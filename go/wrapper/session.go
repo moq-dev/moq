@@ -324,7 +324,7 @@ func (b *BandwidthConsumer) Rate() *uint64 { return b.inner.Rate() }
 
 // RateChanged waits for the estimate to change and returns the new Rate, or fails once its producer closes.
 func (b *BandwidthConsumer) RateChanged(ctx context.Context) (*uint64, error) {
-	return bridge.Call(ctx, b.inner.Cancel, b.inner.RateChanged)
+	return bridge.Call(ctx, nil, b.inner.RateChanged)
 }
 
 // Cancel releases this consumer's demand, including a pending wait.

@@ -206,8 +206,10 @@ connect = [
 Prices aren't static. A publisher can re-price a live announcement, which is
 how a standby transcoder pool seeds a high cost and drops it once it's working.
 A GOAWAY is not a price: a relay receiving one ranks every route learned from
-that peer below every other eligible route, whatever the costs say, so new
-subscriptions go elsewhere while existing ones finish. The drain is that relay's
+that peer below every other eligible route, whatever the costs say. New
+subscriptions go elsewhere when another route serves them, and an existing one
+moves to another route of the same stream if there is one, or else finishes on
+the draining peer. The drain is that relay's
 own state, so it still advertises the routes onward at their real cost. A
 relay keeps its session to a peer draining to restart until that peer closes
 it, and redials only then, so it reaches the replacement rather than the
@@ -319,9 +321,39 @@ without the hidden extension, cannot. Dials retry forever with jittered backoff
 capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
 [Authentication](/bin/relay/auth#mtls).
 
+The NixOS module (`services.moq-relay` in this repository's flake) wires the
+same setup: `cluster.ca` and `auth.enable` on the relay peers dial into, and
+`cluster.certFile` and `cluster.keyFile` on each relay that dials. Bring the CA
+and certificates yourself, at paths outside the Nix store that the service user
+can read. The cluster CA only issues client certificates; each relay still
+serves a certificate its peers trust, so a leaf verifies the root it dials:
+
+```nix
+# root
+services.moq-relay = {
+  enable = true;
+  auth.enable = true;
+  tls.certs = [ { chain = "/etc/moq/root.pem"; key = "/run/secrets/moq-root.key"; } ];
+  cluster.ca = [ "/etc/moq/cluster-ca.pem" ];
+};
+
+# leaf
+services.moq-relay = {
+  enable = true;
+  auth.enable = true;
+  tls.certs = [ { chain = "/etc/moq/leaf.pem"; key = "/run/secrets/moq-leaf.key"; } ];
+  cluster = {
+    mode = "leaf";
+    rootUrl = [ "https://root.example.com:4443" ];
+    certFile = "/run/secrets/moq-cluster.pem";
+    keyFile = "/run/secrets/moq-cluster.key";
+  };
+};
+```
+
 Each dialed session binds its own UDP socket on an ephemeral port of
-`connect.bind`'s address. Once `connect.backoff.timeout` (10s by default; `0`
-takes that default here) passes without a session, the redial leaves from a
+`connect.bind`'s address. Once `connect.backoff.timeout` (10s when unset or `0`,
+which would otherwise retry forever) passes without a session, the redial leaves from a
 fresh port, so a network path that drops one UDP flow can't hold a link down
 while other ports to the same peer would work. A fixed `connect.bind` port opts
 out: static and API peers then share one socket on that port, and a redial

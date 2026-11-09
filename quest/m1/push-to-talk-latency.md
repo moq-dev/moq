@@ -30,7 +30,7 @@ Decided 2026-11-06 (maintainer, on
 `just test push-to-talk` run until Watch lands, since its no-underrun check
 fails on the defaults by design?
 
-- ✅ (a) Require [Watch](/quest/m1/audio-jitter-target/watch.md) for this
+- ✅ (a) Require Watch's time stretch ([moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058)) for this
   quest. The run holds a fixed 300 ms delay until then, and the defaults are
   budgeted after Watch lands, on the jitter buffer users will get.
 - (b) Run the defaults now and stop failing on underruns while `"auto"` is
@@ -91,10 +91,7 @@ measured term (`js/watch/src/audio/latency.ts`); device and render follow the
 watch AudioContext's `latencyHint` (`"interactive"` in
 `js/watch/src/audio/decoder.ts`), otherwise the platform.
 
-## Required
-
-- [Watch](/quest/m1/audio-jitter-target/watch.md) - `"auto"` stops underrunning by time-stretching the ring, so the run can hold the default delay
-
 ## Related
 
+- [Browser ceilings](/quest/m1/audio-jitter-target/browser-ceilings.md) - `"auto"` underruns less by time-stretching the ring, so the run can hold the default delay; the stretch landed in [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058), and its nightly ceilings are re-measured there
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the `"auto"` target this latency feeds

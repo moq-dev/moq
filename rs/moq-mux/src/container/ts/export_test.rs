@@ -9157,7 +9157,7 @@ async fn the_same_instance_continues_after_a_drop() {
 /// A returning route serves the same publisher's catalog and monotonically numbered groups.
 #[tokio::test(start_paused = true)]
 async fn a_return_keeps_catalog_and_group_history() {
-	let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 86_400_000);
+	let wall = kio::clock::Wall::MOQ_EPOCH + Duration::from_millis(86_400_000);
 	crate::clock::fake_host_wall(wall);
 	let start = kio::clock::now();
 	let origin = crate::source::produce_origin();
@@ -10543,14 +10543,10 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let mut follower = super::Follower::new(open_export(source, std::time::Duration::ZERO).await.unwrap()).unwrap();
 	let quiet = Duration::from_secs(1);
 
-	let pool = origin
-		.route_prefix("pool", moq_net::origin::RouteOptions::default())
-		.unwrap();
+	let pool = origin.claim("pool", moq_net::origin::RouteOptions::default()).unwrap();
 	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "a start");
 	drop(pool);
-	let pool = origin
-		.route_prefix("pool", moq_net::origin::RouteOptions::default())
-		.unwrap();
+	let pool = origin.claim("pool", moq_net::origin::RouteOptions::default()).unwrap();
 	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "a restart");
 	drop(pool);
 	assert!(kio::clock::timeout(quiet, follower.next()).await.is_err(), "an end");
@@ -11898,7 +11894,7 @@ async fn a_stitched_switch_keeps_the_healthy_legs_held_frames() {
 	for ms in (1000..2000).step_by(20) {
 		write_aac(&mut old_audio, ms);
 	}
-	let _ = export.poll_next(&moq_net::kio::Waiter::noop());
+	let _ = export.poll_next(&kio::Waiter::noop());
 	let held = export.buffered();
 	assert!(held > 0, "the old healthy leg has future output buffered");
 	let (new, mut new_catalog) = publish_live::<()>(&origin, route());
@@ -11948,7 +11944,7 @@ async fn a_healthy_stitch_feeds_the_old_generation_until_the_new_clock_acquires(
 		}
 		tokio::task::yield_now().await;
 		loop {
-			match follower.poll_next(&moq_net::kio::Waiter::noop()) {
+			match follower.poll_next(&kio::Waiter::noop()) {
 				Poll::Ready(Ok(Some(frame))) => {
 					frames.push((start.elapsed(), follower.export().discontinuity(), frame))
 				}
@@ -12025,7 +12021,7 @@ async fn repeated_stitches_keep_the_delay() {
 		}
 		tokio::task::yield_now().await;
 		loop {
-			match follower.poll_next(&moq_net::kio::Waiter::noop()) {
+			match follower.poll_next(&kio::Waiter::noop()) {
 				Poll::Ready(Ok(Some(frame))) => {
 					frames.push((start.elapsed(), follower.export().discontinuity(), frame))
 				}
@@ -12319,7 +12315,7 @@ async fn a_newer_pending_instance_discards_the_unemitted_held_replacement() {
 	for ms in (1000..4000).step_by(20) {
 		write_aac(&mut a_audio, ms);
 		tokio::task::yield_now().await;
-		if let std::task::Poll::Ready(Ok(Some(frame))) = export.poll_next(&moq_net::kio::Waiter::noop()) {
+		if let std::task::Poll::Ready(Ok(Some(frame))) = export.poll_next(&kio::Waiter::noop()) {
 			out.push(frame);
 		}
 	}

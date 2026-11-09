@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { createInterface } from "node:readline";
 import { Manual, Milli, Nano } from "@moq/clock";
-import Session from "@moq/qmux";
+import { Session } from "@moq/qmux";
 import { DEFAULT_EXPIRY } from "../../js/net/src/cache.ts";
 import { connect } from "../../js/net/src/connection/connect.ts";
 import { Producer } from "../../js/net/src/origin.ts";
@@ -38,7 +38,7 @@ const clock = new Manual();
 const installed = clock.install();
 // A session never announces a received broadcast to another, so the relay advertises it itself.
 const origin = new Producer();
-const route = origin.routePrefix(path);
+const claim = origin.claim(path);
 
 async function dial(address: string, publish?: ReturnType<Producer["consume"]>) {
 	const url = new URL(address);
@@ -55,7 +55,7 @@ async function dial(address: string, publish?: ReturnType<Producer["consume"]>) 
 const source = await dial(upstream);
 const sinks: Awaited<ReturnType<typeof dial>>[] = [];
 const serving = (async () => {
-	for await (const request of route.requested()) request.serve(wireOf(source).consume(path));
+	for await (const request of claim.requested()) request.serve(wireOf(source).consume(path));
 })();
 console.log("ready");
 const lines = createInterface({ input: process.stdin });
@@ -78,7 +78,7 @@ try {
 	}
 } finally {
 	lines.close();
-	route.close();
+	claim.close();
 	await serving;
 	for (const sink of sinks) await sink.close();
 	await source.close();

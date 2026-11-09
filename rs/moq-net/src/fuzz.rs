@@ -461,7 +461,7 @@ pub fn route_info(
 	cost: u64,
 	instance: Option<(crate::Instance, u64)>,
 ) -> crate::origin::RouteInfo {
-	let info = crate::origin::RouteInfo::default()
+	let info = crate::origin::RouteInfo::new()
 		.with_hops(hop_chain(hops))
 		.with_cost(cost);
 	match instance {
@@ -481,12 +481,12 @@ pub fn requests_route(
 	origin: &crate::origin::Producer,
 	prefix: impl Into<crate::Path>,
 	route: crate::origin::RouteInfo,
-) -> Result<crate::origin::Route, crate::Error> {
+) -> Result<crate::origin::Claim, crate::Error> {
 	origin.forward(prefix, route)
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
-pub fn update_route(dynamic: &crate::origin::Route, route: crate::origin::RouteInfo) -> Result<(), crate::Error> {
+pub fn update_route(dynamic: &crate::origin::Claim, route: crate::origin::RouteInfo) -> Result<(), crate::Error> {
 	dynamic.update(route)
 }
 
@@ -622,7 +622,9 @@ impl Meter {
 
 /// Build a session-local payload meter without exposing the model's private stats carriers.
 pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, label: &str, path: &str) -> Meter {
-	let session = registry.tier(tier).session(Path::new(label).expect("label fits"));
+	let session = registry
+		.tier(tier)
+		.session(crate::stats::SessionInfo::new(Path::new(label).expect("label fits")));
 	Meter(session.egress(Path::new(path).expect("path fits")).meter())
 }
 
@@ -994,7 +996,7 @@ impl Default for Messages {
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
-				compress: false,
+				compression: crate::track::Compression::None,
 			},
 			lite_group: lite::Group {
 				subscribe: 7,
@@ -1978,7 +1980,7 @@ pub struct RequestValidity {
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
-	pub fn new(route: &crate::origin::Route, path: &crate::Path) -> Self {
+	pub fn new(route: &crate::origin::Claim, path: &crate::Path) -> Self {
 		Self {
 			watch: crate::model::broadcast::RequestValidity::for_source(route, path),
 			periods: Vec::new(),
@@ -2013,15 +2015,17 @@ mod tests {
 		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::default());
 		let _driver = driver;
 		let tier = crate::stats::Tier::new(crate::Path::from_static("t"));
-		let session = registry.tier(tier.clone()).session(crate::Path::from_static("root"));
+		let session = registry
+			.tier(tier.clone())
+			.session(crate::stats::SessionInfo::new(crate::Path::from_static("root")));
 		let _broadcast = origin.route("room/1", crate::origin::RouteOptions::default()).unwrap();
 		let mut cursor = origin.consume().with_stats(session).routes();
 		while cursor.next().now_or_never().flatten().is_some() {}
 
 		bump_publisher_bytes(&registry, crate::Path::from_static("room/1"), &tier, 5);
 		let mut report = crate::stats::Report::default();
-		registry.report(&mut report);
-		registry.report(&mut report);
+		registry.report(&mut report, crate::time::Instant::now());
+		registry.report(&mut report, crate::time::Instant::now());
 		let entry = report
 			.traffic
 			.iter()

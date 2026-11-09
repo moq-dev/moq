@@ -78,7 +78,7 @@ try {
 	const track = broadcast.createTrack(Catalog.TRACK, {
 		timescale: Moq.Time.Timescale.MILLI,
 		priority: Catalog.PRIORITY.catalog,
-		compress: true,
+		compression: "deflate",
 	});
 	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 	catalog.update({

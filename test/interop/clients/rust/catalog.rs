@@ -4,7 +4,6 @@
 //! moq-lite-07 alone so the relay receives and stores the DEFLATE slices. Prints the catalog
 //! group's inflated size, which is what a relay serving plain readers must inflate exactly once.
 use anyhow::{Context, ensure};
-use moq_tokio::moq_net;
 use tokio::io::AsyncBufReadExt;
 
 /// Renditions enough for the catalog to compress, and for readers to check what they decoded.
@@ -36,7 +35,10 @@ async fn main() -> anyhow::Result<()> {
 	let track = route
 		.broadcast()
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
-	ensure!(track.info().compress, "hang catalogs are compressed");
+	ensure!(
+		track.info().compression == moq_net::track::Compression::Deflate,
+		"hang catalogs are compressed"
+	);
 	let mut catalog = moq_json::snapshot::Producer::<hang::Catalog>::new(track, Default::default());
 	let value = hang::Catalog::from_slice(CATALOG.as_bytes())?;
 	catalog.update(moq_net::Timed::from(&value).at(moq_net::Timestamp::ZERO))?;

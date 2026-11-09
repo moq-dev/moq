@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { Session as Qmux, type WebSocketStreamLike } from "@moq/qmux";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Viewers } from "../bandwidth.ts";
@@ -17,10 +18,10 @@ import { Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { wireOf } from "../wire.ts";
-import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadDelay, type ReloadProps } from "./reload.ts";
+import type { Session } from "./session.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -195,7 +196,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: Milli(0) },
+		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: null },
 	});
 	try {
 		await clock.advance(Nano.fromMilli(Milli(100)));
@@ -307,7 +308,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
 	});
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	try {
@@ -351,7 +352,7 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
 	});
 
 	try {
@@ -396,7 +397,7 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 			enabled: true,
 			url,
 			websocket: { enabled: false },
-			delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+			delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
 		});
 		const watch = new Effect();
 		watch.run((effect) => {
@@ -465,7 +466,7 @@ test("a refused credential replaced since its dial redials with the new one", as
 		versions: ["moq-lite-06"],
 		websocket: { enabled: false },
 		tokens,
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
 	});
 	try {
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
@@ -493,7 +494,7 @@ test("new tokens redial a URL that stopped on refusing the old ones", async () =
 		versions: ["moq-lite-06"],
 		websocket: { enabled: false },
 		tokens,
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: null },
 	});
 	try {
 		await clock.drive(waitFor(reload.error, (error) => error !== undefined));
@@ -536,7 +537,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		url,
 		websocket: { enabled: false },
 		// Unlimited retries prove that `closed` settles only because the rejection is terminal.
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
 	});
 
 	try {
@@ -587,7 +588,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 		websocket: { enabled: false },
 		// Unlimited retries, so a second attempt can only happen because the first failure
 		// was treated as retryable rather than terminal.
-		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: null },
 	});
 
 	try {
@@ -752,7 +753,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 
 		// Only the first session matters: the subscription lives on it.
 		const url = new URL("https://example.com/");
-		const dials: { server: Promise<Established>; quic: WebTransport }[] = [];
+		const dials: { server: Promise<Session>; quic: WebTransport }[] = [];
 		const fin = { hold: undefined as ReturnType<typeof holdFins> | undefined, closed: false };
 		const stub = function StubWebTransport() {
 			const pair = createMockTransportPair(Lite.ALPN_06);
@@ -848,7 +849,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		Object.assign(globalThis, { window: win, document: Object.assign(new EventTarget(), { hidden: false }) });
 		const clock = new Manual();
 		const installed = clock.install();
-		const dials: { server: Promise<Established>; closed: boolean }[] = [];
+		const dials: { server: Promise<Session>; closed: boolean }[] = [];
 		const stub = function StubWebTransport(dialed: string | URL) {
 			const pair = createMockTransportPair(Lite.ALPN_06);
 			const dial = { server: accept(pair.server, new URL(dialed)), closed: false };
@@ -908,7 +909,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	const original = globalThis.WebTransport;
 	const clock = new Manual();
 	const installed = clock.install();
-	const dials: { server: Promise<Established>; quic: WebTransport; closed: boolean }[] = [];
+	const dials: { server: Promise<Session>; quic: WebTransport; closed: boolean }[] = [];
 	const stub = function StubWebTransport(dialed: string | URL) {
 		const pair = createMockTransportPair(Lite.ALPN_06);
 		const dial = { server: accept(pair.server, new URL(dialed)), quic: pair.server, closed: false };
@@ -974,7 +975,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const url = new URL("https://example.com/");
-	const dials: { server: Promise<Established>; quic: WebTransport }[] = [];
+	const dials: { server: Promise<Session>; quic: WebTransport }[] = [];
 	const fin = { hold: undefined as ReturnType<typeof holdFins> | undefined, closed: false };
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
@@ -1293,6 +1294,8 @@ const windows: [string, ReloadDelay, number, number][] = [
 	["an attempt under way finishes past the window", { initial: Milli(10), timeout: Milli(100) }, 110, 3],
 	// The first failure at 30 ms leaves 30 ms, less than the 50 ms wait, so it gives up at the deadline.
 	["a wait that reaches the deadline gives up there", { initial: Milli(50), timeout: Milli(60) }, 60, 1],
+	// Zero is a real bound, not "unlimited": the first failure at 30 ms gives up.
+	["a zero window gives up when the first attempt fails", { initial: Milli(10), timeout: Milli(0) }, 30, 1],
 ];
 for (const [name, delay, gaveUp, dials] of windows) {
 	test(`retry window: ${name}`, async () => {
@@ -1325,6 +1328,40 @@ for (const [name, delay, gaveUp, dials] of windows) {
 	});
 }
 
+// The window is checked again when the backoff ends: a timer that fires late, as after the
+// device slept, gives up instead of dialing past the window.
+test("retry window: a backoff that fires past the window gives up", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const random = spyOn(Math, "random").mockReturnValue(1);
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	const url = new URL("https://relay.example/room");
+	const plan = dialPlan(() => "hang", url);
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		timeout: Milli(30),
+		delay: { initial: Milli(10), multiplier: 1, max: Milli(1000), timeout: Milli(100) },
+	});
+	try {
+		await waitUntil(() => plan.dials() === 1);
+		// The first attempt times out at 30 ms and schedules the next dial for 40 ms.
+		await clock.advance(Nano.fromMilli(Milli(30)));
+		for (let i = 0; i < 3; i++) await settle();
+		expect(reload.error.peek()).toBeUndefined();
+		clock.jump(Nano.fromMilli(Milli(200)));
+		for (let i = 0; i < 3; i++) await settle();
+		expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
+		expect(plan.dials()).toBe(1);
+	} finally {
+		reload.close();
+		plan.restore();
+		warned.mockRestore();
+		random.mockRestore();
+		installed.close();
+	}
+});
+
 test("an invalid timeout is refused when the loop is built, not by every attempt", () => {
 	for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
 		expect(() => new Reload({ url: new URL("https://example.com/"), timeout: timeout as Milli })).toThrow(
@@ -1339,12 +1376,10 @@ const backoffs: [string, ReloadDelay, number[]][] = [
 	// Past `initial` but short of the default bar, so each end is a failed attempt.
 	["a session short of the default healthy bar escalates", {}, [10, 20, 40]],
 	["a session past the healthy bar resets", { healthy: Milli(50) }, [10, 10, 10]],
-	[
-		"a zero max leaves the delay uncapped",
-		{ initial: Milli(1000), multiplier: 4, max: Milli(0) },
-		[1000, 4000, 16000],
-	],
+	["a null max leaves the delay uncapped", { initial: Milli(1000), multiplier: 4, max: null }, [1000, 4000, 16000]],
 	["a max below initial caps the first delay too", { max: Milli(5) }, [5, 5, 5]],
+	// Zero is a real cap, not "uncapped".
+	["a zero max retries at once", { max: Milli(0) }, [0, 0, 0]],
 	["a zero multiplier keeps the delay constant", { multiplier: 0 }, [10, 10, 10]],
 	["a fractional multiplier below 1 keeps the delay constant", { multiplier: 0.5 }, [10, 10, 10]],
 ];
@@ -1406,7 +1441,7 @@ test("backoff: an uncapped delay saturates instead of overflowing", async () => 
 	const reload = new Reload({
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Milli(10), multiplier: 1e300, max: Milli(0) },
+		delay: { initial: Milli(10), multiplier: 1e300, max: null },
 	});
 	try {
 		for (let session = 0; session < 2; session++) {
@@ -1432,7 +1467,7 @@ test("a delay field with no meaning is refused when the loop is built", () => {
 	const invalid: ReloadDelay[] = [
 		// Zero would count every session as healthy.
 		{ healthy: Milli(0) },
-		// Zero `max` is uncapped and zero `timeout` unlimited, so infinity has no spelling here.
+		// `null` spells an uncapped `max` and an unlimited `timeout`, so infinity has no meaning here.
 		...bad.flatMap((value) => [{ initial: value }, { max: value }, { healthy: value }, { timeout: value }]),
 		{ multiplier: Number.NaN },
 		{ multiplier: Number.POSITIVE_INFINITY },
@@ -1441,5 +1476,154 @@ test("a delay field with no meaning is refused when the loop is built", () => {
 		expect(() => new Reload({ url: new URL("https://example.com/"), delay }), JSON.stringify(delay)).toThrow(
 			RangeError,
 		);
+	}
+});
+
+/**
+ * An in-memory `WebSocketStream`, which qmux prefers when the platform has one, whose server
+ * side `onServer` takes once the client's handshake is offered. The server picks the first
+ * subprotocol the client offers.
+ */
+function linkedWebSocketStream(onServer: (socket: WebSocketStreamLike, protocol: string) => void) {
+	return function StubWebSocketStream(url: string, options?: { protocols?: string[] }) {
+		const protocol = options?.protocols?.[0] ?? "";
+		const up = new TransformStream<Uint8Array | string, Uint8Array | string>();
+		const down = new TransformStream<Uint8Array | string, Uint8Array | string>();
+		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
+		const close = () => {
+			closed.resolve({ closeCode: 1000, reason: "" });
+			up.writable.abort().catch(() => {});
+			down.writable.abort().catch(() => {});
+		};
+		onServer(
+			{
+				url,
+				opened: Promise.resolve({ readable: up.readable, writable: down.writable, protocol, extensions: "" }),
+				closed: closed.promise,
+				close,
+			},
+			protocol,
+		);
+		return {
+			url,
+			opened: Promise.resolve({ readable: down.readable, writable: up.writable, protocol, extensions: "" }),
+			closed: closed.promise,
+			close,
+		};
+	};
+}
+
+// A link that fell back to WebSocket while WebTransport was unreachable probes it on a backoff
+// and, once it answers, leaves the fallback make-before-break: the old session tells its peer it
+// is moving with a GOAWAY and drains while the replacement finishes its handshake over the
+// probe's WebTransport session, with no second race, and the status never reports a disconnect.
+test("a WebSocket fallback returns to WebTransport once it is reachable", async () => {
+	using clock = manual();
+	const originalWebTransport = globalThis.WebTransport;
+	const originalStream = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
+	const url = new URL("https://fallback-returns.example.com/");
+
+	let blocked = true;
+	let probes = 0;
+	const sessions: { transport: string; server: Promise<Session> }[] = [];
+	globalThis.WebTransport = function StubWebTransport(dialed: string | URL) {
+		if (blocked) {
+			const refused = Promise.reject(new Error("UDP blocked"));
+			refused.catch(() => {});
+			return { ready: refused, closed: refused, close() {} };
+		}
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		const server = accept(pair.server, new URL(dialed));
+		server.catch(() => {});
+		sessions.push({ transport: "webtransport", server });
+		probes++;
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = linkedWebSocketStream((socket, protocol) => {
+		const transport = Qmux.accept(socket, { protocol }) as unknown as WebTransport;
+		// The negotiated protocol is known once the socket opens.
+		sessions.push({ transport: "websocket", server: transport.ready.then(() => accept(transport, url)) });
+	});
+
+	const statuses: string[] = [];
+	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Milli(0) } });
+	const watch = new Effect();
+	watch.subscribe(reload.status, (status) => statuses.push(status));
+	try {
+		// The fallback joins the race after WebTransport's head start.
+		for (let i = 0; i < 10 && reload.established.peek()?.transport !== "websocket"; i++) {
+			await clock.advance(Nano.fromMilli(Milli(100)));
+		}
+		expect(reload.established.peek()?.transport).toBe("websocket");
+		const fallback = sessions[0];
+		if (!fallback) throw new Error("no fallback session");
+
+		// Every probe fails while WebTransport is unreachable; the fallback keeps serving.
+		await clock.advance(Nano.fromMilli(Milli(70_000)));
+		expect(reload.established.peek()?.transport).toBe("websocket");
+
+		blocked = false;
+		// Past the fourth probe's longest wait after the third.
+		for (let i = 0; i < 80 && reload.established.peek()?.transport !== "webtransport"; i++) {
+			await clock.advance(Nano.fromMilli(Milli(1_000)));
+		}
+		expect(reload.established.peek()?.transport).toBe("webtransport");
+		// The probe's session carries the replacement: one WebTransport dial, never another race.
+		expect(probes).toBe(1);
+		expect(sessions.filter((session) => session.transport === "websocket")).toHaveLength(1);
+		expect(await (await fallback.server).draining).toEqual({ uri: "" });
+		expect(statuses).not.toContain("disconnected");
+	} finally {
+		watch.close();
+		reload.close();
+		for (const session of sessions) (await session.server.catch(() => undefined))?.abort();
+		globalThis.WebTransport = originalWebTransport;
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = originalStream;
+	}
+});
+
+// A WebSocket win is provisional: once the session it carried ends, the redial gives
+// WebTransport its head start again, since the outage that lost the race may be over.
+test("a WebSocket session ending restores WebTransport's head start", async () => {
+	using clock = manual();
+	const originalWebTransport = globalThis.WebTransport;
+	const originalStream = (globalThis as { WebSocketStream?: unknown }).WebSocketStream;
+	const url = new URL("https://fallback-ends.example.com/");
+
+	const dials: Instant[] = [];
+	const servers: Promise<Session>[] = [];
+	globalThis.WebTransport = function BlockedWebTransport() {
+		const refused = Promise.reject(new Error("UDP blocked"));
+		refused.catch(() => {});
+		return { ready: refused, closed: refused, close() {} };
+	} as unknown as typeof WebTransport;
+	(globalThis as { WebSocketStream?: unknown }).WebSocketStream = linkedWebSocketStream((socket, protocol) => {
+		dials.push(now());
+		const transport = Qmux.accept(socket, { protocol }) as unknown as WebTransport;
+		servers.push(transport.ready.then(() => accept(transport, url)));
+	});
+
+	const reload = new Reload({ url, versions: [Lite.ALPN_06], delay: { initial: Milli(0) } });
+	try {
+		for (let i = 0; i < 10 && reload.established.peek()?.transport !== "websocket"; i++) {
+			await clock.advance(Nano.fromMilli(Milli(100)));
+		}
+		const first = servers[0];
+		if (!first) throw new Error("no fallback session");
+		// Let the server's half of the handshake finish before ending it.
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		(await first).abort();
+		const ended = now();
+		for (let i = 0; i < 20 && dials.length < 2; i++) {
+			await clock.advance(Nano.fromMilli(Milli(100)));
+		}
+		const redial = dials[1];
+		if (redial === undefined) throw new Error("never redialed the fallback");
+		expect(Instant.durationSince(redial, ended)).toBeGreaterThanOrEqual(Nano.fromMilli(Milli(500)));
+	} finally {
+		reload.close();
+		for (const server of servers) (await server.catch(() => undefined))?.abort();
+		globalThis.WebTransport = originalWebTransport;
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = originalStream;
 	}
 });

@@ -16,7 +16,8 @@ import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "
  *     stops once the PCM in the ring plus the frames still decoding reach the floor, since the ring
  *     plays through and cannot shed what overflows it;
  *   - while playing, once the playhead is within the floor of where its output lands, keeping the
- *     ring on its floor;
+ *     ring on its floor. Live, that is where the output ends: the ring's time stretch measures its
+ *     depth right after each write, and reads a tail past the floor as audio behind the clock;
  *   - while playing live, also once the media queued behind it covers the hold, so media past the
  *     target reaches the ring, whose skip band catches up to the live edge. Buffered mode plays
  *     through instead.
@@ -63,6 +64,10 @@ export class Backpressure {
 	// ring compares a frame to its playhead where the output lands, or an offset past the floor would
 	// drain it.
 	#offset = 0;
+	// The duration of the latest output, which the next frame's is taken to match. A live frame released
+	// by where its output starts would land with its tail past the floor, and the stretch accelerating
+	// that away would only draw the next frame out sooner, playing through the hold.
+	#frame = 0 as Micro;
 
 	#waiters: Array<{ timestamp: Micro; resolve: () => void }> = [];
 
@@ -141,6 +146,7 @@ export class Backpressure {
 
 	/** Note that PCM from `start` to `end` reached the ring. */
 	inserted(start: Micro, end: Micro): void {
+		this.#frame = (end - start) as Micro;
 		const inserted = this.#inserted;
 		this.#inserted = { start: inserted?.start ?? start, end: inserted && inserted.end > end ? inserted.end : end };
 		this.#release();
@@ -229,7 +235,8 @@ export class Backpressure {
 	#due(timestamp: Micro): boolean {
 		const playhead = this.#playhead;
 		if (!this.#stalled && playhead !== undefined) {
-			if (timestamp - this.#offset - this.#headroom <= playhead) return true;
+			const tail = this.#buffered ? 0 : this.#frame;
+			if (timestamp + tail - this.#offset - this.#headroom <= playhead) return true;
 			return !this.#buffered && this.#covered(timestamp);
 		}
 
@@ -269,6 +276,18 @@ export class AudioBuffer {
 	readonly #underruns = new Signal<number>(0);
 	/** How many times the ring has run dry mid-playback, cumulative. */
 	readonly underruns: Getter<number> = this.#underruns;
+
+	readonly #skips = new Signal<number>(0);
+	/** How many times the ring skipped ahead, dropping queued audio, cumulative. */
+	readonly skips: Getter<number> = this.#skips;
+
+	readonly #trimmed = new Signal<Milli>(Milli.zero);
+	/** Media the ring's skips dropped unplayed, less declared silence, cumulative. */
+	readonly trimmed: Getter<Milli> = this.#trimmed;
+
+	readonly #accelerated = new Signal<Milli>(Milli.zero);
+	/** Media the stretch removed by playing faster, cumulative. */
+	readonly accelerated: Getter<Milli> = this.#accelerated;
 
 	readonly #silent = new Signal<boolean>(false);
 	/** Whether playback is at a declared end, reached or announced before any audio, and nothing has played since. */
@@ -326,6 +345,9 @@ export class AudioBuffer {
 				this.#timestamp.set(data.timestamp);
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
+				this.#skips.set(data.skips);
+				this.#trimmed.set(data.trimmed);
+				this.#accelerated.set(data.accelerated);
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
 					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
@@ -354,7 +376,10 @@ export class AudioBuffer {
 		this.#backpressure.dropped();
 	}
 
-	/** Insert audio samples at the given timestamp, transferring their buffers. Handles out-of-order writes. */
+	/**
+	 * Insert audio samples at the given timestamp, transferring their buffers. A write may land out of
+	 * order, but samples behind what live playback already staged, up to 30 ms past the playhead, are dropped.
+	 */
 	insert(timestamp: Micro, data: Float32Array[]): void {
 		const end = (timestamp + Micro.fromSecond(((data[0]?.length ?? 0) / this.rate) as Second)) as Micro;
 		this.#backpressure.inserted(timestamp, end);

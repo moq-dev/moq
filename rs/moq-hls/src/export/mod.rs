@@ -840,9 +840,17 @@ mod tests {
 
 	/// The average bitrate encoded in a synthesized AAC init segment.
 	fn aac_avg_bitrate(init: &bytes::Bytes) -> u32 {
-		let wire = moq_mux::container::fmp4::Wire::from_init(init).unwrap();
-		let codec = &wire.trak().mdia.minf.stbl.stsd.codecs[0];
-		let moq_mux::container::fmp4::mp4_atom::Codec::Mp4a(mp4a) = codec else {
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(init.as_ref());
+		let moov = std::iter::from_fn(|| mp4_atom::Any::decode_maybe(&mut cursor).unwrap())
+			.find_map(|atom| match atom {
+				mp4_atom::Any::Moov(moov) => Some(moov),
+				_ => None,
+			})
+			.expect("no moov in init");
+		let codec = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0];
+		let mp4_atom::Codec::Mp4a(mp4a) = codec else {
 			panic!("expected mp4a, got {codec:?}");
 		};
 		mp4a.esds.es_desc.dec_config.avg_bitrate
@@ -850,7 +858,7 @@ mod tests {
 
 	/// The `trun` sample durations of a fragment.
 	fn sample_durations(fragment: &bytes::Bytes) -> Vec<Option<u32>> {
-		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe};
+		use mp4_atom::DecodeMaybe;
 
 		let mut cursor = std::io::Cursor::new(fragment.as_ref());
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
@@ -947,7 +955,6 @@ mod tests {
 	// nothing numbers their segments. Once it does, every rendition is added.
 	#[tokio::test(start_paused = true)]
 	async fn renditions_wait_for_the_join_interval() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1032,7 +1039,6 @@ mod tests {
 	// and makes every recording cursor see a Removed followed by an Added.
 	#[tokio::test(start_paused = true)]
 	async fn estimate_only_catalog_update_keeps_the_rendition() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1103,7 +1109,6 @@ mod tests {
 	// (its timescale derives from the framerate) and churn every recording cursor mid-stream.
 	#[tokio::test(start_paused = true)]
 	async fn estimated_framerate_keeps_the_rendition() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1168,7 +1173,6 @@ mod tests {
 	// longer matches.
 	#[tokio::test(start_paused = true)]
 	async fn decoder_config_change_rebuilds_the_rendition() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1232,9 +1236,8 @@ mod tests {
 	// The whole fetch-on-demand path in process: a broadcast publishes media through the
 	// catalog (which declares its join interval), the Broadcaster renders playlists from the
 	// groups' timestamps, and a segment request fetches and transmuxes exactly its groups.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn master_lists_only_playable_renditions() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1244,16 +1247,12 @@ mod tests {
 		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
-		let rendition = kio::clock::timeout(Duration::from_secs(5), async {
-			loop {
-				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0") {
-					break rendition;
-				}
-				tokio::task::yield_now().await;
-			}
-		})
-		.await
-		.expect("rendition discovered from the catalog");
+		let added = kio::clock::timeout(Duration::from_secs(5), broadcaster.renditions().next())
+			.await
+			.expect("rendition discovered from the catalog");
+		let Ok(Some(renditions::Event::Added(rendition))) = added else {
+			panic!("expected an Added event");
+		};
 
 		assert!(
 			rendition.media_playlist(None).unwrap().is_none(),
@@ -1370,7 +1369,7 @@ mod tests {
 		media.set(disabled).unwrap();
 		kio::clock::timeout(Duration::from_secs(5), async {
 			while listed() {
-				tokio::task::yield_now().await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -1873,9 +1872,8 @@ mod tests {
 	// A reconfigure that changes the init bytes changes the init URL, so a cache can never hand a
 	// player the previous init under the new one. The old URL keeps naming the old bytes while the
 	// playlist still lists the segments muxed under them.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_reconfigure_versions_the_init_url() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -2166,9 +2164,8 @@ mod tests {
 
 	/// Indexing reads every group of the media, but a stats session on the source's origin
 	/// counts only the catalog and what a client fetches.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_metered_source_counts_only_what_clients_fetch() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -2181,7 +2178,7 @@ mod tests {
 		let consumer = origin.consume().with_stats(
 			registry
 				.tier(moq_net::stats::Tier::default())
-				.session(moq_net::Path::from_static("viewer")),
+				.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("viewer"))),
 		);
 		let bytes = || -> u64 {
 			registry
@@ -2381,7 +2378,7 @@ mod tests {
 		settle().await;
 
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
-		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = kio::clock::Wall::MOQ_EPOCH;
 		let config = catalog_config()
 			.with_clock(moq_mux::Clock::at(moq_net::time::Instant::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
@@ -2553,7 +2550,7 @@ mod tests {
 	}
 
 	async fn live_fmp4_segments(version: Option<&str>, late: bool) {
-		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe, Encode};
+		use mp4_atom::{DecodeMaybe, Encode};
 		// Reuse the A/V descriptors; opaque samples exercise segment discovery and FETCH,
 		// without involving a codec decoder.
 		let mut fixture =
@@ -2678,9 +2675,8 @@ mod tests {
 	}
 
 	// A finished broadcast renders a static presentation.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn dash_manifest_turns_static_when_finished() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -3193,14 +3189,13 @@ mod tests {
 	}
 
 	async fn until_finished(rendition: &Rendition) {
-		let deadline = kio::clock::now() + Duration::from_secs(5);
-		loop {
-			if rendition.snapshot().finished {
-				return;
+		kio::clock::timeout(Duration::from_secs(5), async {
+			while !rendition.snapshot().finished {
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
-			assert!(kio::clock::now() < deadline, "the playlist did not end");
-			tokio::task::yield_now().await;
-		}
+		})
+		.await
+		.expect("the playlist did not end");
 	}
 
 	/// A sibling-media fixture: the catalog broadcast `live` lists `video0`, and its media lives in
@@ -3532,6 +3527,14 @@ mod tests {
 
 		let mut segments = rendition.segments();
 		assert!(segments.init().await.unwrap().is_some(), "init is buildable");
+
+		// Peeking reports the segment's metadata and wire bytes before its media is built, without
+		// advancing.
+		let peek = segments.peek().await.unwrap().expect("a segment, not end");
+		assert_eq!(peek.segment, 0);
+		assert_eq!(peek.bytes, 5, "one 4-byte frame and its 1-byte timestamp");
+		assert_eq!(peek.duration, Duration::from_secs(2));
+		assert_eq!(peek.discontinuity, 0);
 
 		let first = kio::clock::timeout(Duration::from_secs(5), segments.next())
 			.await

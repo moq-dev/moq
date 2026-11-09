@@ -26,6 +26,7 @@ websocket = ["moq-tokio/websocket"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
+bytes = { workspace = true }
 humantime = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 moq-net = { workspace = true }

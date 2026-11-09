@@ -357,7 +357,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	///
 	/// Media samples stream into their frames as bytes arrive. What must be held whole is
 	/// bounded: a `moov` or `moof` body larger than 2 MiB, or a text sample larger than the
-	/// transport's per-group bound ([`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES)), is
+	/// transport's 32 MiB frame bound, is
 	/// refused before it is held. A `moof` declaring more than 131,072 samples, or more than its
 	/// size accepts, is refused before they are planned, and a `moov` declaring more than 256
 	/// tracks before any is created.
@@ -392,7 +392,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				let count = (needed - self.buffer.len()).min(data.len());
 				self.buffer.extend_from_slice(&data[..count]);
 				data = &data[count..];
-				let Some(header) = mp4_atom::Header::decode_maybe(&mut self.buffer.as_ref())? else {
+				let Some(header) =
+					mp4_atom::Header::decode_maybe(&mut self.buffer.as_ref()).map_err(crate::Error::mp4)?
+				else {
 					if data.is_empty() {
 						return Ok(());
 					}
@@ -493,9 +495,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if kind == Moof::KIND && self.moof.is_some() {
 			return Err(Error::DuplicateMoof.into());
 		}
-		let size = size.ok_or(mp4_atom::Error::InvalidSize)?;
+		let size = size.ok_or(mp4_atom::Error::InvalidSize).map_err(crate::Error::mp4)?;
 		if size > super::MAX_METADATA_BYTES {
-			return Err(Error::MetadataTooLarge { kind, size }.into());
+			return Err(Error::MetadataTooLarge {
+				kind: kind.to_string(),
+				size,
+			}
+			.into());
 		}
 		Ok(Body::Metadata {
 			kind,
@@ -508,12 +514,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn end_metadata(&mut self, kind: mp4_atom::FourCC, body: Bytes, header_size: usize) -> Result<()> {
 		super::metadata::body(kind, &body)?;
 		if kind == Moov::KIND {
-			return self.init(Moov::decode_body(&mut body.as_ref())?);
+			return self.init(Moov::decode_body(&mut body.as_ref()).map_err(crate::Error::mp4)?);
 		}
 		if self.moof.is_some() {
 			return Err(Error::DuplicateMoof.into());
 		}
-		let moof = Moof::decode_body(&mut body.as_ref())?;
+		let moof = Moof::decode_body(&mut body.as_ref()).map_err(crate::Error::mp4)?;
 		self.moof = Some(moof);
 		self.moof_span = header_size.checked_add(body.len()).ok_or(Error::InvalidDataOffset)?;
 		Ok(())
@@ -749,8 +755,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			};
 
 			let mut buf = Vec::new();
-			ftyp.encode(&mut buf)?;
-			single_moov.encode(&mut buf)?;
+			ftyp.encode(&mut buf).map_err(crate::Error::mp4)?;
+			single_moov.encode(&mut buf).map_err(crate::Error::mp4)?;
 
 			Ok(Container::Cmaf { init: buf.into() })
 		}
@@ -850,8 +856,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					av01.spatial.as_deref(),
 				)
 			}
-			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
-			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
+			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(unknown.to_string()).into()),
+			unsupported => return Err(Error::unsupported_codec(unsupported).into()),
 		};
 		// The codec config outranks the colr box a muxer added, which only fills its gaps.
 		for entry in colr {
@@ -886,7 +892,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		container: Container,
 	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
-		avcc.encode_body(&mut description)?;
+		avcc.encode_body(&mut description).map_err(crate::Error::mp4)?;
 		let description = description.freeze();
 
 		// Start from everything the avcC's SPS signals, so no field is dropped by a copy list.
@@ -913,7 +919,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		container: Container,
 	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
-		hvcc.encode_body(&mut description)?;
+		hvcc.encode_body(&mut description).map_err(crate::Error::mp4)?;
 
 		let mut config = VideoConfig::new(H265 {
 			in_band,
@@ -1028,8 +1034,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.container = container;
 				config
 			}
-			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
-			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
+			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(unknown.to_string()).into()),
+			unsupported => return Err(Error::unsupported_codec(unsupported).into()),
 		};
 
 		Ok(config)
@@ -1496,7 +1502,7 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 	}
 
 	let mut moof_buf = Vec::new();
-	adjusted_moof.encode(&mut moof_buf)?;
+	adjusted_moof.encode(&mut moof_buf).map_err(crate::Error::mp4)?;
 	let new_moof_size = moof_buf.len();
 
 	// A payload past 4 GiB takes the 16-byte largesize header.
@@ -1505,7 +1511,8 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 		kind: (*b"mdat").into(),
 		size: Some(run.samples.iter().map(|sample| sample.range.len()).sum()),
 	}
-	.encode(&mut mdat)?;
+	.encode(&mut mdat)
+	.map_err(crate::Error::mp4)?;
 
 	// Re-encode moof with corrected per-trun data_offset for the per-track fragment.
 	// Each trun's data_offset points to the start of that run's data within the new mdat.
@@ -1525,7 +1532,7 @@ fn fragment(traf: &mp4_atom::Traf, moof: &Moof, run: &Run, defaults: &sample::De
 	}
 
 	moof_buf.clear();
-	adjusted_moof.encode(&mut moof_buf)?;
+	adjusted_moof.encode(&mut moof_buf).map_err(crate::Error::mp4)?;
 	// Each data_offset was reserved above, so restating them keeps the moof's size.
 	debug_assert_eq!(moof_buf.len(), new_moof_size);
 	moof_buf.extend_from_slice(&mdat);
@@ -1707,7 +1714,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			_ => false,
 		};
 		let mut result = match truncated {
-			true => Err(mp4_atom::Error::UnexpectedEof.into()),
+			true => Err(crate::Error::mp4(mp4_atom::Error::UnexpectedEof)),
 			false => Ok(()),
 		};
 		// End every track even on refusal, keeping the first error. A track whose finish fails

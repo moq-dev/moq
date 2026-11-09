@@ -6,3 +6,4 @@
 "MoqSocketEndpoint.close" = "end"
 # See MoqRoute::instance_id: the C++ generator reserves `instance`, Kotlin does not.
 "MoqRoute.instance_id" = "instance"
+"MoqClaim.instance_id" = "instance"

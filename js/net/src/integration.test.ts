@@ -8,7 +8,7 @@ import {
 	Connection,
 	type ConnectProps,
 	connect as connectSession,
-	type Established,
+	type Session,
 } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -39,7 +39,7 @@ function publish(origin: OriginProducer, path: Path.Valid) {
 
 const url = new URL("https://localhost:4443/test");
 
-function connect(url: URL, props: Omit<ConnectProps, "url"> = {}): Promise<Established> {
+function connect(url: URL, props: Omit<ConnectProps, "url"> = {}): Promise<Session> {
 	return connectSession({ url, ...props });
 }
 
@@ -47,7 +47,7 @@ function accept(
 	transport: WebTransport,
 	url: URL,
 	props: Omit<AcceptProps, "transport" | "url"> = {},
-): Promise<Established> {
+): Promise<Session> {
 	return acceptSession({ transport, url, ...props });
 }
 
@@ -933,9 +933,9 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const path = Path.from("test");
 	// One publisher instance, so the two compete on cost alone.
 	const instance = Instance.random();
-	const localRoute = origin.route(path, { instance, cost: 5n });
+	const localRoute = origin.route(path, { instance: { id: instance, epoch: 0n }, cost: 5n });
 	const local = localRoute.broadcast;
-	const dynamic = origin.routePrefix(path, { instance, cost: 1n });
+	const dynamic = origin.claim(path, { instance: { id: instance, epoch: 0n }, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -1236,7 +1236,7 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 			explicit: broadcast.createTrack("explicit", { timescale: Timescale.MILLI, maxAge: Milli(5000) }),
 		};
 		expect((await tracks.omitted.info()).maxAge).toBe(Milli.zero);
-		expect((await tracks.unlimited.info()).maxAge).toBeUndefined();
+		expect((await tracks.unlimited.info()).maxAge).toBeNull();
 
 		const remote = wireOf(client).consume(path);
 		const info = async (name: string) => {
@@ -1249,9 +1249,9 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 			}
 		};
 		const carried = alpn !== Lite.ALPN_03;
-		expect((await info("omitted")).maxAge).toBe(carried ? Milli.zero : undefined);
-		expect((await info("unlimited")).maxAge).toBeUndefined();
-		expect((await info("explicit")).maxAge).toBe(carried ? Milli(5000) : undefined);
+		expect((await info("omitted")).maxAge).toBe(carried ? Milli.zero : null);
+		expect((await info("unlimited")).maxAge).toBeNull();
+		expect((await info("explicit")).maxAge).toBe(carried ? Milli(5000) : null);
 
 		broadcast.close();
 		remote.close();
@@ -1330,7 +1330,7 @@ test("integration: ietf fetches a past group of a finished track", async () => {
 		expect(await group.readFrame()).toBeUndefined();
 		group.close();
 		// The FETCH-only copy keeps the absent MAX_CACHE_DURATION as no limit, not the authored zero.
-		expect((await remote.track("video").info()).maxAge).toBeUndefined();
+		expect((await remote.track("video").info()).maxAge).toBeNull();
 		remote.close();
 		client.abort();
 		server.abort();
@@ -2670,7 +2670,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_2
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const held = new BroadcastProducer();
 		held.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
 		const serving = (async () => {
@@ -2705,7 +2705,7 @@ test.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const serving = (async () => {
 			const requests = handle.requested();
 			const request = (await requests.next()).value;
@@ -2745,7 +2745,7 @@ test.each(["request", "follow"] as const)(
 		const origin = new OriginProducer();
 		const consumer = new OriginProducer();
 		const path = Path.from("live/cam");
-		const handle = origin.routePrefix(Path.empty());
+		const handle = origin.claim(Path.empty());
 		const serving = (async () => {
 			const requests = handle.requested();
 			const request = (await requests.next()).value;

@@ -84,7 +84,7 @@ pub(crate) struct Forward {
 
 /// A congestion controller of the application's own, built fresh for each connection.
 ///
-/// Implement [`crate::congestion::Factory`] and install it with [`Config::controller`].
+/// Implement [`moq_congestion::Factory`] and install it with [`Config::controller`].
 #[cfg(feature = "driver")]
 #[derive(Clone)]
 pub struct Controller(pub std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>);
@@ -253,7 +253,7 @@ pub struct Config {
 	/// [`congestion_control`](Self::congestion_control)'s families.
 	///
 	/// Code-only, since a controller has no text form: no flag or setting reaches it.
-	/// The QUIC backend runs it, and the io_uring runtime refuses it.
+	/// Both the QUIC backend and the relay's io_uring runtime run it.
 	#[cfg(feature = "driver")]
 	#[serde(skip)]
 	#[usage(skip)]
@@ -719,23 +719,6 @@ impl Resolved {
 	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
-	}
-
-	/// Whether an application's own congestion controller is installed.
-	///
-	/// Compiled in every feature set, unlike the `controller` field, so a runtime
-	/// that cannot run one, such as the relay's io_uring workers, can refuse it
-	/// whichever features unify onto this crate.
-	#[cfg(feature = "driver")]
-	pub fn has_controller(&self) -> bool {
-		self.controller.is_some()
-	}
-
-	/// Whether an application's own congestion controller is installed: never,
-	/// since a build without the `driver` feature has no way to install one.
-	#[cfg(not(feature = "driver"))]
-	pub fn has_controller(&self) -> bool {
-		false
 	}
 
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than

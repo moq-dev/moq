@@ -527,7 +527,7 @@ test("no ratio never refreshes", async () => {
 });
 
 test("a compressed refresh opens a fresh group", async () => {
-	const track = new Track.Producer("test").accept({ refresh: 0, compress: true, maxAge: null });
+	const track = new Track.Producer("test").accept({ refresh: 0, compression: "deflate", maxAge: null });
 	const producer = new Producer<Value>({ track });
 	producer.update({ value: { a: 1, b: 1 } });
 	producer.update({ value: { a: 1, b: 2 } });
@@ -718,7 +718,7 @@ test("an untimed state reads back untimed", async () => {
 // Each state carries the timestamp of the frame that produced it, snapshot or delta, so a caller can
 // hold it back until a playhead reaches it. `latest()` reports the head's own frame.
 test("each state reads back with its frame's timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compress: true });
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, compression: "deflate" });
 	const producer = new Producer<Value>({ track, deltas: true });
 	for (let n = 1; n <= 3; n++) {
 		producer.update({ value: { n, b: "x".repeat(64) }, at: Time.Timestamp.fromMillis(n * 1_000) });

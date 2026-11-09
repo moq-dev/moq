@@ -31,9 +31,9 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
--	dynamic: crate::origin::Route,
+-	dynamic: crate::origin::Claim,
 +	// MUTATION: never dropped, so a route outlives the session that announced it.
-+	dynamic: std::mem::ManuallyDrop<crate::origin::Route>,
++	dynamic: std::mem::ManuallyDrop<crate::origin::Claim>,
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Queues this route on its prefix's ready set when its request queue wakes.

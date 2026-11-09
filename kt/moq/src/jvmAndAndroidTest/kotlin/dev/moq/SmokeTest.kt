@@ -210,7 +210,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.routePrefix("", RouteOptions()).use { /* prefix route smoke */ }
+            origin.claim("", RouteOptions()).use { /* claim smoke */ }
         }
     }
 
@@ -587,7 +587,10 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = WindowConfig()
             val track =
-                broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
+                broadcast.publishTrack(
+                    "log",
+                    TrackInfo(timescale = 1_000_000uL, compression = Compression.DEFLATE),
+                )
             val producer = WindowProducer(track, config)
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
             for (n in 1..3) producer.push(
@@ -912,8 +915,7 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.routePrefix("live", RouteOptions()).use { dynamic ->
-                assertFailsWith<MoqException.Internal> { dynamic.broadcast() }
+            origin.claim("live", RouteOptions()).use { dynamic ->
                 val pending = async {
                     origin.consume().request("live/cam")
                 }
@@ -1188,6 +1190,7 @@ class SmokeTest {
 
                         // The frame outlives its consumer's cancellation.
                         decoder.cancel()
+                        assertNull(frame.surface())
 
                         val planar = frame.pixels(VideoPixelFormat.I420)
                         assertEquals(

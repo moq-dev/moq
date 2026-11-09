@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
-use moq_tokio::moq_net;
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -50,7 +49,7 @@ fn worker_config(cert: &std::path::Path, key: &std::path::Path, workers: u16) ->
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
-	config.runtime.workers = Some(workers);
+	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(workers).unwrap());
 	config.runtime.pin = false;
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config

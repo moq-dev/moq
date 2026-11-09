@@ -53,7 +53,7 @@ pub(crate) struct Inner {
 }
 
 pub(crate) struct State {
-	pub(crate) active: Option<moq_net::server::Active>,
+	pub(crate) active: Option<moq_net::server::Admitted>,
 	/// Wakes the driver when the endpoint fed the connection (a received
 	/// datagram, an unreachable peer) so it answers and re-arms its timers, or
 	/// failed it from outside. Handles need no wake of their own: whatever
@@ -295,9 +295,8 @@ impl Connection {
 	/// The certificate chain the peer presented, end entity first, or `None`
 	/// if it presented none.
 	///
-	/// A server only sees one when it asked
-	/// ([`ClientAuth`](crate::quic::server::ClientAuth)), and TLS already
-	/// validated it against the configured roots by the time this connection
+	/// A server only sees one when its TLS policy asked, and TLS already
+	/// validated it against that policy's roots by the time this connection
 	/// exists: an invalid chain fails the handshake instead. So a `Some` here
 	/// is an authenticated peer, and the chain is what names it.
 	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -349,7 +348,7 @@ impl Connection {
 	/// The receive windows now in force: the connection's, and the most one stream holds.
 	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
 		let conn = self.shared.conn.borrow();
-		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
+		moq_net::transport::ReceiveWindow::new(Some(conn.receive_window()), conn.stream_receive_window())
 	}
 }
 

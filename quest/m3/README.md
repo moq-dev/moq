@@ -47,6 +47,7 @@ federation) land.
 - [Release pull requests read the R2 Rust cache](/quest/m3/mbx-r2-release-cache.md) - after the cut brings the platform Rust cache to `release`
 - [Binary release publishers run on their tag](/quest/m3/release-tag-publishers.md) - after the cut brings the workflows to `release`
 - [Relays split horizon per session](/quest/m3/route-split-horizon.md) - a relay never advertises a route back over the session it came from
+- [Cache-aware routing](/quest/m3/cache-routing/README.md) - a relay stays on a broadcast's path only for a local reader, two downstream sessions, or its one consumer's cheapest cold route, and joins a neighbor's copy instead of pulling another
 - [crates.io trusts the workflow](/quest/m3/crates-trusted-publisher.md) - maintainer action: the crates the cut first-publishes by token get a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m3/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [One policy for oversized container metadata](/quest/m3/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
@@ -74,7 +75,6 @@ federation) land.
 - [fMP4 and TS imports publish BCP-47 languages](/quest/m3/import-lang-iso639.md) - ISO 639-2 codes become `en`-style tags on audio and text
 - [HLS carries every audio language](/quest/m3/hls-audio-languages.md) - every `EXT-X-MEDIA` audio entry imports with its `LANGUAGE`, and exports write it back
 - [A refused follower asks a replacement handler](/quest/m3/follow-refused-retry.md) - a same-instance handler swap with identical route details re-asks a refused `Following`, while listeners still see no change
-- [Content protection](/quest/m3/drm/README.md) - Common Encryption CMAF publishes unchanged, signalled in the hang `drm` section and MSF `contentProtections`, with license URLs from Rust, the CLI, and every binding
 - [iOS capture](/quest/m3/mobile-capture-ios.md) - Rust captures the camera and screen on iOS, setting the catalog rotation
 - [Android capture](/quest/m3/mobile-capture-android.md) - Rust captures through NDK/JNI on Android, reusing the existing codecs and setting the catalog rotation
 - [Latest readers use Range::live()](/quest/m3/readers-range-live.md) - after #6278, readers start at the live edge without waiting on `largest()`
