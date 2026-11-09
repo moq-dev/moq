@@ -1327,6 +1327,40 @@ for (const [name, delay, gaveUp, dials] of windows) {
 	});
 }
 
+// The window is checked again when the backoff ends: a timer that fires late, as after the
+// device slept, gives up instead of dialing past the window.
+test("retry window: a backoff that fires past the window gives up", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const random = spyOn(Math, "random").mockReturnValue(1);
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	const url = new URL("https://relay.example/room");
+	const plan = dialPlan(() => "hang", url);
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		timeout: Milli(30),
+		delay: { initial: Milli(10), multiplier: 1, max: Milli(1000), timeout: Milli(100) },
+	});
+	try {
+		await waitUntil(() => plan.dials() === 1);
+		// The first attempt times out at 30 ms and schedules the next dial for 40 ms.
+		await clock.advance(Nano.fromMilli(Milli(30)));
+		for (let i = 0; i < 3; i++) await settle();
+		expect(reload.error.peek()).toBeUndefined();
+		clock.jump(Nano.fromMilli(Milli(200)));
+		for (let i = 0; i < 3; i++) await settle();
+		expect(reload.error.peek()).toBeInstanceOf(ConnectTimeout);
+		expect(plan.dials()).toBe(1);
+	} finally {
+		reload.close();
+		plan.restore();
+		warned.mockRestore();
+		random.mockRestore();
+		installed.close();
+	}
+});
+
 test("an invalid timeout is refused when the loop is built, not by every attempt", () => {
 	for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
 		expect(() => new Reload({ url: new URL("https://example.com/"), timeout: timeout as Milli })).toThrow(

@@ -343,22 +343,11 @@ enum Phase {
 	Live(Box<Live>),
 	Backoff {
 		until: Instant,
-		/// What follows the wait.
-		then: Resume,
+		/// After a restart's wait, the retry window counts from its end.
+		restart: bool,
 	},
 	/// The policy ended; every later poll waits forever.
 	Done,
-}
-
-/// What a backoff wait ends in.
-#[derive(Clone, Copy)]
-enum Resume {
-	/// Walk the targets again.
-	Walk,
-	/// Walk again, with the retry window counting from the wait's end.
-	Restart,
-	/// Give up: the retry window of this length ran out before another walk could start.
-	GiveUp(Duration),
 }
 
 struct Dialing {
@@ -513,19 +502,21 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 						None => return Action::Wait(handover),
 					}
 				}
-				Phase::Backoff { until, then } => {
+				Phase::Backoff { until, restart } => {
 					if now < *until {
 						return Action::Wait(earliest(Some(*until), handover));
 					}
-					match *then {
-						Resume::GiveUp(window) => {
-							self.done(Err(self.exhausted(window)));
-							continue;
-						}
+					if *restart {
 						// After the wait, so the window counts only the time after the peer
 						// stops answering.
-						Resume::Restart => self.retry.start = now,
-						Resume::Walk => {}
+						self.retry.start = now;
+					} else if let Some(window) = self.config.backoff.timeout
+						&& now.saturating_duration_since(self.retry.start) >= window
+					{
+						// Checked when the wait ends, not when it began, so a late poll (a
+						// stalled runtime, a sleeping device) never dials past the window.
+						self.done(Err(self.exhausted(window)));
+						continue;
 					}
 					self.retry.delay = Pacing::new(&self.config.backoff).next(self.retry.delay);
 					self.phase = Phase::Start;
@@ -570,9 +561,9 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		}
 	}
 
-	/// Start a walk, unless the tokens ended. The retry window is [`Self::back_off`]'s to
-	/// check, so the first dial of a run, a healthy migration, and a restart's redial always
-	/// happen, even under a zero window.
+	/// Start a walk, unless the tokens ended. Only a retry's backoff checks the window, so
+	/// the first dial of a run, a healthy migration, and a restart's redial always happen,
+	/// even under a zero window.
 	fn start(&mut self) {
 		// An ended auth handle refuses every later session, so no dial can recover. A fresh
 		// watch only reports an error once its handle has ended.
@@ -810,25 +801,20 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		self.back_off(now, self.config.backoff.timeout, false, "reconnecting after backoff");
 	}
 
-	/// Wait out the next jittered delay, or give up once it reaches the end of `window`, if
-	/// any: no walk starts once the window has passed.
+	/// Wait out the next jittered delay, capped by what remains of `window`, if any.
 	fn back_off(&mut self, now: Instant, window: Option<Duration>, restart: bool, reason: &'static str) {
 		let wait = self.retry.wait();
-		let left = window.map(|window| {
-			(
-				window,
-				window.saturating_sub(now.saturating_duration_since(self.retry.start)),
-			)
-		});
-		let (wait, then) = match left {
-			Some((window, left)) if wait >= left => (left, Resume::GiveUp(window)),
-			_ if restart => (wait, Resume::Restart),
-			_ => (wait, Resume::Walk),
+		let wait = match window {
+			None => wait,
+			Some(window) => match window.checked_sub(now.saturating_duration_since(self.retry.start)) {
+				Some(left) => wait.min(left),
+				None => return self.done(Err(self.exhausted(window))),
+			},
 		};
 		tracing::warn!(?wait, "{reason}");
 		self.phase = Phase::Backoff {
 			until: now + wait,
-			then,
+			restart,
 		};
 	}
 

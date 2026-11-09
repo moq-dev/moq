@@ -826,21 +826,27 @@ export class Reload {
 
 		// No attempt starts once the window has passed: a wait that reaches the deadline gives up
 		// there instead of dialing.
-		const left = this.#deadline - at;
+		const deadline = this.#deadline;
+		const left = deadline - at;
+		// A graceful close has no error, so report the timeout itself.
+		const failure = cause === undefined ? new Error("reconnect timed out") : error(cause);
+		const giveUp = () => {
+			console.warn("reconnect timed out");
+			this.#giveUp(failure);
+		};
 		if (wait >= left) {
-			// A graceful close has no error, so report the timeout itself.
-			const failure = cause === undefined ? new Error("reconnect timed out") : error(cause);
-			const giveUp = () => {
-				console.warn("reconnect timed out");
-				this.#giveUp(failure);
-			};
 			if (left > 0) effect.timer(giveUp, Nano(left));
 			else giveUp();
 			return;
 		}
 
 		const tick = this.#tick.peek() + 1;
-		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), Nano(wait));
+		effect.timer(() => {
+			// Checked again when the wait ends: a timer that fires late, as after the device
+			// slept, must not dial past the window.
+			if (now() >= deadline) return giveUp();
+			this.#tick.update((prev) => Math.max(prev, tick));
+		}, Nano(wait));
 	}
 
 	#giveUp(cause: Error): void {

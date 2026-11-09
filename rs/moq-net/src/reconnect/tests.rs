@@ -339,6 +339,26 @@ async fn a_zero_timeout_gives_up_when_the_first_walk_fails() {
 	assert!(machine.session().is_some(), "a zero window refused the first dial");
 }
 
+/// The window is checked when a retry's wait ends, not when it began: a poll that comes
+/// late, as after the device slept, gives up rather than dialing past the window.
+#[test]
+fn a_late_poll_past_the_window_gives_up() {
+	let started = Instant::now();
+	let config = config(INITIAL, Some(Duration::from_secs(1)));
+	let mut machine = Reconnect::<Url, TestError>::new(config, vec![url("tcp://peer:1/")], started).unwrap();
+	let waiter = kio::Waiter::noop();
+	assert!(matches!(machine.poll(started, &waiter), Action::Dial(_)));
+	machine.failed(started, TestError::Dial, Verdict::Retry);
+	assert!(matches!(machine.poll(started, &waiter), Action::Retrying(_)));
+	assert!(matches!(machine.poll(started, &waiter), Action::Wait(Some(until)) if until <= started + INITIAL));
+
+	let action = machine.poll(started + Duration::from_secs(2), &waiter);
+	assert!(
+		matches!(action, Action::Done(Err(TestError::Policy(Failure::Exhausted { .. })))),
+		"{action:?}"
+	);
+}
+
 /// The first address that answers wins, however many dead ones precede it.
 #[kio::test]
 async fn the_walk_lands_on_the_first_address_that_answers() {
