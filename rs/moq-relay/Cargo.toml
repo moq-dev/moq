@@ -117,7 +117,7 @@ h2 = { workspace = true }
 kio = { path = "../kio", features = ["manual", "sim"] }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-congestion = { path = "../moq-congestion" }
-# The shared session bench fills FETCH runs through the hidden `fuzz` module.
+# The shared session bench fills FETCH runs through the `fuzz` module.
 moq-net = { path = "../moq-net", features = ["fuzz"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 pem = { workspace = true }

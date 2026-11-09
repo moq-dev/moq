@@ -65,7 +65,6 @@ pub enum Extension {
 	ColorSpace,
 
 	/// Not recognized URI, but it could still be user parseable.
-	#[doc(hidden)]
 	UnknownUri(String, Arc<dyn ExtensionSerializer>),
 }
 
@@ -866,30 +865,18 @@ pub struct ExtensionValues {
 	// The values below are considered internal until we have a reason to expose them.
 	// Generally we want to avoid expose experimental features unless there are strong
 	// reasons to do so.
-	#[doc(hidden)]
 	pub video_content_type: Option<u8>, // 0 = unspecified, 1 = screenshare
-	#[doc(hidden)]
 	pub tx_time_offs: Option<u32>,
-	#[doc(hidden)]
 	pub abs_send_time: Option<Instant>,
-	#[doc(hidden)]
 	pub abs_capture_time: Option<AbsCaptureTime>,
-	#[doc(hidden)]
 	pub transport_cc: Option<u16>, // (buf[0] << 8) | buf[1];
-	#[doc(hidden)]
 	// https://webrtc.googlesource.com/src/+/refs/heads/master/docs/native-code/rtp-hdrext/playout-delay
 	pub play_delay_min: Option<MediaTime>,
-	#[doc(hidden)]
 	pub play_delay_max: Option<MediaTime>,
-	#[doc(hidden)]
 	pub video_timing: Option<VideoTiming>,
-	#[doc(hidden)]
 	pub rid: Option<Rid>,
-	#[doc(hidden)]
 	pub rid_repair: Option<Rid>,
-	#[doc(hidden)]
 	pub mid: Option<Mid>,
-	#[doc(hidden)]
 	pub frame_mark: Option<u32>,
 
 	/// User values for [`ExtensionSerializer`] to parse into and write from.

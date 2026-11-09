@@ -10,7 +10,7 @@
 //! - uncovered: a watch on a fresh prefix comes and goes, which every session hears.
 //! - covered: a watch beneath one already held comes and goes, which no session hears.
 //!
-//! The session side is crate-private, so this reaches it through the hidden `fuzz` module.
+//! The session side is crate-private, so this reaches it through the `fuzz` module.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench interests`.
 

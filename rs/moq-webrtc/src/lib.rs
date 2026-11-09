@@ -46,7 +46,6 @@
 
 pub mod client;
 #[cfg(feature = "p2p")]
-#[doc(hidden)]
 pub mod p2p;
 mod rate;
 pub mod server;

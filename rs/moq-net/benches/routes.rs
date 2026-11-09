@@ -12,7 +12,7 @@
 //!   batches behind the first, and each hears its next batch. Swept over the claims
 //!   the origin holds and how far the second lags: neither axis is expected to grow.
 //!
-//! The route layer is crate-private, so this reaches it through the hidden `fuzz` module.
+//! The route layer is crate-private, so this reaches it through the `fuzz` module.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench routes`.
 

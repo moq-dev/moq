@@ -19,9 +19,8 @@ features = ["async"]
 default = []
 # Generated async wrappers for the poll methods, and `Publisher::run`. Enable where you `.await` them.
 async = ["kio/async"]
-# Exposes one producer tick to the producer_tick bench, through the hidden
-# `produce::bench` module, and moq-net's hidden counter bump. Off by default
-# and hidden from the docs. Not a supported API.
+# Exposes one producer tick to the producer_tick bench, through the
+# `produce::bench` module, and moq-net's counter bump. Off by default.
 bench = ["moq-net/fuzz"]
 
 [dependencies]
@@ -54,7 +53,7 @@ harness = false
 name = "aggregate"
 harness = false
 
-# Reaches the producer drain through the hidden `bench` module.
+# Reaches the producer drain through the `bench` module.
 [[bench]]
 name = "producer_tick"
 harness = false
