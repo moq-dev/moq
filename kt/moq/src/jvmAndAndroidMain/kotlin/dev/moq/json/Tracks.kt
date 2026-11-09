@@ -4,12 +4,14 @@ package dev.moq.json
 // producer takes over a `dev.moq.TrackProducer` (the snapshot and stream
 // producers also advertise it in the broadcast's catalog, which has no window
 // mode), and a consumer takes over a `dev.moq.TrackConsumer` that has not read
-// a group yet. Compression is the track's, set through `TrackInfo(compress = true)`.
+// a group yet. Compression is the track's, set through `TrackInfo(compression =
+// Compression.DEFLATE)`.
 // Every write (a snapshot update, a stream append, a window push or pop) takes a
 // timestamp on the broadcast clock, the epoch every track in the broadcast
 // shares, so the track needs a timescale; one without is refused:
 //
-//     val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL, compress = true))
+//     val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL, compression =
+// Compression.DEFLATE))
 //     val status = SnapshotProducer(broadcast, track, SnapshotConfig())
 //     status.update(Status(state = "live"), CatalogProducer(broadcast).now())
 //     val reader = SnapshotConsumer(consumer, "status")

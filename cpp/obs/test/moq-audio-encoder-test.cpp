@@ -204,7 +204,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 
 	auto origin = moq::OriginProducer::init(moq::OriginConfig{});
 	auto route = TestOk(origin->route("room", {}), "route");
-	auto broadcast = TestOk(route->broadcast(), "route broadcast");
+	auto broadcast = route->broadcast();
 
 	moq::AudioInit init{};
 	init.format = moq::AudioFormat::kOpus;

@@ -41,7 +41,7 @@ export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
 
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
 export function datagramTrackInfo(info: datagram.Info): Info {
-	return { compress: false, timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
+	return { compression: "none", timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
 }
 
 /** A subscription's {@link Delay.max} as the wire carries it: null for no limit, omitted for zero. */
@@ -1308,9 +1308,16 @@ export class Epochs {
 	}
 }
 
-/** Prefer identified publishers, then lower static cost. */
+/**
+ * Prefer a route that is not draining (a peer that sent GOAWAY ranks below every other), then
+ * identified publishers, then lower static cost.
+ */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
-	return Number(isAnonymous(a)) - Number(isAnonymous(b)) || (a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0);
+	return (
+		Number(a.draining ?? false) - Number(b.draining ?? false) ||
+		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
+		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
+	);
 }
 
 /**

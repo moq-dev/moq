@@ -11,7 +11,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
-use moq_tokio::moq_net::{self, Timescale, Timestamp, Version, origin, track};
+use moq_net::{Timescale, Timestamp, Version, origin, track};
 use moq_tokio::quic::driver::{
 	self,
 	sim::{Bottleneck, Link, Network, Path},

@@ -510,8 +510,8 @@ mod tests {
 		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
 		// the second `next()` would then block forever waiting for a group that was
 		// skipped.
-		let mut export =
-			moq_mux::container::fmp4::Export::new(source, catalog).with_max_delay(std::time::Duration::from_secs(30));
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
@@ -744,6 +744,7 @@ mod tests {
 			kind: Kind::Named(probe::NATIVE_NAME.into()),
 			output: crate::Output::Cpu,
 			scale_hint: Some(crate::Size::new(160, 120)),
+			..Default::default()
 		};
 		let max_delay = std::time::Duration::from_secs(10);
 		let mut consumer = pollster::block_on(Consumer::new(

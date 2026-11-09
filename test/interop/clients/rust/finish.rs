@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::{Context, ensure};
 use moq_mux::catalog::Stream;
-use moq_tokio::moq_net;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 /// How long the publisher keeps its finished broadcast up for the late readers.

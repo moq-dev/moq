@@ -2,9 +2,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::Result;
 
-/// The moq epoch (2020-01-01T00:00:00Z) in Unix-epoch milliseconds.
-pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
-
 /// The largest integer JSON preserves exactly (2^53 - 1).
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
@@ -38,7 +35,7 @@ struct Wire {
 /// The broadcast's one continuous clock, advertised at the catalog root.
 ///
 /// [`wall`](Self::wall) is the wall-clock time of PTS zero since the moq epoch
-/// ([`MOQ_EPOCH_UNIX_MILLIS`], 2020-01-01). Its embedded timescale is serialized beside it as
+/// ([`Wall::MOQ_EPOCH`](kio::clock::Wall::MOQ_EPOCH), 2020-01-01). Its embedded timescale is serialized beside it as
 /// `{ wall, timescale }`, preserving the catalog wire shape while keeping the pair inseparable in
 /// Rust. Every media track and every HLS record refer to this mapping after timescale conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,9 +87,8 @@ impl Clock {
 		let nanos = (num % den).checked_mul(1_000_000_000).ok_or_else(overflow)? / den;
 		let since_moq_epoch = std::time::Duration::new(secs, nanos as u32);
 		// A catalog can name a wall beyond the clock's nanosecond range.
-		kio::clock::Wall::UNIX_EPOCH
-			.checked_add(std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS))
-			.and_then(|moq_epoch| moq_epoch.checked_add(since_moq_epoch))
+		kio::clock::Wall::MOQ_EPOCH
+			.checked_add(since_moq_epoch)
 			.ok_or_else(overflow)
 	}
 }
@@ -187,13 +183,13 @@ mod test {
 	#[test]
 	fn wall_clock_converts_across_timescales() {
 		let clock = Clock::new(moq_net::Timestamp::from_micros(1_000_000).unwrap()).unwrap();
-		let epoch = kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS + 1_000);
+		let epoch = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_000);
 		assert_eq!(
 			clock.wall_clock(moq_net::Timestamp::from_millis(0).unwrap()).unwrap(),
 			epoch
 		);
 
-		let second = kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS + 2_000);
+		let second = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(2_000);
 		assert_eq!(
 			clock
 				.wall_clock(moq_net::Timestamp::from_millis(1000).unwrap())
@@ -217,7 +213,7 @@ mod test {
 	/// Regression: the result was floored to the millisecond, dropping the sub-millisecond part.
 	#[test]
 	fn wall_clock_keeps_sub_millisecond_precision() {
-		let moq_epoch = kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS);
+		let moq_epoch = kio::clock::Wall::MOQ_EPOCH;
 		let micros = |v| moq_net::Timestamp::from_micros(v).unwrap();
 		let nanos = std::time::Duration::from_nanos;
 

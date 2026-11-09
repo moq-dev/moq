@@ -59,9 +59,3 @@ mod worker;
 pub use error::Error;
 pub use timer::Timer;
 pub use worker::{Config, Handle, Worker};
-
-/// The `url` crate, re-exported because
-/// [`quic::web::proto::ConnectRequest::url`](crate::quic::web::proto::ConnectRequest::url) hands one back.
-/// Naming that type otherwise means depending on a matching `url` version
-/// directly, so a major bump here is a breaking change for this crate.
-pub use url;

@@ -40,6 +40,18 @@ to the PR gate; the full run costs about 17 minutes per PR.
 
 Public API: none. Wire: none.
 
+Decided 2026-11-09 (maintainer, /quest-complete), from the triage of runs
+[42377867523](https://github.com/moq-dev/moq/actions/runs/42377867523) and
+[42487375545](https://github.com/moq-dev/moq/actions/runs/42487375545): four
+more children for the causes nothing owned. Dropped: one-night bench moves
+near the paired threshold (re-check if one repeats), a one-off
+`remote error: 52` in the browser bench smoke, and failures main or
+[moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290) already fixes.
+
 ## Required
 
 - [Nightly's macOS platform job passes](/quest/m0/nightly/macos.md) - `moq-audio`'s tests compile on macOS again and the websocket version test's timeout is fixed if it recurs
+- [The qmux startup benchmark's fake peer sends transport parameters](/quest/m0/nightly/qmux-bench-peer.md) - Audio quality's WebSocket startup step stops timing out
+- [The moq-net session bench completes moq-transport-22 at 16 broadcasts](/quest/m0/nightly/session-bench-handshake.md) - the bench workload stops panicking on a handshake timeout
+- [Bisect the moq-audio bus and moq-mux parameter_sets regressions](/quest/m0/nightly/bench-regressions.md) - two real benchmark regressions are explained and fixed or accepted
+- [Moxygen conformance cells pass again](/quest/m0/nightly/moxygen-conformance.md) - the first-object signal and integer extensions survive, or moxygen's divergence is skipped with an upstream link

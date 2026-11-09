@@ -66,8 +66,9 @@ Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and r
 Settled 2026-11-08: the public entry points that leave a task running past their call
 are kept, each on a dependency that already needs a tokio runtime, with the reason at
 the site: moq-hls `Server::broadcaster` (axum), moq-auth `Client::connect` and
-`attach` (reqwest), and moq-webrtc as a whole (moq-tokio, axum, tokio sockets; see its
-crate docs). Every other non-test spawn in a library sits inside a future its
-caller awaits (moq-transcode's rungs) or behind private API (moq-transcode's
-`Feed` and moq-video's PipeWire `SessionGuard`), so converting it changes no
-public signature.
+`attach` (reqwest), moq-webrtc as a whole (moq-tokio, axum, tokio sockets; see its
+crate docs), and moq-video `capture::open` on Linux PipeWire (ashpd), whose portal
+session task closes the session after the returned stream drops. Every other non-test
+spawn in a library sits inside a future its caller awaits (moq-transcode's rungs) or
+behind private API (moq-transcode's `Feed`), so converting it changes no public
+signature.

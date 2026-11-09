@@ -1,7 +1,6 @@
-use crate::quic::web::{
-	Connecting, Error, HandshakeError, Session, Settings,
-	proto::{ConnectRequest, ConnectResponse},
-};
+use web_transport_proto::{ConnectRequest, ConnectResponse};
+
+use crate::quic::web::{Connecting, Error, HandshakeError, Session, Settings};
 
 /// A mostly complete WebTransport handshake, just awaiting the server's decision on whether to
 /// accept or reject the session based on the URL.
@@ -39,18 +38,19 @@ impl Request {
 	pub async fn respond(self, response: impl Into<ConnectResponse>) -> Result<Session, Error> {
 		let response = response.into();
 		if response.status != http::StatusCode::OK {
-			return Err(HandshakeError::Status(response.status).into());
+			return Err(HandshakeError::Status(response.status.as_u16()).into());
 		}
 		let connect = self.connect.respond(response).await?;
 		Ok(Session::new(self.conn, self.settings, connect))
 	}
 
-	/// Reject the session with a 4xx or 5xx status code.
-	pub async fn reject(self, status: http::StatusCode) -> Result<(), Error> {
-		if !status.is_client_error() && !status.is_server_error() {
-			return Err(HandshakeError::Status(status).into());
-		}
-		self.connect.reject(status).await?;
+	/// Reject the session with a 4xx or 5xx HTTP status code.
+	pub async fn reject(self, status: u16) -> Result<(), Error> {
+		let code = http::StatusCode::from_u16(status)
+			.ok()
+			.filter(|code| code.is_client_error() || code.is_server_error())
+			.ok_or(HandshakeError::Status(status))?;
+		self.connect.reject(code).await?;
 		Ok(())
 	}
 

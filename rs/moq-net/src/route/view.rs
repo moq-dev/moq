@@ -1,6 +1,9 @@
 //! An origin's claims as one node knows them, certified per region by floors.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+	collections::{BTreeMap, BTreeSet},
+	ops::Bound,
+};
 
 use crate::Path;
 
@@ -38,57 +41,62 @@ impl<A: Clone + Eq> View<A> {
 	/// The view as a stream answering `prefix` presents it.
 	///
 	/// Every claim inside the prefix keeps its path, and of the claims above it only
-	/// the most specific remains, presented at the prefix itself: a receiver can tell
-	/// apart no claims that cover the whole prefix alike. A region meeting the prefix
-	/// is narrowed to whichever of the two lies within the other.
-	///
-	/// The newest floor over the prefix certifies what covers it there: a claim
-	/// between the two, else the one that floor presents at its own region, else
-	/// none. A claim above that floor is older knowledge, or uncertified, so it is
-	/// not presented.
+	/// the most specific remains, presented at the prefix itself (see [`covering`]): a
+	/// receiver can tell apart no claims that cover the whole prefix alike. A region
+	/// meeting the prefix is narrowed to whichever of the two lies within the other.
 	pub fn present(&self, prefix: &Path) -> Self {
-		let mut out = Self {
+		let mut items: BTreeMap<Path, A> = below(&self.items, prefix)
+			.map(|(claim, item)| (claim.clone(), item.clone()))
+			.collect();
+		if let Some(item) = covering(&self.floors, prefix, |claim| self.items.get(claim)) {
+			items.insert(prefix.clone(), item.clone());
+		}
+		Self {
 			floors: narrow(&self.floors, prefix),
-			items: BTreeMap::new(),
-		};
-		let mut covering: Option<(&Path, &A)> = None;
-		for (claim, item) in &self.items {
-			if within(claim, prefix) {
-				out.items.insert(claim.clone(), item.clone());
-			}
-			if within(prefix, claim) && covering.is_none_or(|(best, _)| claim.len() > best.len()) {
-				covering = Some((claim, item));
-			}
+			items,
 		}
-		if let Some(&floor) = out.floors.get(prefix) {
-			let certifier = self
-				.floors
-				.iter()
-				.filter(|&(region, &rev)| rev == floor && within(prefix, region))
-				.map(|(region, _)| region)
-				.max_by_key(|region| region.len());
-			if certifier.is_some_and(|certifier| covering.is_some_and(|(claim, _)| !within(claim, certifier))) {
-				covering = None;
-			}
-		}
-		if let Some((_, item)) = covering {
-			out.items.entry(prefix.clone()).or_insert_with(|| item.clone());
-		}
-		out
 	}
 
 	/// The view presented to the union of `regions`.
+	#[cfg(test)]
 	pub fn present_all(&self, regions: &[Path]) -> Self {
 		let mut out = Self::default();
+		out.represent(self, regions, self.items.keys());
+		out
+	}
+
+	/// Bring this view of `raw`, presented to the union of `regions`, up to date once
+	/// `claims` of `raw` changed and its floors were replaced.
+	///
+	/// A claim strictly below a region keeps its path, and each region is shown what
+	/// covers it (see [`covering`]), which is the claim exactly there when one is. Only
+	/// the regions' covering claims and the named claims can change, so the work
+	/// follows those rather than the view's size.
+	pub fn represent<'a>(&mut self, raw: &Self, regions: &[Path], claims: impl IntoIterator<Item = &'a Path>) {
+		for claim in claims {
+			// Shown at its region by the covering claim below.
+			if regions.contains(claim) {
+				continue;
+			}
+			let below = regions.iter().any(|region| claim != region && within(claim, region));
+			match raw.items.get(claim).filter(|_| below) {
+				Some(item) => self.items.insert(claim.clone(), item.clone()),
+				None => self.items.remove(claim),
+			};
+		}
 		for region in regions {
-			let presented = self.present(region);
-			out.items.extend(presented.items);
-			for (region, floor) in presented.floors {
-				let entry = out.floors.entry(region).or_insert(floor);
+			match covering(&raw.floors, region, |claim| raw.items.get(claim)) {
+				Some(item) => self.items.insert(region.clone(), item.clone()),
+				None => self.items.remove(region),
+			};
+		}
+		self.floors.clear();
+		for region in regions {
+			for (region, floor) in narrow(&raw.floors, region) {
+				let entry = self.floors.entry(region).or_insert(floor);
 				*entry = (*entry).max(floor);
 			}
 		}
-		out
 	}
 
 	/// What the view certifies within `prefix`: the view as presented there, less
@@ -136,19 +144,41 @@ impl<A: Clone + Eq> View<A> {
 	/// Take `other`'s state for every claim it knows at a newer revision, then
 	/// raise the floors and drop any region a wider one at least as new covers.
 	/// An uncertified claim of `other` is known at no revision, so it is not taken.
-	pub fn merge(&mut self, other: &Self) {
+	/// Returns the claims whose state changed.
+	pub fn merge(&mut self, other: &Self) -> Vec<Path> {
 		let claims: BTreeSet<Path> = self.items.keys().chain(other.items.keys()).cloned().collect();
+		self.merge_claims(other, &claims)
+	}
+
+	/// [`Self::merge`], considering only `claims`: the same once they include every
+	/// claim whose state differs between the two views, since a claim held alike is
+	/// never taken.
+	pub fn merge_claims<'a>(&mut self, other: &Self, claims: impl IntoIterator<Item = &'a Path>) -> Vec<Path> {
+		// Every floor of `other` lies within a newer one here, so it knows no claim at a
+		// newer revision and changes nothing: a lagging view costs nothing to merge,
+		// however far it lags.
+		let stale = other
+			.floors
+			.iter()
+			.all(|(region, &floor)| (self.floors.iter()).any(|(wider, &newer)| newer > floor && within(region, wider)));
+		if stale {
+			return Vec::new();
+		}
+		let mut changed = Vec::new();
 		for claim in claims {
-			let (theirs, ours) = (other.as_of(&claim), self.as_of(&claim));
+			let (theirs, ours) = (other.as_of(claim), self.as_of(claim));
 			// At one revision, a claim exactly on a wider region outranks the claim
 			// above it that a floor on this path presented here.
-			let exact = theirs == ours && self.floors.contains_key(&claim) && !other.floors.contains_key(&claim);
-			if theirs > ours || exact {
-				match other.items.get(&claim) {
-					Some(item) => self.items.insert(claim, item.clone()),
-					None => self.items.remove(&claim),
-				};
+			let exact = theirs == ours && self.floors.contains_key(claim) && !other.floors.contains_key(claim);
+			if (theirs > ours || exact) && self.items.get(claim) != other.items.get(claim) {
+				changed.push(claim.clone());
 			}
+		}
+		for claim in &changed {
+			match other.items.get(claim) {
+				Some(item) => self.items.insert(claim.clone(), item.clone()),
+				None => self.items.remove(claim),
+			};
 		}
 		for (region, &floor) in &other.floors {
 			let entry = self.floors.entry(region.clone()).or_insert(floor);
@@ -160,6 +190,7 @@ impl<A: Clone + Eq> View<A> {
 				.iter()
 				.any(|(wider, newer)| wider != region && within(region, wider) && newer >= floor)
 		});
+		changed
 	}
 
 	/// What a node keeps of its view once its interest is `watch`.
@@ -215,9 +246,60 @@ impl<A: Clone + Eq> View<A> {
 	}
 }
 
+/// The entries of `map` strictly below `prefix`, as one range: a path lies below a
+/// non-empty prefix exactly when it starts with the prefix and a `/`.
+pub(crate) fn below<'a, V>(map: &'a BTreeMap<Path, V>, prefix: &Path) -> impl Iterator<Item = (&'a Path, &'a V)> {
+	let (lo, hi) = match prefix.is_empty() {
+		true => (String::new(), None),
+		false => (format!("{prefix}/"), Some(format!("{prefix}0"))),
+	};
+	let lo = match prefix.is_empty() {
+		true => Bound::Excluded(lo.as_str()),
+		false => Bound::Included(lo.as_str()),
+	};
+	let hi = hi.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+	map.range::<str, _>((lo, hi))
+}
+
+/// `path` and every prefix above it, the root first.
+pub(crate) fn ancestors(path: &Path) -> impl DoubleEndedIterator<Item = Path> + '_ {
+	(0..=path.parts().count()).filter_map(|n| path.head(n))
+}
+
+/// The claim a stream answering `prefix` is shown at `prefix` itself, looked up by
+/// `item`: one exactly there, else the most specific claim above it.
+///
+/// The newest floor over the prefix certifies what covers it there: a claim between
+/// the two, else the one that floor presents at its own region, else none. A claim
+/// above that floor is older knowledge, or uncertified, so it is not presented.
+pub(crate) fn covering<'a, A>(
+	floors: &BTreeMap<Path, Rev>,
+	prefix: &Path,
+	item: impl Fn(&Path) -> Option<&'a A>,
+) -> Option<&'a A> {
+	let (claim, found) = ancestors(prefix)
+		.rev()
+		.find_map(|claim| item(&claim).map(|found| (claim, found)))?;
+	if claim == *prefix {
+		return Some(found);
+	}
+	let over = || floors.iter().filter(|(region, _)| within(prefix, region));
+	let Some(floor) = over().map(|(_, &rev)| rev).max() else {
+		return Some(found);
+	};
+	let certifier = over()
+		.filter(|&(_, &rev)| rev == floor)
+		.map(|(region, _)| region)
+		.max_by_key(|region| region.len());
+	match certifier.is_some_and(|certifier| !within(&claim, certifier)) {
+		true => None,
+		false => Some(found),
+	}
+}
+
 /// `floors` narrowed to `prefix`: a region meeting it becomes whichever of the two
 /// lies within the other, keeping the newest floor where two narrow alike.
-fn narrow(floors: &BTreeMap<Path, Rev>, prefix: &Path) -> BTreeMap<Path, Rev> {
+pub(crate) fn narrow(floors: &BTreeMap<Path, Rev>, prefix: &Path) -> BTreeMap<Path, Rev> {
 	let mut out: BTreeMap<Path, Rev> = BTreeMap::new();
 	for (region, &floor) in floors {
 		let narrowed = if within(region, prefix) {

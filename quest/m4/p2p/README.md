@@ -140,8 +140,8 @@ identity becomes a public key, independent of P2P.
 Decided 2026-10-13: priority then total cost selects among authorized routes;
 a direct connection does not always win. A watching tab never re-serves what
 it receives. Offloading a room of watchers is a local relay's job
-(`moq-cli --p2p` is the small one), which keeps warm and cold costs and cache-aware routing out of the
-protocol. [Peer route policy](/quest/m4/p2p/cost-scopes.md) sets the cost
+(`moq-cli --p2p` is the small one); warm routes pass only between relays
+([cache-aware routing](/quest/m3/cache-routing/README.md)). [Peer route policy](/quest/m4/p2p/cost-scopes.md) sets the cost
 knobs and defaults.
 
 Target the public `@moq/net` interface regardless of whether its

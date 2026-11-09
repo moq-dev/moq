@@ -14,8 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	match args[1].as_str() {
 		"fetch-supported" => {
 			// The library's own capability, so a failing FETCH cell is a failure, not a skip.
-			let supported = match args[2].parse::<hang::moq_net::Version>()? {
-				hang::moq_net::Version::Lite(version) => version.has_track_stream(),
+			let supported = match args[2].parse::<moq_net::Version>()? {
+				moq_net::Version::Lite(version) => version.has_track_stream(),
 				_ => return Err("the released comparison runs only moq-lite".into()),
 			};
 			println!("{supported}");

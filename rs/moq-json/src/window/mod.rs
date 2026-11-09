@@ -21,7 +21,7 @@
 //!
 //! Trimming is therefore an op, not a group boundary. Dropping a record costs one small frame
 //! instead of a roll that restates the whole window (and, on a
-//! [`compress`](moq_net::track::Info::compress)ed track, throws away the group's DEFLATE window).
+//! [compressed](moq_net::track::Info::compression) track, throws away the group's DEFLATE window).
 //!
 //! # Group boundaries are invisible
 //!
@@ -806,7 +806,7 @@ mod test {
 	fn compressed_round_trip_across_rolls() {
 		let mut live = Live::on(
 			ProducerConfig::default(),
-			moq_net::track::Info::default().with_compress(true),
+			moq_net::track::Info::default().with_compression(moq_net::track::Compression::Deflate),
 		);
 		for n in 0..40 {
 			live.push(n);

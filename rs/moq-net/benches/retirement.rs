@@ -2,7 +2,7 @@
 //! The route-only control models the old gate: a more-specific source does not retract the broad route.
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use moq_net::{Path, fuzz::RequestValidity, kio, origin};
+use moq_net::{Path, fuzz::RequestValidity, origin};
 use std::{hint::black_box, time::Duration};
 
 fn retirement(c: &mut Criterion) {
@@ -24,10 +24,7 @@ fn retirement(c: &mut Criterion) {
 								let routes: Vec<_> = (0..routes)
 									.map(|i| {
 										origin
-											.route_prefix(
-												format!("route/{i}"),
-												moq_net::origin::RouteOptions::default(),
-											)
+											.claim(format!("route/{i}"), moq_net::origin::RouteOptions::default())
 											.unwrap()
 									})
 									.collect();
@@ -55,7 +52,7 @@ fn retirement(c: &mut Criterion) {
 							|fixture| {
 								let replacement = fixture
 									.0
-									.route_prefix("route/0/jobs", moq_net::origin::RouteOptions::default())
+									.claim("route/0/jobs", moq_net::origin::RouteOptions::default())
 									.unwrap();
 								let refused = fixture
 									.5

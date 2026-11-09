@@ -153,12 +153,7 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
 	let certs = crate::support::certs().expect("certificates");
-	let server = quic::server::Config::new(
-		quic::Identity::open(&certs.cert, &certs.key)
-			.expect("identity")
-			.server(&[moq_tokio::quic::web::ALPN], quic::server::ClientAuth::None)
-			.expect("tls"),
-	);
+	let server = quic::server::Config::new(certs.server(&[moq_tokio::quic::web::ALPN]));
 	let socket = handle
 		.udp(UdpSocket::bind("0.0.0.0:0").expect("bind"), udp::Config::default())
 		.expect("socket");
@@ -175,9 +170,8 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 			.build()
 			.expect("runtime");
 		runtime.block_on(async move {
-			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
-				url::Url::parse(&format!("https://{addr}/")).expect("url"),
-			);
+			let request =
+				web_transport_proto::ConnectRequest::new(url::Url::parse(&format!("https://{addr}/")).expect("url"));
 			kio::clock::timeout(TIMEOUT, crate::support::web_connect(request, Default::default()))
 				.await
 				.expect("handshake stalled")

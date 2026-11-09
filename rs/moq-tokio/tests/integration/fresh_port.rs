@@ -8,7 +8,7 @@ use std::{
 	time::Duration,
 };
 
-use moq_tokio::{Client, Connection, moq_net};
+use moq_tokio::{Client, Connection};
 use tokio::{net::UdpSocket, sync::mpsc};
 
 const DIAL: Duration = Duration::from_secs(1);

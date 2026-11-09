@@ -574,14 +574,6 @@ pub struct Publish<S = Conn> {
 	stream_key: String,
 	tc_url: Option<String>,
 	peer: SocketAddr,
-	/// Max age declared on the media tracks this publish mints, or `None` for no publisher
-	/// limit. Override with [`with_max_age`](Self::with_max_age).
-	max_age: Option<Duration>,
-	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
-	/// Override with [`with_bandwidth`](Self::with_bandwidth).
-	bandwidth: moq_net::bandwidth::Allocator,
-	/// How long an unpublished broadcast stays up. Override with [`with_linger`](Self::with_linger).
-	linger: Duration,
 }
 
 impl<S: Stream> Publish<S> {
@@ -610,39 +602,8 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
-	/// Set how long a superseded group of this publish's media tracks stays fresh, or
-	/// `None` for no publisher limit. Defaults to
-	/// [`MAX_AGE`](hang::container::MAX_AGE).
-	///
-	/// A freshness bound, not a delivery one: it never makes a subscriber play further
-	/// behind live, it caps how far back a FETCH can still reach. The default suits a
-	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
-	/// advertise segments that are still fetchable. Lower it when nothing reads history.
-	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
-		self.max_age = max_age.into();
-		self
-	}
-
-	/// Claim each ingested track's peak-hold catalog bitrate on `bandwidth`.
-	///
-	/// A passthrough import has no configured ceiling, so it reserves the measured
-	/// maximum instead. A co-resident encoder then targets what is left of the
-	/// uplink. Unlimited (the default) claims nothing a sender can follow.
-	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
-		self.bandwidth = bandwidth;
-		self
-	}
-
-	/// Keep the broadcast up for `linger` after the client unpublishes, so a subscriber that
-	/// arrives after the end still gets the tail. Defaults to [`moq_mux::Linger::DEFAULT`];
-	/// zero closes it at once.
-	pub fn with_linger(mut self, linger: Duration) -> Self {
-		self.linger = linger;
-		self
-	}
-
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
-	/// RTMP media into it until the client disconnects.
+	/// RTMP media into it, published as `ingest` says, until the client disconnects.
 	///
 	/// `origin` is whatever the caller wants the media published into (e.g. a
 	/// relay's shared origin, optionally re-rooted/scoped per the authenticated
@@ -650,18 +611,20 @@ impl<S: Stream> Publish<S> {
 	/// run it on its own task.
 	///
 	/// A client that unpublishes (`deleteStream`) ends cleanly: the finished broadcast
-	/// stays up for the [linger](Self::with_linger), and the future resolves after that.
-	/// Dropping the future ends the linger early. A connection that drops without
+	/// stays up for the ingest's [linger](moq_mux::Ingest::linger), and the future resolves
+	/// after that. Dropping the future ends the linger early. A connection that drops without
 	/// unpublishing closes the broadcast at once.
-	pub async fn accept(mut self, origin: &origin::Producer, path: impl Into<moq_net::Path>) -> Result<()> {
+	pub async fn accept(
+		mut self,
+		origin: &origin::Producer,
+		path: impl Into<moq_net::Path>,
+		ingest: &moq_mux::Ingest,
+	) -> Result<()> {
 		let path: moq_net::Path = path.into();
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
-		let config = moq_mux::catalog::Config::default()
-			.with_max_age(self.max_age)
-			.with_bandwidth(self.bandwidth);
-		let mut publisher = match Publisher::new(origin, path.as_str(), config) {
+		let mut publisher = match Publisher::new(origin, path.as_str(), ingest.catalog()) {
 			Ok(publisher) => publisher,
 			Err(err) => {
 				tracing::warn!(peer = %self.peer, %path, %err, "rejecting RTMP publish: broadcast unavailable");
@@ -701,9 +664,9 @@ impl<S: Stream> Publish<S> {
 			// arrives after the end still gets the tail. The encoder is done, so hang up first.
 			Ok(End::Unpublished) => {
 				drop(self.stream);
-				match publisher.finish(self.linger) {
+				match publisher.finish(ingest.linger) {
 					Ok(linger) => {
-						tracing::info!(%peer, %path, linger = ?self.linger, "rtmp publish ended, serving the finished broadcast");
+						tracing::info!(%peer, %path, linger = ?ingest.linger, "rtmp publish ended, serving the finished broadcast");
 						linger.wait().await;
 					}
 					Err(err) => tracing::debug!(%peer, %err, "error finishing RTMP publish"),
@@ -890,7 +853,11 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.delay)
+			.with_delay(
+				moq_net::track::Delay::default()
+					.with_min(self.delay)
+					.with_max(self.delay),
+			)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -1199,9 +1166,6 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							max_age: Some(hang::container::MAX_AGE),
-							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-							linger: moq_mux::Linger::DEFAULT,
 						})));
 					}
 					// The client wants to play: hand control back to the caller.
@@ -1851,9 +1815,10 @@ mod tests {
 		let Some(Request::Publish(publish)) = accept_stream(stream, peer).await.unwrap() else {
 			panic!("expected a publish request");
 		};
+		let mut ingest = moq_mux::Ingest::default();
+		ingest.linger = linger;
 		publish
-			.with_linger(linger)
-			.accept(&origin, moq_net::Path::from_static("live/cam0"))
+			.accept(&origin, moq_net::Path::from_static("live/cam0"), &ingest)
 			.await
 			.unwrap();
 	}
@@ -2811,7 +2776,11 @@ mod tests {
 					panic!("expected a publish request");
 				};
 				let origin = origin.clone();
-				tokio::spawn(async move { publish.accept(&origin, moq_net::Path::from_static("live/cam0")).await });
+				tokio::spawn(async move {
+					publish
+						.accept(&origin, moq_net::Path::from_static("live/cam0"), &Default::default())
+						.await
+				});
 			}
 		});
 

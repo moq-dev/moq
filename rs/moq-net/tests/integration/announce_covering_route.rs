@@ -23,7 +23,7 @@ const REQUESTED: &str = ".dash/nobody";
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 /// Drain every event the cursor has pending, as `kind prefix` lines.
@@ -133,7 +133,7 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		let version: Version = version.parse().unwrap();
 		let publisher = produce_origin(1);
 		let claim = publisher
-			.route_prefix("room", moq_net::origin::RouteOptions::default())
+			.claim("room", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let listed = publisher
 			.route("lobby.chat", moq_net::origin::RouteOptions::hidden())

@@ -72,6 +72,10 @@ pub enum Version {
 }
 
 impl Version {
+	/// Every version this crate speaks, newest first, including the opt-in `-wip` drafts
+	/// that [`Versions::all`] leaves out.
+	pub const ALL: &'static [Version] = &ALL;
+
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn session_code(self, error: &crate::SessionError) -> u32 {
 		match self {
@@ -86,6 +90,16 @@ impl Version {
 	pub(crate) fn has_setup_token(self) -> bool {
 		match self {
 			Self::Lite(version) => version.has_auth(),
+			Self::Ietf(_) => true,
+		}
+	}
+
+	/// Whether SETUP carries the request path, so a transport with no request URI (native
+	/// QUIC, qmux over TCP) can still name its target: moq-lite-05 and newer, and every
+	/// moq-transport draft.
+	pub fn has_request_path(&self) -> bool {
+		match self {
+			Self::Lite(version) => version.has_setup_stream(),
 			Self::Ietf(_) => true,
 		}
 	}
@@ -107,7 +121,7 @@ impl Version {
 	}
 
 	/// Parse from wire version code (used during SETUP negotiation).
-	pub fn from_code(code: u64) -> Option<Self> {
+	pub(crate) fn from_code(code: u64) -> Option<Self> {
 		match code {
 			0xff0dad01 => Some(Self::Lite(lite::Version::Lite01)),
 			0xff0dad02 => Some(Self::Lite(lite::Version::Lite02)),
@@ -124,7 +138,7 @@ impl Version {
 	}
 
 	/// Get the wire version code.
-	pub fn code(&self) -> u64 {
+	pub(crate) fn code(&self) -> u64 {
 		match self {
 			Self::Lite(lite::Version::Lite01) => 0xff0dad01,
 			Self::Lite(lite::Version::Lite02) => 0xff0dad02,

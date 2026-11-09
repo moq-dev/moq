@@ -500,7 +500,9 @@ fn bench_inflate(c: &mut Criterion) {
 				b.iter_batched(
 					|| {
 						let broadcast = broadcast::Producer::new(broadcast::Info::default());
-						let track = broadcast.create_track("bench", timed().with_compress(true)).unwrap();
+						let track = broadcast
+							.create_track("bench", timed().with_compression(moq_net::track::Compression::Deflate))
+							.unwrap();
 						let consumers: Vec<group::Consumer> = (0..groups)
 							.flat_map(|_| {
 								let mut group = track.append_group().unwrap();
@@ -545,7 +547,10 @@ fn bench_compressed_updates(c: &mut Criterion) {
 						let producers: Vec<_> = (0..tracks)
 							.map(|i| {
 								let track = broadcast
-									.create_track(format!("bench{i}"), track::Info::default().with_compress(true))
+									.create_track(
+										format!("bench{i}"),
+										track::Info::default().with_compression(moq_net::track::Compression::Deflate),
+									)
 									.unwrap();
 								let mut group = track.append_group().unwrap();
 								group.write_frame(None, payload.clone()).unwrap();

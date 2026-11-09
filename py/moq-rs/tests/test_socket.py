@@ -98,6 +98,9 @@ async def test_cancelled_dial_releases_the_original_subscription():
     b.close()
 
 
+# Quarantined: under load the reader once got `Unroutable` after `a.close()`, which the
+# accepted shutdown errors leave out. See quest/m0/test-flakes-2/tcp-close-unroutable.md.
+@pytest.mark.skip(reason="flaky under load: quest/m0/test-flakes-2/tcp-close-unroutable.md")
 async def test_tcp_rst_and_endpoint_close_are_errors():
     a, b = endpoints()
     client, server = await tcp(a, b)
@@ -254,6 +257,6 @@ async def test_tcp_ready_paces_a_writer_behind_a_slow_reader():
 
 
 if __name__ == "__main__":
-    from moq.testing import Clock
+    from clock import Clock
 
     asyncio.run(late_peer(Clock()))

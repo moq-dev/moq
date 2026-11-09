@@ -13,13 +13,13 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use futures::stream::BoxStream;
 use moq_archive::Store;
-use moq_archive::object_store::memory::InMemory;
-use moq_archive::object_store::path::Path;
-use moq_archive::object_store::{
-	self, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-	PutMultipartOptions, PutOptions, PutPayload, PutResult,
-};
 use moq_net::{Timescale, Timestamp, group, track};
+use object_store::memory::InMemory;
+use object_store::path::Path;
+use object_store::{
+	CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
+	PutOptions, PutPayload, PutResult,
+};
 
 use super::*;
 

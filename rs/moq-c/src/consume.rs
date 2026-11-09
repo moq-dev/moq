@@ -879,22 +879,21 @@ impl Consume {
 		// `close` is a oneshot that panics if polled after completion, so a `Stop`
 		// must unwind the whole task rather than fall through to the outer loop.
 		loop {
-			let mut group =
-				match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
-					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
-						return Poll::Ready(Ok(RawStep::Stop));
-					}
-					match ready!(track.poll_next_group(waiter))? {
-						Some(group) => Poll::Ready(Ok(RawStep::Item(group))),
-						None => Poll::Ready(Ok(RawStep::End)),
-					}
-				})
-				.await?
-				{
-					RawStep::Item(group) => group,
-					// Track finished or the consumer was closed: nothing left to deliver.
-					RawStep::End | RawStep::Stop => return Ok(()),
-				};
+			let mut group = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
+				if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
+					return Poll::Ready(Ok(RawStep::Stop));
+				}
+				match ready!(track.poll_next_group(waiter))? {
+					Some(group) => Poll::Ready(Ok(RawStep::Item(group))),
+					None => Poll::Ready(Ok(RawStep::End)),
+				}
+			})
+			.await?
+			{
+				RawStep::Item(group) => group,
+				// Track finished or the consumer was closed: nothing left to deliver.
+				RawStep::End | RawStep::Stop => return Ok(()),
+			};
 
 			if Self::run_group(callback, &mut group, &mut close).await? {
 				return Ok(());
@@ -912,7 +911,7 @@ impl Consume {
 		close: &mut oneshot::Receiver<()>,
 	) -> Result<bool, Error> {
 		loop {
-			let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
+			let frame = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
 				if Pin::new(&mut *close).poll(&mut waiter.context()).is_ready() {
 					return Poll::Ready(Ok(RawStep::Stop));
 				}

@@ -18,7 +18,7 @@ its own decryption path.
   and `@moq/watch`'s subscriptions.
 - `@moq/crypto`'s broadcast, track, and group wrappers adapt to `@moq/net`'s
   method shapes, as moq-crypto does in Rust, with its errors mapped to
-  `@moq/net`'s. Like moq-crypto, it compresses a `compress` track before
+  `@moq/net`'s. Like moq-crypto, it compresses a `compression: "deflate"` track before
   encryption, publishes the physical track uncompressed, and carries the
   logical flag in the same authenticated E2EE metadata
   ([e2ee](/quest/m5/net-wrap/e2ee.md)).

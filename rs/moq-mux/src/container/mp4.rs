@@ -85,9 +85,9 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the max delay for each per-track source; see [`fmp4::Export::with_max_delay`].
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.fmp4 = self.fmp4.with_max_delay(max_delay);
+	/// Set how far behind the live edge each per-track source plays; see [`fmp4::Export::with_delay`].
+	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+		self.fmp4 = self.fmp4.with_delay(delay);
 		self
 	}
 
@@ -132,9 +132,9 @@ impl<S: Stream> Export<S> {
 	fn init(&mut self, init: &Bytes) -> Result<Bytes> {
 		fmp4::metadata::check(init)?;
 		let mut cursor = std::io::Cursor::new(init.as_ref());
-		mp4_atom::Ftyp::decode(&mut cursor)?;
+		mp4_atom::Ftyp::decode(&mut cursor).map_err(crate::Error::mp4)?;
 		let split = cursor.position() as usize;
-		let moov = mp4_atom::Moov::decode(&mut cursor)?;
+		let moov = mp4_atom::Moov::decode(&mut cursor).map_err(crate::Error::mp4)?;
 
 		let mut data = BytesMut::with_capacity(init.len() + RESERVED as usize);
 		data.put_slice(&init[..split]);
@@ -157,7 +157,7 @@ impl<S: Stream> Export<S> {
 	fn fragment(&mut self, fragment: Bytes) -> Result<Bytes> {
 		fmp4::metadata::check(&fragment)?;
 		let index = self.index.as_mut().expect("the init segment comes first");
-		let moof = mp4_atom::Moof::decode(&mut std::io::Cursor::new(fragment.as_ref()))?;
+		let moof = mp4_atom::Moof::decode(&mut std::io::Cursor::new(fragment.as_ref())).map_err(crate::Error::mp4)?;
 
 		let mut data = BytesMut::new();
 		for traf in &moof.traf {
@@ -185,7 +185,8 @@ impl<S: Stream> Export<S> {
 				kind: b"free".into(),
 				size: Some(fragment.len()),
 			}
-			.encode(&mut data)?;
+			.encode(&mut data)
+			.map_err(crate::Error::mp4)?;
 		}
 		index.fragment(self.written + data.len() as u64, &moof)?;
 		data.put_slice(&fragment);
@@ -318,7 +319,7 @@ impl Atom {
 		let mut data = vec![0u8; (self.end - self.start) as usize];
 		file.seek(SeekFrom::Start(self.start))?;
 		file.read_exact(&mut data)?;
-		Ok(T::decode(&mut std::io::Cursor::new(data.as_slice()))?)
+		T::decode(&mut std::io::Cursor::new(data.as_slice())).map_err(crate::Error::mp4)
 	}
 }
 
@@ -369,14 +370,15 @@ impl Description {
 			..Default::default()
 		};
 		let mut buf = Vec::new();
-		moov.encode(&mut buf)?;
+		moov.encode(&mut buf).map_err(crate::Error::mp4)?;
 		mp4_atom::Header {
 			kind: b"free".into(),
 			size: Some(buf.len()),
 		}
-		.encode(data)?;
+		.encode(data)
+		.map_err(crate::Error::mp4)?;
 		data.put_slice(&buf);
-		Ok(mp4_atom::Moov::decode(&mut std::io::Cursor::new(buf.as_slice()))?)
+		mp4_atom::Moov::decode(&mut std::io::Cursor::new(buf.as_slice())).map_err(crate::Error::mp4)
 	}
 }
 
@@ -536,7 +538,7 @@ impl Index {
 			..Default::default()
 		};
 		let mut buf = Vec::new();
-		moov.encode(&mut buf)?;
+		moov.encode(&mut buf).map_err(crate::Error::mp4)?;
 
 		// Everything from the reserved box to the moov, the fragmented moov and every moof
 		// included, becomes one mdat that a reader skips through to the moov.
@@ -798,7 +800,8 @@ mod tests {
 	}
 
 	async fn export(live: &Live) -> super::Export<crate::catalog::Consumer> {
-		super::Export::new(live.source().await, live.catalog_stream().await).with_max_delay(MAX_DELAY)
+		super::Export::new(live.source().await, live.catalog_stream().await)
+			.with_delay(moq_net::track::Delay::default().with_max(MAX_DELAY))
 	}
 
 	/// Append everything the export writes without waiting for more input.

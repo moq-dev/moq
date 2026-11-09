@@ -43,7 +43,7 @@ Sessions, origins, broadcasts, tracks, and groups: `Client`, `Server`,
 | C | `moq_session_*`, `moq_origin_*`, `moq_publish_track_*`, `moq_consume_track_*` | `moq_publish_track` |
 
 On-demand broadcast requests in every binding can answer with held content
-without announcing an exact route. The answer uses the prefix route's
+without announcing an exact route. The answer uses the claim's
 continuous sequence space at that path. Use a fresh publication for a job
 that may restart independently; see [work on demand](/concept/identity#work-on-demand)
 and the [Go](/lib/go/) and [C](/lib/c/) binding references.
@@ -87,7 +87,7 @@ The catalog has no window mode, so a window track is not advertised there.
 Go code usually imports it under an alias, next to `encoding/json`.
 
 Compression is the track's, not this layer's: publish a JSON track with
-`compress` set on its track info, and a consumer reads it like any other.
+`compression` set on its track info, and a consumer reads it like any other.
 Opaque bytes go on a raw net track.
 
 ## audio

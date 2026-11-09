@@ -21,7 +21,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::egress::{EgressClock, EgressSource, Format, WriteRequest};
-use crate::rate::{self, Cap, Meter};
+use crate::rate::{self, Meter};
 use crate::{Error, Result, codec};
 
 /// str0m's outbound video buffer depth (packets), which also backs NACK resends.
@@ -150,12 +150,12 @@ impl Session {
 
 	/// Meter an ingest against `limit`'s cap, following its updates, and steer the
 	/// publisher under it with REMB on every video line that negotiated it.
-	pub(crate) fn with_rate(mut self, limit: &rate::Limit) -> Self {
-		let limit = limit.subscribe();
-		let cap = *limit.borrow();
+	pub(crate) fn with_rate(mut self, mut limit: moq_net::bandwidth::Limit) -> Self {
+		// One read sets both the meter and the cap `changed` compares against.
+		let cap = limit.get();
 		self.rate = Some(IngestRate {
 			meter: Meter::new(cap, Instant::now()),
-			limit: Some(limit),
+			limit,
 			remb: Vec::new(),
 			next_remb: Instant::now(),
 			steered: cap.is_some(),
@@ -230,24 +230,18 @@ impl Session {
 					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
 				}
 
-				changed = async {
-					match self.rate.as_mut().and_then(|rate| rate.limit.as_mut()) {
-						Some(limit) => limit.changed().await.map(|()| *limit.borrow_and_update()),
+				cap = async {
+					match self.rate.as_mut() {
+						Some(rate) => rate.limit.changed().await,
 						None => std::future::pending().await,
 					}
 				} => {
 					let rate = self.rate.as_mut().expect("only a rated session watches its cap");
-					match changed {
-						Ok(cap) => {
-							tracing::debug!(?cap, "ingest cap updated");
-							rate.meter.set(cap, Instant::now());
-							rate.steered |= cap.is_some();
-							// REMB follows an update at once.
-							rate.next_remb = Instant::now();
-						}
-						// Every handle is gone, so the cap can no longer change: keep the last one.
-						Err(_) => rate.limit = None,
-					}
+					tracing::debug!(?cap, "ingest cap updated");
+					rate.meter.set(cap, Instant::now());
+					rate.steered |= cap.is_some();
+					// REMB follows an update at once.
+					rate.next_remb = Instant::now();
 				}
 
 				_ = async {
@@ -400,7 +394,7 @@ impl Session {
 		// A REMB ceiling holds until the next one replaces it, so a lifted cap keeps sending
 		// the largest REMB can carry rather than going quiet and leaving the old ceiling.
 		let bitrate = match rate.meter.cap() {
-			Some(cap) => str0m::bwe::Bitrate::bps(cap.steer().as_bps()),
+			Some(cap) => str0m::bwe::Bitrate::bps(rate::steer(cap).as_bps()),
 			None => str0m::bwe::Bitrate::MAX,
 		};
 		let mut rtc = self.agent.rtc_mut();
@@ -425,8 +419,8 @@ impl Session {
 /// steers the publisher under it.
 struct IngestRate {
 	meter: Meter,
-	/// Live cap updates; `None` once every handle is dropped.
-	limit: Option<tokio::sync::watch::Receiver<Option<Cap>>>,
+	/// Live cap updates.
+	limit: moq_net::bandwidth::Limit,
 	/// Video lines that negotiated REMB.
 	remb: Vec<str0m::media::Mid>,
 	next_remb: Instant,

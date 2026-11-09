@@ -1,7 +1,6 @@
-"""Test-only control of the native MoQ clock.
+"""Test-only control of the native MoQ clock, kept beside the tests and out of the wheel.
 
-Needs a ``moq-ffi`` built with its ``testing`` feature, as ``just py test`` does;
-released wheels leave it out.
+Needs a ``moq-ffi`` built with its ``testing`` feature, as ``just py test`` does.
 """
 
 import ctypes
@@ -32,7 +31,7 @@ class Clock:
 
     def __init__(self) -> None:
         self._advance = _symbol("moq_ffi_test_clock_advance", (ctypes.c_uint64,), ctypes.c_bool)
-        self._now = _symbol("moq_ffi_test_clock_now", (), ctypes.c_uint64)
+        self._now = _symbol("moq_ffi_test_clock_now", (ctypes.POINTER(ctypes.c_uint64),), ctypes.c_bool)
         if not _symbol("moq_ffi_test_clock_start", (), ctypes.c_bool)():
             raise RuntimeError("the native runtime already started on the host clock")
 
@@ -46,4 +45,7 @@ class Clock:
 
     def time(self) -> float:
         """Seconds elapsed since the clock started."""
-        return self._now() / 1_000_000_000
+        nanos = ctypes.c_uint64()
+        if not self._now(ctypes.byref(nanos)):
+            raise RuntimeError("the native test clock is not running")
+        return nanos.value / 1_000_000_000

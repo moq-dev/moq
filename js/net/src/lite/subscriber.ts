@@ -117,11 +117,6 @@ const datagramBudget = new Budget();
 // tracks' datagrams behind their ends.
 const HELD_DATAGRAMS = 32;
 
-// Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
-// candidate outranks it, while the route stays selectable as the last path. Matches Rust
-// Cost::DRAIN: cost is the whole mechanism, not a separate state.
-const DRAIN_COST: Cost = 2n ** 62n - 1n;
-
 // What a subscription has set up so far, so a revocation (or abandonment) can reach it at
 // any stage.
 interface SubscribeSetup {
@@ -328,7 +323,7 @@ export class Subscriber {
 	// stream on the peer having advertised Probe >= Report.
 	#peerSetup?: Signal<Setup | undefined>;
 
-	// Settles when the peer sends GOAWAY, repricing this session's routes to the drain cost.
+	// Settles when the peer sends GOAWAY, ranking this session's routes last.
 	#goaway?: GetPromise<Drain>;
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
@@ -380,10 +375,10 @@ export class Subscriber {
 		return this.#goaway?.peek() !== undefined;
 	}
 
-	// What a route costs once the peer has asked us to leave. A later announce on a
+	// A route ranks last once the peer has asked us to leave. A later announce on a
 	// draining session must not win selection, however cheap the path it advertises.
-	#cost(cost?: Cost): Cost {
-		return this.#goingAway() ? DRAIN_COST : (cost ?? Cost.zero);
+	#drained(route: WireRoute): WireRoute {
+		return this.#goingAway() ? { ...route, draining: true } : route;
 	}
 
 	// Whether our grant no longer lets us subscribe to `broadcast`.
@@ -547,7 +542,12 @@ export class Subscriber {
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { instance: mint(path), epoch: 0n, hops: [UNKNOWN_HOP], cost: this.#cost() };
+						const route = this.#drained({
+							instance: mint(path),
+							epoch: 0n,
+							hops: [UNKNOWN_HOP],
+							cost: Cost.zero,
+						});
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { live, route, captures });
@@ -563,15 +563,15 @@ export class Subscriber {
 					break;
 			}
 
-			// A draining peer usually stops announcing, so reprice from the GOAWAY itself.
-			// Waiting for another message would leave the route primary until the session
-			// closed. Idempotent: an unchanged cost emits nothing. A GOAWAY that already
-			// arrived needs no listener, since `#cost()` priced every route above.
+			// A draining peer usually stops announcing, so rank its routes last from the GOAWAY
+			// itself. Waiting for another message would leave the route primary until the
+			// session closed. Idempotent: a route already draining emits nothing. A GOAWAY that
+			// already arrived needs no listener, since `#drained()` marked every route above.
 			const drainAdvertised = () => {
 				if (announced.closed.peek() !== undefined) return;
 				for (const [path, ad] of advertised) {
 					if (!ad.live) continue;
-					const route = { ...ad.route, cost: DRAIN_COST };
+					const route = { ...ad.route, draining: true };
 					if (routesEqual(ad.route, route)) continue;
 					advertised.set(path, { ...ad, route });
 					this.#consumes.announce(path, announced, route);
@@ -767,7 +767,7 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route: WireRoute = { instance, epoch, hops: fullHops, cost: this.#cost(cost) };
+				const route = this.#drained({ instance, epoch, hops: fullHops, cost: cost ?? Cost.zero });
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });
@@ -1697,7 +1697,7 @@ export class Subscriber {
 			maxAge: info.maxAge === undefined ? null : Milli(info.maxAge),
 			priority: info.priority,
 			refresh: info.refresh ?? null,
-			compress: info.compress,
+			compression: info.compress ? "deflate" : "none",
 			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
 			...(hasMediaTime(this.version) ? {} : { unchecked: true }),
 		};

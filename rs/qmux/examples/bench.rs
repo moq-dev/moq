@@ -191,15 +191,12 @@ async fn connect(transport: Transport, tls: &Tls, addr: SocketAddr) -> anyhow::R
 				.await?,
 		),
 		Transport::Ws => spawn(qmux::ws::Client::new().connect(&format!("ws://{addr}")).await?),
-		Transport::Wss => {
-			let connector = qmux::ws::tokio_tungstenite::Connector::Rustls(tls.client.clone());
-			spawn(
-				qmux::ws::Client::new()
-					.with_connector(connector)
-					.connect(&format!("wss://localhost:{}", addr.port()))
-					.await?,
-			)
-		}
+		Transport::Wss => spawn(
+			qmux::ws::Client::new()
+				.with_tls(tls.client.clone())
+				.connect(&format!("wss://localhost:{}", addr.port()))
+				.await?,
+		),
 	})
 }
 

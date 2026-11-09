@@ -5,8 +5,6 @@
 
 use std::time::Duration;
 
-use moq_tokio::moq_net;
-
 /// The only version whose routes carry the epoch that lets a subscription resume across
 /// the move.
 const LITE_07: &str = "moq-lite-07-wip";
@@ -70,7 +68,8 @@ fn connect(origin: &moq_net::origin::Producer, port: u16, versions: Vec<moq_net:
 	config
 		.init(Default::default())
 		.expect("init client")
-		.with_origin(origin.clone())
+		.with_publisher(origin)
+		.with_subscriber(origin.clone())
 		.connect(format!("tcp://127.0.0.1:{port}/").parse::<url::Url>().unwrap())
 }
 

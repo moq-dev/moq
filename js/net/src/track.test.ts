@@ -560,7 +560,7 @@ test("an authored track defaults to a zero max age, and null is unlimited", asyn
 // superseded group goes stale and the live edge is exempt from the payload cache window.
 test("a sole snapshot stays readable to a late joiner at the zero default max age", async () => {
 	const clock = manualTime(10_000);
-	const producer = new TrackProducer("catalog").accept({ timescale: Timescale.MILLI, compress: true });
+	const producer = new TrackProducer("catalog").accept({ timescale: Timescale.MILLI, compression: "deflate" });
 	try {
 		expect((await producer.info()).maxAge).toBe(Milli.zero);
 		const group = producer.appendGroup();

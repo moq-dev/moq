@@ -21,7 +21,7 @@ catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamp
 `TimestampFromDuration` converts exactly; `TimestampToDuration` rounds down to a whole nanosecond.
 A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
-`TrackInfo.Compress` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+`TrackInfo.Compression` set to `CompressionDeflate` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `Update`, `Append`, `Push`, and `Pop` take a final `moq.Timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
 skips to the newest state where `Next` yields each one. A read timestamp is at the track's timescale.
@@ -96,7 +96,7 @@ import (
 // opusInit, packet, pts (90 kHz ticks), and rgba come from your encoder or capture source.
 // Hidden until the catalog is filled; keep the route reachable while publishing.
 route, _ := client.Route("my-stream.hang", moq.RouteOptions{Hidden: true})
-broadcast, _ := route.Broadcast()
+broadcast := route.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
 timestamp := moq.Timestamp{Value: 960, Scale: 48_000} // 20 ms on the Opus sample clock
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
@@ -124,8 +124,8 @@ The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
 one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
-- **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A one-shot call (`Request`, `FetchGroup`, `Server.Accept`) aborts alone; a stream read (`Next`, `ReadFrame`, and the iterators over them) cancels the stream it reads.
-- **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer and `Route`), and its consumers then fail with `moq.ErrClosed`. A `Route` the collector reclaims is retracted, so keep it reachable while it should stay announced, or end it with `Cancel()`.
+- **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A call (`Request`, `Next`, `ReadFrame`, `Server.Accept`) aborts alone and leaves its object usable; a range loop over a consumer's stream cancels the stream when its context ends, while `Claim.All` and `Server.All` leave the claim advertised and the listener open.
+- **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer, `Route`, and `Claim`), and its consumers then fail with `moq.ErrClosed`. A `Route` or `Claim` the collector reclaims is retracted, so keep it reachable while it should stay announced, or end it with `Cancel()`.
 - **Bandwidth ownership.** An encoder you manage can reserve a share of the session's bandwidth. Reuse its reservation when the ceiling changes; before abandoning or replacing it, call `Update(0)` to return its share and automatic probe ceiling without waiting for garbage collection. The track can stay subscribed and the reservation can be reused.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after every frame, or less often to batch frames into fewer groups.
 - **Timeline breaks.** On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.

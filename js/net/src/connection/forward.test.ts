@@ -72,6 +72,7 @@ class FakeSession {
 		registerWire(this, {
 			consume: (path) => this.consume(path),
 			exclusive,
+			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
 		});
 		this.closed = new Promise((resolve) => {

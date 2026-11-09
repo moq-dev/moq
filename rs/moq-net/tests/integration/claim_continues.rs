@@ -19,7 +19,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
 	support::harness::spawn(driver);
-	producer
+	producer.with_proxy(true)
 }
 
 fn lite07() -> Version {
@@ -47,7 +47,7 @@ async fn settle() {
 /// A worker claiming `claim`, answering each request with an output whose `video` track
 /// carries the worker's name and how many outputs it made before.
 struct Worker {
-	claim: Rc<origin::Route>,
+	claim: Rc<origin::Claim>,
 	outputs: Rc<RefCell<Vec<(origin::Route, track::Producer)>>>,
 	origin: origin::Producer,
 }
@@ -55,7 +55,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64, claim: &str, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.route_prefix(claim, origin::RouteOptions::default()).unwrap());
+		let claim = Rc::new(origin.claim(claim, origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {

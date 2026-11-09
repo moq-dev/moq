@@ -55,19 +55,58 @@ capacity watermark and an incoming excess at the fast threshold trim.
 Remaining verification:
 
 - Native `test/audio-quality` rows must meet their measured underrun
-  ceilings once their targets settle. Keep a failed or void row explicit and fix
-  any implementation cause before calling this complete.
+  ceilings once their targets settle. Keep a failed or void row explicit and
+  fix any implementation cause.
 - Re-measure the provisional native budgets from seven scheduled nightly
-  artifacts using `budgets.json`'s rule: worst clean run times 1.25, plus
+  artifacts that carry `moq play`'s own `trimmed` and `accelerated`
+  counters, using `budgets.json`'s rule: worst clean run times 1.25, plus
   its documented native hiccup, rounded to two significant figures. A
-  developer run is not that calibration.
-- Run `just rs bench-playback` on a quiet host with no other agents. It
-  now sweeps both sink count and callback size with and without stretch,
-  and the nightly `rust-test` benchmark job (`sh/gh/nightly.sh`) already
-  runs it. A loaded-host smoke run is not a timing acceptance claim.
-- Listen to real speech with 2 ms/s drift and the measured expansions on
-  a real output device (below). Deterministic PCM and allocation checks do
-  not establish perceptual acceptance.
+  developer run is not that calibration. Native rows then budget the
+  player's own `player_skips_per_min` and `trimmed_ms_per_min` in place of
+  the analyzer's `skip_aheads_per_min` and `discarded_ms_per_min`, which
+  count the accelerate too.
+
+Graded 2026-11-08: the scheduled Nightlies of 2026-11-05 to 11-08 on
+`main` (42050683248, 42236107954, 42377867523, 42487375545) are the first
+four with this implementation; 11-04's ran at 14:56 UTC, before it merged
+at 17:31. Every night has all 12 native rows and none voided. Eleven rows
+read zero underruns every night. Opus `step` reads one 22 to 44 ms gap on
+three nights, at 29.6 s, when the shaper's one-way delay steps from 5 to
+60 ms while the settled target is 60 ms: a late arrival no stretch can
+cover without concealment, played clean once the target rises to 100 ms.
+The scheduled Nightlies of 11-02 to 11-04, before this implementation,
+read up to 23.9 underruns a minute on AAC `wide` and 8.6 on Opus `wide`.
+
+The stretch adds skip-aheads the harness did not see before: up to 3.3 a
+minute and 232 ms discarded on Opus `bursty`, 2.2 and 181 ms on AAC
+`near-zero` and `step` on 11-08. Each is the accelerate shedding a lowered
+target or a startup overfill at about 8% speed for 1 to 4 s, with no single
+sample's media advancing more than 33 ms past real time. The harness counts
+any shed of more than 40 ms across nine samples as a skip, which its README
+now says. Two rows failed their provisional ceilings that way: Opus
+`bursty` on 11-07 (232 > 170 ms discarded, and a 380 ms startup target hold
+> 350) and AAC `step` on 11-08 (157.5 > 110). The rest of the job's red is
+outside this work: `raw-audio-bench` on 11-06, `qmux-bench` on 11-08, and
+browser and replay rows.
+
+The nightly `rust-test` benchmark job ran `just rs bench-playback` and
+passed on all four nights, alone on a GitHub `ubuntu-24.04-arm` runner. The
+stretch costs 16 to 43% per callback, stable across nights; its worst cell,
+64 sinks at 2048 frames, is 1.02 ms of a 42.7 ms period.
+[moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308)'s body keeps
+every graded native row's metrics.
+
+Decided 2026-11-09 (maintainer, on
+[moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308#issuecomment-6730322286)):
+
+- ✅ `moq play --metrics` reports its own trimmed and accelerated audio,
+  and the calibration budgets trims alone (rejected: keep budgeting
+  accelerates as `discarded_ms`). An accelerate is inaudible, so it is not
+  the discarded audio these rows guard. #8308 adds the counters to both
+  players, beside the browser's skip count
+  [moq-dev/moq#8058](https://github.com/moq-dev/moq/pull/8058) added.
+- ✅ The nightly runner's `bench-playback` counts as the quiet-host run
+  (rejected: naming another host). That settles the timing check.
 
 Decided 2026-11-04 (maintainer, on
 [moq-dev/moq#7856](https://github.com/moq-dev/moq/pull/7856)): accept the
@@ -111,12 +150,13 @@ bench waits below remain.
 
 ## Waiting
 
-- moq-dev/moq: collect seven scheduled native nightly rows for this
-  implementation, then apply the existing calibration rule. Keep the
-  current provisional budgets until those artifacts exist.
-- moq-dev/moq: run `just rs bench-playback` on a quiet host. On
-  2026-11-04 `nixos`, `nixos2`, and `kixtop` all ran agents and `desktop`
-  refused SSH.
+- moq-dev/moq: seven scheduled Nightlies on a `main` that includes
+  [moq-dev/moq#8308](https://github.com/moq-dev/moq/pull/8308), whose
+  native rows report `player_skips` and `trimmed_ms`. Find them with `gh run list --workflow
+  nightly.yml --event schedule`, download each with `gh run download <id>
+  -n audio-quality-run` within its 7 days, keep its native rows in the
+  calibration PR's body, and apply the calibration rule once seven exist.
+  Never dispatch the nightly by hand.
 
 ## Related
 

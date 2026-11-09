@@ -441,8 +441,7 @@ where
 
 	/// The jitter, bitrate, delay, and framerate measured from the frames written so far.
 	///
-	/// A catalog-owned producer publishes this automatically. See
-	/// [`Estimator`](crate::catalog::Estimator).
+	/// A catalog-owned producer publishes this automatically.
 	pub fn estimate(&self) -> crate::catalog::Estimate {
 		self.estimator.estimate()
 	}

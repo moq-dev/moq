@@ -292,7 +292,7 @@ impl TlsAcceptor {
 	pub async fn accept<T>(
 		&self,
 		stream: tokio_rustls::server::TlsStream<T>,
-		active: moq_net::server::Active,
+		active: moq_net::server::Admitted,
 	) -> crate::Result<crate::server::Request>
 	where
 		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRef<tokio::net::TcpStream> + Send + Unpin + 'static,
