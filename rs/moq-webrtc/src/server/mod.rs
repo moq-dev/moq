@@ -126,9 +126,8 @@ pub(crate) fn session_location(uri: &Uri, resource_id: &str) -> Option<HeaderVal
 }
 
 /// Configuration shared by both `server publish` and `server subscribe`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-#[derive(Default)]
 pub struct Config {
 	/// Public UDP socket addresses that should be advertised as ICE host
 	/// candidates. Each is sent as a separate `candidate` line in the SDP

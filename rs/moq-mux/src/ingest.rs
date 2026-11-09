@@ -5,8 +5,8 @@ use std::time::Duration;
 /// How a gateway publishes what it ingests: the media tracks' max age, the allocator they
 /// claim on, and how long a cleanly ended broadcast stays up.
 ///
-/// Every protocol gateway takes one per ingest, so the same knobs mean the same thing on
-/// RTMP, SRT, and WHIP.
+/// RTMP, SRT, and WHIP each take one per ingest, so the same knobs mean the same thing
+/// across them.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Ingest {

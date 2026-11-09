@@ -156,13 +156,14 @@ impl Limit {
 		}
 	}
 
-	/// The current cap, if any.
-	pub fn get(&self) -> Option<Cap> {
-		*self.cap.read()
+	/// The current cap, if any, which [`poll_changed`](Self::poll_changed) then counts as seen.
+	pub fn get(&mut self) -> Option<Cap> {
+		self.last = *self.cap.read();
+		self.last
 	}
 
 	/// The cap once it differs from the one this handle last saw: at its creation or clone,
-	/// or its last report.
+	/// its last [`get`](Self::get), or its last report.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Cap>> {
 		let last = self.last;
@@ -184,7 +185,7 @@ impl Clone for Limit {
 	fn clone(&self) -> Self {
 		Self {
 			cap: self.cap.clone(),
-			last: self.get(),
+			last: *self.cap.read(),
 		}
 	}
 }
@@ -197,7 +198,7 @@ impl Default for Limit {
 
 impl std::fmt::Debug for Limit {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("Limit").field(&self.get()).finish()
+		f.debug_tuple("Limit").field(&*self.cap.read()).finish()
 	}
 }
 
@@ -1345,6 +1346,20 @@ mod tests {
 		assert!(late.poll_changed(&kio::Waiter::noop()).is_pending());
 		limit.set(None);
 		assert_eq!(late.poll_changed(&kio::Waiter::noop()), Poll::Ready(None));
+	}
+
+	#[test]
+	fn a_limit_get_marks_the_cap_seen() {
+		let low = Cap::new(Rate::from_kbps(8));
+		let high = Cap::new(Rate::from_kbps(16));
+		let limit = Limit::new(low);
+		let mut watch = limit.clone();
+
+		// A cap read between the clone and a restore still reports the restore.
+		limit.set(high);
+		assert_eq!(watch.get(), Some(high));
+		limit.set(low);
+		assert_eq!(watch.poll_changed(&kio::Waiter::noop()), Poll::Ready(Some(low)));
 	}
 
 	/// Priorities matching `hang`'s, which is what the allocator sees in practice.

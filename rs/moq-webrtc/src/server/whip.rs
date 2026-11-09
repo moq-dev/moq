@@ -199,14 +199,15 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	let resource_id = sdp::new_resource_id();
 	let socket = crate::ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let mut session = session::Session::ingest(rtc, socket, sink)?;
-	if let Some(rate) = &rate {
+	let mut cap = None;
+	if let Some(mut rate) = rate {
+		cap = rate.get();
 		session = session.with_rate(rate);
 	}
 
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	let cap = rate.as_ref().and_then(moq_net::bandwidth::Limit::get);
 	tracing::info!(%broadcast, %instance, cap = cap.map(|cap| cap.rate.as_bps()), "whip publish accepted");
 
 	let mut answer = sdp::render_answer(&answer);

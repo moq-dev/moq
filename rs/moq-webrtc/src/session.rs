@@ -150,8 +150,8 @@ impl Session {
 
 	/// Meter an ingest against `limit`'s cap, following its updates, and steer the
 	/// publisher under it with REMB on every video line that negotiated it.
-	pub(crate) fn with_rate(mut self, limit: &moq_net::bandwidth::Limit) -> Self {
-		let limit = limit.clone();
+	pub(crate) fn with_rate(mut self, mut limit: moq_net::bandwidth::Limit) -> Self {
+		// One read sets both the meter and the cap `changed` compares against.
 		let cap = limit.get();
 		self.rate = Some(IngestRate {
 			meter: Meter::new(cap, Instant::now()),
