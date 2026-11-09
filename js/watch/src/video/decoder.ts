@@ -24,7 +24,7 @@ import { type DecoderConfig, hardwareAcceleration, type PlaybackIdentity, playba
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { Recovery } from "./recovery";
 import type { Source } from "./source";
-import { supported } from "./supported";
+import { accepted, supported } from "./supported";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Milli(500);
@@ -620,6 +620,8 @@ class DecoderTrack {
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<Container.BufferedRanges>([]);
 
+	// The codec string WebCodecs accepted for this track, resolved before its first configure.
+	#codec?: string;
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
 	// Whether the next chunk opens the codec, after a configure or a reset.
@@ -787,7 +789,7 @@ class DecoderTrack {
 		// Input processing - depends on container type
 		this.#spawn(effect, async () => {
 			if (this.config.container.kind === "cmaf") await this.#runCmaf(effect, sub, decoder);
-			else this.#runLegacy(effect, sub, decoder);
+			else await this.#runLegacy(effect, sub, decoder);
 		});
 	}
 
@@ -805,7 +807,8 @@ class DecoderTrack {
 		});
 	}
 
-	#runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
+	async #runLegacy(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): Promise<void> {
+		if (!(await this.#accept(effect))) return;
 		const format =
 			this.config.container.kind === "loc"
 				? new Container.Loc.Format("video")
@@ -879,6 +882,7 @@ class DecoderTrack {
 		const abort = effect.abort;
 		const Cmaf = await import("@moq/hang/cmaf");
 		if (abort.aborted) return;
+		if (!(await this.#accept(effect))) return;
 
 		const initSegment = base64ToBytes(container.init);
 		const init = Cmaf.decodeInitSegment(initSegment);
@@ -1031,10 +1035,23 @@ class DecoderTrack {
 		return new EncodedVideoChunk({ type: frame.keyframe ? "key" : "delta", data, timestamp: frame.timestamp });
 	}
 
+	// Resolve the codec string WebCodecs accepts once per track, from the same probe as `supported`, so a
+	// custom `supported` that skipped the probe still opens an `avc3.*` rendition on Safari. False when
+	// torn down meanwhile.
+	async #accept(effect: Effect): Promise<boolean> {
+		if (this.#codec !== undefined) return true;
+		const codec = await accepted(this.config);
+		if (effect.abort.aborted) return false;
+		if (codec === undefined) throw new Error(`video: WebCodecs does not support codec ${this.config.codec}`);
+		this.#codec = codec;
+		return true;
+	}
+
 	#configure(decoder: VideoDecoder): void {
+		if (this.#codec === undefined) throw new Error("video: configured before the codec was accepted");
 		this.#opening = true;
 		decoder.configure({
-			codec: this.config.codec,
+			codec: this.#codec,
 			description: this.#description,
 			displayAspectWidth: this.config.displayAspectWidth,
 			displayAspectHeight: this.config.displayAspectHeight,
