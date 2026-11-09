@@ -90,12 +90,12 @@ pub struct Config {
 	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
 	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
 	/// without a copy. A named node is used even when it fails to open.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	pub vaapi: Option<std::path::PathBuf>,
 	/// The V4L2 M2M decoder node, such as `/dev/video10`. `None` searches every
 	/// node for one that decodes H.264, which a driver whose format enumeration
 	/// is wrong can defeat.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
 	pub v4l2: Option<std::path::PathBuf>,
 }
 

@@ -20,6 +20,6 @@ pub struct Config {
 	///
 	/// `None` uses the node the VA-API codecs share. Name the encoder's node so
 	/// the scaled buffer imports into it without a copy.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	pub vaapi: Option<std::path::PathBuf>,
 }

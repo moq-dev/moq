@@ -206,12 +206,12 @@ pub struct Config {
 	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
 	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
 	/// without a copy. A named node is used even when it fails to open.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	pub vaapi: Option<std::path::PathBuf>,
 	/// The V4L2 M2M encoder node, such as `/dev/video11`. `None` searches every
 	/// node for one that encodes H.264, which a driver whose format enumeration
 	/// is wrong can defeat.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
 	pub v4l2: Option<std::path::PathBuf>,
 }
 
@@ -232,9 +232,9 @@ impl Config {
 			resize: None,
 			#[cfg(target_os = "linux")]
 			input: None,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			vaapi: None,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2: None,
 		}
 	}
@@ -336,7 +336,7 @@ impl Config {
 	/// The resize options, scaling on this encoder's VA-API node unless they name one.
 	fn resolved_resize(&self) -> Option<crate::resize::Config> {
 		let resize = self.resize.clone()?;
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "vaapi"))]
 		let resize = crate::resize::Config {
 			vaapi: resize.vaapi.or_else(|| self.vaapi.clone()),
 			..resize

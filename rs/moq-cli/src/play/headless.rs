@@ -139,9 +139,9 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: None,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			vaapi_device: None,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
@@ -167,9 +167,9 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: Some(path.clone()),
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			vaapi_device: None,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
@@ -197,9 +197,9 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: None,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			vaapi_device: None,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {

@@ -313,10 +313,10 @@ pub struct Capture {
 	/// watches, and leaves nothing to fetch from before the first viewer arrived.
 	pub on_demand: bool,
 	/// The VA-API render node the encoder opens; see [`Config::vaapi`](encoder::Config::vaapi).
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	pub vaapi: Option<std::path::PathBuf>,
 	/// The V4L2 M2M node the encoder opens; see [`Config::v4l2`](encoder::Config::v4l2).
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
 	pub v4l2: Option<std::path::PathBuf>,
 }
 
@@ -328,11 +328,10 @@ impl Capture {
 		config.bitrate = self.bitrate;
 		config.codec = self.codec;
 		config.kind = self.kind.clone();
-		#[cfg(target_os = "linux")]
-		{
-			config.vaapi = self.vaapi.clone();
-			config.v4l2 = self.v4l2.clone();
-		}
+		#[cfg(all(target_os = "linux", feature = "vaapi"))]
+		config.vaapi = self.vaapi.clone();
+		#[cfg(all(target_os = "linux", feature = "v4l2"))]
+		config.v4l2 = self.v4l2.clone();
 		config
 	}
 }

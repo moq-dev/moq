@@ -270,11 +270,10 @@ impl<O: Output> Media<O> {
 						// that imports none.
 						let mut decode = moq_video::decode::Config::new();
 						decode.output = self.output.render().await;
-						#[cfg(target_os = "linux")]
-						{
-							decode.vaapi = self.args.vaapi_device.clone();
-							decode.v4l2 = self.args.v4l2_decoder.clone();
-						}
+						#[cfg(all(target_os = "linux", feature = "vaapi"))]
+						decode.vaapi = self.args.vaapi_device.clone();
+						#[cfg(all(target_os = "linux", feature = "v4l2"))]
+						decode.v4l2 = self.args.v4l2_decoder.clone();
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						let mut subscriber = track
@@ -1757,9 +1756,9 @@ mod tests {
 			args: Args {
 				catalog_format: None,
 				metrics: None,
-				#[cfg(target_os = "linux")]
+				#[cfg(all(target_os = "linux", feature = "vaapi"))]
 				vaapi_device: None,
-				#[cfg(target_os = "linux")]
+				#[cfg(all(target_os = "linux", feature = "v4l2"))]
 				v4l2_decoder: None,
 				delay: Delay::Fixed(delay),
 				select: Default::default(),

@@ -92,13 +92,13 @@ pub struct Args {
 
 	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
 	/// first that encodes, decodes, and scales.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
 	pub vaapi_device: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M decoder node, such as `/dev/video10`. Defaults to the first
 	/// that decodes H.264.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "v4l2"))]
 	#[usage(long, env = "MOQ_V4L2_DECODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_decoder: Option<std::path::PathBuf>,
 }
