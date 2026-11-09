@@ -1702,6 +1702,7 @@ async def test_decode_video_frame():
     decoder.cancel()
     assert isinstance(frame, moq.VideoDecodedFrame)
     assert frame.timestamp().scale == 1_000_000
+    assert frame.surface() is None
 
     i420 = frame.pixels(moq.VideoPixelFormat.I420)
 
@@ -1713,6 +1714,15 @@ async def test_decode_video_frame():
 
     video.finish()
     broadcast.close()
+
+
+def test_video_surface_unknown_kind() -> None:
+    """A surface kind this package predates maps to the fallback arm instead of failing."""
+    from moq._records import _surface
+
+    assert _surface(None) is None
+    assert _surface(moq_ffi.MoqVideoSurface.PIXEL_BUFFER(7)) == moq.VideoSurfacePixelBuffer(7)
+    assert _surface(cast(Any, object())) == moq.VideoSurfaceUnknown()
 
 
 async def test_broadcast_is_reachable_only_while_announced():

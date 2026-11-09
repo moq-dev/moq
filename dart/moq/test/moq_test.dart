@@ -6,6 +6,7 @@ import 'package:moq/audio.dart' as moq_audio;
 import 'package:moq/media.dart' as moq_media;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
+import 'package:moq/src/surface.dart' show surfaceFrom;
 import 'package:moq/video.dart' as moq_video;
 import 'package:test/test.dart';
 
@@ -877,6 +878,14 @@ void main() {
     broadcast.close();
   });
 
+  // A surface kind the package predates maps to the fallback arm instead of failing.
+  test('video surface maps an unknown kind', () {
+    expect(surfaceFrom(null), isNull);
+    final pixels = surfaceFrom(PixelBufferMoqVideoSurface(7));
+    expect((pixels as moq_video.PixelBuffer).pointer, 7);
+    expect(surfaceFrom(_FutureSurface()), isA<moq_video.UnknownSurface>());
+  });
+
   // A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
   test('audio consumer reports its playout delay', () async {
     final broadcast = BroadcastProducer();
@@ -968,4 +977,16 @@ void main() {
     producer.finish();
     broadcast.close();
   });
+}
+
+/// Stands in for a generated surface variant this package predates.
+final class _FutureSurface extends MoqVideoSurface {
+  @override
+  RustBuffer lower() => throw UnimplementedError();
+
+  @override
+  int allocationSize() => throw UnimplementedError();
+
+  @override
+  int write(Uint8List buf) => throw UnimplementedError();
 }

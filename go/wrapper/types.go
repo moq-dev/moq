@@ -71,10 +71,6 @@ type (
 	Order = ffi.MoqOrder
 	// Position is a location within a track: a group sequence and a frame index in it.
 	Position = ffi.MoqPosition
-	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
-	VideoSurface = ffi.MoqVideoSurface
-	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
-	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
 	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to video.Producer, or read from a VideoDecodedFrame.
