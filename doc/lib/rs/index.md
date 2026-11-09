@@ -85,8 +85,8 @@ let route = origin.route("my-stream.hang", RouteOptions::default())?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill
 // `route.broadcast()`. Keep the route: dropping it, or closing its broadcast,
 // retracts it, and `withdraw()`/`announce()` hide and show the same stream. To
-// serve a whole subtree on demand instead, `origin.route_prefix("room", ..)?`
-// yields each requested path: answer with `request.route(..)`, `serve` a held
+// serve a whole subtree on demand instead, `origin.claim("room", ..)?` returns
+// a `Claim` that yields each requested path: answer with `request.route(..)`, `serve` a held
 // broadcast, or `reject`.
 ```
 

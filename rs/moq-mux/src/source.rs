@@ -675,7 +675,7 @@ mod tests {
 		settle().await;
 		let source = resolved(&origin, "pub").await;
 		let dynamic = origin
-			.route_prefix("media", moq_net::origin::RouteOptions::default())
+			.claim("media", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let binding = source.bind(Some(&Relative::new("media").unwrap()), None).unwrap();
 		let request = dynamic.requested().await.unwrap();

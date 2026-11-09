@@ -8,6 +8,7 @@ from moq_ffi import (
     MoqAnnounceConsumer,
     MoqAnnounceEvent,
     MoqBroadcastRequest,
+    MoqClaim,
     MoqFollowing,
     MoqOriginConfig,
     MoqOriginConsumer,
@@ -119,19 +120,19 @@ class BroadcastRequest:
     def route(self, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0) -> Route:
         """Answer with the path's own exact :class:`Route`, owning a new broadcast.
 
-        Unless ``instance`` names one, the route takes the instance its prefix route lends when
-        it first announces or :attr:`Route.instance` first reads it, so readers that resolved
-        the path through the prefix route continue on it; its end then moves the prefix route to
-        a fresh instance, so a job that restarts is a new stream. A prefix route that names its
-        instance lends none, and the route mints its own. Created visible, it announces now and
-        answers the waiting requesters; created ``hidden``, they wait until
-        :meth:`Route.announce`, so the job can fill its catalog first, and cancelling the route
-        before then refuses them. Ending the route withdraws only this path.
+        Unless ``instance`` names one, the route takes the instance its claim lends when it
+        first announces or :attr:`Route.instance` first reads it, so readers that resolved the
+        path through the claim continue on it; its end then moves the claim to a fresh
+        instance, so a job that restarts is a new stream. A claim that names its instance lends
+        none, and the route mints its own. Created visible, it announces now and answers the
+        waiting requesters; created ``hidden``, they wait until :meth:`Route.announce`, so the
+        job can fill its catalog first, and cancelling the route before then refuses them.
+        Ending the route withdraws only this path.
         """
         return Route(self._inner.route(_options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
 
     def serve(self, broadcast: BroadcastConsumer) -> None:
-        """Serve held content under the prefix route's continuous sequence space, without an exact route."""
+        """Serve held content under the claim's continuous sequence space, without an exact route."""
         self._inner.serve(broadcast._inner)
 
     def reject(self, error_code: int) -> None:
@@ -139,40 +140,37 @@ class BroadcastRequest:
         self._inner.reject(error_code)
 
 
-class Route(_Stream[BroadcastRequest]):
-    """A route on an origin: an exact route owning one broadcast, or a prefix route
-    yielding the requests beneath it.
+class Route:
+    """An exact route on an origin, owning one broadcast.
 
     Hold it for as long as the route should stay advertised: dropping or cancelling it
-    retracts it, as does closing an exact route's broadcast. A broadcast handle alone does
-    not keep it announced. Iterate a prefix route with ``async for`` for its
-    :class:`BroadcastRequest` values; usable as an async context manager that cancels the
-    route on exit.
+    retracts it, as does closing its broadcast. A broadcast handle alone does not keep it
+    announced. Usable as an async context manager that cancels the route on exit.
     """
 
     def __init__(self, inner: MoqRoute) -> None:
         self._inner = inner
-        self._broadcast: BroadcastProducer | None = None
+        self._broadcast = BroadcastProducer._from_inner(inner.broadcast())
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     @property
     def broadcast(self) -> BroadcastProducer:
-        """The broadcast this exact route owns, to fill with tracks.
-
-        Raises ``moq.Error.Internal`` on a prefix route, which owns none: answer its requests instead.
-        """
-        if self._broadcast is None:
-            self._broadcast = BroadcastProducer._from_inner(self._inner.broadcast())
+        """The broadcast this route owns, to fill with tracks."""
         return self._broadcast
 
     @property
     def instance(self) -> str:
         """The stream this route serves now.
 
-        A named instance never changes. Unnamed, a prefix route moves to a fresh one each time
-        a job holding its current one ends. A job's route takes its prefix route's current one
-        when it first announces or when this first reads it. Read first, the job announces
-        under it, and :meth:`announce` fails with ``Unroutable`` once the prefix route has moved
-        past it, so a signer built from it stays valid. Withdrawing and announcing keep it."""
+        A named instance never changes. A job's route takes its claim's current one when it
+        first announces or when this first reads it. Read first, the job announces under it,
+        and :meth:`announce` fails with ``Unroutable`` once the claim has moved past it, so a
+        signer built from it stays valid. Withdrawing and announcing keep it."""
         return self._inner.instance_id()
 
     def announce(self) -> None:
@@ -198,21 +196,65 @@ class Route(_Stream[BroadcastRequest]):
         """
         self._inner.set_cost(cost)
 
+    def cancel(self) -> None:
+        """Retract the route and release it now. Its broadcast lives on until
+        :meth:`BroadcastProducer.close`."""
+        self._inner.cancel()
+
+
+class Claim(_Stream[BroadcastRequest]):
+    """A prefix route on an origin: a claim that every path beneath a prefix can be served,
+    yielding each request as it arrives.
+
+    Hold it for as long as the claim should stay advertised: dropping or cancelling it
+    retracts it and rejects the requests still waiting. Iterate it with ``async for`` for its
+    :class:`BroadcastRequest` values; usable as an async context manager that cancels the
+    claim on exit.
+    """
+
+    def __init__(self, inner: MoqClaim) -> None:
+        self._inner = inner
+
+    @property
+    def instance(self) -> str:
+        """The stream this claim serves now.
+
+        A named instance never changes. Unnamed, the claim moves to a fresh one each time a
+        job holding its current one ends. Withdrawing and announcing keep it."""
+        return self._inner.instance_id()
+
+    def announce(self) -> None:
+        """Make the claim visible, or keep it so."""
+        self._inner.announce()
+
+    def withdraw(self) -> None:
+        """Hide the claim from everyone, keeping its instance: :meth:`announce` brings it back.
+
+        Requests beneath it are rejected meanwhile.
+        """
+        self._inner.withdraw()
+
+    def set_cost(self, cost: int) -> None:
+        """Re-price the claim in place: lower wins among routes covering the same prefix.
+
+        A hidden claim keeps the price for when it next announces.
+        """
+        self._inner.set_cost(cost)
+
     async def _next(self) -> BroadcastRequest | None:
         return await self.requested()
 
     async def requested(self) -> BroadcastRequest | None:
-        """Await the next broadcast a consumer requests beneath this prefix route.
+        """Await the next broadcast a consumer requests beneath this claim.
 
         Serve, route, or reject it; the requester stays pending until then. Returns
-        ``None`` once the origin closes, and at once on an exact route.
+        ``None`` once the claim is retracted or the origin closes.
         """
         request = await self._inner.requested()
         return None if request is None else BroadcastRequest(request)
 
     def cancel(self) -> None:
-        """Retract the route and release it now. An exact route's broadcast lives on until
-        :meth:`BroadcastProducer.close`."""
+        """Retract the claim and release it now, rejecting the requests still waiting."""
         self._inner.cancel()
 
 
@@ -260,7 +302,7 @@ class OriginConsumer:
 class OriginProducer:
     """The publishing side of an origin: route broadcasts for consumers to discover.
 
-    Call :meth:`route` to publish a broadcast at a path, :meth:`route_prefix` to
+    Call :meth:`route` to publish a broadcast at a path, :meth:`claim` to
     serve on-demand requests beneath a prefix, or :meth:`consume` for a matching
     :class:`OriginConsumer`.
     """
@@ -293,15 +335,13 @@ class OriginProducer:
         """
         return Route(self._inner.route(path, _options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
 
-    def route_prefix(
+    def claim(
         self, prefix: str, *, hidden: bool = False, cost: int = 0, instance: str | None = None, epoch: int = 0
-    ) -> Route:
-        """Create a :class:`Route` over ``prefix`` that yields the requests beneath it.
+    ) -> Claim:
+        """Claim ``prefix`` and yield the requests beneath it as a :class:`Claim`.
 
-        A route claims ``prefix`` and every path beneath it (``""`` claims every
+        A claim covers ``prefix`` and every path beneath it (``""`` claims every
         path). A service that only serves some of them rejects the rest as they
-        are requested. Hold the route while it should stay advertised.
+        are requested. Hold the claim while it should stay advertised.
         """
-        return Route(
-            self._inner.route_prefix(prefix, _options(hidden=hidden, cost=cost, instance=instance, epoch=epoch))
-        )
+        return Claim(self._inner.claim(prefix, _options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))

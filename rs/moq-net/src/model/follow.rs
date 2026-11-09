@@ -606,7 +606,7 @@ mod tests {
 	/// it, the takeover's restart lands while resolving; at it, the origin holds that restart.
 	async fn hands_out_a_takeover_once(dynamic_at: &str) {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix(dynamic_at, RouteOptions::default()).unwrap();
+		let dynamic = origin.claim(dynamic_at, RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over under another instance.
@@ -633,7 +633,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_waits_for_another_instance_after_a_dropped_takeover() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let dynamic = origin.claim("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		let (takeover, _publish) = futures::join!(available(&mut announced), async {
@@ -653,7 +653,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("", RouteOptions::default()).unwrap();
+		let dynamic = origin.claim("", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
@@ -756,7 +756,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_reports_a_dropped_prepared_answer() {
 		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -789,7 +789,7 @@ mod tests {
 	async fn announced_retries_a_refusal_on_another_route_of_the_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
-		let claim = origin.route_prefix("", options(&instance)).unwrap();
+		let claim = origin.claim("", options(&instance)).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -813,7 +813,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_waits_for_a_route_change_after_a_refusal() {
 		let origin = Hop::new(1).unwrap().produce();
-		let claim = origin.route_prefix("live", RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", RouteOptions::default()).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
@@ -835,7 +835,7 @@ mod tests {
 	#[kio::test]
 	async fn announced_does_not_retry_a_refusal_after_a_takeover() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.route_prefix("", options(&Instance::random())).unwrap();
+		let dynamic = origin.claim("", options(&Instance::random())).unwrap();
 		let exact = origin.route("live", options(&Instance::random())).unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let _first = available(&mut announced).await;

@@ -72,7 +72,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 // Hidden until the catalog is filled; hold the route while it should stay announced.
 let route = try session.publish.route(path: "my-stream.hang", hidden: true)
-let broadcast = try route.broadcast
+let broadcast = route.broadcast
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
 try audio.writeFrame(packet, timestamp: Timestamp(value: 20, scale: 1_000))
 try audio.cut() // audio has no keyframes, so this is what gives it groups

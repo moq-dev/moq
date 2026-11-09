@@ -649,7 +649,7 @@ struct Pool {
 
 impl Pool {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = Rc::new(origin.route_prefix("pool", origin::RouteOptions::default()).unwrap());
+		let claim = Rc::new(origin.claim("pool", origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
 		let answered = Rc::new(RefCell::new(0));
 		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());

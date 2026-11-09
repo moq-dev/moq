@@ -29,7 +29,7 @@ async fn widest_hop_crosses_each_varint_form() {
 		let _upstream = peer(upstream, &source, &relay).await;
 		let _downstream = peer(downstream.parse().unwrap(), &relay, &sink).await;
 		let _route = source
-			.route_prefix("room", moq_net::origin::RouteOptions::default())
+			.claim("room", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		kio::clock::sim::idle().await;
 

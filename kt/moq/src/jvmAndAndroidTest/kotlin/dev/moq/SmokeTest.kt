@@ -210,7 +210,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.routePrefix("", RouteOptions()).use { /* prefix route smoke */ }
+            origin.claim("", RouteOptions()).use { /* claim smoke */ }
         }
     }
 
@@ -912,8 +912,7 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.routePrefix("live", RouteOptions()).use { dynamic ->
-                assertFailsWith<MoqException.Internal> { dynamic.broadcast() }
+            origin.claim("live", RouteOptions()).use { dynamic ->
                 val pending = async {
                     origin.consume().request("live/cam")
                 }

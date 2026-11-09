@@ -301,7 +301,7 @@ struct Job {
 
 impl Worker {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = origin.route_prefix("live", origin::RouteOptions::default()).unwrap();
+		let claim = origin.claim("live", origin::RouteOptions::default()).unwrap();
 		let jobs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 		let (handler, answered) = (claim.clone(), jobs.clone());
 		tokio::spawn(async move {

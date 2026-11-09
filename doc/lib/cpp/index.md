@@ -140,7 +140,7 @@ A raw `moq::Frame` with `std::nullopt` is untimed.
 moq::RouteOptions options;
 options.hidden = true; // fill tracks before anyone finds it; hold the route to stay announced
 auto route = ok(session->publish()->route("my-stream.hang", options));
-auto broadcast = ok(route->broadcast());
+auto broadcast = route->broadcast();
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 

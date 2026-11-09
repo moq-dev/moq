@@ -141,7 +141,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 					let _routes: Vec<_> = (0..routes)
 						.map(|i| {
 							producer
-								.route_prefix(format!("room/{i}/mic.hang"), moq_net::origin::RouteOptions::default())
+								.claim(format!("room/{i}/mic.hang"), moq_net::origin::RouteOptions::default())
 								.unwrap()
 						})
 						.collect();
@@ -157,7 +157,7 @@ fn bench_announce_covering(c: &mut Criterion) {
 					b.iter(|| {
 						for (name, delivered) in [("room/live.chat", true), ("room/mic.hang", covering)] {
 							let route = producer
-								.route_prefix(name, moq_net::origin::RouteOptions::default())
+								.claim(name, moq_net::origin::RouteOptions::default())
 								.unwrap();
 							for cursor in &mut cursors {
 								assert_eq!(cursor.next().now_or_never().flatten().is_some(), delivered);
@@ -633,7 +633,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			let consumer = producer.consume();
 			// Served but never answered: every request under it parks a front.
 			let _served = producer
-				.route_prefix("room", moq_net::origin::RouteOptions::default())
+				.claim("room", moq_net::origin::RouteOptions::default())
 				.unwrap();
 			let _requests: Vec<_> = (0..fronts)
 				.map(|i| consumer.request(format!("room/{i}"), None))
@@ -681,7 +681,7 @@ fn bench_lend(c: &mut Criterion) {
 				let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 				let consumer = producer.consume();
 				let claim = producer
-					.route_prefix("room", moq_net::origin::RouteOptions::default())
+					.claim("room", moq_net::origin::RouteOptions::default())
 					.unwrap();
 				let waiter = kio::Waiter::noop();
 				let mut ask = |path: &str| {
@@ -743,7 +743,7 @@ fn bench_serve_idle(c: &mut Criterion) {
 			let dynamics: Vec<_> = (0..routes)
 				.map(|i| {
 					producer
-						.route_prefix(
+						.claim(
 							format!(".stats/p{}/node/edge{i}", i % 8),
 							moq_net::origin::RouteOptions::default(),
 						)

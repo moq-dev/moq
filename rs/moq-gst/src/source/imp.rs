@@ -4448,7 +4448,7 @@ mod session_tests {
 		let origin = origin();
 
 		let claim = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
+			.claim("", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let (answers, answered) = std::sync::mpsc::channel();
 		let handler = super::RUNTIME.spawn(async move {
@@ -4484,7 +4484,7 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 		let pool = origin
-			.route_prefix("", moq_net::origin::RouteOptions::default())
+			.claim("", moq_net::origin::RouteOptions::default())
 			.unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {

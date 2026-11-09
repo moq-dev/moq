@@ -454,7 +454,7 @@ impl From<i8> for Preference {
 /// paths under its prefix are servable, never that any specific broadcast exists. The
 /// common convention is that a publisher announces each broadcast's exact path with
 /// [`Producer::route`], so subscribers can enumerate broadcasts; a service instead
-/// announces one short prefix with [`Producer::route_prefix`] and answers whatever is
+/// announces one short prefix with [`Producer::claim`] and answers whatever is
 /// requested beneath it.
 ///
 /// Applications never build one: a [`Route`] takes [`RouteOptions`], and the origin
@@ -2317,7 +2317,7 @@ impl Producer {
 	/// a request for its path fails with [`Error::Unroutable`], for a consumer of this
 	/// origin exactly as for a peer. Create it hidden when the tracks a subscriber needs
 	/// first, such as a catalog, are not there yet. To serve paths on demand without
-	/// publishing each one, use [`Self::route_prefix`].
+	/// publishing each one, use [`Self::claim`].
 	///
 	/// Announcing is visible to local consumers before it returns; only lifecycle work
 	/// (track serving, teardown) waits for the [`Driver`] to be polled. Register a
@@ -2471,7 +2471,7 @@ impl Producer {
 	/// can be served, answered by nothing.
 	///
 	/// A request under an advertise-only route resolves [`Error::Unroutable`]
-	/// unless an announced broadcast or a prefix route ([`Self::route_prefix`]) covers
+	/// unless an announced broadcast or a prefix route ([`Self::claim`]) covers
 	/// the path too. Tests use it to shape the route table; everything else
 	/// advertises through a [`Route`] or [`Claim`], which serves what it claims.
 	#[cfg(test)]
@@ -2585,7 +2585,7 @@ impl Producer {
 	///
 	/// The prefix must overlap this producer's pattern scope. Individual requests
 	/// remain authoritative and are refused when they do not match the scope.
-	pub fn route_prefix(
+	pub fn claim(
 		&self,
 		prefix: impl TryInto<Path, Error: Into<Error>>,
 		options: RouteOptions,
@@ -2785,7 +2785,7 @@ impl Producer {
 }
 
 /// What it takes to insert a route: the prefixes it covers and the origin table
-/// to insert them into. Built by [`Producer::route`], [`Producer::route_prefix`]
+/// to insert them into. Built by [`Producer::route`], [`Producer::claim`]
 /// and the advertise-only test helper.
 struct Announcing {
 	hop: Hop,
@@ -2956,7 +2956,7 @@ pub struct Route {
 /// A prefix route on an origin: a claim that every path beneath a prefix can be served,
 /// answering each request as it arrives.
 ///
-/// Created by [`Producer::route_prefix`]. Requests arrive on [`Self::poll_requested`]; answer
+/// Created by [`Producer::claim`]. Requests arrive on [`Self::poll_requested`]; answer
 /// each by serving a broadcast already held or by creating the path's own [`Route`].
 ///
 /// Clones share one claim. Dropping the last clone retracts it and refuses the requests
@@ -3237,7 +3237,7 @@ impl Claim {
 	/// [`RouteOptions::with_instance`] named one.
 	///
 	/// Unnamed, it can change: the claim moves to a fresh instance each time an answer
-	/// holding its current one ends. See [`Producer::route_prefix`].
+	/// holding its current one ends. See [`Producer::claim`].
 	pub fn instance(&self) -> Instance {
 		self.state.instance()
 	}
@@ -11501,7 +11501,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let server = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let server = producer.claim("room", RouteOptions::default()).unwrap();
 
 		let pending = consumer.request("room/alice", None);
 		let request = queued(&server).await;
@@ -11528,9 +11528,9 @@ mod tests {
 		let consumer = producer.consume();
 		let excluded = producer.exclude(".stats").unwrap();
 		assert!(excluded.route(".stats/node", RouteOptions::default()).is_err());
-		assert!(excluded.route_prefix(".stats", RouteOptions::default()).is_err());
+		assert!(excluded.claim(".stats", RouteOptions::default()).is_err());
 
-		let server = excluded.route_prefix("", RouteOptions::default()).unwrap();
+		let server = excluded.claim("", RouteOptions::default()).unwrap();
 		let Err(err) = consumer.request(".stats/evil", None).await else {
 			panic!("excluded path served")
 		};
@@ -12114,7 +12114,7 @@ mod tests {
 	async fn claim_answer_is_hidden_until_published_under_the_claims_instance() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		let mut pending = Box::pin(consumer.request("room/alice", None));
 		assert!((&mut pending).now_or_never().is_none());
 
@@ -12142,7 +12142,7 @@ mod tests {
 	async fn a_hidden_job_route_is_listed_only_once_announced() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().routes();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		announced.assert_next_active("room");
 		let pending = producer.consume().request("room/alice", None);
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
@@ -12229,7 +12229,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn a_refused_prepared_answer_cannot_announce_later() {
 		let producer = origin(1).produce();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		let _pending = producer.consume().request("room/alice", None);
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
 		let clone = prepared.clone();
@@ -12244,7 +12244,7 @@ mod tests {
 	async fn dropping_a_prepared_claim_answer_refuses_the_request() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		let pending = consumer.request("room/alice", None);
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
 		drop(prepared);
@@ -12257,7 +12257,7 @@ mod tests {
 	async fn a_prepared_answer_for_an_abandoned_claim_is_never_announced() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().routes();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		announced.assert_next_active("room");
 		let _pending = producer.consume().request("room/alice", None);
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
@@ -12275,7 +12275,7 @@ mod tests {
 	async fn a_job_route_for_a_withdrawn_prefix_is_never_announced() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().routes();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		announced.assert_next_active("room");
 		let pending = producer.consume().request("room/alice", None);
 		let job = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
@@ -12300,7 +12300,7 @@ mod tests {
 	async fn a_prepared_answer_for_a_released_request_is_never_announced() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().routes();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		announced.assert_next_active("room");
 		let _pending = producer.consume().request("room/alice", None);
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
@@ -12319,7 +12319,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn a_withdrawn_publication_is_not_a_cached_claim_answer() {
 		let producer = origin(1).produce();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		let path = Path::from_static("room/alice");
 		let pending = producer.consume().request(path.clone(), None);
 		let publication = queued(&claim).await.route(RouteOptions::default()).unwrap();
@@ -12345,7 +12345,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.routes();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		announced.assert_next_active("room");
 		let first = claim.instance();
 
@@ -12398,7 +12398,7 @@ mod tests {
 	async fn a_hidden_job_takes_the_claims_instance_when_it_announces() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 
 		let alice = consumer.request("room/alice", None);
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
@@ -12426,7 +12426,7 @@ mod tests {
 	async fn a_job_that_read_its_instance_is_refused_once_the_claim_moves() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 
 		let alice = consumer.request("room/alice", None);
 		let prepared = queued(&claim).await.route(RouteOptions::hidden()).unwrap();
@@ -12457,7 +12457,7 @@ mod tests {
 	async fn a_pinned_request_reaches_its_job_after_a_sibling_moves_the_claim() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		let lent = claim.instance();
 
 		let reader = consumer.request("room/alice", None);
@@ -12481,7 +12481,7 @@ mod tests {
 	async fn a_request_pinned_to_an_ended_job_is_refused() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 
 		let pending = consumer.request("room/alice", None);
 		let job = queued(&claim).await.route(RouteOptions::default()).unwrap();
@@ -12511,7 +12511,7 @@ mod tests {
 	async fn a_claim_and_its_job_end_independently() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		let pending = consumer.request("room/alice", None);
 		let job = queued(&claim).await.route(RouteOptions::default()).unwrap();
 		let held = pending.await.unwrap();
@@ -12534,7 +12534,7 @@ mod tests {
 		let consumer = producer.consume();
 		let stable = instance();
 		let claim = producer
-			.route_prefix("room", RouteOptions::default().with_instance(stable.clone(), 0))
+			.claim("room", RouteOptions::default().with_instance(stable.clone(), 0))
 			.unwrap();
 
 		let pending = consumer.request("room/alice", None);
@@ -12544,7 +12544,7 @@ mod tests {
 		drop(minted);
 		assert_eq!(claim.instance(), stable);
 
-		let lending = producer.route_prefix("lent", RouteOptions::default()).unwrap();
+		let lending = producer.claim("lent", RouteOptions::default()).unwrap();
 		let lent = lending.instance();
 		let named = instance();
 		let pending = consumer.request("lent/bob", None);
@@ -12565,7 +12565,7 @@ mod tests {
 	async fn a_pinned_request_resolves_only_through_the_published_instance() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let claim = producer.route_prefix("room", RouteOptions::default()).unwrap();
+		let claim = producer.claim("room", RouteOptions::default()).unwrap();
 		let unknown = consumer.request("room/alice", crate::Instance::random());
 		assert!(matches!(unknown.await, Err(Error::Unroutable)));
 
@@ -15713,7 +15713,7 @@ mod tests {
 		assert!(routes.next().await.is_some());
 		drop(routes);
 		drop(overlap);
-		let source = producer.route_prefix("project/room", RouteOptions::default()).unwrap();
+		let source = producer.claim("project/room", RouteOptions::default()).unwrap();
 		let pending = consumer.request("room/lobby.chat", None);
 		let request = source.requested().await.unwrap();
 		request.serve(local.broadcast().consume());

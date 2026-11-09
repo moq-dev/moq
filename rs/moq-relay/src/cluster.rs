@@ -2786,9 +2786,9 @@ mod tests {
 					"route {path}, peer={peer}"
 				);
 				assert_eq!(
-					publisher.route_prefix(path, options()).is_ok(),
+					publisher.claim(path, options()).is_ok(),
 					peer,
-					"route_prefix {path}, peer={peer}"
+					"claim {path}, peer={peer}"
 				);
 			}
 			assert!(publisher.route(".statsish", options()).is_ok());

@@ -57,7 +57,7 @@ impl Worker {
 		let origin = produce_origin(hop);
 		let claim = Rc::new(
 			origin
-				.route_prefix("pool", moq_net::origin::RouteOptions::default())
+				.claim("pool", moq_net::origin::RouteOptions::default())
 				.unwrap(),
 		);
 		let outputs = Rc::new(RefCell::new(Vec::new()));

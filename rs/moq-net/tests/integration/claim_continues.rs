@@ -55,7 +55,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64, claim: &str, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.route_prefix(claim, origin::RouteOptions::default()).unwrap());
+		let claim = Rc::new(origin.claim(claim, origin::RouteOptions::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {

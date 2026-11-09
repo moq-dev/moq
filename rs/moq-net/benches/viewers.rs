@@ -188,7 +188,7 @@ fn bench_churn(c: &mut Criterion) {
 			b.iter(|| {
 				let covering = room
 					.producer
-					.route_prefix("room", moq_net::origin::RouteOptions::default())
+					.claim("room", moq_net::origin::RouteOptions::default())
 					.unwrap();
 				room.poll();
 				drop(covering);
