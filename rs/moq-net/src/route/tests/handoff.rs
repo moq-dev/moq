@@ -744,6 +744,7 @@ fn exhausted_counters_rotate_the_identity() {
 	let rotated = |sim: &Sim| {
 		let fresh = sim.proven(origin);
 		assert_ne!(fresh, 7, "a fresh identity");
+		assert!(fresh <= crate::route::GENERATED, "a lite-06 hop carries it as itself");
 		assert_eq!(sim.shows(client, 7, "live/x"), None);
 		assert_eq!(sim.shows(client, fresh, "live/x"), Some(true));
 		assert!(sim.route(a, 7).is_none());

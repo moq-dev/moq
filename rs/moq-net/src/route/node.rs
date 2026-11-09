@@ -24,7 +24,7 @@ use crate::{Instance, Path};
 
 use rand::RngExt;
 
-use super::{Error, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
+use super::{Error, GENERATED, Id, Link, Metric, Out, QUALIFIED, Reach, Rev, Router, Seqno};
 
 /// One announce stream in one direction.
 pub(crate) type Key = u64;
@@ -387,7 +387,7 @@ impl Node {
 	pub fn origin(hop: std::num::NonZeroU64) -> Self {
 		let mut rng = kio::clock::rng();
 		let id = match hop.get() & !QUALIFIED {
-			0 => rng.random_range(1..QUALIFIED),
+			0 => rng.random_range(1..=GENERATED),
 			id => id,
 		};
 		Self::new(id, rng.random())
@@ -737,7 +737,7 @@ pub(crate) fn hop(id: Id) -> crate::Hop {
 		hash ^= u64::from(byte);
 		hash = hash.wrapping_mul(0x0100_0000_01b3);
 	}
-	let id = (hash & ((1 << 53) - 1)).max(1);
+	let id = (hash & GENERATED).max(1);
 	crate::Hop::from(std::num::NonZeroU64::new(id).expect("a non-zero hop id"))
 }
 

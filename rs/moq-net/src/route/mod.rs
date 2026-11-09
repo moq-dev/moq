@@ -48,6 +48,10 @@ pub(crate) type Id = u64;
 /// qualified key and refuses to qualify it again.
 pub(crate) const QUALIFIED: Id = 1 << 63;
 
+/// The largest identity a node generates: the 53 bits a generated hop id keeps, so
+/// a generated identity travels as itself on a lite-06 hop chain (see `node::hop`).
+pub(crate) const GENERATED: Id = (1 << 53) - 1;
+
 /// A route metric: the sum of configured link costs.
 pub(crate) type Metric = u64;
 
@@ -662,12 +666,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 	fn rotate(&mut self, old: Id) {
 		let origin = self.origins.remove(&old).expect("declared");
 		let id = loop {
-			// xorshift64: a fresh, unqualified identity.
+			// xorshift64: a fresh identity within a generated hop id's range.
 			self.rng ^= self.rng << 13;
 			self.rng ^= self.rng >> 7;
 			self.rng ^= self.rng << 17;
-			let id = self.rng & !QUALIFIED;
-			if id != old && !self.origins.contains_key(&id) {
+			let id = self.rng & GENERATED;
+			if id != 0 && id != old && !self.origins.contains_key(&id) {
 				break id;
 			}
 		};
@@ -1443,10 +1447,12 @@ impl<N: Key, A: Clone + Eq + fmt::Debug> Router<N, A> {
 			return;
 		};
 		let ctx = self.ctx(id, Some(selected));
+		// As `advertise` decides, including that a route ends on a stream until its end is echoed.
 		let sends = peers.iter().any(|to| {
 			let peer = &self.neighbors[to];
 			self.serves(peer, id)
 				&& !(peer.link.upstream && selected.down_only)
+				&& (self.sent.contains_key(&(id, *to)) || !self.unacked.contains_key(&(id, *to)))
 				&& self.meets(id, &ctx, peer.watch.as_ref().expect("a watching peer"))
 		});
 		if !sends {
