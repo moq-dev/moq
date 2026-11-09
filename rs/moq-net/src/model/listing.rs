@@ -85,9 +85,6 @@ pub(super) struct ListingState {
 	live: LinkedHashMap<Arc<str>, Entry>,
 	/// The queue of every reader of the current answer.
 	readers: slab::Slab<kio::Shared<Queue>>,
-	/// Bumped whenever every reader is detached at once, so a reader of an earlier
-	/// answer releases nothing on drop.
-	generation: u64,
 	/// Each owner's reader, by its key in `readers`.
 	owners: HashMap<Owner, usize>,
 	/// Whether a [`Lister`] exists. While one does, readers wait for its answer to sync.
@@ -109,31 +106,28 @@ impl ListingState {
 	}
 
 	/// Start a reader with every listed track queued, ending `owner`'s older one.
-	fn read(&mut self, owner: Option<Owner>) -> (kio::Shared<Queue>, usize, u64) {
+	fn read(&mut self, owner: Option<Owner>) -> (kio::Shared<Queue>, usize) {
 		let mut queue = Queue::default();
 		for (name, entry) in &self.live {
 			queue.pending.insert(name.clone(), Pending::Add(entry.info.clone()));
 		}
 		if self.synced() {
-			queue.bound = Some(queue.pending.len());
+			queue.sync = SyncPhase::Counting(queue.pending.len());
 		}
 		let queue = kio::Shared::new(queue);
 		let key = self.readers.insert(queue.clone());
 		if let Some(older) = owner.and_then(|owner| self.owners.insert(owner, key)) {
-			let older = self.readers.remove(older);
-			let mut older = older.lock();
-			older.end = Some(Err(Error::Cancel));
-			older.detached = true;
+			self.readers.remove(older).lock().end = Some(Err(Error::Cancel));
 		}
-		(queue, key, self.generation)
+		(queue, key)
 	}
 
-	fn release(&mut self, key: usize, generation: u64, owner: Option<Owner>, queue: &kio::Shared<Queue>) {
-		// A replaced reader already left, and its key may be another's now.
-		if generation != self.generation || queue.read().detached {
+	fn release(&mut self, key: usize, owner: Option<Owner>, queue: &kio::Shared<Queue>) {
+		// A replaced or ended reader already left, and its key may be another's now.
+		if !self.readers.get(key).is_some_and(|current| current.same_channel(queue)) {
 			return;
 		}
-		self.readers.try_remove(key);
+		self.readers.remove(key);
 		if let Some(owner) = owner {
 			self.owners.remove(&owner);
 		}
@@ -270,7 +264,6 @@ impl ListingState {
 		self.each(|queue| queue.end = Some(end.clone()));
 		self.readers.clear();
 		self.owners.clear();
-		self.generation += 1;
 	}
 
 	/// The broadcast ended: so does every listing of it, first unlisting each track its
@@ -364,20 +357,36 @@ enum Pending {
 #[derive(Default)]
 pub(super) struct Queue {
 	pending: LinkedHashMap<Arc<str>, Pending>,
-	/// Events left to send before SYNCED, once the listing has synced.
-	bound: Option<usize>,
-	/// SYNCED was sent.
-	synced: bool,
+	sync: SyncPhase,
+	/// How the listing ended for this reader, once it did: its broadcast ended, or a newer
+	/// reader of the same owner replaced it.
 	end: Option<Result<(), Error>>,
-	/// A newer reader of the same owner replaced this one.
-	detached: bool,
+}
+
+/// Where one reader's SYNCED stands.
+#[derive(Default)]
+enum SyncPhase {
+	/// The listing has not synced.
+	#[default]
+	Waiting,
+	/// The listing synced: SYNCED goes out after this many more events, or once the queue
+	/// drains if that comes first.
+	Counting(usize),
+	/// SYNCED went out.
+	Sent,
 }
 
 impl Queue {
 	fn add(&mut self, name: Arc<str>, info: track::Info) {
 		match self.pending.get_mut(&name) {
 			Some(pending) => match *pending {
-				Pending::Remove { finished } => *pending = Pending::Readd { finished, info },
+				Pending::Remove { finished } => {
+					*pending = Pending::Readd { finished, info };
+					// The readd's extra event must not use up the count owed to changes queued behind it.
+					if let SyncPhase::Counting(left) = &mut self.sync {
+						*left += 1;
+					}
+				}
 				// A name is listed once at a time, so only its removal can be pending.
 				_ => debug_assert!(false, "a listed track was listed again"),
 			},
@@ -393,7 +402,13 @@ impl Queue {
 			Some(Pending::Add(_)) => {
 				self.pending.remove(name);
 			}
-			// Read, then re-added unread: the reader sees only the last removal.
+			// Read, then re-added unread: the reader sees only the last removal, one event fewer.
+			Some(pending @ Pending::Readd { .. }) => {
+				*pending = Pending::Remove { finished };
+				if let SyncPhase::Counting(left) = &mut self.sync {
+					*left = left.saturating_sub(1);
+				}
+			}
 			Some(pending) => *pending = Pending::Remove { finished },
 			None => {
 				self.pending.insert(name.clone(), Pending::Remove { finished });
@@ -415,20 +430,20 @@ impl Queue {
 	/// The listing synced: SYNCED goes out once what is queued now has been read, or
 	/// earlier if the queue drains first.
 	fn sync(&mut self) {
-		if !self.synced && self.bound.is_none() {
-			self.bound = Some(self.events());
+		if let SyncPhase::Waiting = self.sync {
+			self.sync = SyncPhase::Counting(self.events());
 		}
 	}
 
 	/// The listing's answer restarted before this reader was told it synced.
 	fn unsync(&mut self) {
-		if !self.synced {
-			self.bound = None;
+		if let SyncPhase::Counting(_) = self.sync {
+			self.sync = SyncPhase::Waiting;
 		}
 	}
 
 	fn is_ready(&self) -> bool {
-		self.end.is_some() || !self.pending.is_empty() || (!self.synced && self.bound.is_some())
+		self.end.is_some() || !self.pending.is_empty() || matches!(self.sync, SyncPhase::Counting(_))
 	}
 
 	fn next(&mut self) -> Result<Option<TracksEvent>, Error> {
@@ -449,13 +464,15 @@ impl Queue {
 			}
 			None => {}
 		}
-		if !self.synced && (self.bound == Some(0) || (self.bound.is_some() && self.pending.is_empty())) {
-			self.synced = true;
+		if let SyncPhase::Counting(left) = self.sync
+			&& (left == 0 || self.pending.is_empty())
+		{
+			self.sync = SyncPhase::Sent;
 			return Ok(Some(TracksEvent::Synced));
 		}
 		let (name, pending) = self.pending.pop_front().expect("a ready queue has a pending change");
-		if let Some(bound) = self.bound.as_mut().filter(|_| !self.synced) {
-			*bound -= 1;
+		if let SyncPhase::Counting(left) = &mut self.sync {
+			*left -= 1;
 		}
 		Ok(Some(match pending {
 			Pending::Add(info) => TracksEvent::Added { name, info },
@@ -486,7 +503,6 @@ pub struct Tracks {
 	broadcast: Consumer,
 	queue: kio::Shared<Queue>,
 	key: usize,
-	generation: u64,
 	owner: Option<Owner>,
 }
 
@@ -511,9 +527,7 @@ impl Tracks {
 impl Drop for Tracks {
 	fn drop(&mut self) {
 		let mut state = self.broadcast.state.lock();
-		state
-			.listing
-			.release(self.key, self.generation, self.owner, &self.queue);
+		state.listing.release(self.key, self.owner, &self.queue);
 	}
 }
 
@@ -542,13 +556,12 @@ impl Consumer {
 		if state.closing {
 			return Err(Error::Unroutable);
 		}
-		let (queue, key, generation) = state.listing.read(owner);
+		let (queue, key) = state.listing.read(owner);
 		drop(state);
 		Ok(Tracks {
 			broadcast: self.clone(),
 			queue,
 			key,
-			generation,
 			owner,
 		})
 	}
@@ -711,6 +724,31 @@ mod tests {
 	}
 
 	const NONE: [&str; 0] = [];
+
+	/// A removal re-added after SYNCED was owed still lets the changes queued behind it out first.
+	#[test]
+	fn a_readd_after_sync_keeps_synced_behind_queued_changes() {
+		let mut queue = Queue::default();
+		queue.remove(&"a".into(), false);
+		queue.add("b".into(), track::Info::default());
+		queue.sync();
+		// Churn coalesces in place, so it owes SYNCED nothing extra.
+		for _ in 0..3 {
+			queue.add("a".into(), track::Info::default());
+			queue.remove(&"a".into(), false);
+		}
+		queue.add("a".into(), track::Info::default());
+		let mut events = Vec::new();
+		while queue.is_ready() {
+			events.push(match queue.next().unwrap().unwrap() {
+				TracksEvent::Added { name, .. } => format!("+{name}"),
+				TracksEvent::Removed { name } => format!("-{name}"),
+				TracksEvent::Finished { name } => format!("~{name}"),
+				TracksEvent::Synced => "synced".into(),
+			});
+		}
+		assert_eq!(events, ["-a", "+a", "+b", "synced"]);
+	}
 
 	#[test]
 	fn tracks_present_arrive_before_synced() {
@@ -1112,7 +1150,7 @@ mod tests {
 		let mut listing = ListingState::default();
 		let first = listing.list_own("a".into(), track::Info::default());
 		listing.answer_add("a".into(), track::Info::default()).unwrap();
-		let (queue, _, _) = listing.read(None);
+		let (queue, _) = listing.read(None);
 		assert!(matches!(queue.lock().next(), Ok(Some(TracksEvent::Added { .. }))));
 		// The new track of the name lists before the earlier one unlists.
 		listing.list_own("a".into(), track::Info::default());

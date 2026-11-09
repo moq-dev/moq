@@ -5,7 +5,7 @@ import { Signal } from "@moq/signals";
 const sources: FakeSource[] = [];
 const encoders: Record<string, unknown>[] = [];
 class FakeSource {
-	out = { source: new Signal<unknown>(undefined) };
+	out = { source: new Signal<unknown>(undefined), state: new Signal<unknown>({ kind: "off" }) };
 	constructor() {
 		sources.push(this);
 	}
@@ -35,27 +35,51 @@ async function flush() {
 	for (let i = 0; i < 30; i++) await Promise.resolve();
 }
 
-test("screen capture stays enabled while pending and resets after a live share ends", async () => {
+function setup() {
+	// Each test counts only its own Local's sources and encoders.
+	sources.length = 0;
+	encoders.length = 0;
 	const bandwidth = new Signal(undefined);
 	const local = new Local({
-		connection: {
-			origin: new Signal(undefined),
-			allocator: bandwidth,
-		} as never,
+		connection: { origin: new Signal(undefined), allocator: bandwidth } as never,
 		identity: Path.from("alice"),
 	});
+	return { local, bandwidth, screen: sources.at(-1) as FakeSource };
+}
+
+test("screen capture stays enabled while prompting and resets after a live share ends", async () => {
+	const { local, bandwidth, screen } = setup();
 	try {
 		await flush();
 		expect(encoders).toHaveLength(6);
 		expect(encoders.every((props) => props.bandwidth === bandwidth)).toBe(true);
 		local.screenEnabled.set(true);
+		screen.out.state.set({ kind: "prompting" });
 		await flush();
 		expect(local.screenEnabled.peek()).toBe(true);
-		const screen = sources.at(-1);
-		screen?.out.source.set({ video: {} });
+		expect(local.preview.peek().screen).toBe(false);
+
+		screen.out.state.set({ kind: "live", media: { video: {} } });
 		await flush();
 		expect(local.preview.peek().screen).toBe(true);
-		screen?.out.source.set(undefined);
+
+		screen.out.state.set({ kind: "ended", reason: "stopped" });
+		await flush();
+		expect(local.screenEnabled.peek()).toBe(false);
+		expect(local.preview.peek().screen).toBe(false);
+	} finally {
+		local.close();
+	}
+});
+
+// The share never went live, so nothing but its state says the picker is gone.
+test("a dismissed screen picker turns sharing off", async () => {
+	const { local, screen } = setup();
+	try {
+		local.screenEnabled.set(true);
+		screen.out.state.set({ kind: "prompting" });
+		await flush();
+		screen.out.state.set({ kind: "ended", reason: "dismissed" });
 		await flush();
 		expect(local.screenEnabled.peek()).toBe(false);
 		expect(local.preview.peek().screen).toBe(false);

@@ -3,23 +3,19 @@ use std::{hint::black_box, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kio::clock::Instant;
-use moq_mux::timeline;
+use moq_mux::{container::Kind, sync};
 use moq_net::Timestamp;
 
 fn presentation(c: &mut Criterion) {
-	let mut group = c.benchmark_group("timeline_present");
+	let mut group = c.benchmark_group("sync_present");
 	let now = Instant::ZERO + Duration::from_secs(1);
 	for readers in [1, 8, 64] {
 		for frames in [1, 3, 30] {
-			let clock = timeline::Producer::new(Duration::from_millis(100));
-			clock.audio(
-				moq_mux::timeline::Audio {
-					end: Duration::from_secs(1),
-					buffered: Duration::from_millis(100),
-					target: Duration::from_millis(100),
-				},
-				now,
-			);
+			let clock = sync::Producer::new(Duration::from_millis(100));
+			let audio = clock.track(Kind::Audio);
+			let video = clock.track(Kind::Video);
+			audio.received(Timestamp::from_millis(1_000).unwrap(), now);
+			video.received(Timestamp::from_millis(1_000).unwrap(), now);
 			let consumers: Vec<_> = (0..readers).map(|_| clock.consume()).collect();
 			let timestamps: Vec<_> = (0..frames)
 				.map(|index| Timestamp::from_millis(1_000 + index * 20).unwrap())
@@ -41,18 +37,11 @@ fn presentation(c: &mut Criterion) {
 
 fn update(c: &mut Criterion) {
 	let now = Instant::ZERO + Duration::from_secs(1);
-	let clock = timeline::Producer::new(Duration::from_millis(100));
-	c.bench_function("timeline_audio_update", |b| {
-		b.iter(|| {
-			black_box(clock.audio(
-				moq_mux::timeline::Audio {
-					end: black_box(Duration::from_secs(1)),
-					buffered: Duration::from_millis(100),
-					target: Duration::from_millis(100),
-				},
-				now,
-			))
-		});
+	let clock = sync::Producer::new(Duration::from_millis(100));
+	let audio = clock.track(Kind::Audio);
+	let _video = clock.track(Kind::Video);
+	c.bench_function("sync_received", |b| {
+		b.iter(|| black_box(audio.received(black_box(Timestamp::from_millis(1_000).unwrap()), now)));
 	});
 }
 

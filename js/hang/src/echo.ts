@@ -60,6 +60,8 @@ export const SnapshotSchema = z.looseObject({
 });
 /** One viewer report, with application or container sections flattened beside it. */
 export type Snapshot = z.infer<typeof SnapshotSchema>;
+/** What a viewer writes for one report: {@link Snapshot} with plain numbers. */
+export type SnapshotInput = z.input<typeof SnapshotSchema>;
 
 /** The suffix identifying viewer feedback broadcasts at announce time. */
 export const SUFFIX = ".echo";

@@ -1,4 +1,5 @@
 import type { Window } from "./credit.ts";
+import { Queue } from "./queue.ts";
 
 /** A receive half's phase, each carrying its own data: the RFC 9000 §3.2 states,
  *  plus `stopped` once the application stops reading.
@@ -7,10 +8,10 @@ import type { Window } from "./credit.ts";
  * and "Data Recvd" are one state, `sizeKnown`. A stopped half buffers nothing and
  * only tracks whether the peer has sent its final size. */
 type Phase =
-	| { state: "recv"; queue: Uint8Array[] }
-	| { state: "sizeKnown"; queue: Uint8Array[] }
+	| { state: "recv"; queue: Queue<Uint8Array> }
+	| { state: "sizeKnown"; queue: Queue<Uint8Array> }
 	| { state: "dataRead" }
-	| { state: "resetRecvd"; queue: Uint8Array[]; error: Error }
+	| { state: "resetRecvd"; queue: Queue<Uint8Array>; error: Error }
 	| { state: "resetRead"; error: Error }
 	| { state: "stopped"; error: Error; sizeKnown: boolean };
 
@@ -44,7 +45,7 @@ export interface RecvStreamOptions {
  * explicitly flow-controlled queue below.
  */
 export class RecvStream {
-	#phase: Phase = { state: "recv", queue: [] };
+	#phase: Phase = { state: "recv", queue: new Queue() };
 	// The end of the bytes received, and the final size once known.
 	#end = 0n;
 	// Bytes handed to the reader so far: the stream offset where the queue starts.
@@ -203,7 +204,7 @@ export class RecvStream {
 		// surfacing the error.
 		let keep = reliableSize - this.#delivered;
 		let discarded = 0n;
-		const queue: Uint8Array[] = [];
+		const queue = new Queue<Uint8Array>();
 		for (const chunk of phase.queue) {
 			const bytes = BigInt(chunk.byteLength);
 			if (keep >= bytes) {
