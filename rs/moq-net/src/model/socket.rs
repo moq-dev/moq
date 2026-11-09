@@ -34,7 +34,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::task::{Poll, ready};
 
-use crate::{Error, Path};
+use crate::{Error, Path, SessionError, StreamError};
 
 use super::WeakEntry;
 use super::origin::{self, RouteOptions};
@@ -660,12 +660,13 @@ impl Shared {
 		let routes = [state.client.take(), state.server.take()];
 		drop(guard);
 
+		// Reset outside the lock, as the session closing, and before retracting the
+		// broadcasts: a peer reading through a retracted route sees `Unroutable` instead.
+		for stream in streams {
+			stream.abort(Error::Stream(StreamError::Session(SessionError::Cancel)));
+		}
 		for route in routes.iter().flatten() {
 			route.broadcast().close();
-		}
-		// Reset outside the lock.
-		for stream in streams {
-			stream.abort(Error::Cancel);
 		}
 		for request in queued {
 			request.reject(Error::Cancel);
