@@ -6916,12 +6916,23 @@ async fn server_cancel_releases_its_origins() {
 	server.listen().await.expect("listen failed");
 	assert!(Arc::strong_count(&origin) > 1);
 
+	// Parked, then left unpolled, as a foreign cancel leaves it until `rust_future_free`.
+	let mut accept = Box::pin(server.accept());
+	let waker = std::task::Waker::noop();
+	assert!(
+		accept
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(waker))
+			.is_pending()
+	);
+
 	server.cancel();
 	assert_eq!(
 		Arc::strong_count(&origin),
 		1,
 		"the cancelled server still holds the origin"
 	);
+	drop(accept);
 }
 
 /// A listen that fails to bind leaves the server idle, so it can listen again once the

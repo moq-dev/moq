@@ -342,14 +342,10 @@ impl MoqServer {
 	pub async fn accept(&self) -> Result<Option<Arc<MoqRequest>>, MoqError> {
 		let listening = match &*self.phase.lock().unwrap() {
 			Phase::Idle(_) => return Err(not_listening()),
-			Phase::Listening(listening) => Ok((
-				listening.driver.clone(),
-				listening.queue.clone(),
-				listening.origins.clone(),
-			)),
+			Phase::Listening(listening) => Ok((listening.driver.clone(), listening.queue.clone())),
 			Phase::Cancelled(driver) => Err(driver.clone()),
 		};
-		let (driver, queue, origins) = match listening {
+		let (driver, queue) = match listening {
 			Ok(listening) => listening,
 			Err(driver) => return cancelled(driver).await,
 		};
@@ -359,13 +355,16 @@ impl MoqServer {
 				Ok::<_, MoqError>(queue.lock().await.recv().await)
 			}))
 			.await;
-		let after = match &*self.phase.lock().unwrap() {
-			Phase::Cancelled(driver) => Some(driver.clone()),
-			Phase::Idle(_) | Phase::Listening(_) => None,
+		// Read after the wait, so a parked accept holds no origin past a cancel.
+		let origins = match &*self.phase.lock().unwrap() {
+			Phase::Cancelled(driver) => Err(driver.clone()),
+			Phase::Idle(origins) => Ok(origins.clone()),
+			Phase::Listening(listening) => Ok(listening.origins.clone()),
 		};
-		if let Some(driver) = after {
-			return cancelled(driver).await;
-		}
+		let origins = match origins {
+			Ok(origins) => origins,
+			Err(driver) => return cancelled(driver).await,
+		};
 		match request? {
 			Some(request) => Ok(Some(MoqRequest::new(request, origins.publish, origins.consume)?)),
 			None => {
