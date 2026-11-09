@@ -360,11 +360,11 @@ test("a closed lister answers nothing more, even beside its successor", async ()
 	stale.close();
 	const lister = wireOf(broadcast).lister();
 	const tracks = list(broadcast);
-	stale.add("stale", { priority: 0 });
+	stale.add("stale", INFO);
 	stale.synced();
 	stale.abort(new Error("stale"));
 	expect(await tracks.drain()).toEqual([]);
-	lister.add("up", { priority: 0 });
+	lister.add("up", INFO);
 	lister.synced();
 	expect(await tracks.drain()).toEqual(["+up", "synced"]);
 });
