@@ -133,7 +133,7 @@ chmod 0755 "$PACKAGE_DIR/bin/$BIN"
 # Rewrite the leaked paths to load from the system dyld shared cache (via
 # /usr/lib), like a plain `cargo build` does. scrub-macho.sh also asserts no
 # /nix path survives, so this can't silently ship again.
-if [[ "$(uname)" == "Darwin" ]]; then
+if [[ "$TARGET" == *-apple-darwin ]]; then
     bin="$PACKAGE_DIR/bin/$BIN"
     "$SCRIPT_DIR/scrub-macho.sh" "$bin"
 

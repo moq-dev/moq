@@ -131,6 +131,9 @@ Changed 2026-10-26 (maintainer): pure-Rust crypto moved to m3 until upstream
 graviola and ACME releases make it cheap, so the cut ships on aws-lc-rs.
 Dropping the `rsa` crate from moq-auth's production graph stays in m1.
 
+Changed 2026-11-08: the rind epic finished in m1, so the cut ships on rind
+with no C crypto; aws-lc-rs is out of the workspace.
+
 Added 2026-10-25 (maintainer): the studio's
 GPU encode and source import quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU

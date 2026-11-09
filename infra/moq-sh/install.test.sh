@@ -231,6 +231,8 @@ suite() {
     refuse "intel mac" "only Apple silicon" "$tmp/served.sh" --dir "$dir"
     host Linux riscv64 2.39
     refuse "unsupported arch" "x86_64, aarch64, and armv7" "$tmp/served.sh" --dir "$dir"
+    host Linux armv7b 2.36
+    refuse "big-endian armv7" "x86_64, aarch64, and armv7" "$tmp/served.sh" --dir "$dir"
     host FreeBSD amd64
     refuse "unsupported os" "winget" "$tmp/served.sh" --dir "$dir"
     host Linux x86_64 2.31

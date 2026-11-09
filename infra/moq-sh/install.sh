@@ -69,7 +69,8 @@ detect_target() {
             case "$arch" in
                 x86_64 | amd64) target=x86_64-unknown-linux-gnu ;;
                 aarch64 | arm64) target=aarch64-unknown-linux-gnu ;;
-                armv7* | armv8l) target=armv7-unknown-linux-gnueabihf ;;
+                # Only little-endian (`l`) is published; big-endian ARM reports armv7b.
+                armv7l | armv8l) target=armv7-unknown-linux-gnueabihf ;;
                 *) die "no moq build for Linux on $arch; x86_64, aarch64, and armv7 are published. Try: cargo install moq-cli" ;;
             esac
             check_glibc
