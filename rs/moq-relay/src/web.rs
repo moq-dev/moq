@@ -2440,7 +2440,7 @@ mod tests {
 	/// sockets, so this runs on the wall clock and bounds the answer from below.
 	#[tokio::test]
 	async fn an_unanswered_http_admission_is_refused_at_the_timeout() {
-		kio::clock::host_time();
+		kio::clock::host_time(); // real HTTP sockets
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 		let timeout = std::time::Duration::from_millis(200);

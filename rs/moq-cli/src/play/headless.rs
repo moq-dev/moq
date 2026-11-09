@@ -154,9 +154,8 @@ mod tests {
 
 	/// A run that ends still writes its final sample, with nothing it could not
 	/// measure filled in.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn metrics_write_a_final_sample() {
-		kio::clock::host_time();
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("play.ndjson");
 		let producer = moq_tokio::origin::spawn();

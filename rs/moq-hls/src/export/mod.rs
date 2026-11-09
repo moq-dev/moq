@@ -947,7 +947,6 @@ mod tests {
 	// nothing numbers their segments. Once it does, every rendition is added.
 	#[tokio::test(start_paused = true)]
 	async fn renditions_wait_for_the_join_interval() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1032,7 +1031,6 @@ mod tests {
 	// and makes every recording cursor see a Removed followed by an Added.
 	#[tokio::test(start_paused = true)]
 	async fn estimate_only_catalog_update_keeps_the_rendition() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1103,7 +1101,6 @@ mod tests {
 	// (its timescale derives from the framerate) and churn every recording cursor mid-stream.
 	#[tokio::test(start_paused = true)]
 	async fn estimated_framerate_keeps_the_rendition() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1168,7 +1165,6 @@ mod tests {
 	// longer matches.
 	#[tokio::test(start_paused = true)]
 	async fn decoder_config_change_rebuilds_the_rendition() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let _broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1232,9 +1228,8 @@ mod tests {
 	// The whole fetch-on-demand path in process: a broadcast publishes media through the
 	// catalog (which declares its join interval), the Broadcaster renders playlists from the
 	// groups' timestamps, and a segment request fetches and transmuxes exactly its groups.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn master_lists_only_playable_renditions() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -1244,16 +1239,12 @@ mod tests {
 		let mut media = video(&catalog, broadcast.broadcast(), "video0", video_config());
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
-		let rendition = kio::clock::timeout(Duration::from_secs(5), async {
-			loop {
-				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0") {
-					break rendition;
-				}
-				tokio::task::yield_now().await;
-			}
-		})
-		.await
-		.expect("rendition discovered from the catalog");
+		let added = kio::clock::timeout(Duration::from_secs(5), broadcaster.renditions().next())
+			.await
+			.expect("rendition discovered from the catalog");
+		let Ok(Some(renditions::Event::Added(rendition))) = added else {
+			panic!("expected an Added event");
+		};
 
 		assert!(
 			rendition.media_playlist(None).unwrap().is_none(),
@@ -1370,7 +1361,7 @@ mod tests {
 		media.set(disabled).unwrap();
 		kio::clock::timeout(Duration::from_secs(5), async {
 			while listed() {
-				tokio::task::yield_now().await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -1873,9 +1864,8 @@ mod tests {
 	// A reconfigure that changes the init bytes changes the init URL, so a cache can never hand a
 	// player the previous init under the new one. The old URL keeps naming the old bytes while the
 	// playlist still lists the segments muxed under them.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_reconfigure_versions_the_init_url() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -2166,9 +2156,8 @@ mod tests {
 
 	/// Indexing reads every group of the media, but a stats session on the source's origin
 	/// counts only the catalog and what a client fetches.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_metered_source_counts_only_what_clients_fetch() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -2678,9 +2667,8 @@ mod tests {
 	}
 
 	// A finished broadcast renders a static presentation.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn dash_manifest_turns_static_when_finished() {
-		kio::clock::host_time();
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::default())
@@ -3193,14 +3181,13 @@ mod tests {
 	}
 
 	async fn until_finished(rendition: &Rendition) {
-		let deadline = kio::clock::now() + Duration::from_secs(5);
-		loop {
-			if rendition.snapshot().finished {
-				return;
+		kio::clock::timeout(Duration::from_secs(5), async {
+			while !rendition.snapshot().finished {
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
-			assert!(kio::clock::now() < deadline, "the playlist did not end");
-			tokio::task::yield_now().await;
-		}
+		})
+		.await
+		.expect("the playlist did not end");
 	}
 
 	/// A sibling-media fixture: the catalog broadcast `live` lists `video0`, and its media lives in
