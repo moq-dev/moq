@@ -89,13 +89,30 @@ export function timeout<T>(duration: Nano, operation: PromiseLike<T>): Promise<T
 }
 
 /** An `AbortSignal` that aborts with a `TimeoutError` after a duration on the installed clock, or with `signal`'s reason once it aborts first, cancelling the timer. */
-export function timeoutSignal(duration: Nano, options?: { signal?: AbortSignal; ref?: boolean }): AbortSignal {
-	const expired = new AbortController();
-	void sleep(duration, options).then(
-		() => expired.abort(new DOMException("signal timed out", "TimeoutError")),
-		() => {},
+export function timeoutSignal(duration: Nano, options: Options = {}): AbortSignal {
+	const { signal: parent, ref = true } = options;
+	const controller = new AbortController();
+	if (parent?.aborted) {
+		controller.abort(parent.reason);
+		return controller.signal;
+	}
+	const clock = backend();
+	const abort = () => {
+		disarm();
+		controller.abort(parent?.reason);
+	};
+	// The clock may fire synchronously for a reached deadline, before `disarm` is assigned.
+	let disarm = () => {};
+	disarm = clock.arm(
+		Instant.add(Instant(clock.now()), duration),
+		() => {
+			parent?.removeEventListener("abort", abort);
+			controller.abort(new DOMException("signal timed out", "TimeoutError"));
+		},
+		ref,
 	);
-	return options?.signal ? AbortSignal.any([options.signal, expired.signal]) : expired.signal;
+	if (!controller.signal.aborted) parent?.addEventListener("abort", abort, { once: true });
+	return controller.signal;
 }
 
 /** Choose how an interval catches up after its caller misses ticks. */

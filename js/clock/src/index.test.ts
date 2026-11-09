@@ -174,6 +174,11 @@ test("a timeout signal aborts at the manual deadline unless its parent aborts fi
 	expect(child.reason).toBe("closed");
 	await clock.advance(Nano(10));
 	expect(child.reason).toBe("closed");
+	const late = new AbortController();
+	const fired = timeoutSignal(Nano(10), { signal: late.signal });
+	clock.jump(Nano(10));
+	late.abort("closed");
+	expect(fired.reason).toHaveProperty("name", "TimeoutError");
 });
 
 test("interval burst delivers every missed scheduled tick", async () => {
