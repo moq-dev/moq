@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Micro, Milli, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Effect, Signal } from "@moq/signals";
 import { decoderConfig, frameDuration, packetDuration, playbackIdentity } from "./config";
@@ -62,13 +62,13 @@ test("routing and decoder inputs change the playback identity", () => {
 
 test("AAC and MP3 frame durations follow their codec frame sizes", () => {
 	for (const codec of ["mp4a.40.2", "mp4a.40.02", "mp4a.67"]) {
-		expect(frameDuration(config({ codec, sampleRate: 48000 }))).toBeCloseTo(21.333, 3);
+		expect(frameDuration(config({ codec, sampleRate: 48000 }))?.asMillis()).toBeCloseTo(21.333, 3);
 	}
 	for (const codec of ["mp4a.40.5", "mp4a.40.05", "mp4a.40.29"]) {
-		expect(frameDuration(config({ codec, sampleRate: 48000 }))).toBeCloseTo(42.667, 3);
+		expect(frameDuration(config({ codec, sampleRate: 48000 }))?.asMillis()).toBeCloseTo(42.667, 3);
 	}
-	expect(frameDuration(config({ codec: "mp3", sampleRate: 48000 }))).toBe(Milli(24));
-	expect(frameDuration(config({ codec: "mp3", sampleRate: 24000 }))).toBe(Milli(24));
+	expect(frameDuration(config({ codec: "mp3", sampleRate: 48000 }))).toEqual(Duration.millis(24));
+	expect(frameDuration(config({ codec: "mp3", sampleRate: 24000 }))).toEqual(Duration.millis(24));
 });
 
 test("Opus and unknown codecs have no constant frame duration", () => {
@@ -82,11 +82,11 @@ test("Opus and unknown codecs have no constant frame duration", () => {
 test("an implicit CMAF duration falls through to the Opus TOC", () => {
 	// TOC 0x78: config 15 (hybrid fullband, 20 ms), one frame.
 	const frame = {
-		timestamp: Micro(0),
+		timestamp: Duration.micros(0),
 		keyframe: true,
 		payload: new Uint8Array([0x78, 0]),
-		duration: Micro(0),
+		duration: Duration.micros(0),
 	};
-	expect(packetDuration("opus", frame)).toBe(Milli(20));
+	expect(packetDuration("opus", frame)).toEqual(Duration.millis(20));
 	expect(packetDuration("mp4a.40.2", frame)).toBeUndefined();
 });

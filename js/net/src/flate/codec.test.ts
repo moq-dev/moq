@@ -60,3 +60,11 @@ test("final blocks, malformed input, and a decoder already failed are refused", 
 	expect(() => decoder.frame(new Uint8Array(64).fill(0xff), 64)).toThrow();
 	expect(() => decoder.frame(new Uint8Array(), 0)).toThrow(/already failed/);
 });
+
+test("incompressible input stays within the worst-case bound, across stored-block boundaries", () => {
+	const encoder = new Encoder();
+	for (const size of [1, 4095, 4096, 16383, 16384, 16385, 65536, 100_003]) {
+		const payload = crypto.getRandomValues(new Uint8Array(size));
+		expect(encoder.frame(payload).length).toBeLessThanOrEqual(Encoder.bound(size));
+	}
+});

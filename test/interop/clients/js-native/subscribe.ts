@@ -24,7 +24,7 @@
 import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Cmaf from "@moq/hang/cmaf";
 import * as Container from "@moq/hang/container";
@@ -43,13 +43,13 @@ install();
 // superseded group (RESET_STREAM Old) rather than finish sending it, e.g. a
 // cached group a fresh one lands right behind, so a subscriber has to move on
 // to the next group instead of failing.
-const MAX_DELAY = Milli(1000);
+const MAX_DELAY = Duration.millis(1000);
 
 // Audio is checked for gaps, which a reader skipping behind live would cause itself: the matrix
 // starts every subscriber at once, and a runtime starved by the others can fall a second behind.
 // That is this reader's speed, not the delivery under test, so it gets a wider budget. A track's
 // max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
-const AUDIO_MAX_DELAY = Milli(5000);
+const AUDIO_MAX_DELAY = Duration.millis(5000);
 
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
@@ -201,12 +201,12 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 		for (;;) {
 			const next = await consumer.next();
 			if (!next) throw new Error("audio track ended early");
-			if (next.kind !== "frame" || next.frame.timestamp <= last) continue;
-			last = next.frame.timestamp;
+			if (next.kind !== "frame") continue;
+			const timestamp = Math.floor(next.frame.timestamp.asMicros());
+			if (timestamp <= last) continue;
+			last = timestamp;
 			if (decoder.state === "closed") return;
-			decoder.decode(
-				new EncodedAudioChunk({ type: "key", data: next.frame.payload, timestamp: next.frame.timestamp }),
-			);
+			decoder.decode(new EncodedAudioChunk({ type: "key", data: next.frame.payload, timestamp }));
 		}
 	})();
 	try {
@@ -258,7 +258,7 @@ async function run(): Promise<void> {
 			} finally {
 				input.close();
 			}
-			console.error(await readFinish(origin, broadcast as string, frames, Milli(timeoutMs)));
+			console.error(await readFinish(origin, broadcast as string, frames, Duration.millis(timeoutMs)));
 			return;
 		}
 		const path = Moq.Path.from(broadcast as string);

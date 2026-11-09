@@ -537,7 +537,7 @@ impl<T: Serialize> Snapshot<T> {
 				true => self.largest.map_or(0, |largest| largest + 1),
 				false => stamp.group,
 			};
-			if let Some(mut group) = self.group.take() {
+			if let Some(group) = self.group.take() {
 				group.finish()?;
 			}
 			self.group = Some(self.track.create_group(moq_net::group::Info { sequence })?);
@@ -565,10 +565,11 @@ impl<T: Serialize> Snapshot<T> {
 	}
 
 	fn finish(&mut self) -> moq_json::Result<()> {
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
-		Ok(self.track.finish()?)
+		// The output keeps its own clone, whose appends the end refuses.
+		Ok(self.track.clone().finish().map(drop)?)
 	}
 }
 
@@ -1693,10 +1694,17 @@ mod tests {
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 		match announced.next().await? {
-			moq_net::origin::RouteEvent::Start(route)
-			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+			moq_net::origin::RouteEvent {
+				kind:
+					moq_net::origin::RouteKind::Start
+					| moq_net::origin::RouteKind::Update
+					| moq_net::origin::RouteKind::Restart,
+				announce: route,
+			} => Some((route, true)),
+			moq_net::origin::RouteEvent {
+				kind: moq_net::origin::RouteKind::End,
+				announce: route,
+			} => Some((route, false)),
 		}
 	}
 

@@ -1011,7 +1011,11 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	};
 	let mut config = relay_config();
 	config.quic = relay_quic();
-	let relay_idle = config.quic.resolve().idle_timeout;
+	let relay_idle = config
+		.quic
+		.resolve()
+		.idle_timeout
+		.expect("the relay has an idle timeout");
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
 	let peer = match (link, lane) {
@@ -1400,10 +1404,15 @@ lanes!(no_publisher_never_delivers);
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net::announce::Announce, bool)> {
 	match announced.next().await? {
-		moq_net::origin::RouteEvent::Start(route)
-		| moq_net::origin::RouteEvent::Update(route)
-		| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
-		moq_net::origin::RouteEvent::End(route) => Some((route, false)),
+		moq_net::origin::RouteEvent {
+			kind:
+				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
+			announce: route,
+		} => Some((route, true)),
+		moq_net::origin::RouteEvent {
+			kind: moq_net::origin::RouteKind::End,
+			announce: route,
+		} => Some((route, false)),
 	}
 }
 

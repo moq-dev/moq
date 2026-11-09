@@ -1,6 +1,6 @@
-import { Elapsed, Milli, Nano, timeout } from "@moq/clock";
+import { Duration, Elapsed, timeout } from "@moq/clock";
 
-const TRACK_ALIAS_TIMEOUT = Nano.fromMilli(Milli(1000));
+const TRACK_ALIAS_TIMEOUT = Duration.millis(1000);
 
 /**
  * How many cancelled aliases to remember. Objects keep arriving for about a round trip

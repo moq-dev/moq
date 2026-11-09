@@ -19,8 +19,6 @@ type (
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
 	// AudioFrame is one audio frame: PCM payload plus a presentation Timestamp.
 	AudioFrame = ffi.MoqAudioFrame
-	// ConnectionPhase is a connection lifecycle transition reported by Session.State.
-	ConnectionPhase = ffi.MoqConnectionPhase
 	// CongestionControl is the congestion control family for a QUIC connection.
 	CongestionControl = ffi.MoqCongestionControl
 	// ErrorScope is whether a protocol code is from the session or stream registry.
@@ -160,20 +158,6 @@ const (
 const (
 	// CompressionDeflate makes each group one DEFLATE stream, which suits small, repetitive frames like JSON.
 	CompressionDeflate = ffi.MoqCompressionDeflate
-)
-
-// ConnectionPhase values: the lifecycle of a client session's connection.
-const (
-	// ConnectionPhaseConnecting means no session has connected yet.
-	ConnectionPhaseConnecting = ffi.MoqConnectionPhaseConnecting
-	// ConnectionPhaseClosed means the connection has stopped for good.
-	ConnectionPhaseClosed = ffi.MoqConnectionPhaseClosed
-	// ConnectionPhaseConnected means a session connected (the first connect, or a reconnect after a drop).
-	ConnectionPhaseConnected = ffi.MoqConnectionPhaseConnected
-	// ConnectionPhaseDisconnected means the session dropped; a reconnect attempt follows.
-	ConnectionPhaseDisconnected = ffi.MoqConnectionPhaseDisconnected
-	// ConnectionPhaseMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
-	ConnectionPhaseMigrating = ffi.MoqConnectionPhaseMigrating
 )
 
 // CongestionControl values.

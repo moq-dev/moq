@@ -295,7 +295,7 @@ impl OnState {
 
 	/// Deliver one snapshot, recording its failure first so the callback can read `moq_error()`.
 	pub fn call(&self, state: &crate::session::Lifecycle) {
-		if let Some(failure) = &state.failure {
+		if let Some(failure) = state.failure() {
 			record(failure);
 		}
 		let state = state.to_c();

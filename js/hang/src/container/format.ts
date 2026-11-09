@@ -1,4 +1,4 @@
-import type { Micro } from "@moq/clock";
+import type { Duration } from "@moq/clock";
 import type { Time } from "@moq/net";
 import type { Frame } from "./types";
 
@@ -9,5 +9,5 @@ export interface Format {
 	/** Parse one MoQ frame's payload, given its moq-net timestamp (absent on an untimed track), into decoded media frames. On a data track no frames means the discontinuity marker, so a format returns none only for an object with no bytes. */
 	decode(payload: Uint8Array, timestamp: Time.Timestamp | undefined): Frame[];
 	/** Return the endpoint timestamp carried by empty-payload metadata. */
-	end?(frame: Frame): Micro | undefined;
+	end?(frame: Frame): Duration | undefined;
 }

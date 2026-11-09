@@ -16,7 +16,7 @@
  * exposes `gc` and fails once a retired route stays reachable. Bun scans its stack conservatively,
  * so a dead reference there can survive a collection.
  */
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Duration, Manual } from "@moq/clock";
 import type { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
@@ -28,9 +28,9 @@ import { Front } from "../src/resume.ts";
 import { wireOf } from "../src/wire.ts";
 
 const PAYLOAD = 4096;
-const MAX_DELAY = Milli(1000);
+const MAX_DELAY = Duration.millis(1000);
 /** Past every cache's age-out, including the 30 s window a closed track's cache drains over. */
-const EXPIRY = Nano.fromMilli(Milli(60_000));
+const EXPIRY = Duration.millis(60_000);
 const url = new URL("https://localhost/resume-history");
 type History = "stable" | "churn";
 type Access = "lookup" | "fetch" | "subscribe";

@@ -21,7 +21,7 @@
  */
 import * as net from "node:net";
 import { parseArgs } from "node:util";
-import { Milli } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Moq from "@moq/net";
 
 const { values } = parseArgs({
@@ -51,7 +51,7 @@ const GROUPS_PER_RELAY = 10;
 const GROUP_INTERVAL_MS = 100;
 // How long the viewer's old session may keep serving after the GOAWAY. Well inside the relay's
 // 20s drain window, so the relay's exit log can prove the viewer left on its own.
-const HANDOVER = Milli(2000);
+const HANDOVER = Duration.millis(2000);
 
 const path = Moq.Path.from("drain");
 // Publisher instances travel on the work-in-progress moq-lite-07 only, which nothing offers by default.
@@ -186,7 +186,7 @@ try {
 	process.kill(aPid, "SIGTERM");
 
 	// The old session leaves at the handover cap, before A's own deadline would cut it.
-	await until("the viewer to leave relay A", () => a.open === 0, HANDOVER * 3);
+	await until("the viewer to leave relay A", () => a.open === 0, HANDOVER.mul(3).asMillis());
 	// Counted past the newest group when A went: only B can have delivered these. Bounded well
 	// inside A's 20s drain window: a viewer that only reconnects once A cuts it off at the
 	// deadline would otherwise pass, just late.
@@ -194,7 +194,7 @@ try {
 	await until(
 		`${GROUPS_PER_RELAY} new groups through relay B`,
 		() => newest() >= left + GROUPS_PER_RELAY,
-		HANDOVER * 3,
+		HANDOVER.mul(3).asMillis(),
 	);
 
 	if (a.dialed !== 1) throw new Error(`the viewer redialed the withdrawn relay (${a.dialed} dials)`);

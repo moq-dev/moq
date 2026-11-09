@@ -496,7 +496,7 @@ fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
 	for _ in 0..frames {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
-	group.finish().unwrap();
+	let group = group.finish().unwrap();
 	group.sequence
 }
 
@@ -750,7 +750,16 @@ impl Viewer {
 			.unwrap()
 			.routes();
 		let event = announced.next().await.expect("announced");
-		assert!(matches!(event, moq_net::origin::RouteEvent::Start(_)), "{event:?}");
+		assert!(
+			matches!(
+				event,
+				moq_net::origin::RouteEvent {
+					kind: moq_net::origin::RouteKind::Start,
+					..
+				}
+			),
+			"{event:?}"
+		);
 		self.following.push(announced);
 	}
 
@@ -1133,8 +1142,7 @@ impl<B: Backend> Room<B> {
 			let group = writing.get_or_insert_with(|| self.cluster.tracks[broadcast].append_group().unwrap());
 			group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
 			if last {
-				group.finish().unwrap();
-				*writing = None;
+				writing.take().expect("written above").finish().unwrap();
 			}
 		}
 		if last {
@@ -1916,7 +1924,16 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 							while let Ok(Some(event)) =
 								kio::clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
-								assert!(matches!(event, moq_net::origin::RouteEvent::End(_)), "{event:?}");
+								assert!(
+									matches!(
+										event,
+										moq_net::origin::RouteEvent {
+											kind: moq_net::origin::RouteKind::End,
+											..
+										}
+									),
+									"{event:?}"
+								);
 								retracted += 1;
 							}
 							let elapsed = start.elapsed();

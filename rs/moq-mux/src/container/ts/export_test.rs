@@ -248,7 +248,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 		(broadcast, track)
 	};
 	let (broadcast, mut track) = publish();
-	track.finish().unwrap();
+	drop(track.clone().finish().unwrap());
 	let source = crate::source::resolved(&origin, "live").await;
 	let stream = source.catalog::<()>(CatalogFormat::Msf).await.unwrap();
 	let mut export = Export::new(source, stream, std::time::Duration::ZERO);
@@ -284,7 +284,7 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 	.await
 	.expect("MSF catalog resubscribed");
 	assert_eq!(follower.export().catalog_format(), CatalogFormat::Msf);
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	drop((follower, broadcast, track));
 }
 
@@ -1016,7 +1016,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		format.write(&mut group, &frames).unwrap();
 		group.finish().unwrap();
 	}
-	track.finish().unwrap();
+	let _track = track.finish().unwrap();
 	let mut export = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
 		.await
 		.unwrap()
@@ -1323,7 +1323,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catal
 		format.write(&mut group, &frames).unwrap();
 		group.finish().unwrap();
 	}
-	track.finish().unwrap();
+	let track = track.finish().unwrap();
 	let export = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
 		.await
 		.unwrap()
@@ -6972,7 +6972,7 @@ async fn clock_revisions_wait_for_their_stamped_grid_slots() {
 			.write_frame(Timestamp::from_millis(6_500).unwrap(), Bytes::from(section(3)))
 			.unwrap();
 		rig.producer.finish().unwrap();
-		rig.si_track.finish().unwrap();
+		let _si_track = rig.si_track.finish().unwrap();
 		rig.catalog.finish().unwrap();
 		assert_eq!(count_pid(&drain_frames(&mut rig.exporter).await, 0x0014), 0);
 	}
@@ -8544,7 +8544,7 @@ async fn a_skipped_group_flags_the_clock() {
 				}
 				out.extend(poll_frames(&mut export));
 			}
-			track.finish().unwrap();
+			let _track = track.finish().unwrap();
 			out.extend(drain_frames(&mut export).await);
 
 			assert_eq!(export.discontinuity(), 0, "a skipped group is not a new program clock");
