@@ -1,8 +1,8 @@
 //! What one relay pays per stats tick to drain its registry and encode its
-//! group track, swept over held paths, tiers, and the share of those paths
+//! bucket track, swept over held paths, tiers, and the share of those paths
 //! whose counters changed since the last tick.
 //!
-//! Idle paths stay in the group's snapshot for as long as the registry holds
+//! Idle paths stay in the bucket's snapshot for as long as the registry holds
 //! them, so `heldB` grows with the table and is what nears the frame cap
 //! (`cap%`).
 //! `wroteB` is what this tick wrote: a merge-patch delta, or a snapshot when
@@ -17,9 +17,9 @@
 //! tracks: each row walks its ancestors once a prefix is held, so the cost
 //! grows with rows times depth, plus each held track's encode.
 //!
-//! `stats/groups` sweeps a depth-1 producer over held paths and the groups
-//! they spread across, each group one track: the rows cost the same however
-//! they split, so a slope in groups is per-track overhead.
+//! `stats/buckets` sweeps a depth-1 producer over held paths and the buckets
+//! they spread across, each bucket one track: the rows cost the same however
+//! they split, so a slope in buckets is per-track overhead.
 //!
 //! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
 
@@ -78,7 +78,7 @@ unsafe impl GlobalAlloc for Counter {
 const TABLE_TICKS: u32 = 4;
 
 /// Held paths. The last count is sized so its one-tier snapshot nears the cache cap; `cap%` shows
-/// how close. Every tier shares the one group's snapshot, so more tiers stop below it.
+/// how close. Every tier shares the one bucket's snapshot, so more tiers stop below it.
 const PATHS: [usize; 4] = [100, 1_000, 10_000, 50_000];
 
 const TIERS: [usize; 2] = [1, 4];
@@ -102,18 +102,18 @@ struct Relay {
 }
 
 impl Relay {
-	/// `depth` is each path's segment count, at least 2. With `groups`, the
+	/// `depth` is each path's segment count, at least 2. With `buckets`, the
 	/// paths spread over that many first segments and the driver publishes each
-	/// as its own group track; without, every path shares one.
-	fn build(paths: usize, tiers: usize, changed_percent: usize, depth: usize, groups: Option<usize>) -> Self {
+	/// as its own bucket track; without, every path shares one.
+	fn build(paths: usize, tiers: usize, changed_percent: usize, depth: usize, buckets: Option<usize>) -> Self {
 		let registry = stats::Registry::new(
 			stats::Config::new().with_exclude(moq_net::Pattern::subtree(".stats").expect("literal prefix")),
 		);
 		let (origin, origin_driver) = origin::Producer::new(origin::Config::default());
 		let nested = "/s".repeat(depth - 2);
 		let path_names: Vec<String> = (0..paths)
-			.map(|index| match groups {
-				Some(groups) => format!("g{:04}/{index:06}{nested}", index % groups),
+			.map(|index| match buckets {
+				Some(buckets) => format!("g{:04}/{index:06}{nested}", index % buckets),
 				None => format!("room/{index:06}{nested}"),
 			})
 			.collect();
@@ -145,7 +145,7 @@ impl Relay {
 		registry.report(&mut report, moq_net::time::Instant::now());
 		assert_eq!(report.traffic.len(), paths * tiers, "one held entry per path and tier");
 
-		let depth = if groups.is_some() { 1 } else { 0 };
+		let depth = if buckets.is_some() { 1 } else { 0 };
 		let driver = Driver::new(registry.clone(), origin.clone(), depth).expect("stats broadcast");
 		Self {
 			registry,
@@ -222,14 +222,14 @@ const CAP: u64 = 32 * 1024 * 1024;
 
 fn check_row(paths: usize, changed: usize, row: &Row) {
 	let cap = CAP;
-	assert!(row.bytes.held > 0, "group snapshot missing");
+	assert!(row.bytes.held > 0, "bucket snapshot missing");
 	assert!(
 		row.bytes.held as u64 <= cap,
-		"group frame exceeds the cache cap: {} > {cap}",
+		"bucket frame exceeds the cache cap: {} > {cap}",
 		row.bytes.held
 	);
 	// The snapshot keeps every held path, so a few paths cannot be a couple of braces.
-	assert!(row.bytes.held > paths, "group snapshot did not grow with held paths");
+	assert!(row.bytes.held > paths, "bucket snapshot did not grow with held paths");
 	if changed > 0 {
 		assert!(row.bytes.wrote > 0, "changed paths did not publish a frame");
 	}
@@ -439,31 +439,34 @@ fn prefix(c: &mut Criterion) {
 	group.finish();
 }
 
-const GROUP_PATHS: [usize; 2] = [1_000, 10_000];
+const BUCKET_PATHS: [usize; 2] = [1_000, 10_000];
 
-/// Groups the paths spread across, each a track.
-const GROUPS: [usize; 3] = [1, 100, 1_000];
+/// Buckets the paths spread across, each a track.
+const BUCKETS: [usize; 3] = [1, 100, 1_000];
 
-/// What spreading paths over group tracks costs a tick, with a tenth of the
+/// What spreading paths over bucket tracks costs a tick, with a tenth of the
 /// paths moving.
-fn groups(c: &mut Criterion) {
-	println!("paths groups allocs/tick us/tick");
+fn buckets(c: &mut Criterion) {
+	println!("paths buckets allocs/tick us/tick");
 
-	let mut group = c.benchmark_group("stats/groups");
+	let mut group = c.benchmark_group("stats/buckets");
 	group.sample_size(10);
 	group.warm_up_time(Duration::from_millis(200));
 	group.measurement_time(Duration::from_secs(1));
-	for &paths in &GROUP_PATHS {
-		for &groups in GROUPS.iter().filter(|&&groups| groups <= paths) {
-			let id = BenchmarkId::from_parameter(format!("{paths}p_{groups}g"));
+	for &paths in &BUCKET_PATHS {
+		for &buckets in BUCKETS.iter().filter(|&&buckets| buckets <= paths) {
+			let id = BenchmarkId::from_parameter(format!("{paths}p_{buckets}b"));
 			group.throughput(Throughput::Elements(paths as u64));
 			let mut relay = None;
 			group.bench_function(id, |b| {
 				let relay = relay.get_or_insert_with(|| {
-					let mut relay = Relay::build(paths, 1, 10, 2, Some(groups));
+					let mut relay = Relay::build(paths, 1, 10, 2, Some(buckets));
 					let row = sample(&mut relay);
 					let micros = row.elapsed.as_secs_f64() * 1e6;
-					println!("{paths:>5} {groups:>6} {allocs:>11} {micros:>8.1}", allocs = row.allocs);
+					println!(
+						"{paths:>5} {buckets:>7} {allocs:>11} {micros:>8.1}",
+						allocs = row.allocs
+					);
 					relay
 				});
 				b.iter_custom(|iters| {
@@ -482,5 +485,5 @@ fn groups(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench, presence, prefix, groups);
+criterion_group!(benches, bench, presence, prefix, buckets);
 criterion_main!(benches);
