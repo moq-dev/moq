@@ -8,11 +8,11 @@
 import type { Valid } from "./instance.ts";
 
 /**
- * Prefixes a minted instance's key. A lone surrogate is never well-formed text, so `parse`
- * refuses it and no named instance starts with it, while equality and map keys stay plain
- * string comparisons.
+ * Prefixes a minted instance's key. Well-formed text never starts with a low surrogate (one
+ * only ever follows a high surrogate), so no named instance starts with it and `parse` refuses
+ * a minted key, while equality and map keys stay plain string comparisons.
  */
-export const MARK = "\uD800";
+export const MARK = "\uDC00";
 
 /** 128 random bits as hex. */
 export function hex(): string {

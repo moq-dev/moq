@@ -40,6 +40,12 @@ test("a minted instance keeps its flag, and text never builds one", async () => 
 	expect(Instance.isMinted(named)).toBe(false);
 	expect(named).not.toBe(minted);
 	expect(Instance.isMinted(Instance.parse("~named"))).toBe(false);
+	// U+10000 is the surrogate pair D800 DC00: well-formed text that starts with a surrogate.
+	for (const text of ["\u{10000}", "\u{10000}x", "\u{FFFF}"]) {
+		const astral = Instance.parse(text);
+		expect(Instance.isMinted(astral)).toBe(false);
+		expect(Instance.text(astral)).toBe(text);
+	}
 	expect(() => Instance.parse(minted)).toThrow();
 	for (const instance of [minted, named]) {
 		const pin = await encoded((w) => encodePin(w, Version.DRAFT_07, instance));
