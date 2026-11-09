@@ -702,9 +702,11 @@ impl Front {
 				actions.push(Action::Park { track: name });
 			}
 			TrackState::Parked { .. } => {}
-			// A copy still being asked for is dropped with the park.
+			// A copy still being asked for is dropped with the park, and with it the loss
+			// it would have recovered: a returning reader's query is a fresh request.
 			TrackState::Idle | TrackState::Querying { .. } => {
 				track.state = TrackState::Parked { since: now };
+				track.lost = None;
 				// An ended track has nothing to drop.
 				if !track.ended {
 					actions.push(Action::Park { track: name });
@@ -1189,6 +1191,13 @@ mod tests {
 			delivered: true,
 		});
 		assert!(matches!(front.lost("video"), Some(Error::Dropped)));
+		// A reader leaving abandons the recovery, so its loss is not reported later.
+		let mut parked = front.clone();
+		parked.step(Event::Unwanted {
+			track: name("video"),
+			now: Instant::now(),
+		});
+		assert!(parked.lost("video").is_none());
 		assert_actions(
 			front.step(Event::TrackInfo {
 				track: name("video"),
