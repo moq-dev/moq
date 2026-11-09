@@ -1501,7 +1501,9 @@ pub struct QuicLimits(crate::quic::driver::connection::Connection);
 
 #[cfg(feature = "quic")]
 impl QuicLimits {
-	/// Replace the connection's limits, as [`Request::with_quic_limits`] does before SETUP.
+	/// Update the connection's limits, as [`Request::with_quic_limits`] does before SETUP.
+	///
+	/// A `None` field keeps its current limit; lift a rate cap with `moq_quic::Rate::Unlimited`.
 	pub fn set(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
 		self.0.set_limits(limits)
 	}

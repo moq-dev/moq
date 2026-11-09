@@ -551,11 +551,15 @@ async fn upgrade<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, request: &ht
 	if !header(http::header::UPGRADE).is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket")) {
 		return invalid("no Upgrade: websocket");
 	}
-	let connection = header(http::header::CONNECTION).unwrap_or_default();
-	if !connection
-		.split(',')
-		.any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-	{
+	// `Connection` may arrive as several fields; the upgrade token can sit in any of them.
+	let upgrades = parsed
+		.headers
+		.iter()
+		.filter(|header| header.name.eq_ignore_ascii_case(http::header::CONNECTION.as_str()))
+		.filter_map(|header| std::str::from_utf8(header.value).ok())
+		.flat_map(|value| value.split(','))
+		.any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+	if !upgrades {
 		return invalid("no Connection: upgrade");
 	}
 	let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
@@ -1143,6 +1147,19 @@ mod tests {
 		let (result, rest) = check_upgrade(|accept| switching(accept, "qmux-01.moqt-22"), b"frames").await;
 		assert_eq!(result.unwrap(), "qmux-01.moqt-22");
 		assert_eq!(rest, b"frames");
+	}
+
+	#[tokio::test]
+	async fn upgrade_finds_the_token_in_a_later_connection_field() {
+		let (result, _) = check_upgrade(
+			|accept| {
+				switching(accept, "qmux-01.moqt-22")
+					.replace("Connection: Upgrade", "Connection: keep-alive\r\nConnection: Upgrade")
+			},
+			b"",
+		)
+		.await;
+		assert_eq!(result.unwrap(), "qmux-01.moqt-22");
 	}
 
 	#[tokio::test]

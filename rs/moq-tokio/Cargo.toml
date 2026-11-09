@@ -64,7 +64,7 @@ futures = "0.3"
 hex = { workspace = true }
 http = { version = "1", optional = true }
 # Parses the WebSocket upgrade response without reading past it.
-httparse = { version = "1", optional = true }
+httparse = { workspace = true, optional = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 kio = { workspace = true, features = ["async", "runtime"] }
