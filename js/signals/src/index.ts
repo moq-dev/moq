@@ -63,6 +63,8 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	// Microtask coalescing state
 	#pending = false;
+	// Watchers owed their first value at the next flush, unless it delivers a change anyway.
+	#initial: Set<Subscriber<T>> = new Set();
 	#oldValue: T | undefined;
 	#hasCapturedOldValue = false;
 	#forceNotify = false;
@@ -96,6 +98,13 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	 * A function is stored as the value; use {@link update} to transform instead.
 	 */
 	set(value: T, notify?: boolean): void {
+		// A silent write captures nothing: a listener that subscribes after it starts from the new
+		// value, so comparing a later write against the value it replaced would hide a change.
+		if (notify === false) {
+			this.#value = value;
+			return;
+		}
+
 		// Capture old value before the first set in this microtask.
 		if (!this.#hasCapturedOldValue) {
 			this.#oldValue = this.#value;
@@ -103,9 +112,6 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		}
 
 		this.#value = value;
-
-		// If notify is false, don't notify.
-		if (notify === false) return;
 
 		if (notify === true) this.#forceNotify = true;
 
@@ -128,37 +134,60 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	#flush(): void {
 		this.#pending = false;
+		const value = this.#value;
+
+		// Watchers added during this flush wait for the flush their watch() queued.
+		let initial: Set<Subscriber<T>> | undefined;
+		if (this.#initial.size > 0) {
+			initial = this.#initial;
+			this.#initial = new Set();
+		}
 
 		// A write while nobody listened dropped the capture, so any listener since then saw the
 		// current value when it subscribed and there is no change to deliver.
-		if (!this.#hasCapturedOldValue) return;
-		this.#hasCapturedOldValue = false;
-		const old = this.#oldValue;
-		this.#oldValue = undefined;
+		if (this.#hasCapturedOldValue) {
+			this.#hasCapturedOldValue = false;
+			const old = this.#oldValue;
+			this.#oldValue = undefined;
 
-		const force = this.#forceNotify;
-		this.#forceNotify = false;
+			const force = this.#forceNotify;
+			this.#forceNotify = false;
 
-		// Check if the net change is zero (value returned to what it was before).
-		if (!force && isEqual(old as T, this.#value)) return;
+			// Deliver unless the net change is zero (value returned to what it was before).
+			if (force || !isEqual(old as T, value)) {
+				const changed = this.#changed;
+				this.#changed = new Set();
 
-		const value = this.#value;
-		const changed = this.#changed;
-		this.#changed = new Set();
+				for (const fn of this.#subscribers) {
+					if (this.#initial.size > 0 && this.#initial.has(fn)) continue;
+					try {
+						fn(value);
+					} catch (error) {
+						console.error("signal subscriber error", error);
+					}
+				}
 
-		for (const fn of this.#subscribers) {
-			try {
-				fn(value);
-			} catch (error) {
-				console.error("signal subscriber error", error);
+				for (const fn of changed) {
+					try {
+						fn(value);
+					} catch (error) {
+						console.error("signal changed error", error);
+					}
+				}
+
+				// Pending watchers are subscribers, so the loop above was their first value.
+				return;
 			}
 		}
 
-		for (const fn of changed) {
+		if (!initial) return;
+		for (const fn of initial) {
+			// Disposed during this flush.
+			if (!this.#subscribers.has(fn)) continue;
 			try {
 				fn(value);
 			} catch (error) {
-				console.error("signal changed error", error);
+				console.error("signal watch error", error);
 			}
 		}
 	}
@@ -199,11 +228,23 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		});
 	}
 
-	/** Calls `fn` with the current value now, and again every time it changes. */
+	/**
+	 * Calls `fn` with the current value on a microtask, and again every time it changes.
+	 * A change before that first call is delivered once, as the first call.
+	 */
 	watch(fn: Subscriber<T>): Dispose {
-		const dispose = this.subscribe(fn);
-		queueMicrotask(() => fn(this.#value));
-		return dispose;
+		// A wrapper per call, so watching with the same `fn` twice stays two watchers.
+		const watcher: Subscriber<T> = (value) => fn(value);
+		const dispose = this.subscribe(watcher);
+		this.#initial.add(watcher);
+		if (!this.#pending) {
+			this.#pending = true;
+			queueMicrotask(() => this.#flush());
+		}
+		return () => {
+			this.#initial.delete(watcher);
+			dispose();
+		};
 	}
 
 	/**
@@ -1298,12 +1339,17 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 	}
 }
 
+// Nesting past this compares unequal, bounding the work and stack for cyclic or very deep
+// values. A false "changed" only costs an extra notification.
+const EQUAL_DEPTH = 64;
+
 // Deep equality for plain objects/arrays, SameValueZero for everything else.
 // Class instances have identity semantics (e.g. two different Broadcast instances are never equal),
 // except the clock's immutable values, which compare by value like the numbers they replace.
-function isEqual(a: unknown, b: unknown): boolean {
+function isEqual(a: unknown, b: unknown, depth = 0): boolean {
 	if (a === b || (Number.isNaN(a) && Number.isNaN(b))) return true;
 	if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+	if (depth >= EQUAL_DEPTH) return false;
 
 	const protoA = Object.getPrototypeOf(a);
 	const protoB = Object.getPrototypeOf(b);
@@ -1322,7 +1368,7 @@ function isEqual(a: unknown, b: unknown): boolean {
 	for (const key of keysA) {
 		// Membership matters on its own: `{ a: undefined }` is not `{ b: undefined }`.
 		if (!Object.hasOwn(b, key)) return false;
-		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false;
+		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], depth + 1)) return false;
 	}
 
 	return true;
