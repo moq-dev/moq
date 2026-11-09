@@ -6,9 +6,9 @@
 
 #include "moq-dock-stop.h"
 
-#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 
 #define CHECK(cond)                                                                         \
@@ -36,20 +36,24 @@ int main()
 	{
 		MoQDockStopBridge bridge;
 		CHECK(bridge.begin());
-		std::atomic<bool> ended{false};
+		// Ends only once the close began, so the close returning with nothing active
+		// means it waited for this end. A timeout the test never reaches means the end's
+		// notify, not the deadline, released it; a lost notify hangs instead.
 		std::thread worker([&] {
-			std::this_thread::sleep_for(std::chrono::milliseconds(30));
+			{
+				std::unique_lock<std::mutex> lock(bridge.mutex);
+				bridge.cv.wait(lock, [&] { return bridge.closing; });
+			}
 			bridge.end();
-			ended.store(true);
 		});
-		const auto start = std::chrono::steady_clock::now();
-		bridge.closeAndWait(std::chrono::milliseconds(500));
-		const auto elapsed = std::chrono::steady_clock::now() - start;
+		bridge.closeAndWait(std::chrono::hours(1));
+		bool idle;
+		{
+			std::lock_guard<std::mutex> lock(bridge.mutex);
+			idle = bridge.active == 0;
+		}
 		worker.join();
-		CHECK(ended.load());
-		CHECK(bridge.active == 0);
-		CHECK(elapsed >= std::chrono::milliseconds(20));
-		CHECK(elapsed < std::chrono::milliseconds(400));
+		CHECK(idle);
 		CHECK(!bridge.begin());
 	}
 	printf("close waits for in-flight end: ok\n");

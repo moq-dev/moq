@@ -7517,7 +7517,6 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_encoder_follows_a_shrinking_grant() {
-	kio::clock::host_time();
 	use crate::bandwidth::MoqAllocator;
 	use crate::video::*;
 
@@ -7568,18 +7567,8 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	let deadline = kio::clock::Instant::now() + TIMEOUT;
-	loop {
-		if video.applied_bitrate() == 1_000_000 {
-			break;
-		}
-		assert!(
-			kio::clock::Instant::now() < deadline,
-			"encoder did not follow the shrinking grant, last applied {}",
-			video.applied_bitrate()
-		);
-		kio::clock::sleep(Duration::from_millis(10)).await;
-	}
+	// A drop applies at once, so this waits on the follow thread alone, never a timer.
+	video.wait_applied(1_000_000);
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();

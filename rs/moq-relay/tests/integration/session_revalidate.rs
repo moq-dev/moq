@@ -289,32 +289,28 @@ async fn connect(url: url::Url, bind: &str) -> moq_tokio::Connection {
 	.expect("connect failed")
 }
 
-async fn wait_listed(fixture: &Fixture, n: usize) -> List {
-	let deadline = kio::clock::now() + Duration::from_secs(5);
-	loop {
-		let (status, list) = fixture.list("").await;
-		assert_eq!(status, reqwest::StatusCode::OK);
-		if list.sessions.len() >= n {
-			return list;
-		}
-		assert!(
-			kio::clock::now() < deadline,
-			"expected {n} sessions, got {}",
-			list.sessions.len()
-		);
-		kio::clock::sleep(Duration::from_millis(25)).await;
+/// Every session on the node, once all `n` are. A session registers when admitted,
+/// which its client's handshake need not wait for, and the registry signals nothing,
+/// so yield until it holds them; no timer runs.
+async fn listed(fixture: &Fixture, n: usize) -> List {
+	while fixture.sessions.list(&Filter::default()).len() < n {
+		tokio::task::yield_now().await;
 	}
+	let (status, list) = fixture.list("").await;
+	assert_eq!(status, reqwest::StatusCode::OK);
+	assert_eq!(list.sessions.len(), n, "{list:?}");
+	list
 }
 
-/// A push by id closes a refused session well inside the cadence, and `end` says
-/// `refused`.
+/// A push by id closes a refused session with the clock standing still, so no
+/// cadence did, and `end` says `refused`.
 #[tokio::test]
 async fn push_by_id_refuses_inside_the_cadence() {
-	kio::clock::host_time();
+	let _clock = crate::manual();
 	let script = Script::new(grant());
 	let fixture = Fixture::tcp(build_auth(script.spawn().await)).await;
 	let session = connect(fixture.path("/room"), "127.0.0.1:0").await;
-	let list = wait_listed(&fixture, 1).await;
+	let list = listed(&fixture, 1).await;
 	assert_eq!(list.sessions.len(), 1);
 	assert!(
 		serde_json::to_value(&list.sessions[0]).unwrap().get("query").is_none(),
@@ -327,10 +323,7 @@ async fn push_by_id_refuses_inside_the_cadence() {
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 	assert_eq!(nudged.ids.as_slice(), std::slice::from_ref(&id));
 
-	kio::clock::timeout(Duration::from_secs(3), session.closed())
-		.await
-		.expect("a push must close the session well inside the cadence")
-		.expect_err("refused as Unauthorized");
+	session.closed().await.expect_err("refused as Unauthorized");
 
 	assert_eq!(script.end_of(&id).await, moq_auth::lease::Reason::Refused);
 	assert_eq!(script.ends().len(), 1);
@@ -345,9 +338,9 @@ async fn path_and_cidr_select_a_subset() {
 	let a = connect(fixture.path("/demo/one"), "127.0.0.1:0").await;
 	let b = connect(fixture.path("/demo/two"), "127.0.0.1:0").await;
 	let c = connect(fixture.path("/other"), "127.0.0.1:0").await;
-	let listed = wait_listed(&fixture, 3).await;
+	let all = listed(&fixture, 3).await;
 	let id_of = |path: &str| {
-		let session = listed.sessions.iter().find(|session| session.path == path);
+		let session = all.sessions.iter().find(|session| session.path == path);
 		session.unwrap_or_else(|| panic!("{path} is listed")).id.clone()
 	};
 
@@ -405,7 +398,7 @@ async fn websocket_is_listed_and_closes_on_a_push() {
 	let script = Script::new(grant());
 	let fixture = Fixture::ws(build_auth(script.spawn().await)).await;
 	let session = connect(fixture.path("/room"), "127.0.0.1:0").await;
-	let list = wait_listed(&fixture, 1).await;
+	let list = listed(&fixture, 1).await;
 	assert_eq!(list.sessions[0].transport, moq_auth::Transport::WebSocket);
 
 	script.on_revalidate(Answer::Status(403));
@@ -424,7 +417,7 @@ async fn empty_filter_reaches_all() {
 	let fixture = Fixture::tcp(build_auth(script.spawn().await)).await;
 	let _a = connect(fixture.path("/a"), "127.0.0.1:0").await;
 	let _b = connect(fixture.path("/b"), "127.0.0.1:0").await;
-	wait_listed(&fixture, 2).await;
+	listed(&fixture, 2).await;
 
 	let (status, nudged) = fixture.revalidate("").await;
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
@@ -440,11 +433,11 @@ async fn empty_filter_reaches_all() {
 /// A retier arrives on the next reply after a push, and the session stays.
 #[tokio::test]
 async fn a_pushed_retier_arrives_on_the_next_reply() {
-	kio::clock::host_time();
+	let _clock = crate::manual();
 	let script = Script::new(grant());
 	let fixture = Fixture::tcp(build_auth(script.spawn().await)).await;
 	let session = connect(fixture.path("/room"), "127.0.0.1:0").await;
-	let id = wait_listed(&fixture, 1).await.sessions[0].id.clone();
+	let id = listed(&fixture, 1).await.sessions[0].id.clone();
 
 	let mut moved = grant();
 	moved.tier = Some("gold".into());
@@ -452,9 +445,9 @@ async fn a_pushed_retier_arrives_on_the_next_reply() {
 	let (status, _) = fixture.revalidate("").await;
 	assert_eq!(status, reqwest::StatusCode::ACCEPTED);
 
-	// A re-check applies a new tier only once it has decided to keep the session.
+	// A re-check applies a new tier only once it has decided to keep the session. The
+	// stats signal no change, so yield until the reply lands; the clock stands still.
 	let gold = moq_net::stats::Tier::new(moq_net::Path::from_static("gold"));
-	let deadline = kio::clock::now() + TIMEOUT;
 	while !fixture
 		.stats
 		.snapshot()
@@ -462,8 +455,7 @@ async fn a_pushed_retier_arrives_on_the_next_reply() {
 		.iter()
 		.any(|(tier, presence)| *tier == gold && presence.active() == 1)
 	{
-		assert!(kio::clock::now() < deadline, "the pushed retier never applied");
-		kio::clock::sleep(Duration::from_millis(20)).await;
+		tokio::task::yield_now().await;
 	}
 	session.abort(moq_net::Error::Cancel);
 	assert_eq!(
