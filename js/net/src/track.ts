@@ -892,11 +892,15 @@ function sameVerdict(a: DropRun, b: DropRun): boolean {
 	return sameHole({ ...a, received: undefined }, { ...b, received: undefined });
 }
 
-// The runs of `drops` and a reader's `refused` overlapping `[start, end)`, lowest first.
+// The runs of `drops` and a reader's `refused` overlapping `[start, end)`, lowest first; a
+// track drop or skip hides the refusals it covers.
 function givenUp(drops: DropSet, refused: readonly DropRun[], start: bigint, end: bigint): DropRun[] {
 	const found = drops.overlapping(start, end);
 	if (refused.length === 0) return found;
-	found.push(...refused.filter((run) => run.start < end && start < run.end));
+	// The track's verdict wins where it covers the reader's own refusal, as in Rust.
+	let own = refused.filter((run) => run.start < end && start < run.end);
+	for (const run of found) own = removeRun(own, run.start, run.end);
+	found.push(...own);
 	return found.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 }
 

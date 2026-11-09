@@ -324,6 +324,27 @@ test("fill: a group arriving after a refusal reaches the reader the refusal name
 	broadcast.close();
 });
 
+test("fill: the track's skip of a run a reader's fill refused is what the reader reports", async () => {
+	const { broadcast, track } = resumed(4n);
+	const requests = track.requests();
+	const reader = track.subscribe({
+		ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }],
+		delay: { max: null },
+	});
+	const first = reader.recvGroup();
+	const fill = await requests.requestedFill();
+	if (!fill) throw new Error("no fill");
+	fill.refuseGroups(0n, 2n, new StreamError(StreamCode.Cancel, { message: "storage busy" }));
+	// The publisher declares the refused run never produced; its verdict wins, as in Rust.
+	track.skipGroups(0n, 2n);
+	expect(hooks.tryDrop(reader)).toMatchObject({ kind: "drop", start: 0n, end: 2n, skip: true });
+
+	fill.close();
+	requests.close();
+	broadcast.close();
+	await first.catch(() => undefined);
+});
+
 test("fill: a fill names the most urgent priority and loosest budget among its readers", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
