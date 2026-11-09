@@ -129,10 +129,11 @@ just test push-to-talk
 ```
 
 This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
-page, and the native `moq play` as a second listener. A constant tone loops through the fake microphone, encoded as 128 kbit/s Opus with 60 ms
-frames. A release mutes the publisher, which sends nothing until the next press while its rendition
-stays enabled, so the listener keeps its subscription and plays comfort noise in between. The
-listener holds a fixed 300 ms delay. After warmup and a mute, it measures 22 presses,
+page, and the native `moq play` as a second listener. Both elements keep their defaults: Opus with
+20 ms frames, and `delay: "auto"`. A constant tone loops through the fake microphone. A release
+mutes the publisher, which sends nothing until the next press while its rendition stays enabled,
+so the listener keeps its subscription and plays comfort noise in between. After warmup and a
+mute, it measures 22 presses,
 alternating two and three seconds: the first after the warmup's five-second mute, seven with no
 intervening wait, seven after five seconds, and seven after sixty seconds. Both elements reach a
 local relay directly over WebTransport, with no shaping, loss, or queueing, so every millisecond
@@ -172,7 +173,7 @@ The latency goal is at most 300 ms of playout added on top of one-way delivery. 
 press, `delivery` is the slowest of the utterance's frames that arrived before its onset, measured
 from that frame's first sample (its media offset after the press). `playout` is what remains of the
 render onset after the press and that delivery, and `output` is the projected device output after
-that onset. `path` follows the head frame from the press to projected output in parts that sum to
+that onset. `onset` is the press to the render onset, everything but the device's own output. `path` follows the head frame from the press to projected output in parts that sum to
 it: `capture` (worklet delivery and framing, after the media the frame still needed),
 `packetization` (that media, placed on the media clock by the newest chunk captured before the
 press), `encode` (codec and container write), `network` (write to arrival, through the relay),

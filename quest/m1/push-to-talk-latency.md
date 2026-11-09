@@ -47,9 +47,21 @@ head was not decoded"): 2 of 22 on the default 20 ms Opus and 1 on 60 ms.
 The group after a head could overtake it, and the read took the mute's
 timestamp jump as proof the head was too late to wait for;
 [moq-dev/moq#8123](https://github.com/moq-dev/moq/pull/8123) fixed it, and two
-20 ms runs after the fix kept all 44 heads. What remains is to switch the
-page to the defaults, measure on `kixtop` again, and set and enforce the
-budget.
+20 ms runs after the fix kept all 44 heads.
+[moq-dev/moq#8364](https://github.com/moq-dev/moq/pull/8364) switches the page
+to the defaults and reports `latency.onset`, the press to the render onset,
+which the budget will gate. What remains is to measure on `kixtop` and set and
+enforce the budget.
+
+Validated 2026-11-09 on the defaults with Watch's stretch, one run on the Linux
+agent host (load average 3 to 5): every completeness check passed and all 44
+heads arrived, but the browser counted 596 underruns and 136 stalls, against
+64 / 33 on 2026-11-05. The stretch only accelerates and never expands, so it
+cannot cover a target set below the arrival spread; the premise of the
+2026-11-06 decision does not hold. Press to render onset was 56 / 83 ms
+(median / max over 15 separated presses), the `"auto"` target 40 to 60 ms,
+`device` 114 / 120 ms. This run checks the harness only; the budget comes from
+`kixtop`.
 
 Measured 2026-11-05 on the defaults, before Watch, one run of 22 presses
 each, Chromium 156 headless through a local relay. `kixtop` is a MacBook Air
@@ -90,6 +102,23 @@ Knobs: the target's frame term (`frameDuration`, 20 ms by default) and its
 measured term (`js/watch/src/audio/latency.ts`); device and render follow the
 watch AudioContext's `latencyHint` (`"interactive"` in
 `js/watch/src/audio/decoder.ts`), otherwise the platform.
+
+## Waiting
+
+- Maintainer: free about 30 GB on `kixtop`, which had 193 MiB free on
+  2026-11-09, too little for the relay build and Chromium. An agent does not
+  delete files on a personal laptop unasked. Check with `ssh kixtop df -h /`.
+  The harness's native listener needs PulseAudio, so the agent then runs the
+  browser half ad hoc there, as on 2026-11-05.
+- Maintainer: decide how `just test push-to-talk` treats browser underruns on
+  the defaults, since the stretch does not bring them to zero: (a) gate on a
+  ceiling measured on `kixtop` and the nightly runner, as `budgets.json` does
+  for the browser rows, leaving zero to
+  [Audio jitter target](/quest/m1/audio-jitter-target/README.md)
+  (recommended: it keeps the latency budget enforceable now and records
+  today's player honestly); (b) keep the zero check, so the nightly step fails
+  until the jitter target covers push-to-talk's spread; (c) hold the fixed
+  300 ms delay and budget latency only on the defaults' onset in a second row.
 
 ## Related
 

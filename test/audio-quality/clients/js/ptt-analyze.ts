@@ -118,6 +118,7 @@ const presses = result.presses
 			firstDecoded: input[0] ? decoded.has(input[0].timestamp) : false,
 			arrival: earliest ? earliest[0] - press.at : null,
 			audible: audible ? audible.at - press.at : null,
+			onset: audible ? audible.rendered - press.at : null,
 			delivery,
 			spread,
 			delay: filled ? (delayAt(filled.at) ?? null) : null,
@@ -168,8 +169,9 @@ const nativePlayback = {
 };
 const parts = ["capture", "packetization", "encode", "network", "decode", "jitter_buffer", "render", "device"] as const;
 const summary = {
-	// The goal: at most 300 ms of playout added on top of one-way delivery.
 	latency: {
+		// Press to render onset: what the budget covers, everything but the device's own output.
+		onset: summarize(presses.map((press) => press.onset)),
 		delivery: summarize(presses.map((press) => press.delivery)),
 		playout: summarize(presses.map((press) => press.playout)),
 		output: summarize(presses.map((press) => press.output)),
