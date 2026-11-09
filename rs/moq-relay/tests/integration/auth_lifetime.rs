@@ -32,6 +32,8 @@ fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
+/// Bounds a wait on the host clock. Under `crate::manual()` it never fires, and nextest's
+/// `terminate-after` bounds the test instead.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the scripted server answers next, per event.
@@ -175,11 +177,14 @@ fn all() -> Patterns {
 	[Pattern::all()].into_iter().collect()
 }
 
-/// Everything under the dialed path, re-checked every second, good for `expires_in`.
+/// How often [`grant`] asks to be re-checked.
+const CADENCE: Duration = Duration::from_secs(1);
+
+/// Everything under the dialed path, re-checked every [`CADENCE`], good for `expires_in`.
 fn grant(expires_in: Duration) -> Grant {
 	let mut grant = Grant::new(all(), all());
 	grant.expires = Some(kio::clock::wall() + expires_in);
-	grant.revalidate = Some(Duration::from_secs(1));
+	grant.revalidate = Some(CADENCE);
 	grant
 }
 
@@ -425,8 +430,8 @@ async fn spawn_quic_relay_with(
 	(addr, handle)
 }
 
-async fn assert_closed(session: moq_tokio::Connection, within: Duration, what: &str) {
-	let _ = kio::clock::timeout(within, session.closed())
+async fn assert_closed(session: moq_tokio::Connection, what: &str) {
+	let _ = kio::clock::timeout(TIMEOUT, session.closed())
 		.await
 		.unwrap_or_else(|_| panic!("relay should close the {what} session"));
 }
@@ -656,7 +661,7 @@ async fn refusals_and_outages_refuse_at_connect() {
 /// ones, and media sent afterwards records there in both directions.
 #[tokio::test]
 async fn a_moved_tier_retags_the_live_session() {
-	kio::clock::host_time();
+	let clock = crate::manual();
 	let mut labeled = grant(Duration::from_secs(3600));
 	labeled.label = Some("project/key/1".into());
 	let script = Script::new(labeled);
@@ -780,10 +785,10 @@ async fn a_moved_tier_retags_the_live_session() {
 	moved_grant.label = Some("project/key/2".into());
 	script.on_revalidate(Answer::Grant(moved_grant));
 
-	let deadline = kio::clock::now() + TIMEOUT;
+	clock.advance(CADENCE);
+	// The stats signal no retag, so yield until both re-checks land; the clock stands still.
 	while active(&moved) < 2 {
-		assert!(kio::clock::now() < deadline, "the re-checked tier never applied");
-		kio::clock::sleep(Duration::from_millis(50)).await;
+		tokio::task::yield_now().await;
 	}
 	assert_eq!(active(&stats::Tier::default()), 0, "presence left the old tier");
 
@@ -824,8 +829,8 @@ async fn a_moved_tier_retags_the_live_session() {
 #[cfg(feature = "websocket")]
 #[tokio::test]
 async fn a_rechecked_grant_resizes_live_sessions() {
-	// Each scheme waits out two re-check cadences, so run them side by side.
-	futures::future::join_all(["tcp", "ws"].map(|scheme| async move {
+	let clock = crate::manual();
+	for scheme in ["tcp", "ws"] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = match scheme {
@@ -910,6 +915,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let mut narrow = grant(Duration::from_secs(3600));
 		narrow.subscribe = ["alice/video/**".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
+		clock.advance(CADENCE);
 
 		let err = loop {
 			match kio::clock::timeout(TIMEOUT, subs[0].recv_group())
@@ -939,6 +945,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Undeafen: the path is announced again and a new subscription flows.
 		script.on_revalidate(Answer::Grant(grant(Duration::from_secs(3600))));
+		clock.advance(CADENCE);
 		let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.follow("alice/audio", None).unwrap().available())
 			.await
 			.expect("the undeafened path was never announced again")
@@ -965,15 +972,14 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		assert_open_until_closed(&script, [pub_session, sub_session], &format!("{scheme}: a resize")).await;
 		relay.abort();
-	}))
-	.await;
+	}
 }
 
 /// A re-check that moves the root still closes the session: nothing it holds is
 /// named the same way under the new one.
 #[tokio::test]
 async fn a_moved_root_closes_live_sessions() {
-	kio::clock::host_time();
+	let clock = crate::manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
@@ -982,8 +988,9 @@ async fn a_moved_root_closes_live_sessions() {
 	moved.root = Some("elsewhere".into());
 	script.on_revalidate(Answer::Grant(moved));
 
-	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
-	assert_closed(sub_session, Duration::from_secs(5), "subscriber").await;
+	clock.advance(CADENCE);
+	assert_closed(pub_session, "publisher").await;
+	assert_closed(sub_session, "subscriber").await;
 	relay.abort();
 }
 
@@ -991,22 +998,22 @@ async fn a_moved_root_closes_live_sessions() {
 /// 403, 401, and an empty grant are all a no.
 #[tokio::test]
 async fn a_refusal_closes_live_sessions() {
-	kio::clock::host_time();
-	// Each answer waits out a re-check cadence, so run them side by side.
+	let clock = crate::manual();
 	let answers = [
 		("403", Answer::Status(403)),
 		("401", Answer::Status(401)),
 		("empty grant", Answer::Grant(Grant::default())),
 	];
-	futures::future::join_all(answers.map(|(label, answer)| async move {
+	for (label, answer) in answers {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 		let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
 
 		script.on_revalidate(answer);
 
-		assert_closed(pub_session, Duration::from_secs(5), &format!("{label} publisher")).await;
-		assert_closed(sub_session, Duration::from_secs(5), &format!("{label} subscriber")).await;
+		clock.advance(CADENCE);
+		assert_closed(pub_session, &format!("{label} publisher")).await;
+		assert_closed(sub_session, &format!("{label} subscriber")).await;
 
 		let ends = script.ends_at_least(2, &format!("{label}: an end per session")).await;
 		for end in &ends {
@@ -1017,8 +1024,7 @@ async fn a_refusal_closes_live_sessions() {
 		}
 
 		relay.abort();
-	}))
-	.await;
+	}
 }
 
 /// The one-shot HTTP routes are sessions of their own: `/announced` is admitted
@@ -1028,6 +1034,7 @@ async fn a_refusal_closes_live_sessions() {
 #[cfg(feature = "websocket")]
 #[tokio::test]
 async fn http_routes_hold_a_lease() {
+	let clock = crate::manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 
@@ -1137,7 +1144,8 @@ async fn http_routes_hold_a_lease() {
 
 	// A refusal on the fetch's re-check cuts the transfer; the publisher is untouched.
 	script.on_revalidate_http(Answer::Status(403));
-	let cut = kio::clock::timeout(Duration::from_secs(5), async {
+	clock.advance(CADENCE);
+	let cut = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match fetch.chunk().await {
 				Ok(Some(_)) => continue,
@@ -1198,7 +1206,7 @@ async fn the_end_carries_duration_and_bytes() {
 /// reporting its end, and holds both registrations until those reports finish.
 #[tokio::test]
 async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
-	let clock = manual();
+	let clock = crate::manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let gate = script.hold_ends();
 	let auth = build_auth(script.spawn().await);
@@ -1539,7 +1547,7 @@ async fn an_embedded_decider_admits_and_revokes() {
 	// The publisher was admitted first; revoking its lease closes it alone.
 	let publisher = decider.producers.lock().unwrap().remove(0);
 	publisher.revoke(moq_auth::lease::Reason::Refused);
-	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
+	assert_closed(pub_session, "publisher").await;
 	// The subscriber's lease reports the client's own close, so the revocation had
 	// not ended it.
 	let subscriber = decider.producers.lock().unwrap().remove(0);
@@ -1575,7 +1583,7 @@ async fn an_embedded_decider_admits_and_revokes() {
 /// `supervise`, as `a_rechecked_grant_resizes_live_sessions` proves.
 #[tokio::test(start_paused = true)]
 async fn a_fixed_lease_still_expires() {
-	let clock = manual();
+	let clock = crate::manual();
 	closes_at_expires(&clock, moq_auth::lease::Consumer::fixed(expiring())).await;
 }
 
@@ -1627,7 +1635,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session, kio::Producer
 /// server's outage keeps the grant is `moq_auth::Client`'s to test.
 #[tokio::test(start_paused = true)]
 async fn an_outage_keeps_the_session_until_expires() {
-	let clock = manual();
+	let clock = crate::manual();
 	let (producer, consumer) = moq_auth::lease::Producer::new(expiring());
 	closes_at_expires(&clock, consumer).await;
 	let (reason, _) = producer.closed().await;
@@ -1636,12 +1644,6 @@ async fn an_outage_keeps_the_session_until_expires() {
 
 /// How long after the manual clock's start [`expiring`] grants run out.
 const EXPIRES: Duration = Duration::from_secs(3);
-
-/// Make the test runtime's clock one that only the test moves, wall time included,
-/// so a grant's life is measured exactly. Call it before anything reads the clock.
-fn manual() -> kio::clock::Installed {
-	kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
-}
 
 /// Everything under the dialed path, until [`EXPIRES`] from now on the ambient clock.
 fn expiring() -> Grant {
@@ -1771,24 +1773,22 @@ async fn connect_through_embedded_admission(
 /// comes closes the connection at the deadline, not after a fixed cap of its own.
 #[tokio::test]
 async fn an_unanswered_admission_closes_at_the_handshake_deadline() {
-	kio::clock::host_time();
-	let (relay, mut admissions, connecting) = connect_through_embedded_admission(Duration::from_secs(1)).await;
+	let clock = crate::manual();
+	let deadline = Duration::from_secs(1);
+	let (relay, mut admissions, connecting) = connect_through_embedded_admission(deadline).await;
 	let trigger = relay.shutdown_trigger().clone();
 	let running = tokio::spawn(relay.run());
 	let admission = admissions.next().await.expect("the admission is asked");
 
-	// Only timers decide what follows: the deadline passes with nobody answering.
-	tokio::time::pause();
-	tokio::time::advance(Duration::from_secs(2)).await;
-	tokio::time::resume();
-	// The close reaches the client over loopback within moments; the old fixed cap
-	// would have held the connection for another eight seconds.
+	// Only timers decide what follows: the deadline passes with nobody answering, then
+	// the clock stands still, so the close owes nothing to the old fixed cap.
+	clock.advance(deadline);
 	let connecting = kio::clock::timeout(TIMEOUT, connecting)
 		.await
 		.expect("the client never settled")
 		.expect("client task");
 	if let Ok(connection) = connecting {
-		kio::clock::timeout(Duration::from_secs(3), connection.closed())
+		kio::clock::timeout(TIMEOUT, connection.closed())
 			.await
 			.expect("the connection outlived the handshake deadline")
 			.expect_err("closed as refused, not cleanly");
