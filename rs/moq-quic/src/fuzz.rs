@@ -36,6 +36,17 @@ pub use crate::connection::BenchSentPackets as SentPackets;
 pub use connection::connection;
 pub use plaintext::Plaintext;
 
+/// Whether `conn` is still handshaking, for the benches to wait out.
+pub fn is_handshaking(conn: &crate::connection::Connection) -> bool {
+	conn.is_handshaking()
+}
+
+/// Pins every packet to `mtu`, so black hole detection cannot shrink them.
+pub fn pin_mtu(transport: &mut crate::transport::Config, mtu: u16) {
+	transport.initial_mtu = mtu;
+	transport.min_mtu = mtu;
+}
+
 /// One fuzz target body: it returns whether the input got past the first parse, which
 /// is what [`seeds`] is checked against.
 pub type Target = fn(&[u8]) -> bool;
