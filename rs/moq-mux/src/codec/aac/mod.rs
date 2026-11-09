@@ -248,11 +248,16 @@ impl Config {
 	/// over an AAC-LC core at half the output rate, mono under PS. A channel count that does
 	/// not pick a channelConfiguration is refused rather than written as another layout.
 	pub fn encode(&self) -> Result<Bytes> {
-		// audioObjectType is a 5-bit field; a wider type is masked, not escaped.
-		let profile = self.profile & 0x1F;
+		let profile = self.profile;
 
 		let mut out = BitWriter::default();
-		out.write(5, profile.into());
+		// audioObjectType 32 and above escapes the 5-bit field with 31 and a 6-bit extension.
+		if profile >= 32 {
+			out.write(5, 31);
+			out.write(6, u32::from(profile - 32));
+		} else {
+			out.write(5, profile.into());
+		}
 		if matches!(profile, OBJECT_TYPE_SBR | OBJECT_TYPE_PS) {
 			let channel_count = if profile == OBJECT_TYPE_PS {
 				1
@@ -663,6 +668,8 @@ mod tests {
 		assert_eq!(cfg.profile, 36);
 		assert_eq!(cfg.sample_rate, 48_000);
 		assert_eq!(cfg.channel_count, 2);
+		let encoded = cfg.encode().unwrap();
+		assert_eq!(Config::parse(&mut encoded.as_ref()).unwrap().profile, 36);
 	}
 
 	#[test]
