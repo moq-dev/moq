@@ -536,21 +536,20 @@ test("a plain frame has no size cap, while a compressed one keeps its whole-fram
 });
 
 // Quarantined: flaky under load, see /quest/m0/test-flakes-2/compressed-frame-cap.md
-test.skip("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
+// The bound's soundness for incompressible input lives in flate/codec.test.ts; deflating 32 MiB of
+// noise here would cost seconds under load.
+test("a compressed frame is refused unless its worst-case slice fits a peer's frame cap", async () => {
 	const MAX = 32 * 1024 * 1024;
 	let largest = MAX;
 	while (!encodable(largest)) largest--;
 	const compressed = new Producer(0n);
 	hooks.bindGroupCompression(compressed, true);
 	const reader = compressed.consume();
-	// High-entropy input expands under DEFLATE, so even the cap itself may not encode within it.
+	// Refused by size alone, even though zeros would compress far below the cap.
 	expect(() => compressed.writeFrame({ payload: new Uint8Array(largest + 1) })).toThrow(FrameTooLarge);
 	expect(() => compressed.createFrame({ size: largest + 1 })).toThrow(FrameTooLarge);
-	const payload = new Uint8Array(largest);
-	for (let i = 0; i < largest; i += 65536) crypto.getRandomValues(payload.subarray(i, i + 65536));
-	compressed.writeFrame({ payload });
+	compressed.writeFrame({ payload: new Uint8Array(largest) });
 	const read = await hooks.readGroupFrame(reader, true);
-	expect(read?.frame.payload.byteLength).toBeGreaterThan(largest);
 	expect(read?.frame.payload.byteLength).toBeLessThanOrEqual(MAX);
 	compressed.finish();
 
