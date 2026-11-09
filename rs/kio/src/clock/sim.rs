@@ -453,6 +453,11 @@ impl Timer {
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
+		// The same deadline keeps its entry and wakes nobody, like tokio's
+		// `Sleep::reset`, so a task resetting on every poll still parks.
+		if at == self.at && self.key.is_some() {
+			return;
+		}
 		self.at = at;
 		// Wake whoever is parked on the old deadline, so it re-arms for the new one;
 		// the reset may come from another task.
@@ -686,6 +691,29 @@ mod tests {
 		for _ in 0..10_000 {
 			assert!(consumer.poll(&waiter, |_| Poll::Ready(())).is_ready());
 		}
+	}
+
+	/// A task resetting its sleep to the same deadline on every poll still parks
+	/// until that deadline, rather than waking itself and spinning.
+	#[crate::test]
+	async fn a_same_deadline_reset_does_not_wake() {
+		let at = crate::clock::now().saturating_add(Duration::from_secs(1));
+		let mut sleep = Box::pin(crate::clock::sleep(Duration::from_secs(1)));
+		let mut polls = 0;
+		std::future::poll_fn(|cx| {
+			polls += 1;
+			assert!(polls <= 3, "the sleep woke its task without time passing");
+			// The first poll arms the sleep and wakes once, so the next poll
+			// resets an armed entry before the deadline.
+			if polls == 1 {
+				cx.waker().wake_by_ref();
+			} else {
+				sleep.as_mut().reset(at);
+			}
+			sleep.as_mut().poll(cx)
+		})
+		.await;
+		assert_eq!(crate::clock::now(), at);
 	}
 
 	#[test]

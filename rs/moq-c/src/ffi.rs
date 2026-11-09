@@ -124,26 +124,34 @@ impl Background {
 		Self { result: Some(receiver) }
 	}
 
+	/// Read the operation's completion, arming `waiter` while it runs. Every reader goes through
+	/// here, so a synchronous check and an awaited one agree on each state.
+	fn completion(&self, waiter: &kio::Waiter) -> Completion {
+		let Some(result) = &self.result else {
+			return Completion::Detached;
+		};
+		let completed = result.poll(waiter, |state| match &**state {
+			Some(result) => std::task::Poll::Ready(result.clone()),
+			None => std::task::Poll::Pending,
+		});
+		match completed {
+			std::task::Poll::Pending => Completion::Running,
+			std::task::Poll::Ready(Ok(result)) => Completion::Done(result),
+			std::task::Poll::Ready(Err(_)) => Completion::Dropped,
+		}
+	}
+
 	/// Return a completed background failure, if any.
 	pub fn check(&self) -> Result<(), Error> {
-		self.result
-			.as_ref()
-			.map(|result| result.read().clone().unwrap_or(Ok(())))
-			.unwrap_or(Ok(()))
+		self.completion(&kio::Waiter::noop()).result().unwrap_or(Ok(()))
 	}
 
 	/// The background operation's result, once it finishes.
 	#[kio::wrapper]
 	pub fn poll_finished(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
-		let Some(result) = &self.result else {
-			return std::task::Poll::Ready(Ok(()));
-		};
-		match std::task::ready!(result.poll(waiter, |state| match &**state {
-			Some(result) => std::task::Poll::Ready(result.clone()),
+		match self.completion(waiter).result() {
+			Some(result) => std::task::Poll::Ready(result),
 			None => std::task::Poll::Pending,
-		})) {
-			Ok(result) => std::task::Poll::Ready(result),
-			Err(_) => std::task::Poll::Ready(Err(Error::Panic)),
 		}
 	}
 
@@ -161,6 +169,28 @@ impl Background {
 		};
 		self.check()?;
 		result
+	}
+}
+
+/// Where an owned operation stands, as its handle's calls report it.
+enum Completion {
+	/// The handle owns no operation, so nothing can fail it.
+	Detached,
+	Running,
+	Done(Result<(), Error>),
+	/// Released without a result, which only the runtime's teardown does.
+	Dropped,
+}
+
+impl Completion {
+	/// What the handle's calls report, or `None` while the operation runs.
+	fn result(self) -> Option<Result<(), Error>> {
+		match self {
+			Self::Detached => Some(Ok(())),
+			Self::Running => None,
+			Self::Done(result) => Some(result),
+			Self::Dropped => Some(Err(moq_net::Error::Cancel.into())),
+		}
 	}
 }
 
@@ -548,13 +578,13 @@ pub unsafe fn parse_strings(items: *const crate::moq_string, count: usize) -> Re
 		.collect()
 }
 
-/// Parse a raw pointer and size into a byte slice.
+/// Parse a raw pointer and element count into a slice.
 ///
 /// Returns an empty slice if both pointer and size are zero.
 ///
 /// # Safety
 /// The caller must ensure that data is valid for 'a.
-pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], Error> {
+pub unsafe fn parse_slice<'a, T>(data: *const T, size: usize) -> Result<&'a [T], Error> {
 	if data.is_null() {
 		if size == 0 {
 			return Ok(&[]);
@@ -615,6 +645,23 @@ mod tests {
 				.await,
 			Err(Error::Panic)
 		));
+	}
+
+	/// A background dropped before it reported reads as cancelled to a check and an await alike.
+	#[tokio::test]
+	async fn a_dropped_background_reads_cancelled_everywhere() {
+		let result = kio::Producer::new(None);
+		let background = Background {
+			result: Some(result.consume()),
+		};
+		drop(result);
+		let checked = background.check();
+		let finished = background.finished().await;
+		assert!(
+			matches!(checked, Err(Error::Moq(moq_net::Error::Cancel)))
+				&& matches!(finished, Err(Error::Moq(moq_net::Error::Cancel))),
+			"{checked:?} {finished:?}"
+		);
 	}
 
 	struct PanickingDriver {

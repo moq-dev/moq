@@ -21,7 +21,7 @@ use super::args::Args;
 use super::layout::fit;
 use super::media::Media;
 use super::output::Output;
-use moq_mux::timeline::{Consumer, Producer as Presentation};
+use moq_mux::sync::{Consumer, Producer as Presentation};
 
 /// How early a frame may be shown rather than waiting another wakeup for it.
 /// Under a display's frame interval, so it can't be seen, but enough that timer
@@ -79,6 +79,7 @@ pub fn run(
 			args,
 			video: video.clone(),
 			presentation: presentation.clone(),
+			playhead: Default::default(),
 			drained: drained.clone(),
 			output: Remote {
 				proxy: proxy.clone(),
@@ -195,7 +196,7 @@ impl App {
 			return Ok(());
 		};
 		let mut video = self.video.lock().unwrap();
-		// Re-read the shared anchor on every redraw: audio may have moved it.
+		// Re-read the shared schedule on every redraw: any track may have moved it.
 		let cutoff = Instant::now().saturating_add(VIDEO_EARLY_TOLERANCE);
 		let mut due = None;
 		if let Some(index) = self

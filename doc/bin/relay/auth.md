@@ -133,7 +133,8 @@ and use its `moq auth` subcommand.
 moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
 
 # Let the bearer publish under rooms/123/alice and subscribe to anything in rooms/123.
-moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' --expires "$(( $(date +%s) + 3600 ))" > alice.jwt
+# The token expires in an hour unless --ttl, --expires, or --unbounded says otherwise.
+moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' > alice.jwt
 
 moq auth verify --key public.jwk --in alice.jwt
 ```
@@ -415,7 +416,7 @@ evaluated or refused: nothing is ignored, and no two are combined.
 | a JWT and a certificate | never requested | refused |
 
 A JWT is verified against `--key FILE`, `--key-dir DIR`, or `--key-set FILE`
-(by `kid`, read per request so rotation needs no restart) and authorized at the
+(by `kid`, re-read when the file changes so rotation needs no restart) and authorized at the
 dialed path, as in [Path matching](#path-matching). A bad token is refused; it
 never falls through to the anonymous rules. A JWT presented with a certificate
 is refused too, because neither can safely win, so a peer presents
@@ -433,8 +434,12 @@ security boundary: approximate across relay crashes and server restarts, and
 they gate admission without revoking.
 
 `--listen unix:/run/moq-auth.sock` serves a socket. Binding anything but a
-loopback address needs `--listen-public`: the server has no authentication of
-its own. See `moq auth serve --help` for the rest.
+loopback address needs `--listen-public`, which needs `--listen-secret FILE`:
+every request must then carry the file's secret as its HTTP Basic password, so
+only relays can record sessions and fill the session limits. A relay sends it
+from its URL, `--auth-url https://relay:<secret>@auth.example.com/` (percent-encode
+reserved characters), through the TLS proxy in front of the server. `--listen-secret`
+also guards a loopback listener. See `moq auth serve --help` for the rest.
 
 ### Mesh enrollment
 
@@ -469,8 +474,9 @@ proxy, since devices refuse plain `http://` beyond loopback. A challenge holds
 no state until a proof uses it, so unauthenticated requests cannot crowd out a
 device's; the proxy should still rate-limit each client. The owner's
 commands go to `--listen` (`moq auth mesh --url`, `unix:///path` for a
-socket), which has no authentication, so `--mesh-url` refuses
-`--listen-public`. A hosted coordinator implements
+socket), which every relay holding `--listen-secret` could reach, so `--mesh-url`
+refuses `--listen-public`. With `--listen-secret` set, the owner presents it
+too, as the URL's password: `moq auth mesh --url http://owner:SECRET@127.0.0.1:4440`. A hosted coordinator implements
 the same JSON contract, documented in
 [`moq_auth::mesh`](https://docs.rs/moq-auth/latest/moq_auth/mesh/); it adds
 no token claims.

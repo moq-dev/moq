@@ -221,7 +221,9 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			let cut = std::mem::take(&mut track.queue).len() as u64;
 			track.bytes = 0;
 			// A cancel resumes the old publisher, whose next frames may reference the cut ones.
-			track.waiting |= cut > 0;
+			if cut > 0 {
+				track.admit = Admit::Waiting;
+			}
 			match track.started {
 				true => self.active.dropped += cut,
 				false => self.active.trimmed += cut,
@@ -741,6 +743,18 @@ struct Floor<K> {
 	began: Instant,
 }
 
+/// Which frames a track admits to its queue.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Admit {
+	/// Every frame that makes its deadline.
+	Flowing,
+	/// None until the next sync frame.
+	Waiting,
+	/// It resumed at its last sync frame after waiting, whose leading frames are dropped too:
+	/// they reference the frames dropped while waiting.
+	Resumed,
+}
+
 struct Track<T> {
 	/// Frames in arrival order, each with its generation, decode time, deadline and bytes.
 	queue: VecDeque<(u64, Decode, Instant, T, usize)>,
@@ -754,11 +768,7 @@ struct Track<T> {
 	arrived: Instant,
 	/// The generation of the last frame.
 	generation: u64,
-	/// Frames are dropped until the next sync frame.
-	waiting: bool,
-	/// Whether the track resumed at its last sync frame after waiting, whose leading frames are
-	/// dropped too.
-	resumed: bool,
+	admit: Admit,
 	/// Whether a frame of it has gone out. Until one has, a loss takes everything it holds.
 	started: bool,
 }
@@ -1035,8 +1045,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			decode: arrival.decode,
 			arrived: arrival.arrived,
 			generation,
-			waiting: false,
-			resumed: false,
+			admit: Admit::Flowing,
 			started: false,
 		});
 		track.restart = arrival.restart;
@@ -1045,16 +1054,19 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		track.generation = generation;
 		let push = match deadline {
 			_ if stale => {
-				track.waiting = true;
+				track.admit = Admit::Waiting;
 				Push::Waiting
 			}
-			_ if track.waiting && !arrival.sync => Push::Waiting,
-			_ if track.resumed && arrival.leading => Push::Waiting,
+			_ if track.admit == Admit::Waiting && !arrival.sync => Push::Waiting,
+			_ if track.admit == Admit::Resumed && arrival.leading => Push::Waiting,
 			Some(deadline) if arrival.arrived <= deadline || self.delay.is_zero() => {
+				// A frame past the checks above while waiting is a sync frame.
 				if arrival.sync {
-					track.resumed = track.waiting;
+					track.admit = match track.admit {
+						Admit::Waiting => Admit::Resumed,
+						Admit::Flowing | Admit::Resumed => Admit::Flowing,
+					};
 				}
-				track.waiting = false;
 				let cost = arrival.cost();
 				track.bytes += cost;
 				track
@@ -1065,7 +1077,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			}
 			// Past the deadline, or so far off the clock that no instant holds it.
 			_ => {
-				track.waiting = true;
+				track.admit = Admit::Waiting;
 				Push::Late
 			}
 		};
@@ -1073,7 +1085,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			Push::Queued => {}
 			_ if track.started => self.dropped += 1,
 			// A leading frame of the sync frame the track starts at, which stays queued.
-			_ if !track.waiting => self.trimmed += 1,
+			_ if track.admit != Admit::Waiting => self.trimmed += 1,
 			_ => {
 				self.trimmed += 1 + track.queue.len() as u64;
 				track.queue.clear();

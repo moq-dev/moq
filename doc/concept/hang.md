@@ -175,7 +175,7 @@ steps back is a new broadcast. `randomAccess` says whether every published group
 began where a receiver can start decoding, and `muxRate` is the measured
 constant multiplex rate in bits per second, absent for a variable-rate source.
 A player has nothing to decode here. `moq import ts --passthrough` writes this
-section (see [moq-cli](/bin/cli)); the encoding is in
+section (see [MPEG-TS](/bin/ts#passthrough-mode)); the encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
 
 ## Container

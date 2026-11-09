@@ -5,6 +5,13 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `Lease::new` validates its grant
+
+`Lease::new` refuses a grant `Grant::validate` refuses, as an auth server's answer
+already was: one that grants nothing, marks a non-peer upstream, revalidates without a
+bound, names an invalid tier or label, or has expired. Fix the grant an embedder builds;
+an expired one is refused as `Refusal` reason `expired`.
+
 ### Shutdown reports deadline cuts separately from end reports
 
 `shutdown::Observer::drained()` now returns `shutdown::Drained` instead of `()`.

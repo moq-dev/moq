@@ -103,7 +103,7 @@ pub(crate) struct Openh264 {
 fn new_decoder() -> Result<Decoder, Error> {
 	let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
 	Decoder::with_api_config(OpenH264API::from_source(), config)
-		.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 decoder init: {e}")))
+		.map_err(|e| Error::codec(anyhow::anyhow!("openh264 decoder init: {e}")))
 }
 
 impl Openh264 {
@@ -118,7 +118,7 @@ impl Openh264 {
 	/// drain it through a method the [`Backend`] trait does not carry.
 	fn new(codec: Codec, _config: &Config) -> Result<Self, Error> {
 		if codec != Codec::H264 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"openh264 cannot decode {}",
 				codec.label()
 			)));
@@ -156,7 +156,7 @@ impl Openh264 {
 	fn picture_lost(&mut self, timestamp: Timestamp, err: &openh264::Error) -> Result<Vec<Frame>, Error> {
 		let state = i32::try_from(err.native_code()).unwrap_or(dsErrorFree);
 		if state == dsErrorFree || state & !PICTURE_LOST != 0 {
-			return Err(Error::Codec(anyhow::anyhow!("openh264 decode: {err}")));
+			return Err(Error::codec(anyhow::anyhow!("openh264 decode: {err}")));
 		}
 
 		if state & DECODER_RESET != 0 {
@@ -212,13 +212,50 @@ impl Openh264 {
 			self.pending = kept.into_iter().collect();
 		}
 	}
+
+	/// The pictures the decoder still holds, each stamped with its access unit's
+	/// timestamp.
+	fn drain_tail(&mut self) -> Result<Vec<Frame>, Error> {
+		let tail = self
+			.decoder
+			.flush_remaining()
+			.map_err(|e| Error::codec(anyhow::anyhow!("openh264 flush: {e}")))?;
+		// `tail` borrows the decoder, so copy the pictures before taking their
+		// timestamps. The placeholder is replaced before any frame reaches a
+		// caller; an unstamped picture is dropped below.
+		let decoded: Vec<Frame> = tail
+			.iter()
+			.map(|yuv| picture(yuv, Timestamp::ZERO))
+			.collect::<Result<_, _>>()?;
+		drop(tail);
+
+		let mut frames = Vec::with_capacity(decoded.len());
+		let mut unstamped = 0usize;
+		for mut frame in decoded {
+			match self.picture_out() {
+				Some(timestamp) => {
+					frame.timestamp = timestamp;
+					frames.push(frame);
+				}
+				None => unstamped += 1,
+			}
+		}
+		if unstamped > 0 {
+			tracing::warn!(
+				decoder = NAME,
+				dropped = unstamped,
+				"flushed pictures had no timestamp waiting for them"
+			);
+		}
+		Ok(frames)
+	}
 }
 
 /// Copies one decoded picture out of openh264's own buffers.
 fn picture(yuv: &impl YUVSource, timestamp: Timestamp) -> Result<Frame, Error> {
 	let (width, height) = yuv.dimensions();
 	if width % 2 != 0 || height % 2 != 0 {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"decoded frame has odd dimensions {width}x{height}, expected 4:2:0"
 		)));
 	}
@@ -261,43 +298,14 @@ impl Backend for Openh264 {
 
 	/// Return the reordered pictures still buffered at the end of the stream.
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		let tail = self
-			.decoder
-			.flush_remaining()
-			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 flush: {e}")))?;
-		// `tail` borrows the decoder, so copy the pictures before taking their
-		// timestamps. The placeholder is replaced before any frame reaches a
-		// caller; an unstamped picture is dropped below.
-		let decoded: Vec<Frame> = tail
-			.iter()
-			.map(|yuv| picture(yuv, Timestamp::ZERO))
-			.collect::<Result<_, _>>()?;
-		drop(tail);
-
-		let mut frames = Vec::with_capacity(decoded.len());
-		let mut unstamped = 0usize;
-		for mut frame in decoded {
-			match self.picture_out() {
-				Some(timestamp) => {
-					frame.timestamp = timestamp;
-					frames.push(frame);
-				}
-				None => unstamped += 1,
-			}
-		}
-		if unstamped > 0 {
-			tracing::warn!(
-				decoder = NAME,
-				dropped = unstamped,
-				"flushed pictures had no timestamp waiting for them"
-			);
-		}
+		let tail = self.drain_tail();
 		self.pending.clear();
 		self.lost = 0;
-		// `FlushFrame` leaks a single-threaded decoder's picture-pool slots, so
-		// replace the drained decoder before it is reused for another stream.
-		self.decoder = new_decoder()?;
-		Ok(frames)
+		// Replaced whatever the drain did, so a failed one does not carry its
+		// state into the next stream. `FlushFrame` also leaks a single-threaded
+		// decoder's picture-pool slots, so a drained decoder is never reused.
+		self.decoder = new_decoder().map_err(|err| Error::CodecGone(format!("openh264 decoder replacement: {err}")))?;
+		tail
 	}
 
 	fn name(&self) -> &str {

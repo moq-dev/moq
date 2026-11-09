@@ -308,7 +308,6 @@ fn waiting(c: &mut Criterion) {
 										moq_net::origin::RouteEvent::Start(update)
 										| moq_net::origin::RouteEvent::Update(update)
 										| moq_net::origin::RouteEvent::Restart(update)
-										| moq_net::origin::RouteEvent::Takeover { announce: update, .. }
 											if update.prefix.as_str().starts_with(&prefix) =>
 										{
 											seen.insert(update.prefix);

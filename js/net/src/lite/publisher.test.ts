@@ -12,7 +12,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Front } from "../resume.ts";
-import { Reader, Stream, Writer } from "../stream.ts";
+import { Reader, Stream, Writer, writeBudget } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { Budget } from "../util/yield.ts";
@@ -1051,25 +1051,28 @@ test("lite-07 refuses an update retiring an unknown Range ID", async () => {
 
 // A bounded window that resolves empty has no group to answer it, so the publisher answers it
 // at once. The stream stays open for an update until the subscriber FINs, and the publisher
-// FINs in reply.
-// Quarantined: a subscriber FIN during the reply write's budget yield resets the stream.
-// Investigation: quest/m0/test-flakes-2/lite07-reply-fin.md.
-test.skip("lite-07 answers a bounded window that resolves empty and FINs in reply", async () => {
+// FINs in reply, even when the FIN lands while the reply's write yields to the host.
+test("lite-07 answers a bounded window that resolves empty and FINs in reply", async () => {
 	const version = Version.DRAFT_07;
-	const sub = await servedSubscription({
-		version,
-		prefill: [0n, 1n, 2n, 3n, 4n, 5n],
-		maxAge: Milli(3_600_000),
-		ranges: [{ start: { relative: 0n }, end: { absolute: 3n } }],
-	});
+	const yielding = spyOn(writeBudget, "poll").mockImplementation(() => yieldNow());
 	try {
-		const resp = await decodeSubscribeResponse(sub.client.reader, version);
-		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.starts).toEqual([undefined]);
-		sub.client.writer.close();
-		expect(await decodeSubscribeResponseMaybe(sub.client.reader, version)).toBeUndefined();
+		const sub = await servedSubscription({
+			version,
+			prefill: [0n, 1n, 2n, 3n, 4n, 5n],
+			maxAge: Milli(3_600_000),
+			ranges: [{ start: { relative: 0n }, end: { absolute: 3n } }],
+		});
+		try {
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+			expect(resp.start.starts).toEqual([undefined]);
+			sub.client.writer.close();
+			expect(await decodeSubscribeResponseMaybe(sub.client.reader, version)).toBeUndefined();
+		} finally {
+			await sub.close();
+		}
 	} finally {
-		await sub.close();
+		yielding.mockRestore();
 	}
 });
 
@@ -1704,6 +1707,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
 			const sub = await servedSubscription({ version, startGroup: 2n });
 			try {
+				hooks.receiveTrack(sub.track);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
@@ -1727,6 +1731,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`lite ${version}: START waits for the upstream START before resolving`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 2n });
 		try {
+			hooks.receiveTrack(sub.track);
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
@@ -1744,6 +1749,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`lite ${version}: a closed source releases the START it was waiting for`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 2n });
 		try {
+			hooks.receiveTrack(sub.track);
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
@@ -1766,6 +1772,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			maxAge: skipped === "stale" ? Milli(0) : undefined,
 		});
 		try {
+			hooks.receiveTrack(sub.track);
 			hooks.startTrack(sub.track, { start: 5n, requested: 5n });
 			const group = sub.track.createGroup(5n);
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));

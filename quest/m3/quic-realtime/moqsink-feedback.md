@@ -25,6 +25,8 @@ latency win once `Realtime` lands.
 - Document the behavior in `doc/bin/gstreamer.md`; tests drive it with mocked
   time.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): per-element `bitrate` properties with a unit table, failing loud on an unknown encoder; a custom GStreamer event only if a named consumer needs a wrapper bin.
+
 ## Related
 
 - [Realtime uplink congestion control](/quest/m3/quic-realtime/README.md) - the controller whose rate this follows

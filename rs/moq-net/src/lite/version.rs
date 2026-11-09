@@ -20,7 +20,7 @@ pub enum Version {
 	/// Lite-07. Adds the hidden opt-in to ANNOUNCE_REQUEST: without it, a route with
 	/// a `.`-prefixed segment below the requested prefix is left out. SUBSCRIBE_DROP
 	/// accounts for every group the subscription will not deliver.
-	/// ANNOUNCE_START and ANNOUNCE_TAKEOVER may copy a path head from a live
+	/// ANNOUNCE_START may copy a path head from a live
 	/// announcement on the same stream, and name a Route ID in place of the hop chain.
 	/// Adds the Auth Stream. SUBSCRIBE carries a list of ranges. The wire format is
 	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
@@ -268,7 +268,7 @@ impl Version {
 		)
 	}
 
-	/// Whether ANNOUNCE_START and ANNOUNCE_TAKEOVER may copy a path head from a live
+	/// Whether ANNOUNCE_START may copy a path head from a live
 	/// announcement on the same stream. Added in lite-07.
 	pub fn has_announce_compression(self) -> bool {
 		!matches!(
@@ -371,16 +371,6 @@ impl Version {
 	/// ANNOUNCE_OK and SETUP carry no Hop ID, and requests name the origin's Node ID.
 	/// Added in lite-07.
 	pub(crate) fn has_routes(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement that
-	/// continues what a live one served beneath its prefix. Added in lite-07. Older
-	/// versions send an ANNOUNCE_START, which the receiver treats as another instance.
-	pub(crate) fn has_announce_takeover(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

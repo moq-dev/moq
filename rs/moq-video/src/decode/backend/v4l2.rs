@@ -106,17 +106,30 @@ pub(crate) struct V4l2 {
 	device: Device,
 	/// The OUTPUT queue: access units going in.
 	coded: Queue,
-	/// The CAPTURE queue, which exists only once the driver has reported the
-	/// stream's size.
-	pictures: Option<Pictures>,
-	/// When the first access unit went in, which is what
-	/// [`SOURCE_CHANGE_LIMIT`] is measured from.
-	since: Option<Instant>,
+	phase: Phase,
 	/// Access units the driver has taken, by the key their picture will carry,
 	/// with the timestamp to give that picture. The buffer carries whole
 	/// microseconds, and a [`Timestamp`] is an instant at its own scale, which a
 	/// round trip through microseconds would change.
 	submitted: VecDeque<(Duration, Timestamp)>,
+}
+
+/// Where the decoder stands, with what each stage needs.
+enum Phase {
+	/// The driver has not reported the stream's size, so there is no CAPTURE
+	/// queue yet. `since` is when the first access unit went in, which is what
+	/// [`SOURCE_CHANGE_LIMIT`] is measured from.
+	Sizing { since: Option<Instant> },
+	/// Pictures come back on the negotiated CAPTURE queue.
+	Decoding(Pictures),
+	/// A drain left the decoder in a state it could not be brought back from,
+	/// so it takes no more input.
+	Failed,
+}
+
+/// The error every call reports once the decoder has failed.
+fn failed() -> Error {
+	Error::CodecGone("the V4L2 decoder could not be restarted after a drain and takes no more input".into())
 }
 
 /// The CAPTURE queue plus where a picture sits in one of its buffers.
@@ -150,7 +163,7 @@ impl V4l2 {
 			},
 		)?;
 		if coded.pixelformat != v4l2::H264 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"V4L2 decoder answered an H264 request with {}",
 				v4l2::name(coded.pixelformat)
 			)));
@@ -170,8 +183,7 @@ impl V4l2 {
 		Ok(Box::new(Self {
 			device,
 			coded,
-			pictures: None,
-			since: None,
+			phase: Phase::Sizing { since: None },
 			submitted: VecDeque::new(),
 		}))
 	}
@@ -185,7 +197,7 @@ impl V4l2 {
 				break index;
 			}
 			if Instant::now() >= deadline {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 decoder held every input buffer for {BUFFER_TIMEOUT:?}"
 				)));
 			}
@@ -197,7 +209,7 @@ impl V4l2 {
 			// The buffer goes back on the free list: losing one to a single oversized
 			// access unit would shrink the pool for the rest of the stream.
 			self.coded.reclaim(index);
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"access unit of {} bytes exceeds the V4L2 decoder's {capacity} byte buffer",
 				access_unit.len()
 			)));
@@ -228,9 +240,14 @@ impl V4l2 {
 		Ok(reclaimed)
 	}
 
-	/// Negotiate the CAPTURE queue against the size the driver has just reported.
+	/// Negotiate the CAPTURE queue against the size the driver has just reported,
+	/// releasing the old one first.
+	///
+	/// The decoder is [`Phase::Failed`] unless this succeeds: the driver has
+	/// already consumed the source change, so nothing would announce the size
+	/// again.
 	fn negotiate(&mut self) -> Result<(), Error> {
-		if let Some(pictures) = self.pictures.take() {
+		if let Phase::Decoding(pictures) = std::mem::replace(&mut self.phase, Phase::Failed) {
 			pictures.queue.release(&self.device)?;
 		}
 
@@ -271,7 +288,7 @@ impl V4l2 {
 		}
 		queue.stream_on(&self.device)?;
 
-		self.pictures = Some(Pictures { queue, planes });
+		self.phase = Phase::Decoding(Pictures { queue, planes });
 		Ok(())
 	}
 
@@ -293,7 +310,7 @@ impl V4l2 {
 
 		let offered = self.device.formats(Dir::Capture)?;
 		let Some(&pixelformat) = v4l2::RAW.iter().find(|code| offered.contains(code)) else {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"V4L2 decoder defaults to {} and offers no 8-bit 4:2:0 format for this stream",
 				v4l2::name(format.pixelformat)
 			)));
@@ -325,7 +342,7 @@ impl V4l2 {
 	/// `V4L2_BUF_FLAG_LAST` on its last picture and then with `EPIPE` on any
 	/// dequeue past it.
 	fn drain(&mut self, frames: &mut Vec<Frame>) -> Result<bool, Error> {
-		let Some(pictures) = &self.pictures else {
+		let Phase::Decoding(pictures) = &self.phase else {
 			return Ok(false);
 		};
 
@@ -427,12 +444,79 @@ impl V4l2 {
 			if reclaimed > 0 || frames.len() > before {
 				deadline = Instant::now().saturating_add(DRAIN_TIMEOUT);
 			} else if Instant::now() >= deadline {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"V4L2 decoder did not finish its drain within {DRAIN_TIMEOUT:?}, holding {} access unit(s)",
 					self.coded.outstanding()
 				)));
 			}
 			self.device.wait(POLL_INTERVAL);
+		}
+	}
+
+	/// Restart both queues, leaving the decoder waiting for the next stream's
+	/// keyframe or [`Phase::Failed`].
+	///
+	/// Restarting OUTPUT is the seek sequence, which returns every access unit
+	/// and resumes at the next keyframe. It is also, with restarting CAPTURE,
+	/// the only way out of a drain that did not finish: `V4L2_DEC_CMD_START`
+	/// fails with `EBUSY` while one is in progress. Restarting CAPTURE also
+	/// clears an end of sequence the drain may already have dequeued. See
+	/// `Documentation/userspace-api/media/v4l/dev-decoder.rst`, "Drain" and
+	/// "Seek".
+	fn reset(&mut self) -> Result<(), Error> {
+		let restarted = self.restart();
+		if restarted.is_err() {
+			self.phase = Phase::Failed;
+		}
+		restarted
+	}
+
+	/// Restart both queues, handing every CAPTURE buffer back to the driver.
+	fn restart(&mut self) -> Result<(), Error> {
+		self.submitted.clear();
+		self.coded.restart(&self.device)?;
+		let Phase::Decoding(pictures) = &mut self.phase else {
+			return Ok(());
+		};
+		pictures.queue.restart(&self.device)?;
+		while let Some(index) = pictures.queue.take_free() {
+			pictures.queue.queue(&self.device, index, &[], Duration::ZERO)?;
+		}
+		Ok(())
+	}
+
+	/// End the stream and drain it, returning the decoder ready for the next
+	/// stream's keyframe or [`Phase::Failed`].
+	fn drain_stream(&mut self) -> Result<Vec<Frame>, Error> {
+		let mut frames = Vec::new();
+		loop {
+			// Refused, no drain began, so the decoder carries on as it was.
+			self.device.decoder_cmd(V4L2_DEC_CMD_STOP)?;
+			let changed = match self.drain_sequence() {
+				Ok((tail, changed)) => {
+					frames.extend(tail);
+					changed
+				}
+				Err(err) => {
+					self.reset()?;
+					return Err(err);
+				}
+			};
+
+			if changed {
+				self.negotiate()?;
+			}
+			if let Err(err) = self.device.decoder_cmd(V4L2_DEC_CMD_START) {
+				self.reset()?;
+				return Err(err);
+			}
+
+			// A source change can leave work for the new format inside the decoder
+			// even after every OUTPUT buffer was returned. Resume it, then always run
+			// a fresh drain so the flush still covers everything submitted before it.
+			if !changed {
+				return Ok(frames);
+			}
 		}
 	}
 }
@@ -468,6 +552,9 @@ fn restore(submitted: &mut VecDeque<(Duration, Timestamp)>, key: Duration) -> Re
 
 impl Backend for V4l2 {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+		if let Phase::Failed = self.phase {
+			return Err(failed());
+		}
 		self.submit(&access_unit, timestamp)?;
 
 		// Before the first negotiation there is nowhere for a picture to go, so the
@@ -475,14 +562,14 @@ impl Backend for V4l2 {
 		// missed resolution change would decode the rest of the stream at the old
 		// geometry.
 		let mut frames = Vec::new();
-		if self.pictures.is_none() {
-			let since = *self.since.get_or_insert_with(Instant::now);
+		if let Phase::Sizing { since } = &mut self.phase {
+			let since = *since.get_or_insert_with(Instant::now);
 			let deadline = Instant::now().saturating_add(SOURCE_CHANGE_TIMEOUT);
 			while !self.device.take_source_change() {
 				if Instant::now() >= deadline {
 					let waited = since.elapsed();
 					if waited >= SOURCE_CHANGE_LIMIT {
-						return Err(Error::Codec(anyhow::anyhow!(
+						return Err(Error::codec(anyhow::anyhow!(
 							"V4L2 decoder did not report the stream's size within {waited:?}"
 						)));
 					}
@@ -508,42 +595,24 @@ impl Backend for V4l2 {
 	}
 
 	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
-		// A drain only begins with both queues streaming. Before the driver has
-		// reported a format there is no CAPTURE queue and therefore no picture it
-		// can hand back.
-		if self.pictures.is_none() {
-			// OUTPUT may still hold undecodable access units. Restarting it triggers
-			// the stateful decoder's seek/reset sequence and returns those buffers,
-			// so none can surface after the next stream's keyframe.
-			self.coded.restart(&self.device)?;
-			self.submitted.clear();
-			self.since = None;
-			return Ok(Vec::new());
-		}
-
-		let mut frames = Vec::new();
-		loop {
-			self.device.decoder_cmd(V4L2_DEC_CMD_STOP)?;
-			let (tail, changed) = self.drain_sequence()?;
-			frames.extend(tail);
-
-			if changed {
-				self.negotiate()?;
+		match self.phase {
+			Phase::Failed => Err(failed()),
+			// A drain only begins with both queues streaming. Before the driver has
+			// reported a format there is no CAPTURE queue and therefore no picture
+			// it can hand back.
+			Phase::Sizing { .. } => {
+				// OUTPUT may still hold undecodable access units. The seek returns
+				// them, so none can surface after the next stream's keyframe.
+				self.reset()?;
+				self.phase = Phase::Sizing { since: None };
+				Ok(Vec::new())
 			}
-			self.device.decoder_cmd(V4L2_DEC_CMD_START)?;
-
-			// A source change can leave work for the new format inside the decoder
-			// even after every OUTPUT buffer was returned. Resume it, then always run
-			// a fresh drain so the flush still covers everything submitted before it.
-			if changed {
-				continue;
+			Phase::Decoding(_) => {
+				let frames = self.drain_stream()?;
+				self.submitted.clear();
+				Ok(frames)
 			}
-			break;
 		}
-
-		self.submitted.clear();
-		self.since = None;
-		Ok(frames)
 	}
 
 	fn name(&self) -> &str {

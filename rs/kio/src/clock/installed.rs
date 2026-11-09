@@ -164,6 +164,11 @@ impl Timer {
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
+		// The same deadline keeps its entry and wakes nobody, like tokio's
+		// `Sleep::reset`, so a task resetting on every poll still parks.
+		if at == self.at && self.key.is_some() {
+			return;
+		}
 		self.at = at;
 		// Wake whoever is parked on the old deadline, so it re-arms for the new one;
 		// the reset may come from another task.
@@ -291,6 +296,49 @@ mod tests {
 			assert!(poll_once(&mut sleep).is_pending());
 			clock.advance(Duration::from_secs(1));
 			assert!(poll_once(&mut sleep).is_ready());
+		});
+	}
+
+	/// Counts its wakes.
+	struct Wakes(std::sync::atomic::AtomicUsize);
+
+	impl std::task::Wake for Wakes {
+		fn wake(self: std::sync::Arc<Self>) {
+			self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		}
+	}
+
+	fn wakes(waker: &std::sync::Arc<Wakes>) -> usize {
+		waker.0.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Resetting to the armed deadline wakes nobody, so a task resetting on every
+	/// poll parks until that deadline; an earlier deadline still wakes it.
+	#[test]
+	fn reset_wakes_only_on_a_new_deadline() {
+		let runtime = runtime(false);
+		let clock = Manual::new().install(runtime.handle());
+		runtime.block_on(async {
+			let counter = std::sync::Arc::new(Wakes(Default::default()));
+			let waker = Waker::from(counter.clone());
+			let mut cx = Context::from_waker(&waker);
+			let at = Instant::ZERO.saturating_add(Duration::from_secs(10));
+			let mut sleep = pin!(crate::clock::sleep(Duration::from_secs(10)));
+			assert!(sleep.as_mut().poll(&mut cx).is_pending());
+
+			for _ in 0..3 {
+				sleep.as_mut().reset(at);
+				assert!(sleep.as_mut().poll(&mut cx).is_pending());
+			}
+			assert_eq!(wakes(&counter), 0, "a same-deadline reset woke the task");
+
+			let earlier = Instant::ZERO.saturating_add(Duration::from_secs(2));
+			sleep.as_mut().reset(earlier);
+			assert_eq!(wakes(&counter), 1, "an earlier reset left the task parked");
+			assert!(sleep.as_mut().poll(&mut cx).is_pending());
+			clock.advance(Duration::from_secs(2));
+			assert!(sleep.as_mut().poll(&mut cx).is_ready());
+			assert_eq!(crate::clock::now(), earlier);
 		});
 	}
 

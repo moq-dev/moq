@@ -22,11 +22,13 @@ test("control messages past 65,535 bytes are refused at the length prefix", asyn
 	await expect(Subscribe.decode(new Reader(undefined, wire, version), version)).rejects.toThrow("too large");
 });
 
-test("ANNOUNCE_INIT keeps room for a large initial set", async () => {
+test("ANNOUNCE_INIT keeps room for an initial set up to its cap", async () => {
 	const version = Version.DRAFT_02;
-	const wire = await prefix(1024 * 1024, version);
+	const wire = await prefix(AnnounceInit.MAX_SIZE, version);
 	// Past the size check, so it fails waiting for a body that never arrives instead.
-	await expect(AnnounceInit.decode(new Reader(undefined, wire, version), version)).rejects.not.toThrow("too large");
+	await expect(AnnounceInit.decode(new Reader(undefined, wire, version), version, 1)).rejects.not.toThrow(
+		"too large",
+	);
 });
 
 test("control message length 65,535 passes the prefix check", async () => {

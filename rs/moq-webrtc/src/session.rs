@@ -180,19 +180,23 @@ impl Session {
 		}
 	}
 
+	/// Drive the media session until it fails or the peer disconnects, which is `Ok`.
 	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
 		// Any end but the peer's DELETE, a disconnect or an offer that never connected
 		// included, ends the sink's tracks with its cause, so subscribers see the publisher
 		// go rather than its tracks dropped unfinished.
-		if let Err(err) = &result
-			&& let MediaRole::Ingest(sink) = &mut self.role
-		{
-			sink.abort(moq_net::Error::Transport(err.to_string()));
+		if let MediaRole::Ingest(sink) = &mut self.role {
+			let cause = match &result {
+				Ok(()) => "session closed".to_string(),
+				Err(err) => err.to_string(),
+			};
+			sink.abort(moq_net::Error::Transport(cause));
 		}
 		result
 	}
 
+	/// Returns `Ok` only when the peer disconnects.
 	async fn run_loop(&mut self) -> Result<()> {
 		loop {
 			let remb_at = self.rate.as_ref().and_then(IngestRate::remb_at);
@@ -257,7 +261,7 @@ impl Session {
 					Ok(crate::ice::Event::Rtc(event)) => self.handle_event(event)?,
 					// No STUN servers are configured, so there is nothing to trickle.
 					Ok(_) => {}
-					Err(crate::ice::Error::Closed) => return Err(Error::SessionClosed),
+					Err(crate::ice::Error::Closed) => return Ok(()),
 					Err(crate::ice::Error::Timeout) => return Err(Error::IceTimeout),
 					Err(crate::ice::Error::Rtc(err)) => return Err(Error::Rtc(err)),
 				},
@@ -570,21 +574,17 @@ fn to_u64(value: i128) -> u64 {
 	value.clamp(0, u64::MAX as i128) as u64
 }
 
-/// Log a finished session at the right level, then fold an ordinary peer disconnect
-/// ([`Error::SessionClosed`]) into `Ok` so only genuine failures error. Keeps normal
-/// WebRTC churn out of the warning stream. `role` labels the path (e.g. `"whip server"`).
+/// Log a finished session at the right level, keeping normal WebRTC churn out of the
+/// warning stream. `role` labels the path (e.g. `"whip server"`).
 pub(crate) fn end(role: &str, result: Result<()>) -> Result<()> {
 	match &result {
-		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
+		Ok(()) => tracing::debug!(role, "session ended"),
 		// An abandoned offer (peer answered but never connected) is normal churn, not
 		// a failure: keep it out of the warning stream.
 		Err(Error::IceTimeout) => tracing::debug!(role, "session ended: ICE never connected"),
 		Err(err) => tracing::warn!(%err, role, "session ended"),
 	}
-	match result {
-		Ok(()) | Err(Error::SessionClosed) => Ok(()),
-		Err(err) => Err(err),
-	}
+	result
 }
 
 /// Convert a str0m [`MediaTime`](str0m::media::MediaTime) to microseconds.

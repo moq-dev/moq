@@ -81,6 +81,12 @@ impl crate::listen::Config {
 		self.bind.is_some() || self.has_stream_listener()
 	}
 
+	/// Whether this asks for a QUIC listener: [`bind`](Self::bind) is set, or no
+	/// stream listener replaces the default one.
+	pub fn serves_quic(&self) -> bool {
+		self.bind.is_some() || !self.has_stream_listener()
+	}
+
 	/// Whether a `tcp`/`unix` stream listener is configured.
 	///
 	/// When true and [`bind`](Self::bind) is unset, the server runs stream-only
@@ -304,7 +310,7 @@ impl Server {
 		#[cfg(any(feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
 		let resolved = quic.resolve();
 
-		let build_quic = parts.quic() && (config.bind.is_some() || !config.has_stream_listener());
+		let build_quic = parts.quic() && config.serves_quic();
 		// A stream-only server would silently ignore what only QUIC reads. A caller
 		// opening only the streams owns QUIC elsewhere, which reads them.
 		if parts.quic() && !build_quic {

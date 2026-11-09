@@ -578,11 +578,11 @@ impl AuthServe {
 					// needs someone to verify it. Tell the presenter explicitly.
 					None if !msg.token.is_empty() => {
 						let mut state = issue.lock();
-						state.outbox.push_back(crate::auth::Reply::Refuse {
+						state.queue(crate::auth::Reply::Refuse {
 							code: crate::SessionError::Unsupported,
 							reason: Error::Unsupported.to_string(),
 						});
-						state.done = true;
+						state.finish();
 						self.unsupported = true;
 					}
 					None => {
@@ -626,24 +626,22 @@ impl AuthServe {
 			if let Some(default) = &mut self.default
 				&& let Poll::Ready(grant) = default.poll(waiter)
 			{
-				issue.lock().outbox.push_back(crate::auth::Reply::Grant(grant));
+				issue.lock().queue(crate::auth::Reply::Grant(grant));
 			}
 
-			let mut state = match issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
+			let mut state = match issue.poll(waiter, |issue| match issue.idle() {
 				true => Poll::Pending,
 				false => Poll::Ready(()),
 			}) {
 				Poll::Ready(state) => state,
 				Poll::Pending => return Poll::Pending,
 			};
-			match state.outbox.pop_front() {
+			match state.next() {
 				Some(reply) => {
 					drop(state);
 					if !Self::write(&self.shared, stream, reply)? {
 						self.unsupported = true;
-						let mut state = issue.lock();
-						state.outbox.clear();
-						state.done = true;
+						issue.lock().refused();
 					}
 				}
 				// The app is done with the grant, or refused the token: close our side.
@@ -1234,8 +1232,7 @@ impl AnnounceRun {
 			match event {
 				origin::RouteEvent::Start(update)
 				| origin::RouteEvent::Update(update)
-				| origin::RouteEvent::Restart(update)
-				| origin::RouteEvent::Takeover { announce: update, .. } => {
+				| origin::RouteEvent::Restart(update) => {
 					current.insert(update.prefix, update.route);
 				}
 				origin::RouteEvent::End(update) => {
@@ -1599,15 +1596,10 @@ impl AnnounceRun {
 				return Poll::Pending;
 			};
 
-			let (update, active, restart, predecessor) = match next {
-				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => {
-					(update, true, false, None)
-				}
-				Some(origin::RouteEvent::Restart(update)) => (update, true, true, None),
-				Some(origin::RouteEvent::Takeover { announce, predecessor }) => {
-					(announce, true, false, Some(predecessor))
-				}
-				Some(origin::RouteEvent::End(update)) => (update, false, false, None),
+			let (update, active, restart) = match next {
+				Some(origin::RouteEvent::Start(update) | origin::RouteEvent::Update(update)) => (update, true, false),
+				Some(origin::RouteEvent::Restart(update)) => (update, true, true),
+				Some(origin::RouteEvent::End(update)) => (update, false, false),
 				None => {
 					if self.initial.take().is_some() {
 						stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
@@ -1629,9 +1621,6 @@ impl AnnounceRun {
 				continue;
 			}
 
-			// Only lite-07 carries a takeover, and it answers from the route layer. Here one
-			// is another instance, in place or not.
-			let restart = restart || predecessor.as_ref() == Some(&suffix);
 			match self.outgoing(&update.route, &absolute) {
 				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
 					self.restart(stream, suffix, hops, cost, served(&update.route), &absolute)?;
@@ -9647,14 +9636,13 @@ mod tests {
 				crate::origin::RouteInfo::default()
 					.with_hops(echoed_hops)
 					.with_via(assigned),
-				None,
 			)
 			.unwrap();
 
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops), None)
+			.forward("local", crate::origin::RouteInfo::default().with_hops(local_hops))
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
@@ -10228,13 +10216,7 @@ mod tests {
 		let mut _route = None;
 		let mut held = None;
 		match wait {
-			Wait::Broadcast => {
-				_route = Some(
-					origin
-						.forward("room", crate::origin::RouteInfo::default(), None)
-						.unwrap(),
-				)
-			}
+			Wait::Broadcast => _route = Some(origin.forward("room", crate::origin::RouteInfo::default()).unwrap()),
 			Wait::Track => {
 				let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
 				let dynamic = broadcast.broadcast().requests();

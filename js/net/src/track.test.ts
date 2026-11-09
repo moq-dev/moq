@@ -3971,6 +3971,7 @@ async function settled(read: Promise<unknown>): Promise<boolean> {
 test("a received end behind a hole settles only once the hole fills", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 0n });
 	const late = producer.createGroup(2n);
 	late.finish();
@@ -4020,6 +4021,46 @@ test("a pending tail ends readers at the boundary once the track closes", async 
 	expect(await reader.closed).toBeNull();
 });
 
+// A FETCH_OK's end of track on a copy no subscription feeds: nothing is in flight below it, so a
+// reader above the groups another reader's floor still lacks ends at the boundary.
+test("an end no subscription feeds owes no tail", async () => {
+	const producer = new TrackProducer("test");
+	const history = producer.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(60_000) } });
+	const group = producer.createGroup(2n);
+	group.finish();
+	hooks.endTrack(producer, { group: 3n, frame: 0 });
+	const live = producer.subscribe({ ranges: [{ start: { absolute: 2n } }], delay: { max: Milli(60_000) } });
+	expect((await live.recvGroup())?.sequence).toBe(2n);
+	const next = live.recvGroup();
+	expect(await settled(next)).toBe(true);
+	expect(await next).toBeUndefined();
+	history.close();
+	live.close();
+	producer.close();
+});
+
+// A group still in flight when the subscription ended may refine the end, but no subscription
+// feeds the tail `cacheTrack` cleared anymore.
+test("an end refined after the subscription ended owes no tail", async () => {
+	const producer = new TrackProducer("test");
+	hooks.receiveTrack(producer);
+	const history = producer.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: Milli(60_000) } });
+	const group = producer.createGroup(2n);
+	group.writeFrame({ payload: new Uint8Array([1]) });
+	group.finish();
+	hooks.endTrack(producer, { group: 3n, frame: 0 });
+	hooks.cacheTrack(producer);
+	hooks.endTrack(producer, { group: 2n, frame: 1 });
+	const live = producer.subscribe({ ranges: [{ start: { absolute: 2n } }], delay: { max: Milli(60_000) } });
+	expect((await live.recvGroup())?.sequence).toBe(2n);
+	const next = live.recvGroup();
+	expect(await settled(next)).toBe(true);
+	expect(await next).toBeUndefined();
+	history.close();
+	live.close();
+	producer.close();
+});
+
 test("without a declared start, the first arrival stands in for it", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
@@ -4036,6 +4077,7 @@ test("a source start follows the current requested floor after an update", async
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ ranges: [{ start: { absolute: 5n } }] });
 	try {
+		hooks.receiveTrack(producer);
 		hooks.startTrack(producer, { start: 6n, requested: 5n });
 		expect(hooks.sourceStart(reader)).toBe(6n);
 		const lower = producer.subscribe({ ranges: [{ start: { absolute: 2n } }] });
@@ -4064,6 +4106,7 @@ test("a source start follows the current requested floor after an update", async
 test("a pending tail owes from SUBSCRIBE_START while the demand keeps its floor", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) }, ranges: [{ start: { absolute: 1n } }] });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 3n, requested: 1n });
 	hooks.endTrack(producer, { group: 4n, frame: 0 });
 	const group = producer.createGroup(3n);
@@ -4084,6 +4127,7 @@ test("a pending tail owes from SUBSCRIBE_START while the demand keeps its floor"
 test("an end after the highest group holds the reader at the hole", async () => {
 	const producer = new TrackProducer("test");
 	const reader = producer.subscribe({ delay: { max: Milli(60_000) } });
+	hooks.receiveTrack(producer);
 	hooks.startTrack(producer, { start: 0n });
 	const high = producer.createGroup(2n);
 	high.finish();
@@ -4670,4 +4714,26 @@ test("reopening stale drops reports again what is stale at the max age bound", (
 	expect(drain()).toEqual([[1n, 2n, 1500], [2n, 3n, 1500], 3n, 4n]);
 	expect(hooks.reofferStale(reader)).toEqual([{ start: 1n, end: 3n }]);
 	expect(drain()).toEqual([[1n, 3n, 1500]]);
+});
+
+test("group sequences stop at 2^64-1, as a u64 does", () => {
+	const producer = new TrackProducer("test").accept({});
+	expect(() => producer.createGroup(1n << 64n)).toThrow(RangeError);
+	producer.createGroup((1n << 64n) - 1n).finish();
+	expect(() => producer.appendGroup()).toThrow(RangeError);
+	// A run's exclusive end may sit just past the last group.
+	producer.skipGroups(1n << 63n, 1n << 64n);
+	expect(() => producer.skipGroups(0n, (1n << 64n) + 1n)).toThrow(RangeError);
+});
+
+// Mirrors moq-net's `the_reserved_sequence_is_refused` and `a_group_at_the_reserved_sequence_is_refused`.
+test("the reserved sequence is refused", () => {
+	const reserved = (1n << 64n) - 1n;
+	const producer = new TrackProducer("test");
+	expect(() => producer.createGroup(reserved)).toThrow(RangeError);
+	expect(() => hooks.receiveGroup(producer, { sequence: reserved, start: 0 })).toThrow(RangeError);
+	producer.createGroup(reserved - 1n).finish();
+	expect(() => producer.appendGroup()).toThrow(RangeError);
+	producer.finish();
+	producer.close();
 });

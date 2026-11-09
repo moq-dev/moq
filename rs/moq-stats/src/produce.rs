@@ -1670,8 +1670,7 @@ mod tests {
 		match announced.next().await? {
 			moq_net::origin::RouteEvent::Start(route)
 			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route)
-			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
 			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}

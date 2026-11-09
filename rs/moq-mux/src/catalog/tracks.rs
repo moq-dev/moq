@@ -788,10 +788,16 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		Ok(())
 	}
 
+	/// Why an unpublished rendition can't be edited: the catalog's terminal error once it is closed,
+	/// since a handle made after a failed finish must report that failure, else `NotPublished`.
+	fn unpublished(&self) -> crate::Error {
+		self.catalog.closed().unwrap_or(crate::Error::NotPublished)
+	}
+
 	/// Refine the rendition, refusing an unserializable edit before retaining it.
 	pub(crate) fn config(&self) -> crate::Result<C> {
 		if !self.present {
-			return Err(crate::Error::NotPublished);
+			return Err(self.unpublished());
 		}
 		self.catalog.config::<C>(&self.name).ok_or(crate::Error::NotPublished)
 	}
@@ -822,7 +828,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	/// Write `config` into the catalog, leaving the caller to choose how the guard publishes it.
 	fn stage(&mut self, config: C) -> crate::Result<super::Guard<'_, E>> {
 		if !self.present {
-			return Err(crate::Error::NotPublished);
+			return Err(self.unpublished());
 		}
 		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
 		let mut guard = self.catalog.modify()?;
