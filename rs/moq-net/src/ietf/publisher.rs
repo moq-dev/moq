@@ -6715,7 +6715,7 @@ impl TrackServe {
 			publisher_priority: super::priority::to_wire(self.track.info().priority),
 			// Carry per-object timestamps as extension headers (the Timestamp
 			// Object Property) only when TIMESCALE was declared. The relay state adds
-			// to these once it settles (see `GroupServe::poll_open`).
+			// to these once it settles (see `GroupState::Describe`).
 			flags: ietf::GroupFlags {
 				has_extensions: self.compression || self.timescale.is_some(),
 				..Default::default()
@@ -7526,8 +7526,6 @@ struct GroupServe {
 	version: Version,
 	prior_object: Option<u64>,
 	slice: GroupSlice,
-	/// Whether `msg` and the read slice reflect the group's settled relay state.
-	described: bool,
 	bounds: Option<kio::Consumer<ServeRange>>,
 	/// Set when a narrowing gives this stream up.
 	retired: Arc<AtomicBool>,
@@ -7551,6 +7549,11 @@ struct GroupServe {
 enum GroupState {
 	/// Waiting for stream credit on this machine's own session handle.
 	Open,
+	/// The stream is open, and its header waits for the group's relay state, which a relayed
+	/// group settles after it becomes visible.
+	Describe {
+		writer: Writer<crate::transport::boxed::SendStream, Version>,
+	},
 	/// Streaming objects: the write buffer drains first, then the pending chunk,
 	/// then the pending frame, then the next frame.
 	Serve {
@@ -7583,7 +7586,7 @@ impl Drop for GroupServe {
 	fn drop(&mut self) {
 		// The writer's own fallback would say CANCELLED, which a lapse is not.
 		if self.lapse.as_ref().is_some_and(Lapse::lapsed)
-			&& let GroupState::Serve { writer, .. } | GroupState::Closed { writer } =
+			&& let GroupState::Describe { writer } | GroupState::Serve { writer, .. } | GroupState::Closed { writer } =
 				std::mem::replace(&mut self.state, GroupState::Done)
 		{
 			writer.reset(super::error::EXPIRED_AUTH_TOKEN);
@@ -7612,7 +7615,6 @@ impl GroupServe {
 			version,
 			prior_object: None,
 			slice,
-			described: false,
 			bounds: None,
 			retired: Default::default(),
 			ended: false,
@@ -7687,10 +7689,9 @@ impl GroupServe {
 			self.group.skip_to(self.slice.skip);
 			self.group.end_at(self.slice.until);
 		}
-		self.described = true;
 	}
 
-	/// Wait for stream credit, then write the group header, leaving the machine serving.
+	/// Wait for stream credit, leaving the machine to describe the group on its stream.
 	/// Gives up once the group can no longer be sent, so a parked group never spends the
 	/// credit it was waiting for on a reset.
 	fn poll_open(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -7707,12 +7708,6 @@ impl GroupServe {
 		}
 		// The current rank, so a move while parked applies to the stream as it opens.
 		let _ = self.rank.poll_moved(waiter);
-		// Before the stream, whose header describes it: a relayed group is visible before
-		// its own header has been read.
-		if !self.described {
-			let wire = ready!(self.group.poll_wire(waiter));
-			self.describe(wire);
-		}
 		let stream = match ready!(self.session.poll_open_group(
 			&mut self.open,
 			waiter,
@@ -7727,17 +7722,8 @@ impl GroupServe {
 		};
 		self.opened.fetch_add(1, Ordering::Relaxed);
 
-		let mut writer = Writer::new(stream, self.version);
-		if let Err(err) = writer.buffer(&self.msg) {
-			self.state = GroupState::Done;
-			return Poll::Ready(Err(err));
-		}
-		self.state = GroupState::Serve {
-			writer,
-			frame: None,
-			chunk: None,
-			batch: Box::new(arrayvec::ArrayVec::new()),
-			batch_pos: 0,
+		self.state = GroupState::Describe {
+			writer: Writer::new(stream, self.version),
 		};
 		Poll::Ready(Ok(()))
 	}
@@ -7758,6 +7744,30 @@ impl GroupServe {
 					ready!(self.poll_open(waiter))?;
 					// The current rank, which already includes anything `moved` saw.
 					moved = None;
+				}
+				GroupState::Describe { writer } => {
+					if let Some(priority) = moved.take() {
+						writer.set_priority(priority);
+					}
+					// The peer closing first cancels the group.
+					if writer.poll_closed(waiter).is_ready() {
+						self.state = GroupState::Done;
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					let wire = ready!(self.group.poll_wire(waiter));
+					let GroupState::Describe { mut writer } = std::mem::replace(&mut self.state, GroupState::Done)
+					else {
+						unreachable!("matched above");
+					};
+					self.describe(wire);
+					writer.buffer(&self.msg)?;
+					self.state = GroupState::Serve {
+						writer,
+						frame: None,
+						chunk: None,
+						batch: Box::new(arrayvec::ArrayVec::new()),
+						batch_pos: 0,
+					};
 				}
 				GroupState::Serve {
 					writer,
@@ -8670,6 +8680,17 @@ mod group_priority_test {
 
 		let group = track.create_group(group::Info { sequence: 0 }).unwrap();
 		assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
+		// A later group is served meanwhile, its stream independent of the one waiting.
+		let mut later = track.create_group(group::Info { sequence: 1 }).unwrap();
+		later.write_frame(None, b"later".as_slice()).unwrap();
+		later.finish().unwrap();
+		for _ in 0..8 {
+			assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
+			kio::clock::sim::yield_now().await;
+		}
+		let written = log.writes.lock().unwrap().clone();
+		assert!(written.windows(5).any(|window| window == b"later"));
+
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -8699,9 +8720,20 @@ mod group_priority_test {
 		track.finish().unwrap();
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
-		let mut buf = bytes::Bytes::from(log.writes.lock().unwrap().clone());
-		let header = crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| ietf::GroupHeader::decode(r, v))
-			.expect("a group header");
+		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
+		for (stream, sent) in log.trail() {
+			if let crate::lite::test_transport::Sent::Write(bytes) = sent {
+				streams.entry(stream).or_default().extend(bytes);
+			}
+		}
+		let header = streams
+			.into_values()
+			.filter_map(|bytes| {
+				let mut buf = bytes::Bytes::from(bytes);
+				crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| ietf::GroupHeader::decode(r, v)).ok()
+			})
+			.find(|header| header.group_id == 0)
+			.expect("group 0's header");
 		assert!(header.flags.has_extensions);
 		assert!(!header.flags.first_object);
 	}
