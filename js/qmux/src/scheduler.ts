@@ -1,3 +1,4 @@
+import { Queue } from "./queue.ts";
 /** Prioritized send scheduler for a QMux session.
  *
  * A single writer loop owns the socket. Frames are written in priority order:
@@ -157,6 +158,9 @@ export interface SchedulerOptions {
 	onActivity?: () => void;
 	/** Called once if the sink fails, after which nothing more is sent. */
 	onFail?: (err: Error) => void;
+	/** Encodes the next pending update (MAX_DATA, MAX_STREAMS, MAX_STREAM_DATA), or
+	 *  returns undefined once none is owed. Polled after {@link SendScheduler.notify}. */
+	pending?: () => Uint8Array | undefined;
 }
 
 /** Default `sendOrder` for streams that don't set one. */
@@ -175,11 +179,16 @@ export class SendScheduler {
 	#failed = false;
 
 	// Control frames preempt all stream data, FIFO among themselves. Lossless and
-	// uncapped, so whatever the peer can trigger here must be bounded by design:
-	// at most one RESET_STREAM or STOP_SENDING per stream, and flow-control and
-	// stream-count updates only as the peer spends credit it has already received
-	// (which a peer not reading our writes never gets more of).
-	#control: Uint8Array[] = [];
+	// uncapped, so whatever the peer can trigger here must be bounded by design: a
+	// stream's state allows it at most one RESET_STREAM and one STOP_SENDING, and the
+	// peer opens streams only as fast as it reads the MAX_STREAMS we send.
+	#control = new Queue<Uint8Array>();
+
+	// Window updates are not queued at all: the session flags them and this polls
+	// `#pending` for the newest values when it next writes, so one is owed at most per
+	// window however often credit returns.
+	#pending: () => Uint8Array | undefined;
+	#notified = false;
 
 	// Control frames where only the newest matters (QX_PING requests and
 	// responses), keyed by kind. A newer frame replaces one still unsent, so a peer
@@ -208,6 +217,7 @@ export class SendScheduler {
 		this.#sink = sink;
 		this.#onActivity = options?.onActivity ?? (() => {});
 		this.#onFail = options?.onFail ?? (() => {});
+		this.#pending = options?.pending ?? (() => undefined);
 		// Start the writer loop. It never rejects - failures are captured by #fail.
 		void this.#run(options?.first);
 		// A write the sink already accepted can fail while the loop is parked.
@@ -222,6 +232,13 @@ export class SendScheduler {
 	enqueueControl(bytes: Uint8Array): void {
 		if (this.#closed) throw this.#closed;
 		this.#control.push(bytes);
+		this.#signal();
+	}
+
+	/** Flag that a window update is pending; the loop polls for it after the control lane. */
+	notify(): void {
+		if (this.#closed) return;
+		this.#notified = true;
 		this.#signal();
 	}
 
@@ -301,7 +318,8 @@ export class SendScheduler {
 		this.#ready.clear();
 		this.#sendOrders.clear();
 		// Nothing queued means anything once closed, so the close frame goes next.
-		this.#control.length = 0;
+		this.#control.clear();
+		this.#notified = false;
 		this.#latest.clear();
 		this.#datagrams.length = 0;
 		if (final) this.#control.push(final);
@@ -346,6 +364,7 @@ export class SendScheduler {
 			while (true) {
 				if (
 					this.#control.length === 0 &&
+					!this.#notified &&
 					this.#latest.size === 0 &&
 					this.#datagrams.length === 0 &&
 					this.#ready.size === 0
@@ -365,6 +384,17 @@ export class SendScheduler {
 					const bytes = this.#control.shift() as Uint8Array;
 					await this.#sink.write(bytes);
 					this.#onActivity();
+					continue;
+				}
+
+				if (this.#notified) {
+					const bytes = this.#pending();
+					if (bytes) {
+						await this.#sink.write(bytes);
+						this.#onActivity();
+					} else {
+						this.#notified = false;
+					}
 					continue;
 				}
 
@@ -416,7 +446,8 @@ export class SendScheduler {
 		this.#closed ??= err;
 		for (const waiter of this.#ready.values()) waiter.reject(err);
 		this.#ready.clear();
-		this.#control.length = 0;
+		this.#control.clear();
+		this.#notified = false;
 		this.#latest.clear();
 		this.#datagrams.length = 0;
 		this.#onFail(err);

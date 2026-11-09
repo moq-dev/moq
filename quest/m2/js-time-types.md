@@ -29,6 +29,10 @@ precision).
   and no implicit number conversion (`valueOf` refuses). `Clock.Instant`
   supports `add(Duration)`, `since(Instant) -> Duration`, and comparison;
   `Wall` follows the same rule.
+- `Clock.Instant`'s arithmetic mirrors `kio::clock::Instant`'s. If
+  [moq-dev/moq#8151](https://github.com/moq-dev/moq/pull/8151)'s
+  peer-arithmetic drops kio's `Duration` operators for checked and saturating
+  forms, JS gets `checkedAdd` and `saturatingAdd` too (added 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests)).
 - The wire still carries whole milliseconds; rounding stays inside the
   encoders, as it does today.
 - `Manual`, `sleep`, `timeout`, `interval`, and the signals timers take the

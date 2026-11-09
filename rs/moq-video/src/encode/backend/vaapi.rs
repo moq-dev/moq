@@ -35,9 +35,11 @@
 //! frames, VA-API decodes handed over as DMA-BUFs, and packed RGB buffers at
 //! and above the encoder's size, decode each stream with openh264, and compare
 //! pixels. The H.265 case decodes with the VA-API decoder, since there is no
-//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of them,
-//! ignored ones included, pass on an AMD Radeon RX 9070 (radeonsi, Mesa 26.2.5).
-//! They skip on a machine without a VA-API device.
+//! software one, and was validated on Intel Arrow Lake (iHD 26.1.2). All of
+//! them, ignored ones included, also pass on an AMD RX 9070 with radeonsi (Mesa
+//! 26.2.6). They skip on a machine without a VA-API device, except the ignored
+//! `vaapi_1080p_ladder_stays_on_the_gpu`, which requests hardware explicitly and
+//! fails without it.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -102,7 +104,7 @@ impl Vaapi {
 				interval,
 			)
 		};
-		let encoder = Encoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
+		let encoder = Encoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
 
 		tracing::info!(
 			encoder = NAME,
@@ -166,7 +168,7 @@ impl Vaapi {
 		i420_to_nv12(&i420, &mut self.nv12);
 		self.encoder
 			.encode_nv12(&self.nv12, cut)
-			.map_err(|e| Error::Codec(e.context("VAAPI encode")))
+			.map_err(|e| Error::codec(e.context("VAAPI encode")))
 	}
 }
 
@@ -208,7 +210,7 @@ impl Backend for Vaapi {
 		// applies from the next one without an IDR.
 		self.encoder
 			.set_bitrate(bitrate.min(u32::MAX as u64) as u32)
-			.map_err(|e| Error::Codec(e.context("VAAPI bitrate change")))
+			.map_err(|e| Error::codec(e.context("VAAPI bitrate change")))
 	}
 
 	fn can_cut(&self) -> bool {
@@ -645,7 +647,7 @@ mod hardware_tests {
 	/// The tests above check pixels with an independent software decoder; this
 	/// proof deliberately compiles without a software codec.
 	#[test]
-	#[ignore = "requires an Intel VA-API decode/VPP/encode device"]
+	#[ignore = "requires a VA-API decode/VPP/encode device"]
 	fn vaapi_1080p_ladder_stays_on_the_gpu() {
 		const FRAMES: usize = 12;
 		let size = Size::new(1920, 1080);

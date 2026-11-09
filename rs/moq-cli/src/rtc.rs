@@ -107,7 +107,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, instance: moq_net::I
 	let mut config = moq_webrtc::client::Config::default();
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
-	let client = moq_webrtc::Client::new(config);
+	let client = moq_webrtc::Client::new(config)?;
 	client.subscribe(url, route.broadcast().clone()).await?;
 	Ok(())
 }
@@ -127,7 +127,7 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHIP client pushing");
 	notify_ready();
 
-	let client = moq_webrtc::Client::new(moq_webrtc::client::Config::default());
+	let client = moq_webrtc::Client::new(moq_webrtc::client::Config::default())?;
 	client.publish(url, source).await?;
 	Ok(())
 }

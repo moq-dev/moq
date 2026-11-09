@@ -37,17 +37,13 @@ pub(crate) struct State {
 	///
 	/// The connection's `poll_closed` resolves the moment it is closed, but a close this side
 	/// asked for is published here only once the driver delivered it and shut the transport, or
-	/// gave up after [`CLOSE_TIMEOUT`](crate::driver::CLOSE_TIMEOUT) (see `local_close`), so
-	/// [`Session`]'s `poll_closed` keeps this latch and its own list.
+	/// gave up after [`CLOSE_TIMEOUT`](crate::driver::CLOSE_TIMEOUT) (see [`Self::closing`]),
+	/// so [`Session`]'s `poll_closed` keeps this latch and its own list.
 	/// Only the driver knows when the close frame reached the transport, which the sans-I/O
 	/// connection cannot see, and a caller may exit the moment `poll_closed` resolves, so
 	/// publishing earlier would leave the frame unwritten.
 	closed: Option<Error>,
 	closed_waiters: kio::WaiterList,
-	/// The error for a close this side asked for, published once the driver has delivered
-	/// the close frame or gave up on a stalled one, so a caller that exits the moment
-	/// `poll_closed` resolves already handed it to the transport.
-	pub(crate) local_close: Option<Error>,
 }
 
 impl State {
@@ -66,22 +62,29 @@ impl State {
 
 	/// Publish a loss the connection recorded since the last check: a remote close or a
 	/// violation fails the session now, while a close this side asked for waits for the driver
-	/// to deliver its frame.
+	/// to deliver its frame and [`publish`](Self::publish) it.
 	///
 	/// Called after every call that can lose the connection: a record, a timeout, a close.
 	pub(crate) fn check_lost(&mut self) {
-		if self.closed.is_some() || self.local_close.is_some() {
+		if self.closed.is_none() && !self.closing() {
+			self.publish();
+		}
+	}
+
+	/// Whether this side closed the connection, which the session reports only once the driver
+	/// is done delivering the close. The connection keeps the first reason it ended with.
+	pub(crate) fn closing(&self) -> bool {
+		matches!(self.conn.error(), Some(ConnectionError::LocallyClosed { .. }))
+	}
+
+	/// Publish why the connection ended, if it has, a close this side asked for included.
+	pub(crate) fn publish(&mut self) {
+		if self.closed.is_some() {
 			return;
 		}
-		let Some(reason) = self.conn.error() else {
-			return;
-		};
-		let local = matches!(reason, ConnectionError::LocallyClosed { .. });
-		let err = Error::lost(reason.clone());
-		match local {
-			// The driver publishes a local close once its frame is out.
-			true => self.local_close = Some(err),
-			false => self.fail(err),
+		if let Some(reason) = self.conn.error() {
+			let err = Error::lost(reason.clone());
+			self.fail(err);
 		}
 	}
 
@@ -181,7 +184,6 @@ impl Session {
 				conn,
 				closed: None,
 				closed_waiters: kio::WaiterList::new(),
-				local_close: None,
 			}),
 			wire: net::Wire::new(),
 			socket_stats: transport.socket_stats(),
@@ -414,16 +416,6 @@ impl poll::Session for Session {
 		quic.receive_window = limits.receive_window;
 		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
 	}
-
-	fn stream_credit(&self, dir: net::Dir) -> Option<net::StreamCredit> {
-		let dir = match dir {
-			net::Dir::Uni => Dir::Uni,
-			net::Dir::Bi => Dir::Bi,
-		};
-		let mut state = self.inner.lock();
-		let streams = state.conn.streams();
-		Some(net::StreamCredit::new(streams.credit(dir), streams.blocked(dir)))
-	}
 }
 
 /// A snapshot of the session's metrics; its [`net::Wire`] holds the byte counts.
@@ -489,15 +481,24 @@ impl std::fmt::Debug for SendGroup {
 	}
 }
 
-/// An outgoing stream. Dropping it unfinished resets it with code 0.
+/// An outgoing stream. Dropping it unfinished resets it with code 0, and dropping one the peer
+/// stopped echoes the stop's code.
 pub struct SendStream {
 	inner: Arc<Inner>,
 	id: StreamId,
-	/// The FIN was queued; further writes are refused and `poll_closed` waits for it to go
-	/// out.
-	fin: bool,
+	end: SendEnd,
+}
+
+/// How this side ended a [`SendStream`]. A peer's STOP_SENDING is not one: the connection keeps
+/// it, and reports it to every call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SendEnd {
+	/// Still writable.
+	Open,
+	/// The FIN was queued; further writes are refused and `poll_closed` waits for it to go out.
+	Finished,
 	/// We reset the stream; it is as closed as it will ever be.
-	reset: bool,
+	Reset,
 }
 
 impl SendStream {
@@ -505,20 +506,19 @@ impl SendStream {
 		Self {
 			inner,
 			id,
-			fin: false,
-			reset: false,
+			end: SendEnd::Open,
 		}
 	}
 
 	fn reset_with(&mut self, code: u32) {
-		if self.reset {
+		if self.end == SendEnd::Reset {
 			return;
 		}
 		let code = VarInt::from_u32(code);
 		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
 		let _ = state.conn.send_stream(self.id).reset(code);
-		self.reset = true;
+		self.end = SendEnd::Reset;
 	}
 }
 
@@ -531,7 +531,7 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
-		if self.fin || self.reset {
+		if self.end != SendEnd::Open {
 			return Poll::Ready(Err(Error::StreamClosed));
 		}
 		let mut state = self.inner.lock();
@@ -555,22 +555,19 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn finish(&mut self) -> Result<(), Error> {
-		if self.fin || self.reset {
+		if self.end != SendEnd::Open {
 			return Ok(());
 		}
 		let mut state = self.inner.lock();
 		match state.conn.send_stream(self.id).finish() {
 			Ok(()) => {}
-			// A STOP_SENDING beat us here; carry its code like `poll_write` does. The stream is
-			// over without our reset, so `poll_closed` reports the stop the connection recorded.
-			Err(send::Error::Stopped(code)) => {
-				self.fin = true;
-				return Err(Error::StreamStop(code.into_inner()));
-			}
+			// A STOP_SENDING beat us here; carry its code like `poll_write` does. No FIN was
+			// queued, so the stream stays open for the drop to answer the stop with a reset.
+			Err(send::Error::Stopped(code)) => return Err(Error::StreamStop(code.into_inner())),
 			// Already finished or reset, so the FIN it wanted is out.
 			Err(_) => {}
 		}
-		self.fin = true;
+		self.end = SendEnd::Finished;
 		Ok(())
 	}
 
@@ -579,7 +576,7 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if self.reset {
+		if self.end == SendEnd::Reset {
 			return Poll::Ready(Ok(()));
 		}
 		let mut state = self.inner.lock();
@@ -599,7 +596,7 @@ impl poll::SendStream for SendStream {
 	/// Whether every byte written so far went to the transport, which acknowledges it on a
 	/// reliable transport.
 	fn acknowledged(&self) -> Option<bool> {
-		if self.reset {
+		if self.end == SendEnd::Reset {
 			return Some(false);
 		}
 		let mut state = self.inner.lock();
@@ -612,11 +609,24 @@ impl poll::SendStream for SendStream {
 impl Drop for SendStream {
 	fn drop(&mut self) {
 		let mut state = self.inner.lock();
-		// Reset before giving up the ID, which refuses every later call on it.
-		if !self.fin && !self.reset {
-			let _ = state.conn.send_stream(self.id).reset(VarInt::from_u32(0));
-		}
-		state.conn.send_stream(self.id).release();
+		let mut stream = state.conn.send_stream(self.id);
+		let stopped = match stream.end() {
+			Ok(Some(send::End::Stopped(code))) => Some(code),
+			_ => None,
+		};
+		// Reset before giving up the ID, which refuses every later call on it. Err means the
+		// stream is already gone, which is what we wanted.
+		let _ = match (self.end, stopped) {
+			(SendEnd::Reset, _) => Ok(()),
+			// Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
+			// nothing more, so whatever is still queued is wasted. A stream stopped before its
+			// FIN needs it most, or the peer never learns its final size and never returns its
+			// credit.
+			(_, Some(code)) => stream.reset(code),
+			(SendEnd::Finished, None) => Ok(()),
+			(SendEnd::Open, None) => stream.reset(VarInt::from_u32(0)),
+		};
+		stream.release();
 	}
 }
 
@@ -635,11 +645,30 @@ impl std::fmt::Debug for SendStream {
 pub struct RecvStream {
 	inner: Arc<Inner>,
 	id: StreamId,
+	end: RecvEnd,
+}
+
+/// How a [`RecvStream`] ended, once the connection no longer keeps its state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecvEnd {
+	/// The connection keeps the stream, and answers for it.
+	Open,
 	/// The peer reset the stream with this code. Observing it frees the connection's stream
 	/// state, so later calls report it from here.
-	reset: Option<u64>,
+	Reset(u64),
 	/// We stopped the stream; it is gone.
-	stopped: bool,
+	Stopped,
+}
+
+impl RecvEnd {
+	/// What every call reports once the stream ended.
+	fn error(self) -> Option<Error> {
+		match self {
+			Self::Open => None,
+			Self::Reset(code) => Some(Error::StreamReset(code)),
+			Self::Stopped => Some(Error::StreamClosed),
+		}
+	}
 }
 
 impl RecvStream {
@@ -647,19 +676,15 @@ impl RecvStream {
 		Self {
 			inner,
 			id,
-			reset: None,
-			stopped: false,
+			end: RecvEnd::Open,
 		}
 	}
 
 	/// Take the connection's lease, which [`RecvLease`] wraps once this returns: the borrow of
 	/// `self` it holds cannot start inside a poll that may return `Pending`.
 	fn poll_take(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<moq_quic::recv::Lease, Error>> {
-		if let Some(code) = self.reset {
-			return Poll::Ready(Err(Error::StreamReset(code)));
-		}
-		if self.stopped {
-			return Poll::Ready(Err(Error::StreamClosed));
+		if let Some(err) = self.end.error() {
+			return Poll::Ready(Err(err));
 		}
 		let mut state = self.inner.lock();
 		// moq-quic wakes the driver for any credit the lease frees, and the reader of any stream
@@ -671,7 +696,7 @@ impl RecvStream {
 				// Observing the reset frees the stream and the credit its lease withheld; only
 				// then may later calls skip it.
 				let _ = state.conn.recv_stream(self.id).received_reset();
-				self.reset = Some(code.into_inner());
+				self.end = RecvEnd::Reset(code.into_inner());
 				Poll::Ready(Err(Error::StreamReset(code.into_inner())))
 			}
 			Err(recv::Error::Evicted) => Poll::Ready(Err(Error::Evicted)),
@@ -697,35 +722,32 @@ impl poll::RecvStream for RecvStream {
 	}
 
 	fn set_priority(&mut self, priority: i64) {
-		if self.reset.is_some() || self.stopped {
+		if self.end != RecvEnd::Open {
 			return;
 		}
 		self.inner.lock().conn.recv_stream(self.id).set_priority(priority);
 	}
 
 	fn stop(&mut self, code: u32) {
-		if self.stopped || self.reset.is_some() {
+		if self.end != RecvEnd::Open {
 			return;
 		}
 		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
 		let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(code));
-		self.stopped = true;
+		self.end = RecvEnd::Stopped;
 	}
 
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		if let Some(code) = self.reset {
-			return Poll::Ready(Error::StreamReset(code));
-		}
-		if self.stopped {
-			return Poll::Ready(Error::StreamClosed);
+		if let Some(err) = self.end.error() {
+			return Poll::Ready(err);
 		}
 		let mut state = self.inner.lock();
 		match ready!(state.conn.recv_stream(self.id).poll_received_reset(waiter)) {
 			Ok(code) => {
 				// Observing it freed the stream, and moq-quic wakes the driver for any credit
 				// that owes the peer.
-				self.reset = Some(code.into_inner());
+				self.end = RecvEnd::Reset(code.into_inner());
 				Poll::Ready(Error::StreamReset(code.into_inner()))
 			}
 			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
@@ -739,7 +761,7 @@ impl poll::RecvStream for RecvStream {
 
 impl Drop for RecvStream {
 	fn drop(&mut self) {
-		if self.stopped || self.reset.is_some() {
+		if self.end != RecvEnd::Open {
 			return;
 		}
 		let mut state = self.inner.lock();

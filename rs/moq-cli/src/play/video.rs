@@ -12,7 +12,7 @@ use moq_video::decode::{Lane, Next, Selector};
 use super::buffer::Buffer;
 use super::output::Output;
 use super::window::Event;
-use moq_mux::timeline::{Producer as Presentation, Transition};
+use moq_mux::sync::{Producer as Presentation, Transition};
 
 /// A few surfaces, independent of the requested playout delay. A codec batch
 /// that overflows it waits beside the queue rather than pushing out pictures
@@ -145,7 +145,7 @@ impl<O: Output> Video<O> {
 		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
 		// Signalled when a segment held behind a resume becomes the front.
 		let advanced = tokio::sync::Notify::new();
-		let role = self.presentation.track(super::playback::Kind::Video);
+		let role = self.presentation.track(moq_mux::container::Kind::Video);
 		let receive = async {
 			// The group of a declared end whose restart waits for a later group, so the
 			// media buffered before the end still plays out, and the transition that
@@ -193,9 +193,7 @@ impl<O: Output> Video<O> {
 								..Default::default()
 							});
 						}
-						if active
-							&& buffers.len() == 1 && self.presentation.video(role.map(frame.timestamp)?, Instant::now())
-						{
+						if active && buffers.len() == 1 && role.received(role.map(frame.timestamp)?, Instant::now()) {
 							self.output.send(Event::Wake);
 						}
 						let back = buffers.back_mut().unwrap();
@@ -242,7 +240,7 @@ impl<O: Output> Video<O> {
 								..Default::default()
 							});
 						}
-						self.presentation.video_restarted();
+						role.reset();
 						false
 					}
 					Some(Read::End { group, end: endpoint }) => {
@@ -479,9 +477,8 @@ impl<O: Output> Video<O> {
 							role.end(end)?;
 						}
 						advancing.store(false, std::sync::atomic::Ordering::Relaxed);
-						let presentation = &self.presentation;
 						for frame in &buffers.front().unwrap().frames {
-							presentation.video(role.map(frame.timestamp)?, Instant::now());
+							role.received(role.map(frame.timestamp)?, Instant::now());
 						}
 						self.output.send(Event::Wake);
 						continue;
@@ -725,6 +722,7 @@ mod tests {
 			},
 			video: Default::default(),
 			presentation: Presentation::new(delay),
+			playhead: Default::default(),
 			drained: Default::default(),
 			output: Recorder::default(),
 		}
@@ -816,15 +814,11 @@ mod tests {
 		let media = media(delay);
 		let start = Instant::now();
 		let last = moq_net::Timestamp::from_millis(1_980).unwrap();
+		// A speaker that anchored on the first frame's turn, and so trails the
+		// burst's live edge by all of it.
+		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
 		if speaker {
-			media.presentation.audio(
-				moq_mux::timeline::Audio {
-					end: Duration::ZERO,
-					buffered: delay,
-					target: delay,
-				},
-				start,
-			);
+			audio.received(moq_net::Timestamp::ZERO, start);
 		}
 		let decoder = Buffered::default();
 		let decoded = decoder.decoded.clone();
@@ -843,20 +837,14 @@ mod tests {
 			tokio::spawn(playback(&media, delay).run(track, decoder, None))
 		};
 		tokio::task::yield_now().await;
-		let last_due = start
-			+ delay + if speaker {
-			Duration::from_millis(1_980)
-		} else {
-			Duration::ZERO
-		};
+		// The burst is the live edge, which no speaker holds video back from.
+		let last_due = start + delay;
+		assert_eq!(media.presentation.due(last), Some(last_due));
+		// Audio's own tune-in burst lands on the same edge, so the tail keeps its
+		// schedule once video's track goes.
+		audio.received(last, start);
 		assert_eq!(media.presentation.due(last), Some(last_due));
 		assert!(media.video.lock().unwrap().len() <= MAX_FRAMES);
-		if speaker {
-			assert!(
-				decoded.lock().unwrap().is_empty(),
-				"the delay was buffered as raw pictures"
-			);
-		}
 		let mut shown = Vec::new();
 		let mut sizes = Vec::new();
 		while Instant::now() <= last_due + Duration::from_millis(10) {
@@ -899,7 +887,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_dual_burst_follows_the_speakers_clock() {
+	async fn a_dual_burst_reaches_live_past_a_trailing_speaker() {
 		burst_with(true, false, true).await;
 	}
 
@@ -914,7 +902,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_video_burst_follows_the_speakers_clock() {
+	async fn a_video_burst_reaches_live_past_a_trailing_speaker() {
 		burst(true, false).await;
 	}
 
@@ -1135,7 +1123,7 @@ mod tests {
 			.due(moq_net::Timestamp::from_millis(66).unwrap())
 			.unwrap();
 		assert!(Instant::now() < last, "the track closed after its tail was due");
-		let audio = media.presentation.track(super::super::playback::Kind::Audio);
+		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
 		let transition = audio.declare();
 		let _mapping = audio
 			.resume(transition, moq_net::Timestamp::ZERO, None)
@@ -1165,7 +1153,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(source, format());
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
-		let audio = media.presentation.track(super::super::playback::Kind::Audio);
+		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
 		// Two-picture segments, one per restart, published live for two seconds
 		// while audio's end holds the first replacement back.
 		const SEGMENTS: u64 = 50;
@@ -1231,7 +1219,7 @@ mod tests {
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0), None));
 		// Audio's end two seconds out holds every replacement back.
-		let audio = media.presentation.track(super::super::playback::Kind::Audio);
+		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
 		audio.declare();
 		audio.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
 		producer.write(frame(0, true)).unwrap();
@@ -1263,14 +1251,7 @@ mod tests {
 			audio.resume(transition, start, Some(delay)).ready().await.unwrap(),
 		);
 		let first = audio.map(start).unwrap();
-		media.presentation.audio(
-			moq_mux::timeline::Audio {
-				end: Duration::from(first),
-				buffered: delay,
-				target: delay,
-			},
-			Instant::now(),
-		);
+		audio.received(first, Instant::now());
 		let mut shown = None;
 		for _ in 0..1_000 {
 			tokio::task::yield_now().await;
@@ -1322,7 +1303,7 @@ mod tests {
 		};
 		step(3).await;
 		// Audio waits on an end ten seconds out while the decoder idles.
-		let audio = media.presentation.track(super::super::playback::Kind::Audio);
+		let audio = media.presentation.track(moq_mux::container::Kind::Audio);
 		let transition = audio.declare();
 		audio.end(moq_net::Timestamp::from_secs(10).unwrap()).unwrap();
 		let resume = tokio::spawn(async move {

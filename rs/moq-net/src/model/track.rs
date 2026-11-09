@@ -355,6 +355,176 @@ enum Publication {
 	Published,
 }
 
+/// How far a track got toward its end; each step replaces the last, and only an abort
+/// follows a seal or a drop.
+#[derive(Debug, Default)]
+enum Outcome {
+	/// Producing, with no end declared.
+	#[default]
+	Open,
+	/// The end is declared and a producer remains: groups below it may still arrive.
+	Ending(End),
+	/// The end is declared and the last producer dropped: nothing more arrives.
+	Sealed(End),
+	/// The last producer dropped without declaring an end or aborting.
+	Dropped {
+		/// Where production stopped when the open groups went; see
+		/// [`TrackState::resume_position`].
+		resume: Option<Position>,
+	},
+	/// Aborted, or refused before anyone published it.
+	Aborted {
+		err: Error,
+		/// The end declared before the abort. Readers reaching it get the clean end only if it
+		/// had settled first ([`End::settled`]); otherwise a group below it was still open, and
+		/// they get `err`.
+		end: Option<End>,
+		/// Where production stopped when the open groups went.
+		resume: Option<Position>,
+		/// How long the upstream refusing the request asked to wait before asking again, kept
+		/// so a relay refuses its own readers with the same interval rather than deriving one.
+		#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+		retry: Option<Duration>,
+	},
+}
+
+/// A track's declared end.
+#[derive(Debug)]
+struct End {
+	/// The exclusive end: no frame at or past it exists.
+	at: Position,
+	/// The error the track ended with at `at`, if it did not end cleanly: a reader reaching
+	/// the end gets it instead of the end of stream, while everything below stays readable.
+	error: Option<Error>,
+	/// On a received copy, when its readers began waiting out the grace for group streams
+	/// below the end that QUIC may deliver in any order: when the end or a start was
+	/// declared, or a group last arrived since. Readers wait for that tail (see
+	/// [`TrackState::tail_deadline`]) rather than end at the boundary with groups still to
+	/// arrive. `None` on a local track, which owes no tail.
+	tail: Option<crate::time::Instant>,
+	/// Whether the end settled before a write that could reopen it or an abort, or
+	/// `closed()` reported it: every group below it was produced and finished then, so the
+	/// clean end stands for good. Atomic so reporting it latches through a read guard; see
+	/// [`TrackState::latch_settled`].
+	settled: AtomicBool,
+}
+
+impl End {
+	fn settled(&self) -> bool {
+		self.settled.load(Ordering::Relaxed)
+	}
+}
+
+impl Outcome {
+	/// The declared end, which an abort keeps.
+	fn end(&self) -> Option<&End> {
+		match self {
+			Self::Ending(end) | Self::Sealed(end) | Self::Aborted { end: Some(end), .. } => Some(end),
+			Self::Open | Self::Dropped { .. } | Self::Aborted { end: None, .. } => None,
+		}
+	}
+
+	fn end_mut(&mut self) -> Option<&mut End> {
+		match self {
+			Self::Ending(end) | Self::Sealed(end) | Self::Aborted { end: Some(end), .. } => Some(end),
+			Self::Open | Self::Dropped { .. } | Self::Aborted { end: None, .. } => None,
+		}
+	}
+
+	/// The abort's error.
+	fn aborted(&self) -> Option<&Error> {
+		match self {
+			Self::Aborted { err, .. } => Some(err),
+			_ => None,
+		}
+	}
+
+	/// The abort's error, if it cut the track off before its declared end settled.
+	fn cut_off(&self) -> Option<&Error> {
+		match self {
+			Self::Aborted { err, end, .. } if !end.as_ref().is_some_and(End::settled) => Some(err),
+			_ => None,
+		}
+	}
+
+	/// How long the upstream refusing the track asked to wait before asking again.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn retry(&self) -> Option<Duration> {
+		match self {
+			Self::Aborted { retry, .. } => *retry,
+			_ => None,
+		}
+	}
+
+	/// Whether nothing more can arrive: the track was sealed or aborted.
+	fn is_final(&self) -> bool {
+		matches!(self, Self::Sealed(_) | Self::Aborted { .. })
+	}
+
+	/// Whether no producer remains (sealed, dropped, or aborted), so nothing protects the
+	/// live edge any longer: the pool's idle expiry reclaims it like every other group, and a
+	/// stale consumer cannot pin the cache.
+	fn is_released(&self) -> bool {
+		!matches!(self, Self::Open | Self::Ending(_))
+	}
+}
+
+/// Where a track's live feed starts, as its publisher declared it; each declaration
+/// replaces the last.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Start {
+	/// Nothing declared.
+	#[default]
+	Unknown,
+	/// The floor a subscription asked for (`None` at the live edge), still waiting on the
+	/// serving session to resolve where the live feed begins (a lite-06+ SUBSCRIBE_START).
+	/// Readers that must know the resolved start (see [`Subscriber::poll_start`]) wait on it;
+	/// everything else treats the floor as declared.
+	Pending(Option<u64>),
+	/// The first group the live feed serves.
+	Declared(u64),
+	/// The first group the live feed serves, which its publisher resolved from its
+	/// subscriber's budget (a lite-06+ SUBSCRIBE_START): it may sit above history a reader
+	/// can still fill.
+	Resolved(u64),
+}
+
+impl Start {
+	/// The first group the live feed serves, or the floor asked while that is pending.
+	fn sequence(self) -> Option<u64> {
+		match self {
+			Self::Unknown => None,
+			Self::Pending(floor) => floor,
+			Self::Declared(start) | Self::Resolved(start) => Some(start),
+		}
+	}
+}
+
+/// Whether a track is a copy received from a remote publisher, and what its readers'
+/// relative and time anchors resolve against. Each step replaces the last.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Anchors {
+	/// The track's own publisher's copy: anchors resolve against its own groups.
+	#[default]
+	Local,
+	/// A received copy holding only part of the track, whose declared end waits for groups
+	/// still in flight below it (see [`End::tail`]): its readers' relative and time anchors are
+	/// refused (see [`Holdings::drops_anchors`]).
+	Refused,
+	/// A received copy whose wire tells it what relative and time anchors resolve against,
+	/// so they resolve here as at the publisher.
+	Wire,
+	/// A received copy that can translate only time anchors its cache has already settled. A
+	/// relative one waits for the live edge its wire reports, as under [`Self::Wire`].
+	Cached,
+}
+
+impl Anchors {
+	fn received(self) -> bool {
+		self != Self::Local
+	}
+}
+
 #[derive(Default)]
 pub(crate) struct TrackState {
 	// The publisher's properties, once known; always Some for Subscriber/Producer.
@@ -447,7 +617,7 @@ pub(crate) struct TrackState {
 	evicted: Option<(u64, Timestamp)>,
 
 	// The sequence of the newest cached group: the live edge, protected from
-	// eviction by never entering the eviction order until the track is `closed`.
+	// eviction by never entering the eviction order until no producer remains.
 	// Tracked separately from `max_sequence`, which a reserved sequence can push past
 	// any cached group.
 	latest_group: Option<u64>,
@@ -455,21 +625,10 @@ pub(crate) struct TrackState {
 	// Incarnation counter for `Slot::stamp`.
 	next_stamp: u32,
 
-	// The exclusive end: no frame at or past it exists. Retained independently of the
-	// cache, so an evicted last group does not lose where the track ended.
-	end: Option<Position>,
-	// The error the track ended with at `end`, if it did not end cleanly: a reader reaching
-	// the end gets it instead of the end of stream, while everything below stays readable.
-	end_error: Option<Error>,
-
-	// Nothing more can arrive: the last producer dropped after a declared boundary.
-	sealed: bool,
-
-	// Set once a received copy's end is declared, ahead of group streams below it that QUIC
-	// may deliver in any order: when the end or a start was declared, or a group last arrived since.
-	// Readers wait out the grace for that tail (see [`Self::tail_deadline`]), rather than
-	// end at the boundary with groups still to arrive.
-	tail: Option<crate::time::Instant>,
+	// How far the track got toward its end: declared, sealed, dropped, or aborted, with
+	// what each of those phases knows. Retained independently of the cache, so an evicted
+	// last group does not lose where the track ended.
+	outcome: Outcome,
 
 	// The sequences the live feed delivered: what a pending tail
 	// is judged by. Fetched copies never count, and eviction never touches it. A gap folds
@@ -477,37 +636,15 @@ pub(crate) struct TrackState {
 	// does, so this holds only the gaps still worth waiting for.
 	arrivals: Ledger,
 
-	// No producer remains (aborted, sealed, or dropped), so nothing protects the live
-	// edge any longer: the pool's idle expiry reclaims it like every other group, and a
-	// stale consumer cannot pin the cache.
-	closed: bool,
+	// The first sequence the live feed serves, as the publisher declared it (the wire's
+	// SUBSCRIBE_START). Lower groups are not waited for, though one may still arrive late
+	// or be fetched.
+	start: Start,
 
-	// The first sequence the live feed serves, once the publisher declared one
-	// (the wire's SUBSCRIBE_START). Lower groups are not waited for, though one
-	// may still arrive late or be fetched.
-	start_sequence: Option<u64>,
-
-	// Whether `start_sequence` is only the floor a subscription asked for, still
-	// waiting on the serving session to resolve where the live feed begins (a
-	// lite-06+ SUBSCRIBE_START). Readers that must know the resolved start (see
-	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
-	start_pending: bool,
-
-	// Whether the publisher resolved `start_sequence` (a lite-06+ SUBSCRIBE_START), which
-	// may sit above history a reader can still fill. Cleared by any other declaration.
-	start_resolved: bool,
-
-	// A copy received from a remote publisher, whose declared end waits for groups still
-	// in flight below it (see `tail`), and whose readers' relative and time anchors are
-	// refused unless `anchored` (see `Holdings::drops_anchors`).
-	received: bool,
-	// Whether a received copy's wire tells it what relative and time anchors resolve
-	// against, so they resolve here as at the publisher.
-	anchored: bool,
-	// This copy can translate only time anchors its cache has already settled. A relative one
-	// waits for the live edge its wire reports, as on an `anchored` copy.
-	cached_anchors: bool,
-	// Whether readers ask no fills below `start_sequence`: its publisher resolved it from the
+	// Whether this is a copy received from a remote publisher, and what its readers'
+	// relative and time anchors resolve against there.
+	anchors: Anchors,
+	// Whether readers ask no fills below `start`: its publisher resolved it from the
 	// budget, but neither this copy's timestamps nor a fill can judge an older group against
 	// a reader's budget. A widened budget reaches lower groups through the feed's re-offer.
 	fills_from_start: bool,
@@ -558,24 +695,6 @@ pub(crate) struct TrackState {
 	// The route's live feed starts past a gap after everything cached, so the cache
 	// below this group is unjudgeable for readers with a finite delay budget.
 	live_floor: Option<u64>,
-
-	// Where production stopped, snapshotted when the open groups are released (an
-	// abort, or the last producer dropping). Computed live from the cache otherwise;
-	// see [`Self::resume_position`].
-	resume: Option<Position>,
-
-	// The error that caused the track to be aborted, if any.
-	abort: Option<Error>,
-	// How long the upstream refusing the request asked to wait before asking again, kept so
-	// a relay refuses its own readers with the same interval rather than deriving one.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	retry: Option<Duration>,
-
-	// Whether the declared end settled before a write that could reopen it or an abort, or
-	// `closed()` reported it: every group below it was produced and finished then, so the
-	// clean end stands for good. Atomic so reporting it latches through a read guard. See
-	// [`Self::latch_settled`].
-	settled: AtomicBool,
 
 	// Active subscriptions, in their own [`kio::Lock`] so a read-only `Consumer`
 	// registers under that lock instead of writing back into the track state.
@@ -837,12 +956,12 @@ impl Holdings for TrackState {
 	}
 
 	fn drops_anchors(&self) -> bool {
-		self.received && !self.anchored
+		self.anchors == Anchors::Refused
 	}
 
 	fn looks_up(&self) -> bool {
 		// A received copy's handler is its session, which fetches by group alone.
-		!self.received && self.fills.read().has_handlers()
+		!self.anchors.received() && self.fills.read().has_handlers()
 	}
 
 	fn containing(&self, pts: Timestamp) -> Containing {
@@ -895,7 +1014,7 @@ impl Holdings for TrackState {
 			return dropped;
 		}
 		// Without a declared start, the first arrival stands in for it, as the tail's does.
-		let floor = self.start_sequence.or(self.arrivals.first()).unwrap_or(0);
+		let floor = self.start.sequence().or(self.arrivals.first()).unwrap_or(0);
 		if sequence < floor {
 			return Some(floor);
 		}
@@ -903,12 +1022,12 @@ impl Holdings for TrackState {
 	}
 
 	fn complete(&self) -> bool {
-		self.sealed || self.abort.is_some()
+		self.outcome.is_final()
 	}
 
 	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
 		let global = [
-			self.start_sequence.map_or(0, |start| start.saturating_add(1)),
+			self.start.sequence().map_or(0, |start| start.saturating_add(1)),
 			u64::from(self.complete()),
 			self.fetched,
 			// A handler appearing or leaving changes which starts count and what is gone.
@@ -1319,7 +1438,7 @@ impl TrackState {
 	fn poll_info(&self) -> Poll<Result<Info>> {
 		if let Some(info) = self.info.as_ref().filter(|_| self.publication != Publication::Staged) {
 			Poll::Ready(Ok(info.clone()))
-		} else if let Some(err) = &self.abort {
+		} else if let Some(err) = self.outcome.aborted() {
 			// Aborted before anyone served it, so the info can never arrive: fail the
 			// waiting subscribes instead of parking them on a track nobody will fill.
 			Poll::Ready(Err(err.clone()))
@@ -1332,7 +1451,7 @@ impl TrackState {
 	/// reached its end, which makes the cache the whole of it. An end declared but not
 	/// reached does not: the groups before it are still to come from the feed.
 	fn readable(&self) -> bool {
-		self.feed.is_live() || self.sealed || self.abort.is_some() || self.is_complete()
+		self.feed.is_live() || self.outcome.is_final() || self.is_complete()
 	}
 
 	/// Where relative starts count back from: the live feed's newest group, produced or
@@ -1398,7 +1517,7 @@ impl TrackState {
 		// TODO once we have drop notifications, check if index == final_sequence.
 		if self.is_complete() {
 			Poll::Ready(Ok(None))
-		} else if let Some(err) = &self.abort {
+		} else if let Some(err) = self.outcome.aborted() {
 			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
@@ -1423,12 +1542,12 @@ impl TrackState {
 		// Nothing more can arrive once the track was sealed (dropped with its end
 		// declared) or aborted. Either closed the channel, so parking is not an option:
 		// the consumer would be handed the abort, or `Dropped`, instead of how it ended.
-		let closed = self.sealed || self.abort.is_some();
+		let closed = self.outcome.is_final();
 		// Once nothing more is in range: an abort before the end settled cut the track
 		// off. One after it is a clean end (see `is_complete`), as is reaching the end.
-		let end = || match &self.abort {
-			Some(err) if !self.settled.load(Ordering::Relaxed) => Err(err.clone()),
-			_ => Ok(None),
+		let end = || match self.outcome.cut_off() {
+			Some(err) => Err(err.clone()),
+			None => Ok(None),
 		};
 
 		// If the exclusive end is already at or below where we'd resume, no
@@ -1908,7 +2027,7 @@ impl TrackState {
 			return Poll::Ready(Ok(consumer));
 		}
 
-		if let Some(err) = &self.abort {
+		if let Some(err) = self.outcome.aborted() {
 			return Poll::Ready(Err(err.clone()));
 		}
 
@@ -2103,16 +2222,13 @@ impl TrackState {
 	/// Whether `sequence` is the live edge, which eviction and expiry never take
 	/// while a producer remains.
 	fn protects(&self, sequence: u64) -> bool {
-		!self.closed && Some(sequence) == self.latest_group
+		!self.outcome.is_released() && Some(sequence) == self.latest_group
 	}
 
 	/// No producer remains: stop protecting the live edge, so the pool's idle expiry
 	/// reclaims every group once readers stop touching it, and a stale consumer can't
 	/// pin the cache (and its frame buffers) forever.
 	fn close_cache(&mut self) {
-		if std::mem::replace(&mut self.closed, true) {
-			return;
-		}
 		self.cache.end_largest();
 		if let Some(latest) = self.latest_group
 			&& let Some(slot) = self.lookup.get(&latest)
@@ -2125,12 +2241,12 @@ impl TrackState {
 	/// End the track abruptly with `err`: drop the open groups nobody will finish, keep the
 	/// finished ones for readers still draining, and stop protecting the live edge.
 	///
-	/// Returns every unfinished copy, cached or not, to abort once the track lock is released,
-	/// so a reader that already pulled one ends with `err` too and its writer fails.
-	fn tear_down(&mut self, err: Error) -> OpenGroups {
-		// Snapshot the frame boundary before the open group it may sit in goes away: an
-		// abrupt end is exactly when a replacement route asks where to resume.
-		self.resume = self.resume_position();
+	/// Returns where production stopped, snapshotted before the open group it may sit in
+	/// goes (an abrupt end is exactly when a replacement route asks where to resume), and
+	/// every unfinished copy, cached or not, to abort once the track lock is released, so a
+	/// reader that already pulled one ends with `err` too and its writer fails.
+	fn tear_down(&mut self, err: Error) -> (Option<Position>, OpenGroups) {
+		let resume = self.resume_position();
 		let groups = self
 			.lookup
 			.values()
@@ -2164,8 +2280,7 @@ impl TrackState {
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
 			.retain(|sequence, _| lookup.contains_key(sequence));
-		self.close_cache();
-		OpenGroups { groups, err }
+		(resume, OpenGroups { groups, err })
 	}
 
 	/// Take `sequence` out of the cache, along with its checked start.
@@ -2186,16 +2301,14 @@ impl TrackState {
 	/// Record that the live feed delivered `sequence`, then fold the gaps that aged out.
 	fn record_arrival(&mut self, sequence: u64, now: crate::time::Instant) {
 		self.arrivals.arrive(sequence, now);
-		if !self.received
+		if !self.anchors.received()
 			&& self.appended.is_none_or(|appended| sequence >= appended)
 			&& let Some(end) = sequence.checked_add(1)
 		{
 			self.produced.insert(sequence..end);
 		}
 		// A feed still delivering keeps the gap above its last arrival open.
-		if self.tail.is_some() {
-			self.tail = Some(now);
-		}
+		self.refresh_tail(now);
 		self.fold_arrivals(now);
 	}
 
@@ -2215,6 +2328,22 @@ impl TrackState {
 	fn arrival_grace(&self) -> Duration {
 		let max_delay = clamp_max_delay(self.subscriptions.lock().max_delay(), self.max_age_bound());
 		ledger::grace(max_delay)
+	}
+
+	/// Refuse a request nobody published with `err`, waking the subscribes waiting on it.
+	/// No producer ever wrote to it, so there is nothing to tear down, but a fill answered
+	/// before the refusal may have cached the live edge, which nothing protects anymore.
+	fn reject(&mut self, err: Error, retry: Option<Duration>) {
+		let released = self.outcome.is_released();
+		self.outcome = Outcome::Aborted {
+			err,
+			end: None,
+			resume: None,
+			retry,
+		};
+		if !released {
+			self.close_cache();
+		}
 	}
 
 	/// Attach the publisher's immutable metadata without replacing it with local cache policy.
@@ -2591,7 +2720,7 @@ impl TrackState {
 		{
 			return Poll::Ready(Some(slot.serving().consume()));
 		}
-		match self.start_sequence.is_some_and(|start| start > sequence)
+		match self.start.sequence().is_some_and(|start| start > sequence)
 			|| self.final_sequence().is_some_and(|fin| fin <= sequence)
 		{
 			true => Poll::Ready(None),
@@ -2664,7 +2793,7 @@ impl TrackState {
 			true => groups.start,
 			false => groups.start.max(self.arrivals.first()?),
 		};
-		let start = start.max(self.start_sequence.unwrap_or(0));
+		let start = start.max(self.start.sequence().unwrap_or(0));
 		let end = groups.end.min(self.final_sequence().unwrap_or(u64::MAX));
 		let now = self.cache.pool().now_wall();
 		for (gap, opened) in self.arrivals.gaps(start..end) {
@@ -2684,10 +2813,10 @@ impl TrackState {
 	/// group accounted for by its arrivals (since evicted or aborted), dropped,
 	/// outside the feed, or in a gap its grace stopped waiting for. A local track owes none.
 	fn owed(&self, groups: ops::Range<u64>, window: &Window) -> Option<u64> {
-		if !self.received || self.closed || !self.readable() {
+		if !self.anchors.received() || self.outcome.is_released() || !self.readable() {
 			return None;
 		}
-		let asked = self.start_sequence.is_some();
+		let asked = self.start.sequence().is_some();
 		self.find_landable(groups, asked, self.arrival_grace(), |open, _| {
 			window.clip(open).map(|run| run.start)
 		})
@@ -2701,18 +2830,21 @@ impl TrackState {
 	/// A declared start asks the feed for every group from it, so a gap in the arrivals at
 	/// or above it, and a pending tail above the last arrival, is waited for a fresh grace:
 	/// the feed may only now be sending it.
-	fn set_start(&mut self, start_sequence: Option<u64>, pending: bool) {
+	fn set_start(&mut self, start: Start) {
 		self.latch_settled();
-		self.start_sequence = start_sequence;
-		self.start_pending = pending;
-		self.start_resolved = false;
-		if let Some(start) = start_sequence {
+		self.start = start;
+		if let Some(start) = start.sequence() {
 			self.cache.wakes().arrived(..start);
 			let now = self.cache.pool().now_wall();
 			self.arrivals.demand(start..u64::MAX, now);
-			if self.tail.is_some() {
-				self.tail = Some(now);
-			}
+			self.refresh_tail(now);
+		}
+	}
+
+	/// Restart a received copy's tail grace from `now`, once it is waiting one out.
+	fn refresh_tail(&mut self, now: crate::time::Instant) {
+		if let Some(tail) = self.outcome.end_mut().and_then(|end| end.tail.as_mut()) {
+			*tail = now;
 		}
 	}
 
@@ -2720,9 +2852,21 @@ impl TrackState {
 	/// already-produced groups, or one inside a group that already holds a frame past it.
 	/// A mid-group end caps that group, so no later write can land past it either.
 	fn set_end(&mut self, end: Position, error: Option<Error>) -> Result<()> {
-		if self.end.is_some() {
+		if !matches!(self.outcome, Outcome::Open) {
 			return Err(Error::Closed);
 		}
+		self.declare(end, error, None, false)
+	}
+
+	/// Declare `end` on an open track, or one whose declared end it refines (the declared end
+	/// already taken out of `outcome`), carrying over that end's `tail` and settling.
+	fn declare(
+		&mut self,
+		end: Position,
+		error: Option<Error>,
+		tail: Option<crate::time::Instant>,
+		settled: bool,
+	) -> Result<()> {
 		let fin = end.final_sequence().ok_or(coding::BoundsExceeded)?;
 		if let Some(max) = self.max_sequence
 			&& fin <= max
@@ -2742,16 +2886,25 @@ impl TrackState {
 				}
 			}
 		}
-		self.end = Some(end);
-		self.end_error = error;
+		self.outcome = Outcome::Ending(End {
+			at: end,
+			error,
+			tail,
+			settled: AtomicBool::new(settled),
+		});
 		self.cache.declare_end();
 		self.cache.wakes().arrived(fin..);
 		Ok(())
 	}
 
+	/// The declared end's position.
+	fn declared(&self) -> Option<Position> {
+		self.outcome.end().map(|end| end.at)
+	}
+
 	/// What a reader past the end gets: the end of stream, or the error the track ended with.
 	fn ended<T>(&self) -> Result<Option<T>> {
-		match &self.end_error {
+		match self.outcome.end().and_then(|end| end.error.as_ref()) {
 			Some(err) => Err(err.clone()),
 			None => Ok(None),
 		}
@@ -2762,17 +2915,17 @@ impl TrackState {
 		if !self.is_complete() {
 			return None;
 		}
-		Some((self.final_sequence()?, self.end_error.clone()?))
+		Some((self.final_sequence()?, self.outcome.end()?.error.clone()?))
 	}
 
 	/// The first group the end excludes whole: one past the last group that may exist.
 	fn final_sequence(&self) -> Option<u64> {
-		self.end.and_then(Position::final_sequence)
+		self.declared().and_then(Position::final_sequence)
 	}
 
 	/// Cap a new group the end cuts, so it never holds a frame past the end.
 	fn cap(&self, group: &group::Handle) -> Result<()> {
-		match self.end {
+		match self.declared() {
 			Some(end) if end.frame != 0 && end.group == group.sequence => group.limit(Some(end.frame)),
 			_ => Ok(()),
 		}
@@ -2788,19 +2941,23 @@ impl TrackState {
 	/// An abort before the end settled wins over it: a group below the boundary was
 	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
-		// `sealed` is a declared end the last producer dropped short of. An abort still wins
-		// unless that end had already settled: a group below it was still open.
-		let reached = self.sealed
-			|| self
+		match &self.outcome {
+			Outcome::Ending(end) => end
+				.at
 				.final_sequence()
-				.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin));
-		reached && (self.abort.is_none() || self.settled.load(Ordering::Relaxed))
+				.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin)),
+			// A declared end the last producer dropped short of.
+			Outcome::Sealed(_) => true,
+			// An abort wins unless the end had already settled: a group below it was still open.
+			Outcome::Aborted { end, .. } => end.as_ref().is_some_and(End::settled),
+			Outcome::Open | Outcome::Dropped { .. } => false,
+		}
 	}
 
 	/// Whether nothing more reaches the cache but what fills answer: the track was aborted,
 	/// reached its end, or its session holds no subscription that feeds it.
 	pub(super) fn nothing_arrives(&self) -> bool {
-		self.abort.is_some() || self.is_complete() || self.unfed
+		self.outcome.aborted().is_some() || self.is_complete() || self.unfed
 	}
 
 	/// Whether a bounded window reads from the cache: whenever readers may, and on a copy no
@@ -2815,7 +2972,9 @@ impl TrackState {
 	/// misses up to `fin` is waited for only as long as the grace.
 	fn reaches(&self, fin: u64) -> bool {
 		let edge = self.edge();
-		edge >= fin || self.tail.is_some() || self.drops.gaps(&(edge..fin)).next().is_none()
+		edge >= fin
+			|| self.outcome.end().is_some_and(|end| end.tail.is_some())
+			|| self.drops.gaps(&(edge..fin)).next().is_none()
 	}
 
 	/// Whether the largest can no longer advance while a producer is still held: the track
@@ -2835,7 +2994,7 @@ impl TrackState {
 	/// Only such a hole holds readers, so a tail with nothing missing ends them at once.
 	fn awaits_tail(&self, fin: u64) -> bool {
 		// Nothing arrives after an abort, so a hole left then is final.
-		self.abort.is_none() && self.owes(fin)
+		self.outcome.aborted().is_none() && self.owes(fin)
 	}
 
 	/// Whether the tail misses a sequence from where the feed starts up to `fin` that is
@@ -2857,22 +3016,22 @@ impl TrackState {
 	/// end declared ahead of it is not cut off. Judged by the arrivals, not the cache, so an evicted group
 	/// counts as delivered, and the check costs the same however much is cached.
 	fn tail_deadline(&self, fin: u64) -> Option<Option<crate::time::Instant>> {
-		let active = self.tail?;
+		let active = self.outcome.end()?.tail?;
 		let grace = self.arrival_grace();
 		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
 		// arrivals count. Without a declared start, the first one stands in for it.
-		let floor = match self.start_sequence {
-			Some(start) => start,
+		let floor = match self.start {
+			Start::Declared(start) | Start::Resolved(start) | Start::Pending(Some(start)) => start,
 			// Where the feed starts is still unknown, so everything below the end not yet
 			// delivered or dropped is owed.
-			None if self.start_pending => {
+			Start::Pending(None) => {
 				let missing = self
 					.arrivals
 					.gaps(0..fin)
 					.any(|(gap, _)| self.drops.gaps(&gap).next().is_some());
 				return missing.then(|| active.checked_add(grace));
 			}
-			None => self.arrivals.first().unwrap_or(0),
+			Start::Unknown => self.arrivals.first().unwrap_or(0),
 		};
 		// Nothing opened the gap above the last arrival, so its grace runs from `active`.
 		self.arrivals
@@ -2899,7 +3058,7 @@ impl TrackState {
 		let Some(fin) = self.final_sequence() else {
 			return false;
 		};
-		let reached = self.sealed || self.reaches(fin);
+		let reached = matches!(self.outcome, Outcome::Sealed(_)) || self.reaches(fin);
 		reached && !self.owes(fin) && self.lookup.range(..fin).all(|(_, slot)| slot.is_settled())
 	}
 
@@ -2908,8 +3067,11 @@ impl TrackState {
 	/// then stands, and a later abort ends readers cleanly. A late group or a wider
 	/// subscription is still served; it just cannot turn the outcome into an error.
 	fn latch_settled(&mut self) {
-		if self.abort.is_none() && self.is_settled() {
-			self.settled.store(true, Ordering::Relaxed);
+		if let Outcome::Ending(end) | Outcome::Sealed(end) = &self.outcome
+			&& !end.settled()
+			&& self.is_settled()
+		{
+			end.settled.store(true, Ordering::Relaxed);
 		}
 	}
 
@@ -2921,8 +3083,12 @@ impl TrackState {
 	fn resume_position(&self) -> Option<Position> {
 		// A snapshot taken when the open groups were released wins; the group it was
 		// derived from may be gone.
-		if self.resume.is_some() {
-			return self.resume;
+		if let Outcome::Dropped { resume: Some(resume) }
+		| Outcome::Aborted {
+			resume: Some(resume), ..
+		} = self.outcome
+		{
+			return Some(resume);
 		}
 
 		let max = self.latest_group?;
@@ -3095,9 +3261,9 @@ impl TrackState {
 	}
 
 	fn poll_finished(&self) -> Poll<Result<Position>> {
-		if let Some(end) = self.end {
+		if let Some(end) = self.declared() {
 			Poll::Ready(Ok(end))
-		} else if let Some(err) = &self.abort {
+		} else if let Some(err) = self.outcome.aborted() {
 			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
@@ -3105,7 +3271,9 @@ impl TrackState {
 	}
 
 	fn modify(producer: &kio::Producer<Self>) -> Result<kio::Mut<'_, Self>> {
-		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		producer
+			.write()
+			.map_err(|r| r.outcome.aborted().cloned().unwrap_or(Error::Dropped))
 	}
 
 	/// Observe a shared track's abort, or every producer leaving, without extending its
@@ -3114,7 +3282,7 @@ impl TrackState {
 	pub(crate) fn poll_aborted(producer: &kio::Producer<Self>, waiter: &kio::Waiter) -> Poll<Error> {
 		producer
 			.poll_closed(waiter)
-			.map(|()| producer.read().abort.clone().unwrap_or(Error::Dropped))
+			.map(|()| producer.read().outcome.aborted().cloned().unwrap_or(Error::Dropped))
 	}
 
 	/// The track's outcome once final: `Ok` once its declared end is reached with every
@@ -3124,7 +3292,7 @@ impl TrackState {
 	/// A clean outcome latches once reported: a received copy's tail grace is judged when
 	/// polled, and a later subscription asking for a longer one must not reopen it.
 	fn poll_outcome(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		if self.settled.load(Ordering::Relaxed) {
+		if self.outcome.end().is_some_and(End::settled) {
 			return Poll::Ready(self.ended().map(|_: Option<()>| ()));
 		}
 		if self.is_complete() {
@@ -3132,7 +3300,7 @@ impl TrackState {
 			// may still abort, which would cut the track off, so wait for each slot to settle
 			// ([`Slot::is_settled`]). One whose last serving copy aborts leaves the outcome to
 			// the track's own abort or drop.
-			if self.abort.is_none()
+			if self.outcome.aborted().is_none()
 				&& let Some(fin) = self.final_sequence()
 			{
 				for (_, slot) in self.lookup.range(..fin).filter(|(_, slot)| !slot.is_settled()) {
@@ -3146,9 +3314,11 @@ impl TrackState {
 					}
 				}
 			}
-			self.settled.store(true, Ordering::Relaxed);
+			if let Some(end) = self.outcome.end() {
+				end.settled.store(true, Ordering::Relaxed);
+			}
 			Poll::Ready(self.ended().map(|_: Option<()>| ()))
-		} else if let Some(err) = &self.abort {
+		} else if let Some(err) = self.outcome.aborted() {
 			Poll::Ready(Err(err.clone()))
 		} else {
 			self.watch_tail(waiter);
@@ -3162,14 +3332,14 @@ impl TrackState {
 		Poll::Ready(match ready!(poll) {
 			Ok(outcome) => outcome,
 			Err(closed) if closed.is_complete() => closed.ended().map(|_: Option<()>| ()),
-			Err(closed) => Err(closed.abort.clone().unwrap_or(Error::Dropped)),
+			Err(closed) => Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped)),
 		})
 	}
 
 	/// Abort shared track state without extending its publisher lifetime.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
-		commit_abort(Self::modify(producer)?, err).abort();
+		commit_abort(Self::modify(producer)?, err, None).abort();
 		Ok(())
 	}
 
@@ -3198,7 +3368,7 @@ impl TrackState {
 		frames: group::Bounds,
 		info: Option<Info>,
 	) -> Result<group::Producer> {
-		if let Some(err) = &self.abort {
+		if let Some(err) = self.outcome.aborted() {
 			return Err(err.clone());
 		}
 		if let Some(fin) = self.final_sequence()
@@ -3288,7 +3458,7 @@ impl TrackState {
 		frames: group::Bounds,
 		info: Option<Info>,
 	) -> Result<group::Producer> {
-		if let Some(err) = &self.abort {
+		if let Some(err) = self.outcome.aborted() {
 			return Err(err.clone());
 		}
 		if self.info.is_none() {
@@ -3448,17 +3618,30 @@ impl Deferred {
 
 /// Record `err` and close the track, the shared tail of every abort, returning the open
 /// groups to abort once the guard is gone.
-fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) -> OpenGroups {
+fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error, retry: Option<Duration>) -> OpenGroups {
 	// Decided before the open groups go: the groups below the end are the evidence. A gap
 	// past the grace was lost before the abort rather than cut off by it.
 	let now = state.cache.pool().now_wall();
 	state.fold_arrivals(now);
 	state.latch_settled();
-	state.abort = Some(err.clone());
 	// Keep what finished for consumers still draining: they get it, then the abort (or
 	// the clean end, when the end settled). Clearing here would abort finished groups a
 	// slower reader has not pulled yet. The pool's idle expiry bounds how long they stay.
-	let open = state.tear_down(err);
+	let released = state.outcome.is_released();
+	let (resume, open) = state.tear_down(err.clone());
+	let end = match std::mem::take(&mut state.outcome) {
+		Outcome::Ending(end) | Outcome::Sealed(end) => Some(end),
+		_ => None,
+	};
+	state.outcome = Outcome::Aborted {
+		err,
+		end,
+		resume,
+		retry,
+	};
+	if !released {
+		state.close_cache();
+	}
 	state.close();
 	open
 }
@@ -3522,7 +3705,7 @@ fn poll_largest(
 /// end that is not reached yet does not count: an idle copy's largest is still only what
 /// its ended feed left.
 fn largest_live(state: &TrackState, waiter: &kio::Waiter) -> Poll<()> {
-	match state.feed.is_live() || state.sealed || state.abort.is_some() || state.largest_settled() {
+	match state.feed.is_live() || state.outcome.is_final() || state.largest_settled() {
 		true => Poll::Ready(()),
 		false => {
 			state.watch_tail(waiter);
@@ -3665,7 +3848,8 @@ impl Producer {
 
 	fn create_group_inner(&self, info: group::Info, received: Option<u64>) -> Result<Received> {
 		let mut state = self.modify()?;
-		if state.sealed || state.final_sequence().is_some_and(|fin| info.sequence >= fin) {
+		if matches!(state.outcome, Outcome::Sealed(_)) || state.final_sequence().is_some_and(|fin| info.sequence >= fin)
+		{
 			return Err(Error::Closed);
 		}
 		// A skip says the sequence will never be produced, so it is final. A drop is not: a
@@ -3710,9 +3894,12 @@ impl Producer {
 	/// there. Those sequences are then final: creating one is refused. Appending alone never
 	/// leaves such a gap; one left by out-of-order [`Self::create_group`] calls is what it names.
 	///
-	/// The broadcast remembers nothing of an earlier producer of the name, so a replacement
-	/// starts at 0. Since a name always means the same content, a replacement continues past
-	/// its predecessor's groups with [`Self::create_group`].
+	/// The same broadcast, track, and group sequence always name the same content, and nothing
+	/// checks it: the broadcast remembers nothing of an earlier producer of the name, so a
+	/// replacement starts at 0. A recreated track, or a restarted publisher keeping its
+	/// instance, continues past its predecessor's groups with [`Self::create_group`], or uses
+	/// a new track name or instance. Reusing a sequence only corrupts this broadcast for its
+	/// readers. Datagram sequences name no cached content and are exempt.
 	pub fn append_group(&self) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		let sequence = state.next_sequence()?;
@@ -3807,26 +3994,33 @@ impl Producer {
 	/// refined end must carry the same error code.
 	pub fn finish_at(&mut self, end: Position, error: Option<Error>) -> Result<()> {
 		let mut state = self.modify()?;
-		let code = |err: &Option<Error>| err.as_ref().map(|err| StreamError::from(err).to_code());
-		if state.end.is_some() && code(&state.end_error) != code(&error) {
-			return Err(Error::ProtocolViolation);
-		}
-		match state.end {
-			Some(declared) if declared == end => return Ok(()),
-			Some(declared) if declared.frame == 0 && end.frame != 0 && end.final_sequence() == Some(declared.group) => {
-				state.end = None;
-				if let Err(err) = state.set_end(end, error) {
-					state.end = Some(declared);
-					return Err(err);
-				}
+		let code = |err: Option<&Error>| err.map(|err| StreamError::from(err).to_code());
+		// A received copy's readers wait out a grace for groups still in flight below its end.
+		let tail = state.anchors.received().then(|| state.cache.pool().now_wall());
+		match std::mem::take(&mut state.outcome) {
+			Outcome::Open => state.declare(end, error, tail, false),
+			Outcome::Ending(declared) if code(declared.error.as_ref()) != code(error.as_ref()) => {
+				state.outcome = Outcome::Ending(declared);
+				Err(Error::ProtocolViolation)
 			}
-			Some(_) => return Err(Error::ProtocolViolation),
-			None => state.set_end(end, error)?,
+			Outcome::Ending(declared) if declared.at == end => {
+				state.outcome = Outcome::Ending(declared);
+				Ok(())
+			}
+			Outcome::Ending(declared)
+				if declared.at.frame == 0 && end.frame != 0 && end.final_sequence() == Some(declared.at.group) =>
+			{
+				let refined = state.declare(end, error, declared.tail.or(tail), declared.settled());
+				if refined.is_err() {
+					state.outcome = Outcome::Ending(declared);
+				}
+				refined
+			}
+			outcome => {
+				state.outcome = outcome;
+				Err(Error::ProtocolViolation)
+			}
 		}
-		if state.received && state.tail.is_none() {
-			state.tail = Some(state.cache.pool().now_wall());
-		}
-		Ok(())
 	}
 
 	/// Declare the first group the live feed serves (the wire's SUBSCRIBE_START,
@@ -3842,7 +4036,8 @@ impl Producer {
 	///
 	/// Resolves a start a subscriber session left pending.
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
-		self.modify()?.set_start(sequence.into(), false);
+		let start = sequence.into().map_or(Start::Unknown, Start::Declared);
+		self.modify()?.set_start(start);
 		Ok(())
 	}
 
@@ -3851,9 +4046,7 @@ impl Producer {
 	/// fillable, and a fill that finds none ends empty.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn start_resolved(&mut self, sequence: u64) -> Result<()> {
-		let mut state = self.modify()?;
-		state.set_start(Some(sequence), false);
-		state.start_resolved = true;
+		self.modify()?.set_start(Start::Resolved(sequence));
 		Ok(())
 	}
 
@@ -3865,8 +4058,10 @@ impl Producer {
 	/// unless its session's wire lets it resolve them, since it holds only part of the track.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn received(&self) {
-		if let Ok(mut state) = self.modify() {
-			state.received = true;
+		if let Ok(mut state) = self.modify()
+			&& state.anchors == Anchors::Local
+		{
+			state.anchors = Anchors::Refused;
 		}
 	}
 
@@ -3875,7 +4070,7 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored(&self) {
 		if let Ok(mut state) = self.modify() {
-			state.anchored = true;
+			state.anchors = Anchors::Wire;
 		}
 	}
 
@@ -3884,8 +4079,7 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored_cached(&self) {
 		if let Ok(mut state) = self.modify() {
-			state.anchored = true;
-			state.cached_anchors = true;
+			state.anchors = Anchors::Cached;
 		}
 	}
 
@@ -4175,7 +4369,7 @@ impl Producer {
 	/// subscription asks for again.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn request_start(&mut self, sequence: Option<u64>) -> Result<()> {
-		self.modify()?.set_start(sequence, true);
+		self.modify()?.set_start(Start::Pending(sequence));
 		Ok(())
 	}
 
@@ -4184,7 +4378,7 @@ impl Producer {
 	#[cfg(test)]
 	#[cfg(feature = "async")]
 	pub(crate) fn start_sequence(&self) -> Option<u64> {
-		self.state.read().start_sequence
+		self.state.read().start.sequence()
 	}
 
 	/// Evict group `sequence` from the cache, as expiry does.
@@ -4198,7 +4392,7 @@ impl Producer {
 	/// `None` while the track is still open ended. Both methods reject a second end, so
 	/// callers that may have already declared one check here first.
 	pub fn finished(&self) -> Option<Position> {
-		self.state.read().end
+		self.state.read().declared()
 	}
 
 	/// Abort the track with the given error.
@@ -4219,7 +4413,7 @@ impl Producer {
 	pub fn abort(self, err: Error) -> Result<()> {
 		// Unlisted first, so the track leaves the listing before its name is free again.
 		self.alive.unlist(false);
-		commit_abort(self.modify()?, err).abort();
+		commit_abort(self.modify()?, err, None).abort();
 		Ok(())
 	}
 
@@ -4228,9 +4422,7 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn refuse(self, err: Error, retry: Duration) -> Result<()> {
 		self.alive.unlist(false);
-		let mut state = self.modify()?;
-		state.retry = Some(retry);
-		commit_abort(state, err).abort();
+		commit_abort(self.modify()?, err, Some(retry)).abort();
 		Ok(())
 	}
 
@@ -4255,7 +4447,7 @@ impl Producer {
 	pub(crate) fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
 		let wanted = match self.state.write_unwanted() {
 			kio::Unwanted::Idle(guard) => {
-				commit_abort(guard, err).abort();
+				commit_abort(guard, err, None).abort();
 				false
 			}
 			kio::Unwanted::Closed => false,
@@ -4419,7 +4611,7 @@ impl Producer {
 		// Surface an abort as the stream ending. `poll_closed` parks on the closed
 		// waiters, so per-group churn on the track state never wakes this poll.
 		if self.state.poll_closed(waiter).is_ready() {
-			let abort = self.state.read().abort.clone();
+			let abort = self.state.read().outcome.aborted().cloned();
 			return Poll::Ready(Err(abort.unwrap_or(Error::Dropped)));
 		}
 
@@ -4616,7 +4808,7 @@ impl Drop for Alive {
 	fn drop(&mut self) {
 		// Withdrawn before the state closes, so the track leaves the listing before a
 		// later one can take its name. It finished if its producer declared its end.
-		let finished = self.state.read().end.is_some();
+		let finished = self.state.read().outcome.end().is_some();
 		self.unlist(finished);
 		// A request nobody accepted was never publishing; there's nothing to tear down.
 		if !self.published.load(Ordering::Relaxed) {
@@ -4629,27 +4821,28 @@ impl Drop for Alive {
 		// `abort()` closes the channel, so `write()` returns `Err(Ref)`. `finish()`
 		// leaves it open with `end` set, so inspect both outcomes.
 		match self.state.write() {
-			Ok(mut state) => {
-				if state.end.is_some() {
-					// Groups still missing below the boundary can no longer arrive, so a
-					// reader waiting on one ends cleanly instead of with `Dropped`.
-					state.sealed = true;
+			Ok(mut state) => match std::mem::take(&mut state.outcome) {
+				Outcome::Open => {
+					tracing::warn!(
+						track = %self.name,
+						"track::Producer dropped without finish() or abort()"
+					);
+					let (resume, open) = state.tear_down(Error::Dropped);
+					state.outcome = Outcome::Dropped { resume };
 					state.close_cache();
-					return;
+					drop(state);
+					open.abort();
 				}
-				if state.abort.is_some() {
-					return;
+				// Groups still missing below the boundary can no longer arrive, so a reader
+				// waiting on one ends cleanly instead of with `Dropped`.
+				Outcome::Ending(end) => {
+					state.outcome = Outcome::Sealed(end);
+					state.close_cache();
 				}
-				tracing::warn!(
-					track = %self.name,
-					"track::Producer dropped without finish() or abort()"
-				);
-				let open = state.tear_down(Error::Dropped);
-				drop(state);
-				open.abort();
-			}
+				outcome => state.outcome = outcome,
+			},
 			Err(state) => {
-				if state.sealed || state.end.is_some() || state.abort.is_some() {
+				if !matches!(state.outcome, Outcome::Open) {
 					return;
 				}
 				tracing::warn!(
@@ -4760,10 +4953,10 @@ impl TrackWeak {
 		let Ok(mut state) = producer.write() else {
 			return false;
 		};
-		if state.publication != Publication::Pending || state.abort.is_some() {
+		if state.publication != Publication::Pending || state.outcome.aborted().is_some() {
 			return false;
 		}
-		state.abort = Some(err);
+		state.reject(err, None);
 		state.close();
 		true
 	}
@@ -4780,12 +4973,12 @@ impl TrackWeak {
 		let Ok(state) = producer.write() else {
 			return;
 		};
-		commit_abort(state, err).abort();
+		commit_abort(state, err, None).abort();
 	}
 
 	/// Whether its producer declared the track's end, which is how its listing ends too.
 	pub(super) fn is_finished(&self) -> bool {
-		self.state.read().end.is_some()
+		self.state.read().outcome.end().is_some()
 	}
 
 	/// Whether anyone is consuming the track right now. A closed track doesn't
@@ -4817,7 +5010,7 @@ impl TrackWeak {
 		};
 		match producer.write_unwanted() {
 			kio::Unwanted::Idle(guard) => {
-				commit_abort(guard, err).abort();
+				commit_abort(guard, err, None).abort();
 				true
 			}
 			kio::Unwanted::Closed => true,
@@ -4986,7 +5179,7 @@ impl Demand {
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
 	fn abort_reason(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		self.state.read().outcome.aborted().cloned().unwrap_or(Error::Dropped)
 	}
 }
 
@@ -5093,7 +5286,7 @@ impl ArrivalRead<'_> {
 			}
 		};
 		let closed = self.state.is_closed();
-		let start = state.start_sequence.unwrap_or(0);
+		let start = state.start.sequence().unwrap_or(0);
 		let fin = state.final_sequence().unwrap_or(u64::MAX);
 		for hole in miss::holes(state, groups) {
 			if closed {
@@ -5168,13 +5361,13 @@ impl Consumer {
 
 	/// An already declared end, without resolving a pending subscription or registering a wake.
 	pub(super) fn declared_end(&self) -> Option<Position> {
-		self.with_state(|state| state?.read().end)
+		self.with_state(|state| state?.read().declared())
 	}
 
 	/// The error the declared end carries, reached or not.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn declared_error(&self) -> Option<Error> {
-		self.with_state(|state| state?.read().end_error.clone())
+		self.with_state(|state| state?.read().outcome.end()?.error.clone())
 	}
 
 	fn new(name: Arc<str>, state: kio::ConsumerWeak<TrackState>) -> Self {
@@ -5292,13 +5485,13 @@ impl Consumer {
 	/// whatever it last declared, since nothing will resolve it anymore.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_state_start(state: &kio::Consumer<TrackState>, waiter: &kio::Waiter) -> Poll<Option<u64>> {
-		let res = state.poll(waiter, |state| match state.start_pending && state.abort.is_none() {
-			true => Poll::Pending,
-			false => Poll::Ready(state.start_sequence),
+		let res = state.poll(waiter, |state| match state.start {
+			Start::Pending(_) if state.outcome.aborted().is_none() => Poll::Pending,
+			start => Poll::Ready(start.sequence()),
 		});
 		match ready!(res) {
 			Ok(start) => Poll::Ready(start),
-			Err(state) => Poll::Ready(state.start_sequence),
+			Err(state) => Poll::Ready(state.start.sequence()),
 		}
 	}
 
@@ -5518,7 +5711,7 @@ impl Consumer {
 				let track = state.read();
 				let group = track.covering_group(sequence, frame_start)?;
 				let whole = !track.is_closed()
-					&& track.abort.is_none()
+					&& track.outcome.aborted().is_none()
 					&& group.live_first_frame() == Some(0)
 					&& group.is_finished();
 				if !whole {
@@ -5562,7 +5755,7 @@ impl Consumer {
 		self.with_state(|state| {
 			state.is_some_and(|state| {
 				let state = state.read();
-				state.routes.is_none() && state.minted() && !state.closed && state.feed.is_live()
+				state.routes.is_none() && state.minted() && !state.outcome.is_released() && state.feed.is_live()
 			})
 		})
 	}
@@ -5827,7 +6020,7 @@ impl Consumer {
 				Ok(_) => Poll::Ready(Ok(())),
 				// Closed before completing. Read through the returned guard: it holds
 				// the lock, so re-locking the channel here would deadlock.
-				Err(closed) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+				Err(closed) => Poll::Ready(Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped))),
 			}
 		})
 	}
@@ -5857,7 +6050,7 @@ impl Subscribing {
 	/// How long the upstream that refused the track asked to wait before asking again.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn retry(&self) -> Option<Duration> {
-		self.state.read().retry
+		self.state.read().outcome.retry()
 	}
 
 	/// Poll until the peer confirms the subscription, yielding the [`Subscriber`].
@@ -5865,7 +6058,7 @@ impl Subscribing {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
-			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
+			.map_err(|e| e.outcome.aborted().cloned().unwrap_or(Error::Dropped))??;
 		refuse_untimed(&info, &self.subscription.read())?;
 		if self.subscription.read().has_time() {
 			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&self.subscription.read())?;
@@ -5927,7 +6120,7 @@ impl Resolving {
 	/// How long the upstream that refused the track asked to wait before asking again.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn retry(&self) -> Option<Duration> {
-		self.state.read().retry
+		self.state.read().outcome.retry()
 	}
 
 	/// A handle on the track instance this resolves, whatever its broadcast serves later.
@@ -5945,7 +6138,7 @@ impl Resolving {
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Info>> {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
-			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
+			.map_err(|e| e.outcome.aborted().cloned().unwrap_or(Error::Dropped))??;
 		Poll::Ready(Ok(info))
 	}
 }
@@ -6165,7 +6358,7 @@ impl Fetching {
 		let cached = |waiter: &kio::Waiter| match state.poll(waiter, |state| state.poll_fetch_cached(sequence, frames))
 		{
 			Poll::Ready(Ok(res)) => Poll::Ready(res.map(resolve)),
-			Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+			Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped))),
 			Poll::Pending => Poll::Pending,
 		};
 		if let Poll::Ready(res) = cached(waiter) {
@@ -7938,7 +8131,7 @@ impl Cursor {
 		Poll::Ready(match ready!(polled) {
 			Ok(res) => res,
 			// We try to clone abort just in case the function forgot to check for terminal state.
-			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+			Err(state) => Err(state.outcome.aborted().cloned().unwrap_or(Error::Dropped)),
 		})
 	}
 
@@ -7953,7 +8146,7 @@ impl Cursor {
 			.get_or_insert_with(|| Box::new(kio::Watch::new(self.state.clone())));
 		Poll::Ready(match ready!(watch.poll(waiter, |state| state.poll_finished())) {
 			Ok(res) => res,
-			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+			Err(state) => Err(state.outcome.aborted().cloned().unwrap_or(Error::Dropped)),
 		})
 	}
 
@@ -8835,7 +9028,7 @@ impl Control {
 
 /// A group-only wire refuses an unresolved time anchor before changing shared demand.
 fn refuse_cached_anchors(state: &TrackState, subscription: &Subscription) -> Result<()> {
-	if state.cached_anchors && subscription.has_time() {
+	if state.anchors == Anchors::Cached && subscription.has_time() {
 		let window = Window::new(&subscription.ranges, state.latest_live(), state)?;
 		if !window.is_settled() {
 			return Err(Error::Unsupported);
@@ -9082,7 +9275,7 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn end_error(&self) -> Option<Error> {
 		match &self.inner {
-			Inner::Plain(cursor) => cursor.state.read().end_error.clone(),
+			Inner::Plain(cursor) => cursor.state.read().outcome.end().and_then(|end| end.error.clone()),
 			Inner::Resume(resume, _) => resume.declared_error(),
 		}
 	}
@@ -9467,7 +9660,7 @@ impl Subscriber {
 	pub(super) fn declared_end(&mut self) -> Option<Position> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => match cursor.cache.end_declared() {
-				true => cursor.state.read().end,
+				true => cursor.state.read().declared(),
 				false => None,
 			},
 			Inner::Resume(..) => match self.poll_finished(&kio::Waiter::noop()) {
@@ -10090,7 +10283,7 @@ impl Request {
 	pub(crate) fn reject_unwanted(&self, err: Error) -> bool {
 		match self.state.write_unwanted() {
 			kio::Unwanted::Idle(guard) => {
-				commit_abort(guard, err).abort();
+				commit_abort(guard, err, None).abort();
 				true
 			}
 			kio::Unwanted::Closed => true,
@@ -10122,7 +10315,7 @@ impl Request {
 			Ok(mut state) => {
 				state.stage(info.clone());
 				if let RequestedStart::Pending(floor) = self.requested_start {
-					state.set_start(floor, true);
+					state.set_start(Start::Pending(floor));
 				}
 				if self.idle {
 					state.set_idle();
@@ -10155,7 +10348,7 @@ impl Request {
 	/// Reject the request, waking all waiting subscribers with `err`.
 	pub fn reject(self, err: Error) {
 		if let Ok(mut state) = self.state.write() {
-			state.abort = Some(err);
+			state.reject(err, None);
 		}
 	}
 
@@ -10163,8 +10356,7 @@ impl Request {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn refuse(self, err: Error, retry: Duration) {
 		if let Ok(mut state) = self.state.write() {
-			state.abort = Some(err);
-			state.retry = Some(retry);
+			state.reject(err, Some(retry));
 		}
 	}
 
@@ -12109,6 +12301,22 @@ mod test {
 		let state = state.read();
 		assert_eq!(state.info.as_ref().unwrap().max_age, None);
 		assert_eq!(state.max_age_bound(), None);
+	}
+
+	/// A refused request stops protecting the live edge a fill cached before the refusal: it
+	/// joins the eviction order, so pool pressure and idle expiry can still reclaim it.
+	#[test]
+	fn a_refusal_releases_the_live_edge_a_fill_cached() {
+		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
+		let mut guard = state.write().ok().unwrap();
+		let _group = guard.insert_group_request(0, group::Bounds::default(), None).unwrap();
+		assert!(guard.protects(0));
+		guard.reject(Error::NotFound, None);
+		assert!(!guard.protects(0));
+		assert!(
+			guard.evict.iter().any(|(sequence, _)| *sequence == 0),
+			"the released live edge is reclaimable"
+		);
 	}
 
 	#[test]
@@ -15083,7 +15291,7 @@ mod test {
 
 	#[test]
 	fn drop_after_abort_does_not_warn() {
-		// abort() closes the channel after recording `abort`. Drop must treat the
+		// abort() closes the channel after recording the abort. Drop must treat the
 		// read-only guard returned by write() as clean or it emits a false WARN.
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let producer = track_producer("test", Info::timed());
@@ -20482,6 +20690,33 @@ mod test {
 		);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
 			panic!("the reader asks below the start");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 2));
+	}
+
+	/// A received copy's start the publisher later resolves from a budget, at the same group,
+	/// turns the history below it from unasked into fillable: a reader asks for it then.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_start_resolved_in_place_asks_the_history_below_it() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		let dynamic = producer.requests();
+		let mut reader = producer.subscribe(replay());
+		producer.start_at(2).unwrap();
+		write_group(&producer, 2);
+		write_group(&producer, 3);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut reader), [2, 3]);
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"below a declared start is no miss"
+		);
+
+		producer.start_resolved(2).unwrap();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the reader asks below the resolved start");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
 	}

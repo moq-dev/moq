@@ -87,6 +87,9 @@ pub struct Applied {
 	/// The backend controls that took effect, for display, e.g.
 	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
 	pub controls: String,
+	/// Whether [`Encoder::cut`] can force a group boundary; one that cannot (a V4L2
+	/// driver without the force-keyframe control) refuses every cut.
+	pub cut: bool,
 }
 
 impl Applied {
@@ -115,6 +118,8 @@ impl Applied {
 		Self {
 			preset: Some(preset),
 			controls: controls.into(),
+			// The encoder reports `cut` from the backend's `can_cut`.
+			cut: false,
 		}
 	}
 
@@ -129,6 +134,7 @@ impl Applied {
 		Self {
 			preset: None,
 			controls: controls.into(),
+			cut: false,
 		}
 	}
 }
@@ -154,8 +160,10 @@ pub struct Config {
 	/// in band) opens a group this often, so a subscriber joining mid-stream waits
 	/// at most this long for a picture it can decode. [`Encoder::cut`] opens one
 	/// sooner. Rounded to whole frames at `framerate`, never below one; see
-	/// [`effective_join`](Self::effective_join). [`Encoder::new`] refuses zero.
-	/// Defaults to two seconds.
+	/// [`effective_join`](Self::effective_join). Measured by the frames'
+	/// timestamps on a backend that can cut, so a source running slower than
+	/// `framerate` still opens a group this often, overshooting by less than one of
+	/// its frames. [`Encoder::new`] refuses zero. Defaults to two seconds.
 	pub join: std::time::Duration,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
@@ -231,9 +239,10 @@ impl Config {
 		std::time::Duration::from_nanos(nanos.try_into().unwrap_or(u64::MAX))
 	}
 
-	/// Frames between keyframes: [`join`](Self::join) rounded to the nearest
-	/// frame, and never below one, since a positive join shorter than a frame
-	/// still opens a group per frame.
+	/// Frames between keyframes at `framerate`: [`join`](Self::join) rounded to
+	/// the nearest frame, and never below one, since a positive join shorter than
+	/// a frame still opens a group per frame. Each backend keys on this count, and
+	/// the encoder keys sooner when the timestamps reach it first.
 	pub(crate) fn keyframe_interval(&self) -> u32 {
 		self.framerate.frames(self.join).max(1)
 	}
@@ -287,7 +296,7 @@ impl Config {
 			Codec::H265 => moq_mux::codec::h265::config(&annexb),
 		};
 		let mut rendition = parsed.map_err(|err| {
-			Error::Codec(anyhow::anyhow!(
+			Error::codec(anyhow::anyhow!(
 				"{} emitted no usable parameter sets: {err}",
 				sink.name()
 			))
@@ -347,6 +356,8 @@ pub struct Encoder {
 	/// rather than applied immediately because the caller decides a group
 	/// boundary before it has the frame that opens it.
 	pending_cut: bool,
+	/// Where [`Config::join`] cuts a source slower than its frame rate.
+	join: Join,
 	/// How to scale a frame at another size, if at all; see [`Config::resize`].
 	resize: Option<crate::resize::Config>,
 	#[cfg(target_os = "linux")]
@@ -376,6 +387,7 @@ impl Encoder {
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
 			pending_cut: false,
+			join: Join::new(config),
 			resize: config.resize,
 			#[cfg(target_os = "linux")]
 			input: config.input,
@@ -389,9 +401,12 @@ impl Encoder {
 	}
 
 	/// The latency and compression controls the backend applied for
-	/// [`Config::preset`], fixed for the session's lifetime.
+	/// [`Config::preset`], and whether it cuts, fixed for the session's lifetime.
 	pub fn applied(&self) -> Applied {
-		self.backend.applied()
+		Applied {
+			cut: self.backend.can_cut(),
+			..self.backend.applied()
+		}
 	}
 
 	/// The resolution this encoder emits; external Vulkan inputs may be larger.
@@ -456,9 +471,9 @@ impl Encoder {
 	///
 	/// Returns [`Error::CutUnsupported`] when this backend cannot force a group
 	/// boundary (a V4L2 driver without the force-keyframe control), in which case
-	/// nothing is queued: groups keep falling where [`Config::join`] puts them, and
-	/// the caller decides whether that layout is acceptable rather than finding
-	/// out from the stream.
+	/// nothing is queued: groups keep falling every [`Config::join`]'s worth of
+	/// frames at [`Config::framerate`], and the caller decides whether that layout
+	/// is acceptable rather than finding out from the stream.
 	pub fn cut(&mut self) -> Result<(), Error> {
 		self.check_cut()?;
 		self.pending_cut = true;
@@ -518,7 +533,7 @@ impl Encoder {
 		};
 		let size = frame.size();
 		if !external && size != self.size {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size
 			)));
@@ -536,11 +551,15 @@ impl Encoder {
 				encoder: self.color,
 			});
 		}
-		let encoded = self.backend.encode(frame, self.pending_cut)?;
+		let timestamp = std::time::Duration::from(frame.timestamp);
+		let cut = self.pending_cut || (self.backend.can_cut() && self.join.due(timestamp));
+		let encoded = self.backend.encode(frame, cut)?;
 		// Cleared only once the frame is through: a failed encode produced no
 		// picture, so the request still belongs to whatever comes next rather than
 		// being swallowed. The size check above returns early for the same reason.
 		self.pending_cut = false;
+		self.join.encoded(timestamp, cut);
+		self.join.observe(&encoded);
 		Ok(encoded)
 	}
 
@@ -559,7 +578,9 @@ impl Encoder {
 	/// encode and the next frame's submission, so flush at boundaries rather than
 	/// per frame.
 	pub fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-		self.backend.flush()
+		let encoded = self.backend.flush()?;
+		self.join.observe(&encoded);
+		Ok(encoded)
 	}
 
 	/// Flush the encoder, returning any buffered frames. Each keeps the timestamp
@@ -570,6 +591,57 @@ impl Encoder {
 	/// last call rather than one leaving a drained encoder in your hands.
 	pub fn finish(mut self) -> Result<Vec<Encoded>, Error> {
 		self.backend.finish()
+	}
+}
+
+/// The keyframes [`Config::join`] adds for a source slower than [`Config::framerate`].
+///
+/// Each backend keys every [`Config::keyframe_interval`] frames, which a slower
+/// source (a camera dropping to 20 fps in low light) stretches past the join the
+/// catalog declared. This keys the first frame whose distance from the last
+/// keyframe, counted in frames at the configured rate and rounded to the nearest,
+/// reaches that interval: a source at the configured rate keys on the same frame
+/// as the backend whatever its jitter, and a slower one overshoots the join by
+/// less than one of its frames. A faster source reaches the backend's count first.
+struct Join {
+	framerate: FrameRate,
+	interval: u32,
+	/// The last keyframe's timestamp, `None` before the first frame, which every
+	/// backend keys.
+	last: Option<std::time::Duration>,
+}
+
+impl Join {
+	fn new(config: &Config) -> Self {
+		Self {
+			framerate: config.framerate,
+			interval: config.keyframe_interval(),
+			last: None,
+		}
+	}
+
+	/// Whether the frame at `timestamp` is due a keyframe.
+	fn due(&self, timestamp: std::time::Duration) -> bool {
+		self.last
+			.and_then(|last| timestamp.checked_sub(last))
+			.is_some_and(|elapsed| self.framerate.frames(elapsed) >= self.interval)
+	}
+
+	/// The frame at `timestamp` went in, keyed when `cut`.
+	fn encoded(&mut self, timestamp: std::time::Duration, cut: bool) {
+		// A timestamp behind the last keyframe starts a new timeline, measured from
+		// here rather than held until it catches up with the old one.
+		if cut || self.last.is_none_or(|last| timestamp < last) {
+			self.last = Some(timestamp);
+		}
+	}
+
+	/// Count the keyframes among `encoded`, including those the backend placed on
+	/// its own count, so the next is measured from the latest.
+	fn observe(&mut self, encoded: &[Encoded]) {
+		for keyframe in encoded.iter().filter(|encoded| encoded.keyframe) {
+			self.last = self.last.max(Some(keyframe.timestamp.into()));
+		}
 	}
 }
 
@@ -1168,6 +1240,7 @@ mod tests {
 			bitrate: config.resolved_bitrate(),
 			color: config.resolved_color(),
 			pending_cut: false,
+			join: Join::new(config),
 			resize: config.resize,
 			#[cfg(target_os = "linux")]
 			input: None,
@@ -1293,6 +1366,208 @@ mod tests {
 		assert_eq!(*log.lock().unwrap(), vec![false]);
 	}
 
+	/// A 320x240 gray frame at `micros`, for a source whose rate varies.
+	fn gray_at(micros: u64) -> Frame {
+		let surface = Surface::rgba(&gray_rgba(320, 240), Size::new(320, 240)).unwrap();
+		Frame::new(surface, moq_net::Timestamp::from_micros(micros).unwrap())
+	}
+
+	/// A source slower than the configured rate (a camera dropping frames in low
+	/// light) still opens a group every join, by its timestamps: no group holds a
+	/// frame a join past its keyframe, so it overshoots by less than one of its
+	/// frames, and none closes more than half a configured frame early. A backend
+	/// that cannot cut is never asked to.
+	#[test]
+	fn a_slow_source_keys_by_time() {
+		let config = Config {
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		// 30 fps, then 20, then 12.5, then 24, the rates a camera drifts through as
+		// the light changes.
+		let mut times = Vec::new();
+		let mut micros = 0u64;
+		for (interval, count) in [(33_333, 45), (50_000, 50), (80_000, 30), (41_667, 60)] {
+			for _ in 0..count {
+				times.push(micros);
+				micros += interval;
+			}
+		}
+
+		for cuts in [true, false] {
+			let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+			let backend = Recorder { log: log.clone(), cuts };
+			let mut encoder = encoder_with(Box::new(backend), &config);
+			for &micros in &times {
+				encoder.encode(&gray_at(micros)).unwrap();
+			}
+			let log = log.lock().unwrap();
+			if !cuts {
+				assert!(log.iter().all(|cut| !cut), "a backend that cannot cut was asked to");
+				continue;
+			}
+
+			let mut key = times[0];
+			for (&micros, &cut) in times.iter().zip(log.iter()).skip(1) {
+				if cut {
+					assert!(
+						micros - key + 16_667 >= 1_000_000,
+						"the group at {key}us closed at {micros}us"
+					);
+					key = micros;
+				} else {
+					assert!(
+						micros - key < 1_000_000,
+						"the group at {key}us holds a frame at {micros}us"
+					);
+				}
+			}
+		}
+	}
+
+	/// A source at the configured rate keys on the same frames as the backend's
+	/// own count, however its timestamps jitter, so measuring by time adds none.
+	#[test]
+	fn a_jittery_source_at_the_configured_rate_keys_on_the_count() {
+		let config = Config {
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let backend = Recorder {
+			log: log.clone(),
+			cuts: true,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
+
+		// Up to a quarter frame either way, so neither end of a group can pull it
+		// past half a frame.
+		let jitter = [0, 8_000, -8_000, 5_000, -5_000];
+		for i in 0..120u64 {
+			let micros = (i * 33_333)
+				.checked_add_signed(jitter[i as usize % jitter.len()])
+				.unwrap();
+			encoder.encode(&gray_at(micros)).unwrap();
+		}
+
+		let log = log.lock().unwrap();
+		let cuts: Vec<usize> = (0..log.len()).filter(|&i| log[i]).collect();
+		assert_eq!(cuts, [30, 60, 90]);
+	}
+
+	/// Keys on its own every `interval` frames, restarting the count at a cut the
+	/// way a real codec's GOP does, and records the cut flag each frame came with.
+	struct Counting {
+		log: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+		interval: u32,
+		count: u32,
+	}
+
+	impl Backend for Counting {
+		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
+			self.log.lock().unwrap().push(cut);
+			let keyframe = cut || self.count.is_multiple_of(self.interval);
+			self.count = if keyframe { 1 } else { self.count + 1 };
+			Ok(vec![Encoded::new(bytes::Bytes::new(), frame.timestamp, keyframe)])
+		}
+
+		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn can_cut(&self) -> bool {
+			true
+		}
+
+		fn name(&self) -> &'static str {
+			"counting"
+		}
+	}
+
+	/// A source faster than the configured rate reaches the backend's count before
+	/// the join, and each keyframe the backend places restarts the clock, so the
+	/// encoder forces none between them.
+	#[test]
+	fn a_fast_source_keys_on_the_backend_count() {
+		let config = Config {
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let backend = Counting {
+			log: log.clone(),
+			interval: config.keyframe_interval(),
+			count: 0,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
+
+		// Three seconds at 60 fps: the backend keys every half second.
+		for i in 0..180 {
+			encoder.encode(&gray_at(i * 16_667)).unwrap();
+		}
+		assert!(log.lock().unwrap().iter().all(|cut| !cut));
+	}
+
+	/// A timestamp behind the last keyframe starts a new timeline: the next
+	/// keyframe comes a join after the jump, not once the source catches up with
+	/// where it was.
+	#[test]
+	fn a_jump_back_restarts_the_join() {
+		let config = Config {
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let backend = Recorder {
+			log: log.clone(),
+			cuts: true,
+		};
+		let mut encoder = encoder_with(Box::new(backend), &config);
+
+		for i in 0..20 {
+			encoder.encode(&gray_at(10_000_000 + i * 33_333)).unwrap();
+		}
+		for i in 0..40 {
+			encoder.encode(&gray_at(i * 33_333)).unwrap();
+		}
+
+		let log = log.lock().unwrap();
+		let cuts: Vec<usize> = (0..log.len()).filter(|&i| log[i]).collect();
+		assert_eq!(cuts, [50], "a join after the jump at frame 20");
+	}
+
+	/// openh264 keys where the join asks and restarts its own count there, so a
+	/// 20 fps source on a 30 fps config keys every 20 frames, with no stray IDR
+	/// on the 30-frame count in between.
+	#[test]
+	#[cfg(feature = "openh264")]
+	fn openh264_keys_a_slow_source_by_time() {
+		let config = Config {
+			kind: Kind::Software,
+			join: std::time::Duration::from_secs(1),
+			..Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+
+		let mut keys = Vec::new();
+		for i in 0..70 {
+			for encoded in encoder.encode(&gray_at(i * 50_000)).unwrap() {
+				if encoded.keyframe {
+					keys.push(encoded.timestamp.as_micros() / 50_000);
+				}
+			}
+		}
+		assert_eq!(keys, [0, 20, 40, 60]);
+	}
+
 	/// A join of zero opens no group, so it is refused at open rather than
 	/// handed to a backend, each of which would do something different with it
 	/// (openh264 keys every frame, V4L2 rejects the control, VideoToolbox reads
@@ -1384,7 +1659,7 @@ mod tests {
 
 	impl Backend for Failing {
 		fn encode(&mut self, _frame: &Frame, _cut: bool) -> Result<Vec<Encoded>, Error> {
-			Err(Error::Codec(anyhow::anyhow!("no")))
+			Err(Error::codec(anyhow::anyhow!("no")))
 		}
 
 		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {

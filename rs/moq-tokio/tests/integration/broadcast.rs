@@ -821,8 +821,7 @@ async fn next_route(routes: &mut moq_net::origin::Routes) -> (moq_net::announce:
 		moq_net::origin::RouteEvent::End(announce) => (announce, false),
 		moq_net::origin::RouteEvent::Start(announce)
 		| moq_net::origin::RouteEvent::Update(announce)
-		| moq_net::origin::RouteEvent::Restart(announce)
-		| moq_net::origin::RouteEvent::Takeover { announce, .. } => (announce, true),
+		| moq_net::origin::RouteEvent::Restart(announce) => (announce, true),
 	}
 }
 

@@ -12,9 +12,9 @@ use std::task::{Poll, ready};
 
 use bytes::{Buf, Bytes};
 
-use super::open::{self, Open};
+use super::open::{self, Dir, Open};
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, Dir, Limits, LimitsError, Probe, ReceiveWindow, StreamCredit, Wire};
+use super::{Address, CloseKind, Limits, LimitsError, Probe, ReceiveWindow, Wire};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl Session {
 			session,
 		});
 		Self {
-			opens: Arc::new(open::Lines::new(Arc::downgrade(&inner))),
+			opens: Default::default(),
 			inner,
 			closing: Default::default(),
 			work: Default::default(),
@@ -117,6 +117,17 @@ impl Session {
 		&self.closing
 	}
 
+	/// Resolve once the session is ending: this side closed the transport, or it closed.
+	///
+	/// Unlike `poll_closed`, which a backend holds until its close is on the wire, this sees a
+	/// local close the moment it is sent.
+	pub(crate) fn poll_ending(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.closing.is_sent() {
+			return Poll::Ready(());
+		}
+		poll::Session::poll_closed(self, waiter).map(|_| ())
+	}
+
 	/// The subscriptions and fetches the session's tasks carry over this transport.
 	pub(crate) fn work(&self) -> &crate::session::Work {
 		&self.work
@@ -156,15 +167,6 @@ impl Shared<dyn ErasedSession> {
 /// The session a stream reserves paused credit from, which a stream outliving it never keeps
 /// open: once it is gone, nothing is paused.
 type Budget = Weak<Shared<dyn ErasedSession>>;
-
-/// The transport a session's lines read the peer's stream credit from, which they never keep
-/// open.
-pub(super) type Transport = Weak<Shared<dyn ErasedSession>>;
-
-/// The peer's stream credit in `dir`, or `None` once the transport is gone or cannot say.
-pub(super) fn stream_credit(transport: &Transport, dir: Dir) -> Option<StreamCredit> {
-	transport.upgrade()?.session.stream_credit(dir)
-}
 
 /// A boxed transport error, keeping both code registries and the message.
 #[derive(Debug)]
@@ -569,7 +571,6 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit>;
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
 
@@ -709,10 +710,6 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		poll::Session::set_limits(self, limits)
-	}
-
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
-		poll::Session::stream_credit(self, dir)
 	}
 
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
@@ -918,10 +915,6 @@ impl poll::Session for Session {
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		self.inner.session.set_limits(limits)
-	}
-
-	fn stream_credit(&self, dir: Dir) -> Option<StreamCredit> {
-		self.inner.session.stream_credit(dir)
 	}
 
 	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {

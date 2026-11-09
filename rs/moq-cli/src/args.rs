@@ -1079,7 +1079,7 @@ impl Export {
 			ExportSink::Flv(args) => found.extend(args.deprecated()),
 			ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
 			ExportSink::Rtmp(rtmp) => found.extend(rtmp.deprecated()),
-			ExportSink::Hls(hls) => found.extend(hls.tls.deprecated()),
+			ExportSink::Hls(hls) => found.extend(hls.deprecated()),
 			_ => {}
 		}
 		found
@@ -1792,7 +1792,7 @@ mod tests {
 	fn sinks_without_selection_refuse_it() {
 		let sinks = [
 			["ts"].as_slice(),
-			&["hls", "--listen", "127.0.0.1:8080"],
+			&["hls", "--hls-listen", "127.0.0.1:8080"],
 			&["rtmp", "--listen", "127.0.0.1:1935"],
 			&["srt", "--listen", "127.0.0.1:9000"],
 			&["rtc", "--listen", "127.0.0.1:8443"],
@@ -1896,7 +1896,11 @@ mod tests {
 		for sink in ["ts", "fmp4", "mkv", "flv", "h264", "h265"] {
 			export(&["--echo", "alice", sink]).unwrap().validate().unwrap();
 		}
-		for sink in [["hls", "--listen", "127.0.0.1:8080"].as_slice(), &["report"], &["echo"]] {
+		for sink in [
+			["hls", "--hls-listen", "127.0.0.1:8080"].as_slice(),
+			&["report"],
+			&["echo"],
+		] {
 			let err = export(&[["--echo", "alice"].as_slice(), sink].concat())
 				.unwrap()
 				.validate()
@@ -2116,8 +2120,37 @@ mod tests {
 
 		let reported = err.to_string();
 		assert!(reported.contains("--tls-cert"), "{reported}");
-		assert!(reported.contains("--listen-tls-cert"), "{reported}");
-		assert!(reported.contains("--listen-tls-root"), "{reported}");
+		assert!(reported.contains("--hls-tls-cert"), "{reported}");
+		assert!(reported.contains("--hls-tls-root"), "{reported}");
+	}
+
+	/// The released `export hls --listen*` spellings name their `--hls-*` replacements
+	/// rather than reach the MoQ listener's flags of the same name.
+	#[test]
+	fn released_hls_listener_flags_are_refused() {
+		for (old, value, new) in [
+			("--listen", "127.0.0.1:8080", "--hls-listen"),
+			("--listen-tls-cert", "cert.pem", "--hls-tls-cert"),
+			("--listen-tls-key", "key.pem", "--hls-tls-key"),
+			("--listen-tls-generate", "localhost", "--hls-tls-generate"),
+			("--listen-tls-root", "ca.pem", "--hls-tls-root"),
+		] {
+			let Err(err) = Invocation::try_parse_from([
+				"moq",
+				"--connect",
+				"http://relay/anon",
+				"--broadcast",
+				"room",
+				"export",
+				"hls",
+				old,
+				value,
+			]) else {
+				panic!("{old} on export hls must not start a run");
+			};
+			let reported = err.to_string();
+			assert!(reported.contains(old) && reported.contains(new), "{reported}");
+		}
 	}
 
 	/// One released spelling stops the run even when the rest of the command line is
@@ -2306,7 +2339,7 @@ mod tests {
 			"--broadcast",
 			"cam1.hang",
 			"hls",
-			"--listen",
+			"--hls-listen",
 			"0.0.0.0:8080",
 		])
 		.unwrap();

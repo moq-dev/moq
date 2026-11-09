@@ -37,15 +37,41 @@ struct ConsumeCatalog {
 	audio_codec: Vec<String>,
 	video_codec: Vec<String>,
 
+	/// Each rendition's broadcast reference and instance as strings, for the same reason.
+	audio_ref: Vec<Reference>,
+	video_ref: Vec<Reference>,
+
 	/// Section names and their JSON, serialized on the heap so the section iterator
 	/// and direct-lookup APIs can hand C borrowed pointers into stable storage.
 	sections: Vec<(String, String)>,
+}
+
+/// A rendition's reference, rendered once so C can borrow it.
+#[derive(Default)]
+struct Reference {
+	broadcast: Option<String>,
+	instance: Option<String>,
+}
+
+impl Reference {
+	fn new(broadcast: &Option<moq_net::path::Relative>, instance: &Option<moq_net::Instance>) -> Self {
+		Self {
+			broadcast: broadcast.as_ref().map(ToString::to_string),
+			instance: instance.as_ref().map(ToString::to_string),
+		}
+	}
+}
+
+/// Borrow an optional string as a C pointer and length, NULL when absent.
+fn lend(value: Option<&String>) -> (*const c_char, usize) {
+	value.map_or((std::ptr::null(), 0), |value| (value.as_ptr().cast(), value.len()))
 }
 
 impl ConsumeCatalog {
 	fn rendition<C: Clone>(&self, name: &str, config: &C) -> Rendition<C> {
 		Rendition {
 			broadcast: self.broadcast.clone(),
+			origin: self.origin.clone(),
 			config: config.clone(),
 			name: name.to_string(),
 			driver: self
@@ -104,13 +130,33 @@ impl Media for hang::catalog::AudioConfig {
 	}
 }
 
-/// A catalog rendition to decode: the broadcast and track serving it, and the owner whose panic
-/// ends the decode.
+/// A catalog rendition to decode: the catalog's broadcast and the origin that resolves the
+/// rendition's reference against it, the track serving it, and the owner whose panic ends the
+/// decode.
 pub struct Rendition<C> {
 	pub broadcast: moq_net::broadcast::Consumer,
+	pub(crate) origin: Option<crate::origin::Consumer>,
 	pub config: C,
 	pub name: String,
 	pub driver: crate::ffi::Background,
+}
+
+impl<C: hang::catalog::Reference> Rendition<C> {
+	/// The broadcast serving the rendition, honoring its reference and instance like
+	/// [`moq_consume_video`](crate::moq_consume_video) does. Awaited inside the decode task.
+	pub(crate) async fn resolve(
+		broadcast: moq_net::broadcast::Consumer,
+		origin: Option<crate::origin::Consumer>,
+		config: &C,
+	) -> Result<moq_net::broadcast::Consumer, Error> {
+		resolve(
+			broadcast,
+			origin,
+			config.broadcast().cloned(),
+			config.instance().cloned(),
+		)
+		.await
+	}
 }
 
 /// A broadcast handed to C, plus the origin cursor that named it.
@@ -125,28 +171,34 @@ struct ConsumeBroadcast {
 	origin: Option<crate::origin::Consumer>,
 }
 
-/// The broadcast serving a rendition, honoring its catalog `broadcast` reference.
+/// The broadcast serving a rendition, honoring its catalog `broadcast` reference and `instance`.
 ///
-/// An absent or empty reference names the catalog's own broadcast, which the caller already
-/// holds; anything else resolves against that broadcast's path through the origin, which
-/// deduplicates the subscription the catalog itself already holds. Awaited inside the track
-/// task, never under the state lock, so `origin` is cloned out rather than borrowed.
-async fn resolve(
+/// An absent or empty reference names the catalog's own broadcast; anything else resolves
+/// against that broadcast's path through the origin, which deduplicates the subscription the
+/// catalog itself already holds. A rendition naming an instance resolves through the origin
+/// even without a reference, so a broadcast proven to serve another stream is refused; a route
+/// over a wire that carries no instance cannot prove one, so there it is best effort. Awaited
+/// inside the track task, never under the state lock, so `origin` is cloned out rather than
+/// borrowed.
+pub(crate) async fn resolve(
 	broadcast: moq_net::broadcast::Consumer,
 	origin: Option<crate::origin::Consumer>,
 	reference: Option<moq_net::path::Relative>,
+	instance: Option<moq_net::Instance>,
 ) -> Result<moq_net::broadcast::Consumer, Error> {
-	let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
+	let reference = reference.filter(|reference| !reference.is_empty());
+	// The catalog's own broadcast, with no instance to check, or none to prove: a standalone
+	// broadcast came through no route.
+	if reference.is_none() && (instance.is_none() || origin.is_none()) {
 		return Ok(broadcast);
-	};
-
-	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
+	}
+	let origin = origin.ok_or_else(|| {
+		Error::UnresolvableBroadcast(reference.as_ref().map(|r| r.as_str().to_string()).unwrap_or_default())
+	})?;
 	let source = moq_mux::Source::new(origin.inner, broadcast);
-	// The C ABI does not expose a reference's instance yet, so it reads like an older reader: the
-	// first instance resolved, without the instance's guarantee.
 	origin
 		.driver
-		.watch(async { Ok(source.resolve(Some(&reference), None).await?) })
+		.watch(async { Ok(source.resolve(reference.as_ref(), instance.as_ref()).await?) })
 		.await
 }
 
@@ -162,6 +214,8 @@ enum RawControl {
 	Pending(Option<moq_net::track::Subscription>),
 	/// Subscribed: updates apply at once, so a refusal reaches the caller.
 	Live(moq_net::track::Control),
+	/// A socket's `tcp` half: one group, with no subscription to update.
+	Group,
 }
 
 /// Outcome of polling a raw track source alongside its control channels.
@@ -266,6 +320,9 @@ pub struct Consume {
 
 	/// Buffered JSON window events ready for consumption.
 	json_window_event: NonZeroSlab<Timed<JsonWindowEvent>>,
+
+	/// Watchers waiting for a broadcast to end.
+	closed_task: NonZeroSlab<Task>,
 }
 
 impl Consume {
@@ -286,6 +343,33 @@ impl Consume {
 		origin: Option<crate::origin::Consumer>,
 	) -> Result<Id, Error> {
 		self.broadcast.insert(ConsumeBroadcast { broadcast, origin })
+	}
+
+	/// Watch for a broadcast's end, reported through the task's terminal callback.
+	pub fn closed(&mut self, broadcast: Id, on_closed: OnStatus) -> Result<Id, Error> {
+		let ConsumeBroadcast { broadcast, origin } =
+			self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
+		let driver = origin.map(|origin| origin.driver).unwrap_or_default();
+		self.closed_task.spawn(
+			on_closed,
+			|state| &mut state.consume.closed_task,
+			|close| async move {
+				driver
+					.watch(async move {
+						tokio::select! {
+							biased;
+							_ = close => {}
+							_ = broadcast.closed() => {}
+						}
+						Ok(())
+					})
+					.await
+			},
+		)
+	}
+
+	pub fn closed_cancel(&mut self, task: Id) -> Result<(), Error> {
+		self.closed_task.close(task, Error::NotFound)
 	}
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
@@ -346,6 +430,19 @@ impl Consume {
 				.map(|config| config.codec.to_string())
 				.collect();
 
+			let audio_ref = update
+				.audio
+				.renditions
+				.values()
+				.map(|config| Reference::new(&config.broadcast, &config.instance))
+				.collect();
+			let video_ref = update
+				.video
+				.renditions
+				.values()
+				.map(|config| Reference::new(&config.broadcast, &config.instance))
+				.collect();
+
 			// Serialize the untyped application sections to owned strings so the
 			// C section APIs can borrow stable pointers from the snapshot.
 			let sections = update
@@ -360,6 +457,8 @@ impl Consume {
 				catalog: update,
 				audio_codec,
 				video_codec,
+				audio_ref,
+				video_ref,
 				sections,
 			};
 
@@ -380,6 +479,10 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
+		let reference = consume.video_ref.get(index).ok_or(Error::NoIndex)?;
+		let (broadcast, broadcast_len) = lend(reference.broadcast.as_ref());
+		let (instance, instance_len) = lend(reference.instance.as_ref());
+		let (track, track_len) = lend(config.track.as_ref());
 
 		*dst = moq_video_config {
 			preference: config.preference,
@@ -402,6 +505,14 @@ impl Consume {
 				.map(|label| label.as_ptr() as *const c_char)
 				.unwrap_or(std::ptr::null()),
 			label_len: config.label.as_ref().map_or(0, String::len),
+			warmup_us: micros(config.warmup),
+			has_warmup: config.warmup.is_some(),
+			broadcast,
+			broadcast_len,
+			instance,
+			instance_len,
+			track,
+			track_len,
 		};
 
 		Ok(())
@@ -448,6 +559,10 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
+		let reference = consume.audio_ref.get(index).ok_or(Error::NoIndex)?;
+		let (broadcast, broadcast_len) = lend(reference.broadcast.as_ref());
+		let (instance, instance_len) = lend(reference.instance.as_ref());
+		let (track, track_len) = lend(config.track.as_ref());
 
 		*dst = moq_audio_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
@@ -469,6 +584,16 @@ impl Consume {
 				.map(|label| label.as_ptr() as *const c_char)
 				.unwrap_or(std::ptr::null()),
 			label_len: config.label.as_ref().map_or(0, String::len),
+			jitter_us: micros(config.jitter),
+			has_jitter: config.jitter.is_some(),
+			warmup_us: micros(config.warmup),
+			has_warmup: config.warmup.is_some(),
+			broadcast,
+			broadcast_len,
+			instance,
+			instance_len,
+			track,
+			track_len,
 		};
 
 		Ok(())
@@ -545,6 +670,7 @@ impl Consume {
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
 		let reference = config.broadcast().cloned();
+		let instance = config.instance().cloned();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
@@ -561,7 +687,7 @@ impl Consume {
 							playout.subscription(moq_net::track::Subscription::default().with_priority(C::PRIORITY));
 						// Resolving a sibling broadcast can wait too, so the close races both steps.
 						let setup = async {
-							let broadcast = resolve(broadcast, origin, reference).await?;
+							let broadcast = resolve(broadcast, origin, reference, instance).await?;
 							Self::subscribe(&broadcast, &name, subscription).await
 						};
 						let Some(track) = Self::until_closed(&mut close, setup).await? else {
@@ -652,7 +778,7 @@ impl Consume {
 	///
 	/// A publisher can leave SUBSCRIBE_OK pending forever, so a cancel must not wait on it.
 	/// `close` is left unpolled once it fires, since a oneshot panics if polled again.
-	async fn until_closed<T>(
+	pub(crate) async fn until_closed<T>(
 		close: &mut oneshot::Receiver<()>,
 		setup: impl Future<Output = Result<T, Error>>,
 	) -> Result<Option<T>, Error> {
@@ -769,31 +895,83 @@ impl Consume {
 				RawStep::End | RawStep::Stop => return Ok(()),
 			};
 
-			loop {
-				let frame = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
-					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
-						return Poll::Ready(Ok(RawStep::Stop));
-					}
-					match ready!(group.poll_read_frame(waiter))? {
-						Some(frame) => Poll::Ready(Ok(RawStep::Item(frame))),
-						None => Poll::Ready(Ok(RawStep::End)),
-					}
-				})
-				.await?
-				{
-					RawStep::Item(frame) => frame,
-					// Group fully read: advance to the next group.
-					RawStep::End => break,
-					// Consumer closed mid-group: terminate without touching `close` again.
-					RawStep::Stop => return Ok(()),
-				};
-
-				// Hold the lock only to buffer the read; release it before the callback.
-				let frame = Timed::new(frame.payload, frame.timestamp);
-				let frame_id = State::lock().consume.raw_frame.insert(frame)?;
-				callback.call(Ok(frame_id));
+			if Self::run_group(callback, &mut group, &mut close).await? {
+				return Ok(());
 			}
 		}
+	}
+
+	/// Deliver every frame of `group` in order, returning whether `close` fired.
+	///
+	/// `close` is a oneshot that panics if polled after completion, so a `true` must unwind
+	/// the whole task.
+	async fn run_group(
+		callback: OnStatus,
+		group: &mut moq_net::group::Consumer,
+		close: &mut oneshot::Receiver<()>,
+	) -> Result<bool, Error> {
+		loop {
+			let frame = match kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
+				if Pin::new(&mut *close).poll(&mut waiter.context()).is_ready() {
+					return Poll::Ready(Ok(RawStep::Stop));
+				}
+				match ready!(group.poll_read_frame(waiter))? {
+					Some(frame) => Poll::Ready(Ok(RawStep::Item(frame))),
+					None => Poll::Ready(Ok(RawStep::End)),
+				}
+			})
+			.await?
+			{
+				RawStep::Item(frame) => frame,
+				// Group fully read.
+				RawStep::End => return Ok(false),
+				// Consumer closed mid-group: terminate without touching `close` again.
+				RawStep::Stop => return Ok(true),
+			};
+
+			// Hold the lock only to buffer the read; release it before the callback.
+			let frame = Timed::new(frame.payload, frame.timestamp);
+			let frame_id = State::lock().consume.raw_frame.insert(frame)?;
+			callback.call(Ok(frame_id));
+		}
+	}
+
+	/// Read a socket stream's peer half as a raw track reader: `track` for a `track` session,
+	/// or the one group of a `tcp` session.
+	///
+	/// The `track` half keeps the reliable, oldest-first subscription the socket opened it with
+	/// until [`Self::raw_track_update`] changes it.
+	pub(crate) fn socket_read(
+		&mut self,
+		half: crate::socket::Half,
+		driver: crate::ffi::Background,
+		on_frame: OnStatus,
+	) -> Result<Id, Error> {
+		let (task, mut close) = Task::new(on_frame);
+		let control = match &half {
+			crate::socket::Half::Track(track) => RawControl::Live(track.control()),
+			crate::socket::Half::Group(_) => RawControl::Group,
+		};
+		let id = self.raw_task.insert(RawTaskEntry { task, control })?;
+
+		tokio::spawn(async move {
+			let res = crate::ffi::run(driver.watch(async move {
+				match half {
+					crate::socket::Half::Track(track) => Self::run_raw(on_frame, (*track).ordered(), close).await,
+					crate::socket::Half::Group(mut group) => {
+						Self::run_group(on_frame, &mut group, &mut close).await.map(drop)
+					}
+				}
+			}))
+			.await;
+
+			let entry = State::lock().consume.raw_task.remove(id);
+			if let Some(entry) = entry {
+				entry.task.callback.call(res);
+			}
+		});
+
+		Ok(id)
 	}
 
 	pub fn raw_track_update(
@@ -806,6 +984,9 @@ impl Consume {
 		match &mut entry.control {
 			RawControl::Pending(pending) => *pending = Some(subscription),
 			RawControl::Live(control) => Self::update_raw(control, subscription)?,
+			RawControl::Group => {
+				return Err(Error::Unsupported("a tcp socket stream has no subscription".into()));
+			}
 		}
 		Ok(())
 	}
@@ -1206,6 +1387,11 @@ impl Consume {
 	}
 }
 
+/// A catalog duration in microseconds, saturating; zero when absent.
+fn micros(duration: Option<Duration>) -> u64 {
+	duration.map_or(0, |duration| duration.as_micros().try_into().unwrap_or(u64::MAX))
+}
+
 #[cfg(test)]
 mod supervision_tests {
 	use super::*;
@@ -1231,6 +1417,8 @@ mod supervision_tests {
 				catalog,
 				audio_codec: Vec::new(),
 				video_codec: Vec::new(),
+				audio_ref: Vec::new(),
+				video_ref: Vec::new(),
 				sections: Vec::new(),
 			})
 			.unwrap();
@@ -1265,6 +1453,8 @@ mod rendition_tests {
 				catalog,
 				audio_codec: Vec::new(),
 				video_codec: Vec::new(),
+				audio_ref: Vec::new(),
+				video_ref: Vec::new(),
 				sections: Vec::new(),
 			})
 			.unwrap();
@@ -1413,6 +1603,8 @@ mod tests {
 						catalog,
 						audio_codec: Vec::new(),
 						video_codec: Vec::new(),
+						audio_ref: Vec::new(),
+						video_ref: Vec::new(),
 						sections: Vec::new(),
 					})
 					.unwrap();

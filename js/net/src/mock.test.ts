@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
+import { Elapsed, Instant, Milli, Nano, now, sleep, timeout } from "@moq/clock";
 import { StreamCode, toTransport } from "./error.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, manual } from "./mock.ts";
+
+const ms = (n: number) => Nano.fromMilli(Milli(n));
 
 async function pair() {
 	const { client, server } = createMockTransportPair();
@@ -52,4 +55,60 @@ test("a write parked on a full peer gives up when the peer stops", async () => {
 	await remote.readable.cancel(toTransport(StreamCode.Cancel, "cancel"));
 	const last = await writes[writes.length - 1];
 	expect(last).toMatchObject({ source: "stream", streamErrorCode: StreamCode.Cancel });
+});
+
+test("drive delivers a queued round trip before its deadline and stops at the deadline the work then meets", async () => {
+	using clock = manual();
+	const { local, remote } = await pair();
+	let late = false;
+	void sleep(ms(60_000)).then(() => {
+		late = true;
+	});
+	// The peer answers only once the request reaches it, so the response is a second delivery.
+	void (async () => {
+		const { value } = await remote.readable.getReader().read();
+		if (value) await remote.writable.getWriter().write(value);
+	})();
+	const work = (async () => {
+		await local.writable.getWriter().write(Uint8Array.of(7));
+		const { value } = await timeout(ms(1000), local.readable.getReader().read());
+		await sleep(ms(10));
+		return { value, at: now() };
+	})();
+	expect(await clock.drive(work)).toEqual({ value: Uint8Array.of(7), at: Instant(ms(10)) });
+	expect(late).toBe(false);
+});
+
+test("drive times out a read with nothing in flight at its deadline", async () => {
+	using clock = manual();
+	const { local } = await pair();
+	const read = timeout(ms(1000), local.readable.getReader().read());
+	expect(await clock.drive(read.catch((e: unknown) => e))).toBeInstanceOf(Elapsed);
+	expect(clock.now()).toBe(Instant(ms(1000)));
+});
+
+test("drive reaches a deadline while deliveries keep arriving", async () => {
+	using clock = manual();
+	const { local, remote } = await pair();
+	// A peer that refills the stream's queue on every host turn, so a delivery is always pending.
+	let delivered = 0;
+	const reader = remote.readable.getReader();
+	void (async () => {
+		while (!(await reader.read()).done) delivered++;
+	})();
+	const writer = local.writable.getWriter();
+	let sending = true;
+	const send = () => {
+		if (!sending) return;
+		while ((writer.desiredSize ?? 0) > 0) void writer.write(Uint8Array.of(1));
+		setImmediate(send);
+	};
+	send();
+	try {
+		await clock.drive(sleep(ms(1000)));
+		expect(clock.now()).toBe(Instant(ms(1000)));
+		expect(delivered).toBeGreaterThan(0);
+	} finally {
+		sending = false;
+	}
 });

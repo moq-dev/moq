@@ -810,11 +810,8 @@ impl<S: Shape> Merged<S> {
 		// unannounce. A closed stream ends the merged view.
 		loop {
 			match self.announce.poll_next(waiter) {
-				// A takeover continues what was read through its predecessor, like an update.
 				Poll::Ready(Some(
-					moq_net::origin::RouteEvent::Start(update)
-					| moq_net::origin::RouteEvent::Update(update)
-					| moq_net::origin::RouteEvent::Takeover { announce: update, .. },
+					moq_net::origin::RouteEvent::Start(update) | moq_net::origin::RouteEvent::Update(update),
 				)) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true)
@@ -914,9 +911,9 @@ impl<S: Shape> Merged<S> {
 		}
 
 		self.last_announced.insert(key.0.clone(), key.1.clone());
-		// A route update on a node already tracked (a reprice, or a takeover
-		// with different metadata) keeps the live reader: existing
-		// subscriptions survive a takeover, and the reader re-resolves through
+		// A route update on a node already tracked (a reprice, or another route
+		// of the same instance) keeps the live reader: existing
+		// subscriptions survive it, and the reader re-resolves through
 		// the current best route the moment it actually ends. Only an ended
 		// node re-arms here, since a fresh route is new evidence that a
 		// re-resolve could succeed. A sticky contribution carries across the
@@ -1147,8 +1144,7 @@ mod tests {
 		match announced.next().await? {
 			moq_net::origin::RouteEvent::Start(route)
 			| moq_net::origin::RouteEvent::Update(route)
-			| moq_net::origin::RouteEvent::Restart(route)
-			| moq_net::origin::RouteEvent::Takeover { announce: route, .. } => Some((route, true)),
+			| moq_net::origin::RouteEvent::Restart(route) => Some((route, true)),
 			moq_net::origin::RouteEvent::End(route) => Some((route, false)),
 		}
 	}

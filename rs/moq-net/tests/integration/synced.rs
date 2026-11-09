@@ -30,9 +30,7 @@ async fn read_until_synced(announced: &mut origin::Routes) -> BTreeSet<String> {
 			.expect("synced in time")
 			.expect("the cursor stays open");
 		match event {
-			origin::RouteEvent::Start(announce)
-			| origin::RouteEvent::Restart(announce)
-			| origin::RouteEvent::Takeover { announce, .. } => {
+			origin::RouteEvent::Start(announce) | origin::RouteEvent::Restart(announce) => {
 				seen.insert(announce.prefix.to_string());
 			}
 			origin::RouteEvent::End(announce) => {

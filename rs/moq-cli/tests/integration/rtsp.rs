@@ -64,9 +64,7 @@ async fn next_broadcast(
 			.await
 			.expect("origin closed")
 		{
-			moq_net::origin::RouteEvent::Start(_)
-			| moq_net::origin::RouteEvent::Restart(_)
-			| moq_net::origin::RouteEvent::Takeover { .. } => break,
+			moq_net::origin::RouteEvent::Start(_) | moq_net::origin::RouteEvent::Restart(_) => break,
 			moq_net::origin::RouteEvent::End(_) | moq_net::origin::RouteEvent::Update(_) => {}
 		}
 	}

@@ -56,3 +56,5 @@ records):
 Tests: a refused session and an abnormal end each produce exactly one record
 under the right label; a flood past the rate produces summaries whose counts
 match the counters; an admitted session that ends normally produces none.
+
+Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [api-shape/net](/quest/m2/api-shape/net.md) makes `stats::Handle::{refuse, session}` take `#[non_exhaustive]` structs before the cut, so the records add fields and are not breaking.

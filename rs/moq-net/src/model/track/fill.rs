@@ -798,12 +798,12 @@ pub(super) fn poll_requested(
 	}
 
 	// No fill queued: surface a track abort so the handler loop can exit.
-	match state.poll_ref(waiter, |state| match &state.abort {
+	match state.poll_ref(waiter, |state| match state.outcome.aborted() {
 		Some(err) => Poll::Ready(err.clone()),
 		None => Poll::Pending,
 	}) {
 		Poll::Ready(Ok(err)) => Poll::Ready(Err(err)),
-		Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+		Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.outcome.aborted().cloned().unwrap_or(Error::Dropped))),
 		Poll::Pending => Poll::Pending,
 	}
 }
@@ -1058,17 +1058,6 @@ impl Fill {
 				_ => Poll::Ready(()),
 			})
 			.map(drop)
-	}
-
-	/// Poll until a run's next group may be written: at once until a reader of the track lost
-	/// a group to eviction, then as [`Self::poll_paced`]. An unpaced run moves at its source's
-	/// speed, which is fine while every reader keeps up.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_run_paced(&self, waiter: &kio::Waiter) -> Poll<()> {
-		if self.inner.state.read().evictions == 0 {
-			return Poll::Ready(());
-		}
-		self.poll_paced(waiter)
 	}
 
 	/// Refuse every group still owed with `err`, which says nothing about whether the source
@@ -1428,7 +1417,7 @@ impl Inner {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn finish_track_at(&self, final_sequence: u64) {
 		if let Ok(mut state) = TrackState::modify(&self.state)
-			&& state.end.is_none()
+			&& state.declared().is_none()
 		{
 			let _ = state.set_end(Position::group(final_sequence), None);
 		}
@@ -1468,7 +1457,7 @@ impl TrackState {
 	/// or the live feed may still deliver: a fill refused is no verdict on the feed.
 	fn drop_unfed(&mut self, groups: ops::Range<u64>, err: StreamError) {
 		// Until the serving session resolves where the feed starts, it may deliver anything.
-		if self.start_pending {
+		if matches!(self.start, super::Start::Pending(_)) {
 			return;
 		}
 		let now = self.cache.pool().now_wall();

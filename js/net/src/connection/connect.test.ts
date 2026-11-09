@@ -6,7 +6,7 @@ import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
 import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as Lite } from "../lite/version.ts";
-import { createMockTransportPair, driveUntil, manual } from "../mock.ts";
+import { createMockTransportPair, manual } from "../mock.ts";
 import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
@@ -173,6 +173,47 @@ test("an http:// URL pins the fetched fingerprint and dials https", async () => 
 	]);
 });
 
+test("a fingerprint fetch slower than the hedge starts no second dial", async () => {
+	using clock = manual();
+	// Hold the fingerprint until the clock has passed the 500 ms hedge: the hedge arms only once
+	// the fingerprint resolves, so a slow fetch neither fires it nor fetches or dials twice.
+	const requested = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const server = fingerprintServer(async () => {
+		requested.resolve();
+		await release.promise;
+		return new Response("ab".repeat(32));
+	});
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let dials = 0;
+	function StubWebTransport(this: unknown) {
+		dials++;
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+	const captured = captureConsole();
+
+	try {
+		const connecting = connect(server.url, { websocket: { enabled: false } });
+		await requested.promise;
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
+		// The hedge logs inside its timer callback, so this catches it as deterministically as the
+		// clock; the dial/request counts below race connect() cancelling the hedge once one dial wins.
+		expect(captured.lines.filter((line) => line.includes("dialing a second"))).toEqual([]);
+		release.resolve();
+		const connection = await connecting;
+		connection.abort();
+	} finally {
+		captured.restore();
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+
+	expect(dials).toBe(1);
+	expect(server.requests()).toBe(1);
+});
+
 test("an http:// fingerprint longer than a SHA-256 is refused without reading the rest", async () => {
 	// A chunked body with no Content-Length that never ends: only a bounded read can refuse it.
 	const chunk = new TextEncoder().encode("a".repeat(1024));
@@ -279,9 +320,9 @@ test("connect logs the relay URL without its credentials", async () => {
 		restoreTransport();
 	}
 
-	// The diagnostics must still identify the relay, just without the query.
+	// The diagnostics must still identify the relay, just without the path or query.
 	expect(captured.lines.length).toBeGreaterThan(0);
-	expect(captured.lines.every((line) => line.includes("https://example.com/test"))).toBe(true);
+	expect(captured.lines.every((line) => line.includes("https://example.com:443"))).toBe(true);
 
 	for (const line of captured.lines) {
 		expect(line).not.toContain(SECRET);
@@ -559,18 +600,33 @@ test("SETUP refuses a version the client did not name", async () => {
 	const pair = createMockTransportPair("");
 	const restore = stubWebTransport(pair.client);
 	try {
-		const server = accept({ url, transport: pair.server, version: Lite.DRAFT_05 }).catch(() => undefined);
 		const connecting = connect(url, {
 			versions: ["moq-lite-07-wip", "moq-lite-06"],
 			websocket: { enabled: false },
 		});
-		// The refusal waits out the grace a peer's close code gets.
-		await driveUntil(clock, connecting);
+		// Handled now, since the refusal can land while the write below yields.
+		connecting.catch(() => {});
+		const stream = await Stream.accept(pair.server, Lite.DRAFT_02);
+		if (!stream) throw new Error("no SETUP stream");
+		await ClientSetup.decode(stream.reader);
+		await new ServerSetup(Lite.DRAFT_05).encode(stream.writer);
+		// The refusal waits out the grace a peer's close code gets. Driven outside `expect`, as
+		// `Manual.drive` asks.
+		await clock.drive(connecting.catch(() => {}));
 		await expect(connecting).rejects.toThrow("unsupported server version: 0xff0dad05");
-		(await server)?.abort();
 	} finally {
 		restore();
 	}
+});
+
+test("a server pinned to a version the client did not offer refuses the SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const accepting = accept({ url, transport: pair.server, version: Lite.DRAFT_05 });
+	// Handled now, since the refusal can land while the write below yields.
+	accepting.catch(() => {});
+	const stream = await Stream.open(pair.client, { version: Lite.DRAFT_02 });
+	await new ClientSetup([Lite.DRAFT_07, Lite.DRAFT_06]).encode(stream.writer);
+	await expect(accepting).rejects.toThrow("no common version found");
 });
 
 test("a peer without an ALPN is refused when no named version negotiates in SETUP", async () => {
@@ -601,7 +657,7 @@ test.each(IETF_VERSIONS)("a client refuses %s selected in the moql SETUP", async
 		await ClientSetup.decode(stream.reader);
 		await new ServerSetup(version).encode(stream.writer);
 		// The refusal waits out the grace a peer's close code gets.
-		await driveUntil(clock, connecting);
+		await clock.drive(connecting.catch(() => {}));
 		await expect(connecting).rejects.toThrow(`unsupported server version: 0x${version.toString(16)}`);
 	} finally {
 		restore();

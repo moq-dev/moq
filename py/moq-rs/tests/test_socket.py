@@ -74,7 +74,7 @@ async def test_refusal_and_cancelled_wait_leave_endpoint_usable():
     incoming.reject()
     with pytest.raises(moq.Error.NotFound):
         await dial
-    with pytest.raises(moq.Error.Closed):
+    with pytest.raises(moq.Error.AlreadyResponded):
         incoming.reject()
     client, server = await tcp(a, b)
     assert client.session == server.session

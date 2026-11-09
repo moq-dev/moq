@@ -149,7 +149,7 @@ pub async fn accept(
 	// fulfil; set the mux's known ICE credentials on the same config.
 	let mux = server.mux().await?;
 	let (creds, inbound, registration) = mux.register();
-	let mut rtc = session::rtc_config_with_codecs(&codecs)
+	let mut rtc = session::rtc_config_with_codecs(&codecs)?
 		.set_local_ice_credentials(creds)
 		.build(kio::clock::now().into_std());
 	for addr in mux.candidates() {
@@ -219,7 +219,6 @@ fn status_for(err: &Error) -> StatusCode {
 	match err {
 		Error::InvalidSdp(_) | Error::InvalidPath(_) => StatusCode::BAD_REQUEST,
 		Error::UnsupportedCodec(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-		Error::SessionNotFound => StatusCode::NOT_FOUND,
 		Error::Moq(moq_net::Error::Unauthorized) => StatusCode::UNAUTHORIZED,
 		Error::Moq(moq_net::Error::NotFound | moq_net::Error::Unroutable) => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,

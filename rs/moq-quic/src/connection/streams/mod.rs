@@ -7,7 +7,7 @@ use crate::{Dir, StreamId, connection::Error, frame};
 
 mod lease;
 pub mod recv;
-use recv::Recv;
+use recv::{Reader, Recv};
 
 #[cfg(test)]
 mod saturated;
@@ -23,14 +23,15 @@ pub(crate) use state::StreamsState;
 /// Access to streams
 pub struct Streams<'a> {
 	pub(super) state: &'a mut StreamsState,
-	pub(super) conn_state: &'a super::State,
+	/// The connection ended, so no stream opens
+	pub(super) closed: bool,
 }
 
 impl<'a> Streams<'a> {
 	/// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
 	#[cfg(any(test, feature = "fuzz"))]
-	pub(crate) fn new(state: &'a mut StreamsState, conn_state: &'a super::State) -> Self {
-		Self { state, conn_state }
+	pub(crate) fn new(state: &'a mut StreamsState, closed: bool) -> Self {
+		Self { state, closed }
 	}
 
 	/// Open a single stream if possible, its sending half scheduled by `options`
@@ -41,7 +42,7 @@ impl<'a> Streams<'a> {
 	/// - when `options.group` was opened on another connection
 	pub fn open(&mut self, dir: Dir, options: send::Options<'_>) -> Option<StreamId> {
 		let group = options.group.map(|g| g.index(self.state.tag));
-		if self.conn_state.is_closed() {
+		if self.closed {
 			return None;
 		}
 
@@ -124,17 +125,6 @@ impl<'a> Streams<'a> {
 		}
 		self.state.waits.register_accept(dir, waiter);
 		Poll::Pending
-	}
-
-	/// How many more streams the peer lets this side open in `dir` before it raises its limit.
-	pub fn credit(&self, dir: Dir) -> u64 {
-		self.state.max[dir as usize].saturating_sub(self.state.next[dir as usize])
-	}
-
-	/// Whether an open in `dir` was refused since the peer last raised its limit, so this side
-	/// waits for its MAX_STREAMS, as the STREAMS_BLOCKED it sends says.
-	pub fn blocked(&self, dir: Dir) -> bool {
-		self.state.open_refused[dir as usize]
 	}
 
 	/// The number of streams that may have unacknowledged data.

@@ -111,12 +111,26 @@ fn scheme_tier(scheme: &str) -> u8 {
 /// "verified remote".
 fn is_local(url: &Url) -> bool {
 	match url.host() {
-		// A non-special scheme (`moqt://127.0.0.1`, and every other scheme but
-		// `http`/`https`/`ws`/`wss`) parses its host as a domain even when it is an
-		// address literal, so the literal check can't be left to the URL parser.
-		Some(url::Host::Domain(host)) => match host.parse::<std::net::IpAddr>() {
-			Ok(ip) => is_local_ip(ip),
-			Err(_) => host == "localhost" || host.ends_with(".localhost"),
+		// A non-special scheme (`moqt://127.1`, and every other scheme but
+		// `http`/`https`/`ws`/`wss`) keeps its host opaque, while the dial resolves it
+		// like an address in any spelling `inet_aton` accepts. Reading it back through
+		// https decodes the same IPv4 spellings (WHATWG's host parser), as js/net does.
+		Some(url::Host::Domain(host)) => match Url::parse(&format!("https://{host}/"))
+			.ok()
+			.and_then(|u| u.host().map(|h| h.to_owned()))
+		{
+			Some(url::Host::Ipv4(ip)) => is_local_ip(ip.into()),
+			Some(url::Host::Ipv6(ip)) => is_local_ip(ip.into()),
+			Some(url::Host::Domain(name)) => {
+				// A trailing dot names the same host from the root.
+				let name = name.strip_suffix('.').unwrap_or(&name);
+				name == "localhost" || name.ends_with(".localhost")
+			}
+			// Unparsable as a special host: judge the opaque text as written.
+			None => match host.parse::<std::net::IpAddr>() {
+				Ok(ip) => is_local_ip(ip),
+				Err(_) => host == "localhost" || host.ends_with(".localhost"),
+			},
 		},
 		Some(url::Host::Ipv4(ip)) => is_local_ip(ip.into()),
 		Some(url::Host::Ipv6(ip)) => is_local_ip(ip.into()),
@@ -238,24 +252,16 @@ mod tests {
 	/// reach. IPv4-mapped and link-local forms are the easy ones to miss.
 	#[test]
 	fn local_targets_are_recognized() {
-		let local = [
-			"https://127.0.0.1/",
-			"https://localhost/",
-			"https://[::1]/",
-			"https://10.0.0.1/",
-			"https://169.254.1.1/",
-			"https://[::ffff:127.0.0.1]/",
-			"https://[::ffff:10.0.0.1]/",
-			"https://[fe80::1]/",
-			"https://[fc00::1]/",
-			"https://0.0.0.0/",
-		];
-		for url in local {
-			assert!(is_local(&url.parse().unwrap()), "{url} should be local");
+		// Shared with js/net's endpoint test, so the two classifiers cannot drift.
+		#[derive(serde::Deserialize)]
+		struct Case {
+			url: String,
+			local: bool,
 		}
-
-		for url in ["https://example.com/", "https://8.8.8.8/", "https://[2606:4700::1]/"] {
-			assert!(!is_local(&url.parse().unwrap()), "{url} should not be local");
+		let cases: Vec<Case> =
+			serde_json::from_str(include_str!("../../fixtures/endpoints.json")).expect("a malformed fixture");
+		for case in cases {
+			assert_eq!(is_local(&url(&case.url)), case.local, "{}", case.url);
 		}
 
 		// A public endpoint may not redirect us inward, but a local one may stay local.
@@ -264,6 +270,11 @@ mod tests {
 		assert!(refused(Redirect::Follow.target(
 			"https://[::ffff:127.0.0.1]/",
 			&public,
+			false
+		)));
+		assert!(refused(Redirect::Follow.target(
+			"moqt://127.1/",
+			&url("moqt://relay.example/"),
 			false
 		)));
 		assert_eq!(

@@ -475,50 +475,66 @@ impl Background {
 		})
 	}
 
+	/// Read the operation's completion, arming `waiter` while it runs. Every reader goes through
+	/// here, so a synchronous check and an awaited one agree on each state.
+	fn completion(&self, waiter: &kio::Waiter) -> Completion {
+		let Some(result) = &self.result else {
+			return Completion::Detached;
+		};
+		let completed = result.poll(waiter, |state| match &**state {
+			Some(completed) => Poll::Ready(completed.clone()),
+			None => Poll::Pending,
+		});
+		match completed {
+			Poll::Pending => Completion::Running,
+			Poll::Ready(Ok(completed)) => Completion::Done(completed),
+			Poll::Ready(Err(_)) => Completion::Dropped,
+		}
+	}
+
 	pub async fn finished(&self) -> Result<(), MoqError> {
-		let Some(result) = &self.result else { return Ok(()) };
-		let completed = host(kio::wait(|waiter| {
-			match std::task::ready!(result.poll(waiter, |state| {
-				match &**state {
-					Some(completed) => std::task::Poll::Ready(completed.clone()),
-					None => std::task::Poll::Pending,
-				}
-			})) {
-				Ok(completed) => std::task::Poll::Ready(completed),
-				Err(_) => std::task::Poll::Ready(Err(moq_net::Error::Cancel.into())),
-			}
+		host(kio::wait(|waiter| match self.completion(waiter).result() {
+			Some(result) => Poll::Ready(result),
+			None => Poll::Pending,
 		}))
-		.await;
-		completed.map_err(crate::session::map_closed_error)
+		.await
+	}
+}
+
+/// Where an owned operation stands, as its handle's calls report it.
+enum Completion {
+	/// The handle owns no operation, so nothing can fail it.
+	Detached,
+	Running,
+	Done(moq_tokio::Result<()>),
+	/// Released without a result: [`shutdown`] dropped it, or it was submitted after and never ran.
+	Dropped,
+}
+
+impl Completion {
+	/// What the handle's calls report, or `None` while the operation runs.
+	fn result(self) -> Option<Result<(), MoqError>> {
+		match self {
+			Self::Detached => Some(Ok(())),
+			Self::Running => None,
+			Self::Done(result) => Some(result.map_err(crate::session::map_closed_error)),
+			Self::Dropped => Some(Err(MoqError::Cancelled)),
+		}
 	}
 }
 
 impl Background {
+	/// The operation's failure, if it has failed or was dropped; `Ok` while it runs.
 	pub fn check(&self) -> Result<(), MoqError> {
-		if let Some(result) = &self.result {
-			return result
-				.read()
-				.clone()
-				.unwrap_or(Ok(()))
-				.map_err(crate::session::map_closed_error);
-		}
-		Ok(())
+		self.completion(&kio::Waiter::noop()).result().unwrap_or(Ok(()))
 	}
 
 	/// Ready with the owner's failure once it fails; pending while it runs or after it ended
 	/// cleanly, the same split [`Self::watch`] makes.
 	pub fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<MoqError> {
-		let Some(result) = &self.result else {
-			return Poll::Pending;
-		};
-		let completed = ready!(result.poll(waiter, |state| match &**state {
-			Some(completed) => Poll::Ready(completed.clone()),
-			None => Poll::Pending,
-		}));
-		match completed {
-			Ok(Ok(())) => Poll::Pending,
-			Ok(Err(err)) => Poll::Ready(crate::session::map_closed_error(err)),
-			Err(_) => Poll::Ready(crate::session::map_closed_error(moq_net::Error::Cancel.into())),
+		match self.completion(waiter).result() {
+			Some(Err(err)) => Poll::Ready(err),
+			Some(Ok(())) | None => Poll::Pending,
 		}
 	}
 
@@ -775,6 +791,96 @@ impl<T> Drop for Polled<T> {
 	fn drop(&mut self) {
 		let state = self.state.get_mut().take();
 		self.release(state);
+	}
+}
+
+/// A one-shot request a handle answers once: pending, being answered, answered, or failed.
+///
+/// Every answer goes through [`Self::answer`] or [`Self::take`], so a failure after the request
+/// was taken is what later calls report, rather than looking like a successful answer.
+pub(crate) struct OneShot<T>(std::sync::Mutex<Answer<T>>);
+
+enum Answer<T> {
+	Pending(T),
+	/// Taken by an answer that has not finished.
+	Taken,
+	Answered,
+	/// The answer failed after taking the request, or stopped before it finished.
+	Failed(MoqError),
+}
+
+impl<T> OneShot<T> {
+	pub fn new(request: T) -> Self {
+		Self(std::sync::Mutex::new(Answer::Pending(request)))
+	}
+
+	fn lock(&self) -> std::sync::MutexGuard<'_, Answer<T>> {
+		// Nothing panics under this lock: every answer runs outside it.
+		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+	}
+
+	/// Read the pending request, or fail with why it can no longer be answered.
+	pub fn peek<R>(&self, f: impl FnOnce(&T) -> R) -> Result<R, MoqError> {
+		match &*self.lock() {
+			Answer::Pending(request) => Ok(f(request)),
+			Answer::Taken | Answer::Answered => Err(MoqError::AlreadyResponded),
+			Answer::Failed(err) => Err(err.clone()),
+		}
+	}
+
+	/// Answer with `f`, which consumes the request: answered or failed once this returns.
+	///
+	/// Validate the answer's inputs first, so a refused input leaves the request pending.
+	pub fn answer<R>(&self, f: impl FnOnce(T) -> Result<R, MoqError>) -> Result<R, MoqError> {
+		let (request, answering) = self.take()?;
+		answering.settle(f(request))
+	}
+
+	/// Take the request for an answer that awaits, settling the returned guard with its outcome.
+	pub fn take(&self) -> Result<(T, Answering<'_, T>), MoqError> {
+		let mut state = self.lock();
+		match std::mem::replace(&mut *state, Answer::Taken) {
+			Answer::Pending(request) => Ok((request, Answering { owner: Some(self) })),
+			Answer::Taken => Err(MoqError::AlreadyResponded),
+			Answer::Answered => {
+				*state = Answer::Answered;
+				Err(MoqError::AlreadyResponded)
+			}
+			Answer::Failed(err) => {
+				*state = Answer::Failed(err.clone());
+				Err(err)
+			}
+		}
+	}
+}
+
+/// An answer in flight. Dropped unsettled, a cancelled or panicked call, it fails the request.
+pub(crate) struct Answering<'a, T> {
+	/// Taken by [`Self::settle`].
+	owner: Option<&'a OneShot<T>>,
+}
+
+impl<T> Answering<'_, T> {
+	/// Record the answer's outcome and return it.
+	pub fn settle<R>(mut self, result: Result<R, MoqError>) -> Result<R, MoqError> {
+		if let Some(owner) = self.owner.take() {
+			*owner.lock() = match &result {
+				Ok(_) => Answer::Answered,
+				Err(err) => Answer::Failed(err.clone()),
+			};
+		}
+		result
+	}
+}
+
+impl<T> Drop for Answering<'_, T> {
+	fn drop(&mut self) {
+		if let Some(owner) = self.owner.take() {
+			*owner.lock() = Answer::Failed(match std::thread::panicking() {
+				true => crate::session::map_closed_error(moq_tokio::Error::Panic),
+				false => MoqError::Cancelled,
+			});
+		}
 	}
 }
 

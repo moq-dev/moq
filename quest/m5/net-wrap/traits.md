@@ -68,6 +68,8 @@ Public API: new moq-net traits, plus the hidden test-wrapper feature. Wire: none
 Decided 2026-10-22 (maintainer): the traits break moq-net's public API, so
 they wait for the breaking release cut.
 
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): trait only what adopters call: the broadcast, track, group, and frame producer chain, `track::Consumer` to `Subscriber` to `Ordered`, `requests` with `requested_track`, `tracks`, and datagrams. `Fill`, `Fetching`, and `Resolving` stay concrete until a wrapped consumer needs them.
+
 ## Required
 
 - [Breaking release cut](/quest/m3/release/cut.md) - the traits land after the cut that ships m2's breaks
