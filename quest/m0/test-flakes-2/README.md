@@ -241,6 +241,11 @@ reader got `Unroutable` after the endpoint closed during
 [moq-dev/moq#8293](https://github.com/moq-dev/moq/pull/8293)'s loaded `just check`.
 It is quarantined with `pytest.mark.skip` until its child fixes it.
 
+Added 2026-11-09 (maintainer, `/quest-complete`, under the flaky-test rule):
+`js/common/worklet.test.ts`'s dev-server test, which hit bun's 5 s timeout in a
+loaded full `just check` on [moq-dev/moq#8325](https://github.com/moq-dev/moq/pull/8325).
+It is quarantined with `test.skip` until its child fixes it.
+
 Public API: none. Wire: none.
 
 ## Required
@@ -250,3 +255,4 @@ Public API: none. Wire: none.
 - [js/net's lite-07 re-dropped re-offer test holds up under load](/quest/m0/test-flakes-2/redropped-reoffer.md) - update 3 is ordered before the re-offer opens by an event, not a yield count, and its `test.skip` is removed
 - [js/net's datagram session-close-after-end test holds up under load](/quest/m0/test-flakes-2/datagram-close-end.md) - the abort is ordered after the end by an event the client observes, and its `test.skip` is removed
 - [moq-rs's Python TCP close test settles on a promised error](/quest/m0/test-flakes-2/tcp-close-unroutable.md) - the reader's error after an endpoint close is one the socket contract promises, and its `pytest.mark.skip` is removed
+- [js/common's worklet dev-server test holds up under load](/quest/m0/test-flakes-2/worklet-dev-server.md) - the dev-server test passes on a loaded host, and its `test.skip` is removed
