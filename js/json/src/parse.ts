@@ -3,7 +3,8 @@ import { DuplicateKey } from "./error.ts";
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /**
- * Parse one JSON frame, refusing malformed Unicode and any object that repeats a key.
+ * Parse one JSON frame, refusing malformed Unicode, any object that repeats a key, nesting 128
+ * containers deep, and a number outside the double range.
  *
  * `JSON.parse` keeps the last of a repeated key while other parsers keep the first or refuse, so
  * such a frame could mean two things to two readers. A full parser that reports duplicates costs
