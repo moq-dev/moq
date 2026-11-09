@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Bus::channel` is `Bus::live`
+
+The bus has two kinds of source: a live one on its own clock, whose ring
+absorbs jitter and drift, and a positioned one on the bus's clock, whose every
+write names its bus position. `Bus::channel` and `bus::Channel` are renamed
+`Bus::live` and `bus::Live` to pair with `Bus::positioned` and
+`bus::Positioned`. Their behavior is unchanged: rename the calls and the type.
+
 ### Playback fills a declared silence with comfort noise
 
 `Sink::end()` declares that the audio written so far is followed by a silence
@@ -88,7 +96,7 @@ Device channel counts above stereo are now consistently `Layout::Discrete`:
 a microphone array does not declare surround-speaker positions. A stereo bus
 refuses those inputs instead of guessing a surround downmix. Request mono or
 stereo through `capture::Config::channels` when the device supports it, or map
-the known channels explicitly before writing a `Bus::channel`. The encoder refuses
+the known channels explicitly before writing a `Bus::live`. The encoder refuses
 them too: `encode::Control::new` fails for such a consumer, since its default
 stereo config (and Opus in any config) cannot take a discrete layout. Publish a
 microphone array only when it delivers mono or stereo, or with an

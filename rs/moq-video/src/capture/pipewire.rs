@@ -60,7 +60,7 @@ const FORMAT_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn err(ctx: &str, e: impl std::fmt::Display) -> Error {
-	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
+	Error::codec(anyhow::anyhow!("{ctx}: {e}"))
 }
 
 pub(super) mod camera;
@@ -178,12 +178,12 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 	let geo = match kio::clock::timeout(FORMAT_TIMEOUT, geo_rx).await {
 		Ok(Ok(result)) => result?,
 		Ok(Err(_)) => {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"{kind:?} capture thread exited before negotiating a format"
 			)));
 		}
 		Err(_) => {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"no video format from {} within {FORMAT_TIMEOUT:?}",
 				kind.producer()
 			)));
@@ -194,7 +194,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 		Ok(Ok(Some(frame))) => frame,
 		Ok(Err(error)) => return Err(error),
 		Ok(Ok(None)) | Err(_) => {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"no frames from {} within {FIRST_FRAME_TIMEOUT:?}",
 				kind.producer()
 			)));
@@ -290,7 +290,7 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 	let stream = response
 		.streams()
 		.first()
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("portal granted no streams")))?;
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("portal granted no streams")))?;
 	let node_id = stream.pipe_wire_node_id();
 
 	let fd = proxy
@@ -429,23 +429,23 @@ impl DmaBufFrame for PipeWireDmaBuf {
 		// DRM_FORMAT_MOD_LINEAR is zero. A tiled allocation cannot be interpreted
 		// as strided rows; its fallback needs a GPU/VPP download instead.
 		if self.modifier != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"cannot download DMA-BUF modifier {:#x} as linear rows",
 				self.modifier
 			)));
 		}
 
 		wait_dma_buf_readable(self.fd.as_fd())
-			.map_err(|e| Error::Codec(anyhow::anyhow!("waiting for DMA-BUF producer: {e}")))?;
+			.map_err(|e| Error::codec(anyhow::anyhow!("waiting for DMA-BUF producer: {e}")))?;
 		with_dma_buf_read(&self.fd, || {
 			let allocation_size = self
 				.allocation_size
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("DMA-BUF descriptor does not report a mappable size")))?;
+				.ok_or_else(|| Error::codec(anyhow::anyhow!("DMA-BUF descriptor does not report a mappable size")))?;
 			let mapping = Mapping::new(&self.fd, self.map_offset, allocation_size)?;
 			let data = mapping
 				.as_slice()
 				.get(self.data_offset..)
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("DMA-BUF chunk starts outside its allocation")))?;
+				.ok_or_else(|| Error::codec(anyhow::anyhow!("DMA-BUF chunk starts outside its allocation")))?;
 
 			match self.format {
 				DrmFormat::NV12 => {
@@ -465,7 +465,7 @@ impl DmaBufFrame for PipeWireDmaBuf {
 					self.layout.stride,
 					crate::Size::new(self.layout.width, self.layout.height),
 				),
-				other => Err(Error::Codec(anyhow::anyhow!(
+				other => Err(Error::codec(anyhow::anyhow!(
 					"cannot download DMA-BUF format {:#x}",
 					other.as_raw()
 				))),
@@ -538,7 +538,7 @@ fn dma_buf_sync(fd: &OwnedFd, flags: u64) -> Result<(), Error> {
 		}
 		let err = std::io::Error::last_os_error();
 		if err.kind() != std::io::ErrorKind::Interrupted {
-			return Err(Error::Codec(anyhow::anyhow!("DMA-BUF sync: {err}")));
+			return Err(Error::codec(anyhow::anyhow!("DMA-BUF sync: {err}")));
 		}
 	}
 }
@@ -587,7 +587,7 @@ struct Mapping {
 impl Mapping {
 	fn new(fd: &OwnedFd, offset: u32, len: usize) -> Result<Self, Error> {
 		if len == 0 {
-			return Err(Error::Codec(anyhow::anyhow!("cannot map an empty DMA-BUF")));
+			return Err(Error::codec(anyhow::anyhow!("cannot map an empty DMA-BUF")));
 		}
 		// SAFETY: `fd` stays open for the mapping's lifetime, `len` is non-zero,
 		// and the kernel validates the PipeWire-provided offset and allocation.
@@ -602,7 +602,7 @@ impl Mapping {
 			)
 		};
 		if ptr == libc::MAP_FAILED {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"DMA-BUF mmap: {}",
 				std::io::Error::last_os_error()
 			)));
@@ -636,24 +636,24 @@ fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 		layout.source_height as usize,
 	);
 	if source_height < height {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"NV12 source is shorter than the cropped output"
 		)));
 	}
 	let y_len = stride
 		.checked_mul(source_height)
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 luma size overflow")))?;
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("NV12 luma size overflow")))?;
 	let uv_rows = height / 2;
 	let uv_len = uv_rows
 		.checked_sub(1)
 		.and_then(|rows| rows.checked_mul(stride))
 		.and_then(|offset| offset.checked_add(width))
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 chroma size overflow")))?;
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("NV12 chroma size overflow")))?;
 	let frame_len = y_len
 		.checked_add(uv_len)
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 frame size overflow")))?;
+		.ok_or_else(|| Error::codec(anyhow::anyhow!("NV12 frame size overflow")))?;
 	if stride < width || data.len() < frame_len {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"NV12 frame is shorter than its declared rows"
 		)));
 	}
@@ -1265,7 +1265,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		.iter()
 		.map(|offer| {
 			spa::pod::Pod::from_bytes(offer)
-				.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build pipewire format offer")))
+				.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to build pipewire format offer")))
 		})
 		.collect::<Result<Vec<_>, _>>()?;
 	stream
@@ -1445,7 +1445,7 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 		spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN | spa::sys::SPA_VIDEO_COLOR_RANGE_16_235 => Range::Limited,
 		spa::sys::SPA_VIDEO_COLOR_RANGE_0_255 => Range::Full,
 		_ => {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"unsupported PipeWire YUV color range {range}"
 			)));
 		}
@@ -1455,7 +1455,7 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709 => Color::BT709,
 		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT601 => Color::BT601,
 		_ => {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"unsupported PipeWire YUV color matrix {matrix}"
 			)));
 		}
@@ -1494,7 +1494,7 @@ fn validate_pipewire_description(kind: Kind, color: Color, primaries: u32, trans
 				spa::sys::SPA_VIDEO_COLOR_PRIMARIES_SMPTE170M | spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT709
 			));
 	if !primaries_match {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"PipeWire YUV primaries {primaries} do not match the negotiated matrix"
 		)));
 	}
@@ -1505,7 +1505,7 @@ fn validate_pipewire_description(kind: Kind, color: Color, primaries: u32, trans
 			| SPA_VIDEO_TRANSFER_BT601
 			| SPA_VIDEO_TRANSFER_BT2020_10
 	) {
-		return Err(Error::Codec(anyhow::anyhow!(
+		return Err(Error::codec(anyhow::anyhow!(
 			"unsupported PipeWire YUV transfer function {transfer}"
 		)));
 	}
@@ -1543,7 +1543,7 @@ fn convert(format: VideoFormat, bytes: &[u8], layout: FrameLayout, color: Option
 		}
 		// Only a camera negotiates MJPEG, which the format records as `Encoded`.
 		VideoFormat::Encoded => I420::from_mjpeg(bytes, crate::Size::new(layout.width, layout.height)),
-		other => Err(Error::Codec(anyhow::anyhow!(
+		other => Err(Error::codec(anyhow::anyhow!(
 			"pipewire negotiated an unsupported video format {other:?}"
 		))),
 	}

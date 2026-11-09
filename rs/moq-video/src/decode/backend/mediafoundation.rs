@@ -108,7 +108,7 @@ impl MediaFoundation {
 			Codec::H264 => (MFVideoFormat_H264, "H.264"),
 			Codec::H265 => (MFVideoFormat_HEVC, "H.265"),
 			Codec::Av1 | Codec::Vp8 | Codec::Vp9 => {
-				return Err(Error::Codec(anyhow::anyhow!(
+				return Err(Error::codec(anyhow::anyhow!(
 					"Media Foundation {} decode is not wired",
 					codec.label()
 				)));
@@ -192,7 +192,7 @@ impl MediaFoundation {
 			let media = match unsafe { self.transform.GetOutputAvailableType(0, index) } {
 				Ok(media) => media,
 				Err(e) if e.code() == MF_E_NO_MORE_TYPES => {
-					return Err(Error::Codec(anyhow::anyhow!("decoder offers no NV12 output type")));
+					return Err(Error::codec(anyhow::anyhow!("decoder offers no NV12 output type")));
 				}
 				Err(e) => return Err(mf_err("GetOutputAvailableType", e)),
 			};
@@ -239,7 +239,7 @@ impl MediaFoundation {
 
 		// I420 chroma is 2x2 subsampled, so the download needs even dimensions.
 		if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
+			return Err(Error::codec(anyhow::anyhow!(
 				"decoder reported unusable frame size {width}x{height}"
 			)));
 		}
@@ -448,7 +448,7 @@ impl Backend for MediaFoundation {
 					// it, and that is exactly the case where feeding the same access
 					// unit again is the right move.
 					if !self.drain_output(&mut out)? {
-						return Err(Error::Codec(anyhow::anyhow!(
+						return Err(Error::codec(anyhow::anyhow!(
 							"decoder rejected the access unit with no output to drain"
 						)));
 					}
@@ -573,7 +573,7 @@ fn enumerate_decoder(subtype: GUID) -> Result<IMFTransform, Error> {
 		.map_err(|e| mf_err("MFTEnumEx", e))?;
 	}
 	if count == 0 {
-		return Err(Error::Codec(anyhow::anyhow!("no decoder MFT found")));
+		return Err(Error::codec(anyhow::anyhow!("no decoder MFT found")));
 	}
 
 	let entries = unsafe { std::slice::from_raw_parts_mut(activates, count as usize) };
@@ -590,7 +590,7 @@ fn enumerate_decoder(subtype: GUID) -> Result<IMFTransform, Error> {
 		windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const c_void));
 	}
 
-	transform.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to activate decoder MFT")))
+	transform.ok_or_else(|| Error::codec(anyhow::anyhow!("failed to activate decoder MFT")))
 }
 
 #[cfg(test)]

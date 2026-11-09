@@ -5,7 +5,7 @@ use std::task::{Poll, ready};
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::{Background, Polled};
+use crate::ffi::{Background, OneShot, Polled};
 use crate::media::{MoqDatagram, MoqTimestamp};
 use crate::producer::{Child, Children, MoqBroadcastProducer};
 
@@ -281,7 +281,7 @@ impl MoqDatagramRequests {
 			.wait(|requests, waiter| Poll::Ready(Ok(ready!(requests.poll_requested(waiter))?)))
 			.await?;
 		Ok(Arc::new(MoqDatagramRequest {
-			inner: std::sync::Mutex::new(Some(request)),
+			inner: OneShot::new(request),
 			children: self.children.clone(),
 		}))
 	}
@@ -295,7 +295,7 @@ impl MoqDatagramRequests {
 /// A requested datagram track awaiting acceptance or rejection.
 #[derive(uniffi::Object)]
 pub struct MoqDatagramRequest {
-	inner: std::sync::Mutex<Option<moq_net::datagram::Request>>,
+	inner: OneShot<moq_net::datagram::Request>,
 	children: Children,
 }
 
@@ -303,34 +303,28 @@ pub struct MoqDatagramRequest {
 impl MoqDatagramRequest {
 	/// The requested datagram track's name.
 	pub fn name(&self) -> Result<String, MoqError> {
-		Ok(self
-			.inner
-			.lock()
-			.unwrap()
-			.as_ref()
-			.ok_or(MoqError::Closed)?
-			.name()
-			.to_owned())
+		self.inner.peek(|request| request.name().to_owned())
 	}
 
 	/// The highest priority among the consumers waiting for this track.
 	pub fn priority(&self) -> Result<Option<i8>, MoqError> {
-		Ok(self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.priority())
+		self.inner.peek(|request| request.priority())
 	}
 
 	/// Accept the request with its fixed publisher properties.
 	pub fn accept(&self, info: Option<MoqDatagramInfo>) -> Result<Arc<MoqDatagramProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let info = info.unwrap_or_default().try_into()?;
-		let request = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		MoqDatagramProducer::child(request.accept(info), &self.children)
+		self.inner
+			.answer(|request| MoqDatagramProducer::child(request.accept(info), &self.children))
 	}
 
 	/// Reject this request with an application error code.
 	pub fn reject(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let request = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		request.reject(moq_net::Error::App(error_code));
-		Ok(())
+		self.inner.answer(|request| {
+			request.reject(moq_net::Error::App(error_code));
+			Ok(())
+		})
 	}
 }

@@ -470,7 +470,7 @@ mod tests {
 	const DRIVERLESS: Candidate = Candidate {
 		name: "driverless",
 		supports: |c| matches!(c, Codec::H264),
-		open: |_, _| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
+		open: |_, _| Err(Error::codec(anyhow::anyhow!("driver libraries not found"))),
 	};
 
 	#[tracing_test::traced_test]
@@ -501,7 +501,7 @@ mod tests {
 		const H265_ONLY: Candidate = Candidate {
 			name: "driverless",
 			supports: |c| matches!(c, Codec::H265),
-			open: |_, _| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
+			open: |_, _| Err(Error::codec(anyhow::anyhow!("driver libraries not found"))),
 		};
 
 		let attempts = vec![Attempt::hardware(&H265_ONLY), Attempt::software(&WORKING)];

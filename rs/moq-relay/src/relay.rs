@@ -294,7 +294,7 @@ impl Relay {
 		let mut cluster_options = cluster::Options::new(config.cluster)
 			.with_cache(cache)
 			.with_stats(config.stats);
-		cluster_options.session = config.limits.client;
+		cluster_options.client = config.limits.client;
 		cluster_options.peer = config.limits.peer;
 		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
 		let mut cluster = cluster.with_connect(config.connect.clone(), config.quic.clone());
@@ -429,21 +429,19 @@ impl Relay {
 	/// The WebRTC media path (ICE, DTLS, and RTP) arriving on the QUIC port,
 	/// for an embedder's WebRTC stack to serve and answer through the same port.
 	///
-	/// Until a feed is taken, and once every feed is dropped, that traffic is
-	/// dropped and counted. Fails when no tokio listener serves QUIC: a stream-only
-	/// relay, or one on the io_uring workers, which do not split the port yet.
+	/// Until it is taken, and once it is dropped, that traffic is
+	/// dropped and counted. `None` once taken, or when no tokio listener serves
+	/// QUIC: a stream-only relay, or one on the io_uring workers, which do not
+	/// split the port yet.
 	#[cfg(feature = "_quic")]
-	pub fn webrtc(&self) -> anyhow::Result<moq_tokio::quic::demux::WebRtc> {
-		let demux = self
-			.demux
-			.as_ref()
-			.context("the WebRTC media path needs QUIC served by the tokio runtime")?;
-		Ok(demux.webrtc())
+	pub fn webrtc(&mut self) -> Option<moq_tokio::quic::demux::WebRtc> {
+		self.demux.take().map(|demux| demux.webrtc())
 	}
 
 	/// The RTMP and RTMPS connections the public web listeners classify, for the
 	/// embedder to serve; see [`web::Web::rtmp`]. Untaken, they are logged and closed.
-	pub fn rtmp(&mut self) -> web::rtmp::Incoming {
+	/// `None` once taken.
+	pub fn rtmp(&mut self) -> Option<web::rtmp::Incoming> {
 		self.web.rtmp()
 	}
 

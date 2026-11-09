@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -24775,7 +24773,7 @@ void _checkApiChecksums() {
       55377) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqrequest_accept() != 55136) {
+  if (uniffi_moq_ffi_checksum_method_moqrequest_accept() != 30910) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqrequest_cancel() != 25859) {
@@ -24791,7 +24789,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqrequest_query() != 23842) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqrequest_reject() != 2829) {
+  if (uniffi_moq_ffi_checksum_method_moqrequest_reject() != 53566) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqrequest_transport() != 57171) {
